@@ -12,6 +12,7 @@ import os
 import re
 import uuid
 from functools import wraps
+import base64
 import shutil
 import stat
 import threading
@@ -1235,6 +1236,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         decoded_path = unquote(parsed.path)
         try:
+            if decoded_path == "/api/health":
+                return self.send_json({"ok": True})
             if decoded_path == "/api/batches":
                 return self.send_json({"batches": list_batches()})
             if decoded_path == "/api/taxonomy":
@@ -1265,6 +1268,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("媒体文件不存在")
                 content_type = MEDIA_KINDS.get(media.suffix.lower(), "application/octet-stream")
                 data = media.read_bytes()
+                # Desktop fetch bridges may transport text only. Keep raw media for
+                # browsers/downloads and provide a JSON data URL for the review UI.
+                if parse_qs(parsed.query).get("format") == ["data-url"]:
+                    if not content_type.startswith("image/"):
+                        raise ValueError("该文件不是图片")
+                    return self.send_json({"src": "data:" + content_type + ";base64," +
+                                           base64.b64encode(data).decode("ascii")})
                 self.send_response(200)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
