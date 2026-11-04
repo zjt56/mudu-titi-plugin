@@ -10,7 +10,6 @@
 #
 # 环境变量（由宿主插件 index.js 注入或自动发现）：
 #   WF_PLUGIN_DIR     插件版目录（默认本脚本上两级）
-#   WF_WORKFLOW_DIR   上传工作流仓库根（默认插件版上一级）
 #   DSH_BIN           dsh 可执行路径（默认 $HOME/.local/bin/dsh 或 PATH 中的 dsh）
 #   DSH_HOME          dsh 家目录（默认 $HOME/.dsh）
 #

@@ -1,7 +1,7 @@
 {
   "name": "dsh-wf-plugin",
   "version": "0.1.0",
-  "description": "录题工作流插件版：把上传工作流与录题工作台嵌入 DSH，支持选择 harness 内模型（含第三方）、分别指定三审模型、自定义提示词/审核口径。不修改原工作流代码，模型路由经 MUDU_AGENT_CONFIG + 插件自有 wf-router.sh 注入。",
+  "description": "录题工作流插件版（独立项目）：把录题工作台与上传工作流嵌入 DSH，支持选择 harness 内模型（含第三方）、分别指定三审模型、自定义提示词/审核口径。模型路由经 MUDU_AGENT_CONFIG + 插件自有 wf-router.sh 注入。",
   "type": "module",
   "private": true,
   "main": "lib/index.js",
