@@ -2,7 +2,7 @@
   "provider": "command",
   "command": [
     "/bin/sh",
-    "/Users/zjt/Desktop/上传工作流/插件版/app/scripts/bin/wf-agent.sh",
+    "/Users/zjt/Desktop/上传插件版/app/scripts/bin/wf-agent.sh",
     "{prompt_file}",
     "{response_file}"
   ],

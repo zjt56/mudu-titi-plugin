@@ -2,6 +2,11 @@
 backend/.local-agent.effective.json
 backend/.local-agent.effective.json.tmp-*
 
+# 运行时试卷数据（上传批次与暂存，不随代码提交）
+/workflows/
+/inbox/
+/.workbench-trash/
+
 # Python
 __pycache__/
 *.py[cod]
