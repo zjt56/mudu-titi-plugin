@@ -54,6 +54,8 @@ class LocalAgentTest(unittest.TestCase):
             self.assertEqual(config["provider"], "dsh")
             self.assertEqual(config["timeout_seconds"], 900)
             self.assertEqual(config["max_input_chars"], 180000)
+            self.assertEqual(config["assemble_part_units"], 8)
+            self.assertEqual(config["review_part_units"], 15)
             with self.assertRaises(agent.AgentError):
                 agent.load_config(self.root / "missing.json")
 
@@ -67,7 +69,9 @@ class LocalAgentTest(unittest.TestCase):
                        {"timeout_seconds": True}, {"timeout_seconds": float("nan")},
                        {"max_input_chars": 1.2}, {"max_input_chars": False},
                        {"executable": ""}, {"executable": str(self.root / "missing")},
-                       {"provider": "codex", "model": ""}):
+                       {"assemble_part_units": 0}, {"assemble_part_units": True},
+                        {"review_part_units": -1}, {"review_part_units": 1.5},
+                        {"provider": "codex", "model": ""}):
             with self.subTest(change=change), self.assertRaises(agent.AgentError):
                 agent._validate_config({**self.config, **change}, self.root)
         path = self.root / "broken.json"

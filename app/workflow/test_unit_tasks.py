@@ -84,6 +84,14 @@ class UnitTasksTest(unittest.TestCase):
             self.assertIn("knowledge-catalog.json", part["prompt"])
             self.assertIn("标签规则正文", part["prompt"])
 
+    def test_configurable_max_units_limits_partition_size(self):
+        with patch.object(agent_tasks, "build_task", return_value=self.base):
+            _, parts = unit_tasks.build_parts("unused", "review", len(self.prompt) + 1000, max_units=1)
+        self.assertEqual([part["unit_ids"] for part in parts], [["q-1"], ["q-2"]])
+        with patch.object(agent_tasks, "build_task", return_value=self.base):
+            with self.assertRaisesRegex(ValueError, "max_units"):
+                unit_tasks.build_parts("unused", "review", len(self.prompt) + 1000, max_units=0)
+
     def test_rejects_wrong_or_duplicate_partition_coverage(self):
         _, parts = self.build()
         with self.assertRaises(ValueError):

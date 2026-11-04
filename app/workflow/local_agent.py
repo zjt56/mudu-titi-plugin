@@ -33,7 +33,9 @@ import time
 
 MAX_FINAL_BYTES = 8 * 1024 * 1024
 DEFAULTS = {"provider": "dsh", "timeout_seconds": 900, "max_input_chars": 180000,
-            "retries": 1, "retry_feedback_chars": 1200, "unit_split": True}
+            "retries": 1, "retry_feedback_chars": 1200, "unit_split": True,
+            # 每片更小，减少单次模型上下文压力；审核片默认可稍大但仍可调。
+            "assemble_part_units": 8, "review_part_units": 15}
 
 # 额度/限流不是普通失败：重试只会继续消耗时间，应立即停下并交给人工或换通道。
 QUOTA_RE = re.compile(
@@ -128,6 +130,8 @@ def _validate_config(data, base):
     if not isinstance(config["unit_split"], bool):
         raise AgentError("unit_split must be a boolean", "config")
     _part_concurrency(config)  # 配置加载即校验，避免跑到一半才发现并发度非法
+    _part_units(config, "assemble")
+    _part_units(config, "review")
     model = config.get("model")
     if model is not None:
         if provider != "codex" or not isinstance(model, str) or not model.strip():
@@ -506,6 +510,15 @@ def _part_concurrency(config):
     return value
 
 
+def _part_units(config, stage):
+    """每片单元上限：组装默认 8、审核默认 15，均可在 local-agent.json 调整。"""
+    key = "assemble_part_units" if stage == "assemble" else "review_part_units"
+    value = config.get(key, DEFAULTS[key])
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AgentError(f"{key} must be a positive integer", "config")
+    return value
+
+
 def _record_assemble_guard(batch_dir, stage, report):
     """模型路径组装成功后同样登记基线，后续同结构重跑才能走确定性路径。"""
     if stage == "assemble" and isinstance(report, dict) and report.get("completed"):
@@ -549,10 +562,12 @@ def main(argv=None):
             if not split_enabled or "exceeding max_input_chars" not in str(exc):
                 raise
             from workflow import unit_tasks
-            task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"])
-        if split_enabled and parts is None and not task.get("preconditions") and len(agent_tasks.confirmed_units(batch_dir)) > 15:
+            task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
+                                                 max_units=_part_units(config, args.stage))
+        if split_enabled and parts is None and not task.get("preconditions") and len(agent_tasks.confirmed_units(batch_dir)) > _part_units(config, args.stage):
             from workflow import unit_tasks
-            task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"])
+            task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
+                                                 max_units=_part_units(config, args.stage))
         attempts = batch_dir / "workflow" / "agent-runs"
         attempts.mkdir(parents=True, exist_ok=True)
         run_dir = Path(tempfile.mkdtemp(prefix=args.stage + "-", dir=attempts))

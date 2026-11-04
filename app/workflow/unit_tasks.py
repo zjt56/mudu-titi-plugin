@@ -40,7 +40,9 @@ def compact_extraction(value):
     return _compact_extraction(value)
 
 
-def build_parts(batch, stage, max_input_chars):
+def build_parts(batch, stage, max_input_chars, max_units=15):
+    if isinstance(max_units, bool) or not isinstance(max_units, int) or max_units < 1:
+        raise ValueError("max_units must be a positive integer")
     if stage not in ("assemble", "review"):
         raise ValueError("Unit splitting supports assemble and review only")
     base = agent_tasks.build_task(batch, stage, max_input_chars=sys.maxsize)
@@ -112,7 +114,7 @@ def build_parts(batch, stage, max_input_chars):
     for unit in units:
         candidate = selected + [unit]
         prompt = make(candidate)
-        if len(candidate) <= 15 and len(prompt) <= max_input_chars:
+        if len(candidate) <= max_units and len(prompt) <= max_input_chars:
             selected = candidate
             continue
         if not selected:
