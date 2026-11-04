@@ -16,6 +16,7 @@ import base64
 import shutil
 import stat
 import threading
+from time import monotonic
 from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default as email_policy
@@ -73,14 +74,20 @@ FORMAT_FIELDS = {"stem", "options", "option", "answer", "material", "materialblo
                  "punctuation", "wording", "explanation", "summary", "材料", "解析"}
 SIDE_EFFECTS = ("upload", "publish", "delete")
 _lock = threading.RLock()
+_batches_snapshot = None
 
 
 def serialized(function):
     """同服务的建批次、推进注册、删除与写入共享临界区。"""
     @wraps(function)
     def wrapped(*args, **kwargs):
+        global _batches_snapshot
         with _lock:
-            return function(*args, **kwargs)
+            try:
+                return function(*args, **kwargs)
+            finally:
+                # Writes must invalidate the short-lived HTTP list snapshot.
+                _batches_snapshot = None
     return wrapped
 
 
@@ -811,6 +818,24 @@ def list_batches():
     return result
 
 
+def cached_list_batches():
+    """Coalesce overlapping HTTP list reads; writes invalidate immediately.
+
+    Older loaded hosts use this endpoint as a readiness probe. A short snapshot
+    prevents those parallel probes from repeating all media audits per image.
+    The uncached list_batches remains available to internal workflow callers.
+    """
+    global _batches_snapshot
+    with _lock:
+        key = (str(WORKFLOWS), str(INBOX))
+        if (_batches_snapshot is not None and _batches_snapshot[0] == key
+                and monotonic() < _batches_snapshot[1]):
+            return _batches_snapshot[2]
+        result = list_batches()
+        _batches_snapshot = (key, monotonic() + 2.0, result)
+        return result
+
+
 def unit_label_path(folder: Path, unit_id) -> Path:
     """标签按“单元”存一份：组题整体打标，子题不各存一份。"""
     safe = re.sub(r"[^0-9A-Za-z._-]", "_", str(unit_id or "").strip())
@@ -1239,7 +1264,7 @@ class Handler(BaseHTTPRequestHandler):
             if decoded_path == "/api/health":
                 return self.send_json({"ok": True})
             if decoded_path == "/api/batches":
-                return self.send_json({"batches": list_batches()})
+                return self.send_json({"batches": cached_list_batches()})
             if decoded_path == "/api/taxonomy":
                 return self.send_json(taxonomy.taxonomy())
             if decoded_path == "/api/knowledge/tree":
