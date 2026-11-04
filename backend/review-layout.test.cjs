@@ -9,7 +9,7 @@ test('审核布局：右栏“待人工处理”始终固定右侧，绝不换�
   assert.match(client, /\.wf-review-layout\{display:grid;grid-template-columns:minmax\(300px,1fr\) minmax\(240px,285px\)/);
   // 整块有最小宽度，面板更窄时靠外层容器横向滚动（overflow:auto），而不是把右栏挤下去
   assert.match(client, /\.wf-review-layout\{[^}]*min-width:564px/);
-  assert.match(client, /\.wf-review-container\{flex:1;min-height:0;overflow:auto\}/);
+  assert.match(client, /\.wf-review-container\{[^}]*overflow-x:auto/);
   // 不再有任何“切单列/换行”规则
   assert.doesNotMatch(client, /@container wfrev/);
   assert.doesNotMatch(client, /wf-review-layout\{flex-direction:column\}/);
