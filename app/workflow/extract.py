@@ -319,6 +319,55 @@ def _pdf(source, out, config):
     return result
 
 
+def _doc_has_image_bytes(source: Path) -> bool:
+    """粗略探测旧版 .doc 内是否含图片数据（JPEG/PNG/GIF/EMF/WMF/PICT/BMP 魔数）。
+    仅用于在 textutil 转换可能丢图时给出提醒，不做精确定位。"""
+    try:
+        data = Path(source).read_bytes()
+    except OSError:
+        return False
+    sigs = (b"\xff\xd8\xff",            # JPEG
+            b"\x89PNG\r\n\x1a\n",        # PNG
+            b"GIF87a", b"GIF89a",        # GIF
+            b" EMF", b"\x01\x00\x09\x00",# EMF 粗判
+            b"\xd7\xcd\xc6\x9a",         # WMF
+            b"BM")                       # BMP
+    return any(s in data for s in sigs)
+
+
+def _doc_to_docx(source: Path, evidence: Path):
+    """把旧版 Word(.doc) 转为 .docx。优先 textutil(macOS，系统自带、无需安装，但可能丢图)，
+    其次 soffice(LibreOffice，保真但需安装)。返回 (docx路径, 方法名)。失败则抛错。"""
+    import subprocess
+    out = evidence / (source.stem + ".docx")
+    errors = []
+    # 1) macOS textutil（零安装）
+    if shutil.which("textutil"):
+        try:
+            subprocess.run(["textutil", "-convert", "docx", "-output", str(out), str(source)],
+                           check=True, capture_output=True, timeout=120)
+            if out.is_file() and out.stat().st_size > 0:
+                return out, "textutil"
+        except Exception as exc:  # noqa: BLE001
+            errors.append("textutil: " + str(exc))
+    # 2) LibreOffice / soffice（保真，但需安装）
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice:
+        try:
+            subprocess.run([soffice, "--headless", "--convert-to", "docx", "--outdir", str(evidence), str(source)],
+                           check=True, capture_output=True, timeout=180)
+            cand = evidence / (source.stem + ".docx")
+            if cand.is_file() and cand.stat().st_size > 0:
+                return cand, "soffice"
+        except Exception as exc:  # noqa: BLE001
+            errors.append("soffice: " + str(exc))
+    raise ValueError(
+        "无法转换 .doc 文件（需要系统 textutil 或 LibreOffice）："
+        + ("; ".join(errors) if errors else "未找到可用的转换工具")
+        + "。请将文件另存为 .docx 后再上传。"
+    )
+
+
 def extract_source(source: Path, destination: Path, config=None) -> dict:
     """原件只读，原生/OCR 结果留存；不伪造答案、题号覆盖或审核通过。"""
     source = Path(source).expanduser().resolve(strict=True)
@@ -327,6 +376,12 @@ def extract_source(source: Path, destination: Path, config=None) -> dict:
     original_hash = mf.sha256_file(source)
     # 每次执行独立证据目录；不覆盖上一轮图片/OCR 文件。
     evidence = Path(tempfile.mkdtemp(prefix="extract-", dir=str(destination)))
+    # 旧版二进制 Word(.doc) 无法直接解析：先转成 .docx 再走既有 DOCX 提取。
+    # textutil 为系统自带（无需安装）但可能丢图；soffice 保真但需安装。
+    doc_convert = None
+    if source.suffix.lower() == ".doc":
+        orig_doc = source
+        source, doc_convert = _doc_to_docx(source, evidence)
     if source.suffix.lower() == ".docx":
         from workflow.docx_extract import extract_docx
         result = extract_docx(source, evidence)
@@ -382,6 +437,13 @@ def extract_source(source: Path, destination: Path, config=None) -> dict:
         result["text"] = "\n\n".join(p.get("text", "") for p in result["pages"])
     else:
         raise ValueError("原卷只支持 docx、pdf 或图片；旧 doc 请先转换为 docx")
+    # .doc 经 textutil 转换可能丢图：若原 .doc 疑似含图、而转换后无媒体，给出明确提醒。
+    if doc_convert == "textutil" and not (result.get("media") or []):
+        if _doc_has_image_bytes(orig_doc):
+            result.setdefault("warnings", []).append(
+                "此 .doc 由系统转换（textutil）而来，疑似含图片但转换后未保留图片；"
+                "如需保留题图，请用 Word/WPS 另存为 .docx 后重新上传（.docx 保真且无需安装任何工具）。")
+        result.setdefault("warnings", []).append("该文件为旧版 .doc，已用系统工具转换为 .docx 解析（不含图片保真）。")
     text = result.get("text", "")
     if not text.strip():
         raise ValueError("提取正文为空，不能完成解析阶段")

@@ -27,9 +27,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 from workbench import media_audit, taxonomy
 
 try:
-    from workflow.preview import batch_rows as preview_batch_rows, slice_range, slice_text, source_slice, source_group_candidates
+    from workflow.preview import (batch_rows as preview_batch_rows, slice_range, slice_text,
+                                  source_slice, source_group_candidates, section_leadin)
 except ImportError:  # 直接双击运行时给出手动路径
-    preview_batch_rows = slice_range = slice_text = source_slice = source_group_candidates = None
+    preview_batch_rows = slice_range = slice_text = source_slice = source_group_candidates = section_leadin = None
 
 try:
     from workflow import auto as auto_flow
@@ -44,15 +45,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # 无需软链接（软链接会被 batch_dir 拒绝），只覆盖数据根即可。
 WORKFLOWS = Path(os.environ.get("WF_WORKFLOWS_DIR") or (ROOT / "workflows")).resolve()
 INBOX = Path(os.environ.get("WF_INBOX_DIR") or (ROOT / "inbox")).resolve()
-STATIC = Path(__file__).resolve().parent / "static"
 MEDIA_KINDS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
-STATIC_KINDS = {**MEDIA_KINDS,
-                ".html": "text/html; charset=utf-8",
-                ".js": "text/javascript; charset=utf-8",
-                ".css": "text/css; charset=utf-8",
-                ".json": "application/json; charset=utf-8",
-                ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf"}
 DOC_SUFFIXES = (".docx", ".pdf")
 AUDIO_SUFFIXES = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac")
 STAGE_TITLES = {s.id: s.title for s in wf_contracts.STAGES} if wf_contracts else {}
@@ -625,6 +619,40 @@ def advance_state(name: str) -> dict:
     return _advance_state.get(name) or {"running": False}
 
 
+# 重新标签 / 重新审核：从指定阶段起让其后全部失效，再后台推进到停住。
+# - tag    （重新标签）：从「题型与子类 types」起，重跑题型/解析/知识点/组装/体检/审核全链路。
+# - review （重新审核）：从「审核 review」起，只重跑两轮审核（一审全量 + 二审抽检）到审核结束。
+RERUN_START = {"tag": "types", "review": "review"}
+RERUN_LABEL = {"tag": "重新标签", "review": "重新审核"}
+
+
+def start_rerun(name: str, mode: str) -> dict:
+    """让 RERUN_START[mode] 及其下游失效，然后后台推进到停住。"""
+    if auto_flow is None or wf_manifest is None:
+        raise ValueError("流水线模块不可用")
+    if mode not in RERUN_START:
+        raise ValueError("不支持的重新执行类型")
+    folder = batch_dir(name)
+    if (_advance_state.get(name) or {}).get("running"):
+        return {"started": False, "running": True}
+    manifest = wf_manifest.load(folder)
+    start_stage = RERUN_START[mode]
+    changed = wf_manifest.invalidate_downstream(folder, manifest, start_stage, RERUN_LABEL[mode])
+    wf_manifest.save(folder, manifest)
+    _advance_state[name] = {"running": True, "started_at": now(), "mode": mode, "invalidated": changed}
+
+    def work():
+        try:
+            result = auto_flow.advance(folder, auto_flow.load_bridge())
+        except Exception as exc:  # noqa: BLE001 - 后台线程，结果回显给前端
+            result = {"error": str(exc)}
+        with _lock:
+            _advance_state[name] = {"running": False, "result": result, "finished_at": now()}
+
+    threading.Thread(target=work, daemon=True, name=f"workbench-rerun-{name}").start()
+    return {"started": True, "running": True, "mode": mode, "from": start_stage, "invalidated": changed}
+
+
 def _slug(text, fallback: str = "新试卷") -> str:
     cleaned = re.sub(r'[\\/:*?"<>|\s]+', "", str(text or "")).strip(".")
     return cleaned[:40] or fallback
@@ -650,7 +678,7 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
         raise ValueError("流水线模块不可用，无法自动建批次")
     docs = [f for f in files if Path(f["filename"]).suffix.lower() in DOC_SUFFIXES]
     if not docs:
-        raise ValueError("请至少上传一个试卷文件（docx 或 pdf）")
+        raise ValueError("请至少上传一个试卷文件（仅支持 .docx 或 .pdf）")
     audio = next((f for f in files if Path(f["filename"]).suffix.lower() in AUDIO_SUFFIXES), None)
     answer = next((f for f in docs if re.search(r"答案|answer|解析", Path(f["filename"]).stem, re.I)), None)
     source = next((f for f in docs if f is not answer), docs[0])
@@ -705,8 +733,11 @@ def archive_batch(name: str, confirm_name: str) -> dict:
     if advance_state(name).get("running") or manifest.get("status") == "running" or any(
             stage.get("status") == "running" for stage in (manifest.get("stages") or {}).values()):
         raise ValueError("批次正在运行，请等待任务结束后再删除")
-    root = ROOT.resolve()
-    if WORKFLOWS.resolve().parent != root or INBOX.is_symlink() or INBOX.resolve().parent != root:
+    # 数据根以 workflows/inbox 的共同父目录为准，而不是代码根 ROOT。
+    # 插件版把代码放在 app/、数据放在插件目录（WF_WORKFLOWS_DIR/WF_INBOX_DIR 指过去），
+    # 此时 ROOT 是 app/ 而数据根是插件目录，用 ROOT 当边界会把每次删除都误判成越界。
+    root = WORKFLOWS.resolve().parent
+    if INBOX.is_symlink() or INBOX.resolve().parent != root:
         raise ValueError("批次或收件箱根目录越出工作区")
     inbox = INBOX / name
     targets = [(folder, "workflows")]
@@ -975,7 +1006,7 @@ def has_unverified_review_history(folder: Path) -> bool:
 
 
 def review_comparison(folder: Path, unit_id, numbers):
-    """读取输入绑定有效的三轮判断及其原始标签，保留逐题抽样范围。"""
+    """读取输入绑定有效的两轮判断及其原始标签，保留逐题抽样范围。"""
     uid = str(unit_id or "")
     payload = load(folder / "07_review/review-rounds.json", {})
     records = payload.get("rounds", []) if isinstance(payload, dict) else []
@@ -1015,7 +1046,7 @@ def review_comparison(folder: Path, unit_id, numbers):
                            "labels": labels, "subquestions": originals}, "rounds": []}
     wanted = {str(int(n)) for n in numbers if str(n).isdigit()}
     history_exists = has_unverified_review_history(folder)
-    for rid, name in (("labels", "一审"), ("knowledge", "二审"), ("sample", "三审")):
+    for rid, name in (("labels", "一审"), ("sample", "二审")):
         matches = [r for r in records if isinstance(r, dict) and r.get("round_id") == rid] if isinstance(records, list) else []
         entry = {"round_id": rid, "name": name,
                  "status": "待重新审核" if matches else ("历史来源未验证" if history_exists else "未提供"), "checks": []}
@@ -1128,6 +1159,18 @@ def detail(name, unit_id):
     lines = source_lines(folder)
     if source_slice is not None and lines and numbers:
         chunk = source_slice(folder, numbers, lines)
+        # 独立题预览补上所属大题的标题+作答导语（「Ⅱ.短对话理解…」「你将听到十段对话…」），
+        # 题组自己带材料/导语，无需重复。只影响预览，不改切题结果。
+        if len(numbers) == 1 and str(row.get("unit_kind") or "") != "group" and section_leadin is not None:
+            try:
+                lead = section_leadin(lines, numbers, chunk[0] if chunk else None)
+                if lead:
+                    # 书面表达等无印刷题号时，chunk 首行本身就是导语/要求，避免与之重复。
+                    if chunk and lead[-1] == chunk[0]:
+                        lead = lead[:-1]
+                    chunk = list(lead) + list(chunk)
+            except (ValueError, KeyError, TypeError, IndexError):
+                pass
     elif slice_text is not None and lines and numbers:
         chunk = slice_text(lines, numbers[0])
     else:
@@ -1319,48 +1362,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Accept-Ranges", "bytes")
                 self.end_headers()
                 return self.wfile.write(data)
-                return self.send_json(detail(parts[2], self.headers.get("X-Unit-Id", "")))
             if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "units":
                 return self.send_json(detail(parts[2], parts[4]))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "pipeline":
                 return self.send_json({"name": parts[2], **advance_state(parts[2])})
-            if decoded_path.startswith("/vendor/") or decoded_path in ("/app.js", "/app.css"):
-                return self.send_static(decoded_path.lstrip("/"))
-            if decoded_path in ("/", "/index.html"):
-                return self.send_static("index.html")
-            if not decoded_path.startswith("/api/"):
-                return self.send_static("index.html")  # 前端用 hash 路由，未知路径回首页
-            if decoded_path.startswith("/preview/"):
-                name = decoded_path[len("/preview/"):].strip("/")
-                folder = batch_dir(name)
-                preview = folder / "preview.html"
-                if not preview.is_file():
-                    raise ValueError("该批次没有 preview.html，请先生成静态预览")
-                data = preview.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                return self.wfile.write(data)
             self.send_json({"error": "not found"}, 404)
         except (ValueError, KeyError) as exc:
             self.send_json({"error": str(exc)}, 400)
         except Exception as exc:  # noqa: BLE001 - 本地服务，错误直接回显
             self.send_json({"error": str(exc)}, 500)
-
-    def send_static(self, filename):
-        target = (STATIC / filename).resolve()
-        if STATIC.resolve() not in target.parents or not target.is_file():
-            raise ValueError(f"静态文件不存在：{filename}")
-        data = target.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", STATIC_KINDS.get(target.suffix.lower(), "application/octet-stream"))
-        self.send_header("Content-Length", str(len(data)))
-        # 前端还在频繁改动，脚本和样式一律不缓存，避免浏览器拿到旧界面。
-        cache = "max-age=86400" if filename.startswith("vendor/") else "no-cache, no-store, must-revalidate"
-        self.send_header("Cache-Control", cache)
-        self.end_headers()
-        self.wfile.write(data)
 
     @serialized
     def do_POST(self):
@@ -1376,6 +1386,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("请求内容必须是对象")
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "rerun":
+                return self.send_json({"ok": True, **start_rerun(parts[2], str(payload.get("mode") or ""))})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "archive":
                 return self.send_json(archive_batch(parts[2], payload.get("confirm_name")))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "decisions":
@@ -1412,9 +1424,12 @@ class Handler(BaseHTTPRequestHandler):
                 labels = payload.get("labels")
                 if labels is not None and not isinstance(labels, dict):
                     raise ValueError("labels 必须是对象")
-                if not items and not labels:
+                unit_edit = payload.get("unit")
+                if unit_edit is not None and not isinstance(unit_edit, dict):
+                    raise ValueError("unit 必须是对象")
+                if not items and not labels and not unit_edit:
                     raise ValueError("没有可保存的内容")
-                saved = self.save_units(folder, unit_id, items, labels)
+                saved = self.save_units(folder, unit_id, items, labels, unit_edit)
                 return self.send_json({"ok": True, **saved})
             self.send_json({"error": "not found"}, 404)
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -1424,7 +1439,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     @serialized
-    def save_units(folder: Path, unit_id: str, items: list[dict], labels: dict | None = None) -> dict:
+    def save_units(folder: Path, unit_id: str, items: list[dict], labels: dict | None = None,
+                   unit: dict | None = None) -> dict:
         """标签写一份（单元级），题面按小题各写各的候选。
 
         组题（完形/阅读等）整体打标一次，子题不重复存标签，避免同一套标签散在
@@ -1443,6 +1459,26 @@ class Handler(BaseHTTPRequestHandler):
         saved = []
         warnings = []
         with _lock:
+            if unit:
+                # 单元级正文/解析：写入单元草稿候选，candidate() 优先读取它；
+                # 不直接改 batch.json 正式清单。
+                allowed = {k: unit[k] for k in ("material", "explanation") if k in unit}
+                if allowed:
+                    safe = str(unit_id).replace("/", "_").replace("\\", "_")
+                    target = folder / "candidates" / f"{safe}.json"
+                    merged = dict(load(target, {}))
+                    merged.setdefault("unit_id", str(unit_id))
+                    # 不带 number：单元级正文/解析文件不应被 candidates_by_number 当作某道
+                    # 小题的候选索引，避免覆盖该小题的题面草稿。
+                    merged.pop("number", None)
+                    merged.update({k: ("" if v is None else str(v)) for k, v in allowed.items()})
+                    merged["updated_by"] = "workbench"
+                    merged["updated_at"] = now()
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if target.is_file():
+                        shutil.copy2(target, target.with_suffix(target.suffix + ".bak"))
+                    save_json(target, merged)
+                    saved.append(str(target.relative_to(folder)))
             if labels:
                 target = unit_label_path(folder, unit_id)
                 merged = dict(load(target, {}))
@@ -1510,9 +1546,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="木牍录题本地工作台")
+    parser = argparse.ArgumentParser(description="木牍录题 REST API 后端（无页面）")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=8791)
     args = parser.parse_args()
     print(f"Workbench: http://{args.host}:{args.port}")
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
