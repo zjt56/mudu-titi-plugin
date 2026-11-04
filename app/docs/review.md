@@ -55,6 +55,14 @@
 
 通用 `workflow.agent run` / `import` 已在单次 AI 审核完成后接入上述分轮入口；后续 `next` / `run` 可在同一输入上继续未完轮次。分轮未完时阶段保持 needs_review，不能靠单次 local report 的 completed 宣称全流程完成。单次 AI 初审返回 needs_review 时，若已有通过候选形状与发现证据校验的可读候选或真实 finding，且安全输入与上游条件齐备，入口仍继续独立三轮；初审候选保留在 workflow 内部，初审未决保留 required unchecked，不将其伪造为已完成初审。初审与三轮都完成时 review 阶段登记执行完成，质量与人工未决交由整体报告和 review_gate 判断；仅三轮完成而初审尚未完成时，入口仍返回 needs_review，并显式输出 ai_review_completed=false 与 execution_completed=true。runner/contracts 已将新增分轮文件列入审核产物并保留输入失效传播，正式闸门调用当前 `review.evaluate`；全部完成时记录完整审核产物哈希。旧单次 review 阶段完成不代表整个三审完成。部署者如另行显式启用 legacy `independent_review.py` 的 HMAC 配置，仍可额外验签；那是防篡改附加机制，不是用户要求的人工姓名/签名，也不能替代语义复核。
 
+### 分片预绑定与并发（2026-11 更新）
+
+盲审上下文版本为 `blind-context-v7`；`v1`–`v6` 只作为历史保留，不能导入为新结果。每轮导出时一次性为该轮全部分片生成固定任务与绑定（`frozen_state`），因此分片可以独立执行、不必等待前一分片结果；导入仍按分片顺序进行，每个分片都必须对得上自己的任务、绑定、原始响应与安装事务。
+
+`run` 默认按本机配置的 `part_concurrency`（或显式 `review_part_parallel`，上限 4）并发调用同一轮的多个分片。成功的分片响应先写入 `workflow/review-pending/<task_id>.json`，再按顺序导入；某分片失败时，后续已成功的响应不会丢弃，下一次运行直接复用而不再调用模型。失效或被篡改的轮次（例如证据被改动）会换发新的任务标识，不会被旧回执永久卡住。
+
+三轮统一为同一套结构化判断：`assessment` 含 `type`、`subtypes`、组级 `knowledge`、`subquestions`（整篇题组的子题允许 `knowledge=[]`）和逐小题 `difficulty`；三审另含 `source_comparison`。程序按 `(unit_id, 字段)` 与 `(unit_id, number, 字段)` 逐项比较原标注与各轮盲判，只把真实分歧、错误或 `uncertain` 送入人工队列；`uncertain` 允许 `assessment=null`，其他目标与后续轮次继续。三审的每个抽样目标还需可核验的逐小题原文范围；只有题号行/空位锚点能在绑定原文中唯一确定时才视为已核验，表格等无法界定的目标保留未核验而不阻断其他题。知识点目录按原卷大题标题推导的题型范围裁剪（`workflow.review_paper_scope`），题号无法归类时回退完整目录。
+
 ## 人工队列只接真实发现
 
 `07_review/manual-review-queue.json` 只接真实差异、冲突、不确定和缺证据发现。没有问题时 items 可以是 `[]`。缺少分轮执行本身保留在 unchecked，不为每道正常题制造人工确认项。

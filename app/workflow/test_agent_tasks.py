@@ -340,6 +340,17 @@ class AgentTasksTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.accept("audio", {"items": [row]})
 
+    def test_audio_prompt_requires_copying_verified_timestamps(self):
+        self.units[0]["type"] = "听力短对话理解"
+        self.write("01_source/structure.confirmed.json", {"units": self.units})
+        self.write("02_audio/segment.mp3", "existing audio fixture")
+        row = {"unit_id": "q-1", "file": "02_audio/segment.mp3", "start": 12, "end": 20,
+               "evidence": ["first-line verification"]}
+        self.write("02_audio/segment-evidence.json", {"items": [dict(row, verified=True)]})
+        prompt = tasks.build_task(self.batch, "audio")["prompt"]
+        self.assertIn("copy file, start and end EXACTLY", prompt)
+        self.assertIn("never re-based to the segment's own 0", prompt)
+
     def test_failed_structure_gate_blocks_completed_import(self):
         self.write("07_review/structure-gate.json", {"passed": False, "blockers": [{"code": "UNCERTAIN"}]})
         self.assertEqual(tasks.build_task(self.batch, "types")["status"], "needs_review")

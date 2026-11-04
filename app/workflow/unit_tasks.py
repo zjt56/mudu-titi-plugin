@@ -35,6 +35,11 @@ def _compact_extraction(value):
     return {k: v for k, v in value.items() if k not in _EXTRACTION_DROP}
 
 
+def compact_extraction(value):
+    """Public form of the per-part extraction compaction (drops duplicated text)."""
+    return _compact_extraction(value)
+
+
 def build_parts(batch, stage, max_input_chars):
     if stage not in ("assemble", "review"):
         raise ValueError("Unit splitting supports assemble and review only")

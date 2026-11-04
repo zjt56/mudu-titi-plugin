@@ -172,7 +172,7 @@ class ConsensusTest(unittest.TestCase):
 
     def test_recovery_does_not_hide_damaged_current_transaction(self):
         task = 'round-' + 'a' * 32
-        binding = {'plan': self.plan, 'context_version': 'blind-context-v6',
+        binding = {'plan': self.plan, 'context_version': 'blind-context-v7',
                    'task': {'protocol': review.ROUND_PROTOCOL}}
         self.put('workflow/review-bindings/' + task + '.json', binding)
         path = 'workflow/review-transactions/' + task + '.json'

@@ -432,9 +432,14 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             problems = taxonomy.check_question_labels(labels)
             if problems:
                 raise ValueError("Invalid review labels: " + "; ".join(problems))
-        if round_id == "sample" and (not isinstance(assessment.get("source_comparison"), str)
-                or not assessment["source_comparison"].strip()):
-            raise ValueError("Sample review needs a source comparison")
+        if round_id == "sample":
+            comparison_text = assessment.get("source_comparison")
+            if not (isinstance(comparison_text, str) and comparison_text.strip()):
+                # The field is also accepted at the check top level: models
+                # sometimes place it beside unit_id instead of inside assessment.
+                comparison_text = check.get("source_comparison")
+            if not (isinstance(comparison_text, str) and comparison_text.strip()):
+                raise ValueError("Sample review needs a source comparison")
     if covered != expected_set:
         raise ValueError("Review checks must cover each target exactly once")
     part_executions = {}
@@ -488,6 +493,14 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
     return findings
 
 
+def frozen_partition_digest(state):
+    """Digest of an immutable partition set; per-part task IDs may rotate."""
+    stripped = dict(state, completed=[],
+                    parts=[{k: v for k, v in part.items() if k != "task_id"}
+                           for part in state.get("parts", []) if isinstance(part, dict)])
+    return _digest(stripped)
+
+
 def _verify_round_sources(batch, plan, record):
     """Verify v2 observations against their bound tasks and retained responses.
 
@@ -519,12 +532,13 @@ def _verify_round_sources(batch, plan, record):
     collected = []
     for index, (task_id, binding) in enumerate(zip(ids, bindings)):
         task = binding.get("task", {})
-        prefix_state = dict(state, completed=completed[:index])
+        expected_state_digest = (frozen_partition_digest(state) if binding.get("frozen_state")
+                                 else _digest(dict(state, completed=completed[:index])))
         if (binding.get("state_path") != state_path or binding.get("part_index") != index
                 or binding.get("plan") != plan or binding.get("input_hashes") != state.get("input_hashes")
                 or binding.get("prior_rounds") != state.get("prior_rounds")
-                or binding.get("state_digest") != _digest(prefix_state)
-                or binding.get("context_version") != "blind-context-v6"
+                or binding.get("state_digest") != expected_state_digest
+                or binding.get("context_version") not in ("blind-context-v6", "blind-context-v7")
                 or task.get("protocol") != ROUND_PROTOCOL or task.get("task_id") != task_id
                 or task.get("round_id") != record["round_id"] or task.get("input_binding") != plan["input_binding"]
                 or task.get("prompt") != state_parts[index].get("prompt")

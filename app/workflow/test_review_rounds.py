@@ -173,7 +173,12 @@ class ReviewRoundsTest(unittest.TestCase):
         bindings = [json.loads((self.batch / 'workflow/review-bindings' / (e['task_id'] + '.json')).read_text()) for e in exports]
         self.assertEqual(bindings[0]['state_path'], bindings[1]['state_path'])
         self.assertEqual(bindings[0]['state_digest'], bindings[1]['state_digest'])
-        self.assertNotEqual(exports[0]['task_id'], exports[1]['task_id'])
+        # Pre-bound parts have a fixed identity: concurrent exports of the same
+        # pending part return that same task instead of inventing a new one.
+        self.assertEqual(exports[0]['task_id'], exports[1]['task_id'])
+        good = self.response('labels')
+        first = review_rounds.import_result(self.batch, exports[0]['task_id'], good)
+        self.assertEqual(review_rounds.import_result(self.batch, exports[1]['task_id'], good), first)
 
     def test_install_recovers_missing_queue_after_interruption(self):
         exported = review_rounds.export_task(self.batch)
@@ -248,8 +253,14 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(report['part_completed'], 1)
         self.assertNotIn('labels', review.evaluate_rounds(self.batch)['checked_rounds'])
         self.assertEqual(review_rounds.import_result(self.batch, first['task_id'], good), report)
+        # The duplicate export is the same pending part, so an identical replay
+        # is idempotent while a different response for the same task is refused.
+        self.assertEqual(duplicate['task_id'], first['task_id'])
+        self.assertEqual(review_rounds.import_result(self.batch, duplicate['task_id'], good), report)
+        altered = response(duplicate)
+        altered['artifacts']['review_round']['checks'][0]['rationale'] = '不同的结论。'
         with self.assertRaises(ValueError):
-            review_rounds.import_result(self.batch, duplicate['task_id'], response(duplicate))
+            review_rounds.import_result(self.batch, duplicate['task_id'], altered)
         second = review_rounds.export_task(self.batch)
         self.assertEqual(second['part_index'], 2)
         review_rounds.import_result(self.batch, second['task_id'], response(second))
@@ -259,6 +270,133 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(len(record['checks']), 16)
         self.assertIn('labels', review.evaluate_rounds(self.batch)['checked_rounds'])
         self.assertEqual(review_rounds.export_task(self.batch)['round_id'], 'knowledge')
+
+    def test_review_partition_drops_duplicated_extraction_text(self):
+        self.write("01_source/extraction.json", {
+            "text": "DUPLICATED FULL SOURCE", "blocks": [{"t": "layout noise"}],
+            "pages": [{"p": 1}], "tables": [{"rows": [["cell"]]}],
+            "media": [{"path": "image1.jpeg"}], "warnings": ["w"]})
+        base = agent_tasks.build_task(self.batch, "review", max_input_chars=10 ** 9)
+        parts = review_rounds._partition_contexts(base, 10 ** 9, None, "labels", None)
+        text = parts[0]["context"]
+        self.assertNotIn("DUPLICATED FULL SOURCE", text)
+        self.assertNotIn("layout noise", text)
+        ctx = json.loads(text.split("\n", 1)[1])
+        self.assertFalse({"text", "blocks", "pages"} & set(ctx["01_source/extraction.json"]))
+        self.assertIn("image1.jpeg", text)
+        self.assertIn("cell", text)
+
+    def _parallel_batch(self):
+        questions = {n: f'{n}. Question {n}?\nA. a{n} B. b{n} C. c{n} D. d{n}' for n in range(1, 5)}
+        source = '\n'.join(questions[n] for n in range(1, 5))
+        units = [{'unit_id': f'u{n}', 'unit_kind': 'standalone', 'numbers': [n],
+                  'stem': questions[n]} for n in range(1, 5)]
+        self.write('01_source/正文.txt', source)
+        self.write('01_source/structure.confirmed.json', {'units': units})
+        self.write('01_source_ans/answers.json', {'answers': {str(n): 'A' for n in range(1, 5)},
+                   'difficulty': {str(n): '容易' for n in range(1, 5)}})
+        self.write('03_types/types.json', {'items': [
+            {'unit_id': f'u{n}', 'type': '阅读理解', 'subtypes': ['阅读判断'], 'evidence': ['L1']}
+            for n in range(1, 5)]})
+        self.write('04_knowledge/knowledge.json', {'items': [
+            {'unit_id': f'u{n}', 'knowledge': ['语篇体裁/记叙文/故事',
+             '主题/人与自我/生活与学习/日常起居'], 'subquestions': []} for n in range(1, 5)]})
+        self.write('06_batch/batch.json', {'items': []})
+        self.plan = review.prepare_round_plan(self.batch)
+
+    def _part_response(self, prompt, round_id):
+        import re
+        targets = json.loads(re.search(r"TARGETS: (\[.*?\])\n", prompt).group(1))
+        checks = []
+        for target in targets:
+            uid = target['unit_id'] if isinstance(target, dict) else target
+            numbers = ([str(target['number'])] if round_id == 'sample'
+                       else [str(q['number']) for q in self.plan['questions'] if q['unit_id'] == uid])
+            assessment = {'type': '阅读理解', 'subtypes': ['阅读判断'],
+                          'knowledge': ['语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/日常起居'],
+                          'subquestions': [],
+                          'difficulty': [{'number': number, 'value': '容易'} for number in numbers]}
+            if round_id == 'sample':
+                assessment['source_comparison'] = '与原文和答案一致。'
+            base = dict(target) if isinstance(target, dict) else {'unit_id': target}
+            checks.append(dict(base, verdict='ok', rationale='原文说明题目内容。',
+                               evidence=[{'path': '01_source/正文.txt', 'locator': 'L1',
+                                          'quote': f"Question {numbers[0]}?"}],
+                               assessment=assessment))
+        return {'status': 'completed', 'artifacts': {'review_round': {'checks': checks}},
+                'notes': [], 'findings': []}
+
+    def test_three_rounds_run_concurrently(self):
+        self._parallel_batch()
+        import threading
+        barrier = threading.Barrier(3, timeout=5)
+        seen = []
+
+        def invoke(prompt, run_dir, config, permit_parallel=False):
+            import re
+            round_id = re.search(r"ROUND: (\w+)", prompt).group(1)
+            seen.append(round_id)
+            barrier.wait()  # all three rounds must be in flight together
+            return {'response': self._part_response(prompt, round_id)}
+
+        with patch.object(review_rounds, 'invoke', side_effect=invoke):
+            result = review_rounds.run(self.batch, config={'provider': 'fixture',
+                                                           'review_part_parallel': 3})
+        self.assertTrue(result['completed'], result)
+        self.assertEqual(sorted(seen), sorted(review.ROUND_IDS))
+        self.assertEqual(review.evaluate_rounds(self.batch)['checked_rounds'], list(review.ROUND_IDS))
+
+    def test_parallel_parts_overlap_and_complete_in_order(self):
+        self._parallel_batch()
+        import threading, time
+        lock = threading.Lock()
+        state = {'active': 0, 'peak': 0, 'rounds': []}
+        def invoke(prompt, run_dir, config, permit_parallel=False):
+            import re
+            round_id = re.search(r"ROUND: (\w+)", prompt).group(1)
+            with lock:
+                state['active'] += 1
+                state['peak'] = max(state['peak'], state['active'])
+                state['rounds'].append(round_id)
+            time.sleep(0.05)
+            with lock:
+                state['active'] -= 1
+            return {'response': self._part_response(prompt, round_id)}
+        with patch.object(review_rounds, 'invoke', side_effect=invoke):
+            result = review_rounds.run(self.batch, config={'provider': 'fixture', 'review_part_parallel': 4,
+                                                           'review_max_units_per_part': 1})
+        self.assertTrue(result['completed'], result)
+        self.assertGreaterEqual(state['peak'], 2)
+        self.assertEqual(review.evaluate_rounds(self.batch)['checked_rounds'], list(review.ROUND_IDS))
+
+    def test_parallel_failure_keeps_later_pending_for_next_run(self):
+        self._parallel_batch()
+        def failing(prompt, run_dir, config, permit_parallel=False):
+            import re
+            round_id = re.search(r"ROUND: (\w+)", prompt).group(1)
+            targets = json.loads(re.search(r"TARGETS: (\[.*?\])\n", prompt).group(1))
+            if round_id == 'labels' and 'u1' in targets:
+                raise RuntimeError('模型调用失败')
+            return {'response': self._part_response(prompt, round_id)}
+        with patch.object(review_rounds, 'invoke', side_effect=failing):
+            first = review_rounds.run(self.batch, config={'provider': 'fixture', 'review_part_parallel': 4,
+                                                          'review_max_units_per_part': 1})
+        self.assertNotIn('labels', review.evaluate_rounds(self.batch)['checked_rounds'])
+        pending = list((self.batch / 'workflow/review-pending').glob('*.json'))
+        self.assertGreaterEqual(len(pending), 1)
+        # The next invocation must reuse retained responses and only re-run the
+        # partition that never produced one.
+        called = []
+        def second(prompt, run_dir, config, permit_parallel=False):
+            import re
+            round_id = re.search(r"ROUND: (\w+)", prompt).group(1)
+            targets = json.loads(re.search(r"TARGETS: (\[.*?\])\n", prompt).group(1))
+            called.append((round_id, targets))
+            return {'response': self._part_response(prompt, round_id)}
+        with patch.object(review_rounds, 'invoke', side_effect=second):
+            review_rounds.run(self.batch, config={'provider': 'fixture', 'review_part_parallel': 4,
+                                                          'review_max_units_per_part': 1})
+        self.assertEqual([c for c in called if c[0] == 'labels'], [('labels', ['u1'])])
 
     def test_catalog_scoped_by_paper_sections_per_partition(self):
         questions = {1: '1. Choose one?\nA. a1 B. b1 C. c1 D. d1',
