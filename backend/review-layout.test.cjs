@@ -4,16 +4,25 @@ const fs = require('node:fs');
 const path = require('node:path');
 const client = fs.readFileSync(path.resolve(__dirname, '..', 'lib/client.js'), 'utf8');
 
-test('review 布局用 Grid + 分层容器查询（容器不能改自身）', () => {
-  // 外层滚动区是尺寸容器
-  assert.match(client, /\.wf-review-container\{[^}]*container-type:inline-size[^}]*container-name:wfrev\}/);
-  // 内层是 grid
-  assert.match(client, /\.wf-review-layout\{display:grid;grid-template-columns:minmax\(0,1\.4fr\) minmax\(280px,1fr\)/);
-  // 窄容器查询改的是后代 .wf-review-layout（不是容器自身）
-  assert.match(client, /@container wfrev \(max-width:720px\)\{\.wf-review-layout\{grid-template-columns:minmax\(0,1fr\)\}\}/);
-  // DOM 分层：container 内含 layout
+test('审核布局：右栏“待人工处理”始终固定右侧，绝不换行到下方', () => {
+  // 两栏常驻 grid：左栏 minmax(300px,1fr)、右栏 minmax(300px,380px)
+  assert.match(client, /\.wf-review-layout\{display:grid;grid-template-columns:minmax\(300px,1fr\) minmax\(300px,380px\)/);
+  // 整块有最小宽度，面板更窄时靠外层容器横向滚动（overflow:auto），而不是把右栏挤下去
+  assert.match(client, /\.wf-review-layout\{[^}]*min-width:624px/);
+  assert.match(client, /\.wf-review-container\{flex:1;min-height:0;overflow:auto\}/);
+  // 不再有任何“切单列/换行”规则
+  assert.doesNotMatch(client, /@container wfrev/);
+  assert.doesNotMatch(client, /wf-review-layout\{flex-direction:column\}/);
+  assert.doesNotMatch(client, /grid-template-columns:minmax\(0,1fr\)\}$/m);
+});
+
+test('逐题列表列已压缩，给工作区让宽', () => {
+  assert.match(client, /flex: '0 1 180px', minWidth: 116/);
+});
+
+test('DOM 分层：container 内含 layout，左右两栏为 grid 子项', () => {
   assert.match(client, /className: 'wf-scroll wf-review-container'/);
   assert.match(client, /className: 'wf-review-layout'/);
-  // 已移除会互相打架的 flex-basis 旧方案
-  assert.doesNotMatch(client, /wf-review-main\{flex:1 1 420px/);
+  assert.match(client, /className: 'wf-review-main'/);
+  assert.match(client, /className: 'wf-review-notes'/);
 });
