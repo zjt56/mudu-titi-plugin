@@ -94,6 +94,7 @@ dsh plugin --profile <你的 profile> add "$(pwd)"
 
 - 默认 `~/.dsh/wf-plugin-data/`（老用户若插件目录内已有 `workflows/` 则沿用原目录）。
 - 面板 `/wf-plugin/health` 会返回实际使用的 `dataRoot` 与探测到的 `python`，排查问题时先看这个。
+- 后端默认用 `8791` 端口；若被本机其他程序占用，会自动顺延到下一个空闲端口（面板无感知）。需要固定端口时设置环境变量 `WF_WORKBENCH_PORT`。
 
 ## 安装（本机开发）
 
