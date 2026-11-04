@@ -134,12 +134,22 @@ def _fixture(root: Path, findings: list, queue: list) -> Path:
 
 
 def check_gates() -> list[dict]:
+    # 干净批次放行：只构造"无阻断项 / 人工队列为空 / 无必检未核"的审核产物，
+    # 判断闸门对这些自身可核验的维度是否放行。三轮语义审核（labels/knowledge/sample）
+    # 必须来自真实的分别执行，不能由自检伪造，因此这里只要求"除分轮记录未完成外、
+    # 没有闸门自身能判定的错误"——这与 review.py 的 fail-closed 语义一致。
+    gate_own_errors = {"REVIEW_FINDING_OPEN", "MANUAL_REVIEW_OPEN", "MANUAL_QUEUE_MISSING",
+                       "REQUIRED_CHECK_UNCHECKED", "REVIEW_MISSING", "REVIEW_FILE_UNREADABLE"}
     out = []
     with tempfile.TemporaryDirectory() as tmp:
         clean = _fixture(Path(tmp) / "clean", [], [])
         result = review.evaluate(clean)
-        out.append(_check("闸门用例：干净批次放行", result["passed"],
-                          "通过" if result["passed"] else f"误拦：{result['errors'][:1]}"))
+        own = [e for e in result["errors"] if e.get("code") in gate_own_errors]
+        only_rounds = all(e.get("code") in ("REVIEW_ROUND_UNCHECKED", "REVIEW_SAMPLE_SOURCE_UNVERIFIED")
+                          for e in result["errors"])
+        passed = not own and only_rounds
+        out.append(_check("闸门用例：干净批次无自身可判定错误（分轮待真实审核）", passed,
+                          "通过" if passed else f"误拦：{(own or result['errors'])[:1]}"))
 
     with tempfile.TemporaryDirectory() as tmp:
         blocked = _fixture(
