@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Local-only review workbench API. No upload or publish endpoints.
+"""Local-only review workbench API. Upload writes to the cloud 上传暂存 only; no publish.
 
 题目列表按“入库单元”合并：一个独立题一行，一个题组（完形、任务型阅读、
 听力对话组等）一行，前端一次显示整组材料与全部小题。
@@ -15,8 +15,10 @@ from functools import wraps
 import base64
 import shutil
 import stat
+import subprocess
+import sys
 import threading
-from time import monotonic
+from time import monotonic, time
 from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default as email_policy
@@ -834,7 +836,9 @@ def overview(name):
             "media": media_summary,
             "extraction": load(folder / "07_review" / "extraction-report.json", {}),
             "structure_gate": load(folder / "07_review" / "structure-gate.json", {}),
-            "stages": stages, "rows": rows}
+            "stages": stages, "rows": rows,
+            # 已写入云端上传暂存的批次视为完成，试卷审核列表不再展示。
+            "uploaded": str(((manifest.get("stages") or {}).get("upload") or {}).get("status") or "") == "completed"}
 
 
 def list_batches():
@@ -865,6 +869,81 @@ def cached_list_batches():
         result = list_batches()
         _batches_snapshot = (key, monotonic() + 2.0, result)
         return result
+
+
+# ---------------------------------------------------------------------------
+# 批次上传：把本批题目写入云端题库的“上传暂存”。
+#
+# 这在设计上仍是一个显式人工动作：面板点「上传批次」即代表本次上传获得批准，
+# 但内部完整走三步（步骤与 CLI 一致，闸门由 workflow.runner 自己校验，不绕过）：
+#   1) prepare-upload  读取远端目录、校验并冻结上传请求
+#   2) mark upload_gate approved  绑定冻结文件与目标（actor = 本机操作员）
+#   3) upload --yes    真正写入上传暂存
+# 结构闸门/审核闸门未过时 runner 会拒绝，错误原样回显。
+#
+# 上传可能持续数分钟（网络 + 远端校验），因此放在后台线程执行，
+# 不占用服务锁，避免阻塞其他请求。
+# ---------------------------------------------------------------------------
+_upload_jobs = {}
+
+
+def _run_runner(args):
+    return subprocess.run([sys.executable, "-m", "workflow.runner", *args],
+                          cwd=str(ROOT), capture_output=True, text=True, timeout=1800,
+                          env=dict(os.environ))
+
+
+def _run_batch_upload(name, actor):
+    job = _upload_jobs[name]
+
+    def step(label, args):
+        job["step"] = label
+        proc = _run_runner(args)
+        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        job["output"] = out[-4000:]
+        return proc.returncode, out
+
+    try:
+        folder = batch_dir(name)
+        rc, out = step("准备上传（冻结请求）", ["prepare-upload", "--batch-dir", str(folder)])
+        if rc != 0:
+            job.update(ok=False, error="上传准备未通过：" + (out.splitlines()[-1] if out else str(rc)))
+            return
+        rc, out = step("确认上传闸门", ["mark", "--batch-dir", str(folder), "--stage", "upload_gate",
+                                        "--status", "approved", "--actor", actor,
+                                        "--note", "通过插件「上传批次」按钮确认"])
+        if rc != 0:
+            job.update(ok=False, error="上传确认失败：" + (out.splitlines()[-1] if out else str(rc)))
+            return
+        rc, out = step("写入云端上传暂存", ["upload", "--batch-dir", str(folder), "--yes"])
+        if rc != 0:
+            job.update(ok=False, error="上传被拒绝：" + (out.splitlines()[-1] if out else str(rc)))
+            return
+        job.update(ok=True, step="已上传")
+    except Exception as exc:  # noqa: BLE001 - 后台任务，错误回显给面板
+        job.update(ok=False, error=str(exc))
+    finally:
+        job["running"] = False
+        job["finished_at"] = time()
+
+
+def start_batch_upload(name, actor="本机操作员"):
+    batch_dir(name)  # 批次不存在直接抛错
+    with _lock:
+        job = _upload_jobs.get(name)
+        if job and job.get("running"):
+            raise ValueError("该批次正在上传中，请稍候")
+        _upload_jobs[name] = {"running": True, "ok": None, "step": "开始", "output": "",
+                              "error": "", "started_at": time()}
+    threading.Thread(target=_run_batch_upload, args=(name, actor), daemon=True).start()
+    return {"started": True}
+
+
+def upload_state(name):
+    job = _upload_jobs.get(name)
+    if not job:
+        return {"running": False, "ok": None, "step": "", "output": "", "error": ""}
+    return dict(job)
 
 
 def unit_label_path(folder: Path, unit_id) -> Path:
@@ -1366,6 +1445,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(detail(parts[2], parts[4]))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "pipeline":
                 return self.send_json({"name": parts[2], **advance_state(parts[2])})
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "upload-status":
+                return self.send_json(upload_state(parts[2]))
             self.send_json({"error": "not found"}, 404)
         except (ValueError, KeyError) as exc:
             self.send_json({"error": str(exc)}, 400)
@@ -1382,6 +1463,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, **handle_upload(fields, files)})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "advance":
                 return self.send_json({"ok": True, **start_advance(parts[2])})
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "upload":
+                return self.send_json({"ok": True, **start_batch_upload(parts[2])})
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
