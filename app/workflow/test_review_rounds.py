@@ -1,0 +1,811 @@
+"""Real-round contracts, portable handoff and separate invocation regressions."""
+import contextlib
+import concurrent.futures
+import copy
+import io
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from workflow import agent_tasks, ingest, review, review_rounds
+
+
+class ReviewRoundsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.batch = Path(self.tmp.name)
+        stem = 'She reads a book.\n' + '\n'.join(
+            f'{n}. What happens in question {n}?\nA. book{n} B. pen{n} C. map{n} D. bag{n}' for n in range(1, 7))
+        self.write('01_source/正文.txt', stem)
+        self.write("01_source/structure.confirmed.json", {"units": [{"unit_id": "group-1-6", "unit_kind": "group", "numbers": [1, 2, 3, 4, 5, 6], "stem": stem}]})
+        self.write("03_types/types.json", {"items": [{"unit_id": "group-1-6", "type": "阅读理解", "subtypes": ["阅读判断"], "evidence": ["L1"]}]})
+        self.knowledge = {"knowledge": ["语篇体裁/记叙文/故事", "主题/人与自我/生活与学习/日常起居"], "subquestions": [
+            {"number": str(n), "knowledge": ["设题角度/阅读/细节理解"]} for n in range(1, 7)]}
+        self.write("04_knowledge/knowledge.json", {"items": [dict(self.knowledge, unit_id="group-1-6")]})
+        self.write("01_source_ans/answers.json", {"answers": {str(n): "A" for n in range(1, 7)},
+                   "difficulty": {str(n): "容易" for n in range(1, 7)}})
+        self.write("04_knowledge/explanations.json", {"items": [{
+            "unit_id": "group-1-6", "explanation": "", "explanation_origin": "not_applicable",
+            "articleSummary": "短文介绍她读书的情景。（AI生成，待校对）", "summary_origin": "ai",
+            "evidence": ["正文 L1–6"], "subquestions": [
+                {"number": str(n), "explanation": ("主语 She 是第三人称单数，谓语用 reads。" if n == 1
+                    else "原文说她读一本书，因此选 a book。") + "（AI生成，待校对）",
+                 "explanation_origin": "ai", "evidence": [f"正文 L1、L{n}；答案第{n}题"]}
+                for n in range(1, 7)]}]})
+        self.write("06_batch/batch.json", {"items": []})
+        self.plan = review.prepare_round_plan(self.batch)
+
+    def write(self, relative, value):
+        path = self.batch / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+    def checks(self, round_id):
+        targets = self.plan["sample"] if round_id == "sample" else [{"unit_id": "group-1-6"}]
+        checks = []
+        for target in targets:
+            numbers = [target['number']] if round_id == 'sample' else [str(n) for n in range(1, 7)]
+            assessment = {'type': '阅读理解', 'subtypes': ['阅读判断'],
+                          'knowledge': copy.deepcopy(self.knowledge['knowledge']),
+                          'subquestions': [copy.deepcopy(child) for child in self.knowledge['subquestions']
+                                           if child['number'] in numbers],
+                          'difficulty': [{'number': number, 'value': '容易'} for number in numbers]}
+            if round_id == 'sample':
+                assessment['source_comparison'] = 'The selected question is compared against its source and answer.'
+            checks.append(dict(target, verdict='ok', rationale='The article and question require detail retrieval, with evidence in the sentence.',
+                               evidence=[{'path': '01_source/正文.txt', 'locator': 'L1', 'quote': (f"What happens in question {target['number']}?" if round_id == 'sample' else 'She reads a book.')}],
+                               assessment=assessment))
+        return checks
+
+    def payload(self):
+        return {"plan": self.plan, "rounds": [{"round_id": r, "input_binding": self.plan["input_binding"],
+                "execution_id": "fixture-separate-" + r, "checks": self.checks(r)} for r in review.ROUND_IDS]}
+
+    def response(self, round_id):
+        return {"status": "completed", "artifacts": {"review_round": {"checks": self.checks(round_id)}}, "notes": [], "findings": []}
+
+    def test_blind_partitions_hide_labels_and_keep_source_evidence(self):
+        self.write('06_batch/batch.json', {'items': [{'unit_id': 'group-1-6',
+                   'question_type': 'SECRET_TYPE', 'knowledge': ['SECRET_KNOWLEDGE'],
+                   'filterMetadata': {'subtypes': ['SECRET_SUBTYPE']},
+                   'subquestions': [{'number': '1', 'knowledgeIds': ['SECRET_ID'],
+                                     'filterMetadata': {'categories': ['SECRET_CATEGORY']}}],
+                   'explanation': 'assembled-evidence'}]})
+        self.write('03_types/types.json', {'items': [{'unit_id': 'group-1-6', 'type': 'SECRET_TYPE'}]})
+        self.write('04_knowledge/knowledge.json', {'items': [{'unit_id': 'group-1-6', 'knowledge': ['SECRET_KNOWLEDGE']}]})
+        self.write('01_source_ans/answers.json', {'answers': {'1': 'A'},
+                   'evidence': {'1': 'answer-evidence', 'provenance': 'shared-evidence'},
+                   'difficulty': {'1': 'SECRET_DIFFICULTY'}, 'difficultyEvidence': {'1': ['SECRET_DIFFICULTY_BASIS']}})
+        self.write('02_audio/full-transcript.json', {'text': 'complete-dialogue-evidence'})
+        base = agent_tasks.build_task(self.batch, 'review', max_input_chars=1000000)
+        for rid in review.ROUND_IDS:
+            part = review_rounds._partition_contexts(base, 1000000, round_id=rid)[0]
+            text = part['context']
+            for secret in ('SECRET_TYPE', 'SECRET_KNOWLEDGE', 'SECRET_ID', 'SECRET_SUBTYPE', 'SECRET_CATEGORY', 'SECRET_DIFFICULTY', 'SECRET_DIFFICULTY_BASIS'):
+                self.assertNotIn(secret, text)
+            for evidence in ('She reads a book.', 'answer-evidence', 'shared-evidence',
+                             'assembled-evidence', 'complete-dialogue-evidence'):
+                self.assertIn(evidence, text)
+            data = json.loads(text.split('\n', 1)[1])
+            self.assertEqual(data['references/knowledge-catalog.json'],
+                             json.loads((Path(review.__file__).resolve().parents[1] / 'references/knowledge-catalog.json').read_text()))
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_difficulty_blind_assessment_and_comparison(self):
+        exported = review_rounds.export_task(self.batch)
+        package = Path(exported['package_dir'])
+        schema = json.loads((package / 'response.schema.json').read_text())
+        assessment = schema['properties']['artifacts']['properties']['review_round']['properties']['checks']['items']['properties']['assessment']
+        assessment = next((branch for branch in assessment.get('oneOf', []) if branch.get('type') == 'object'), assessment)
+        self.assertIn('difficulty', assessment['required'])
+        record = self.payload()['rounds'][0]
+        self.assertEqual(review._round_checks(record, 'labels', self.plan, self.batch), [])
+        payload = self.payload()
+        payload['rounds'][0]['checks'][0]['assessment']['difficulty'][2]['value'] = '困难'
+        result = review.evaluate_rounds(self.batch, payload)
+        self.assertTrue(result['execution_completed'])
+        self.assertFalse(result['passed'])
+        self.assertTrue(any(finding.get('field') == 'difficulty' and '困难' in finding['reason']
+                            for finding in result['findings']))
+        for bad in ([], [{'number': '1', 'value': '容易'}] * 6,
+                    [{'number': str(n), 'value': '未知'} for n in range(1, 7)]):
+            record['checks'][0]['assessment']['difficulty'] = bad
+            with self.assertRaises(ValueError):
+                review._round_checks(record, 'labels', self.plan, self.batch)
+        record['checks'][0]['assessment'].pop('difficulty')
+        with self.assertRaises(ValueError):
+            review._round_checks(record, 'labels', self.plan, self.batch)
+
+    def test_catalog_filter_retains_metadata_and_unknown_type_falls_back(self):
+        from workbench import taxonomy
+        catalog = json.loads(taxonomy.KNOWLEDGE_PATH.read_text())
+        scoped = review.compact_knowledge_catalog(['阅读理解'], catalog)
+        self.assertEqual(scoped['version'], catalog['version'])
+        self.assertEqual(scoped['versionId'], catalog['versionId'])
+        self.assertLess(len(scoped['points']), len(catalog['points']))
+        for types in ([], ['未知题型'], ['阅读理解', '未知题型'], ['阅读理解', None]):
+            self.assertEqual(review.compact_knowledge_catalog(types, catalog), catalog)
+
+    def test_knowledge_schema_allows_empty_whole_group_child_labels(self):
+        exported = review_rounds.export_task(self.batch, skip_rounds=('labels',))
+        schema = json.loads((Path(exported['package_dir']) / 'response.schema.json').read_text())
+        check = schema['properties']['artifacts']['properties']['review_round']['properties']['checks']['items']
+        assessment = check['properties']['assessment']
+        assessment = next((branch for branch in assessment.get('oneOf', []) if branch.get('type') == 'object'), assessment)
+        assessment = assessment['properties']
+        child = assessment['subquestions']['items']['properties']['knowledge']
+        self.assertEqual(child.get('minItems', 0), 0)
+        self.assertEqual(assessment['knowledge']['minItems'], 1)
+        task = json.loads((Path(exported['package_dir']) / 'task.json').read_text())
+        self.assertIn('整篇题组列出目标子题且其 knowledge=[]', task['prompt'])
+
+    def test_sample_selects_whole_target_unit_before_partition(self):
+        units = [{'unit_id': 'group-1-6', 'unit_kind': 'group', 'numbers': [1, 2, 3, 4, 5, 6]},
+                 {'unit_id': 'other', 'unit_kind': 'standalone', 'numbers': [7]}]
+        self.write('01_source/structure.confirmed.json', {'units': units})
+        self.write('04_knowledge/explanations.json', {'items': [
+            {'unit_id': 'group-1-6', 'material': 'shared-whole-material',
+             'subquestions': [{'number': str(n), 'explanation': 'child-' + str(n)} for n in range(1, 7)]},
+            {'unit_id': 'other', 'explanation': 'x' * 12000}]})
+        base = agent_tasks.build_task(self.batch, 'review', max_input_chars=1000000)
+        before = review_rounds._partition_contexts(base, 1000000, round_id='sample')[0]['context']
+        after = review_rounds._partition_contexts(base, 1000000, round_id='sample', target_unit_ids={'group-1-6'})[0]['context']
+        self.assertGreater(len(before) - len(after), 12000)
+        self.assertIn('shared-whole-material', after)
+        self.assertIn('child-6', after)
+        self.assertIn('She reads a book.', after)
+        self.assertNotIn('x' * 100, after)
+        print(f'Sample context chars: {len(before)} -> {len(after)}')
+
+    def test_no_records_is_three_unchecked_and_never_fake_evidence(self):
+        result = review.evaluate_rounds(self.batch)
+        self.assertFalse(result["passed"])
+        self.assertEqual(len(result["unchecked"]), 3)
+        self.assertEqual(result["findings"], [])
+        self.assertFalse((self.batch / "07_review").exists())
+
+    def test_concurrent_exports_share_partition_initialization(self):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            exports = list(pool.map(lambda _: review_rounds.export_task(self.batch), range(2)))
+        bindings = [json.loads((self.batch / 'workflow/review-bindings' / (e['task_id'] + '.json')).read_text()) for e in exports]
+        self.assertEqual(bindings[0]['state_path'], bindings[1]['state_path'])
+        self.assertEqual(bindings[0]['state_digest'], bindings[1]['state_digest'])
+        self.assertNotEqual(exports[0]['task_id'], exports[1]['task_id'])
+
+    def test_install_recovers_missing_queue_after_interruption(self):
+        exported = review_rounds.export_task(self.batch)
+        response = self.response('labels')
+        response['artifacts']['review_round']['checks'][0].update(verdict='uncertain', rationale='原文与答案冲突。')
+        write_json = ingest._write_json
+        def fail_queue(path, payload):
+            if path.name == 'manual-review-queue.json':
+                raise OSError('injected queue failure')
+            return write_json(path, payload)
+        with patch.object(ingest, '_write_json', side_effect=fail_queue):
+            with self.assertRaises(OSError):
+                review_rounds.import_result(self.batch, exported['task_id'], response)
+        self.assertTrue((self.batch / '07_review/review-rounds.json').exists())
+        # A subsequent export must complete the pending transaction before advancing.
+        self.assertEqual(review_rounds.export_task(self.batch)['round_id'], 'knowledge')
+        items = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['status'], 'open')
+        self.assertEqual(review_rounds.import_result(self.batch, exported['task_id'], response)['round_completed'], 'labels')
+        changed = copy.deepcopy(response)
+        changed['notes'] = ['different result']
+        with self.assertRaises(ValueError):
+            review_rounds.import_result(self.batch, exported['task_id'], changed)
+
+    def test_install_replays_after_receipt_failure(self):
+        exported = review_rounds.export_task(self.batch)
+        response = self.response('labels')
+        save = review_rounds._save
+        def fail_receipt(batch, path, data):
+            if path.endswith('.receipt.json'):
+                raise OSError('injected receipt failure')
+            return save(batch, path, data)
+        with patch.object(review_rounds, '_save', side_effect=fail_receipt):
+            with self.assertRaises(OSError):
+                review_rounds.import_result(self.batch, exported['task_id'], response)
+        self.assertEqual(review_rounds.import_result(self.batch, exported['task_id'], response)['round_completed'], 'labels')
+        self.assertEqual(len(json.loads((self.batch / '07_review/review-rounds.json').read_text())['rounds']), 1)
+
+    def test_partitioned_round_resumes_and_requires_exact_coverage(self):
+        units = [{'unit_id': f'u{n}', 'unit_kind': 'standalone', 'numbers': [n],
+                  'stem': f'{n}. Question text for unit {n}.'} for n in range(1, 17)]
+        self.write('01_source/正文.txt', '\n'.join(unit['stem'] for unit in units))
+        self.write('01_source_ans/answers.json', {'answers': {str(n): 'A' for n in range(1, 17)},
+                   'difficulty': {str(n): '容易' for n in range(1, 17)}})
+        self.write('01_source/structure.confirmed.json', {'units': units})
+        self.write('03_types/types.json', {'items': [{'unit_id': u['unit_id'], 'type': '阅读理解',
+                   'subtypes': ['阅读判断'], 'evidence': ['L1']} for u in units]})
+        self.write('04_knowledge/knowledge.json', {'items': [{'unit_id': u['unit_id'],
+                   'knowledge': ['语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/日常起居'], 'subquestions': []} for u in units]})
+        self.plan = review.prepare_round_plan(self.batch)
+        first = review_rounds.export_task(self.batch, max_units_per_part=15)
+        self.assertEqual(first['part_count'], 2)
+        duplicate = review_rounds.export_task(self.batch, max_units_per_part=15)
+        def response(exported):
+            binding = json.loads((self.batch / 'workflow/review-bindings' / (exported['task_id'] + '.json')).read_text())
+            state = json.loads((self.batch / binding['state_path']).read_text())
+            targets = state['parts'][binding['part_index']]['targets']
+            checks = [dict(unit_id=uid, verdict='ok', rationale='核对原文和题型。',
+                      evidence=[{'path': '01_source/正文.txt', 'locator': f'第{uid[1:]}题',
+                                 'quote': f'Question text for unit {uid[1:]}.'}],
+                      assessment={'type': '阅读理解', 'subtypes': ['阅读判断'],
+                                  'knowledge': ['语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/日常起居'], 'subquestions': [],
+                                  'difficulty': [{'number': uid[1:], 'value': '容易'}]}) for uid in targets]
+            return {'status': 'completed', 'artifacts': {'review_round': {'checks': checks}}, 'notes': [], 'findings': []}
+        bad = response(first)
+        bad['artifacts']['review_round']['checks'].pop()
+        with self.assertRaises(ValueError):
+            review_rounds.import_result(self.batch, first['task_id'], bad)
+        good = response(first)
+        report = review_rounds.import_result(self.batch, first['task_id'], good)
+        self.assertEqual(report['part_completed'], 1)
+        self.assertNotIn('labels', review.evaluate_rounds(self.batch)['checked_rounds'])
+        self.assertEqual(review_rounds.import_result(self.batch, first['task_id'], good), report)
+        with self.assertRaises(ValueError):
+            review_rounds.import_result(self.batch, duplicate['task_id'], response(duplicate))
+        second = review_rounds.export_task(self.batch)
+        self.assertEqual(second['part_index'], 2)
+        review_rounds.import_result(self.batch, second['task_id'], response(second))
+        payload = json.loads((self.batch / '07_review/review-rounds.json').read_text())
+        record = payload['rounds'][0]
+        self.assertEqual([p['execution_id'] for p in record['parts']], [first['task_id'], second['task_id']])
+        self.assertEqual(len(record['checks']), 16)
+        self.assertIn('labels', review.evaluate_rounds(self.batch)['checked_rounds'])
+        self.assertEqual(review_rounds.export_task(self.batch)['round_id'], 'knowledge')
+
+    def test_catalog_scoped_by_paper_sections_per_partition(self):
+        questions = {1: '1. Choose one?\nA. a1 B. b1 C. c1 D. d1',
+                     2: '2. Choose two?\nA. a2 B. b2 C. c2 D. d2',
+                     3: '3. Read three?\nA. a3 B. b3 C. c3 D. d3',
+                     4: '4. Read four?\nA. a4 B. b4 C. c4 D. d4'}
+        source = ('\u2160.\u5355\u9879\u586b\u7a7a(\u51712\u5c0f\u9898)\n' + questions[1] + '\n' + questions[2]
+                  + '\n\u2161.\u9605\u8bfb\u7406\u89e3(\u51712\u5c0f\u9898)\n' + questions[3] + '\n' + questions[4])
+        units = [{'unit_id': f'u{n}', 'unit_kind': 'standalone', 'numbers': [n],
+                  'stem': questions[n]} for n in (1, 2, 3, 4)]
+        self.write('01_source/\u6b63\u6587.txt', source)
+        self.write('01_source/structure.confirmed.json', {'units': units})
+        self.write('01_source_ans/answers.json', {'answers': {str(n): 'A' for n in range(1, 5)},
+                   'difficulty': {str(n): '\u5bb9\u6613' for n in range(1, 5)}})
+        self.write('03_types/types.json', {'items': [
+            {'unit_id': f'u{n}', 'type': '\u5355\u9879\u586b\u7a7a' if n < 3 else '\u9605\u8bfb\u7406\u89e3',
+             'subtypes': ['\u56db\u4e2a\u9009\u9879' if n < 3 else '\u9605\u8bfb\u5224\u65ad'],
+             'evidence': ['L1']} for n in range(1, 5)]})
+        self.write('04_knowledge/knowledge.json', {'items': [
+            {'unit_id': f'u{n}',
+             'knowledge': (['\u8bcd\u6c47/\u77ed\u8bed\u4e0e\u56fa\u5b9a\u642d\u914d'] if n < 3 else
+                           ['\u8bed\u7bc7\u4f53\u88c1/\u8bb0\u53d9\u6587/\u6545\u4e8b',
+                            '\u4e3b\u9898/\u4eba\u4e0e\u81ea\u6211/\u751f\u6d3b\u4e0e\u5b66\u4e60/\u65e5\u5e38\u8d77\u5c45']),
+             'subquestions': []} for n in range(1, 5)]})
+        self.write('06_batch/batch.json', {'items': []})
+        export = review_rounds.export_task(self.batch, max_units_per_part=1)
+        self.assertEqual(export['part_count'], 4)
+        binding = json.loads((self.batch / 'workflow/review-bindings'
+                              / (export['task_id'] + '.json')).read_text())
+        state = json.loads((self.batch / binding['state_path']).read_text())
+        catalogs = []
+        for part in state['parts']:
+            body = part['prompt'].split('BEGIN SUPPLIED CONTENT', 1)[1] \
+                .rsplit('END SUPPLIED CONTENT', 1)[0].split('\n', 1)[1]
+            catalogs.append(json.loads(body)['references/knowledge-catalog.json'])
+        single = [point['path'] for point in catalogs[0]['points']]
+        reading = [point['path'] for point in catalogs[2]['points']]
+        self.assertTrue(single and all(path.startswith(('\u8bcd\u6c47', '\u8bed\u6cd5', '\u8bed\u97f3', '\u8bed\u7528'))
+                                       for path in single))
+        self.assertFalse(any(path.startswith('\u8bbe\u9898\u89d2\u5ea6/\u9605\u8bfb') for path in single))
+        self.assertTrue(reading and all(path.startswith(('\u4e3b\u9898', '\u8bed\u7bc7\u4f53\u88c1',
+                                                         '\u8bbe\u9898\u89d2\u5ea6/\u9605\u8bfb'))
+                                        for path in reading))
+        self.assertFalse(any(path.startswith('\u8bed\u6cd5') for path in reading))
+
+    def test_later_round_completion_keeps_finished_partitions_resumable(self):
+        units = [{'unit_id': f'u{n}', 'unit_kind': 'standalone', 'numbers': [n],
+                  'stem': f'{n}. Question text for unit {n}.'} for n in range(1, 17)]
+        self.write('01_source/正文.txt', '\n'.join(unit['stem'] for unit in units))
+        self.write('01_source_ans/answers.json', {'answers': {str(n): 'A' for n in range(1, 17)},
+                   'difficulty': {str(n): '容易' for n in range(1, 17)}})
+        self.write('01_source/structure.confirmed.json', {'units': units})
+        self.write('03_types/types.json', {'items': [{'unit_id': u['unit_id'], 'type': '阅读理解',
+                   'subtypes': ['阅读判断'], 'evidence': ['L1']} for u in units]})
+        self.write('04_knowledge/knowledge.json', {'items': [{'unit_id': u['unit_id'],
+                   'knowledge': ['语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/日常起居'],
+                   'subquestions': []} for u in units]})
+        self.plan = review.prepare_round_plan(self.batch)
+
+        def answer(exported):
+            binding = json.loads((self.batch / 'workflow/review-bindings'
+                                  / (exported['task_id'] + '.json')).read_text())
+            state = json.loads((self.batch / binding['state_path']).read_text())
+            targets = state['parts'][binding['part_index']]['targets']
+            checks = [dict(unit_id=uid, verdict='ok', rationale='核对原文和题型。',
+                      evidence=[{'path': '01_source/正文.txt', 'locator': f'第{uid[1:]}题',
+                                 'quote': f'Question text for unit {uid[1:]}.'}],
+                      assessment={'type': '阅读理解', 'subtypes': ['阅读判断'],
+                                  'knowledge': ['语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/日常起居'],
+                                  'subquestions': [],
+                                  'difficulty': [{'number': uid[1:], 'value': '容易'}]}) for uid in targets]
+            return {'status': 'completed', 'artifacts': {'review_round': {'checks': checks}},
+                    'notes': [], 'findings': []}
+
+        first = review_rounds.export_task(self.batch, max_units_per_part=15)
+        self.assertEqual((first['round_id'], first['part_index'], first['part_count']),
+                         ('labels', 1, 2))
+        review_rounds.import_result(self.batch, first['task_id'], answer(first))
+        knowledge = review_rounds.export_task(self.batch, skip_rounds=('labels',))
+        self.assertEqual(knowledge['round_id'], 'knowledge')
+        self.assertEqual(knowledge['part_count'], 1)
+        review_rounds.import_result(self.batch, knowledge['task_id'], answer(knowledge))
+        # Another round finishing must not discard the finished labels part.
+        resumed = review_rounds.export_task(self.batch, max_units_per_part=15)
+        self.assertEqual((resumed['round_id'], resumed['part_index'], resumed['part_count']),
+                         ('labels', 2, 2))
+
+    def test_prior_round_digests_allow_later_rounds_but_detect_changes(self):
+        labels = {'round_id': 'labels', 'checks': []}
+        knowledge = {'round_id': 'knowledge', 'checks': []}
+        prior = {'labels': review._digest(labels)}
+        self.assertTrue(review_rounds._prior_unchanged([labels], prior))
+        self.assertTrue(review_rounds._prior_unchanged([labels, knowledge], prior))
+        self.assertFalse(review_rounds._prior_unchanged([knowledge], prior))
+        self.assertFalse(review_rounds._prior_unchanged(
+            [{'round_id': 'labels', 'checks': [1]}], prior))
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_sample_partition_provenance_requires_exact_nonoverlapping_targets(self):
+        payload = self.payload()
+        record = payload['rounds'][2]
+        record['parts'] = [{'execution_id': 'sample-a', 'targets': [self.plan['sample'][0]]},
+                           {'execution_id': 'sample-b', 'targets': [self.plan['sample'][1]]}]
+        self.assertTrue(review.evaluate_rounds(self.batch, payload)['passed'])
+        record['parts'][1]['targets'] = [self.plan['sample'][0]]
+        self.assertNotIn('sample', review.evaluate_rounds(self.batch, payload)['checked_rounds'])
+
+    def test_question_sample_ceil_not_unit_count_and_reproducible(self):
+        self.assertEqual(len(self.plan["units"]), 1)
+        self.assertEqual(len(self.plan["sample"]), 2)
+        self.assertEqual(self.plan, review.prepare_round_plan(self.batch))
+        self.assertEqual(len({q["number"] for q in self.plan["sample"]}), 2)
+        self.assertTrue(all(q["unit_id"] == "group-1-6" for q in self.plan["sample"]))
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_distinct_round_specific_records_pass_without_names_or_signatures(self):
+        result = review.evaluate_rounds(self.batch, self.payload())
+        self.assertTrue(result["passed"], result)
+        self.assertEqual(result["checked_rounds"], list(review.ROUND_IDS))
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_same_structural_checks_cannot_be_three_semantic_reviews(self):
+        # 仅有结构性声称不能替代每轮所需的独立比较结果。
+        payload = self.payload()
+        for record in payload["rounds"]:
+            for check in record["checks"]:
+                check["assessment"] = {"nonempty": True, "valid_taxonomy": True}
+        self.assertEqual(len(review.evaluate_rounds(self.batch, payload)["checked_rounds"]), 0)
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_catalog_labels_do_not_prove_knowledge_semantics(self):
+        payload = self.payload()
+        check = payload["rounds"][1]["checks"][0]
+        check["assessment"] = {"valid_taxonomy": True}
+        self.assertFalse(review.evaluate_rounds(self.batch, payload)["passed"])
+        # 盲判允许与原标注不同：差异由程序记为意见，不再判为无效轮次。
+        payload = self.payload()
+        payload["rounds"][1]["checks"][0]["assessment"]["knowledge"] = ["语篇体裁/说明文/介绍类短文", "主题/人与自我/生活与学习/日常起居"]
+        result = review.evaluate_rounds(self.batch, payload)
+        self.assertIn("knowledge", result["checked_rounds"])
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_stale_inputs_and_added_answer_evidence_invalidate(self):
+        payload = self.payload()
+        self.write("01_source_ans/正文.txt", "1. A")
+        self.assertEqual(len(review.evaluate_rounds(self.batch, payload)["unchecked"]), 3)
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_fake_quote_missing_source_and_shared_execution_fail(self):
+        # 伪造或缺少原文证据不能证明该轮完成，三轮还必须独立执行。
+        payload = self.payload()
+        payload["rounds"][0]["checks"][0]["evidence"][0]["quote"] = "fabricated quote"
+        self.assertFalse(review.evaluate_rounds(self.batch, payload)["passed"])
+        payload = self.payload()
+        payload["rounds"][0]["checks"][0]["evidence"] = []
+        self.assertFalse(review.evaluate_rounds(self.batch, payload)["passed"])
+        payload = self.payload()
+        payload["rounds"][1]["execution_id"] = payload["rounds"][0]["execution_id"]
+        self.assertFalse(review.evaluate_rounds(self.batch, payload)["passed"])
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_empty_or_invalid_verdict_does_not_complete_round(self):
+        for mode in ('empty', 'verdict', 'rationale'):
+            payload = self.payload()
+            checks = payload['rounds'][0]['checks']
+            if mode == 'empty':
+                checks.clear()
+            elif mode == 'verdict':
+                checks[0]['verdict'] = 'unknown'
+            else:
+                checks[0]['rationale'] = ''
+            self.assertNotIn('labels', review.evaluate_rounds(self.batch, payload)['checked_rounds'])
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_sample_missing_duplicate_or_wrong_question_blocks(self):
+        # 缺题、重复和题号异常都不能声称抽样完成。
+        for mode in ("missing", "duplicate", "wrong"):
+            payload = self.payload()
+            checks = payload["rounds"][2]["checks"]
+            if mode == "missing":
+                checks.pop()
+            elif mode == "duplicate":
+                checks.append(copy.deepcopy(checks[0]))
+            else:
+                checks[0]["number"] = "999"
+            self.assertFalse(review.evaluate_rounds(self.batch, payload)["passed"])
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_exact_evidenced_decision_resolves_observation_without_rewriting_round(self):
+        from workbench.server import apply_decision
+        payload = self.payload()
+        payload['rounds'][1]['checks'][0].update(verdict='uncertain', rationale='候选知识点存在歧义，需核原文。')
+        ingest.build_review_files(self.batch, {'review_rounds': payload})
+        queue_path = self.batch / '07_review/manual-review-queue.json'
+        queue = json.loads(queue_path.read_text())
+        finding = queue['items'][0]
+        finding['status'] = 'fixed'
+        self.write('07_review/manual-review-queue.json', queue)
+        self.assertFalse(review.evaluate_rounds(self.batch)['passed'])
+        apply_decision(self.batch, {'finding_id': finding['finding_id'], 'status': 'fixed',
+            'resolution_note': '已据原文She reads a book与设问核对，原标注成立。'}, 'agent-evidence-triage')
+        result = review.evaluate_rounds(self.batch)
+        self.assertTrue(result['passed'])
+        self.assertEqual(len(result['resolved_findings']), 1)
+        raw = json.loads((self.batch / '07_review/review-rounds.json').read_text())
+        self.assertEqual(raw['rounds'][1]['checks'][0]['verdict'], 'uncertain')
+        queue = json.loads(queue_path.read_text())
+        queue['items'][0]['reason'] = '另一个问题'
+        self.write('07_review/manual-review-queue.json', queue)
+        self.assertFalse(review.evaluate_rounds(self.batch)['passed'])
+
+    def test_identical_cross_round_findings_preserve_sources_and_decision(self):
+        from workbench.server import apply_decision
+        payload = self.payload()
+        for record in payload['rounds'][:2]:
+            record['checks'][0].update(verdict='uncertain', rationale='原文存在同一处歧义。', issue_key='题1答案与原文矛盾')
+        first = {'plan': self.plan, 'rounds': payload['rounds'][:1]}
+        self.write('07_review/review-rounds.json', first)
+        ingest.build_review_files(self.batch, {'findings': review._round_checks(first['rounds'][0], 'labels', self.plan, self.batch)})
+        queue_path = self.batch / '07_review/manual-review-queue.json'
+        fid = json.loads(queue_path.read_text())['items'][0]['finding_id']
+        apply_decision(self.batch, {'finding_id': fid, 'status': 'fixed',
+            'resolution_note': '已核对原文并确认歧义。'}, 'reviewer')
+        self.write('07_review/review-rounds.json', payload)
+        findings = review._round_checks(payload['rounds'][1], 'knowledge', self.plan, self.batch)
+        ingest.build_review_files(self.batch, {'findings': findings})
+        ingest.build_review_files(self.batch, {'findings': findings})
+        items = json.loads(queue_path.read_text())['items']
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]['status'], 'fixed')
+        self.assertEqual(items[0]['decided_by'], 'reviewer')
+        self.assertEqual(items[1]['status'], 'open')
+        self.assertEqual(items[1]['round_sources'][0]['evidence'], payload['rounds'][1]['checks'][0]['evidence'])
+        self.assertFalse(review.evaluate_rounds(self.batch)['passed'])
+
+    def test_different_assessments_merge_only_with_same_explicit_resolution(self):
+        payload = self.payload()
+        for record in payload['rounds'][:2]:
+            record['checks'][0].update(verdict='uncertain', rationale='原文存在同一处歧义。',
+                                       issue_key='题1答案冲突', resolution_key='核对题1答案原文')
+        payload['rounds'][1]['checks'][0]['assessment']['difficulty'][0]['value'] = '困难'
+        findings = [review._round_checks(record, record['round_id'], self.plan, self.batch)[0]
+                    for record in payload['rounds'][:2]]
+        self.assertNotEqual(findings[0]['round_sources'][0]['assessment'], findings[1]['round_sources'][0]['assessment'])
+        ingest.build_review_files(self.batch, {'findings': findings})
+        ingest.build_review_files(self.batch, {'findings': findings})
+        queue = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
+        records = [r for name in ('content-review.json', 'metadata-review.json')
+                   for r in json.loads((self.batch / '07_review' / name).read_text())['findings']]
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(queue[0]['round_sources'], [f['round_sources'][0] for f in findings])
+        self.assertEqual(records[0]['round_sources'], queue[0]['round_sources'])
+
+    def test_matching_later_source_never_inherits_prior_decision(self):
+        from workbench.server import apply_decision
+        payload = self.payload()
+        record = payload['rounds'][0]
+        record['checks'][0].update(verdict='uncertain', rationale='题目答案与原文冲突。', issue_key='题1答案冲突', resolution_key='核对题1答案原文')
+        first = review._round_checks(record, 'labels', self.plan, self.batch)[0]
+        later = copy.deepcopy(first)
+        later['field'] = 'knowledge'
+        later['round_sources'][0].update(round_id='knowledge', execution_id='other-execution')
+        ingest.build_review_files(self.batch, {'findings': [first]})
+        queue_path = self.batch / '07_review/manual-review-queue.json'
+        fid = json.loads(queue_path.read_text())['items'][0]['finding_id']
+        apply_decision(self.batch, {'finding_id': fid, 'status': 'fixed',
+                       'resolution_note': '核对原文后确认。'}, 'reviewer')
+        ingest.build_review_files(self.batch, {'findings': [later]})
+        items = json.loads(queue_path.read_text())['items']
+        self.assertEqual([item['status'] for item in items], ['fixed', 'open'])
+        self.assertEqual(items[0]['decided_by'], 'reviewer')
+        self.assertEqual(items[0]['round_sources'], first['round_sources'])
+        self.assertEqual(items[1]['round_sources'], later['round_sources'])
+        self.assertNotIn('decided_by', items[1])
+
+    def test_changed_issue_identity_stays_separate(self):
+        record = self.payload()['rounds'][0]
+        record['checks'][0].update(verdict='uncertain', rationale='原文存在歧义。', issue_key='答案冲突', resolution_key='将答案改为A')
+        first = review._round_checks(record, 'labels', self.plan, self.batch)[0]
+        for field, value in [('issue_key', '另一个问题'), ('resolution_key', '将答案改为B'),
+                             ('resolution_key', None), ('target_number', '2'),
+                             ('input_binding', 'different-binding'), ('verdict', 'incorrect'),
+                             ('rationale', '不同理由'), ('evidence', [{'quote': 'different'}])]:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                later = copy.deepcopy(first)
+                later['round_sources'][0].update(round_id='knowledge', execution_id='another',
+                                                 assessment={'knowledge': ['different']})
+                later['round_sources'][0][field] = value
+                ingest.build_review_files(Path(directory), {'findings': [first, later]})
+                queue = json.loads((Path(directory) / '07_review/manual-review-queue.json').read_text())['items']
+                self.assertEqual(len(queue), 2)
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_distinct_cross_round_observations_remain_separate(self):
+        payload = self.payload()
+        for record in payload['rounds']:
+            for check in record['checks']:
+                check.update(verdict='uncertain', rationale='原文存在歧义。', issue_key='答案与原文冲突')
+        # Same words but a different quote are not enough to identify the issue.
+        payload['rounds'][1]['checks'][0]['evidence'][0]['quote'] = 'reads a book'
+        ingest.build_review_files(self.batch, {'review_rounds': payload})
+        items = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
+        self.assertEqual(len(items), 4)  # Two unit findings and two distinct sampled children.
+        self.assertEqual(len({item['finding_id'] for item in items}), 4)
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_only_real_findings_enter_manual_queue(self):
+        payload = self.payload()
+        ingest.build_review_files(self.batch, {"review_rounds": payload})
+        self.assertEqual(json.loads((self.batch / "07_review/manual-review-queue.json").read_text())["items"], [])
+        payload["rounds"][1]["checks"][0]["verdict"] = "uncertain"
+        payload["rounds"][1]["checks"][0]["rationale"] = "The question could test either detail or inference; source answer evidence conflicts."
+        ingest.build_review_files(self.batch, {"review_rounds": payload})
+        items = json.loads((self.batch / "07_review/manual-review-queue.json").read_text())["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "open")
+        self.assertFalse(review.evaluate_rounds(self.batch)["passed"])
+
+    def test_info_is_retained_without_creating_human_work(self):
+        finding = {'unit_id': 'group-1-6', 'field': 'answer', 'severity': 'info',
+                   'reason': '与原卷答案一致，无需处理', 'evidence': ['原题第1行']}
+        ingest.build_review_files(self.batch, {'findings': [finding]})
+        self.assertEqual(json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items'], [])
+        rows = json.loads((self.batch / '07_review/content-review.json').read_text())['findings']
+        self.assertEqual(rows[0]['status'], 'informational')
+        self.assertFalse(rows[0]['blocking'])
+
+    def test_info_with_explicit_blocking_summary_still_enters_queue(self):
+        finding = {'unit_id': 'group-1-6', 'field': 'answer', 'severity': 'info',
+                   'reason': '实际存在待核验冲突', 'evidence': ['原题第1行']}
+        ingest.build_review_files(self.batch, {'findings': [finding],
+            'summary': {'blocking': [{'unit_id': 'group-1-6', 'field': 'answer'}]}})
+        # The explicit summary must retain its blocking authority.
+        content = json.loads((self.batch / '07_review/content-review.json').read_text())['findings']
+        self.assertTrue(content[0]['blocking'])
+        self.assertEqual(len(json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']), 1)
+
+    def test_same_finding_twice_in_one_submission_is_not_duplicated(self):
+        finding = {'unit_id': 'group-1-6', 'field': 'knowledge', 'severity': 'major',
+                   'reason': '标签与原题不符', 'evidence': ['原题第1行']}
+        result = ingest.build_review_files(self.batch, {'findings': [finding, copy.deepcopy(finding)]})
+        self.assertEqual(result['added'], 1)
+        self.assertEqual(len(json.loads((self.batch / '07_review/metadata-review.json').read_text())['findings']), 1)
+        self.assertEqual(len(json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']), 1)
+
+    def test_annotation_ingest_count_is_not_independent_round_count(self):
+        result = {"annotations": [{"unit_id": "group-1-6"}]}
+        ingest.record_units(self.batch, result)
+        ingest.record_units(self.batch, result)
+        unit = json.loads((self.batch / "07_review/unit-status.json").read_text())["units"]["group-1-6"]
+        self.assertEqual(unit["rounds"], 0)
+        self.assertEqual(unit["observations"], 2)
+
+    def test_portable_export_import_three_real_rounds(self):
+        for round_id in review.ROUND_IDS:
+            exported = review_rounds.export_task(self.batch)
+            self.assertEqual(exported["round_id"], round_id)
+            package = Path(exported["package_dir"])
+            self.assertTrue((package / "response.schema.json").is_file())
+            result = review_rounds.import_result(self.batch, exported["task_id"], self.response(round_id))
+            self.assertEqual(result["round_completed"], round_id)
+        self.assertTrue(result["completed"])
+        self.assertEqual(review_rounds.export_task(self.batch)["action"], "complete")
+        stored = json.loads((self.batch / "07_review/review-rounds.json").read_text())
+        self.assertEqual(len({r["execution_id"] for r in stored["rounds"]}), 3)
+        self.assertEqual(json.loads((self.batch / "07_review/manual-review-queue.json").read_text())["items"], [])
+
+    def test_invalid_needs_review_and_stale_import_retain_candidates(self):
+        exported = review_rounds.export_task(self.batch)
+        result = self.response("labels")
+        result["status"] = "needs_review"
+        self.assertEqual(review_rounds.import_result(self.batch, exported["task_id"], result)["action"], "blocked")
+        self.assertFalse((self.batch / "07_review/review-rounds.json").exists())
+        with self.assertRaisesRegex(ValueError, "already consumed"):
+            review_rounds.import_result(self.batch, exported["task_id"], self.response("labels"))
+        fresh = review_rounds.export_task(self.batch)
+        self.write("01_source/正文.txt", "changed input")
+        with self.assertRaisesRegex((ValueError, RuntimeError), "changed"):
+            review_rounds.import_result(self.batch, fresh["task_id"], self.response("labels"))
+        self.assertEqual(len(list((self.batch / "workflow/review-results" / exported["task_id"]).glob("*.json"))), 1)
+        self.assertFalse((self.batch / "07_review/review-rounds.json").exists())
+
+    def test_progress_ledger_changes_do_not_invalidate_question_evidence(self):
+        original = agent_tasks.build_task(self.batch, 'review', max_input_chars=600000)
+        original['input_hashes']['workflow/manifest.json'] = 'old-progress-ledger-hash'
+        original['input_hashes']['manifest.json'] = 'legacy-progress-ledger-hash'
+        with patch.object(agent_tasks, 'build_task', return_value=original):
+            exported = review_rounds.export_task(self.batch)
+        binding = json.loads((self.batch / 'workflow/review-bindings' / (exported['task_id'] + '.json')).read_text())
+        self.assertNotIn('workflow/manifest.json', binding['input_hashes'])
+        self.assertNotIn('manifest.json', binding['input_hashes'])
+        self.write('workflow/manifest.json', {'progress': 'changed by another question'})
+        result = review_rounds.import_result(self.batch, exported['task_id'], self.response('labels'))
+        self.assertEqual(result['round_completed'], 'labels')
+
+    def test_replay_is_idempotent_and_different_result_cannot_overwrite(self):
+        exported = review_rounds.export_task(self.batch)
+        response = self.response("labels")
+        first = review_rounds.import_result(self.batch, exported["task_id"], response)
+        self.assertEqual(review_rounds.import_result(self.batch, exported["task_id"], response), first)
+        response["artifacts"]["review_round"]["checks"][0]["rationale"] = "changed response"
+        with self.assertRaisesRegex(ValueError, "already consumed"):
+            review_rounds.import_result(self.batch, exported["task_id"], response)
+
+    def test_prior_round_records_and_budget_are_bound(self):
+        exported = review_rounds.export_task(self.batch)
+        review_rounds.import_result(self.batch, exported["task_id"], self.response("labels"))
+        second = review_rounds.export_task(self.batch)
+        payload = json.loads((self.batch / "07_review/review-rounds.json").read_text())
+        payload["rounds"][0]["checks"][0]["rationale"] = "Changed earlier review"
+        self.write("07_review/review-rounds.json", payload)
+        with self.assertRaisesRegex(ValueError, "Earlier round records changed"):
+            review_rounds.import_result(self.batch, second["task_id"], self.response("knowledge"))
+        with self.assertRaisesRegex(ValueError, "exceed(?:ing|s) max_input_chars"):
+            review_rounds.export_task(self.batch, max_input_chars=100)
+
+    def test_conflict_keeps_findings_and_continues_later_round_export(self):
+        exported = review_rounds.export_task(self.batch)
+        response = self.response("labels")
+        response["artifacts"]["review_round"]["checks"][0]["verdict"] = "error"
+        response["artifacts"]["review_round"]["checks"][0]["assessment"]["subtypes"] = ["阅读匹配"]
+        result = review_rounds.import_result(self.batch, exported["task_id"], response)
+        self.assertEqual(result["action"], "continue")
+        self.assertEqual(review_rounds.export_task(self.batch)["round_id"], "knowledge")
+        self.assertEqual(len(result["review"]["unchecked"]), 2)
+        self.assertFalse(result["quality_passed"])
+        self.assertEqual(len(json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']), 1)
+
+    def test_real_ai_findings_do_not_stop_independent_rounds(self):
+        self.write("07_review/manual-review-queue.json", {"items": [
+            {"finding_id": "actual-conflict", "unit_id": "group-1-6", "status": "open", "reason": "Conflicting source answer"}]})
+        self.assertEqual(review_rounds.export_task(self.batch)["round_id"], "labels")
+        self.assertTrue((self.batch / "workflow/review-tasks").exists())
+        self.assertEqual(len(review.evaluate_rounds(self.batch)["unchecked"]), 3)
+
+    def test_run_invokes_separate_process_attempts_in_order(self):
+        seen = []
+        def invoke(prompt, run_dir, config):
+            round_id = review.ROUND_IDS[len(seen)]
+            self.assertIn("ROUND: " + round_id, prompt)
+            seen.append(run_dir)
+            return {"response": self.response(round_id)}
+        with patch.object(review_rounds, "invoke", side_effect=invoke):
+            result = review_rounds.run(self.batch, config={"provider": "fixture"})
+        self.assertTrue(result["completed"])
+        self.assertEqual(len(set(seen)), 3)
+
+    def test_findings_allow_all_rounds_but_do_not_pass_quality(self):
+        seen = []
+        def invoke(prompt, run_dir, config):
+            rid = review.ROUND_IDS[len(seen)]
+            seen.append(rid)
+            response = self.response(rid)
+            response['artifacts']['review_round']['checks'][0]['verdict'] = 'uncertain'
+            return {'response': response}
+        with patch.object(review_rounds, 'invoke', side_effect=invoke):
+            result = review_rounds.run(self.batch, config={'provider': 'fixture'})
+        self.assertTrue(result['completed'])
+        self.assertFalse(result['quality_passed'])
+        self.assertEqual(seen, list(review.ROUND_IDS))
+        self.assertEqual(result['summary']['open_count'], 3)
+        self.assertFalse(result['summary']['release_ready'])
+
+    def test_exhausted_round_failure_does_not_skip_other_rounds(self):
+        seen = []
+        def invoke(prompt, run_dir, config):
+            rid = next(r for r in review.ROUND_IDS if 'ROUND: ' + r in prompt)
+            seen.append(rid)
+            if rid == 'labels':
+                raise ValueError('malformed JSON')
+            return {'response': self.response(rid)}
+        with patch.object(review_rounds, 'invoke', side_effect=invoke):
+            result = review_rounds.run(self.batch, config={'provider': 'fixture', 'review_max_attempts': 2})
+        self.assertFalse(result['completed'])
+        self.assertEqual(seen, ['labels', 'labels', 'knowledge', 'sample'])
+        self.assertEqual(result['review']['checked_rounds'], ['knowledge', 'sample'])
+        self.assertIn('labels', result['summary']['execution_failures'])
+        # A new invocation retries only the unfinished round.
+        with patch.object(review_rounds, 'invoke', return_value={'response': self.response('labels')}):
+            resumed = review_rounds.run(self.batch, config={'provider': 'fixture'})
+        self.assertTrue(resumed['completed'])
+
+    def test_agent_entry_reports_partial_round_handoff_and_resume_binding(self):
+        from workflow import agent
+        def completed_ai():
+            print(json.dumps({"report": {"completed": True}}))
+            return 0
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.object(review_rounds, "run", return_value={"action": "exported", "completed": False}):
+            code = agent._review_after(completed_ai, self.batch)
+        self.assertEqual(code, 3)
+        report = json.loads(output.getvalue())
+        self.assertFalse(report["completed"])
+        self.assertEqual(report["status"], "needs_review")
+        self.assertTrue(agent._ai_review_current(self.batch))
+        self.write("01_source/metadata.json", {"year": 2022})
+        self.assertFalse(agent._ai_review_current(self.batch))
+
+    def test_invalid_prior_round_is_reexecuted_without_blocking_valid_rounds(self):
+        for round_id in review.ROUND_IDS:
+            exported = review_rounds.export_task(self.batch)
+            review_rounds.import_result(self.batch, exported['task_id'], self.response(round_id))
+        payload = json.loads((self.batch / '07_review/review-rounds.json').read_text())
+        payload['rounds'][0]['checks'][0]['evidence'][0]['quote'] = '不存在的证据'
+        self.write('07_review/review-rounds.json', payload)
+        exported = review_rounds.export_task(self.batch)
+        self.assertEqual(exported['round_id'], 'labels')
+        result = review_rounds.import_result(self.batch, exported['task_id'], self.response('labels'))
+        self.assertTrue(result['completed'])
+        self.assertEqual(result['review']['checked_rounds'], list(review.ROUND_IDS))
+        history = list((self.batch / 'workflow/review-history').glob('*.json'))
+        self.assertTrue(history)
+        self.assertTrue(any(json.loads(path.read_text())['rounds'][0]['checks'][0]['evidence'][0]['quote']
+                            == '不存在的证据' for path in history))
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_summary_does_not_release_when_other_required_check_is_pending(self):
+        ingest.build_review_files(self.batch, {'review_rounds': self.payload()})
+        self.write('07_review/unchecked.json', [{'field': 'review_ai', 'required': True, 'reason': '初审尚未完成'}])
+        summary = review_rounds.write_summary(self.batch)
+        self.assertTrue(summary['execution_completed'])
+        self.assertTrue(summary['rounds_quality_passed'])
+        self.assertFalse(summary['quality_passed'])
+        self.assertFalse(summary['release_ready'])
+        self.assertEqual(summary['required_unchecked_count'], 1)
+
+    def test_media_observations_bind_actual_image_bytes(self):
+        import hashlib
+        image = self.batch / '01_source/image.jpeg'
+        image.write_bytes(b'fixture-original-image')
+        self.write('workflow/media-observations.json', {'observations': [
+            {'path': '01_source/image.jpeg', 'sha256': hashlib.sha256(image.read_bytes()).hexdigest(), 'description': '已观察的题图'}]})
+        plan = review.prepare_round_plan(self.batch)
+        self.assertIn('01_source/image.jpeg', plan['input_hashes'])
+        image.write_bytes(b'changed-image')
+        with self.assertRaisesRegex(ValueError, 'Media observation is stale'):
+            review.prepare_round_plan(self.batch)
+
+    def test_model_cannot_supply_execution_or_gate_claims(self):
+        exported = review_rounds.export_task(self.batch)
+        response = self.response("labels")
+        response["artifacts"]["review_round"]["execution_id"] = "fake"
+        with self.assertRaises(ValueError):
+            review_rounds.import_result(self.batch, exported["task_id"], response)
+        self.assertFalse((self.batch / "07_review/review-rounds.json").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

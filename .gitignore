@@ -1,0 +1,16 @@
+# 生成物（运行时由宿主插件写出，不随仓库迁移）
+backend/.local-agent.effective.json
+backend/.local-agent.effective.json.tmp-*
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+._*
+
+# 编辑器/临时文件
+*.tmp
+node_modules/
+

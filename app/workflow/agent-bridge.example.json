@@ -1,0 +1,74 @@
+{
+  "answers": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "answers",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "audio": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "audio",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "types": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "types",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "explanations": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "explanations",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "knowledge": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "knowledge",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "assemble": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "assemble",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "review": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "review",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "_说明": "可选覆盖：未提供本文件时也默认使用通用入口。无 CLI 配置就导出任务包等待接单；有 local-agent.json 则自动调用其适配器。{python} 自动取当前 Python。接手 Agent 先读根目录 AGENTS.md 和 docs/agent-interface.md。",
+  "_约束": "Agent 只返回候选 JSON，适配器校验后写入该阶段允许的产物；不能批准结构/审核/上传/发布闸门。听力切段还需要真实切分及核对证据，时间戳候选不算完成。"
+}

@@ -1,0 +1,40 @@
+{
+  "name": "dsh-wf-plugin",
+  "version": "0.1.0",
+  "description": "录题工作流插件版：把上传工作流与录题工作台嵌入 DSH，支持选择 harness 内模型（含第三方）、分别指定三审模型、自定义提示词/审核口径。不修改原工作流代码，模型路由经 MUDU_AGENT_CONFIG + 插件自有 wf-router.sh 注入。",
+  "type": "module",
+  "private": true,
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "config/",
+    "backend/",
+    "locale/",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

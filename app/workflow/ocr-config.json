@@ -1,0 +1,9 @@
+{
+  "python": "/Users/zjt/OCR识别/PaddleOCR-VL-1.6/.venv/bin/python",
+  "script": "/Users/zjt/OCR识别/PaddleOCR-VL-1.6/ocr_local.py",
+  "timeout_seconds": 1500,
+  "lock_timeout_seconds": 180,
+  "dpi": 200,
+  "preview_dpi": 120,
+  "max_new_tokens": 4096
+}

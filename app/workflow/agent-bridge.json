@@ -1,0 +1,72 @@
+{
+  "answers": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "answers",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "audio": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "audio",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "types": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "types",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "explanations": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "explanations",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "knowledge": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "knowledge",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "assemble": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "assemble",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
+  "review": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "review",
+    "--batch-dir",
+    "{batch_dir}"
+  ]
+}

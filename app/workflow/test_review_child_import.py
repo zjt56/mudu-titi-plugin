@@ -1,0 +1,80 @@
+"""Synthetic real export/import coverage for per-child source attribution."""
+import copy
+import json
+import unittest
+
+from workflow import review, review_rounds
+from workflow import test_review_rounds as fixtures
+
+
+class ChildImportTest(unittest.TestCase):
+    def setUp(self):
+        self.fixture = fixtures.ReviewRoundsTest('runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.batch = self.fixture.batch
+        self.knowledge = self.fixture.knowledge
+        self.blocks = {n: f'{n}. Which item belongs to number {n}?\nA. apple{n}\nB. banana{n}\nC. cat{n}\nD. dog{n}' for n in range(2, 16)}
+        self.stem = 'Shared passage.\nTable | 1. ____ | name\n' + '\n'.join(self.blocks.values())
+        self.fixture.write('01_source/structure.confirmed.json', {'units': [{'unit_id': 'g', 'unit_kind': 'group', 'numbers': list(range(1, 16)), 'stem': self.stem}]})
+        self.fixture.write('03_types/types.json', {'items': [{'unit_id': 'g', 'type': '阅读理解', 'subtypes': ['阅读判断']}]})
+        self.fixture.write('04_knowledge/knowledge.json', {'items': [{'unit_id': 'g', 'knowledge': self.knowledge['knowledge'], 'subquestions': [{'number': str(n), 'knowledge': []} for n in range(1, 16)]}]})
+        self.fixture.write('01_source_ans/answers.json', {'answers': {str(n): 'A' for n in range(1, 16)}, 'difficulty': {str(n): '容易' for n in range(1, 16)}})
+        for salt in range(100):
+            self.fixture.write('01_source/正文.txt', f'Paper {salt}\n' + self.stem + '\n')
+            plan = review.prepare_round_plan(self.batch)
+            if any(q['number'] == '1' for q in plan['sample']):
+                self.plan = plan
+                break
+        else:
+            self.fail('Synthetic deterministic sample did not include table')
+
+    def assessment(self, numbers):
+        return {'type': '阅读理解', 'subtypes': ['阅读判断'], 'knowledge': self.knowledge['knowledge'],
+                'subquestions': [{'number': n, 'knowledge': []} for n in numbers],
+                'difficulty': [{'number': n, 'value': '容易'} for n in numbers]}
+
+    def test_real_import_isolates_unproven_children_and_retains_response(self):
+        sample = self.plan['sample']
+        valid = next(q for q in sample if q['number'] != '1')
+        wrong = next(q for q in sample if q['number'] not in ('1', valid['number']))
+        for rid in review.ROUND_IDS:
+            task = review_rounds.export_task(self.batch)
+            self.assertEqual(task.get('round_id'), rid, task)
+            checks = []
+            for target in (sample if rid == 'sample' else [{'unit_id': 'g'}]):
+                numbers = [target['number']] if rid == 'sample' else [str(n) for n in range(1, 16)]
+                assessment = self.assessment(numbers)
+                quote = 'Shared passage.'
+                if rid == 'sample':
+                    assessment['source_comparison'] = '对照原文。'
+                    if target == valid:
+                        quote = f"Which item belongs to number {valid['number']}?"
+                        assessment['difficulty'][0]['value'] = '困难'
+                    elif target == wrong:
+                        quote = f"Which item belongs to number {valid['number']}?"
+                        assessment['difficulty'][0]['value'] = '适中'
+                    else:
+                        assessment['difficulty'][0]['value'] = '适中'
+                checks.append({**target, 'verdict': 'ok', 'rationale': '根据原文核对。',
+                               'evidence': [{'path': '01_source/正文.txt', 'locator': '正文', 'quote': quote}],
+                               'assessment': assessment})
+            response = {'status': 'completed', 'artifacts': {'review_round': {'checks': checks}}, 'notes': [], 'findings': []}
+            report = review_rounds.import_result(self.batch, task['task_id'], response)
+        self.assertTrue(report['completed'])
+        self.assertFalse(report['quality_passed'])
+        evaluated = review.evaluate_rounds(self.batch)
+        unchecked = [x for x in evaluated['unchecked'] if x['code'] == 'REVIEW_SAMPLE_SOURCE_UNVERIFIED']
+        self.assertEqual({x['number'] for x in unchecked}, {'1', wrong['number']})
+        self.assertTrue(all(x['source_binding']['source_sha256'] == self.plan['input_hashes']['01_source/正文.txt'] for x in unchecked))
+        findings = [f for f in evaluated['findings'] if f['field'] == 'difficulty']
+        self.assertEqual(len(findings), 1)
+        self.assertIn('第' + valid['number'] + '题', findings[0]['reason'])
+        retained = list((self.batch / 'workflow/review-results' / task['task_id']).glob('*.json'))
+        self.assertTrue(any(json.loads(p.read_text()) == response for p in retained))
+        self.assertEqual(json.loads((self.batch / '07_review/review-rounds.json').read_text())['rounds'][-1]['checks'], checks)
+        self.assertFalse(review.evaluate(self.batch)['passed'])
+
+
+if __name__ == '__main__':
+    unittest.main()

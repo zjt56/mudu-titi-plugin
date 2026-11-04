@@ -1,0 +1,353 @@
+# -*- coding: utf-8 -*-
+"""Question-granularity content contract and deterministic source checks."""
+from __future__ import annotations
+
+import json
+import re
+from collections import Counter
+from pathlib import Path
+
+from .preview import slice_text
+
+IMAGE = re.compile(r"\[IMG\s+([^\]]+)\]")
+FORBIDDEN = re.compile(r"(?:考试时间|满分\s*\d+分|本试卷共|扫码练听力|答案链接|初中学业水平考试)")
+OPTION = re.compile(r"(?<![A-Za-z])([A-H])[.．、]\s*")
+
+CONTRACT = {
+    "standalone": ["题号", "题干/作答指令", "本题选项或作答空位（如有）", "答案及来源", "题内图片/图标引用（如有）"],
+    "group": ["共享材料或表格", "组内每个小题的题号和题干/空位", "各小题选项（如有）", "材料与小题的归属关系", "题内图片/图标及归属（如有）"],
+    "exclude": ["卷名、年份页眉、考试时长和总分", "整卷作答说明", "扫码提示、答案册链接、装饰图和页眉 logo", "与本题/本题组无关的相邻题"],
+}
+
+
+def _image_names(lines: list[str]) -> list[str]:
+    return [match.group(1).strip() for line in lines for match in IMAGE.finditer(line)]
+
+
+def audit_question(source_lines: list[str], number: int, item: dict | None = None,
+                   media_dir: str | Path | None = None) -> dict:
+    """Check a source slice for obvious scope/structure defects; visual mapping stays human-reviewed."""
+    item = item if isinstance(item, dict) else {}
+    lines = slice_text(source_lines, int(number))
+    text = "\n".join(lines)
+    issues: list[dict] = []
+    if not lines:
+        issues.append({"code": "QUESTION_NOT_FOUND", "severity": "blocker", "message": f"原卷找不到第 {number} 题的可靠题号边界"})
+    for line_no, line in enumerate(lines, 1):
+        if FORBIDDEN.search(line):
+            issues.append({"code": "IRRELEVANT_HEADER", "severity": "major", "message": f"切片包含卷头/整卷说明：第 {line_no} 行 {line.strip()}"})
+    if text.count("[TABLE") != text.count("[/TABLE]"):
+        issues.append({"code": "TABLE_UNBALANCED", "severity": "blocker", "message": "表格标记未成对，不能确认表格范围"})
+    refs = _image_names(lines)
+    missing = []
+    if media_dir is not None:
+        root = Path(media_dir)
+        for name in refs:
+            if Path(name).name != name or not (root / name).is_file():
+                missing.append(name)
+    if missing:
+        issues.append({"code": "IMAGE_MISSING", "severity": "blocker", "message": "原文引用的图片文件缺失：" + ", ".join(missing)})
+    options = item.get("options") or []
+    source_letters = sorted(set(OPTION.findall(text)))
+    candidate_letters = sorted(set(m.group(1) for option in options for m in OPTION.finditer(str(option)))) if isinstance(options, list) else []
+    if item and source_letters and source_letters != candidate_letters:
+        issues.append({"code": "OPTIONS_MISMATCH", "severity": "major", "message": f"原卷选项 {source_letters} 与候选选项 {candidate_letters} 不一致"})
+    if item:
+        item_number = str(item.get("number", "")).strip()
+        if item_number and item_number != str(number):
+            issues.append({"code": "QUESTION_NUMBER_MISMATCH", "severity": "blocker", "message": f"候选题号 {item_number} 与当前题号 {number} 不一致"})
+    return {"number": int(number), "passed": not issues, "source_lines": lines,
+            "image_refs": refs, "table_present": "[TABLE" in text, "issues": issues,
+            "visual_review_required": bool(refs) or "[TABLE" in text}
+
+
+def _canonical(value: str) -> str:
+    """Ignore layout whitespace/markup, while retaining the source's words."""
+    from .extract import _plain
+    value = re.sub(r"\[/?TABLE[^\]]*\]", "", str(value))
+    return re.sub(r"[\W_]", "", re.sub(r"<[^>]+>", "", _plain(value)), flags=re.UNICODE).casefold()
+
+
+def _generic_choice_instruction(line: str, question_type: str) -> bool:
+    """Recognize a complete reusable rubric, never an article or numbered lead-in."""
+    if question_type not in {"完形填空", "语法选择", "阅读理解"}:
+        return False
+    return bool(re.fullmatch(
+        r"阅读(?:下列|下面)短文从每小题所给的abcd四个选项中选出"
+        r"(?:一个)?(?:可以填入空白处的)?最佳选项", _canonical(line)))
+
+
+def _field_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(_field_text(v) for v in value)
+    if isinstance(value, dict):
+        return "\n".join(_field_text(v) for k, v in value.items()
+                         if k in {"text", "content", "value", "stem", "material", "rows", "cells", "blocks", "options", "subquestions"})
+    return ""
+
+
+def question_parts(lines: list[str], number: int) -> dict:
+    """Return this child's exact source stem and ordered labeled options."""
+    from .extract import _plain, material_label, guide_numbers
+    from .preview import _find, _strong_number, SECTION, LEADIN
+    start = _find(lines, number)
+    if start is None:
+        return {"stem": "", "options": [], "found": _find(lines, number, strong=False) is not None}
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        plain = _plain(lines[i]).strip()
+        if (_strong_number(plain) is not None or SECTION.match(plain)
+                or material_label(plain) or guide_numbers(plain) or LEADIN.match(plain)):
+            end = i
+            break
+    text = "\n".join(lines[start:end])
+    text = re.sub(r"^\s*(?:[（(]\s*[）)]\s*)?\d{1,3}\s*[.．、)]", "", _plain(text))
+    matches = list(OPTION.finditer(text))
+    options = [{"label": m.group(1), "text": text[m.end():matches[i + 1].start() if i + 1 < len(matches) else len(text)].strip()}
+               for i, m in enumerate(matches)]
+    return {"stem": text[:matches[0].start()].strip() if matches else text.strip(),
+            "options": options, "found": True}
+
+
+def strip_writing_answer_space(text: str) -> str:
+    """Remove only empty writing space; keep words, images and meaningful marks.
+
+    Writing response lines are drawn by the UI. They may be empty underlined
+    runs, underscore-only lines, or a blank suffix after the supplied opening
+    sentence. A marked word (including a spelling initial) is never empty space.
+    This is deliberately scoped to writing; numbered cloze gaps stay required.
+    """
+    lines = []
+    for line in str(text or "").splitlines():
+        line = re.sub(r"<u>[\s_]*</u>", "", line)
+        # Remove a trailing response rule, optionally wrapped in DOCX bold runs.
+        # The word boundary guard keeps e.g. r______ as actual source content.
+        line = re.sub(r"(?<![\w])(?:\*\*)?[_\s]*_{2,}[_\s]*(?:\*\*)?\s*$", "", line)
+        visible = line.replace("**", "").strip()
+        if visible:
+            lines.append(line.rstrip())
+    return "\n".join(lines)
+
+
+def _required_stem(text: str) -> str:
+    """Exclude writing response space and trailing pagination residue only.
+
+    Interior instructions and supplied essay words remain required, including
+    meaningful underlines; this never excuses a genuine stem rewrite.
+    """
+    lines = strip_writing_answer_space(text).splitlines()
+    # Some source books append a repeated exam title plus a compact answer
+    # index to the writing response area. Remove only a complete terminal
+    # answer-index block, never a task table or an interior exam reference.
+    from .extract import _plain
+    for index, line in enumerate(lines):
+        title = _plain(line).strip()
+        if not re.fullmatch(r"\d{0,3}(?:19|20)\d{2}年[\u4e00-\u9fff]{2,12}(?:初中)?学业水平考试", title):
+            continue
+        tail = [row.strip() for row in lines[index + 1:] if row.strip()]
+        if len(tail) < 4 or not re.fullmatch(r"\[TABLE(?:\s+\d+)?\]", tail[0]) or tail[-1] != "[/TABLE]":
+            continue
+        rows = tail[1:-1]
+        headers = [row for row in rows if re.fullmatch(r"题号\s*\|[\s\d|~～—–至-]+", row)]
+        answers = [row for row in rows if re.fullmatch(r"答案\s*\|[\sA-H|]+", row)]
+        if headers and len(headers) == len(answers) and len(headers) + len(answers) == len(rows):
+            lines = lines[:index]
+            break
+    while lines and (not lines[-1].strip() or FORBIDDEN.search(lines[-1])):
+        lines.pop()
+    return "\n".join(lines)
+
+
+INLINE_OPTION = re.compile(r"(?<=\s)([A-H])[.．、]\s*\S")
+
+
+def option_block_start(lines: list[str]) -> tuple[int, int] | None:
+    """Locate a labeled option block, including an option that starts inline.
+
+    Some papers put option A at the end of the last dialogue line
+    （"Li Lei:You are welcome.　A.Well done!"）and continue B–G on their own
+    lines. The material ends at that marker; options run from there.
+    """
+    from .preview import BARE_OPTION
+    for index, line in enumerate(lines):
+        if BARE_OPTION.match(line.strip()):
+            return index, len(line) - len(line.lstrip())
+        match = INLINE_OPTION.search(line)
+        if match and match.group(1) == "A":
+            return index, match.start()
+    return None
+
+
+def audit_source_unit(unit: dict) -> dict:
+    """Check every source child and option block, rather than trusting counts alone."""
+    lines = str(unit.get("stem") or "").splitlines()
+    numbers = unit.get("numbers") or []
+    parts = {n: question_parts(lines, n) for n in numbers}
+    issues = []
+    max_options = max([int(unit.get("source_expected_options") or 0), *[len(p["options"]) for p in parts.values()]])
+    choice_group = any(hint in str(unit.get("type") or "") for hint in ("完形", "语法选择"))
+    if len(numbers) == 1 and unit.get("source_span", {}).get("number_binding") == "single_writing_section":
+        # A writing section is bounded only by its own section, so its raw stem
+        # runs to the section end and can drag in trailing blank lines plus a
+        # repeated paper-title / page-footer (e.g. "2022年安徽省初中学业水平考试").
+        # That footer is pagination residue, not required question content: a
+        # candidate that legitimately trims it must not be judged "题干改写".
+        parts[numbers[0]] = {"stem": _required_stem(unit.get("stem") or ""), "options": [], "found": True}
+    for n, part in parts.items():
+        if not part["found"] and not (len(numbers) == 1 and unit.get("source_span", {}).get("number_binding") == "single_writing_section"):
+            issues.append({"code": "QUESTION_NOT_FOUND", "number": n,
+                           "message": f"源头单元缺少第 {n} 题的实际题号/空位"})
+        labels = [o["label"] for o in part["options"]]
+        expected = list("ABCDEFGH"[:max_options])
+        if (choice_group and not labels) or (max_options and (labels != expected or any(not _canonical(o["text"]) for o in part["options"]))):
+            issues.append({"code": "SOURCE_OPTIONS_INCOMPLETE", "number": n,
+                           "message": f"第 {n} 题源头选项 {labels}，本组应完整包含 {expected} 且内容非空"})
+    from .preview import BARE_OPTION, _strong_number
+    shared_options = []
+    if unit.get("unit_kind") == "group" and not any(_strong_number(line) is not None for line in lines):
+        located = option_block_start(lines)
+        if located is not None:
+            first, offset = located
+            shared_options = question_parts(["0." + "\n".join([lines[first][offset:]] + lines[first + 1:])], 0)["options"]
+    return {"passed": not issues, "issues": issues, "questions": parts, "shared_options": shared_options}
+
+
+def _candidate_options(options) -> list[dict]:
+    normalized = []
+    for option in options or []:
+        if isinstance(option, dict):
+            label = str(option.get("label") or option.get("key") or "").strip().rstrip(".．、")
+            normalized.append({"label": label, "text": _field_text(option)})
+        elif isinstance(option, str):
+            text = option.strip()
+            match = OPTION.match(text)
+            normalized.append({"label": match.group(1) if match else "", "text": text[match.end():] if match else text})
+    return normalized
+
+
+def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
+    """Read-only final artifact audit against freshly sliced source units.
+
+    Shared material/instructions are checked at group level; child stems and
+    every labeled option are checked at the corresponding actual number.
+    This is deterministic text evidence, never a claim of visual review.
+    """
+    from . import denoise, structure_gate
+    from .extract import _plain, material_label
+    from .preview import _strong_number, BARE_OPTION
+    root = Path(batch_dir)
+    source = (root / "01_source/正文.txt").read_text(encoding="utf-8-sig")
+    structure = json.loads((root / "01_source/structure.json").read_text(encoding="utf-8-sig"))
+    confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
+    cleaned, _, _ = denoise.clean_body(source)
+    fresh = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
+    by_numbers = {tuple(u["numbers"]): u for u in fresh}
+    items = batch.get("items") or []
+    issues, checked = [], []
+
+    def issue(code, message, uid="", number=None):
+        entry = {"code": code, "severity": "blocker", "unit_id": uid, "message": message}
+        if number is not None:
+            entry["number"] = number
+        issues.append(entry)
+
+    expected_units = confirmed.get("units") or []
+    expected_sets = [tuple(u.get("numbers") or []) for u in expected_units]
+    actual_sets = [tuple(row.get("numbers") or ([row.get("number")] if row.get("number") else [])) for row in items]
+    if Counter(expected_sets) != Counter(actual_sets):
+        issue("BATCH_NUMBER_COVERAGE", "正式批次单元题号及分组与确认结构不一致")
+    # A merged legacy group cannot conceal independently guided source groups.
+    if Counter(expected_sets) != Counter(list(by_numbers)):
+        issue("SOURCE_GROUP_BOUNDARY_MISMATCH", "确认结构与原卷材料/分段导语的实际分组不一致；须重跑结构闸门")
+    materials = {}
+    for key, unit in by_numbers.items():
+        material = []
+        located = option_block_start(unit["stem"].splitlines())
+        for index, line in enumerate(unit["stem"].splitlines()):
+            if _strong_number(line) is not None:
+                break
+            if located is not None and index == located[0]:
+                prefix = line[:located[1]].rstrip()
+                if prefix and not material_label(prefix):
+                    material.append(prefix)
+                break
+            if not material_label(line):
+                material.append(line)
+        materials[key] = material
+    for item, key in zip(items, actual_sets):
+        uid = item.get("unit_id") or item.get("id") or ""
+        unit = by_numbers.get(key)
+        if unit is None:
+            issue("SOURCE_UNIT_NOT_FOUND", f"源头找不到正式单元题号 {list(key)} 的独立边界", uid)
+            continue
+        checked.append(uid)
+        candidate_body = "\n".join(_field_text(item.get(k)) for k in
+                                   ("stem", "material", "materialBlocks", "material_blocks", "options", "subquestions"))
+        def has_table(value):
+            if isinstance(value, dict):
+                return value.get("type") == "table" or any(has_table(v) for v in value.values())
+            return isinstance(value, list) and any(has_table(v) for v in value)
+        required_source = (_required_stem(unit["stem"]) if unit.get("source_span", {}).get("number_binding") == "single_writing_section"
+                           else unit["stem"])
+        if "[TABLE" in required_source and not has_table(item.get("materialBlocks") or item.get("material_blocks")):
+            issue("TABLE_STRUCTURE_MISSING", "原卷含表格，正式单元缺少保留网格结构的 materialBlocks 表格", uid)
+        for marked in re.findall(r"<u>(.*?)</u>", unit["stem"], flags=re.S):
+            if re.search(r"[A-Za-z\u4e00-\u9fff]", marked):
+                preserved = [_canonical(x) for x in re.findall(r"<u>(.*?)</u>", candidate_body, flags=re.S)]
+                if _canonical(marked) not in preserved:
+                    issue("SOURCE_UNDERLINE_MISSING", "原卷实词下划线未保留：" + marked[:80], uid)
+        attachment_text = json.dumps(item.get("attachments") or [], ensure_ascii=False)
+        for name in _image_names(unit["stem"].splitlines()):
+            if (name not in _image_names(candidate_body.splitlines())
+                    and name not in attachment_text
+                    and not re.search(r"(?:src=[\"']|!\[[^\]]*\]\()[^\n]*" + re.escape(name), candidate_body)):
+                issue("SOURCE_IMAGE_MISSING", "原卷图片引用缺失或未映射到本单元：" + name, uid)
+        source_audit = audit_source_unit(unit)
+        for problem in source_audit["issues"]:
+            issue(problem["code"], problem["message"], uid, problem.get("number"))
+        shared_options = source_audit["shared_options"]
+        if shared_options:
+            actual_shared = _candidate_options(item.get("options"))
+            if [(o["label"], _canonical(o["text"])) for o in shared_options] != [(o["label"], _canonical(o["text"])) for o in actual_shared]:
+                issue("SHARED_OPTIONS_MISMATCH", "共享选项标签、数量或内容与原卷不一致，必须归于当前题组", uid)
+        candidate_material = "\n".join(_field_text(item.get(k)) for k in ("material", "materialBlocks", "material_blocks", "stem"))
+        if unit["unit_kind"] == "group":
+            for line in materials[key]:
+                text = _canonical(line)
+                if text and text not in _canonical(candidate_material):
+                    issue("SOURCE_MATERIAL_MISSING", "共享材料/分段作答指令缺失或改写：" + line[:100], uid)
+            for other, lines in materials.items():
+                if other == key:
+                    continue
+                for line in lines:
+                    # A section rubric may be repeated on every article in that
+                    # section. Keep requiring it on its original unit above,
+                    # but do not treat that exact rubric as exclusive prose.
+                    if (by_numbers[other].get("type") == unit.get("type")
+                            and _generic_choice_instruction(line, unit.get("type", ""))):
+                        continue
+                    text = _canonical(line)
+                    if len(text) >= 20 and text not in _canonical(unit["stem"]) and text in _canonical(candidate_material):
+                        issue("FOREIGN_GROUP_MATERIAL", f"材料混入另一题组 {list(other)} 的正文：{line[:100]}", uid)
+        children = item.get("subquestions") or [] if unit["unit_kind"] == "group" else [item]
+        child_numbers = [c.get("number") for c in children]
+        if Counter(map(str, child_numbers)) != Counter(map(str, key)):
+            issue("CHILD_NUMBER_COVERAGE", "组内子题实际题号缺失、重复或归属错误", uid)
+        by_child = {str(c.get("number")): c for c in children}
+        for n, part in source_audit["questions"].items():
+            child = by_child.get(str(n), {})
+            if part["stem"] and _canonical(part["stem"]) not in _canonical(_field_text(child.get("stem"))):
+                issue("SOURCE_STEM_MISSING", f"第 {n} 题题干缺失或改写", uid, n)
+            options = child.get("options") or []
+            normalized = _candidate_options(options)
+            expected_options = part["options"]
+            if expected_options and [o["label"] for o in expected_options] != [o["label"] for o in normalized]:
+                issue("OPTIONS_MISMATCH", f"第 {n} 题选项标签/数量与原卷不一致", uid, n)
+            else:
+                for expected, actual in zip(expected_options, normalized):
+                    if _canonical(expected["text"]) != _canonical(actual["text"]):
+                        issue("OPTION_CONTENT_MISMATCH", f"第 {n} 题 {expected['label']} 选项内容缺失或改写", uid, n)
+    return {"passed": not issues, "issues": issues, "checked_units": checked,
+            "visual_review_claimed": False}

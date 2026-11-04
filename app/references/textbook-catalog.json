@@ -1,0 +1,4344 @@
+{
+  "version": "1.0",
+  "source": "textbook-catalog-1.0.md",
+  "counts": {
+    "versions": 3,
+    "books": 18,
+    "units": 128
+  },
+  "catalog": [
+    {
+      "version": "人教版",
+      "version_label": "人教版（新教材）",
+      "grade": "七年级",
+      "book": "人教版七年级上册",
+      "book_path": "人教版/人教版七年级上册",
+      "units": [
+        {
+          "unit": "Starter Unit 1 Hello!",
+          "topic": "问候",
+          "path": "人教版/人教版七年级上册/Starter Unit 1 Hello!",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1b",
+                "2a-2d",
+                "Pronunciation"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Starter Unit 2 Keep Tidy!",
+          "topic": "保持整洁",
+          "path": "人教版/人教版七年级上册/Starter Unit 2 Keep Tidy!",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1b",
+                "2a-2e",
+                "Pronunciation"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Starter Unit 3 Welcome!",
+          "topic": "农家小院与农场",
+          "path": "人教版/人教版七年级上册/Starter Unit 3 Welcome!",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1b",
+                "2a-2d",
+                "Pronunciation"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 1 You and Me",
+          "topic": "结识新朋友与自我介绍",
+          "path": "人教版/人教版七年级上册/Unit 1 You and Me",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（一般现在时（be 动词）；人称代词主格）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 We're Family!",
+          "topic": "家庭成员",
+          "path": "人教版/人教版七年级上册/Unit 2 We're Family!",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（一般现在时（实义动词）；名词所有格 's）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 My School",
+          "topic": "校园场所",
+          "path": "人教版/人教版七年级上册/Unit 3 My School",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2f",
+                "Grammar Focus（there be 结构；方位介词）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 My Favourite Subject",
+          "topic": "最喜欢的学科",
+          "path": "人教版/人教版七年级上册/Unit 4 My Favourite Subject",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2f",
+                "Grammar Focus（连词 and、but、because）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Fun Clubs",
+          "topic": "有趣的社团",
+          "path": "人教版/人教版七年级上册/Unit 5 Fun Clubs",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（情态动词 can 表能力）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 A Day in the Life",
+          "topic": "日常作息与时间安排",
+          "path": "人教版/人教版七年级上册/Unit 6 A Day in the Life",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1e",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（时间表达法；what time/when/what 疑问句）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 7 Happy Birthday!",
+          "topic": "生日庆祝与祝福",
+          "path": "人教版/人教版七年级上册/Unit 7 Happy Birthday!",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（序数词；wh- 疑问句复习）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "人教版",
+      "version_label": "人教版（新教材）",
+      "grade": "七年级",
+      "book": "人教版七年级下册",
+      "book_path": "人教版/人教版七年级下册",
+      "units": [
+        {
+          "unit": "Unit 1 Animal friends",
+          "topic": "动物朋友",
+          "path": "人教版/人教版七年级下册/Unit 1 Animal friends",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2f",
+                "Grammar Focus（特殊疑问句；形容词；名词复数）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 No Rules, No Order",
+          "topic": "规则与秩序",
+          "path": "人教版/人教版七年级下册/Unit 2 No Rules, No Order",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1e",
+                "Pronunciation",
+                "2a-2f",
+                "Grammar Focus（祈使句；情态动词 can、have to、must）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1c",
+                "2a-2c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Keep Fit",
+          "topic": "运动锻炼",
+          "path": "人教版/人教版七年级下册/Unit 3 Keep Fit",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（名词性物主代词；频度副词）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Eat Well",
+          "topic": "健康饮食",
+          "path": "人教版/人教版七年级下册/Unit 4 Eat Well",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（选择疑问句；可数名词与不可数名词）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Here and Now",
+          "topic": "此刻活动",
+          "path": "人教版/人教版七年级下册/Unit 5 Here and Now",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（现在进行时（一））"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Rain or Shine",
+          "topic": "天气变化及其影响",
+          "path": "人教版/人教版七年级下册/Unit 6 Rain or Shine",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（现在进行时（二））"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 7 A Day to Remember",
+          "topic": "难忘的一天",
+          "path": "人教版/人教版七年级下册/Unit 7 A Day to Remember",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（一般过去时（一））"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 8 Once upon a Time",
+          "topic": "中外经典故事",
+          "path": "人教版/人教版七年级下册/Unit 8 Once upon a Time",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1e",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（一般过去时（二））"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "2a-2b"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "人教版",
+      "version_label": "人教版（新教材）",
+      "grade": "八年级",
+      "book": "人教版八年级上册",
+      "book_path": "人教版/人教版八年级上册",
+      "units": [
+        {
+          "unit": "Unit 1 Happy Holiday",
+          "topic": "假期经历",
+          "path": "人教版/人教版八年级上册/Unit 1 Happy Holiday",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2f",
+                "Grammar Focus（不定代词；一般过去时复习）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1d",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Home Sweet Home",
+          "topic": "家的意义",
+          "path": "人教版/人教版八年级上册/Unit 2 Home Sweet Home",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（can/could 表礼貌请求与许可）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Same or Different?",
+          "topic": "人物特征",
+          "path": "人教版/人教版八年级上册/Unit 3 Same or Different?",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1e",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（-er/more 构成比较级；as … as 同级比较）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Amazing Plants and Animals",
+          "topic": "神奇的动植物",
+          "path": "人教版/人教版八年级上册/Unit 4 Amazing Plants and Animals",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（-est/most 构成最高级）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1f",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 What a Delicious Meal!",
+          "topic": "饮食",
+          "path": "人教版/人教版八年级上册/Unit 5 What a Delicious Meal!",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2d",
+                "Grammar Focus（感叹句；可数与不可数名词）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1f",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Plan for Yourself",
+          "topic": "制定计划与职业理想",
+          "path": "人教版/人教版八年级上册/Unit 6 Plan for Yourself",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2d",
+                "Grammar Focus（be going to 表将来；不定式作宾语）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 7 When Tomorrow Comes",
+          "topic": "畅想未来",
+          "path": "人教版/人教版八年级上册/Unit 7 When Tomorrow Comes",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（一般将来时（will））"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 8 Let's Communicate!",
+          "topic": "沟通交流的艺术",
+          "path": "人教版/人教版八年级上册/Unit 8 Let's Communicate!",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "Pronunciation",
+                "2a-2e",
+                "Grammar Focus（零条件句与第一条件句）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "人教版",
+      "version_label": "人教版（新教材）",
+      "grade": "八年级",
+      "book": "人教版八年级下册",
+      "book_path": "人教版/人教版八年级下册",
+      "units": [
+        {
+          "unit": "Unit 1 Time to Relax",
+          "topic": "闲暇活动",
+          "path": "人教版/人教版八年级下册/Unit 1 Time to Relax",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（不定式作状语与宾语补足语）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Stay Healthy",
+          "topic": "保持健康",
+          "path": "人教版/人教版八年级下册/Unit 2 Stay Healthy",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（should/could 表建议；反身代词）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Growing Up",
+          "topic": "成长烦恼",
+          "path": "人教版/人教版八年级下册/Unit 3 Growing Up",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（连词 although、until、so that）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1f",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 The Wonders of Nature",
+          "topic": "自然奇观",
+          "path": "人教版/人教版八年级下册/Unit 4 The Wonders of Nature",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（形容词/副词比较级与最高级复习；大数表达）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Nature's Temper",
+          "topic": "自然灾害与应对",
+          "path": "人教版/人教版八年级下册/Unit 5 Nature's Temper",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（过去进行时）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3d"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Crossing Cultures",
+          "topic": "跨文化交际",
+          "path": "人教版/人教版八年级下册/Unit 6 Crossing Cultures",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（连词 so … that、unless、as soon as）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 7 A Good Read",
+          "topic": "阅读与分享",
+          "path": "人教版/人教版八年级下册/Unit 7 A Good Read",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（现在完成时（一））"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 8 Making a Difference",
+          "topic": "志愿服务",
+          "path": "人教版/人教版八年级下册/Unit 8 Making a Difference",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（现在完成时（二））"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "人教版",
+      "version_label": "人教版（新教材）",
+      "grade": "九年级",
+      "book": "人教版九年级上册",
+      "book_path": "人教版/人教版九年级上册",
+      "units": [
+        {
+          "unit": "Unit 1 The Changing World",
+          "topic": "家乡变迁与时代发展",
+          "path": "人教版/人教版九年级上册/Unit 1 The Changing World",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（一般过去时与现在完成时的比较）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1f",
+                "Vocabulary in Use",
+                "3a-3d"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Inspiring people",
+          "topic": "榜样人物",
+          "path": "人教版/人教版九年级上册/Unit 2 Inspiring people",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3c",
+                "Grammar Focus（It 句型：of/for sb to do；It is/was … that …）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1f",
+                "Vocabulary in Use",
+                "3a-3d"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Smart Learning",
+          "topic": "学习方法",
+          "path": "人教版/人教版九年级上册/Unit 3 Smart Learning",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3e",
+                "Grammar Focus（that、if、whether 引导的宾语从句）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3d"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Our Memory",
+          "topic": "记忆",
+          "path": "人教版/人教版九年级上册/Unit 4 Our Memory",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1f",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（疑问词引导的宾语从句）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Power of Ideas",
+          "topic": "创意发明",
+          "path": "人教版/人教版九年级上册/Unit 5 Power of Ideas",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（一般现在时与一般过去时的被动语态）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1f",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Beyond Earth",
+          "topic": "太空探索",
+          "path": "人教版/人教版九年级上册/Unit 6 Beyond Earth",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2e",
+                "3a-3c",
+                "Grammar Focus（一般将来时的被动语态）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 7 Feel the Rhythm",
+          "topic": "音乐",
+          "path": "人教版/人教版九年级上册/Unit 7 Feel the Rhythm",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3d",
+                "Grammar Focus（that、which、who 引导的定语从句）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 8 More than a Game",
+          "topic": "体育赛事与体育精神",
+          "path": "人教版/人教版九年级上册/Unit 8 More than a Game",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3c",
+                "Grammar Focus（主谓一致）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "人教版",
+      "version_label": "人教版（新教材）",
+      "grade": "九年级",
+      "book": "人教版九年级下册",
+      "book_path": "人教版/人教版九年级下册",
+      "units": [
+        {
+          "unit": "Unit 1 Let's Celebrate!",
+          "topic": "中外节日与庆祝",
+          "path": "人教版/人教版九年级下册/Unit 1 Let's Celebrate!",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3c",
+                "Grammar Focus（简单句、并列句与复合句）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 A Look into the Past",
+          "topic": "历史文物",
+          "path": "人教版/人教版九年级下册/Unit 2 A Look into the Past",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3c",
+                "Grammar Focus（情态动词表推测）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 A Taste of Art",
+          "topic": "艺术欣赏",
+          "path": "人教版/人教版九年级下册/Unit 3 A Taste of Art",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3c",
+                "Grammar Focus（不定式作宾语、状语、宾语补足语复习）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Reduce,Reuse,Recycle",
+          "topic": "环境保护",
+          "path": "人教版/人教版九年级下册/Unit 4 Reduce,Reuse,Recycle",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3c",
+                "Grammar Focus（状语从句与宾语从句复习）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Open to New Beginnings",
+          "topic": "初中毕业回忆与未来规划",
+          "path": "人教版/人教版九年级下册/Unit 5 Open to New Beginnings",
+          "sections": [
+            {
+              "name": "Section A",
+              "items": [
+                "1a-1d",
+                "2a-2d",
+                "3a-3c",
+                "Grammar Focus（复习：不同时态）"
+              ]
+            },
+            {
+              "name": "Section B",
+              "items": [
+                "1a-1e",
+                "Vocabulary in Use",
+                "3a-3c"
+              ]
+            },
+            {
+              "name": "Project",
+              "items": []
+            },
+            {
+              "name": "Reading Plus",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "外研版",
+      "version_label": "外研版（新教材）",
+      "grade": "七年级",
+      "book": "外研版七年级上册",
+      "book_path": "外研版/外研版七年级上册",
+      "units": [
+        {
+          "unit": "Starter Welcome to junior high!",
+          "topic": "迎接初中生活",
+          "path": "外研版/外研版七年级上册/Starter Welcome to junior high!",
+          "sections": [
+            {
+              "name": "Get ready",
+              "items": []
+            },
+            {
+              "name": "Know your school",
+              "items": []
+            },
+            {
+              "name": "Get to know each other",
+              "items": []
+            },
+            {
+              "name": "Make a wishing tree",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 1 A new start",
+          "topic": "开启初中新生活",
+          "path": "外研版/外研版七年级上册/Unit 1 A new start",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（代词）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 More than fun",
+          "topic": "兴趣爱好",
+          "path": "外研版/外研版七年级上册/Unit 2 More than fun",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（一般现在时）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Family ties",
+          "topic": "家庭纽带与亲情",
+          "path": "外研版/外研版七年级上册/Unit 3 Family ties",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（名词所有格）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Time to celebrate",
+          "topic": "节日与庆祝",
+          "path": "外研版/外研版七年级上册/Unit 4 Time to celebrate",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（频度副词）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 The power of plants",
+          "topic": "植物的力量",
+          "path": "外研版/外研版七年级上册/Unit 5 The power of plants",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（一般将来时）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Fantastic friends",
+          "topic": "动物朋友",
+          "path": "外研版/外研版七年级上册/Unit 6 Fantastic friends",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（现在进行时）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "外研版",
+      "version_label": "外研版（新教材）",
+      "grade": "七年级",
+      "book": "外研版七年级下册",
+      "book_path": "外研版/外研版七年级下册",
+      "units": [
+        {
+          "unit": "Unit 1 The secrets of happiness",
+          "topic": "幸福的秘诀",
+          "path": "外研版/外研版七年级下册/Unit 1 The secrets of happiness",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（一般过去时）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Go for it!",
+          "topic": "勇于尝试",
+          "path": "外研版/外研版七年级下册/Unit 2 Go for it!",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（不定代词）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Food matters",
+          "topic": "饮食",
+          "path": "外研版/外研版七年级下册/Unit 3 Food matters",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（系动词）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 The art of having fun",
+          "topic": "玩乐的艺术",
+          "path": "外研版/外研版七年级下册/Unit 4 The art of having fun",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（祈使句）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Amazing nature",
+          "topic": "奇妙的自然",
+          "path": "外研版/外研版七年级下册/Unit 5 Amazing nature",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（比较级与最高级）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Hitting the road",
+          "topic": "出行与旅行",
+          "path": "外研版/外研版七年级下册/Unit 6 Hitting the road",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（同级比较）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "外研版",
+      "version_label": "外研版（新教材）",
+      "grade": "八年级",
+      "book": "外研版八年级上册",
+      "book_path": "外研版/外研版八年级上册",
+      "units": [
+        {
+          "unit": "Unit 1 This is me",
+          "topic": "认识自我",
+          "path": "外研版/外研版八年级上册/Unit 1 This is me",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（现在完成时（一））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Getting along",
+          "topic": "人际交往",
+          "path": "外研版/外研版八年级上册/Unit 2 Getting along",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（现在完成时（二））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Make it happen!",
+          "topic": "发明创造",
+          "path": "外研版/外研版八年级上册/Unit 3 Make it happen!",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（不定式与 -ing 形式作宾语）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Digital life",
+          "topic": "数字生活",
+          "path": "外研版/外研版八年级上册/Unit 4 Digital life",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（不定式作宾语补足语）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Play by the rules?",
+          "topic": "规则与守则",
+          "path": "外研版/外研版八年级上册/Unit 5 Play by the rules?",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（不定式表目的）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 When disaster strikes",
+          "topic": "自然灾害与应对",
+          "path": "外研版/外研版八年级上册/Unit 6 When disaster strikes",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（过去进行时）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "外研版",
+      "version_label": "外研版（新教材）",
+      "grade": "八年级",
+      "book": "外研版八年级下册",
+      "book_path": "外研版/外研版八年级下册",
+      "units": [
+        {
+          "unit": "Unit 1 Career talks",
+          "topic": "职业与人生规划",
+          "path": "外研版/外研版八年级下册/Unit 1 Career talks",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（一般现在时与一般将来时的被动语态）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Growing pains and gains",
+          "topic": "成长的烦恼与收获",
+          "path": "外研版/外研版八年级下册/Unit 2 Growing pains and gains",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（一般过去时的被动语态）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 What makes a great team?",
+          "topic": "团队合作",
+          "path": "外研版/外研版八年级下册/Unit 3 What makes a great team?",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（情态动词（一））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Helping out",
+          "topic": "志愿服务",
+          "path": "外研版/外研版八年级下册/Unit 4 Helping out",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（情态动词（二））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Looking into nature",
+          "topic": "探索自然",
+          "path": "外研版/外研版八年级下册/Unit 5 Looking into nature",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（宾语从句（一））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Living with nature",
+          "topic": "与自然共生",
+          "path": "外研版/外研版八年级下册/Unit 6 Living with nature",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（宾语从句（二））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "外研版",
+      "version_label": "外研版（新教材）",
+      "grade": "九年级",
+      "book": "外研版九年级上册",
+      "book_path": "外研版/外研版九年级上册",
+      "units": [
+        {
+          "unit": "Unit 1 Teenagers today",
+          "topic": "当代青少年",
+          "path": "外研版/外研版九年级上册/Unit 1 Teenagers today",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（状语从句（一））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 On the money",
+          "topic": "金钱与理财",
+          "path": "外研版/外研版九年级上册/Unit 2 On the money",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（状语从句（二））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Past passing by",
+          "topic": "追寻历史",
+          "path": "外研版/外研版九年级上册/Unit 3 Past passing by",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（状语从句（三））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Heroes",
+          "topic": "英雄人物",
+          "path": "外研版/外研版九年级上册/Unit 4 Heroes",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（定语从句（一））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 A fine balance",
+          "topic": "生态平衡",
+          "path": "外研版/外研版九年级上册/Unit 5 A fine balance",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（定语从句（二））"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Live green",
+          "topic": "绿色生活",
+          "path": "外研版/外研版九年级上册/Unit 6 Live green",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（构词法）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "外研版",
+      "version_label": "外研版（新教材）",
+      "grade": "九年级",
+      "book": "外研版九年级下册",
+      "book_path": "外研版/外研版九年级下册",
+      "units": [
+        {
+          "unit": "Unit 1 Life choices",
+          "topic": "人生选择",
+          "path": "外研版/外研版九年级下册/Unit 1 Life choices",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（复习：时态与情态动词）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 The road to success",
+          "topic": "成功之路",
+          "path": "外研版/外研版九年级下册/Unit 2 The road to success",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（复习：被动语态）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Art for life",
+          "topic": "艺术与生活",
+          "path": "外研版/外研版九年级下册/Unit 3 Art for life",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（复习：不定式）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 More than words",
+          "topic": "语言与沟通",
+          "path": "外研版/外研版九年级下册/Unit 4 More than words",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（复习：状语从句）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Under the waves",
+          "topic": "海洋世界",
+          "path": "外研版/外研版九年级下册/Unit 5 Under the waves",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（复习：宾语从句）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Looking beyond",
+          "topic": "太空探索",
+          "path": "外研版/外研版九年级下册/Unit 6 Looking beyond",
+          "sections": [
+            {
+              "name": "Starting out",
+              "items": []
+            },
+            {
+              "name": "Understanding ideas",
+              "items": [
+                "Reading",
+                "Grammar（复习：定语从句）"
+              ]
+            },
+            {
+              "name": "Developing ideas",
+              "items": [
+                "Listening and speaking",
+                "Reading for writing"
+              ]
+            },
+            {
+              "name": "Presenting ideas",
+              "items": []
+            },
+            {
+              "name": "Reflection",
+              "items": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "译林版",
+      "version_label": "牛津译林版（新教材）",
+      "grade": "七年级",
+      "book": "牛津译林版七年级上册",
+      "book_path": "译林版/牛津译林版七年级上册",
+      "units": [
+        {
+          "unit": "Unit 1 This is me!",
+          "topic": "自我介绍",
+          "path": "译林版/牛津译林版七年级上册/Unit 1 This is me!",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（一般现在时（一））",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Hobbies",
+          "topic": "兴趣爱好",
+          "path": "译林版/牛津译林版七年级上册/Unit 2 Hobbies",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（一般现在时（二））",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Welcome to our school!",
+          "topic": "校园场所",
+          "path": "译林版/牛津译林版七年级上册/Unit 3 Welcome to our school!",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（人称代词主格；人称代词宾格）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 School days",
+          "topic": "校园日常作息",
+          "path": "译林版/牛津译林版七年级上册/Unit 4 School days",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（时间介词；频度副词）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 A healthy lifestyle",
+          "topic": "健康饮食",
+          "path": "译林版/牛津译林版七年级上册/Unit 5 A healthy lifestyle",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（可数名词与不可数名词）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 My clothes, my style",
+          "topic": "穿着搭配",
+          "path": "译林版/牛津译林版七年级上册/Unit 6 My clothes, my style",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（疑问句）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 7 Be wise with money",
+          "topic": "消费与理财",
+          "path": "译林版/牛津译林版七年级上册/Unit 7 Be wise with money",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（some/any 的用法；there be 结构）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 8 Let's celebrate!",
+          "topic": "中外节庆",
+          "path": "译林版/牛津译林版七年级上册/Unit 8 Let's celebrate!",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（现在进行时）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        }
+      ],
+      "extras": [
+        "Project 1 A video about my new school life",
+        "Project 2 A party plan to celebrate New Year"
+      ]
+    },
+    {
+      "version": "译林版",
+      "version_label": "牛津译林版（新教材）",
+      "grade": "七年级",
+      "book": "牛津译林版七年级下册",
+      "book_path": "译林版/牛津译林版七年级下册",
+      "units": [
+        {
+          "unit": "Unit 1 Home",
+          "topic": "房屋类型",
+          "path": "译林版/牛津译林版七年级下册/Unit 1 Home",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（基数词；序数词）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Neighbourhood",
+          "topic": "邻里社区",
+          "path": "译林版/牛津译林版七年级下册/Unit 2 Neighbourhood",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（will 表将来；be going to 表将来）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 My hometown",
+          "topic": "家乡风貌",
+          "path": "译林版/牛津译林版七年级下册/Unit 3 My hometown",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（冠词用法；方位介词）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Chinese folk art",
+          "topic": "中国民间艺术",
+          "path": "译林版/牛津译林版七年级下册/Unit 4 Chinese folk art",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（名词所有格；物主代词）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Animal friends",
+          "topic": "动物朋友",
+          "path": "译林版/牛津译林版七年级下册/Unit 5 Animal friends",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（形容词用法；can/could/may 表请求许可）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Beautiful landscapes",
+          "topic": "壮美山河",
+          "path": "译林版/牛津译林版七年级下册/Unit 6 Beautiful landscapes",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（不定代词；what/how 感叹句）",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 7 Outdoor fun",
+          "topic": "户外骑行与乐趣",
+          "path": "译林版/牛津译林版七年级下册/Unit 7 Outdoor fun",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（一般过去时（一））",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 8 Wonderland",
+          "topic": "文学",
+          "path": "译林版/牛津译林版七年级下册/Unit 8 Wonderland",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（一般过去时（二））",
+              "items": []
+            },
+            {
+              "name": "Pronunciation",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        }
+      ],
+      "extras": [
+        "Project 1 A travel guide to my hometown",
+        "Project 2 A school newspaper about nature"
+      ]
+    },
+    {
+      "version": "译林版",
+      "version_label": "牛津译林版（新教材）",
+      "grade": "八年级",
+      "book": "牛津译林版八年级上册",
+      "book_path": "译林版/牛津译林版八年级上册",
+      "units": [
+        {
+          "unit": "Unit 1 Friendship",
+          "topic": "友谊",
+          "path": "译林版/牛津译林版八年级上册/Unit 1 Friendship",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（形容词比较级与最高级）",
+              "items": []
+            },
+            {
+              "name": "Word power",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 School life",
+          "topic": "中外校园生活",
+          "path": "译林版/牛津译林版八年级上册/Unit 2 School life",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（数量比较；as … as 同级比较）",
+              "items": []
+            },
+            {
+              "name": "Word power",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 To be a good learner",
+          "topic": "学习方法",
+          "path": "译林版/牛津译林版八年级上册/Unit 3 To be a good learner",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（副词比较级与最高级；反身代词）",
+              "items": []
+            },
+            {
+              "name": "Word power",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 DIY fun",
+          "topic": "手工与创意",
+          "path": "译林版/牛津译林版八年级上册/Unit 4 DIY fun",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（祈使句；should 与 had better）",
+              "items": []
+            },
+            {
+              "name": "Word power",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Wild animals",
+          "topic": "野生动物及其保护",
+          "path": "译林版/牛津译林版八年级上册/Unit 5 Wild animals",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（动词+不定式；不定式表目的；动词+宾语+带/不带 to 的不定式）",
+              "items": []
+            },
+            {
+              "name": "Word power",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Seasons",
+          "topic": "四季更迭与天气",
+          "path": "译林版/牛津译林版八年级上册/Unit 6 Seasons",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（动词与基本句型（一））",
+              "items": []
+            },
+            {
+              "name": "Word power",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 7 The natural world",
+          "topic": "自然与生态系统",
+          "path": "译林版/牛津译林版八年级上册/Unit 7 The natural world",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（动词与基本句型（二）；并列连词 and, but, or, so）",
+              "items": []
+            },
+            {
+              "name": "Word power",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 8 Safe and sound",
+          "topic": "自然灾害与应对",
+          "path": "译林版/牛津译林版八年级上册/Unit 8 Safe and sound",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（过去进行时）",
+              "items": []
+            },
+            {
+              "name": "Word power",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        }
+      ],
+      "extras": [
+        "Project 1 A class booklet about best friends",
+        "Project 2 An audio campaign to help nature"
+      ]
+    },
+    {
+      "version": "译林版",
+      "version_label": "牛津译林版（新教材）",
+      "grade": "八年级",
+      "book": "牛津译林版八年级下册",
+      "book_path": "译林版/牛津译林版八年级下册",
+      "units": [
+        {
+          "unit": "Unit 1 Past and present",
+          "topic": "时代变迁",
+          "path": "译林版/牛津译林版八年级下册/Unit 1 Past and present",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（现在完成时）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Amazing China",
+          "topic": "大美中国",
+          "path": "译林版/牛津译林版八年级下册/Unit 2 Amazing China",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（have/has been 与 have/has gone；与 for、since 连用的动词）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 The world at one click",
+          "topic": "网络漫游",
+          "path": "译林版/牛津译林版八年级下册/Unit 3 The world at one click",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（一般过去时与现在完成时）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 A good read",
+          "topic": "阅读",
+          "path": "译林版/牛津译林版八年级下册/Unit 4 A good read",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（疑问词+不定式；must 与 have to）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Good manners",
+          "topic": "礼仪",
+          "path": "译林版/牛津译林版八年级下册/Unit 5 Good manners",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（enough 与 too 的用法；enough to 与 too … to 句型）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 Sunshine for all",
+          "topic": "志愿服务",
+          "path": "译林版/牛津译林版八年级下册/Unit 6 Sunshine for all",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（It is + adj. + to do 句型及 for/of 结构）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 7 Charities",
+          "topic": "慈善机构",
+          "path": "译林版/牛津译林版八年级下册/Unit 7 Charities",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（一般现在时与一般过去时的被动语态）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 8 A green world",
+          "topic": "环境保护",
+          "path": "译林版/牛津译林版八年级下册/Unit 8 A green world",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（一般将来时的被动语态）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        }
+      ],
+      "extras": [
+        "Project 1 An information folder about a country",
+        "Project 2 A leaflet about how to be a good citizen"
+      ]
+    },
+    {
+      "version": "译林版",
+      "version_label": "牛津译林版（新教材）",
+      "grade": "九年级",
+      "book": "牛津译林版九年级上册",
+      "book_path": "译林版/牛津译林版九年级上册",
+      "units": [
+        {
+          "unit": "Unit 1 Know yourself",
+          "topic": "性格特质与职业选择",
+          "path": "译林版/牛津译林版九年级上册/Unit 1 Know yourself",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（起连接作用的词；that 引导的宾语从句）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Teenage problems",
+          "topic": "青春期烦恼",
+          "path": "译林版/牛津译林版九年级上册/Unit 2 Teenage problems",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（if/whether 引导的宾语从句；疑问词引导的宾语从句）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Never give up",
+          "topic": "坚持梦想",
+          "path": "译林版/牛津译林版九年级上册/Unit 3 Never give up",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（时间状语从句连词）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Life is beautiful",
+          "topic": "植物中的人生课",
+          "path": "译林版/牛津译林版九年级上册/Unit 4 Life is beautiful",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（动词-ing 形式；动词-ed 形式）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 5 Music speaks",
+          "topic": "音乐",
+          "path": "译林版/牛津译林版九年级上册/Unit 5 Music speaks",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（because/for 表原因；since/as 表原因）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 6 The art of the brush",
+          "topic": "书法艺术",
+          "path": "译林版/牛津译林版九年级上册/Unit 6 The art of the brush",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（限制性定语从句；关系代词）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 7 The big screen",
+          "topic": "电影",
+          "path": "译林版/牛津译林版九年级上册/Unit 7 The big screen",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（although/though 让步；so/such … that 结果；so that 目的）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 8 The world of literature",
+          "topic": "文学名著",
+          "path": "译林版/牛津译林版九年级上册/Unit 8 The world of literature",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（if 条件句；unless 条件句）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        }
+      ],
+      "extras": [
+        "Project 1 A poster about yourself",
+        "Project 2 A video about an art form"
+      ]
+    },
+    {
+      "version": "译林版",
+      "version_label": "牛津译林版（新教材）",
+      "grade": "九年级",
+      "book": "牛津译林版九年级下册",
+      "book_path": "译林版/牛津译林版九年级下册",
+      "units": [
+        {
+          "unit": "Unit 1 A world of cultures",
+          "topic": "世界多元文化",
+          "path": "译林版/牛津译林版九年级下册/Unit 1 A world of cultures",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（代词it的用法）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 2 Great people",
+          "topic": "伟大人物",
+          "path": "译林版/牛津译林版九年级下册/Unit 2 Great people",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（短语动词的用法）",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 3 Life made easy",
+          "topic": "科技",
+          "path": "译林版/牛津译林版九年级下册/Unit 3 Life made easy",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（简单句和复合句之间的转换（一））",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        },
+        {
+          "unit": "Unit 4 Exploring space",
+          "topic": "探索太空与未来生活",
+          "path": "译林版/牛津译林版九年级下册/Unit 4 Exploring space",
+          "sections": [
+            {
+              "name": "Welcome to the unit",
+              "items": []
+            },
+            {
+              "name": "Reading",
+              "items": []
+            },
+            {
+              "name": "Grammar（简单句和复合句之间的转换（二））",
+              "items": []
+            },
+            {
+              "name": "Integration",
+              "items": []
+            },
+            {
+              "name": "Assessment",
+              "items": []
+            },
+            {
+              "name": "Further study",
+              "items": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

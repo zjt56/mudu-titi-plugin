@@ -1,0 +1,13 @@
+{
+  "provider": "command",
+  "command": ["my-agent", "--prompt-file", "{prompt_file}", "--response-file", "{response_file}"],
+  "response_mode": "file",
+  "input_mode": "none",
+  "timeout_seconds": 900,
+  "max_input_chars": 180000,
+  "retries": 1,
+  "retry_feedback_chars": 1200,
+  "unit_split": true,
+  "part_concurrency": 1,
+  "candidate_cache": false
+}

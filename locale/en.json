@@ -1,0 +1,1 @@
+{ "name": "Paper Ingest Workflow", "description": "Embed the upload workflow and review workbench into DSH: choose in-harness models (incl. third-party), set per-round review models, and customize prompts and review policy." }

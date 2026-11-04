@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+     background:#f5f6f8;color:#1f2329}
+header{position:sticky;top:0;z-index:5;background:#fff;border-bottom:1px solid #e5e6eb;
+       padding:12px 20px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+header h1{font-size:16px;margin:0;font-weight:600}
+.badge{font-size:12px;padding:2px 9px;border-radius:10px;background:#eef0f3;color:#4e5969}
+.badge.ok{background:#e8f7ee;color:#12805c}
+.badge.attention{background:#fff7e6;color:#ad6800}
+.badge.blocked{background:#ffece8;color:#cb2634}
+.badge.unverified{background:#eef0f3;color:#86909c}
+.wrap{display:flex;height:calc(100vh - 62px)}
+aside{width:300px;border-right:1px solid #e5e6eb;background:#fff;display:flex;flex-direction:column}
+.tools{padding:10px;border-bottom:1px solid #eef0f3;display:flex;flex-direction:column;gap:8px}
+input[type=search]{width:100%;padding:7px 10px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font-size:12px;padding:3px 9px;border:1px solid #dcdfe6;border-radius:12px;
+      cursor:pointer;background:#fff;color:#4e5969}
+.chip.active{background:#1f2329;border-color:#1f2329;color:#fff}
+.hint{font-size:12px;color:#86909c;line-height:1.5}
+.list{overflow:auto;flex:1}
+.item{display:flex;gap:9px;align-items:center;padding:8px 12px;cursor:pointer;
+      border-bottom:1px solid #f5f6f8}
+.item:hover{background:#f7f8fa}
+.item.active{background:#eef4ff}
+.item .num{width:34px;text-align:right;color:#4e5969;font-variant-numeric:tabular-nums}
+.item .dot{width:7px;height:7px;border-radius:50%;flex:none}
+.dot.ok{background:#00b42a}.dot.attention{background:#ff7d00}
+.dot.blocked{background:#f53f3f}.dot.unverified{background:#c9cdd4}
+.item .meta{font-size:12px;color:#86909c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+main{flex:1;overflow:auto;padding:20px}
+.card{background:#fff;border-radius:10px;padding:20px;max-width:900px;border:1px solid #e5e6eb}
+.card h2{font-size:17px;margin:0 0 4px}
+.sub{color:#86909c;font-size:12px;margin-bottom:14px}
+.pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #eef0f3;border-radius:8px;
+     padding:12px 14px;font:13px/1.85 ui-monospace,Consolas,"Microsoft YaHei",monospace}
+.kv{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.k{background:#f2f3f5;border-radius:6px;padding:3px 9px;font-size:12px;color:#4e5969}
+.k b{color:#1f2329;font-weight:600}
+.answer{color:#12805c;font-weight:600}
+.sec{margin-top:18px}
+.sec h3{font-size:13px;margin:0 0 8px;color:#4e5969;font-weight:600}
+.find{border-left:3px solid #ff7d00;background:#fffbf2;padding:8px 12px;border-radius:0 6px 6px 0;
+      margin-bottom:8px;font-size:13px}
+.find.major,.find.blocker{border-color:#f53f3f;background:#fff5f4}
+.find .fid{color:#86909c;font-size:12px;margin-right:6px}
+.find.resolved{border-color:#c9cdd4;background:#f7f8fa;color:#86909c}
+.thumbs{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+.thumbs img{max-height:120px;border:1px solid #e5e6eb;border-radius:6px;background:#fff}
+.tbl{border-collapse:collapse;width:100%;font-size:13px}
+.tbl td{border:1px solid #dcdfe6;padding:6px 9px;vertical-align:top;line-height:1.7}
+.tbl tr:first-child td{background:#f7f8fa;font-weight:600}
+.material{white-space:pre-wrap;background:#f7f8fa;border:1px solid #eef0f3;border-radius:8px;
+          padding:12px 14px;font-size:13.5px;line-height:1.95}
+.stem{font-size:14px;line-height:1.9}
+.opts{display:flex;flex-direction:column;gap:3px}
+.opt{font-size:13.5px;line-height:1.8}
+.subq{border-top:1px dashed #e5e6eb;padding:10px 0}
+.subq:first-child{border-top:none;padding-top:0}
+.subq-h{font-weight:600;font-size:13px;color:#1f2329}
+.subq-stem{color:#4e5969;margin:3px 0 4px}
+.cell-items{margin-top:4px;display:flex;flex-direction:column;gap:2px}
+.cell-item{font-size:13px;line-height:1.7}
+.empty{color:#86909c;padding:40px;text-align:center}
+.muted{color:#86909c}
+</style>
+</head>
+<body>
+<header id="head"></header>
+<div class="wrap">
+  <aside>
+    <div class="tools">
+      <input id="q" type="search" placeholder="搜题号 / 题型 / 答案 / 知识点">
+      <div class="chips" id="chips"></div>
+      <div class="hint">↑↓ 或 j/k 切题 · / 搜索 · Home/End 首尾 · 搜索框里按 Enter 回到列表</div>
+    </div>
+    <div class="list" id="list"></div>
+  </aside>
+  <main id="main"></main>
+</div>
+<script>
+const DATA = __DATA__;
+const state = {filter: 'all', keyword: '', current: null};
+const LABEL = {ok:'无误', attention:'有疑问', blocked:'阻断', unverified:'未核对'};
+
+function el(tag, cls, text){
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function renderHeader(){
+  const h = document.getElementById('head');
+  h.innerHTML = '';
+  h.appendChild(el('h1', null, DATA.batch + ' 预览'));
+  const c = DATA.counts || {};
+  [['ok','无误'],['attention','有疑问'],['blocked','阻断'],['unverified','未核对']]
+    .forEach(function(pair){
+      h.appendChild(el('span', 'badge ' + pair[0], pair[1] + ' ' + (c[pair[0]] || 0)));
+    });
+  const cov = DATA.coverage || {};
+  if (cov.paper_total) h.appendChild(el('span', 'badge', '整卷 ' + cov.paper_total + ' 题'));
+  h.appendChild(el('span', 'badge',
+    DATA.gate && DATA.gate.passed ? '审核闸门：通过' : '审核闸门：未通过'));
+  const m = DATA.meta || {};
+  if (m.year || m.region) h.appendChild(el('span', 'badge', (m.year||'') + ' ' + (m.region||'')));
+  if (DATA.generated_at) h.appendChild(el('span', 'badge', DATA.generated_at.slice(0,16).replace('T',' ')));
+}
+
+function match(row){
+  if (state.filter !== 'all' && row.state !== state.filter) return false;
+  if (!state.keyword) return true;
+  const k = state.keyword.toLowerCase();
+  const subs = (row.subquestions || []).map(function(s){
+    return (s.stem || '') + ' ' + (s.options || []).join(' ');
+  }).join(' ');
+  return (row.number + ' ' + (row.label || '') + ' ' + row.unit_id + ' ' + row.type + ' ' +
+    row.answer + ' ' + (row.knowledge || []).join(' ') + ' ' + (row.material || '') + ' ' +
+    (row.stem || '') + ' ' + (row.options || []).join(' ') + ' ' + subs + ' ' + row.text
+  ).toLowerCase().indexOf(k) >= 0;
+}
+
+function visibleRows(){
+  return DATA.rows.filter(match);
+}
+
+function select(number, scroll){
+  state.current = number;
+  renderList();
+  renderCard();
+  if (scroll === false) return;
+  const active = document.querySelector('.item.active');
+  if (active && active.scrollIntoView) active.scrollIntoView({block: 'nearest'});
+}
+
+function ensureSelection(){
+  const rows = visibleRows();
+  if (!rows.length) return;
+  const exists = rows.some(function(r){ return r.number === state.current; });
+  if (!exists) state.current = rows[0].number;
+}
+
+function move(delta){
+  const rows = visibleRows();
+  if (!rows.length) return;
+  let idx = rows.findIndex(function(r){ return r.number === state.current; });
+  if (idx < 0) idx = 0;
+  const next = Math.min(rows.length - 1, Math.max(0, idx + delta));
+  if (rows[next].number === state.current) return;
+  select(rows[next].number);
+}
+
+function jumpTo(where){
+  const rows = visibleRows();
+  if (!rows.length) return;
+  select(where === 'first' ? rows[0].number : rows[rows.length - 1].number);
+}
+
+function renderList(){
+  const list = document.getElementById('list');
+  list.innerHTML = '';
+  const rows = visibleRows();
+  if (!rows.length){ list.appendChild(el('div', 'empty', '没有匹配的题')); return; }
+  rows.forEach(function(row){
+    const item = el('div', 'item' + (state.current === row.number ? ' active' : ''));
+    item.dataset.number = row.number;
+    item.onclick = function(){ select(row.number); };
+    item.appendChild(el('div', 'dot ' + row.state));
+    item.appendChild(el('div', 'num', row.label || row.number || '—'));
+    const box = el('div');
+    box.style.flex = '1'; box.style.minWidth = '0';
+    box.appendChild(el('div', null, (row.type || '未分类') + '　' + (row.answer || '')));
+    box.appendChild(el('div', 'meta', LABEL[row.state] || row.state));
+    item.appendChild(box);
+    list.appendChild(item);
+  });
+}
+
+function section(title, node){
+  const s = el('div', 'sec');
+  s.appendChild(el('h3', null, title));
+  s.appendChild(node);
+  return s;
+}
+
+function renderCard(){
+  const main = document.getElementById('main');
+  main.innerHTML = '';
+  const row = DATA.rows.filter(function(r){ return r.number === state.current; })[0];
+  if (!row){ main.appendChild(el('div', 'empty', '左边选一道题')); return; }
+  const card = el('div', 'card');
+  card.appendChild(el('h2', null, '第 ' + (row.label || row.number || '?') + ' 题'));
+  card.appendChild(el('div', 'sub',
+    row.unit_id + ' · 核对轮次 ' + row.rounds +
+    (row.verdict && row.verdict !== 'missing' ? ' · 审核结论 ' + row.verdict : '')));
+
+  const kv = el('div', 'kv');
+  function chip(k, v, cls){
+    const n = el('span', 'k');
+    n.appendChild(el('b', null, k + ' '));
+    n.appendChild(el('span', cls || null, v));
+    kv.appendChild(n);
+  }
+  chip('状态', LABEL[row.state] || row.state);
+  if (row.type) chip('题型', row.type);
+  if (row.answer) chip('答案', row.answer, 'answer');
+  if (row.difficulty) chip('难度', row.difficulty);
+  (row.knowledge || []).forEach(function(k){ chip('知识点', k); });
+  card.appendChild(kv);
+
+  const hasStructure = row.material || row.stem ||
+    (row.options || []).length || (row.subquestions || []).length;
+  if (hasStructure){
+    if ((row.blocks || []).length){
+      const box = el('div');
+      row.blocks.forEach(function(block){
+        if (!block || block.type !== 'table') return;
+        const table = el('table', 'tbl');
+        (block.rows || []).forEach(function(rowData, rowIndex){
+          const tr = el('tr');
+          (rowData.cells || []).forEach(function(cell){
+            const td = el('td', rowIndex === 0 ? 'head' : null);
+            if (cell.colspan) td.colSpan = cell.colspan;
+            if (cell.rowspan) td.rowSpan = cell.rowspan;
+            if (cell.text) td.appendChild(el('div', null, cell.text));
+            if ((cell.items || []).length){
+              const list = el('div', 'cell-items');
+              cell.items.forEach(function(item){
+                list.appendChild(el('div', 'cell-item', '• ' + item));
+              });
+              td.appendChild(list);
+            }
+            tr.appendChild(td);
+          });
+          table.appendChild(tr);
+        });
+        box.appendChild(table);
+      });
+      card.appendChild(section('材料（表格）', box));
+    } else if (row.material){
+      card.appendChild(section('材料', el('div', 'material', row.material)));
+    }
+    if (row.stem){
+      card.appendChild(section('题干', el('div', 'stem', row.stem)));
+    }
+    if ((row.options || []).length){
+      const opts = el('div', 'opts');
+      row.options.forEach(function(o){ opts.appendChild(el('div', 'opt', o)); });
+      card.appendChild(section('选项', opts));
+    }
+    if ((row.subquestions || []).length){
+      const box = el('div');
+      row.subquestions.forEach(function(s){
+        const one = el('div', 'subq');
+        one.appendChild(el('div', 'subq-h',
+          '第' + s.number + '题' + (s.answer ? '　答案 ' + s.answer : '')));
+        if (s.stem) one.appendChild(el('div', 'subq-stem', s.stem));
+        if ((s.options || []).length){
+          const opts = el('div', 'opts');
+          s.options.forEach(function(o){ opts.appendChild(el('div', 'opt', o)); });
+          one.appendChild(opts);
+        }
+        box.appendChild(one);
+      });
+      card.appendChild(section('子题', box));
+    }
+  } else if (row.table){
+    if (row.table.before){
+      card.appendChild(section('题目说明', el('div', 'pre', row.table.before)));
+    }
+    const table = el('table', 'tbl');
+    row.table.rows.forEach(function(cells, rowIndex){
+      const tr = el('tr');
+      cells.forEach(function(cell){
+        const td = el('td', rowIndex === 0 ? 'head' : null, cell);
+        tr.appendChild(td);
+      });
+      table.appendChild(tr);
+    });
+    card.appendChild(section('表格（机械还原，仅供预览）', table));
+    if (row.table.after){
+      card.appendChild(section('表后文字', el('div', 'pre', row.table.after)));
+    }
+  } else if (row.text){
+    card.appendChild(section('原文片段（机械切片，仅供预览）', el('div', 'pre', row.text)));
+  } else {
+    card.appendChild(section('原文片段', el('div', 'muted', '没切到原文，可能题号格式不同')));
+  }
+
+  if ((row.media || []).length){
+    const box = el('div', 'thumbs');
+    row.media.forEach(function(name){
+      const img = el('img');
+      img.src = '01_source/media/' + name;
+      img.alt = name; img.loading = 'lazy';
+      box.appendChild(img);
+    });
+    card.appendChild(section('本页图片', box));
+  }
+
+  if ((row.open || []).length){
+    const box = el('div');
+    row.open.forEach(function(f){
+      const d = el('div', 'find ' + (f.severity || ''));
+      d.appendChild(el('span', 'fid', f.finding_id || ''));
+      d.appendChild(el('span', null, (f.field || '') + '：' + (f.reason || '')));
+      box.appendChild(d);
+    });
+    card.appendChild(section('待处理', box));
+  }
+
+  if ((row.resolved || []).length){
+    const box = el('div');
+    row.resolved.forEach(function(f){
+      const d = el('div', 'find resolved');
+      d.appendChild(el('span', 'fid', f.finding_id || ''));
+      d.appendChild(el('span', null, (f.field || '') + '：' + (f.reason || '')));
+      box.appendChild(d);
+    });
+    card.appendChild(section('已处理', box));
+  }
+
+  main.appendChild(card);
+}
+
+function renderChips(){
+  const box = document.getElementById('chips');
+  box.innerHTML = '';
+  const opts = [['all','全部'],['ok','无误'],['attention','有疑问'],['blocked','阻断'],['unverified','未核对']];
+  opts.forEach(function(pair){
+    const c = el('button', 'chip' + (state.filter === pair[0] ? ' active' : ''), pair[1]);
+    c.onclick = function(){
+      state.filter = pair[0];
+      ensureSelection();
+      renderChips();
+      renderList();
+      renderCard();
+    };
+    box.appendChild(c);
+  });
+}
+
+document.getElementById('q').addEventListener('input', function(e){
+  state.keyword = e.target.value;
+  ensureSelection();
+  renderList();
+  renderCard();
+});
+
+document.addEventListener('keydown', function(e){
+  const tag = (e.target.tagName || '').toLowerCase();
+  const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
+  if (typing){
+    if (e.key === 'Escape'){ e.target.blur(); }
+    if (e.key === 'Enter'){ e.preventDefault(); e.target.blur(); move(1); }
+    return;
+  }
+  if (e.key === 'ArrowDown' || e.key === 'j'){ e.preventDefault(); move(1); }
+  else if (e.key === 'ArrowUp' || e.key === 'k'){ e.preventDefault(); move(-1); }
+  else if (e.key === 'Home'){ e.preventDefault(); jumpTo('first'); }
+  else if (e.key === 'End'){ e.preventDefault(); jumpTo('last'); }
+  else if (e.key === '/'){ e.preventDefault(); document.getElementById('q').focus(); }
+});
+
+renderHeader();
+renderChips();
+ensureSelection();
+renderList();
+renderCard();
+</script>
+</body>
+</html>

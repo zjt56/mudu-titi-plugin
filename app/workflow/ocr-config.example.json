@@ -1,0 +1,10 @@
+{
+  "python": "",
+  "script": "",
+  "timeout_seconds": 1800,
+  "lock_timeout_seconds": 1800,
+  "dpi": 200,
+  "preview_dpi": 120,
+  "max_new_tokens": 4096,
+  "max_pixels": 1003520
+}

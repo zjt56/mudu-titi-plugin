@@ -1,0 +1,362 @@
+# -*- coding: utf-8 -*-
+"""把多代理工作流的结果登记进批次清单。
+
+解决的问题：workflow 工具跑完只留下 candidates/ 和一份返回值，
+manifest.json 里的阶段仍是 pending，闸门和状态显示都看不到这次运行。
+
+ingest 做三件事：
+1. 扫描 candidates/，记录哪些单元已有标注候选；
+2. 把工作流返回的 findings / summary 落成 07_review/ 的三份审核文件；
+3. 对已经有正式产物的阶段（types / explanations / knowledge / review）写入 completed 与哈希。
+
+它不生成正式批次，也不替人做判断：findings 一律以 needs_review 落盘，
+人工队列一律以 open 落盘，必须有人处理才可能通过 review-gate。
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from . import contracts, manifest as mf
+
+REVIEW_DIR = "07_review"
+
+# 归到标签审核的字段；其余算内容审核
+METADATA_FIELDS = {"knowledge", "difficulty", "categories", "subtype", "type",
+                   "source", "year", "location", "knowledgeids"}
+
+
+def _norm_field(field: str) -> str:
+    text = str(field or "").strip().lower()
+    for sep in ("（", "(", "/", " "):
+        if sep in text:
+            text = text.split(sep)[0]
+    return text.strip()
+
+
+def classify_finding(finding: dict) -> str:
+    return "metadata" if _norm_field(finding.get("field")) in METADATA_FIELDS else "content"
+
+
+def scan_candidates(batch_dir: Path) -> list[dict]:
+    folder = Path(batch_dir) / "candidates"
+    if not folder.is_dir():
+        return []
+    out = []
+    for path in sorted(folder.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except json.JSONDecodeError:
+            out.append({"file": path.name, "error": "JSON 无法解析"})
+            continue
+        out.append({
+            "file": path.name,
+            "unit_id": str(data.get("unit_id") or path.stem),
+            "number": str(data.get("number") or ""),
+            "type": str(data.get("type") or ""),
+            "answer": str(data.get("answer") or ""),
+            "knowledge": data.get("knowledge") or [],
+        })
+    return out
+
+
+def _blocking_keys(summary: dict | None) -> set:
+    keys = set()
+    if not isinstance(summary, dict):
+        return keys
+    for item in summary.get("blocking") or []:
+        if isinstance(item, dict):
+            keys.add((str(item.get("unit_id") or ""), str(item.get("field") or "")))
+    return keys
+
+
+def _key(record: dict) -> tuple:
+    return (str(record.get("unit_id") or ""), str(record.get("field") or ""),
+            str(record.get("reason") or ""))
+
+
+def _round_identity(record: dict):
+    """Only exact, bound observations establish cross-round identity."""
+    sources = record.get("round_sources")
+    if not isinstance(sources, list) or not sources or not isinstance(sources[0], dict):
+        return None
+    source = sources[0]
+    required = ("round_id", "execution_id", "input_binding", "verdict", "rationale", "evidence", "issue_key", "resolution_key", "assessment")
+    if any(not source.get(k) for k in required) or "target_number" not in source:
+        return None
+    return (record.get("unit_id"), source["input_binding"], source["target_number"],
+            source["issue_key"], source["resolution_key"], source["verdict"], source["rationale"],
+            json.dumps(source["evidence"], ensure_ascii=False, sort_keys=True))
+
+
+def _next_index(records: list) -> int:
+    top = 0
+    for record in records:
+        fid = str(record.get("finding_id") or "")
+        if fid.startswith("WF-") and fid[3:].isdigit():
+            top = max(top, int(fid[3:]))
+    return top + 1
+
+
+def build_review_files(batch_dir: Path, result: dict) -> dict:
+    """把工作流返回值落成三份审核文件；已处理过的发现保留原状态。
+
+    普通发现使用原有键；分轮发现只合并相同绑定、目标、判断、原文和证据。
+    """
+    batch_dir = Path(batch_dir)
+    review_dir = batch_dir / REVIEW_DIR
+    review_dir.mkdir(parents=True, exist_ok=True)
+
+    existing = {}
+    for name in ("content-review.json", "metadata-review.json"):
+        payload = _load(review_dir / name) or {"findings": []}
+        existing[name] = payload.get("findings", [])
+    queue_path = review_dir / "manual-review-queue.json"
+    queue_payload = _load(queue_path) or {"queue_version": "1.0", "items": []}
+    queue = queue_payload.get("items", [])
+
+    # 去重看的是"这条发现是否已存在"，与它有没有被处理无关；
+    # 否则重复 ingest 会给未处理的发现再插一条，闸门出现重复阻断。
+    handled_keys = {_key(r) for name in existing for r in existing[name]}
+    previous_count = len(handled_keys)
+    queue_by_key = {_key(item): item for item in queue}
+    records = [r for name in existing for r in existing[name]]
+    round_records = {_round_identity(r): r for r in records if _round_identity(r) is not None}
+    queue_by_id = {item.get("finding_id"): item for item in queue}
+    index = _next_index(records + queue)
+
+    from . import review
+    findings = list(result.get("findings") or [])
+    if "review_rounds" in result:
+        rounds = review.evaluate_rounds(batch_dir, result["review_rounds"])
+        if rounds["unchecked"]:
+            raise ValueError("Invalid/incomplete review_rounds: " + str(rounds["unchecked"]))
+        # Persist only supplied real records; never manufacture ok verdicts.
+        _write_json(review_dir / review.ROUND_FILE, result["review_rounds"])
+        findings.extend(rounds["findings"])
+    summary = result.get("summary") or {}
+    blocking_keys = _blocking_keys(summary)
+
+    fresh = {}
+    for finding in findings:
+        unit_id = str(finding.get("unit_id") or "")
+        field = str(finding.get("field") or "")
+        reason = str(finding.get("reason") or "")
+        key = (unit_id, field, reason)
+        identity = _round_identity(finding)
+        is_round = bool(finding.get("round_sources"))
+        comparison = is_round and all(s.get('protocol') == review.ROUND_PROTOCOL and s.get('field')
+                                      for s in finding['round_sources'])
+        if comparison:
+            # A new participant, value, field, or input invalidates an earlier
+            # decision; only an exact replay can reuse its queue entry.
+            identity = None
+        replay = next((r for r in records if is_round and r.get("unit_id") == unit_id
+                       and ((r.get('field') == field and r.get('reason') == reason
+                             and r.get('round_sources') == finding['round_sources']) if comparison
+                            else finding["round_sources"][0] in r.get("round_sources", []))), None)
+        if replay is not None:
+            item = queue_by_id.get(replay.get("finding_id"))
+            if item is None:
+                item = {"finding_id": replay["finding_id"], "unit_id": unit_id,
+                        "field": replay.get("field", ""), "severity": replay.get("severity", "major"),
+                        "status": "open", "question": replay.get("reason", ""),
+                        "reason": replay.get("reason", ""), "evidence": replay.get("evidence", []),
+                        "round_sources": list(replay["round_sources"])}
+                queue.append(item)
+                queue_by_id[item["finding_id"]] = item
+            elif item.get("round_sources") != replay["round_sources"]:
+                # A previous write stopped after the review record but before
+                # the queue. Never extend an existing decision to unseen sources.
+                if not review._is_open(item):
+                    raise ValueError("Review queue decision predates unrecorded round sources")
+                item["round_sources"] = list(replay["round_sources"])
+            continue
+        if identity is not None and identity in round_records:
+            prior = round_records[identity]
+            # A missing queue entry or differing same-round execution cannot safely
+            # inherit a decision. Exact replays are still idempotent.
+            sources = prior["round_sources"]
+            incoming = finding["round_sources"][0]
+            queue_item = queue_by_id.get(prior.get("finding_id"))
+            if incoming in sources:
+                continue
+            if (queue_item is not None and review._is_open(queue_item)
+                    and review._is_open(prior)
+                    and all(s.get("round_id") != incoming["round_id"] for s in sources)):
+                sources.append(incoming)
+                queue_item.setdefault("round_sources", []).append(incoming)
+                continue
+        if not is_round and key in handled_keys:
+            continue
+        handled_keys.add(key)
+        severity = str(finding.get("severity") or "minor")
+        blocking = (unit_id, field) in blocking_keys or severity in ("blocker", "major")
+        record = {
+            "finding_id": f"WF-{index:04d}",
+            "unit_id": unit_id,
+            "field": field,
+            "severity": severity,
+            "blocking": blocking,
+            "status": "informational" if severity == "info" and not blocking else "needs_review",
+            "reason": reason,
+            "evidence": [str(e) for e in (finding.get("evidence") or [])],
+        }
+        if is_round:
+            record["round_sources"] = list(finding["round_sources"])
+            if identity is not None:
+                round_records[identity] = record
+            records.append(record)
+        index += 1
+        bucket = "metadata" if classify_finding(finding) == "metadata" else "content"
+        fresh.setdefault(bucket, []).append(record)
+        # Informational observations are retained in review history, not turned
+        # into a human decision merely because the model returned them here.
+        if (is_round or key not in queue_by_key) and (severity != "info" or blocking):
+            item = {
+                "finding_id": record["finding_id"],
+                "unit_id": unit_id,
+                "field": field,
+                "severity": severity,
+                "status": "open",
+                "question": reason,
+                "reason": reason,
+                "evidence": record["evidence"],
+            }
+            if is_round:
+                item["round_sources"] = list(record["round_sources"])
+            queue.append(item)
+            queue_by_key[key] = item
+            queue_by_id[item["finding_id"]] = item
+
+    merged = {
+        "content-review.json": existing["content-review.json"] + fresh.get("content", []),
+        "metadata-review.json": existing["metadata-review.json"] + fresh.get("metadata", []),
+    }
+    for name, rows in merged.items():
+        _write_json(review_dir / name, {"findings": rows})
+    _write_json(queue_path, {"queue_version": "1.0", "items": queue})
+
+    old_unchecked = _load(review_dir / "unchecked.json")
+    preserved = old_unchecked if isinstance(old_unchecked, list) else []
+    preserved = [u for u in preserved if not (isinstance(u, dict) and
+                 str(u.get("field", "")).startswith("review_rounds."))]
+    _write_json(review_dir / "unchecked.json", preserved + review.evaluate_rounds(batch_dir)["unchecked"])
+
+    added = sum(len(v) for v in fresh.values())
+    return {
+        "content": len(fresh.get("content", [])),
+        "metadata": len(fresh.get("metadata", [])),
+        "queue": len([q for q in queue if str(q.get("status")) == "open"]),
+        "blocking": len([q for q in queue
+                         if str(q.get("status")) == "open"
+                         and str(q.get("severity")) in ("blocker", "major")]),
+        "added": added,
+        "kept": previous_count,
+    }
+
+
+def _load(path: Path):
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _write_json(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+
+
+def record_units(batch_dir: Path, result: dict) -> int:
+    """记录候选观察次数；导入次数不能证明发生了独立语义审核。"""
+    review_dir = Path(batch_dir) / REVIEW_DIR
+    path = review_dir / "unit-status.json"
+    payload = _load(path) or {"units": {}}
+    units = payload.setdefault("units", {})
+    annotations = result.get("annotations") or []
+    for item in annotations:
+        unit_id = str(item.get("unit_id") or "")
+        if not unit_id:
+            continue
+        previous = units.get(unit_id, {})
+        units[unit_id] = {
+            "number": str(item.get("number") or previous.get("number") or ""),
+            "type": str(item.get("type") or previous.get("type") or ""),
+            "subtype": str(item.get("subtype") or previous.get("subtype") or ""),
+            "answer": str(item.get("answer") or previous.get("answer") or ""),
+            "knowledge": item.get("knowledge") or previous.get("knowledge") or [],
+            "difficulty": str(item.get("difficulty") or previous.get("difficulty") or ""),
+            "verdict": str(item.get("verdict") or previous.get("verdict") or "missing"),
+            # Preserve old counters as historical data, never increment them as
+            # independent reviews merely because the same result was reimported.
+            "rounds": previous.get("rounds", 0),
+            "observations": int(previous.get("observations") or 0) + 1,
+            "last_at": mf.now_iso(),
+        }
+    _write_json(path, payload)
+    return len(annotations)
+
+
+def ingest(batch_dir, result_path=None, stage: str = "auto", actor: str = "workflow",
+           note: str = "") -> dict:
+    batch_dir = Path(batch_dir)
+    manifest = mf.load(batch_dir)
+    candidates = scan_candidates(batch_dir)
+    report = {"candidates": len(candidates), "marked": [], "skipped": [], "review": None,
+              "units": 0}
+
+    result = None
+    if result_path:
+        path = Path(result_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"找不到工作流结果：{path}")
+        result = json.loads(path.read_text(encoding="utf-8-sig"))
+        report["review"] = build_review_files(batch_dir, result)
+        report["units"] = record_units(batch_dir, result)
+
+    targets = []
+    if stage == "auto":
+        targets = ["types", "explanations", "knowledge", "review"]
+    elif stage in ("types", "explanations", "knowledge", "review"):
+        targets = [stage]
+    else:
+        raise ValueError(f"未知阶段：{stage}")
+
+    for stage_id in targets:
+        spec = contracts.STAGE_BY_ID[stage_id]
+        missing = mf.missing_produces(batch_dir, spec)
+        if missing:
+            report["skipped"].append({"stage": stage_id, "missing": missing})
+            continue
+        if stage_id == "review":
+            from .review import evaluate_rounds
+            rounds = evaluate_rounds(batch_dir)
+            if not rounds["execution_completed"]:
+                report["skipped"].append({"stage": stage_id, "review_rounds": rounds["errors"]})
+                continue
+        mf.touch_stage(
+            manifest, stage_id, mf.COMPLETED,
+            input_hashes=mf.input_hashes(batch_dir, manifest, spec),
+            output_hashes=mf.output_hashes(batch_dir, spec),
+            notes=note or f"由工作流登记（{len(candidates)} 个候选）",
+        )
+        report["marked"].append(stage_id)
+
+    manifest.setdefault("workflow_runs", []).append({
+        "at": mf.now_iso(),
+        "actor": actor,
+        "batch_dir": str(batch_dir),
+        "candidates": [c["file"] for c in candidates],
+        "result_path": str(result_path) if result_path else None,
+        "annotations": len(result.get("annotations") or []) if result else 0,
+        "findings": len(result.get("findings") or []) if result else 0,
+        "note": note,
+    })
+    manifest["status"] = mf.derive_status(manifest)
+    mf.save(batch_dir, manifest)
+    mf.append_log(batch_dir, {"event": "ingest", "marked": report["marked"],
+                              "candidates": report["candidates"]})
+    return report

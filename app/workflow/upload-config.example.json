@@ -1,0 +1,7 @@
+{
+  "base_url": "http://127.0.0.1:8089/api",
+  "api_key_env": "MUDU_API_KEY",
+  "timeout_seconds": 30,
+  "subject_id": "english",
+  "max_response_bytes": 8388608
+}

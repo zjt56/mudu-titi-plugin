@@ -1,0 +1,16 @@
+{
+  "_comment": "插件版专用 local-agent 配置。插件拉起 Python 后端时通过 MUDU_AGENT_CONFIG 指向本文件，从而让工作流（runner/auto/review_rounds）的模型调用全部走 wf-router.sh，按 model-router.json 选模型。不改动 workflow/local-agent.json 与 scripts/bin/wf-agent.sh。",
+  "provider": "command",
+  "command": [
+    "/bin/sh",
+    "__PLUGIN_BACKEND__/wf-router.sh",
+    "{prompt_file}",
+    "{response_file}"
+  ],
+  "timeout_seconds": 1500,
+  "max_input_chars": 900000,
+  "part_concurrency": 2,
+  "response_mode": "file",
+  "retries": 1,
+  "review_max_attempts": 1
+}
