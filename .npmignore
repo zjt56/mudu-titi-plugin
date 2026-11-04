@@ -1,0 +1,17 @@
+# 发布包排除：数据、缓存、运行产物，绝不能进包
+workflows/
+inbox/
+.port-backup/
+.git/
+node_modules/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.DS_Store
+**/*.bak
+**/*.log
+backend/.local-agent.effective.json
+app/workflow/ocr-config.json
+app/workflow/local-agent.json
+app/workflow/agent-bridge.json
+app/workflow/upload-config.json

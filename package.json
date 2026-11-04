@@ -1,9 +1,8 @@
 {
   "name": "dsh-wf-plugin",
   "version": "0.1.0",
-  "description": "录题工作流插件版（独立项目）：把录题工作台与上传工作流嵌入 DSH，支持选择 harness 内模型（含第三方）、分别指定三审模型、自定义提示词/审核口径。模型路由经 MUDU_AGENT_CONFIG + 插件自有 wf-router.sh 注入。",
+  "description": "录题系统 DSH 插件：唯一前端是 lib/client.js 的原生面板，app/ 只提供工作流与纯 REST API 后端，不含任何浏览器页面。支持在 Harness 内选模型（含第三方）、分别指定三审模型、自定义提示词/审核口径；模型路由经 MUDU_AGENT_CONFIG + wf-router.sh 注入。",
   "type": "module",
-  "private": true,
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
@@ -12,14 +11,25 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/index.js",
-    "lib/client.js",
+    "lib/",
+    "app/",
     "cordis.patch.yml",
     "config/",
     "backend/",
     "locale/",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "!**/__pycache__/",
+    "!**/*.pyc",
+    "!**/*.pyo",
+    "!**/*.tmp",
+    "!**/*.bak",
+    "!**/*.log",
+    "!**/.DS_Store",
+    "!app/workflow/ocr-config.json",
+    "!app/workflow/local-agent.json",
+    "!app/workflow/agent-bridge.json",
+    "!app/workflow/upload-config.json"
   ],
   "dsh": {
     "bundle": {

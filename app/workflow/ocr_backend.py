@@ -77,6 +77,15 @@ def load_config(config_path=None) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
+        # 仅当"默认配置文件不存在"时降级（新装机器常见）：用当前 Python + 本脚本直接解析 PDF 文本。
+        # 文件存在但内容非法、或显式指定了配置，都保持原契约：直接报错，不掩盖配置问题。
+        if chosen is None and isinstance(exc, FileNotFoundError):
+            fallback = {"python": sys.executable, "script": str(Path(__file__).resolve()),
+                        "fallback": True}
+            try:
+                return _validate_config(fallback, Path(__file__).resolve().parent)
+            except OCRBackendError:
+                pass
         raise OCRBackendError(f"Cannot load OCR configuration {path}: {exc}") from exc
     return _validate_config(data, path.parent)
 
@@ -188,6 +197,11 @@ def recognize(source: Path, output_dir: Path, *, force_ocr=False, pages=None,
     return success. Empty recognized text remains empty; no content is invented.
     """
     settings = _config(config)
+    if settings.get("fallback"):
+        raise OCRBackendError(
+            "OCR 识别未配置：当前只有 PDF 文本解析可用（未找到 ocr-config.json）。"
+            "如需识别扫描件/图片型试卷，请配置 OCR 服务（app/workflow/ocr-config.json 或环境变量 MUDU_OCR_CONFIG）。"
+        )
     source = _source(source)
     if source.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
         raise OCRBackendError(f"Unsupported OCR source format: {source.suffix}")
