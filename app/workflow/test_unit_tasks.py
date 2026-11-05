@@ -145,7 +145,8 @@ class UnitTasksTest(unittest.TestCase):
                 raise ValueError("review exceeding max_input_chars")
             return self.base
 
-        def invoke(prompt, run_dir, config):
+        def invoke(prompt, run_dir, config, *, permit_parallel=False):
+            self.assertTrue(permit_parallel)
             time.sleep(0.3)
             uid = "q-1" if "part-0001" in str(run_dir) else "q-2"
             return {"response": self.response(uid)}

@@ -8,16 +8,22 @@ from workflow import test_review_rounds as fixtures
 
 
 class ChildImportTest(unittest.TestCase):
+    """非整组题型仍按小题抽样，本测试覆盖小题级来源归属的隔离。
+
+    阅读理解/完形等整组题型二审已改为整组抽取、只做组级核对（见
+    test_review_consensus），逐小题归属只用于仍按小题抽样的题型。
+    """
+
     def setUp(self):
         self.fixture = fixtures.ReviewRoundsTest('runTest')
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.batch = self.fixture.batch
-        self.knowledge = self.fixture.knowledge
+        self.knowledge = {'knowledge': ['语用/情景交际']}
         self.blocks = {n: f'{n}. Which item belongs to number {n}?\nA. apple{n}\nB. banana{n}\nC. cat{n}\nD. dog{n}' for n in range(2, 16)}
         self.stem = 'Shared passage.\nTable | 1. ____ | name\n' + '\n'.join(self.blocks.values())
         self.fixture.write('01_source/structure.confirmed.json', {'units': [{'unit_id': 'g', 'unit_kind': 'group', 'numbers': list(range(1, 16)), 'stem': self.stem}]})
-        self.fixture.write('03_types/types.json', {'items': [{'unit_id': 'g', 'type': '阅读理解', 'subtypes': ['阅读判断']}]})
+        self.fixture.write('03_types/types.json', {'items': [{'unit_id': 'g', 'type': '单项填空', 'subtypes': ['四个选项']}]})
         self.fixture.write('04_knowledge/knowledge.json', {'items': [{'unit_id': 'g', 'knowledge': self.knowledge['knowledge'], 'subquestions': [{'number': str(n), 'knowledge': []} for n in range(1, 16)]}]})
         self.fixture.write('01_source_ans/answers.json', {'answers': {str(n): 'A' for n in range(1, 16)}, 'difficulty': {str(n): '容易' for n in range(1, 16)}})
         for salt in range(100):
@@ -30,7 +36,7 @@ class ChildImportTest(unittest.TestCase):
             self.fail('Synthetic deterministic sample did not include table')
 
     def assessment(self, numbers):
-        return {'type': '阅读理解', 'subtypes': ['阅读判断'], 'knowledge': self.knowledge['knowledge'],
+        return {'type': '单项填空', 'subtypes': ['四个选项'], 'knowledge': self.knowledge['knowledge'],
                 'subquestions': [{'number': n, 'knowledge': []} for n in numbers],
                 'difficulty': [{'number': n, 'value': '容易'} for n in numbers]}
 

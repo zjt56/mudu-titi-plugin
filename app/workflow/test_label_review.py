@@ -14,6 +14,16 @@ class TaxonomyTest(unittest.TestCase):
     def test_types_are_the_fixed_27(self):
         self.assertEqual(len(taxonomy.types()), 27)
 
+    def test_user_group_types_are_whole_unit_only(self):
+        # 用户口径（2026-11-05）：这些题型只在组级打标签，子题 knowledge=[]。
+        group_types = ("完形填空", "阅读理解", "补全对话", "任务型阅读", "听力信息转换",
+                       "教材语篇填空", "短文填空", "选词填空", "听力短文理解", "听力长对话理解")
+        for name in group_types:
+            self.assertIn(name, taxonomy.types())
+            self.assertTrue(taxonomy.whole_unit_type(name), name)
+        for name in ("单项填空", "单词拼写", "完成句子", "情景运用", "翻译", "书面表达"):
+            self.assertFalse(taxonomy.whole_unit_type(name), name)
+
     def test_knowledge_search_returns_leaf_paths_only(self):
         by_path, leaves = taxonomy.knowledge_index()
         results = taxonomy.knowledge_search("兴趣爱好", limit=10)

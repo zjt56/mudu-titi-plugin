@@ -45,10 +45,24 @@ class AssembleLocalTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_without_baseline_falls_back_to_model(self):
+    def test_without_baseline_self_seeds_when_batch_matches_structure(self):
+        # 无基线但现有 batch.json 能逐题回指当前结构：自动补登记基线并可用，
+        # 不再要求先由模型组装一次才能走确定性路径。
+        ok, reason = assemble_local.guard_status(self.batch)
+        self.assertTrue(ok, reason)
+        self.assertTrue((self.batch / assemble_local.GUARD).is_file())
+        self.assertTrue(assemble_local.available(self.batch))
+
+    def test_without_baseline_falls_back_when_batch_disagrees_with_structure(self):
+        # 现有 batch.json 与当前结构对不上（选项无法回指）：不登记基线，交回模型。
+        _write(self.batch, assemble_local.STRUCTURE, {"units": [
+            {"unit_kind": "standalone", "numbers": ["1"], "type": "听力关键词语选择",
+             "stem": "1.A.alpha\tB.beta\tC.gamma"}]})
+        if (self.batch / assemble_local.GUARD).is_file():
+            (self.batch / assemble_local.GUARD).unlink()
         ok, reason = assemble_local.guard_status(self.batch)
         self.assertFalse(ok)
-        self.assertIn("基线", reason)
+        self.assertIn("无法回指", reason)
         self.assertIsNone(assemble_local.try_assemble(self.batch))
 
     def test_overlay_updates_content_and_preserves_structure(self):
@@ -106,9 +120,9 @@ class AssembleLocalTest(unittest.TestCase):
         self.assertIn("结构未变", reason)
         self.assertTrue(assemble_local.available(self.batch))
 
-    def test_available_is_false_without_baseline(self):
-        """runner.run 的确定性组装入口依赖 available()，缺失基线时不得误判可用。"""
-        self.assertFalse(assemble_local.available(self.batch))
+    def test_available_self_seeds_without_baseline_when_batch_matches(self):
+        """缺失基线但现有 batch 能回指结构时，runner 的确定性入口应可用。"""
+        self.assertTrue(assemble_local.available(self.batch))
 
     def test_try_assemble_validates_then_imports_and_records_guard(self):
         assemble_local.record_guard(self.batch)

@@ -323,7 +323,8 @@ class ProvisionalTest(unittest.TestCase):
         self.assertEqual([r['explanations']['status'] for r in rows], ['candidate', 'candidate'])
         self.assertEqual([r['knowledge']['status'] for r in rows], ['needs_review', 'candidate'])
         bad = explanation(2)
-        bad['response']['artifacts']['04_knowledge/explanations.json']['items'][0]['explanation'] = ''
+        # 缺解析现在允许归一化为「无」；用错误字段类型测试真正的失败隔离。
+        bad['response']['artifacts']['04_knowledge/explanations.json']['items'][0]['explanation'] = ['invalid type']
         with patch('workflow.provisional.local_agent.invoke',
                    side_effect=[typed(2), bad, typed(3), explanation(3), valid]) as invoke:
             result = provisional.run(self.batch)

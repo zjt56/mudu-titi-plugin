@@ -11,7 +11,11 @@ const audioConfig = JSON.parse(fs.readFileSync(path.join(root, 'config/audio.jso
 
 test('听力切段默认不安装、不启用', () => {
   assert.equal(audioConfig.enabled, false);
-  assert.equal(audioConfig.asr_model, 'small.en');
+  // 默认多语种 small：中文卷听力音频含中文播报，纯英语 small.en 会把题号播报
+  // 转成拼音乱码、锚点几乎全丢。
+  assert.equal(audioConfig.asr_model, 'large-v3-turbo');
+  assert.equal(audioConfig.max_parallel_transcriptions, 1);
+  assert.equal(audioConfig.anchor_language, 'zh');
   assert.equal(audioConfig.align_model, 'facebook/wav2vec2-base-960h');
   assert.equal(audioConfig.vad_method, 'pyannote');
   assert.equal(audioConfig.skeleton_silence, 3.0);

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import errno
 import hashlib
 import json
@@ -37,20 +38,103 @@ DEFAULTS = {"provider": "dsh", "timeout_seconds": 900, "max_input_chars": 180000
             # 每片更小，减少单次模型上下文压力；审核片默认可稍大但仍可调。
             "assemble_part_units": 8, "review_part_units": 15}
 
-# 额度/限流不是普通失败：重试只会继续消耗时间，应立即停下并交给人工或换通道。
-QUOTA_RE = re.compile(
-    r"DAILY_LIMIT_EXCEEDED|daily usage limit|usage limit has been reached|"
-    r"RATE_LIMIT|rate_limit|\b429\b|QUOTA", re.I)
+# Only explicit transport/error fields count; task text can legitimately mention
+# 429, QUOTA or RATE_LIMIT. Never infer a provider failure from those substrings.
+_ERROR_CODES = {
+    "quota": {"quota", "insufficient_quota", "quota_exceeded",
+              "daily_limit_exceeded", "insufficient_balance", "balance_not_enough"},
+    "rate_limit": {"rate_limit", "rate_limit_exceeded", "too_many_requests"},
+    "authentication": {"authentication", "authentication_error", "invalid_api_key",
+                       "unauthorized", "permission_denied", "forbidden"},
+    "request": {"invalid_request_error", "invalid_request", "bad_request"},
+    "response": {"response", "invalid_response", "invalid_json"},
+}
+_HTTP_ERROR = re.compile(
+    r"\b(?:HTTP(?:/\d(?:\.\d)?)?\s+(?:status\s*[:=]?\s*)?|"
+    r"(?:HTTP|API)\s+(?:error|status)(?:\s+code)?\s*[:=(]?\s*|"
+    r"(?:status_code|statusCode|http_status)\s*[:=]\s*)([45]\d\d)\b", re.I)
+
+
+def is_review_prompt(prompt: str) -> bool:
+    """Recognize orchestration headers anywhere before supplied untrusted data."""
+    header = prompt.split("BEGIN SUPPLIED CONTENT", 1)[0]
+    return bool(re.search(r"(?mi)^\s*(?:Stage:\s*review\b|ROUND:\s*[A-Za-z0-9_-]+\b)", header))
+
+
+def failure_details(stderr_text: str) -> tuple[str, int | None]:
+    """Read structured provider errors or explicit HTTP/API error statuses.
+
+    wf-agent's final machine summary is authoritative when fallback also failed;
+    earlier raw stderr remains evidence rather than replacing the first cause.
+    """
+    text = stderr_text or ""
+    codes, statuses = [], []
+
+    def visit(value):
+        if not isinstance(value, dict):
+            return
+        for key in ("error_code", "code", "type"):
+            code = value.get(key)
+            if key == "code" and not isinstance(code, bool) and str(code).isdigit() and 400 <= int(code) <= 599:
+                statuses.append(int(code))
+            if isinstance(code, str):
+                for category, known in _ERROR_CODES.items():
+                    if code.lower() in known:
+                        codes.append(category)
+        for key in ("status", "status_code", "statusCode", "http_status"):
+            status = value.get(key)
+            if not isinstance(status, bool) and str(status).isdigit() and 400 <= int(status) <= 599:
+                statuses.append(int(status))
+        for key in ("error", "cause", "response"):
+            visit(value.get(key))
+
+    decoder = json.JSONDecoder()
+    for line in reversed(text.splitlines()):
+        if line.startswith("wf-agent-result: "):
+            try:
+                summary = json.loads(line[len("wf-agent-result: "):])
+                code = summary.get("error_code")
+                if code in (*_ERROR_CODES, "exit", "spawn"):
+                    status = summary.get("http_status")
+                    return code, status if isinstance(status, int) and not isinstance(status, bool) else None
+            except (ValueError, AttributeError):
+                pass
+    # Decode whole objects (including pretty-printed errors), then exclude their
+    # arbitrary message/artifact strings from plain transport-status matching.
+    plain_parts, consumed = [], 0
+    for match in re.finditer(r"\{", text):
+        if match.start() < consumed:
+            continue
+        try:
+            value, length = decoder.raw_decode(text[match.start():])
+        except (ValueError, RecursionError):
+            continue
+        visit(value)
+        plain_parts.append(text[consumed:match.start()])
+        consumed = match.start() + length
+    plain_parts.append(text[consumed:])
+    plain_text = "\n".join(plain_parts)
+    for match in _HTTP_ERROR.finditer(plain_text):
+        statuses.append(int(match.group(1)))
+    status = statuses[0] if statuses else None
+    if codes:
+        return codes[0], status
+    if status in (401, 403):
+        return "authentication", status
+    if status == 402:
+        return "quota", status
+    if status == 429:
+        # Some CLIs expose the quota type only in a message tied to this status.
+        if re.search(r"\b(?:DAILY_LIMIT_EXCEEDED|insufficient_quota|quota_exceeded)\b", plain_text, re.I):
+            return "quota", status
+        return "rate_limit", status
+    if status in (400, 422):
+        return "request", status
+    return "exit", status
 
 
 def classify_failure(stderr_text: str) -> str:
-    """把 CLI 的失败输出粗分为 quota / rate_limit / exit。"""
-    text = stderr_text or ""
-    if re.search(r"DAILY_LIMIT_EXCEEDED|daily usage limit|usage limit has been reached", text, re.I):
-        return "quota"
-    if QUOTA_RE.search(text):
-        return "rate_limit"
-    return "exit"
+    return failure_details(stderr_text)[0]
 INSTRUCTIONS = (
     "You are processing bundled read-only workflow context. Use only the data in "
     "this prompt. Do not invoke tools, execute shell commands, browse, read other "
@@ -234,7 +318,7 @@ def _cancel(process):
     process.communicate()
 
 
-def _parse_response(text):
+def _parse_response(text, *, strict=False):
     text = text.strip()
     if text.startswith("```"):
         match = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", text, re.DOTALL | re.IGNORECASE)
@@ -266,7 +350,7 @@ def _parse_response(text):
             # 补齐后再解析，避免把可用的整份结果当成协议失败。截断的半截 JSON
             # 不会以 }/] 结尾，不会被误收。
             repaired = None
-            if text.endswith("}") or text.endswith("]"):
+            if not strict and (text.endswith("}") or text.endswith("]")):
                 for extra in ("}", "}}", "}}}"):
                     try:
                         repaired = load_json(text + extra)
@@ -284,6 +368,8 @@ def _parse_response(text):
         raise AgentError("Final response status must be completed or needs_review", "response")
     if not isinstance(response.get("artifacts"), dict):
         raise AgentError("Final response artifacts must be an object", "response")
+    if strict:
+        return response  # Review findings/notes remain exactly where the model put them.
     # 兼容模型把 notes/findings 写进 artifacts（或唯一文件对象）的嵌套错误。
     artifacts = response["artifacts"]
     targets = [artifacts]
@@ -359,8 +445,12 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False) ->
     if any(path.exists() or path.is_symlink() for path in paths.values()):
         raise AgentError(f"Attempt output already exists: {root}", "output_exists")
     started = time.monotonic()
-    metadata = {"provider": settings["provider"], "status": "failed"}
+    call_started = None
     delivered = INSTRUCTIONS + prompt
+    metadata = {"provider": settings["provider"], "status": "failed",
+                "wall_start": None, "wall_end": None,
+                "prompt_bytes": len(delivered.encode("utf-8")),
+                "error_code": None, "error_category": None}
     input_mode = settings.get("input_mode", "stdin") if settings["provider"] == "command" else "stdin"
     response_mode = settings.get("response_mode", "stdout") if settings["provider"] == "command" else (
         "stdout" if settings["provider"] == "dsh" else "file")
@@ -373,59 +463,67 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False) ->
             lock = (_agent_lock(settings["timeout_seconds"], shared=True) if permit_parallel
                     else _agent_lock(settings["timeout_seconds"]))
             with lock:
+                call_started = time.monotonic()
+                metadata["wall_start"] = datetime.now(timezone.utc).isoformat()
+                process = None
                 try:
-                    process = subprocess.Popen(
-                        _command(settings, paths["final"], paths["input"], root),
-                        stdin=subprocess.PIPE if input_mode == "stdin" else subprocess.DEVNULL,
-                        stdout=stdout, stderr=stderr, cwd=str(root), shell=False,
-                        start_new_session=(os.name != "nt"),
-                    )
-                except OSError as exc:
-                    raise AgentError(f"Cannot start agent executable: {exc}", "spawn") from exc
-                try:
-                    process.communicate(input=delivered.encode("utf-8") if input_mode == "stdin" else None,
-                                        timeout=settings["timeout_seconds"])
-                except subprocess.TimeoutExpired as exc:
-                    _cancel(process)
-                    raise AgentError(f"Agent timed out after {settings['timeout_seconds']:g}s", "timeout") from exc
-                except BaseException:
-                    _cancel(process)
-                    raise
-                metadata["exit_code"] = process.returncode
+                    try:
+                        process = subprocess.Popen(
+                            _command(settings, paths["final"], paths["input"], root),
+                            stdin=subprocess.PIPE if input_mode == "stdin" else subprocess.DEVNULL,
+                            stdout=stdout, stderr=stderr, cwd=str(root), shell=False,
+                            start_new_session=(os.name != "nt"),
+                        )
+                    except OSError as exc:
+                        raise AgentError("Cannot start agent executable; inspect attempt logs", "spawn") from exc
+                    try:
+                        process.communicate(input=delivered.encode("utf-8") if input_mode == "stdin" else None,
+                                            timeout=settings["timeout_seconds"])
+                    except subprocess.TimeoutExpired as exc:
+                        _cancel(process)
+                        raise AgentError(f"Agent timed out after {settings['timeout_seconds']:g}s", "timeout") from exc
+                    except BaseException:
+                        _cancel(process)
+                        raise
+                    metadata["exit_code"] = process.returncode
+                finally:
+                    if process is not None and isinstance(process.returncode, int):
+                        metadata["exit_code"] = process.returncode
+                    metadata["wall_end"] = datetime.now(timezone.utc).isoformat()
+                    metadata["duration"] = time.monotonic() - call_started
                 if process.returncode != 0:
+                    stderr.flush()
                     try:
-                        stderr.flush()
-                    except (OSError, ValueError):
-                        pass
-                    try:
-                        detail = (paths["stderr"].read_text(encoding="utf-8", errors="replace") or "").strip()
+                        detail = paths["stderr"].read_text(encoding="utf-8", errors="replace")
                     except OSError:
                         detail = ""
-                    code = classify_failure(detail)
-                    message = f"Agent subprocess failed (exit {process.returncode}); inspect stderr.log"
-                    if code in ("quota", "rate_limit"):
-                        message = ("代理额度/限流不可用（" + code + "）：" + detail.splitlines()[-1][:300]
-                                   if detail else message)
-                    raise AgentError(message, code)
+                    code, http_status = failure_details(detail)
+                    metadata["http_status"] = http_status
+                    raise AgentError(
+                        f"Agent subprocess failed (exit {process.returncode}, {code}); inspect stderr.log", code)
         final_path = paths["stdout"] if response_mode == "stdout" else paths["final"]
         if response_mode == "stdout":
             artifacts.pop("final")
-        response = _parse_response(_read_final(final_path))
+        response = _parse_response(_read_final(final_path), strict=is_review_prompt(prompt))
         _json_write(paths["response"], response)
         metadata["status"] = response["status"]
         return {"response": response, "artifacts": artifacts, "provider": settings["provider"],
                 "duration": time.monotonic() - started}
     except AgentError as exc:
-        metadata["error_code"] = exc.code
-        metadata["error"] = str(exc)
+        metadata["error_code"] = metadata["error_category"] = exc.code
+        metadata["error"] = f"Agent attempt failed ({exc.code}); inspect raw attempt logs"
         exc.artifacts = artifacts
         raise
     except OSError as exc:
-        metadata["error_code"] = "io"
-        metadata["error"] = str(exc)
-        raise AgentError(f"Cannot persist agent attempt: {exc}", "io", artifacts=artifacts) from exc
+        metadata["error_code"] = metadata["error_category"] = "io"
+        metadata["error"] = "Cannot persist agent attempt"
+        raise AgentError("Cannot persist agent attempt", "io", artifacts=artifacts) from exc
+    except BaseException:
+        metadata["error_code"] = metadata["error_category"] = "interrupted"
+        raise
     finally:
-        metadata["duration"] = time.monotonic() - started
+        metadata.setdefault("duration", 0.0)
+        metadata["total_duration"] = time.monotonic() - started
         _json_write(paths["metadata"], metadata)
 
 
@@ -658,6 +756,8 @@ def main(argv=None):
             retries = int(config.get("retries", 0) or 0)
             feedback_limit = int(config.get("retry_feedback_chars", 1200) or 1200)
             concurrency = _part_concurrency(config)
+            invocation_options = ({"permit_parallel": True}
+                                  if concurrency > 1 and len(parts) > 1 else {})
 
             def run_part(index, part):
                 # Resume: a previously validated partition for the same prompt,
@@ -683,7 +783,7 @@ def main(argv=None):
                     try:
                         print(f"  分片 {index + 1}/{len(parts)}：调用模型"
                               f"（{len(part['unit_ids'])} 单元，{len(part['prompt']) // 1000}K 字符，第 {attempt + 1} 次）", flush=True)
-                        result = invoke(delivered, part_dir, config)
+                        result = invoke(delivered, part_dir, config, **invocation_options)
                         _check_input_hashes(batch_dir, hashes)
                         candidate = result["response"]
                         unit_tasks.validate_part(batch_dir, args.stage, part, candidate)

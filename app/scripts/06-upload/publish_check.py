@@ -82,7 +82,8 @@ def main(argv=None):
 
         if kind == "group":
             # A8：题组必须有 material 与 subquestions
-            if _is_blank(unit.get("material")):
+            # 听力组题的材料是音频，跳过听力时允许 material 为空（不伪造文本）。
+            if _is_blank(unit.get("material")) and not str(qt or "").startswith("听力"):
                 problems.append(f"{uid}: 题组缺少 material（A8）")
             if not has_subs:
                 problems.append(f"{uid}: 题组缺少 subquestions（A8）")

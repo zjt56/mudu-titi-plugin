@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from .preview import slice_text
 
@@ -86,6 +88,83 @@ def _field_text(value) -> str:
         return "\n".join(_field_text(v) for k, v in value.items()
                          if k in {"text", "content", "value", "stem", "material", "rows", "cells", "blocks", "options", "subquestions"})
     return ""
+
+
+# Only rendered content can satisfy source evidence, never answers/review metadata.
+_IMAGE_CONTENT_FIELDS = {
+    "text", "content", "value", "stem", "material", "materialBlocks",
+    "material_blocks", "rows", "cells", "blocks",
+}
+_HTML_IMAGE = re.compile(r"<img\b[^>]*>", re.I)
+_MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\(([^\s)]+)(?:\s+[^)]*)?\)")
+
+
+def _media_name(value: str) -> str:
+    try:
+        return unquote(urlsplit(str(value)).path).replace("\\", "/").rsplit("/", 1)[-1]
+    except ValueError:
+        return ""
+
+
+class _ImageParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.names = set()
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "img":
+            src = dict(attrs).get("src")
+            if src:
+                self.names.add(_media_name(src))
+
+
+def _image_refs(value, option_key: str | None = None) -> set[str]:
+    """Collect one content owner's images; do not descend into sibling options/children."""
+    if isinstance(value, str):
+        parser = _ImageParser()
+        parser.feed(value)
+        return (set(_image_names(value.splitlines())) | parser.names
+                | {_media_name(m.group(1)) for m in _MARKDOWN_IMAGE.finditer(value)})
+    if isinstance(value, list):
+        return set().union(*(_image_refs(v, option_key) for v in value)) if value else set()
+    if not isinstance(value, dict):
+        return set()
+    refs = set()
+    if value.get("type") == "image":
+        refs.update(_media_name(value[k]) for k in ("src", "url", "path") if isinstance(value.get(k), str))
+    for key in _IMAGE_CONTENT_FIELDS:
+        refs.update(_image_refs(value.get(key), option_key))
+    attachments = value.get("attachments") or []
+    for attachment in attachments if isinstance(attachments, list) else []:
+        if isinstance(attachment, str):
+            refs.add(_media_name(attachment))
+            continue
+        if not isinstance(attachment, dict) or attachment.get("kind", "image") != "image":
+            continue
+        target = str(attachment.get("optionKey") or "").strip().rstrip(".．、")
+        if target and target != option_key:
+            continue
+        if attachment.get("placement") == "option" and not option_key:
+            continue
+        refs.update(_media_name(attachment[k]) for k in ("url", "src", "path", "name")
+                    if isinstance(attachment.get(k), str))
+        refs.update(_image_refs(attachment, option_key))
+    return refs
+
+
+def _option_image_refs(option, owner: dict, label: str) -> set[str]:
+    # A parent's explicitly labeled attachment can belong to its own option,
+    # but an unbound parent image cannot stand in for an arbitrary option.
+    bound = [a for a in owner.get("attachments") or [] if isinstance(a, dict)
+             and str(a.get("optionKey") or "").strip().rstrip(".．、") == label]
+    return _image_refs(option, label) | _image_refs({"attachments": bound}, label)
+
+
+def _canonical_image_text(value: str) -> str:
+    """Compare words separately from the independently checked image bindings."""
+    value = IMAGE.sub("", str(value))
+    value = _HTML_IMAGE.sub("", value)
+    return _canonical(_MARKDOWN_IMAGE.sub("", value))
 
 
 def question_parts(lines: list[str], number: int) -> dict:
@@ -298,25 +377,47 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                 preserved = [_canonical(x) for x in re.findall(r"<u>(.*?)</u>", candidate_body, flags=re.S)]
                 if _canonical(marked) not in preserved:
                     issue("SOURCE_UNDERLINE_MISSING", "原卷实词下划线未保留：" + marked[:80], uid)
-        attachment_text = json.dumps(item.get("attachments") or [], ensure_ascii=False)
-        for name in _image_names(unit["stem"].splitlines()):
-            if (name not in _image_names(candidate_body.splitlines())
-                    and name not in attachment_text
-                    and not re.search(r"(?:src=[\"']|!\[[^\]]*\]\()[^\n]*" + re.escape(name), candidate_body)):
-                issue("SOURCE_IMAGE_MISSING", "原卷图片引用缺失或未映射到本单元：" + name, uid)
         source_audit = audit_source_unit(unit)
+
+        def check_images(required, present, number=None, label=""):
+            for name in sorted(set(_image_names(str(required).splitlines())) - present):
+                scope = f"第 {number} 题" if number is not None else "本单元共享材料"
+                if label:
+                    scope += f" {label} 选项"
+                issue("SOURCE_IMAGE_MISSING", f"原卷图片引用缺失或未映射到{scope}：{name}", uid, number)
+
+        def check_option_images(expected, owner, number=None):
+            options = owner.get("options") or []
+            actual = {o["label"]: raw for o, raw in zip(_candidate_options(options), options)}
+            for option in expected:
+                label = option["label"]
+                check_images(option["text"], _option_image_refs(actual.get(label), owner, label), number, label)
+
+        # Partition source refs before looking at candidates: each child/option
+        # must prove its own mapping rather than borrowing another child's image.
+        owned = set()
+        for part in source_audit["questions"].values():
+            owned.update(_image_names(part["stem"].splitlines()))
+            for option in part["options"]:
+                owned.update(_image_names(option["text"].splitlines()))
+        for option in source_audit["shared_options"]:
+            owned.update(_image_names(option["text"].splitlines()))
+        shared_refs = (set(_image_names(materials[key]))
+                       | (set(_image_names(unit["stem"].splitlines())) - owned))
+        check_images("\n".join(f"[IMG {name}]" for name in shared_refs), _image_refs(item))
         for problem in source_audit["issues"]:
             issue(problem["code"], problem["message"], uid, problem.get("number"))
         shared_options = source_audit["shared_options"]
         if shared_options:
             actual_shared = _candidate_options(item.get("options"))
-            if [(o["label"], _canonical(o["text"])) for o in shared_options] != [(o["label"], _canonical(o["text"])) for o in actual_shared]:
+            check_option_images(shared_options, item)
+            if [(o["label"], _canonical_image_text(o["text"])) for o in shared_options] != [(o["label"], _canonical_image_text(o["text"])) for o in actual_shared]:
                 issue("SHARED_OPTIONS_MISMATCH", "共享选项标签、数量或内容与原卷不一致，必须归于当前题组", uid)
         candidate_material = "\n".join(_field_text(item.get(k)) for k in ("material", "materialBlocks", "material_blocks", "stem"))
         if unit["unit_kind"] == "group":
             for line in materials[key]:
-                text = _canonical(line)
-                if text and text not in _canonical(candidate_material):
+                text = _canonical_image_text(line)
+                if text and text not in _canonical_image_text(candidate_material):
                     issue("SOURCE_MATERIAL_MISSING", "共享材料/分段作答指令缺失或改写：" + line[:100], uid)
             for other, lines in materials.items():
                 if other == key:
@@ -328,6 +429,10 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                     if (by_numbers[other].get("type") == unit.get("type")
                             and _generic_choice_instruction(line, unit.get("type", ""))):
                         continue
+                    # 通用选择题作答导语（阅读下列短文…选出最佳选项）在不同大题里逐字相同，
+                    # 不构成"混入另一题组正文"；只要本单元自己也要这条导语即可，跨题型也豁免。
+                    if _generic_choice_instruction(line, "阅读理解"):
+                        continue
                     text = _canonical(line)
                     if len(text) >= 20 and text not in _canonical(unit["stem"]) and text in _canonical(candidate_material):
                         issue("FOREIGN_GROUP_MATERIAL", f"材料混入另一题组 {list(other)} 的正文：{line[:100]}", uid)
@@ -338,7 +443,13 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
         by_child = {str(c.get("number")): c for c in children}
         for n, part in source_audit["questions"].items():
             child = by_child.get(str(n), {})
-            if part["stem"] and _canonical(part["stem"]) not in _canonical(_field_text(child.get("stem"))):
+            # 同一道题可把题干与表格分别放在 stem/materialBlocks，不能要求
+            # 原卷整段都挤进 stem；仅在本题自己的内容字段查找，不借答案/解析补缺。
+            child_content = "\n".join(_field_text(child.get(k)) for k in
+                                      ("stem", "material", "materialBlocks", "material_blocks"))
+            check_images(part["stem"], _image_refs(child), n)
+            check_option_images(part["options"], child, n)
+            if part["stem"] and _canonical_image_text(part["stem"]) not in _canonical_image_text(child_content):
                 issue("SOURCE_STEM_MISSING", f"第 {n} 题题干缺失或改写", uid, n)
             options = child.get("options") or []
             normalized = _candidate_options(options)
@@ -347,7 +458,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                 issue("OPTIONS_MISMATCH", f"第 {n} 题选项标签/数量与原卷不一致", uid, n)
             else:
                 for expected, actual in zip(expected_options, normalized):
-                    if _canonical(expected["text"]) != _canonical(actual["text"]):
+                    if _canonical_image_text(expected["text"]) != _canonical_image_text(actual["text"]):
                         issue("OPTION_CONTENT_MISMATCH", f"第 {n} 题 {expected['label']} 选项内容缺失或改写", uid, n)
     return {"passed": not issues, "issues": issues, "checked_units": checked,
             "visual_review_claimed": False}

@@ -44,8 +44,9 @@ def _check_unit(u):
     opts = u.get("options") or []
 
     # A8：group 必须 material 非空 且 subquestions 非空
+    # 例外：听力组题的材料是音频，没有文字 material；跳过听力时允许为空，不伪造文本。
     if kind == "group":
-        if not material:
+        if not material and not str(qt).startswith("听力"):
             problems.append(f"[A8] {uid} ({qt}): 题组 unit_kind=group 但 material 为空")
         if not subs:
             problems.append(f"[A8] {uid} ({qt}): 题组 unit_kind=group 但 subquestions 为空")

@@ -12,6 +12,17 @@ SUMMARY = '本文讲述校园生活中的一段经历，并说明了同学之间
 
 
 class ContentLabelingTest(unittest.TestCase):
+    def test_missing_optional_content_is_normalized_without_generating(self):
+        row = {'unit_id': 'g', 'subquestions': [{'number': 1}, {'number': 2, 'explanation': '原文解析'}]}
+        content_rules.normalize_optional_content(row)
+        self.assertEqual(row['explanation'], '无')
+        self.assertEqual(row['articleSummary'], '无')
+        self.assertEqual(row['subquestions'][0]['explanation'], '无')
+        self.assertEqual(row['subquestions'][1]['explanation'], '原文解析')
+        row['explanation'] = ['wrong type']
+        content_rules.normalize_optional_content(row)
+        self.assertEqual(row['explanation'], ['wrong type'])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

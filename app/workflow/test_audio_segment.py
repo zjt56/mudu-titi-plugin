@@ -37,13 +37,15 @@ def _batch(root: Path, numbers=(1, 2, 3)) -> Path:
 
 class ConfigTest(unittest.TestCase):
     def test_defaults_and_validation(self):
-        self.assertEqual(cfgmod.DEFAULTS["asr_model"], "small.en")
+        # 默认多语种大模型：不能因 small 更快而静默降级。
+        self.assertEqual(cfgmod.DEFAULTS["asr_model"], "large-v3-turbo")
+        self.assertEqual(cfgmod.DEFAULTS["anchor_language"], "zh")
         self.assertFalse(cfgmod.DEFAULTS["enabled"])
         self.assertEqual(cfgmod.DEFAULTS["align_model"], "facebook/wav2vec2-base-960h")
         self.assertEqual(cfgmod.DEFAULTS["vad_method"], "pyannote")
         self.assertEqual(cfgmod.validate({"skeleton_silence": 3.0})["skeleton_silence"], 3.0)
         with self.assertRaises(ValueError):
-            cfgmod.validate({"asr_model": "large-v3"})
+            cfgmod.validate({"asr_model": "unknown-model"})
         with self.assertRaises(ValueError):
             cfgmod.validate({"cut_silence": 9.0})
 
@@ -89,6 +91,125 @@ class AnchorTest(unittest.TestCase):
         self.assertEqual(anchors[2], [20.0])
         self.assertEqual(anchors[3], [40.0])
 
+    def test_word_anchors_handles_plural_and_ranges(self):
+        # 最常见的 “answer questions 6 and 7” 过去会把 questions 的 s 当题号而丢掉；
+        # 现在必须正确展开成 6、7，并共享该句起点时间。
+        def toks(pairs):
+            return [{"word": w, "start": t, "end": t + 0.2} for w, t in pairs]
+        words = toks([("Listen", 2.0), ("to", 2.2), ("answer", 2.4),
+                      ("questions", 3.0), ("6", 3.2), ("and", 3.4), ("7", 3.6),
+                      ("Now", 20.0),
+                      ("questions", 20.4), ("16", 20.6), ("to", 20.8), ("20", 21.0)])
+        anchors = segment.word_anchors(words)
+        self.assertEqual(anchors.get(6), [3.0])
+        self.assertEqual(anchors.get(7), [3.0])
+        for n in range(16, 21):
+            self.assertEqual(anchors.get(n), [20.4])
+
+    def test_anchor_regex_ignores_section_and_chapter_words(self):
+        # Section/Part/Text/Conversation 是章节词，绝不是题号，不能产生假锚点。
+        for text in ("Section B", "Part two", "Text 8.", "Conversation 1.", "Passage 2"):
+            self.assertEqual(segment.ANCHOR_RE.findall(text), [], text)
+        # 而真正的题号线索仍能命中。
+        self.assertTrue(segment.ANCHOR_RE.search("question 3"))
+        self.assertTrue(segment.ANCHOR_RE.search("questions 6-7"))
+        self.assertTrue(segment.ANCHOR_RE.search("第 6、7 题"))
+
+    def test_bare_question_numbers_without_cue_words(self):
+        # 真实听力音频常直接念题号（"3." / "Six,"），没有 question/number 线索词；
+        # 只认线索词会只剩极少数锚点，其余靠等分插值，切点全错。
+        def toks(pairs):
+            return [{"word": w, "start": t, "end": t + 0.3} for w, t in pairs]
+        words = toks([("pencil", 8.0),
+                      ("3.", 20.0), ("You", 20.5), ("may", 20.8),
+                      ("Six", 40.0), ("excuse", 40.5), ("me", 40.8),
+                      ("10.", 60.0), ("Do", 60.5), ("you", 60.8)])
+        anchors = segment.word_anchors(words)
+        self.assertEqual(anchors.get(3), [20.0])
+        self.assertEqual(anchors.get(6), [40.0])
+        self.assertEqual(anchors.get(10), [60.0])
+
+    def test_mid_sentence_number_is_not_a_question_anchor(self):
+        # "take a number two bus" 里的 number two 不是题号；它还会破坏题号与
+        # 时间的同向关系，必须被剔除，而不是把该题起点拖到后面。
+        def toks(pairs):
+            return [{"word": w, "start": t, "end": t + 0.3} for w, t in pairs]
+        words = toks([("Three", 10.0), ("You", 10.4),
+                      ("Four", 30.0), ("My", 30.4),
+                      ("take", 50.0), ("a", 50.3), ("number", 50.6),
+                      ("two", 50.9), ("bus", 51.2)])
+        anchors = segment.word_anchors(words)
+        self.assertEqual(anchors, {3: [10.0], 4: [30.0]})
+        self.assertNotIn(2, anchors)
+
+    def test_chinese_announcements_with_traditional_and_cn_numerals(self):
+        # 实测中文播报是繁体 + 中文数字，且分词会在字之间插空格。
+        def toks(pairs):
+            return [{"word": w, "start": t, "end": t + 0.3} for w, t in pairs]
+        words = toks([("聽", 1.0), ("下面", 1.2), ("一段", 1.4), ("對話", 1.6),
+                      ("回答", 1.8), ("第", 2.0), ("16", 2.2), ("至", 2.4),
+                      ("17", 2.6), ("小", 2.8), ("題", 3.0),
+                      ("第", 30.0), ("十八", 30.2), ("至", 30.4),
+                      ("二十", 30.6), ("小", 30.8), ("題", 31.0)])
+        anchors = segment.word_anchors(words)
+        self.assertEqual(anchors.get(16), [2.0])
+        self.assertEqual(anchors.get(17), [2.0])
+        for n in (18, 19, 20):
+            self.assertEqual(anchors.get(n), [30.0])
+
+    def test_section_anchors_map_big_sections_to_first_number(self):
+        # 短文理解/信息转换不念题号，只能靠大题标题播报定位起点。
+        units = [{"unit_id": "q-1", "numbers": [1], "type": "听力关键词语选择"},
+                 {"unit_id": "q-2", "numbers": [2], "type": "听力关键词语选择"},
+                 {"unit_id": "group-16-17", "numbers": [16, 17], "type": "听力长对话理解"},
+                 {"unit_id": "group-21-25", "numbers": [21, 22, 23, 24, 25], "type": "听力短文理解"},
+                 {"unit_id": "group-26-30", "numbers": [26, 27, 28, 29, 30], "type": "听力信息转换"}]
+        words = [{"word": "1.", "start": 10.0, "end": 10.2},
+                 {"word": "關鍵詞語選擇", "start": 11.0, "end": 11.5},
+                 {"word": "長對話理解", "start": 100.0, "end": 100.5},
+                 {"word": "短文理解", "start": 200.0, "end": 200.5},
+                 {"word": "信息轉換", "start": 300.0, "end": 300.5}]
+        found = segment.section_anchors(units, words)
+        self.assertEqual(found.get(1), 11.0)
+        self.assertEqual(found.get(16), 100.0)
+        self.assertEqual(found.get(21), 200.0)
+        self.assertEqual(found.get(26), 300.0)
+
+    def test_plan_distributes_unanchored_units_between_anchors(self):
+        # q-3 有锚点、q-5 有锚点、q-4 没有：q-4 必须落在两者之间，
+        # 而不是被挤到 q-5 前面只剩几秒。
+        units = [{"unit_id": f"q-{i}", "numbers": [i]} for i in range(1, 6)]
+        cuts = [0.0, 50.0, 100.0, 150.0, 200.0]
+        anchors = {3: [103.0], 5: [148.0]}
+        rows = segment.plan(units, anchors, cuts, 200.0)
+        by_id = {r["unit_id"]: r for r in rows}
+        self.assertLess(by_id["q-3"]["start"], by_id["q-4"]["start"])
+        self.assertLess(by_id["q-4"]["start"], by_id["q-5"]["start"])
+        self.assertGreater(by_id["q-4"]["duration"], segment.MIN_SEGMENT_SECONDS * 3)
+
+    def test_plan_avoids_micro_segments_when_few_cuts(self):
+        # 19 个单元只有 4 个骨架切点：过去会堆出十几个 0.5s 微段；现在应
+        # 从 0 开始、用真实切点 + 剩余区间等分，全部 >= MIN_SEGMENT、严格递增。
+        units = [{"unit_id": f"q-{i}", "numbers": [i]} for i in range(1, 20)]
+        cuts = [0.0, 60.0, 120.0, 180.0, 240.0, 300.0]
+        rows = segment.plan(units, {}, cuts, 300.0)
+        self.assertEqual(rows[0]["start"], 0.0)
+        self.assertEqual(rows[-1]["end"], 300.0)
+        self.assertTrue(all(r["duration"] >= segment.MIN_SEGMENT_SECONDS for r in rows),
+                        [(r["unit_id"], r["duration"]) for r in rows if r["duration"] < segment.MIN_SEGMENT_SECONDS])
+        self.assertTrue(all(rows[i]["start"] < rows[i + 1]["start"] for i in range(len(rows) - 1)))
+        self.assertFalse([r for r in rows if r["quality"] == "micro"])
+
+    def test_plan_flags_micro_when_audio_too_short_for_units(self):
+        # 音频总长装不下这么多单元（每个至少 MIN_SEGMENT 秒）时，才不可避免出现微段，
+        # 这些段必须标 quality=micro，run() 不把它们当 verified。
+        units = [{"unit_id": f"q-{i}", "numbers": [i]} for i in range(1, 6)]
+        cuts = [0.0, 4.0]  # 总长仅 4s，5 个单元不可能都 >= 2s
+        rows = segment.plan(units, {}, cuts, 4.0)
+        micro = [r for r in rows if r["quality"] == "micro"]
+        self.assertTrue(micro, "音频过短时应检测出微段")
+        self.assertTrue(all(r["duration"] < segment.MIN_SEGMENT_SECONDS for r in micro))
+
     def test_plan_snaps_anchors_to_prior_skeleton_cut(self):
         units = [{"unit_id": "q-1", "numbers": [1]}, {"unit_id": "q-2", "numbers": [2]},
                  {"unit_id": "q-3", "numbers": [3]}]
@@ -118,7 +239,7 @@ class EvidenceContractTest(unittest.TestCase):
                      {"word": "Question", "start": 52.0, "end": 52.2},
                      {"word": "three", "start": 52.3, "end": 52.5}]
 
-            def fake_transcribe(audio, cfg, out):
+            def fake_transcribe(audio, cfg, out, language="en", align=True, regions=None, progress=None):
                 out.write_text(json.dumps({"words": words, "text": "..."}), encoding="utf-8")
                 return {"words": words}
 
@@ -129,7 +250,7 @@ class EvidenceContractTest(unittest.TestCase):
 
             cfg = dict(cfgmod.DEFAULTS)
             with mock.patch.object(segment, "probe_duration", return_value=60.0), \
-                 mock.patch.object(segment, "detect_silences", return_value=[(11.0, 13.0), (31.0, 33.0), (49.0, 51.0)]), \
+                 mock.patch.object(segment, "detect_silences", return_value=[(10.5, 13.5), (30.5, 33.5), (48.5, 51.5)]), \
                  mock.patch.object(segment, "transcribe", side_effect=fake_transcribe), \
                  mock.patch.object(segment, "cut", side_effect=fake_cut):
                 result = segment.run(batch, cfg)
@@ -189,16 +310,36 @@ class BootstrapTest(unittest.TestCase):
         import audio.segment as seg
         with tempfile.TemporaryDirectory() as tmp:
             cfg = dict(cfgmod.DEFAULTS, data_dir=str(tmp), hf_endpoint="https://hf-mirror.com")
+            audio = Path(tmp) / "a.mp3"
+            audio.write_bytes(b"ID3audio")
             out = Path(tmp) / "words.json"
-            out.write_text('{"words": []}', encoding="utf-8")
-            with mock.patch.object(seg.bootstrap, "venv_python", return_value=Path(tmp) / "v" / "bin" / "python"), \
-                 mock.patch.object(seg.bootstrap, "worker_path", return_value=Path(tmp) / "worker.py"), \
-                 mock.patch.object(Path, "is_file", return_value=True), \
-                 mock.patch.object(seg, "_run", return_value=mock.Mock()) as run:
-                seg.transcribe(Path(tmp) / "a.mp3", cfg, out)
+            def worker(command, **kwargs):
+                target = Path(command[command.index("--out") + 1])
+                target.write_text(json.dumps({"schema_version": 2, "segments": [
+                    {"start": 0, "end": 1, "text": "hello"}], "words": [],
+                    "timestamp_precision": "segment"}))
+            with mock.patch.object(seg.bootstrap, "venv_python", return_value=audio), \
+                 mock.patch.object(seg, "_run", side_effect=worker) as run:
+                seg.transcribe(audio, cfg, out)
             self.assertEqual(run.call_args.kwargs["env"]["HF_ENDPOINT"], "https://hf-mirror.com")
-            self.assertEqual(run.call_args.kwargs["env"]["HF_HOME"],
-                             cfgmod.model_env(cfg)["HF_HOME"])
+            self.assertEqual(run.call_args.kwargs["env"]["HF_HOME"], cfgmod.model_env(cfg)["HF_HOME"])
+
+    def test_transcribe_reuses_cached_transcript_to_resume(self):
+        import audio.segment as seg
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = dict(cfgmod.DEFAULTS, data_dir=str(tmp))
+            audio = Path(tmp) / "a.mp3"
+            audio.write_bytes(b"ID3audio")
+            out = Path(tmp) / "full-transcript.json"
+            out.write_text(json.dumps({"schema_version": 2, "timestamp_precision": "word",
+                 "segments": [{"text": "hi", "start": 0, "end": 1}],
+                 "words": [{"word": "hi", "start": 0, "end": 1}]}))
+            out.with_name(out.name + ".key.json").write_text(json.dumps({
+                "key": seg._transcript_key(audio, cfg), "sha256": seg._file_digest(out)}))
+            with mock.patch.object(seg, "_run") as run:
+                data = seg.transcribe(audio, cfg, out)
+            run.assert_not_called()
+            self.assertEqual(data["words"][0]["word"], "hi")
 
     def test_hf_endpoint_resolution_order(self):
         with mock.patch.dict(os.environ, {"HF_ENDPOINT": "https://env.example"}, clear=False):

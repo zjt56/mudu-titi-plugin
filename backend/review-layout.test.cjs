@@ -66,9 +66,23 @@ test('全局中性色板：无蓝色，按钮浅白底 + 中性灰文字', () =>
   assert.match(client, /--wf-brand:var\(--dsw-alias-label-primary\)/);
   assert.match(client, /--wf-brand-soft:var\(--dsw-alias-bg-layer-2\)/);
   assert.match(client, /--wf-brand-border:var\(--dsw-alias-border-l2\)/);
-  assert.match(client, /--wf-sel-bg:var\(--dsw-alias-bg-layer-2\)/);
+  // 浅色主题的 bg-layer-2 就是纯白，选中态必须按主题色混合出更深的底色。
+  assert.match(client, /--wf-sel-bg:color-mix\(in srgb, var\(--dsw-alias-label-primary\) 10%, var\(--dsw-alias-bg-base\)\)/);
+  assert.match(client, /--wf-sel-border:var\(--dsw-alias-label-secondary\)/);
   // 主按钮字重与普通按钮一致（不再加粗）。
   assert.doesNotMatch(client, /btnPrimary: \{[^}]*fontWeight: 600/);
+  // 全站不再使用绿色成功色；通过态用中性色 + ✓ 表达。
+  assert.doesNotMatch(client, /--dsw-alias-state-success-primary/);
+});
+
+test('左侧题目列表：每题有独立边框分隔，选中态加深并带强调条', () => {
+  assert.match(client, /margin: '0 2px 6px', padding: '7px 9px'/);
+  assert.match(client, /border: '1px solid ' \+ \(active \? 'var\(--wf-sel-border\)' : 'var\(--dsw-alias-border-l2\)'\)/);
+  assert.match(client, /background: active \? 'var\(--wf-sel-bg\)' : 'var\(--dsw-alias-bg-base\)'/);
+  assert.match(client, /boxShadow: active \? 'inset 2px 0 0 var\(--dsw-alias-label-primary\)' : 'none'/);
+  // hover 不再把选中行刷成纯白，也不影响原卷正文。
+  assert.match(client, /\.wf-paper\[data-unit\]:not\(\.wf-active\):hover/);
+  assert.doesNotMatch(client, /\.wf-paper\.wf-active:hover\{filter:brightness/);
 });
 
 test('插件图标同步改为中性灰', () => {

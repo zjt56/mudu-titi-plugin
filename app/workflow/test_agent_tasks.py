@@ -396,13 +396,23 @@ class AgentTasksTest(unittest.TestCase):
         # A22：装配器应确定性补齐 knowledge_ids，并与 knowledgeIds 一致。
         self.assertEqual(installed["items"][0]["knowledge_ids"], installed["items"][0]["knowledgeIds"])
         for changes in ({"numbers": [2]}, {"number": 2}, {"status": "published"}, {"knowledge": ["词汇"]},
-                        {"answer": "B"}, {"filterMetadata": {"subtypes": ["三个选项"]}},
+                        {"filterMetadata": {"subtypes": ["三个选项"]}},
                         {"knowledgeIds": ["invented"]}, {"knowledge_ids": ["invented"]},
                         {"stem": "Foreign question text"}, {"options": []}):
             candidate = copy.deepcopy(payload)
             candidate["items"][0].update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.accept("assemble", candidate)
+        # answer/explanation/articleSummary 是确定性副本：模型抄写漂移由导入器
+        # 按上游已验证产物覆盖，不再整批失败（可自动修复的错误不重试）。
+        upstream_answer = self.knowledge["items"][0].get("answer")
+        drifted = copy.deepcopy(payload)
+        drifted["items"][0].update({"answer": "Z", "explanation": "编造的解析"})
+        report = self.accept("assemble", drifted)
+        self.assertTrue(report["completed"])
+        installed = json.loads((self.batch / tasks.ARTIFACTS["assemble"]).read_text())
+        self.assertEqual(installed["items"][0]["answer"], upstream_answer)
+        self.assertNotEqual(installed["items"][0]["explanation"], "编造的解析")
 
     def test_assemble_fills_missing_source_placeholders_without_model_rework(self):
         self.write("01_source/structure.confirmed.json", {"units": self.units, "meta": {

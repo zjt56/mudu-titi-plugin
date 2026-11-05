@@ -197,8 +197,8 @@ def _review_after(callback, batch_dir, config_path=None, max_attempts=3, allow_f
             failures.append(failure)
             review_rounds._save(batch_dir, "workflow/review-ai-failures/" + uuid.uuid4().hex + ".json", failure)
             # 额度/限流不是可重试错误：再试只会继续占用时间。
-            if any(token in (stderr + " " + error).lower()
-                   for token in ("quota", "rate_limit", "daily_limit", "429", "usage limit")):
+            from .local_agent import classify_failure
+            if classify_failure(stderr + "\n" + error) in ("rate_limit", "quota"):
                 quota_hit = True
                 break
         else:
@@ -299,6 +299,45 @@ def _run_review_rounds(batch_dir, config_path=None):
         return 2
 
 
+def _audio_evidence_ready(batch_dir) -> bool:
+    """切段产物已存在且通过 audio 阶段校验时，直接判定该阶段完成。
+
+    听力切段由插件内置切段器（ffmpeg + WhisperX）确定性地产出
+    `02_audio/segment-evidence.json`，再让模型"重新生成"一遍既慢又会重写产物、
+    把已经算好的审核输入指纹改掉（审核随即作废、必须重跑）。所以只要产物能通过
+    同一套契约校验，就走确定性快路，不调用模型、不重写文件。
+    """
+    from . import agent_tasks
+    batch = Path(batch_dir)
+    path = batch / "02_audio" / "segment-evidence.json"
+    if not path.is_file():
+        return False
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        items = document.get("items") if isinstance(document, dict) else None
+        if not isinstance(items, list) or not items:
+            return False
+        if document.get("generator") == "audio.segment/v1":
+            # Legacy auto-verification treated every non-micro/interpolated cut
+            # as verified; regenerate evidence under the corrected contract.
+            return False
+        if any(item.get("quality") in ("micro", "interpolated", "coarse")
+               or item.get("review_reasons") for item in items if isinstance(item, dict)):
+            return False
+        keys = ("unit_id", "file", "start", "end", "evidence")
+        payload = {"items": [{key: item[key] for key in keys} for item in items
+                             if isinstance(item, dict) and all(key in item for key in keys)]}
+        if len(payload["items"]) != len(items):
+            return False
+        context, _, missing, units = agent_tasks._collect(batch, "audio")
+        if missing:
+            return False
+        agent_tasks._validate(batch, "audio", payload, context, units)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return True
+
+
 def _mark_stage_completed(batch_dir, stage_id):
     """Import via local CLI writes the artifact; record the stage too."""
     from . import contracts, manifest as mf, runner
@@ -356,6 +395,19 @@ def main(argv=None):
     parser.add_argument('--config', type=Path)
     parser.add_argument('--dry-run', action='store_true')
     values = parser.parse_args(args)
+    if values.stage == 'audio' and not values.dry_run and _audio_evidence_ready(values.batch_dir):
+        # 切段器已产出并通过契约校验：不再调用模型，避免慢调用与无谓改写。
+        _mark_stage_completed(values.batch_dir, 'audio')
+        print(json.dumps({"stage": "audio", "status": "completed",
+                          "detail": "切段产物已通过校验，未调用模型"}, ensure_ascii=False))
+        return 0
+    if values.stage == 'audio' and not values.dry_run:
+        evidence_path = values.batch_dir / '02_audio' / 'segment-evidence.json'
+        if evidence_path.is_file():
+            print(json.dumps({"stage": "audio", "status": "needs_review", "completed": False,
+                              "detail": "现有切片边界证据不足；候选已保留。重新切段或核对边界，不再让模型重写证据。"},
+                             ensure_ascii=False))
+            return 3
     if values.config is not None or configured():
         from . import local_agent
         local_args = ['--stage', values.stage, '--batch-dir', str(values.batch_dir)]

@@ -306,6 +306,10 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
             continue
         record = manifest["stages"].get(stage.id, {})
         status = record.get("status")
+        if status == mf.SKIPPED and not mf.skip_reason(manifest, stage):
+            mf.touch_stage(manifest, stage.id, mf.PENDING, notes="跳过条件已消失，恢复执行")
+            mf.save(batch_dir, manifest)
+            status = mf.PENDING
         if status in mf.TERMINAL_OK:
             continue
         unmet = [d for d in stage.depends_on
@@ -319,6 +323,8 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
             continue
 
         if stage.kind == contracts.AGENT:
+            if rn._skip_agent_stage(batch_dir, manifest, stage):
+                continue
             # 通用就绪并行批：把当前所有依赖已满足、且走默认桥的 AGENT 阶段一次性
             # 并发调用模型，再按阶段顺序导入。这样 types/answers/audio 一波、
             # explanations/knowledge 一波，四个打标签智能体都能并行参与，而不再
@@ -336,6 +342,7 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                     if (bridge.get(candidate.id) == default
                             and manifest["stages"].get(candidate.id, {}).get("status") not in mf.TERMINAL_OK
                             and candidate.id not in parallel_done
+                            and not mf.skip_reason(manifest, candidate)
                             and all(manifest["stages"].get(dep, {}).get("status") in mf.TERMINAL_OK
                                     for dep in candidate.depends_on)):
                         eligible.append(candidate)
@@ -407,6 +414,16 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
             code = rn._execute_command(batch_dir, manifest, executable)
             if code != 0:
                 blocked(stage.id, "脚本执行失败", "failed")
+            elif stage.id == "extract":
+                # 上传后自动识别题源分类/卷名/地区/年份；失败只记录原因，不阻断流程。
+                try:
+                    from . import metadata_ai
+                    identified = metadata_ai.auto_identify(batch_dir)
+                except (OSError, ValueError, TypeError) as exc:
+                    identified = {"ran": False, "reason": str(exc)}
+                if identified.get("ran"):
+                    print("  · 已自动识别试卷元信息：" + "、".join(identified.get("applied") or []))
+                manifest = mf.load(batch_dir)
             continue
 
         if stage.kind == contracts.GATE:
@@ -474,8 +491,10 @@ RATE_LIMIT_MARKERS = (
 
 
 def _is_rate_limited(text: str) -> bool:
-    blob = (text or "").lower()
-    return any(marker.lower() in blob for marker in RATE_LIMIT_MARKERS)
+    from .local_agent import classify_failure
+    # The queue must use the same structured transport evidence as the bridge;
+    # words quoted by a model or ordinary validation messages are not HTTP errors.
+    return classify_failure(text or "") in ("rate_limit", "quota")
 
 
 def _cooldown_path(batch_dir: Path) -> Path:

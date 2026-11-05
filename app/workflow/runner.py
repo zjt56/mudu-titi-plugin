@@ -188,10 +188,11 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
     report = checks.run_all(SKILL_ROOT, batch_json, manifest.get("inputs", {}))
     # 脚本的字段/目录体检不能代替原卷逐题覆盖与材料归属复核。
     try:
-        from .question_content import audit_batch_source
-        audit = audit_batch_source(batch_dir, json.loads(batch_json.read_text(encoding="utf-8-sig")))
+        audit = source_audit_for_batch(batch_dir, json.loads(batch_json.read_text(encoding="utf-8-sig")))
     except (OSError, ValueError, TypeError, ImportError) as exc:
         audit = {"passed": False, "issues": [{"code": "SOURCE_AUDIT_UNAVAILABLE", "message": str(exc)}]}
+    # 跳过听力的批次只豁免听力单元的题图/选项内容；非听力单元的题干、选项、
+    # 题图与共享材料仍逐项对照原卷。
     report["source_audit"] = audit
     report.setdefault("checks", []).append({
         "check": "原卷逐题覆盖与材料归属 source_audit", "blocking": True,
@@ -255,14 +256,40 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
     return 1
 
 
+# 听力单元按用户规则整体跳过、不进入题库；其内容来自音频与题图，无法也不应
+# 按文字保真复核。仅豁免这些"音频派生内容"项，结构、题号、材料归属仍检查。
+_LISTENING_SKIP_CODES = frozenset((
+    "SOURCE_IMAGE_MISSING", "OPTION_CONTENT_MISMATCH",
+    "SOURCE_OPTIONS_INCOMPLETE", "SHARED_OPTIONS_MISMATCH",
+))
+
+
+def source_audit_for_batch(batch_dir: Path, payload: dict) -> dict:
+    """原卷逐题覆盖审计；显式跳过听力的批次不要求听力单元的题图/选项内容。"""
+    from .question_content import audit_batch_source
+    audit = audit_batch_source(batch_dir, payload)
+    try:
+        if (Path(batch_dir) / "02_audio" / "SKIP_LISTENING").is_file():
+            from . import agent_tasks
+            listening = {u["unit_id"] for u in agent_tasks.confirmed_units(Path(batch_dir))
+                         if str(u.get("type", "")).startswith("听力")}
+            if listening:
+                issues = [issue for issue in audit.get("issues", [])
+                          if not (issue.get("unit_id") in listening
+                                  and issue.get("code") in _LISTENING_SKIP_CODES)]
+                audit = dict(audit, issues=issues, passed=not issues)
+    except (OSError, ValueError, KeyError, TypeError, ImportError):
+        pass
+    return audit
+
+
 def flowchart_checks(batch_dir: Path, manifest: dict) -> dict:
     """复核真实切题证据与正式批次；日常审核不要求人工姓名或密钥。"""
     errors = []
     try:
-        from .question_content import audit_batch_source
         actual = batch_dir / "06_batch" / "batch_meta.json"
         final = json.loads(actual.read_text(encoding="utf-8-sig"))
-        audit = audit_batch_source(batch_dir, final)
+        audit = source_audit_for_batch(batch_dir, final)
         if not audit.get("passed"):
             errors.extend({"code": issue.get("code", "SOURCE_SLICE_MISMATCH"),
                            "message": issue.get("message", "切题或正式批次与原卷不一致"),
@@ -670,6 +697,67 @@ def cmd_status(args) -> int:
             print(f"  ⏸ {item['stage']}：缺少 {'、'.join(item['missing'])}")
     ready = mf.ready_stages(batch_dir, manifest)
     print("\n可执行：" + ("、".join(ready) or "无"))
+
+    # 卡点诊断：把分散在日志/报告里的真实原因翻译成一句人话，直接给出修复命令。
+    try:
+        from workflow import diagnose as diag
+        diag_result = diag.diagnose(batch_dir)
+        head = next((it for it in diag_result["items"] if it["blocking"]), None)
+        if head:
+            print(f"\n卡点诊断 → {head['title']}（{head['stage']}）：{head['reason']}")
+            if head["detail"]:
+                print(f"  原因：{head['detail'][:300]}")
+            if head["hint"]:
+                print(f"  怎么办：{head['hint']}")
+            if head["command"]:
+                print(f"  修复：{head['command']}")
+            print("  更多：python -m workflow.runner diagnose --batch-dir "
+                  f"{batch_dir} --stage {head['stage']}")
+    except (OSError, ValueError, KeyError):
+        pass
+    return 0
+
+
+def cmd_diagnose(args) -> int:
+    from workflow import diagnose as diag
+    batch_dir = Path(args.batch_dir).expanduser().resolve()
+    if args.stage:
+        result = diag.explain(batch_dir, args.stage)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2)); return 0
+        print(f"阶段：{result.get('stage')}  状态：{result.get('status')}")
+        print(f"原因：{result.get('reason')}")
+        if result.get("detail"):
+            print(f"细节：{result['detail']}")
+        if result.get("hint"):
+            print(f"怎么办：{result['hint']}")
+        if result.get("command"):
+            print(f"修复：{result['command']}")
+        return 0
+    result = diag.diagnose(batch_dir)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2)); return 0
+    print(f"批次：{result['batch']}  状态：{result['status']}")
+    print(f"概览：{result['summary']}")
+    blocking = [it for it in result["items"] if it["blocking"]]
+    waiting = [it for it in result["items"] if not it["blocking"]]
+    if not blocking and not waiting:
+        print("\n✓ 流程已完成，无卡点")
+        return 0
+    if blocking:
+        print(f"\n真正卡点（{len(blocking)} 个）：")
+        for it in blocking:
+            print(f"\n  ● {it['title']}（{it['stage']}，{it['status']}）")
+            print(f"    原因：{it['reason']}")
+            if it["detail"]:
+                print(f"    细节：{it['detail'][:300]}")
+            if it["hint"]:
+                print(f"    怎么办：{it['hint']}")
+            if it["command"]:
+                print(f"    修复：{it['command']}")
+    if waiting:
+        print(f"\n被上游阻塞、暂不处理（{len(waiting)} 个）："
+              + "、".join(it["stage"] for it in waiting))
     return 0
 
 
@@ -792,6 +880,31 @@ def _cmd_invalidate_locked(batch_dir: Path, args) -> int:
     return 0
 
 
+def _skip_agent_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
+                      *, dry_run: bool = False) -> bool:
+    """Apply an input-based AGENT skip before dispatching its bridge."""
+    reason = mf.skip_reason(manifest, stage)
+    if not reason:
+        return False
+    if dry_run:
+        print(f"  · {stage.id} 将跳过（{reason}）")
+        return True
+    from .local_agent import _agent_lock
+    with _agent_lock(1500):
+        current = mf.load(batch_dir)
+        reason = mf.skip_reason(current, stage)
+        if not reason:
+            return False
+        if current["stages"].get(stage.id, {}).get("status") not in mf.TERMINAL_OK:
+            mf.touch_stage(current, stage.id, mf.SKIPPED, notes=reason)
+            mf.save(batch_dir, current)
+        if current is not manifest:
+            manifest.clear()
+            manifest.update(current)
+    print(f"  · {stage.id} 跳过（{reason}）")
+    return True
+
+
 def cmd_run(args) -> int:
     batch_dir = Path(args.batch_dir).expanduser().resolve()
     try:
@@ -816,11 +929,37 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
         stage = contracts.STAGE_BY_ID[stage_id]
         record = manifest["stages"].get(stage_id, {})
         status = record.get("status")
-        if status in TERMINAL and not args.force:
-            continue
         if status == mf.SKIPPED:
-            print(f"· {stage_id} 跳过（{record.get('notes') or '无必需输入'}）")
-            continue
+            # 跳过理由可能已经消失（例如用户删掉了 02_audio/SKIP_LISTENING 想重新切听力）。
+            # 这时不能一直沿用历史 skipped，否则该阶段永远跑不起来。
+            still = mf.skip_reason(manifest, stage)
+            if still:
+                print(f"· {stage_id} 跳过（{still}）")
+                continue
+            if args.dry_run:
+                print(f"· {stage_id} 跳过条件已消失，将恢复执行")
+                continue
+            mf.touch_stage(manifest, stage_id, mf.PENDING,
+                           notes="跳过条件已消失，自动恢复执行")
+            mf.save(batch_dir, manifest)
+            manifest = mf.load(batch_dir)
+            print(f"· {stage_id} 跳过条件已消失，恢复执行")
+            status = mf.PENDING
+        if status in TERMINAL and not args.force:
+            # A known changed input/output is not reusable merely because the
+            # old manifest still says completed. No model call is needed to see it.
+            if stage.kind != contracts.HUMAN and (record.get("input_hashes") or record.get("output_hashes")):
+                stale, why = mf.is_stale(batch_dir, manifest, stage)
+                if stale and not args.dry_run:
+                    mf.invalidate_downstream(batch_dir, manifest, stage_id, why)
+                    mf.save(batch_dir, manifest)
+                    status = mf.INVALIDATED
+                elif stale:
+                    print(f"· {stage_id} 已过期，将重跑：{why}")
+                else:
+                    continue
+            else:
+                continue
         unmet = [d for d in stage.depends_on
                  if manifest["stages"].get(d, {}).get("status") not in TERMINAL]
         if unmet:
@@ -858,6 +997,8 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
 
         _print_header(f"{stage.id} · {stage.title}（{stage.kind}）")
         if stage.kind == contracts.AGENT:
+            if _skip_agent_stage(batch_dir, manifest, stage, dry_run=args.dry_run):
+                continue
             # 组装是确定性合并：结构不变时直接搬运四路产物，不调用模型。
             if stage.id == "assemble" and not args.dry_run:
                 from workflow import assemble_local, agent_protocol
@@ -1079,6 +1220,26 @@ def cmd_ingest(args) -> int:
     return 0
 
 
+def cmd_identify_meta(args) -> int:
+    """上传后识别题源分类/卷名/地区/年份；识别不出留空，不阻断流程。"""
+    from . import metadata_ai
+    batch_dir = Path(args.batch_dir).expanduser().resolve()
+    try:
+        result = metadata_ai.auto_identify(batch_dir, force=True)
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"✗ 自动识别失败：{exc}")
+        return 2
+    if not result.get("ran"):
+        print(f"  · 未识别：{result.get('reason') or '无可用正文'}")
+        return 0
+    print("  识别结果：" + json.dumps(result.get("identified") or {}, ensure_ascii=False))
+    applied = result.get("applied") or []
+    print("  ✓ 已写入：" + ("、".join(applied) if applied else "无（已有值优先保留）"))
+    if result.get("kept"):
+        print("  · 保留原值：" + "、".join(result["kept"]))
+    return 0
+
+
 def cmd_resolve(args) -> int:
     batch_dir = Path(args.batch_dir).expanduser().resolve()
     result = review.resolve(batch_dir, finding_ids=args.finding,
@@ -1153,6 +1314,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--json", action="store_true")
     p_status.set_defaults(func=cmd_status)
 
+    p_diag = sub.add_parser("diagnose", help="统一卡点诊断：一句话原因 + 解决办法 + 修复命令")
+    batch_arg(p_diag)
+    p_diag.add_argument("--stage", help="只看某个阶段")
+    p_diag.add_argument("--json", action="store_true", help="机器可读输出")
+    p_diag.set_defaults(func=cmd_diagnose)
+
     p_run = sub.add_parser("run", help="按依赖顺序执行可自动完成的阶段")
     batch_arg(p_run)
     p_run.add_argument("--stage", help="只执行指定阶段")
@@ -1208,6 +1375,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_res.add_argument("--note", default="")
     p_res.add_argument("--force", action="store_true", help="允许处理 blocker/major")
     p_res.set_defaults(func=cmd_resolve)
+
+    p_meta = sub.add_parser("identify-meta", help="用模型识别题源分类/卷名/地区/年份（识别不出留空）")
+    batch_arg(p_meta)
+    p_meta.add_argument("--force", action="store_true", help="即使当前正文已识别过也重新识别")
+    p_meta.set_defaults(func=cmd_identify_meta)
 
     p_inv = sub.add_parser("inventory", help="机械清点整卷题号与板块")
     batch_arg(p_inv)

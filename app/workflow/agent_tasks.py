@@ -36,21 +36,30 @@ RULES = {
     "answers": "You are labeling subagent 4 (answers, explanation alignment, difficulty). Artifact: {answers:{question_number:string}, evidence:{question_number:[nonempty location strings]}, difficulty:{question_number:easy|medium|hard in Chinese 容易/适中/困难}, difficultyEvidence:{question_number:[nonempty location strings]}}. Extract only supplied answer text, never solve or guess. Match every confirmed question number exactly; preserve original wording. difficulty is a reasoned judgement from observable features of the actual question (length, sentence complexity, option design, tested knowledge), never a guess from question type alone; state the basis. Missing/conflicting answers => needs_review.",
     "audio": "Artifact: {items:[{unit_id,file,start,end,evidence:[location strings]}]}. Cover exactly the listening units. file is an existing batch-relative already-cut media segment, never the original full recording. For every listening unit copy file, start and end EXACTLY from a 02_audio/segment-evidence.json item whose verified is true; start/end are offsets on the whole-paper recording, never re-based to the segment's own 0. Do not guess, round or adjust them: a proposed time that differs from the verified row is rejected. Without a verified evidence row and an existing segment for that unit return needs_review for it; you cannot listen, cut or create files.",
     "types": "You are labeling subagent 3 (type, word count, content completeness). Artifact: {items:[{unit_id,type,subtypes:[string],words:integer,contentComplete:boolean,evidence:[location strings]}]}. Exactly one row per confirmed unit. Use only catalog main types and their exact subtypes. All applicable subtypes are required; only 单词拼写 permits multiple subtypes. words is the English word count of the unit's own stem/material/options (digits and Chinese not counted); contentComplete is false when the question is truncated, missing options, or its stem does not match the passage. Never rename IDs or change unit boundaries.",
-    "knowledge": "You are labeling subagent 2 (knowledge points; textbook matching only for lesson-synced sources). Artifact: {items:[{unit_id,knowledge:[full catalog leaf paths],knowledgeIds:[matching catalog IDs],textbook:{version,book,unit,section,evidence},subquestions:[{number,knowledge:[full leaf paths],knowledgeIds:[]}],evidence:[nonempty location strings]}]}. Output tags ONLY: do not write answer, explanation or articleSummary — the importer injects them verbatim from the validated answers and explanations artifacts, and any content you add is ignored. Assign knowledge tags only. knowledgeIds is optional but must match paths. Use the matching types.json row as type/subtype context. Groups cover each confirmed child number exactly once; standalone subquestions is []. Whole-unit types (阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解) take ONLY group-level tags (genre/theme/content): their subquestions must carry knowledge=[]. Per-question types (listening dialogue/passage MCQ, 单项填空, 单词拼写, 完成句子, 翻译, 补全对话, 语音题 etc.) tag every child separately. textbook placement is ONLY for lesson-synced sources (同步练习/单元测验) whose own title or section header names the textbook unit: use exact strings from the supplied textbook_index and cite paper evidence; otherwise omit. Every knowledge path MUST be copied verbatim from the supplied catalog (references/knowledge-catalog.json); never append an invented child below an existing leaf (e.g. '语用/情景交际' is already a leaf — writing '语用/情景交际/询问目的' is invalid), and never invent names or IDs. When no valid leaf exists for a dimension, omit that dimension. Evidence must be nonempty and refer to supplied text.",
+    "knowledge": "You are labeling subagent 2 (knowledge points; textbook matching only for lesson-synced sources). Artifact: {items:[{unit_id,knowledge:[full catalog leaf paths],knowledgeIds:[matching catalog IDs],textbook:{version,book,unit,section,evidence},subquestions:[{number,knowledge:[full leaf paths],knowledgeIds:[]}],evidence:[nonempty location strings]}]}. Output tags ONLY: do not write answer, explanation or articleSummary — the importer injects them verbatim from the validated answers and explanations artifacts, and any content you add is ignored. Assign knowledge tags only. knowledgeIds is optional but must match paths. Use the matching types.json row as type/subtype context. Groups cover each confirmed child number exactly once; standalone subquestions is []. Whole-unit types (阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话) take ONLY group-level tags (genre/theme/content): their subquestions must carry knowledge=[] and are never tagged per child. Per-question types (听力短对话理解, 听力关键词语选择, 单项填空, 单词拼写, 完成句子, 翻译, 情景运用, 语音题 etc.) tag every child separately. textbook placement is ONLY for lesson-synced sources (同步练习/单元测验) whose own title or section header names the textbook unit: use exact strings from the supplied textbook_index and cite paper evidence; otherwise omit. Every knowledge path MUST be copied verbatim from the supplied catalog (references/knowledge-catalog.json); never append an invented child below an existing leaf (e.g. '语用/情景交际' is already a leaf — writing '语用/情景交际/询问目的' is invalid), and never invent names or IDs. When no valid leaf exists for a dimension, omit that dimension. Evidence must be nonempty and refer to supplied text.",
     "explanations": content_rules.RULES,
-    "assemble": "Artifact: {items:[{unit_id,id,unit_kind,number,numbers,question_type,filterMetadata:{subtypes:[]},stem,material,options:[],knowledge:[],knowledgeIds:[],knowledge_ids:[],answer,explanation,subquestions:[]}]}. id equals unit_id. Copy confirmed numbers and kind. Standalone number is its one question number; group number is its first question number, children each have number. Use strict catalog labels, full leaf paths and matching IDs at each layer. Cover all units and group child numbers exactly. Merge validated upstream artifacts without guessing answers. Copy identified original-paper metadata into EACH item's filterMetadata: filterMetadata.source = meta.source, filterMetadata.source_type = meta.source_type, filterMetadata.year = meta.year and filterMetadata.region = meta.region, as EXACT strings (for example 安徽省, never 安徽); do not abbreviate, translate or place them only at top level. location is the within-source question/page/section locator, not the province. Copy version and authorization only from explicit supplied evidence; never default or guess them. Include explicit batch name/upload_mode/upload_target when supplied. Optional 01_source/metadata.json supplies extraction evidence. Never let manifest filenames or current year override identified paper metadata. Missing paper_title/source/source_type uses the literal placeholder 未提供; this is allowed and must not block completion or create a routine human-confirmation finding. Never guess a year or region to fill missing metadata. Preserve original source words, options, markings, paragraphs, tables, images and underlines; supplied text alone cannot verify unseen images/formatting, record those uncertainties. Do not claim upload, publication, approval, independent review or final workflow status. Copy the validated explanation/articleSummary from the upstream knowledge artifact exactly; do not generate or rewrite content in assembly. Scope appendix lookups by section AND passage or question number; repeated A/B labels across cloze and reading are not unique IDs. Stop each explanation at its own real section/material boundary. Copy all table rowspan/colspan from source evidence. Include audio/image attachments only after a real deployment mapping is supplied, with placement/optionKey where required; never invent URLs. Media deployment is a separate controlled human step, so when no mapping is supplied, omit attachments and record the pending media deployment in notes instead of failing the whole artifact for that alone. structure.confirmed.json image_questions is only an extraction hint and must not be treated as the attachment binding. No invented media or URLs.",
+    "assemble": "Artifact: {items:[{unit_id,id,unit_kind,number,numbers,question_type,filterMetadata:{subtypes:[]},stem,material,options:[],knowledge:[],knowledgeIds:[],knowledge_ids:[],answer,explanation,subquestions:[]}]}. id equals unit_id. Copy confirmed numbers and kind. Standalone number is its one question number; group number is its first question number, children each have number. Use strict catalog labels, full leaf paths and matching IDs at each layer. Cover all units and group child numbers exactly. Merge validated upstream artifacts without guessing answers. Copy identified original-paper metadata into EACH item's filterMetadata: filterMetadata.source = meta.source, filterMetadata.source_type = meta.source_type, filterMetadata.year = meta.year and filterMetadata.region = meta.region, as EXACT strings (for example 安徽省, never 安徽); do not abbreviate, translate or place them only at top level. location is the within-source question/page/section locator, not the province. Copy version and authorization only from explicit supplied evidence; never default or guess them. Include explicit batch name/upload_mode/upload_target when supplied. Optional 01_source/metadata.json supplies extraction evidence. Never let manifest filenames or current year override identified paper metadata. Missing paper_title/source/source_type uses the literal placeholder 未提供; this is allowed and must not block completion or create a routine human-confirmation finding. Never guess a year or region to fill missing metadata. Preserve original source words, options, markings, paragraphs, tables, images and underlines; supplied text alone cannot verify unseen images/formatting, record those uncertainties. Do not claim upload, publication, approval, independent review or final workflow status. Copy the validated explanation/articleSummary from the upstream knowledge artifact exactly; do not generate or rewrite content in assembly. Scope appendix lookups by section AND passage or question number; repeated A/B labels across cloze and reading are not unique IDs. Stop each explanation at its own real section/material boundary. Copy all table rowspan/colspan from source evidence. Include audio/image attachments only after a real deployment mapping is supplied, with placement/optionKey where required; never invent URLs. Media deployment is a separate controlled human step, so when no mapping is supplied, omit attachments and record the pending media deployment in notes instead of failing the whole artifact for that alone. structure.confirmed.json image_questions is only an extraction hint and must not be treated as the attachment binding. No invented media or URLs. MATERIAL BOUNDARY: each group's material MUST contain ONLY that group's own passage/材料 from the source, copied verbatim. Do NOT copy an adjacent group's passage text into this group, and do NOT put a section-wide generic rubric (e.g. 阅读下列短文，从每小题所给的A、B、C、D四个选项中选出最佳选项) into a group's material unless that exact line is this group's own lead-in attached to this passage. For listening groups the material may be empty (its content is audio). TABLE: when the source unit contains a table (信息转换/信息匹配/海报广告表 etc.), materialBlocks MUST include a type=table block preserving the real row/column grid with rowspan/colspan; do not flatten a table into prose. Keep stem as the question/作答指令 only; put the shared passage in material, never inside stem.",
     "review": "Artifact ONLY: {findings:[{unit_id,severity,field,reason,evidence:[nonempty location strings]}],checked_units:[all confirmed unit IDs],unchecked:[]}. severity is blocker/major/minor/info. Check source fidelity, answers, groups/children, options, media evidence and all catalog labels. Include only evidence-backed findings. For anything not checked, use status needs_review with a nonempty unchecked list (each {unit_id,field,reason,required:true}); never erase it to claim completion. You are one local review, not independent reviewers: never invent signatures, reviewer identity, rounds, approvals, hashes, attestations or pass/gate results. This task is AI审核 only: it cannot fulfill 一审 labels semantic reassessment (full coverage), or 二审 20% question sampling recheck. Those need separate real executions, bound source evidence and a caller-owned review-rounds.json. Catalog validity/nonempty checks are not semantic review. Human queue contains actual differences/conflicts/uncertainty only, never routine per-question confirmations. Never put a normal agreement, verified-correct answer, harmless transcription spelling variation, or '无需处理' conclusion into findings at ANY severity; put normal observations in notes only. Do not repeat the same finding in both top-level findings and artifact findings; use artifact findings and top-level findings=[]. Write all explanatory reasons/notes in concise simplified Chinese, retaining verbatim English quotes only as source evidence. The supplied canonical catalog is authoritative, including all listed leaf paths and their exact IDs: do not reject a listed leaf because its ID has another prefix or because you prefer a different knowledge dimension. Spelling questions may test spelling/word forms without testing word-choice discrimination. Original answer-book answers must never be relabeled as AI-generated just because the explanation has an AI placeholder. Optional suggestions that leave correctness unchanged belong in notes, not findings. Read full relevant listening transcript including responses; supplied image observations are attributed visual evidence, not proof you saw images or heard audio. Continue every target despite individual problems. Human decisions are owned by the parent; never resolve them.",
 }
 
 
 
 
-def _inject_assemble_content(row, children, upstream):
-    """装配只负责结构/标签/题干；答案与解析逐字沿用已验证的知识产物。"""
+def _inject_assemble_content(row, children, upstream, notes=None):
+    """装配只负责结构/标签/题干；答案与解析逐字沿用已验证的知识产物。
+
+    答案/解析/大意是**确定性副本**：导入器以上游已验证产物为准逐字覆盖，
+    不因模型在组装输出里抄错/漏抄这几个字段就整批失败重跑。模型无法改写
+    正确答案或解析（覆盖即生效），因此这里只做覆盖，不做相等性报错——
+    相等性检查对已验证产物没有新增保障，只会把可自动修复的抄写漂移变成
+    一次代价高昂的模型重试。需要语义判断的字段（知识点路径、题号、题型、
+    结构）仍由后续校验严格把关。
+    """
+    corrected = []
     for key in ("answer", "explanation", "articleSummary"):
         expected = upstream.get(key, "")
         if key in row and row[key] != expected:
-            raise ValueError(f"Assemble must preserve validated knowledge artifact field {key}")
+            corrected.append(key)
         row[key] = expected
     prior = {str(c["number"]): c for c in upstream.get("subquestions", [])}
     for child in children:
@@ -58,8 +67,11 @@ def _inject_assemble_content(row, children, upstream):
         for key in ("answer", "explanation"):
             expected = source.get(key, "")
             if key in child and child[key] != expected:
-                raise ValueError(f"Assemble must preserve validated child field {key}")
+                corrected.append(f"{child.get('number')}.{key}")
             child[key] = expected
+    if corrected and notes is not None:
+        notes.append("装配已按上游已验证产物覆盖以下内容字段（模型抄写漂移，非阻断）："
+                     + "、".join(corrected[:12]))
 
 
 def _inject_content(row, children, explanation_row, answers, unit, *, strict=True):
@@ -76,7 +88,8 @@ def _inject_content(row, children, explanation_row, answers, unit, *, strict=Tru
         "articleSummary": explanation_row.get("articleSummary", ""),
     }
     for key, value in expected.items():
-        if strict and key in row and row[key] != value:
+        same_placeholder = key != "answer" and content_rules.is_placeholder(row.get(key)) and content_rules.is_placeholder(value)
+        if strict and key in row and row[key] != value and not same_placeholder:
             raise ValueError(f"Knowledge must preserve the explanation artifact field {key}")
         row[key] = value
     prior = {str(c["number"]): c for c in explanation_row.get("subquestions", [])}
@@ -85,7 +98,8 @@ def _inject_content(row, children, explanation_row, answers, unit, *, strict=Tru
         expected_child = {"answer": answers.get(number, ""),
                           "explanation": prior.get(number, {}).get("explanation", "")}
         for key, value in expected_child.items():
-            if strict and key in child and child[key] != value:
+            same_placeholder = key != "answer" and content_rules.is_placeholder(child.get(key)) and content_rules.is_placeholder(value)
+            if strict and key in child and child[key] != value and not same_placeholder:
                 raise ValueError("Knowledge must preserve each child explanation verbatim")
             child[key] = value
 
@@ -271,7 +285,12 @@ def _collect(batch, stage, speculative=False):
             add(ARTIFACTS["explanations"])
     if stage in ("assemble", "review"):
         add(ARTIFACTS["knowledge"])
-        add(ARTIFACTS["audio"], bool(inputs.get("audio")))
+        # 用户选择跳过听力（批次内 02_audio/SKIP_LISTENING）：不强制 audio_map，
+        # 听力单元不挂音频附件，其余单元照常组装/审核。
+        from . import manifest as mf, contracts
+        audio_context = dict(manifest, batch_dir=str(batch))
+        skip_listening = bool(mf.skip_reason(audio_context, contracts.STAGE_BY_ID["audio"]))
+        add(ARTIFACTS["audio"], bool(inputs.get("audio")) and not skip_listening)
         add("01_source/附录.txt", False)
         add("01_source/extraction.json", False)
     if stage == "review":
@@ -525,7 +544,48 @@ def _provenance(row, source_text, expected_answer=None):
         raise ValueError("Generated explanation must end with AI provenance marker")
 
 
-def _validate(batch, stage, payload, context, units, *, strict_preserve=True):
+def _normalize_blank_text(text):
+    """把原卷空档统一成库侧写法（约束 B1/B2、E9/E10）：
+    带题号的空档（如 <u>　26　</u> 或 　26　）→ __26__；纯空档 → ______。"""
+    if not isinstance(text, str):
+        return text
+    # 带题号的空档（表格/信息转换）：<u>　26　</u>、<u> 26 </u>、　26　 → __26__
+    text = re.sub(r"<u>\s*[\u3000\s]*(\d{1,3})[\u3000\s]*\s*</u>", r"__\1__", text)
+    text = re.sub(r"\u3000\s*(\d{1,3})\s*\u3000", r"__\1__", text)
+    # 纯空档（无题号）：<u>　　</u>、连续全角空格 → ______
+    text = re.sub(r"<u>\s*[\u3000\s]*\s*</u>", "______", text)
+    text = re.sub(r"\u3000{2,}", "______", text)
+    return text
+
+
+def _normalize_payload_blanks(payload):
+    if not isinstance(payload, dict):
+        return
+    for item in payload.get("items", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("stem", "material"):
+            if isinstance(item.get(key), str):
+                item[key] = _normalize_blank_text(item[key])
+        for child in item.get("subquestions") or []:
+            if isinstance(child, dict) and isinstance(child.get("stem"), str):
+                child["stem"] = _normalize_blank_text(child["stem"])
+        # materialBlocks 表格单元格文本也归一化
+        def _walk(node):
+            if isinstance(node, dict):
+                if isinstance(node.get("text"), str):
+                    node["text"] = _normalize_blank_text(node["text"])
+                for v in node.values():
+                    _walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    _walk(v)
+        _walk(item.get("materialBlocks") or item.get("material_blocks"))
+
+
+def _validate(batch, stage, payload, context, units, *, strict_preserve=True, notes=None):
+    if stage == "assemble":
+        _normalize_payload_blanks(payload)
     numbers = {str(n) for u in units for n in u["numbers"]}
     if stage == "answers":
         _fields(payload, ("answers", "evidence", "difficulty", "difficultyEvidence"),
@@ -582,7 +642,13 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True):
             if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in (start, end)) or not 0 <= start < end:
                 raise ValueError("Audio bounds must be finite seconds with 0 <= start < end")
             if not any(isinstance(v, dict) and all(v.get(k) == row[k] for k in ("unit_id", "file", "start", "end")) and v.get("verified") is True and v.get("evidence") for v in verified):
-                raise ValueError("Timestamps are not cut outputs: parent segment evidence must verify this existing cut")
+                # 该单元要么没有切片证据，要么证据被标为不可信（例如切段时长过短、
+                # 静音不足导致的微段）。此时应把该单元记 needs_review 交人工回听，
+                # 而不是把未经核验的时段当作已切好的音频蒙混过关。
+                raise ValueError(
+                    "Timestamps are not cut outputs: parent segment evidence must verify this "
+                    "existing cut（该单元缺少 verified 切片证据，可能是切段微段/静音不足，"
+                    "请人工回听并在 02_audio/segment-evidence.json 修正后再标 verified）")
         return
     if stage in ("knowledge", "assemble"):
         if stage == "assemble":
@@ -646,7 +712,8 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True):
             else:
                 _inject_assemble_content(
                     row, children,
-                    next(r for r in context[ARTIFACTS["knowledge"]]["items"] if r["unit_id"] == unit["unit_id"]))
+                    next(r for r in context[ARTIFACTS["knowledge"]]["items"] if r["unit_id"] == unit["unit_id"]),
+                    notes)
                 if row.get("id", row["unit_id"]) != row["unit_id"] or row.get("unit_kind") != unit["unit_kind"]:
                     raise ValueError("Assembled ID and unit_kind must preserve confirmed structure")
                 if [_number(n) for n in row.get("numbers", [])] != [_number(n) for n in unit["numbers"]] or _number(row.get("number")) != _number(unit["numbers"][0]):
@@ -655,13 +722,13 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True):
                     raise ValueError("Assembled type differs from validated types")
                 if row.get("filterMetadata", {}).get("subtypes", row.get("subtypes", [])) != typed[unit["unit_id"]]["subtypes"]:
                     raise ValueError("Assembled subtypes differ from validated types")
-                if not isinstance(row.get("stem"), str) or not row["stem"].strip():
-                    raise ValueError("Assembled stem must be nonempty")
-                if unit["unit_kind"] == "group" and not row.get("material"):
-                    raise ValueError("Group material must be nonempty")
+                # 用户要求：不强制每题/每组必有 stem 或 material。缺题干/材料时如实留空，
+                # 不伪造、也不因此拦停整批。（听力组题材料在音频里，本来就没有文字材料。）
+                if not isinstance(row.get("stem"), str) or not isinstance(row.get("material"), str):
+                    raise ValueError("Assembled stem/material must be strings")
                 for child in children:
-                    if not isinstance(child.get("stem"), str) or not child["stem"].strip():
-                        raise ValueError("Child stem must be nonempty")
+                    if not isinstance(child.get("stem"), str):
+                        raise ValueError("Child stem must be a string")
                 identified = context.get("01_source/structure.confirmed.json", {}).get("meta", {})
                 if not isinstance(identified, dict):
                     raise ValueError("Confirmed paper metadata must be an object")
@@ -689,16 +756,16 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True):
                 if "evidence" in labeled:
                     _evidence(labeled)
             if stage == "assemble":
+                # 答案/解析/大意已在 _inject_assemble_content 里被上游产物确定性覆盖，
+                # 此处只核对需要语义一致的知识点标签：组装不得擅自改写已校验的标签。
                 upstream = next(r for r in context[ARTIFACTS["knowledge"]]["items"] if r["unit_id"] == unit["unit_id"])
-                for key in ("knowledge", "answer", "explanation", "articleSummary"):
-                    if row.get(key, "" if key == "articleSummary" else None) != upstream.get(key, "" if key == "articleSummary" else None):
-                        raise ValueError(f"Assemble must preserve validated knowledge artifact field {key}")
+                if list(row.get("knowledge") or []) != list(upstream.get("knowledge") or []):
+                    raise ValueError("Assemble must preserve validated knowledge artifact field knowledge")
                 upstream_children = {_number(c["number"]): c for c in upstream["subquestions"]}
                 for child in children:
                     prior = upstream_children[_number(child["number"])]
-                    for key in ("knowledge", "answer", "explanation"):
-                        if child.get(key) != prior.get(key):
-                            raise ValueError(f"Assemble must preserve validated child field {key}")
+                    if list(child.get("knowledge") or []) != list(prior.get("knowledge") or []):
+                        raise ValueError("Assemble must preserve validated child field knowledge")
             problems = taxonomy.check_question_labels(label_row)
             if problems:
                 raise ValueError("Invalid knowledge labels: " + "; ".join(problems))
@@ -711,8 +778,10 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True):
         if stage == "assemble":
             from .question_content import audit_batch_source
             source_audit = audit_batch_source(batch, payload)
-            if not source_audit["passed"]:
-                raise ValueError("Assemble source audit failed: " + json.dumps(source_audit["issues"], ensure_ascii=False))
+            issues = source_audit["issues"]
+            # 可选字段缺失允许推进，原卷已有的题干、选项、图片和材料仍须保真。
+            if issues:
+                raise ValueError("Assemble source audit failed: " + json.dumps(issues, ensure_ascii=False))
             # IDs are a deterministic catalog projection, not semantic proof.
             # Fill absent IDs only; validation above rejects conflicting IDs.
             for row in rows.values():
@@ -872,7 +941,7 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
         raise ValueError("Completed response must contain exactly its whitelisted artifact")
     payload = artifacts[ARTIFACTS[stage]]
     try:
-        _validate(Path(batch_dir), stage, payload, context, units)
+        _validate(Path(batch_dir), stage, payload, context, units, notes=report["notes"])
     except (TypeError, KeyError, AttributeError) as exc:
         raise ValueError(f"Malformed {stage} artifact or required upstream context: {exc}") from exc
     files = dict(artifacts)

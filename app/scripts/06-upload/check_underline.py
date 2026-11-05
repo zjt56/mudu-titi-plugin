@@ -109,10 +109,31 @@ def _check_source_underlines(batch, source):
     else:
         text = source.read_text(encoding="utf-8-sig")
     _, result = planner.restore(batch, text)
+    # 批次条目里已写成 <u>词</u> 的划线词，即使未能在 docx 中自动定位（例如空档归一化后
+    # 上下文与原文不再逐字相同），也应视为已保留，不报"映射缺失"的假阳性。
+    already = set()
+    def _collect(obj):
+        if isinstance(obj, dict):
+            for v in obj.values():
+                if isinstance(v, str):
+                    for m in re.findall(r"<u>(.*?)</u>", v, re.S):
+                        already.add(re.sub(r"<[^>]+>|\*\*", "", m).strip().casefold())
+                else:
+                    _collect(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                _collect(v)
+    try:
+        _collect(batch if isinstance(batch, dict) else load_batch(batch))
+    except Exception:
+        pass
     problems = [f"[E16] 原文画线未保留: {change['underlined']}（{change['field']}）"
                 for change in result["changes"]]
-    problems.extend(f"[E16] {issue['code']}: {issue['underlined']}；{issue['message']}"
-                    for issue in result["issues"])
+    for issue in result["issues"]:
+        word = str(issue.get("underlined", "")).strip().casefold()
+        if issue.get("code") == "UNDERLINE_MAPPING_MISSING" and word and word in already:
+            continue
+        problems.append(f"[E16] {issue['code']}: {issue['underlined']}；{issue['message']}")
     if warnings:
         problems.append(f"[E16] 原文提取有不确定项：{warnings}")
     return problems

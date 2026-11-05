@@ -254,6 +254,24 @@ def ready_stages(batch_dir, manifest: dict) -> list[str]:
 
 def skip_reason(manifest: dict, stage: contracts.Stage) -> str:
     """按输入形态判断阶段是否应当跳过（不是失败）。"""
+    if stage.id == "audio":
+        # 用户显式选择跳过听力：批次内放 02_audio/SKIP_LISTENING 标记即可，
+        # 不污染全局配置，也不影响其它批次；听力音频以后可单独补切。
+        batch_dir = manifest.get("batch_dir")
+        if batch_dir and (Path(batch_dir) / "02_audio" / "SKIP_LISTENING").is_file():
+            return "用户选择跳过听力（02_audio/SKIP_LISTENING 标记）"
+        if batch_dir:
+            # 只有已确认结构中的全部单元都有明确题型，才能证明本卷无听力。
+            # 缺文件、空结构、非法成员或未知题型不能被当作无听力证据。
+            from .agent_tasks import confirmed_units
+            try:
+                units = confirmed_units(Path(batch_dir))
+            except (OSError, ValueError, TypeError):
+                units = []
+            types = [unit.get("type") for unit in units]
+            if (types and all(isinstance(value, str) and value.strip() for value in types)
+                    and not any(value.strip().startswith("听力") for value in types)):
+                return "确认结构无听力题，无需音频切段"
     if stage.id == "underlines":
         docx = manifest.get("inputs", {}).get("docx", {})
         path = str(docx.get("path") or "")

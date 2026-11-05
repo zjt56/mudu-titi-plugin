@@ -145,7 +145,15 @@ def ready(cfg: dict | None = None) -> bool:
     cfg = cfg or cfgmod.load()
     py = venv_python(cfg)
     marker = Path(cfgmod.data_dir(cfg)) / READY_NAME
-    return py.is_file() and marker.is_file()
+    if not py.is_file() or not marker.is_file():
+        return False
+    try:
+        installed = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (installed.get("whisperx") == WHISPERX_SPEC
+            and installed.get("asr_model") == cfg.get("asr_model")
+            and installed.get("align_model") == cfg.get("align_model"))
 
 
 def _run(cmd: list[str], data_dir: Path, phase: str, pct: int, env: dict | None = None):
@@ -174,7 +182,7 @@ def bootstrap(cfg: dict | None = None, force: bool = False) -> dict:
     data_dir.mkdir(parents=True, exist_ok=True)
     py = venv_python(cfg)
     marker = data_dir / READY_NAME
-    if not force and marker.is_file() and py.is_file():
+    if not force and ready(cfg):
         return write_status(data_dir, job="bootstrap", running=False, ok=True, phase="ready", pct=100,
                             detail="已安装，无需重复下载", error="")
 

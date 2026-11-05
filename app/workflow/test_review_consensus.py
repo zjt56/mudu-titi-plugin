@@ -47,19 +47,29 @@ class ConsensusTest(unittest.TestCase):
             targets = self.plan['sample'] if rid == 'sample' else [{'unit_id': 'g'}]
             checks = []
             for target in targets:
-                numbers = [str(target['number'])] if rid == 'sample' else [str(i) for i in range(1, 11)]
+                group_level = rid == 'sample' and target.get('number') is None
+                numbers = ([str(i) for i in range(1, 11)] if (group_level or rid != 'sample')
+                           else [str(target['number'])])
                 assessment = self.assessment(numbers)
                 if rid == 'sample':
                     assessment['source_comparison'] = '原文与答案一致'
-                checks.append({**target, 'verdict': 'ok', 'rationale': '原文说明她读书。',
-                               'evidence': [{'path': '01_source/正文.txt', 'locator': 'L1', 'quote': (f"What happens in question {target['number']}?" if rid == 'sample' else 'She reads a book.')}],
-                               'assessment': assessment})
+                check = {'unit_id': target['unit_id'], 'verdict': 'ok',
+                         'rationale': '原文说明她读书。',
+                         'evidence': [{'path': '01_source/正文.txt', 'locator': 'L1',
+                                       'quote': ('She reads a book.' if (group_level or rid != 'sample')
+                                                 else f"What happens in question {target['number']}?")}],
+                         'assessment': assessment}
+                if rid == 'sample' and not group_level:
+                    check['number'] = str(target['number'])
+                checks.append(check)
             records.append({'round_id': rid, 'input_binding': self.plan['input_binding'], 'execution_id': rid, 'checks': checks})
         return {'plan': self.plan, 'rounds': records}
 
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_sample_and_agreement(self, _verify_sources):
-        self.assertEqual(len(self.plan['sample']), 2)
+        # 阅读理解整组题型：二审整组抽取一个目标，只做组级核对。
+        self.assertEqual(len(self.plan['sample']), 1)
+        self.assertIsNone(self.plan['sample'][0]['number'])
         result = review.evaluate_rounds(self.batch, self.payload())
         self.assertTrue(result['execution_completed'], result['errors'])
         self.assertTrue(result['passed'], result['errors'])
@@ -82,14 +92,16 @@ class ConsensusTest(unittest.TestCase):
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_group_difficulty_names_the_differing_numbers(self, _verify_sources):
         payload = self.payload()
-        for check in payload['rounds'][1]['checks']:
-            check['assessment']['difficulty'] = [{'number': check['number'], 'value': '困难'}]
+        # 组题只做组级难度核对，但差异仍需点名具体小题号。
+        check = payload['rounds'][1]['checks'][0]
+        for item in check['assessment']['difficulty']:
+            item['value'] = '困难' if item['number'] in {'3', '7'} else '容易'
         result = review.evaluate_rounds(self.batch, payload)
         findings = [f for f in result['findings'] if f['field'] == 'difficulty']
         self.assertEqual(len(findings), 1, result['errors'])
         self.assertIn('差异小题', findings[0]['reason'])
-        for check in payload['rounds'][1]['checks']:
-            self.assertIn('第' + str(check['number']) + '题', findings[0]['reason'])
+        self.assertIn('第3题', findings[0]['reason'])
+        self.assertIn('第7题', findings[0]['reason'])
 
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_listening_passage_group_compares_only_at_group_level(self, _verify_sources):
@@ -103,7 +115,8 @@ class ConsensusTest(unittest.TestCase):
                 check['assessment']['subtypes'] = []
         sample = payload['rounds'][1]['checks'][0]
         sample['assessment']['subquestions'] = [
-            {'number': sample['number'], 'knowledge': ['设题角度/听力/推理判断']}]
+            {'number': str(i), 'knowledge': (['设题角度/听力/推理判断'] if i == 1 else [])}
+            for i in range(1, 11)]
         result = review.evaluate_rounds(self.batch, payload)
         self.assertTrue(result['execution_completed'], result['errors'])
         self.assertEqual([f for f in result['findings'] if f['field'] == 'child_knowledge'], [])
@@ -127,14 +140,14 @@ class ConsensusTest(unittest.TestCase):
         payload = self.payload()
         sample = payload['rounds'][1]
         sample['execution_id'] = 'round-group'
-        sample['parts'] = [{'execution_id': 'part-' + str(i), 'targets': [dict(target)]}
-                           for i, target in enumerate(self.plan['sample'])]
+        # 组题整组抽取只有一个目标，因此只有一个真实分片执行 ID。
+        sample['parts'] = [{'execution_id': 'part-0', 'targets': [dict(self.plan['sample'][0])]}]
         for check in sample['checks']:
             check['assessment']['subtypes'] = ['选择4题']
         result = review.evaluate_rounds(self.batch, payload)
         self.assertTrue(result['execution_completed'], result['errors'])
         sources = result['findings'][0]['round_sources']
-        self.assertEqual({s['execution_id'] for s in sources if s['round_id'] == 'sample'}, {'part-0', 'part-1'})
+        self.assertEqual({s['execution_id'] for s in sources if s['round_id'] == 'sample'}, {'part-0'})
 
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_incomplete_or_old_payload_cannot_pass(self, _verify_sources):
@@ -271,8 +284,8 @@ class ConsensusTest(unittest.TestCase):
         queue = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
         self.assertEqual(len(queue), 1)
         self.assertEqual(queue[0]['field'], 'subtypes')
-        # 原标注 + 一审 + 二审抽中的两个小题 = 3 条来源
-        self.assertEqual(len(queue[0]['round_sources']), 3)
+        # 一审一条组级来源 + 二审整组一条来源（组题不再按小题拆分来源）
+        self.assertEqual(len(queue[0]['round_sources']), 2)
         self.assertEqual(review_rounds.import_result(self.batch, task['task_id'], response), report)
         self.assertEqual(len(json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']), 1)
 

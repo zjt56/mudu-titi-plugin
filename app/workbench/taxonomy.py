@@ -321,7 +321,7 @@ def check_unit_dims(main_type: str, knowledge) -> list[str]:
     if banned:
         # 这段文案由现有工作台/测试依赖。
         problems.append(f"「{main_type}」组级不挂 {'/'.join(rule['forbid'])}：{banned}；"
-                        f"这些维度请挂到对应子题上")
+                        f"整组题型不再把这些维度下放到子题")
     outside = [path for path in paths if path not in banned and
                not any(_under(path, prefix) for prefix in rule["allow"])]
     if outside:
@@ -339,10 +339,12 @@ _CLOZE_TYPES = {"完形填空", "语法选择"}
 # 整篇/整个大题只做组级标签（体裁、主题、内容）的题型；子题不要求、也不承载
 # 细分知识点。听力长对话/短文理解属于"一材料带多题"，与阅读同理只在组级评估；
 # 其余题组（如听力短对话、单项选择）按小题分别标注。
+# 用户 2026-11-05 口径：下列题型一律以整组为单位打标签，子题 knowledge=[]，
+# 不做小题标签判断、不做小题二审。
 WHOLE_UNIT_TYPES = frozenset((
     "阅读理解", "任务型阅读", "完形填空", "语法选择", "听力信息转换",
     "读写综合", "选词填空", "短文填空", "教材语篇填空",
-    "听力短文理解", "听力长对话理解",
+    "听力短文理解", "听力长对话理解", "补全对话",
 ))
 
 
@@ -355,10 +357,10 @@ def check_question_labels(question) -> list[str]:
 
     支持 question_type/type、filterMetadata.subtypes/categories、可选的
     knowledgeIds/knowledge_ids。子题未声明题型时只继承题型用于规则选择，
-    不继承知识点或子类；完形/语法选择子题仅挂词汇/语法，阅读子题必有
-    阅读角度且不挂体裁。只校验目录与结构，不判断标签语义是否符合原题。
+    不继承知识点或子类；整组题型的子题 knowledge 可为空，不再要求阅读角度或逐小题考点；
+    独立单题按自身题型校验。只校验目录与结构，不判断标签语义是否符合原题。
     """
-    def validate(item, parent_type=None, location="题目"):
+    def validate(item, parent_type=None, location="题目", parent_is_group=False):
         if not isinstance(item, dict):
             return [f"{location}必须是对象"]
         problems = []
@@ -389,7 +391,9 @@ def check_question_labels(question) -> list[str]:
         if (parent_type is None or type_keys) and subtypes(main_type) and not subs:
             problems.append(f"主类「{main_type}」必须填写目录子类")
         paths = values.get("knowledge", [])
-        child_of_whole = parent_type is not None and whole_unit_type(parent_type)
+        # 以组题为准的题型（完形/阅读/任务型阅读/信息转换/补全对话等）：
+        # 只要求组级 knowledge 非空，子题 knowledge 可空（不强制）。
+        child_of_whole = parent_type is not None and (whole_unit_type(parent_type) or parent_is_group)
         if not isinstance(paths, list) or (not paths and not child_of_whole):
             problems.append("knowledge 必须是非空知识点列表")
         prefixes = None
@@ -417,7 +421,7 @@ def check_question_labels(question) -> list[str]:
         if is_group and parent_type is None and main_type in types():
             problems.extend(check_unit_dims(main_type, clean_paths))
         for index, child in enumerate(children, 1):
-            problems.extend(validate(child, main_type, f"子题[{index}]"))
+            problems.extend(validate(child, main_type, f"子题[{index}]", parent_is_group=is_group))
         return [f"{location}：{problem}" for problem in problems]
 
     return validate(question)

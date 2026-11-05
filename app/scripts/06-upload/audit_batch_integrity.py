@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""批次完整性体检（E20 四条 + D/F 残留）。
+"""批次完整性体检（E20 + D/F 残留）。
 
-E20 四条：
 1. 相邻单元 material 不得互相包含（一个是另一个的子串且长度差很大）。
 2. 字段不得残留 `[来源:` / `[来源：` 或学科网水印字样。
-3. 听力组题（question_type 以"听力"开头且 unit_kind=group）material 必须包含「听力原文」。
-4. 所有 options text 不得为空字符串。
+3. 所有 options text 不得为空字符串。
+
+听力原卷可只有题面或表格，不要求 material 带特定的录音稿标题。
+原卷已有的录音稿与共享材料由 workflow.question_content.audit_batch_source
+对照来源保真；音频及 ASR 位于独立的 02_audio，由 audio 阶段校验。
+不得为了通过体检将 ASR 当作原卷文字补入 material。
 
 调用：python scripts/06-upload/audit_batch_integrity.py --batch <batch_meta.json>
 退出码 0=通过，非0=有问题；问题逐行 print 到 stdout。
@@ -72,18 +75,6 @@ def _check_option_text(u):
     return problems
 
 
-def _check_listening(u):
-    problems = []
-    uid = u.get("unit_id") or u.get("id") or "?"
-    qt = (u.get("question_type") or "").strip()
-    kind = (u.get("unit_kind") or "").strip()
-    if qt.startswith("听力") and kind == "group":
-        mat = plain(u.get("material") or "")
-        if "听力原文" not in mat:
-            problems.append(f"[E20-听力] {uid} ({qt}): 听力组题 material 缺少「听力原文」段")
-    return problems
-
-
 def _check_adjacent_materials(unit_list):
     """相邻单元 material 不得互相包含（子串且长度差很大）。"""
     problems = []
@@ -105,7 +96,7 @@ def _check_adjacent_materials(unit_list):
 
 
 def main(argv=None):
-    args = arg_parser("批次完整性体检 E20 四条 + 残留").parse_args(argv)
+    args = arg_parser("批次完整性体检 E20 + 残留").parse_args(argv)
     try:
         batch = load_batch(args.batch)
     except Exception as exc:
@@ -128,8 +119,8 @@ def main(argv=None):
         uid = u.get("unit_id") or u.get("id") or "?"
         try:
             problems.extend(_check_residuals(u))
+            # 无论听力音频是否跳过，所有题目的原卷选项仍须完整。
             problems.extend(_check_option_text(u))
-            problems.extend(_check_listening(u))
         except Exception as exc:
             problems.append(f"[ERROR] 单元 {uid} 体检异常：{exc}")
 

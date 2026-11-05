@@ -38,7 +38,11 @@ def _word_stats(text: str):
 def _option_homogeneous(options):
     if not options or len(options) < 2:
         return False
-    lens = [len(str(o.get("text", ""))) for o in options]
+    def _text(o):
+        if isinstance(o, dict):
+            return str(o.get("text", ""))
+        return str(o or "")
+    lens = [_text(o) and len(_text(o)) or 0 for o in options]
     return max(lens) - min(lens) <= 2 and all(l > 0 for l in lens)
 
 

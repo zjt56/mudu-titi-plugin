@@ -17,7 +17,9 @@ import re
 from pathlib import Path
 
 ROUND_FILE = "review-rounds.json"
-# 两轮审核：一审全量盲判 + 二审 20% 小题抽样复核（不再单独跑全量知识点轮）。
+# 两轮审核：一审全量盲判 + 二审抽样复核（不再单独跑全量知识点轮）。
+# 抽样口径：整组题型（阅读/完形/补全对话/信息转换等）按整组抽、只做组级核对；
+# 其余题型按小题抽，抽样数 ceil(小题数 × 20%)。
 ROUND_IDS = ("labels", "sample")
 ROUND_PROTOCOL = "upload-workflow.review-rounds/v3"
 ROUND_INPUTS = (
@@ -261,6 +263,10 @@ def prepare_round_plan(batch_dir) -> dict:
     from .agent_tasks import confirmed_units
     batch = Path(batch_dir)
     units = confirmed_units(batch)
+    # 跳过听力的批次：听力单元没有音频/原文可核，语义审核不覆盖它们，
+    # 否则一审/二审会因"无法核对听力"永久 uncertain。
+    if (batch / "02_audio" / "SKIP_LISTENING").is_file():
+        units = [u for u in units if not str(u.get("type", "")).startswith("听力")]
     required = ROUND_INPUTS[:4]
     missing = [p for p in required if not (batch / p).is_file()]
     if not any((batch / p).is_file() for p in ROUND_INPUTS[4:6]):
@@ -287,10 +293,28 @@ def prepare_round_plan(batch_dir) -> dict:
         hashes[relative] = digest
     questions = [{"unit_id": u["unit_id"], "number": str(n)} for u in units for n in u["numbers"]]
     binding = _digest({"input_hashes": hashes, "questions": questions})
-    count = (len(questions) + 4) // 5
+    # 二审抽样口径：以组题为单位的题型（阅读/完形/补全对话/信息转换等）整组作为一个
+    # 抽样单位，number=None 表示"抽整组、只做组级核对"，不再逐小题抽查、不做小题二审；
+    # 独立单题仍按单题（number=题号）抽样。题型取自 03_types/types.json（结构单元行本身
+    # 不带题型）；缺类型时按独立单题处理，保持保守。
+    from workbench import taxonomy
+    types_path = batch / "03_types/types.json"
+    type_rows = {}
+    if types_path.is_file():
+        loaded_types = _load(types_path) or {}
+        type_rows = {x.get("unit_id"): x.get("type")
+                     for x in loaded_types.get("items", []) if isinstance(x, dict)}
+    pool = []
+    for u in units:
+        if (u.get("unit_kind") == "group"
+                and taxonomy.whole_unit_type(type_rows.get(u["unit_id"]))):
+            pool.append({"unit_id": u["unit_id"], "number": None})
+        else:
+            pool.extend({"unit_id": u["unit_id"], "number": str(n)} for n in u["numbers"])
+    count = (len(pool) + 4) // 5
     # Fixed by inputs, not by a model choosing convenient questions. This is not
     # a secret/random sample or the legacy HMAC independent-review mechanism.
-    sample = sorted(questions, key=lambda q: _digest([binding, q]))[:count]
+    sample = sorted(pool, key=lambda q: _digest([binding, q]))[:max(1, count)]
     return {"protocol": ROUND_PROTOCOL, "input_binding": binding, "input_hashes": hashes,
             "units": [u["unit_id"] for u in units], "questions": questions,
             "sample": sample, "sample_method": "sha256-input-binding-question-order/v1"}
@@ -345,7 +369,40 @@ def _sample_source_binding(batch, plan, check):
     text = raw.decode('utf-8-sig')
     unit = next((u for u in confirmed_units(batch) if u['unit_id'] == check.get('unit_id')), {})
     number = check.get('number')
+
+    def _stem_proof(method):
+        """引证逐字且唯一地落在该单元的确认原文里就算可归属。
+
+        整组抽样（number=None）和「原卷里没有题号行」的独立题（如书面表达，
+        卷面只有「Ⅹ.书面表达」而没有「101.」）都走这条路径，否则它们会被
+        判成「题号行缺失或不唯一」，永远无法完成二审。
+        """
+        quotes = [item.get('quote') for item in check.get('evidence', [])
+                  if isinstance(item, dict) and item.get('path') == '01_source/正文.txt']
+        stem = unit.get('stem') if isinstance(unit, dict) else None
+        base = {'status': 'uncertain', 'reason': '', 'source_path': '01_source/正文.txt',
+                'source_sha256': digest, 'unit_id': unit.get('unit_id'), 'number': number}
+        if not isinstance(stem, str) or not stem.strip():
+            return dict(base, reason='缺少确认单元原文')
+        for quote in quotes:
+            if not isinstance(quote, str) or not quote.strip():
+                continue
+            if not re.search(r'[^\W\d_]', quote, re.UNICODE):
+                continue
+            if len(re.findall(re.escape(quote), stem)) == 1:
+                return dict(base, status='proven', reason='', evidence_method=method)
+        return dict(base, reason='原文引证未唯一落在该单元确认原文内')
+
+    if number is None:
+        # 抽整组的二审：以整组为单位核对，不再绑定某个小题。
+        return _stem_proof('group-stem-verbatim')
     proof = prove_child(text, unit, number, source_sha256=digest)
+    if (proof['status'] != 'proven' and unit.get('unit_kind') == 'standalone'
+            and proof.get('reason') in ('题号行缺失或不唯一', '缺少确认单元原文')):
+        # 独立题在原卷里本来就没有题号行（书面表达、整段填空等）：退回到单元原文归属。
+        # 组题的子题不走这条退路——表格空位等没有题号行的小题，仍必须能唯一归属到
+        # 该小题，否则就等于把别的子题的引证当成本子题的证据。
+        return _stem_proof('unit-stem-verbatim')
     if proof['status'] == 'proven':
         quotes = [item.get('quote') for item in check.get('evidence', [])
                   if isinstance(item, dict) and item.get('path') == '01_source/正文.txt']
@@ -483,9 +540,10 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             raise ValueError("Every target needs a review judgment")
         uid = check.get("unit_id")
         number = _sample_number(check) if round_id == "sample" else None
-        if round_id == "sample" and number is not None:
+        if round_id == "sample":
             # Normalise the resolved target number so every later reader
             # (coverage, source binding, consensus) sees a consistent value.
+            # 整组目标显式写回 None，使留存响应与安装记录逐字段一致。
             check["number"] = number
         key = (uid, str(number) if number is not None else None)
         try:
@@ -538,8 +596,14 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             raise ValueError("Every review needs type and subtypes")
         if True:
             difficulty = assessment.get("difficulty")
-            expected_numbers = ({str(number)} if round_id == "sample" else
-                                {str(q["number"]) for q in plan["questions"] if q["unit_id"] == uid})
+            if round_id == "sample":
+                if number is not None:
+                    expected_numbers = {str(number)}
+                else:
+                    # 抽整组：组题按组内全部题号给组级难度。
+                    expected_numbers = {str(n) for n in (unit.get("numbers") or [])}
+            else:
+                expected_numbers = {str(q["number"]) for q in plan["questions"] if q["unit_id"] == uid}
             if (not isinstance(difficulty, list) or not expected_numbers
                     or any(not isinstance(item, dict) or set(item) != {"number", "value"}
                            or not isinstance(item["number"], str)
@@ -595,7 +659,8 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
                 if round_id == "sample":
                     if not isinstance(target, dict) or set(target) != {"unit_id", "number"}:
                         raise ValueError("Invalid sample partition target")
-                    key = (target["unit_id"], str(target["number"]))
+                    key = (target["unit_id"],
+                           None if target["number"] is None else str(target["number"]))
                 else:
                     if not isinstance(target, str):
                         raise ValueError("Invalid unit partition target")
@@ -675,7 +740,7 @@ def _verify_round_sources(batch, plan, record):
                 or binding.get("plan") != plan or binding.get("input_hashes") != state.get("input_hashes")
                 or binding.get("prior_rounds") != state.get("prior_rounds")
                 or binding.get("state_digest") != expected_state_digest
-                or binding.get("context_version") not in ("blind-context-v7", "blind-context-v8")
+                or binding.get("context_version") not in ("blind-context-v8", "blind-context-v9")
                 or task.get("protocol") != ROUND_PROTOCOL or task.get("task_id") != task_id
                 or task.get("round_id") != record["round_id"] or task.get("input_binding") != plan["input_binding"]
                 or task.get("prompt") != state_parts[index].get("prompt")

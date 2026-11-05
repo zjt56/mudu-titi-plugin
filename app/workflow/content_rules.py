@@ -93,9 +93,26 @@ def _check_generated(text, label, minimum):
             raise ValueError(f"{label}: AI-generated content must be within 50 Chinese characters/words")
 
 
+def normalize_optional_content(row):
+    """缺失的可选解析/大意统一占位，不生成内容或覆盖已有原文。"""
+    if not isinstance(row, dict):
+        return
+    for key in ("explanation", "articleSummary"):
+        value = row.get(key)
+        if value is None or (isinstance(value, str) and is_placeholder(value)):
+            row[key] = EMPTY_PLACEHOLDER
+    for child in row.get("subquestions") or []:
+        if isinstance(child, dict):
+            value = child.get("explanation")
+            if value is None or (isinstance(value, str) and is_placeholder(value)):
+                child["explanation"] = EMPTY_PLACEHOLDER
+
+
 def validate(payload, units, typed, batch):
     """校验子智能体1的产物；返回按 unit_id 索引的行，供下游搬运与比对。"""
     rows = _coverage(payload, units)
+    for row in rows.values():
+        normalize_optional_content(row)
     prepared = []
     for unit in units:
         uid, row = unit["unit_id"], rows[unit["unit_id"]]
@@ -145,7 +162,8 @@ def audit_ownership(batch, rows):
 def preserve(row, upstream):
     """知识点/装配阶段只能逐字搬运子智能体1的解析与大意，不能改写。"""
     for key, default in (("explanation", ""), ("articleSummary", "")):
-        if row.get(key, default) != upstream.get(key, default):
+        actual, expected = row.get(key, default), upstream.get(key, default)
+        if actual != expected and not (is_placeholder(actual) and is_placeholder(expected)):
             raise ValueError(f"Knowledge/assemble must preserve the explanation artifact field {key}")
     prior = {_number(c["number"]): c for c in upstream.get("subquestions") or []}
     for child in row.get("subquestions") or []:

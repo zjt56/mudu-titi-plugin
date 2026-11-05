@@ -98,7 +98,7 @@ def _next_index(records: list) -> int:
     return top + 1
 
 
-def build_review_files(batch_dir: Path, result: dict) -> dict:
+def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False) -> dict:
     """把工作流返回值落成三份审核文件；已处理过的发现保留原状态。
 
     普通发现使用原有键；分轮发现只合并相同绑定、目标、判断、原文和证据。
@@ -153,6 +153,40 @@ def build_review_files(batch_dir: Path, result: dict) -> dict:
         for name in existing:
             existing[name] = [r for r in existing[name] if not _superseded(r)]
         queue = [item for item in queue if not (_superseded(item) and _open(item))]
+
+    # 完整且绑定有效的两轮可重新投影当前问题队列；已取消的检查不得永久残留。
+    # 仅退休派生比较发现，保留人工决定和非轮次发现，并将原记录存档。
+    if reconcile_rounds:
+        evaluated = review.evaluate_rounds(batch_dir, rounds_payload)
+        if not evaluated.get("execution_completed"):
+            raise ValueError("Cannot reconcile incomplete review rounds")
+        def signature(item):
+            return (str(item.get("unit_id", "")), str(item.get("field", "")),
+                    str(item.get("reason") or item.get("question") or ""),
+                    json.dumps(item.get("round_sources") or [], sort_keys=True, ensure_ascii=False))
+        active = {signature(f) for f in [*evaluated.get("findings", []),
+                                        *evaluated.get("resolved_findings", [])]}
+        def obsolete(item):
+            sources = item.get("round_sources") or []
+            return (_open(item) and bool(sources)
+                    and all(isinstance(s, dict) and s.get("field")
+                            and s.get("input_binding") == current_binding for s in sources)
+                    and signature(item) not in active)
+        retired = [dict(item, retired_from=name) for name, entries in existing.items()
+                   for item in entries if obsolete(item)]
+        retired.extend(dict(item, retired_from="manual-review-queue.json")
+                       for item in queue if obsolete(item))
+        if retired:
+            archive_path = review_dir / "retired-round-findings.json"
+            archive = _load(archive_path) or {"records": []}
+            saved = archive.setdefault("records", [])
+            for item in retired:
+                if item not in saved:
+                    saved.append(item)
+            _write_json(archive_path, archive)
+            existing = {name: [item for item in entries if not obsolete(item)]
+                        for name, entries in existing.items()}
+            queue = [item for item in queue if not obsolete(item)]
 
     # 去重看的是"这条发现是否已存在"，与它有没有被处理无关；
     # 否则重复 ingest 会给未处理的发现再插一条，闸门出现重复阻断。

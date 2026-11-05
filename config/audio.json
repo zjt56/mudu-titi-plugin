@@ -1,6 +1,9 @@
 {
   "enabled": false,
-  "asr_model": "small.en",
+  "asr_model": "large-v3-turbo",
+  "cpu_threads": 4,
+  "batch_size": 2,
+  "max_parallel_transcriptions": 1,
   "compute_type": "int8",
   "device": "cpu",
   "align_model": "facebook/wav2vec2-base-960h",
@@ -11,5 +14,6 @@
   "venv": "",
   "data_dir": "",
   "hf_endpoint": "",
-  "cpu_torch": true
+  "cpu_torch": true,
+  "anchor_language": "zh"
 }

@@ -151,7 +151,7 @@ STAGES: tuple[Stage, ...] = (
                   "07_review/content-review.json", "07_review/metadata-review.json",
                   "07_review/manual-review-queue.json", "07_review/unchecked.json"),
         docs=("references/review-workflow.md", "codex-skills/mudu-question-review/SKILL.md"),
-        description="分别执行标签重判、知识点对应复核和20%小题抽检；绑定真实分轮证据，只有具体冲突或不确定项进人工队列。",
+        description="分别执行标签重判与抽样复核（整组题型按整组抽检、只做组级核对）；绑定真实分轮证据，只有具体冲突或不确定项进人工队列。",
     ),
     Stage(
         id="review_gate",

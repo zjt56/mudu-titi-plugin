@@ -418,18 +418,32 @@ def paper_info(folder: Path, report, manifest) -> dict:
             "subject": batch.get("subject") or meta.get("subject") or "english"}
 
 
-def stage_cards(manifest, has_output: bool = False, advance_running: bool = False) -> dict:
+def stage_cards(manifest, has_output: bool = False, advance_running: bool = False, diagnostics=None) -> dict:
     stages = (manifest or {}).get("stages") or {}
     recorded_running = (manifest or {}).get("status") == "running" or any(
         record.get("status") == "running" for record in stages.values() if isinstance(record, dict))
     running_unknown = bool(recorded_running and not advance_running)
+    # 统一卡点诊断：把各阶段分散的真实原因翻译成一句人话 + 修复命令（只读视图）。
+    diag_by_stage = {}
+    if isinstance(diagnostics, dict):
+        for item in diagnostics.get("items") or []:
+            if isinstance(item, dict) and item.get("stage"):
+                diag_by_stage[item["stage"]] = item
     cards = []
     for sid in (STAGE_ORDER or list(stages)):
         record = stages.get(sid) or {}
-        cards.append({"id": sid, "title": STAGE_TITLES.get(sid, sid),
-                      "kind": STAGE_KINDS.get(sid) or record.get("kind") or "",
-                      "status": record.get("status") or "pending",
-                      "notes": record.get("notes") or ""})
+        card = {"id": sid, "title": STAGE_TITLES.get(sid, sid),
+                "kind": STAGE_KINDS.get(sid) or record.get("kind") or "",
+                "status": record.get("status") or "pending",
+                "notes": record.get("notes") or ""}
+        diag = diag_by_stage.get(sid)
+        if diag:
+            card["reason"] = diag.get("reason") or ""
+            card["detail"] = diag.get("detail") or ""
+            card["hint"] = diag.get("hint") or ""
+            card["command"] = diag.get("command") or ""
+            card["blocking"] = bool(diag.get("blocking"))
+        cards.append(card)
     done = sum(1 for card in cards if card["status"] in TERMINAL_OK)
     current = next((card for card in cards if card["status"] not in TERMINAL_OK), None)
     early = ("extract", "answers", "audio", "structure_gate")
@@ -446,7 +460,8 @@ def stage_cards(manifest, has_output: bool = False, advance_running: bool = Fals
         waiting = {"agent": "等待代理执行", "human": "等待人工确认"}.get(current["kind"], "等待执行")
         hint = f"{waiting}（{current['title']}）"
     return {"items": cards, "done": done, "total": len(cards), "current": current,
-            "hint": hint, "stale": stale, "running_unknown": running_unknown}
+            "hint": hint, "stale": stale, "running_unknown": running_unknown,
+            "diagnostics": diagnostics if isinstance(diagnostics, dict) else None}
 
 
 _advance_state: dict[str, dict] = {}
@@ -824,6 +839,65 @@ def parse_multipart(handler) -> tuple[dict, list[dict]]:
     return fields, files
 
 
+def review_snapshot(folder):
+    """只读投影真实分轮记录；不以旧 report.json 或流程状态冒充审核证据。"""
+    from workflow import review
+    payload = load(folder / "07_review/review-rounds.json", {}) or {}
+    evaluated = review.evaluate_rounds(folder, payload)
+    checked = set(evaluated.get("checked_rounds", []))
+    records = {r.get("round_id"): r for r in payload.get("rounds", [])
+               if isinstance(r, dict) and r.get("round_id") in checked}
+    plan = evaluated.get("plan") or {}
+    rounds = []
+    for rid, name in (("labels", "一审"), ("sample", "二审")):
+        checks = records.get(rid, {}).get("checks", [])
+        rounds.append({"round_id": rid, "name": name, "completed": rid in checked,
+                       "reviewed": len(checks),
+                       "ok": sum(c.get("verdict") == "ok" for c in checks),
+                       "scope": "全量单元" if rid == "labels" else "抽查小题"})
+    revision = []
+    for rel in ("workflow/manifest.json", "07_review/review-rounds.json",
+                "07_review/manual-review-queue.json", "07_review/report.json"):
+        try:
+            info = (folder / rel).stat()
+            revision.append(f"{rel}:{info.st_mtime_ns}:{info.st_size}")
+        except OSError:
+            revision.append(rel + ":missing")
+    return {"execution_completed": bool(evaluated.get("execution_completed")),
+            "quality_passed": bool(evaluated.get("passed")), "rounds": rounds,
+            "question_total": len(plan.get("questions", [])),
+            "open_findings": len(evaluated.get("findings", [])),
+            "revision": "|".join(revision)}, records
+
+
+def decorate_review_rows(folder, rows):
+    """把真实分轮结果与“跳过听力”口径落到行上；总览与单元详情共用。"""
+    try:
+        review_status, records = review_snapshot(folder)
+    except (ImportError, OSError, ValueError, TypeError, KeyError):
+        review_status, records = {}, {}
+    skip_listening = (folder / "02_audio" / "SKIP_LISTENING").is_file()
+    for row in rows:
+        checks = [c for record in records.values() for c in record.get("checks", [])
+                  if str(c.get("unit_id")) == str(row.get("unit_id"))]
+        covered = [rid for rid, record in records.items()
+                   if any(str(c.get("unit_id")) == str(row.get("unit_id")) for c in record.get("checks", []))]
+        row["rounds"] = len(covered)
+        row["review_rounds"] = covered
+        if checks:
+            row["verdict"] = ("error" if any(c.get("verdict") == "error" for c in checks)
+                                else "uncertain" if any(c.get("verdict") == "uncertain" for c in checks) else "ok")
+            row["state"] = "attention" if row.get("needs_human") or row["verdict"] != "ok" else "ok"
+        # 按规则跳过的听力单元不参与语义审核与完整性判定，不能显示成“未核对”或“待审核”。
+        if skip_listening and str(row.get("type") or "").startswith("听力"):
+            row["excluded"] = True
+            row["excluded_reason"] = "按规则跳过听力，不参与审核与完整性判定"
+            row["state"] = "excluded"
+            row["needs_human"] = False
+            row["review_rounds"] = row.get("review_rounds") or []
+    return review_status
+
+
 def overview(name):
     folder = batch_dir(name)
     report, manifest, queue = report_for(folder)
@@ -831,7 +905,12 @@ def overview(name):
     number_map = number_of_unit(base)
     rows = [mark_row(row, findings_for(queue, row.get("numbers") or [row.get("number")], number_map))
             for row in merged_rows(folder, report)]
-    counts = {s: sum(1 for r in rows if r.get("state") == s) for s in ("ok", "attention", "blocked", "unverified")}
+    review_status = decorate_review_rows(folder, rows)
+    skip_listening = (folder / "02_audio" / "SKIP_LISTENING").is_file()
+    counts = {s: sum(1 for r in rows if r.get("state") == s)
+              for s in ("ok", "attention", "blocked", "unverified", "excluded")}
+    review_status = dict(review_status, skip_listening=skip_listening,
+                         excluded_units=counts.get("excluded", 0)) if review_status else review_status
     open_items = [x for x in (queue.get("items", []) if isinstance(queue, dict) else [])
                   if isinstance(x, dict) and is_open(x)]
     label_open = [x for x in open_items if finding_bucket(x) == "label"]
@@ -851,12 +930,33 @@ def overview(name):
         has_audio = False
     batch_findings = [x for x in open_items if not str(x.get("unit_id") or "").strip()]
     advance = advance_state(name)
+    # 统一卡点诊断（只读视图）：把各阶段真实原因+修复命令汇到一处。
+    diagnostics = None
+    try:
+        from workflow import diagnose as _diagnose
+        diagnostics = _diagnose.diagnose(folder)
+    except (OSError, ValueError, KeyError, ImportError):
+        diagnostics = None
+    # 「二审结束」唯一口径：review（两轮审核：一审全量 + 二审抽 20%）阶段进入完成态。
+    # 上传页排队区据此移除已结束的试卷，并流转到试卷审核界面做人工确认；
+    # 仍在处理 / 卡住的试卷保留在排队区并显示卡点诊断。
+    review_status_value = str(((manifest.get("stages") or {}).get("review") or {}).get("status") or "")
+    gate_status_value = str(((manifest.get("stages") or {}).get("review_gate") or {}).get("status") or "")
+    flow_done = review_status_value in TERMINAL_OK or gate_status_value in TERMINAL_OK
+    uploaded = str(((manifest.get("stages") or {}).get("upload") or {}).get("status") or "") == "completed"
+    stage_info = stage_cards(manifest, bool(rows), bool(advance.get("running")), diagnostics)
+    # 审核已真实执行、只剩人工决定时，卡点提示要指向“去处理差异”，不能写成“等待执行”。
+    if (stage_info.get("current") or {}).get("id") == "review_gate" and label_open:
+        stage_info["hint"] = f"审核已执行；{len(label_open)} 项标签差异待人工决定"
     return {"name": name, "meta": report.get("meta", manifest.get("meta", {})),
             "status": manifest.get("status", report.get("status", "unknown")),
             "paper": paper_info(folder, report, manifest),
-            "stage": stage_cards(manifest, bool(rows), bool(advance.get("running"))), "advance": advance,
+            "stage": stage_info,
+            "diagnostics": diagnostics,
+            "advance": advance,
             "counts": counts, "total": len(rows), "unit_total": len(rows),
-            "question_total": len(base) if base else report.get("total", len(rows)),
+            "question_total": sum(len(row.get("numbers") or [row.get("number")]) for row in rows),
+            "review_status": review_status, "review_revision": review_status.get("revision", ""),
             "open_findings": len(label_open), "format_findings": len(format_open),
             "batch_findings": batch_findings,
             "needs_human": sum(1 for row in rows if row["needs_human"]),
@@ -865,8 +965,10 @@ def overview(name):
             "extraction": load(folder / "07_review" / "extraction-report.json", {}),
             "structure_gate": load(folder / "07_review" / "structure-gate.json", {}),
             "stages": stages, "rows": rows, "has_audio": has_audio,
+            # 自动流程是否结束（二审完成）；上传页排队区按此移除，并提示人工确认。
+            "flow_done": flow_done,
             # 已写入云端上传暂存的批次视为完成，试卷审核列表不再展示。
-            "uploaded": str(((manifest.get("stages") or {}).get("upload") or {}).get("status") or "") == "completed"}
+            "uploaded": uploaded}
 
 
 def list_batches():
@@ -965,9 +1067,13 @@ def start_audio_job(kind: str, options: dict) -> dict:
             if kind == "bootstrap":
                 boot.bootstrap(cfg, force=bool(options.get("force")))
             else:
-                segment_mod.run(Path(options["folder"]), cfg, options.get("audio"), progress)
-                boot.write_status(data_dir, job=kind, running=False, ok=True,
-                                  phase="done", pct=100, detail="听力切段已完成", error="")
+                result = segment_mod.run(Path(options["folder"]), cfg, options.get("audio"), progress)
+                pending = result.get("needs_review_units") or []
+                passed = result.get("ok") is True and not pending
+                boot.write_status(data_dir, job=kind, running=False, ok=passed,
+                                  phase="done" if passed else "needs_review", pct=100,
+                                  detail=("听力切段已完成" if passed else
+                                          "候选切片已保存，边界待核对：" + "、".join(pending[:12])), error="")
         except Exception as exc:  # noqa: BLE001 - 后台任务须把失败写进状态文件
             boot.write_status(data_dir, job=kind, running=False, ok=False,
                               phase="error", detail="", error=str(exc))
@@ -1240,11 +1346,17 @@ def review_comparison(folder: Path, unit_id, numbers):
             for check in record.get("checks", []):
                 if not isinstance(check, dict) or str(check.get("unit_id") or "") != uid:
                     continue
-                if rid == "sample" and (not str(check.get("number", "")).isdigit()
-                                        or str(int(check["number"])) not in wanted):
-                    continue
+                if rid == "sample":
+                    raw = check.get("number")
+                    if raw is not None and str(raw).strip():
+                        # 逐题抽样：只保留抽中的该小题。
+                        if not str(raw).isdigit() or str(int(raw)) not in wanted:
+                            continue
+                    # 整组抽样：number 为空表示整组核对，覆盖本单元全部小题。
                 assessment = check.get("assessment") if isinstance(check.get("assessment"), dict) else {}
                 entry["checks"].append({"unit_id": uid, "number": check.get("number"),
+                                        "scope": ("subquestion" if str(check.get("number") or "").strip()
+                                                  else "unit"),
                                         "verdict": check.get("verdict"), "rationale": check.get("rationale"),
                                         "assessment": assessment, "evidence": check.get("evidence")})
             entry["status"] = "已提供" if entry["checks"] else "未覆盖"
@@ -1289,7 +1401,9 @@ def finding_comparison(finding, comparison, numbers, number_map):
         item = {k: v for k, v in round_entry.items() if k != "checks"}
         checks = []
         for check in round_entry["checks"]:
-            if round_entry["round_id"] == "sample" and number and str(check.get("number")) != number:
+            raw_number = str(check.get("number") or "").strip()
+            if round_entry["round_id"] == "sample" and number and raw_number and raw_number != number:
+                # 逐题抽样的二审只取抽中的该小题；整组抽样（无题号）覆盖整组。
                 continue
             assessment = check.get("assessment") or {}
             if key in ("difficulty", "child_knowledge"):
@@ -1313,7 +1427,9 @@ def finding_comparison(finding, comparison, numbers, number_map):
             checks.append(selected)
         item["checks"] = checks
         if item["status"] == "已提供" and not checks:
-            target_covered = any(str(c.get("number")) == number for c in round_entry["checks"])
+            target_covered = any(
+                not str(c.get("number") or "").strip() or str(c.get("number")) == number
+                for c in round_entry["checks"])
             item["status"] = ("未覆盖" if round_entry["round_id"] == "sample" and number
                               and not target_covered else "未涉及")
         out["rounds"].append(item)
@@ -1336,6 +1452,10 @@ def detail(name, unit_id):
             row = next((r for r in rows if int(alias) in (r.get("numbers") or [])), None)
     if row is None:
         row = next((r for r in rows if str(r.get("number")) == str(unit_id)), {})
+    try:
+        decorate_review_rows(folder, [row])
+    except (ImportError, OSError, ValueError, TypeError, KeyError):
+        pass
     numbers = [int(n) for n in (row.get("numbers") or [row.get("number")]) if str(n).isdigit()]
     if not numbers:
         fallback = number_map.get(str(row.get("unit_id") or unit_id))
@@ -1490,7 +1610,7 @@ class Handler(BaseHTTPRequestHandler):
         decoded_path = unquote(parsed.path)
         try:
             if decoded_path == "/api/health":
-                return self.send_json({"ok": True})
+                return self.send_json({"ok": True, "instance_id": os.environ.get("WF_BACKEND_INSTANCE_ID", "")})
             if decoded_path == "/api/audio/config":
                 return self.send_json(audio_overview())
             if decoded_path == "/api/audio/status":

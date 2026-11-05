@@ -49,11 +49,8 @@ def compare(batch, plan, records):
                 group_difficulty.append((number, value))
             else:
                 add((uid, number, 'difficulty'), {'origin': 'original', 'input_binding': plan['input_binding']}, value)
-            if unit.get('unit_kind') == 'group' and uid not in whole_units:
-                child = by_number.get(number)
-                if not isinstance(child, dict) or not isinstance(child.get('knowledge'), list):
-                    raise ValueError('Missing original child knowledge for ' + number)
-                add((uid, number, 'child_knowledge'), {'origin': 'original', 'input_binding': plan['input_binding']}, child['knowledge'])
+            # 以组题为准的题型只比组级知识点：group 单元子题 knowledge 不参与一致性比对
+            # （补全对话/完形/阅读/信息转换等子题可为空，不要求）。
         if uid in whole_units and group_difficulty:
             # Group-level difficulty is compared per question number, so a round
             # that only sampled some children is not flagged for missing others.
@@ -72,11 +69,16 @@ def compare(batch, plan, records):
                 # Uncertainty is already a blocking human finding from the
                 # round validator; it is never treated as an agreement.
                 continue
-            target = str(check['number']) if record['round_id'] == 'sample' else None
-            partition_id = next((part['execution_id'] for part in record.get('parts', [])
-                                 if (check.get('unit_id') in part['targets'] if target is None else
-                                     {'unit_id': uid, 'number': target} in part['targets'])),
-                                record['execution_id'])
+            raw_number = check.get('number') if record['round_id'] == 'sample' else None
+            target = str(raw_number) if raw_number is not None else None
+            if record['round_id'] == 'sample':
+                partition_id = next((part['execution_id'] for part in record.get('parts', [])
+                                     if {'unit_id': uid, 'number': target} in part['targets']),
+                                    record['execution_id'])
+            else:
+                partition_id = next((part['execution_id'] for part in record.get('parts', [])
+                                     if check.get('unit_id') in part['targets']),
+                                    record['execution_id'])
             source = {'round_id': record['round_id'], 'execution_id': partition_id,
                       'input_binding': plan['input_binding'], 'protocol': plan['protocol'],
                       'target_number': target, 'evidence': check['evidence']}
@@ -91,9 +93,7 @@ def compare(batch, plan, records):
             else:
                 for item in assessment['difficulty']:
                     add((uid, str(item['number']), 'difficulty'), source, item['value'])
-            if uid not in whole_units:
-                for item in assessment['subquestions']:
-                    add((uid, str(item['number']), 'child_knowledge'), source, item['knowledge'])
+            # 组题（含补全对话等）子题 knowledge 不参与比对，只比组级。
     findings = []
     _DIFF = {'容易': 0, '适中': 1, '困难': 2}
 

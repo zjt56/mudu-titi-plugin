@@ -18,8 +18,12 @@ PLUGIN_ROOT = APP_ROOT.parent
 DEFAULTS = {
     # 默认不启用：不点击「安装」就不会下载任何依赖/模型。
     "enabled": False,
-    # 英语专用 small.en（CT2 int8 约 250MB）。
-    "asr_model": "small.en",
+    # 默认多语种大模型；必须由显式安装流程缓存，失败不降级为 small。
+    "asr_model": "large-v3-turbo",
+    # 大模型 CPU 内存/线程预算：默认一次只运行一份模型。
+    "cpu_threads": 4,
+    "batch_size": 2,
+    "max_parallel_transcriptions": 1,
     "compute_type": "int8",
     "device": "cpu",
     # 对齐模型走 HuggingFace repo（而不是 torchaudio bundle）：torchaudio 的权重在
@@ -28,6 +32,11 @@ DEFAULTS = {
     # pyannote VAD 用 whisperx wheel 自带的 assets/pytorch_model.bin，完全不联网、
     # 不需要 HF token；silero 反而要从 GitHub 拉 torch.hub 模型。
     "vad_method": "pyannote",
+    # 题号播报语言：中文卷的听力音频用中文念「四、短文理解」「听下面一段对话，
+    # 回答第16至17小题」。填 zh 时额外跑一遍中文转写，只取题号/大题锚点
+    # （不做词级对齐），保留真实段级时间；并行数受 max_parallel_transcriptions 限制。
+    # 空 = 不跑第二遍（纯英语音频可关掉省时间）。
+    "anchor_language": "zh",
     # 骨架：≥3s 长静音定切点；cut_silence 用于探测更细的候选静音。
     "skeleton_silence": 3.0,
     "cut_silence": 0.35,
@@ -45,13 +54,15 @@ DEFAULTS = {
 }
 
 ALLOWED = {
-    "asr_model": ("tiny.en", "base.en", "small.en", "medium.en", "small", "base", "tiny"),
+    "asr_model": ("large-v3-turbo", "large-v3", "large-v2", "large-v1", "large", "medium",
+                  "tiny.en", "base.en", "small.en", "medium.en", "small", "base", "tiny"),
     "compute_type": ("int8", "int8_float16", "float16", "float32"),
     "device": ("cpu", "cuda"),
     "vad_method": ("pyannote", "silero"),
     # 允许 HF repo id 或 torchaudio bundle 名。
     "align_model": ("facebook/wav2vec2-base-960h", "WAV2VEC2_ASR_BASE_960H",
                     "facebook/wav2vec2-large-960h-lv60-self"),
+    "anchor_language": ("", "zh", "en", "auto"),
 }
 
 
@@ -117,6 +128,10 @@ def validate(cfg: dict) -> dict:
             raise ValueError("未知配置项：" + key)
         if key in ALLOWED and value not in ALLOWED[key]:
             raise ValueError(f"{key} 只能是 {', '.join(ALLOWED[key])}")
+        if key in ("cpu_threads", "batch_size", "max_parallel_transcriptions"):
+            upper = {"cpu_threads": 64, "batch_size": 64, "max_parallel_transcriptions": 2}[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= upper:
+                raise ValueError(f"{key} 必须是 1~{upper} 的整数")
         if key in ("skeleton_silence", "cut_silence"):
             value = float(value)
             if not 0 < value <= 30:
@@ -186,6 +201,14 @@ def model_env(cfg: dict | None = None) -> dict:
         "HUGGINGFACE_HUB_CACHE": str(root / "hub"),
         "TRANSFORMERS_CACHE": str(root / "transformers"),
         "HF_HUB_DISABLE_TELEMETRY": "1",
+        # 让 bootstrap/segment 启动的 worker 继承一致资源预算。
+        "WF_AUDIO_CPU_THREADS": str(cfg.get("cpu_threads", DEFAULTS["cpu_threads"])),
+        "WF_AUDIO_BATCH_SIZE": str(cfg.get("batch_size", DEFAULTS["batch_size"])),
+        "WF_AUDIO_MAX_PARALLEL": str(cfg.get("max_parallel_transcriptions", DEFAULTS["max_parallel_transcriptions"])),
+        "OMP_NUM_THREADS": str(cfg.get("cpu_threads", DEFAULTS["cpu_threads"])),
+        "MKL_NUM_THREADS": str(cfg.get("cpu_threads", DEFAULTS["cpu_threads"])),
+        "OPENBLAS_NUM_THREADS": str(cfg.get("cpu_threads", DEFAULTS["cpu_threads"])),
+        "TOKENIZERS_PARALLELISM": "false",
     }
     endpoint = resolve_hf_endpoint(cfg)
     if endpoint:

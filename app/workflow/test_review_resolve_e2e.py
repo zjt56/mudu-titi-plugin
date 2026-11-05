@@ -13,6 +13,9 @@ class ResolveRoundDecisionTest(test_review_consensus.ConsensusTest):
         for record in payload['rounds']:
             record['checks'][0].update(verdict='uncertain', rationale='原文存在同一处歧义。',
                                        issue_key='题目答案冲突', resolution_key='核对题目答案')
+        # 组题的一审与二审都在组级观察；用不同的问题标识区分两轮的具体观察，
+        # 以便验证“解决一轮的观察不覆盖另一轮”。
+        payload['rounds'][1]['checks'][0].update(issue_key='组级标签存疑', resolution_key='复核组级标签')
         for record in payload['rounds']:
             task = review_rounds.export_task(self.batch)
             response = {'status': 'completed', 'artifacts': {'review_round': {'checks': record['checks']}},

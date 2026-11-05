@@ -9,6 +9,27 @@ from workflow import checks, label_audit, manifest as mf, runner
 
 
 class LabelAuditTest(unittest.TestCase):
+    def test_group_child_knowledge_may_be_empty_but_group_must_be_labeled(self):
+        from workbench import taxonomy
+        item = {"question_type": "补全对话", "unit_kind": "group",
+                "subtypes": ["7选5"],
+                "knowledge": ["语篇体裁/日常口语/日常对话",
+                              "主题/人与社会/社会服务与人际沟通/人际交往",
+                              "语用/情景交际"],
+                "subquestions": [{"number": 71, "knowledge": []}]}
+        self.assertEqual(taxonomy.check_question_labels(item), [])
+        item["knowledge"] = []
+        self.assertTrue(any("knowledge 必须是非空" in p
+                            for p in taxonomy.check_question_labels(item)))
+
+    def test_optional_child_knowledge_still_rejects_invalid_catalog_values(self):
+        from workbench import taxonomy
+        item = {"question_type": "补全对话", "unit_kind": "group",
+                "subtypes": ["7选5"], "knowledge": ["语用/情景交际"],
+                "subquestions": [{"number": 71, "knowledge": ["自造知识点"]}]}
+        self.assertTrue(any("子题[1]" in p
+                            for p in taxonomy.check_question_labels(item)))
+
     def test_empty_or_malformed_batch_never_passes(self):
         for payload in (None, [], {}, {"items": []}, {"items": [None]}):
             with self.subTest(payload=payload):

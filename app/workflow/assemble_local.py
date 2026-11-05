@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -88,7 +89,17 @@ def guard_status(batch_dir):
             return False, f"缺少 {rel}"
     baseline = batch / GUARD
     if not baseline.is_file():
-        return False, "尚无组装基线：先由模型组装一次，之后同结构重跑才走确定性路径"
+        # 旧/半成品批次没有 guard：只要现有 batch.json 能逐题回指当前确认结构，
+        # 就先把它的题干/选项当作可信结构补登记基线，之后同结构重跑即可走
+        # 确定性路径。回指核对不过则不登记，交回模型（不沿用来历不明的旧题干）。
+        ok, problems = verify_against_structure(batch)
+        if not ok:
+            return False, ("尚无组装基线且现有批次无法回指当前结构：需模型重新组装"
+                           + (f"（{problems[0]}）" if problems else ""))
+        record_guard(batch)
+        baseline = batch / GUARD
+        if not baseline.is_file():
+            return False, "尚无组装基线（无法登记）"
     try:
         guard = _load(baseline)
     except (OSError, ValueError):
@@ -194,6 +205,107 @@ def build(batch_dir) -> dict:
             if key in difficulty and "difficulty" in child:
                 child["difficulty"] = difficulty[key]
     return data
+
+
+def build_image_option_repair(batch_dir, payload: dict | None = None) -> dict:
+    """Build (never install) narrowly proven repairs for empty image-only options.
+
+    Existing nonempty content is retained. Ambiguous rows stay unchanged with a
+    reason; duplicate/unknown unit IDs reject the whole request. The
+    candidate must still pass the normal assemble export/import validation.
+    """
+    from . import agent_tasks, denoise, structure_gate
+    from .question_content import IMAGE, _candidate_options, _field_text, _image_refs, question_parts
+
+    root = Path(batch_dir).resolve()
+    candidate = copy.deepcopy(_load(root / BATCH) if payload is None else payload)
+    units = agent_tasks.confirmed_units(root)
+    by_id = {u["unit_id"]: u for u in units}
+    items = candidate.get("items") or []
+    ids = [_unit_id(row) for row in items]
+    if len(ids) != len(set(ids)) or set(ids) != set(by_id):
+        raise ValueError("图片选项修复要求批次单元唯一且与确认结构完全对应")
+    source = (root / "01_source/正文.txt").read_text(encoding="utf-8-sig")
+    structure = _load(root / "01_source/structure.json")
+    cleaned, _, _ = denoise.clean_body(source)
+    fresh_units = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
+    fresh = {}
+    for unit in fresh_units:
+        key = tuple(map(str, unit["numbers"]))
+        if key in fresh:
+            raise ValueError("当前原文有重复单元边界，不能恢复图片选项")
+        fresh[key] = unit
+    # A source filename reused anywhere else cannot prove exclusive ownership.
+    image_uses = {}
+    source_images = [match.group(1).strip() for match in IMAGE.finditer(source)]
+    for unit in units:
+        for match in IMAGE.finditer(unit.get("stem") or ""):
+            name = match.group(1).strip()
+            image_uses[name] = image_uses.get(name, 0) + 1
+    media = root / "01_source/media"
+    repairs, unresolved = [], []
+
+    def blocked(uid, number, reason):
+        unresolved.append({"unit_id": uid, "number": number, "reason": reason})
+
+    for row in items:
+        uid = _unit_id(row)
+        unit = by_id[uid]
+        key = tuple(map(str, unit["numbers"]))
+        if tuple(map(str, row.get("numbers") or [])) != key or row.get("unit_kind") != unit["unit_kind"]:
+            blocked(uid, None, "批次题号或单元类型与确认结构不一致")
+            continue
+        current = fresh.get(key)
+        if current is None or current.get("stem") != unit.get("stem"):
+            blocked(uid, None, "确认源片段与当前原文切片不一致")
+            continue
+        children = row.get("subquestions") or [] if unit["unit_kind"] == "group" else [row]
+        numbers = [str(c.get("number")) for c in children]
+        if len(numbers) != len(set(numbers)) or set(numbers) != set(key):
+            blocked(uid, None, "子题题号缺失、重复或归属不一致")
+            continue
+        for child in children:
+            number = child["number"]
+            options = child.get("options") or []
+            # Never rewrite strings, attachments, blocks, or existing words.
+            empty = [i for i, o in enumerate(options) if isinstance(o, dict)
+                     and (o.get("text") is None or isinstance(o.get("text"), str))
+                     and not _field_text(o).strip() and not _image_refs(o, str(o.get("key") or o.get("label") or ""))
+                     and all(not o.get(k) for k in ("attachments", "blocks", "content", "value", "materialBlocks", "material_blocks"))]
+            if not empty:
+                continue
+            part = question_parts(unit["stem"].splitlines(), int(number))
+            expected = part["options"]
+            normalized = _candidate_options(options)
+            labels = [o["label"] for o in expected]
+            if (not part["found"] or not labels or len(options) != len(expected)
+                    or len(labels) != len(set(labels)) or labels != [o["label"] for o in normalized]):
+                blocked(uid, number, "源题号或完整选项字母序列不能唯一对应")
+                continue
+            names = [IMAGE.findall(o["text"]) for o in expected]
+            if any(len(refs) != 1 or not IMAGE.fullmatch(o["text"].strip()) for o, refs in zip(expected, names)):
+                blocked(uid, number, "源选项并非每项一个明确图片引用的纯图片选项")
+                continue
+            names = [refs[0].strip() for refs in names]
+            if (len(set(names)) != len(names)
+                    or any(image_uses.get(n) != 1 or source_images.count(n) != 1 for n in names)):
+                blocked(uid, number, "源图片在选项或别题重复，归属不能一一证明")
+                continue
+            if any(i not in empty and normalized[i]["text"].strip() != expected[i]["text"].strip()
+                   for i in range(len(expected))):
+                blocked(uid, number, "已有非空选项与源图片文字不一致；保留原内容")
+                continue
+            if (media.resolve() != media or any(Path(n).name != n or "\\" in n
+                    or not (media / n).is_file() or (media / n).is_symlink()
+                    or (media / n).stat().st_size == 0 for n in names)):
+                blocked(uid, number, "源图片在当前01_source/media缺失、为空或路径不安全")
+                continue
+            for i in empty:
+                options[i]["text"] = expected[i]["text"]
+                repairs.append({"unit_id": uid, "number": number, "option": labels[i],
+                                "source_image": names[i], "media_path": "01_source/media/" + names[i],
+                                "media_sha256": _sha(media / names[i])})
+    return {"batch": candidate, "repairs": repairs, "unresolved": unresolved}
 
 
 def _record_fallback(batch_dir, reason: str) -> None:

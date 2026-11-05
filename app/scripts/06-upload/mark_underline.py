@@ -21,16 +21,33 @@ from workflow.extract import infer_structure
 
 MARK = re.compile(r"<u>(.*?)</u>", re.S)
 TAG = re.compile(r"<[^>]*>|\*\*")
+# Explicit answer rules have equivalent layouts in DOCX and assembled JSON.
+# Keep a token for the blank (never delete it), so an absent/moved blank still
+# fails the complete-context comparison. No words or punctuation are folded.
+LAYOUT = re.compile(r"<u>[^\S\r\n]+</u>|_{2,}|<[^>]*>|\*\*")
 
 
-def visible(text):
-    """Visible non-whitespace characters plus offsets into the original field."""
+def visible(text, *, normalize_blanks=False):
+    """Visible characters and original offsets; optionally normalize answer rules.
+
+    A blank is represented by two underscores, with offsets to its first and
+    last characters. This preserves both ends even when a marked sentence spans
+    a rule whose original width differs from its comparison token.
+    """
     chars, offsets = [], []
     cursor = 0
-    for match in TAG.finditer(text):
+    for match in (LAYOUT if normalize_blanks else TAG).finditer(text):
         for index in range(cursor, match.start()):
             if not text[index].isspace():
                 chars.append(text[index]); offsets.append(index)
+        if normalize_blanks:
+            token = match.group()
+            if token.startswith("<u>") and token.endswith("</u>"):
+                chars.extend("__")
+                offsets.extend((match.start() + 3, match.end() - 5))
+            elif token.startswith("__"):
+                chars.extend("__")
+                offsets.extend((match.start(), match.end() - 1))
         cursor = match.end()
     for index in range(cursor, len(text)):
         if not text[index].isspace():
@@ -137,23 +154,24 @@ def restore(batch, source_text):
     # it must never supply underlines to the question surface (or fail mapping).
     _, question_text, _ = infer_structure(source_text)
     for context in contexts(question_text):
-        plain_context, _ = visible(context)
+        plain_context, _ = visible(context, normalize_blanks=True)
         for mark in MARK.finditer(context):
             marked_plain, _ = visible(mark.group(1))
             # Blank runs, numbered blanks and spelling initials are not words.
             if (not re.search(r"[A-Za-z\u4e00-\u9fff]", marked_plain)
                     or re.fullmatch(r"[A-Za-z]", marked_plain) and re.search(r"[\u3000_]{2,}", mark.group(1))):
                 continue
-            before, _ = visible(context[:mark.start()])
-            lo, hi = len(before), len(before) + len(marked_plain)
+            before, _ = visible(context[:mark.start()], normalize_blanks=True)
+            marked_value, _ = visible(mark.group(1), normalize_blanks=True)
+            lo, hi = len(before), len(before) + len(marked_value)
             matches = []
             for owner, key, path in targets:
                 text = owner[key]
-                value, offsets = visible(text)
+                value, offsets = visible(text, normalize_blanks=True)
                 # A bare marked word must equal an entire field/option; it
                 # cannot be searched globally inside arbitrary prose.
-                if plain_context == marked_plain:
-                    if len(marked_plain) == 1:
+                if plain_context == marked_value:
+                    if len(marked_value) == 1:
                         continue
                     unlabelled = re.sub(r"^[A-H][.．、]", "", value)
                     if unlabelled != plain_context:

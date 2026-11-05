@@ -40,9 +40,11 @@ class ComparisonTest(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         payload = fixture.payload()
-        sampled = {str(c['number']) for c in payload['rounds'][1]['checks']}
-        selected = next(iter(sampled))
-        unsampled = next(str(n) for n in range(1, 7) if str(n) not in sampled)
+        # 阅读理解是整组题型：二审整组抽取一个目标，显示为整组范围而非某小题。
+        sample_checks = payload['rounds'][1]['checks']
+        self.assertEqual(len(sample_checks), 1)
+        self.assertIsNone(sample_checks[0].get('number'))
+        selected = '3'  # 组内任一小题都由整组判断覆盖
         payload['rounds'][0]['checks'][0]['assessment']['difficulty'][int(selected) - 1]['value'] = '困难'
         payload['rounds'][1]['checks'][0]['assessment']['type'] = '阅读理解'
         # This display fixture synthesizes assessments, so only provenance
@@ -51,21 +53,24 @@ class ComparisonTest(unittest.TestCase):
             self.assertEqual(review.evaluate_rounds(fixture.batch, payload)['checked_rounds'], ['labels', 'sample'])
             fixture.write('07_review/review-rounds.json', payload)
             comparison = review_comparison(fixture.batch, 'group-1-6', list(range(1, 7)))
+        self.assertEqual([c["scope"] for c in comparison["rounds"][1]["checks"]], ["unit"])
         finding = {'unit_id': 'group-1-6', 'field': 'difficulty', 'reason': '第%s题难度不一致' % selected}
         result = finding_comparison(finding, comparison, list(range(1, 7)), {})
         self.assertEqual(result['original'], '容易')
         self.assertEqual([r['checks'][0]['value'] for r in result['rounds']], ['困难', '容易'])
-        self.assertEqual(str(result['rounds'][1]['checks'][0]['number']), selected)
+        self.assertIsNone(result['rounds'][1]['checks'][0]['number'])
         group = finding_comparison({'unit_id': 'group-1-6', 'field': 'knowledge'}, comparison, list(range(1, 7)), {})
         self.assertEqual(group['rounds'][0]['checks'][0]['value'], fixture.knowledge['knowledge'])
-        self.assertEqual({str(c['number']) for c in group['rounds'][1]['checks']}, sampled)
-        self.assertGreater(len(group['rounds'][1]['checks']), 1)
+        self.assertEqual(len(group['rounds'][1]['checks']), 1)
+        self.assertGreater(len(group['rounds'][1]['checks'][0]['assessment']['subquestions']), 1)
         self.assertEqual(finding_bucket({'field': 'child_knowledge'}), 'label')
         child = finding_comparison({'unit_id': 'group-1-6', 'field': 'child_knowledge',
-                                    'reason': '第%s题知识点不一致' % unsampled}, comparison, list(range(1, 7)), {})
+                                    'reason': '第2题知识点不一致'}, comparison, list(range(1, 7)), {})
         self.assertEqual(child['original'], ['设题角度/阅读/细节理解'])
         self.assertEqual(child['rounds'][0]['checks'][0]['value'], child['original'])
-        self.assertEqual(child['rounds'][1]['status'], '未覆盖')
+        # 整组二审覆盖组内全部小题：小题知识点取自组级判断里的对应子题。
+        self.assertEqual(child['rounds'][1]['status'], '已提供')
+        self.assertEqual(child['rounds'][1]['checks'][0]['value'], ['设题角度/阅读/细节理解'])
         type_comparison = finding_comparison({'unit_id': 'group-1-6', 'field': 'type'}, comparison, list(range(1, 7)), {})
         self.assertEqual(type_comparison['rounds'][1]['checks'][0]['value'], '阅读理解')
         self.assertIsNone(finding_comparison({'unit_id': 'group-1-6', 'field': 'difficulty', 'reason': '无题号'}, comparison, list(range(1, 7)), {}))

@@ -47,17 +47,26 @@ class ReviewRoundsTest(unittest.TestCase):
         targets = self.plan["sample"] if round_id == "sample" else [{"unit_id": "group-1-6"}]
         checks = []
         for target in targets:
-            numbers = [target['number']] if round_id == 'sample' else [str(n) for n in range(1, 7)]
+            group_level = round_id == 'sample' and target.get('number') is None
+            numbers = ([str(n) for n in range(1, 7)] if group_level or round_id != 'sample'
+                       else [str(target['number'])])
             assessment = {'type': '阅读理解', 'subtypes': ['阅读判断'],
                           'knowledge': copy.deepcopy(self.knowledge['knowledge']),
                           'subquestions': [copy.deepcopy(child) for child in self.knowledge['subquestions']
                                            if child['number'] in numbers],
                           'difficulty': [{'number': number, 'value': '容易'} for number in numbers]}
             if round_id == 'sample':
-                assessment['source_comparison'] = 'The selected question is compared against its source and answer.'
-            checks.append(dict(target, verdict='ok', rationale='The article and question require detail retrieval, with evidence in the sentence.',
-                               evidence=[{'path': '01_source/正文.txt', 'locator': 'L1', 'quote': (f"What happens in question {target['number']}?" if round_id == 'sample' else 'She reads a book.')}],
-                               assessment=assessment))
+                assessment['source_comparison'] = 'The selected group is compared against its source and answer.'
+            check = {'unit_id': target['unit_id'],
+                     'verdict': 'ok', 'rationale': 'The article and question require detail retrieval, with evidence in the sentence.',
+                     'evidence': [{'path': '01_source/正文.txt', 'locator': 'L1',
+                                   'quote': ('She reads a book.' if group_level
+                                             else (f"What happens in question {target['number']}?" if round_id == 'sample'
+                                                   else 'She reads a book.'))}],
+                     'assessment': assessment}
+            if round_id == 'sample' and not group_level:
+                check['number'] = str(target['number'])
+            checks.append(check)
         return checks
 
     def payload(self):
@@ -570,18 +579,42 @@ class ReviewRoundsTest(unittest.TestCase):
     def test_sample_partition_provenance_requires_exact_nonoverlapping_targets(self):
         payload = self.payload()
         record = payload['rounds'][1]
-        record['parts'] = [{'execution_id': 'sample-a', 'targets': [self.plan['sample'][0]]},
-                           {'execution_id': 'sample-b', 'targets': [self.plan['sample'][1]]}]
+        # 组题整组抽取后只有一个目标：单个分片完整覆盖它是有效的。
+        record['parts'] = [{'execution_id': 'sample-a', 'targets': [self.plan['sample'][0]]}]
         self.assertTrue(review.evaluate_rounds(self.batch, payload)['passed'])
-        record['parts'][1]['targets'] = [self.plan['sample'][0]]
+        # 同一个目标再出现在第二个分片里即重叠，必须被拒绝。
+        record['parts'] = [{'execution_id': 'sample-a', 'targets': [self.plan['sample'][0]]},
+                           {'execution_id': 'sample-b', 'targets': [self.plan['sample'][0]]}]
         self.assertNotIn('sample', review.evaluate_rounds(self.batch, payload)['checked_rounds'])
 
-    def test_question_sample_ceil_not_unit_count_and_reproducible(self):
+    def test_group_type_sampled_as_one_whole_group_target(self):
+        # 阅读理解是整组题型：二审整组抽取、只做组级核对，number=None，不拆小题。
         self.assertEqual(len(self.plan["units"]), 1)
-        self.assertEqual(len(self.plan["sample"]), 2)
+        self.assertEqual(len(self.plan["sample"]), 1)
         self.assertEqual(self.plan, review.prepare_round_plan(self.batch))
-        self.assertEqual(len({q["number"] for q in self.plan["sample"]}), 2)
-        self.assertTrue(all(q["unit_id"] == "group-1-6" for q in self.plan["sample"]))
+        self.assertIsNone(self.plan["sample"][0]["number"])
+        self.assertEqual(self.plan["sample"][0]["unit_id"], "group-1-6")
+
+    def test_standalone_questions_sample_ceil_not_unit_count_and_reproducible(self):
+        # 独立单题仍按题号抽样，抽样数 = ceil(题数/5)，固定在输入上可复现。
+        stem = '\n'.join(f'{n}. What happens in question {n}?' for n in range(1, 11))
+        units = [{"unit_id": f"q-{n}", "unit_kind": "standalone", "numbers": [n], "stem": f"{n}. What happens in question {n}?"}
+                 for n in range(1, 11)]
+        self.write("01_source/正文.txt", stem)
+        self.write("01_source/structure.confirmed.json", {"units": units})
+        self.write("03_types/types.json", {"items": [{"unit_id": f"q-{n}", "type": "单项填空",
+                   "subtypes": ["语法"], "evidence": ["L1"]} for n in range(1, 11)]})
+        self.write("04_knowledge/knowledge.json", {"items": [
+            {"unit_id": f"q-{n}", "knowledge": ["语用/情景交际"], "subquestions": []} for n in range(1, 11)]})
+        self.write("01_source_ans/answers.json", {"answers": {str(n): "A" for n in range(1, 11)},
+                   "difficulty": {str(n): "容易" for n in range(1, 11)}})
+        self.write("04_knowledge/explanations.json", {"items": [
+            {"unit_id": f"q-{n}", "explanation": "", "explanation_origin": "not_applicable",
+             "articleSummary": "", "summary_origin": "not_applicable", "evidence": ["L1"]} for n in range(1, 11)]})
+        plan = review.prepare_round_plan(self.batch)
+        self.assertEqual(len(plan["sample"]), (10 + 4) // 5)
+        self.assertEqual(plan, review.prepare_round_plan(self.batch))
+        self.assertTrue(all(q["number"] is not None for q in plan["sample"]))
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_distinct_round_specific_records_pass_without_names_or_signatures(self):
@@ -651,6 +684,27 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertIn('WF-9002', ids)             # 已有人工结论保留
         self.assertEqual(len([r for r in items if r.get('round_sources') and
                               r['round_sources'][0].get('input_binding') == binding and r['status'] == 'open']), 0)
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_completed_round_refresh_retires_obsolete_comparisons_with_archive(self):
+        payload = self.payload()
+        binding = payload['plan']['input_binding']
+        old = {'finding_id': 'WF-9901', 'unit_id': 'group-1-6',
+               'field': 'child_knowledge', 'severity': 'major', 'status': 'open',
+               'reason': '旧规则要求子题非空', 'question': '旧规则要求子题非空',
+               'round_sources': [{'round_id': 'labels', 'execution_id': 'old',
+                                  'protocol': review.ROUND_PROTOCOL,
+                                  'input_binding': binding, 'field': 'child_knowledge', 'value': []}]}
+        manual = {'finding_id': 'WF-9902', 'unit_id': 'group-1-6',
+                  'field': 'material', 'severity': 'major', 'status': 'open',
+                  'reason': '真实材料问题'}
+        self.write('07_review/manual-review-queue.json', {'items': [old, manual]})
+        ingest.build_review_files(self.batch, {'review_rounds': payload}, reconcile_rounds=True)
+        queue = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
+        self.assertNotIn('WF-9901', {r['finding_id'] for r in queue})
+        self.assertIn('WF-9902', {r['finding_id'] for r in queue})
+        retired = json.loads((self.batch / '07_review/retired-round-findings.json').read_text())['records']
+        self.assertTrue(any(r['finding_id'] == 'WF-9901' for r in retired))
 
     def test_two_round_review_ids(self):
         self.assertEqual(review.ROUND_IDS, ('labels', 'sample'))
@@ -755,12 +809,20 @@ class ReviewRoundsTest(unittest.TestCase):
         ingest.build_review_files(self.batch, {'findings': findings})
         ingest.build_review_files(self.batch, {'findings': findings})
         queue = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
-        records = [r for name in ('content-review.json', 'metadata-review.json')
-                   for r in json.loads((self.batch / '07_review' / name).read_text())['findings']]
-        # 一審单元级与二審小题级观察不再合并：各自一条，互不继承。
+        # 整组题型的一审与二审都在组级观察同一处问题，且给出同一解决口径：
+        # 合并为一条，两个独立轮次都保留为来源，不丢失任一轮的判断。
+        self.assertEqual(len(queue), 1)
+        self.assertEqual({source['round_id'] for source in queue[0]['round_sources']},
+                         {'labels', 'sample'})
+        # 解决口径不同则不得合并。
+        other = copy.deepcopy(findings[1])
+        other['round_sources'][0]['target_number'] = None
+        ingest.build_review_files(self.batch, {'findings': findings + [dict(
+            other, finding_id='SECOND-RESOLUTION',
+            round_sources=[dict(source, resolution_key='另一种解决口径')
+                           for source in other['round_sources']])]})
+        queue = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
         self.assertEqual(len(queue), 2)
-        self.assertEqual(len(records), 2)
-        self.assertEqual(len({item['round_sources'][0]['round_id'] for item in queue}), 2)
 
     def test_matching_later_source_never_inherits_prior_decision(self):
         from workbench.server import apply_decision
@@ -808,11 +870,13 @@ class ReviewRoundsTest(unittest.TestCase):
             for check in record['checks']:
                 check.update(verdict='uncertain', rationale='原文存在歧义。', issue_key='答案与原文冲突')
         # Same words but a different quote are not enough to identify the issue.
-        payload['rounds'][1]['checks'][0]['evidence'][0]['quote'] = 'A. book2 B. pen2 C. map2 D. bag2'
+        payload['rounds'][1]['checks'][0]['evidence'][0]['quote'] = (
+            'A. book1 B. pen1 C. map1 D. bag1')
         ingest.build_review_files(self.batch, {'review_rounds': payload})
         items = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
-        self.assertEqual(len(items), 3)  # 一审一条单元发现 + 二审两条抽样小题发现
-        self.assertEqual(len({item['finding_id'] for item in items}), 3)
+        # 一审一条组级发现 + 二审整组一条发现：引证不同，不合并。
+        self.assertEqual(len(items), 2)
+        self.assertEqual(len({item['finding_id'] for item in items}), 2)
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_only_real_findings_enter_manual_queue(self):

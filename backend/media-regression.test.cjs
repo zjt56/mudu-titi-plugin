@@ -42,14 +42,29 @@ test('invalid image payload fails locally', async () => {
   const media = mediaContext(async () => ({ ok: true, json: async () => ({ error: 'not found' }) }));
   await assert.rejects(media.fetchPreviewImage('/api/batches/p/media/a.jpeg', new AbortController().signal), /有效图片/);
 });
-test('health probe uses constant-time health route and releases its response', async () => {
-  const code = host.slice(host.indexOf('async function probeBackend('), host.indexOf('function spawnBackend('));
+test('health probe uses constant-time health route and consumes its identity response', async () => {
+  const code = host.slice(host.indexOf('function backendChildAlive('), host.indexOf('function spawnBackend('));
+  let consumed = false;
+  const probe = vm.runInNewContext(code + '\nprobeBackend', {
+    AbortController, setTimeout, clearTimeout, backendUrl: () => 'http://backend/',
+    backend: { proc: { pid: 123, exitCode: null, signalCode: null }, instanceId: 'owned' },
+    fetch: async (url) => {
+      assert.equal(url, 'http://backend/api/health');
+      return { ok: true, json: async () => { consumed = true; return { ok: true, instance_id: 'owned' }; } };
+    },
+  });
+  assert.equal(await probe(), true);
+  assert.equal(consumed, true);
+});
+test('health probe cancels non-success responses without reading their body', async () => {
+  const code = host.slice(host.indexOf('function backendChildAlive('), host.indexOf('function spawnBackend('));
   let released = false;
   const probe = vm.runInNewContext(code + '\nprobeBackend', {
     AbortController, setTimeout, clearTimeout, backendUrl: () => 'http://backend/',
-    fetch: async (url) => { assert.equal(url, 'http://backend/api/health'); return { ok: true, body: { cancel: async () => { released = true; } } }; },
+    backend: { proc: { pid: 123, exitCode: null, signalCode: null }, instanceId: 'owned' },
+    fetch: async () => ({ ok: false, body: { cancel: async () => { released = true; } }, json: () => { throw Error('must not read'); } }),
   });
-  assert.equal(await probe(), true);
+  assert.equal(await probe(), false);
   assert.equal(released, true);
 });
 test('ready proxy skips full batch probes and handles an already-ended GET', async () => {
