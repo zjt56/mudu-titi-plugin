@@ -574,16 +574,21 @@ def run(batch_dir):
                     agent_tasks._validate(batch, stage, payload, context, [unit])
                     return payload, response.get("notes", [])
 
-                # 子智能体1出解析，子智能体2只打知识点并逐字搬运；逐行无解析附录要求 AI 解析来源。
+                # 子智能体1出解析/大意（缺失填「无」，不生成），子智能体2只打知识点并逐字搬运。
                 try:
                     explanations, notes = invoke_stage("explanations")
                     row = explanations["items"][0]
-                    if not str(row.get("explanation") or "").endswith(agent_tasks.AI_MARK):
-                        raise ValueError("逐行无解析附录要求 AI 解析来源")
-                    body = row["explanation"].removesuffix(agent_tasks.AI_MARK).strip()
-                    if (len(re.sub(r'\s|[^\w\u4e00-\u9fff]', '', body)) < 12
-                            or re.fullmatch(r'(?:根据|依据)(?:题意|语境|句意)(?:可知|分析)?(?:选择|选|判断)?(?:该|此|正确)?(?:答案|选项)?[。！!\s]*', body)):
-                        raise ValueError("解析过短或笼统，缺少具体依据")
+                    from .content_rules import is_placeholder
+                    value = str(row.get("explanation") or "").strip()
+                    if not value:
+                        raise ValueError("缺失解析必须显式填「无」，不留空")
+                    if not is_placeholder(value):
+                        if not value.endswith(agent_tasks.AI_MARK):
+                            raise ValueError("逐行无解析附录要求 AI 解析来源")
+                        body = value.removesuffix(agent_tasks.AI_MARK).strip()
+                        if (len(re.sub(r'\s|[^\w\u4e00-\u9fff]', '', body)) < 12
+                                or re.fullmatch(r'(?:根据|依据)(?:题意|语境|句意)(?:可知|分析)?(?:选择|选|判断)?(?:该|此|正确)?(?:答案|选项)?[。！!\s]*', body)):
+                            raise ValueError("解析过短或笼统，缺少具体依据")
                     entry["explanations"] = {"status": "candidate", "artifact": explanations, "notes": notes}
                     context[agent_tasks.ARTIFACTS["explanations"]] = explanations
                 except (local_agent.AgentError, ValueError, OSError, TypeError, KeyError, AttributeError) as exc:

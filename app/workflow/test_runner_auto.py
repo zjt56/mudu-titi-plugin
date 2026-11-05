@@ -18,13 +18,21 @@ class RunnerAutoTest(unittest.TestCase):
         self.manifest = mf.new_manifest("batch", self.batch, {}, {})
         mf.save(self.batch, self.manifest)
 
+    def test_second_run_is_rejected_while_one_holds_the_batch(self):
+        from workflow import runner as runner_mod
+        with runner_mod._single_run_lock(self.batch):
+            with self.assertRaises(RuntimeError):
+                with runner_mod._single_run_lock(self.batch, timeout=0.2):
+                    pass
+        with runner_mod._single_run_lock(self.batch, timeout=0.2):
+            pass
+
     def test_stop_at_passes_from_cli_through_process_and_stops_before_stage(self):
         candidate = {"name": "batch"}
         with patch.object(auto, "discover", return_value=[candidate]), \
              patch.object(auto, "ensure_batch", return_value=self.batch), \
              patch.object(auto.report_mod, "write", return_value={"counts": {
                  "ok": 0, "attention": 0, "blocked": 0, "unverified": 0}}), \
-             patch.object(auto.preview_mod, "refresh"), \
              patch.object(runner, "_execute_command") as execute:
             self.assertEqual(auto.main(["run", "--inbox", str(self.batch),
                                         "--workflows", str(self.batch.parent),
@@ -253,7 +261,8 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual([s["stage"] for s in outcome["failed_stages"]], ["answers"])
         pending = {s["stage"]: s for s in outcome["pending_stages"]}
         self.assertEqual(pending["knowledge"]["unmet_dependencies"], ["answers"])
-        self.assertEqual(pending["assemble"]["unmet_dependencies"], ["knowledge"])
+        # 组装同时消费 explanations（解析/大意），两者都未完成时都必须等待。
+        self.assertEqual(pending["assemble"]["unmet_dependencies"], ["knowledge", "explanations"])
         manifest = mf.load(self.batch)
         for stage_id in ("knowledge", "assemble", "upload_gate", "upload"):
             self.assertEqual(manifest["stages"][stage_id]["status"], mf.PENDING)
@@ -626,6 +635,36 @@ class RunnerAutoTest(unittest.TestCase):
                                   status=mf.APPROVED, actor="editor", note="",
                                   allow_missing=False, invalidate_downstream=False)
         self.assertEqual(runner.cmd_mark(args), 2)
+
+    def test_single_run_lock_blocks_second_concurrent_run(self):
+        """两个 runner run 同时驱动同一批次时，第二个必须快速失败，避免重复模型调用与台账交叉写。"""
+        acquired = threading.Event()
+        release = threading.Event()
+        (self.batch / "workflow").mkdir(parents=True, exist_ok=True)
+
+        def hold():
+            with runner._single_run_lock(self.batch, timeout=0.3):
+                acquired.set()
+                release.wait(3)
+
+        thread = threading.Thread(target=hold)
+        thread.start()
+        self.assertTrue(acquired.wait(2))
+        try:
+            with self.assertRaisesRegex(RuntimeError, "已有运行中的流水线"):
+                with runner._single_run_lock(self.batch, timeout=0.3):
+                    pass
+        finally:
+            release.set()
+            thread.join(3)
+        self.assertTrue((self.batch / "workflow" / ".run.lock").is_file())
+        with runner._single_run_lock(self.batch, timeout=0.3):
+            pass
+
+    def test_cmd_run_accepts_config_argument(self):
+        args = argparse.Namespace(batch_dir=str(self.batch), stage=None, until=None,
+                                  force=False, dry_run=True, config=None)
+        self.assertEqual(runner.cmd_run(args), 0)
 
 
 if __name__ == "__main__":

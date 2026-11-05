@@ -19,3 +19,11 @@ __pycache__/
 *.tmp
 node_modules/
 
+
+# 随插件分发的运行时二进制（体积大，发布前用 fetch_vendor.py 拉进 vendor，不进 git）
+app/audio/vendor/python/
+app/audio/vendor/ffmpeg/
+
+# 听力切段运行时数据根（venv/模型/状态，体积大，每台机器自建，绝不进仓库）
+/audio/
+.port-backup/

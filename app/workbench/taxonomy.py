@@ -169,9 +169,20 @@ def resolve_knowledge(paths):
         if not path:
             continue
         point = by_path.get(path)
+        canonical_path = path
+        # 兼容旧批次只保存末级分支的路径，例如
+        # `基本读音/字母在单词中的基本读音` -> 当前完整路径
+        # `语音/基本读音/字母在单词中的基本读音`。只有唯一叶子才迁移，
+        # 同名分支保持未决，不能猜测目录归属。
+        if point is None:
+            candidates = sorted(candidate for candidate in leaves
+                               if candidate.endswith("/" + path))
+            if len(candidates) == 1:
+                canonical_path = candidates[0]
+                point = by_path[canonical_path]
         if point is None:
             unknown.append(path)
-        elif path not in leaves:
+        elif canonical_path not in leaves:
             non_leaf.append(path)
         else:
             resolved.append(dict(point))
@@ -251,7 +262,8 @@ def _check_labels(values, prefixes=None):
     elif difficulty.strip() and difficulty.strip() not in difficulties():
         problems.append(f"难度「{difficulty.strip()}」不合法，只能是 {'/'.join(difficulties())}")
     cats = _string_list(values["categories"], "categories", problems) if "categories" in values else []
-    bad_cats = [c for c in cats if c not in categories()]
+    from workflow.metadata_policy import MISSING
+    bad_cats = [c for c in cats if c not in categories() and c != MISSING]
     if bad_cats:
         problems.append(f"分类 {bad_cats} 不合法，只能是 {'/'.join(categories())}")
     paths = _string_list(values["knowledge"], "knowledge", problems) if "knowledge" in values else []
@@ -325,10 +337,12 @@ _CLOZE_TYPES = {"完形填空", "语法选择"}
 
 
 # 整篇/整个大题只做组级标签（体裁、主题、内容）的题型；子题不要求、也不承载
-# 细分知识点。其余题组（如听力长对话、单项选择）按小题分别标注。
+# 细分知识点。听力长对话/短文理解属于"一材料带多题"，与阅读同理只在组级评估；
+# 其余题组（如听力短对话、单项选择）按小题分别标注。
 WHOLE_UNIT_TYPES = frozenset((
     "阅读理解", "任务型阅读", "完形填空", "语法选择", "听力信息转换",
     "读写综合", "选词填空", "短文填空", "教材语篇填空",
+    "听力短文理解", "听力长对话理解",
 ))
 
 

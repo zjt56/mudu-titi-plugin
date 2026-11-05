@@ -287,6 +287,12 @@ def inspect_content(batch_dir, payload):
             return
         summary = item.get('articleSummary', item.get('article_summary', ''))
         explanation = item.get('explanation', '')
+        from .content_rules import is_placeholder
+        # 明确缺失占位（待补充等）不是可溯源内容，也不是未标注的 AI 生成。
+        if is_placeholder(summary):
+            summary = ''
+        if is_placeholder(explanation):
+            explanation = ''
         if isinstance(summary, str) and summary.strip():
             normalized = _norm(summary)
             marked = AI_MARK in summary
@@ -348,15 +354,7 @@ def inspect_content(batch_dir, payload):
                   uid, 'location', ['01_source/metadata.json'])
         qtype = item.get('question_type') or item.get('type') or ''
         listening = isinstance(qtype, str) and qtype.startswith('听力')
-        # Each actual question needs its own explanation. A group-level
-        # overview or one explained child must not conceal other empty children.
-        if not listening:
-            children = item.get('subquestions') or []
-            targets = [(sub, f"{uid}/{sub.get('number', index)}") for index, sub in enumerate(children)
-                       if isinstance(sub, dict)] if children else [(item, uid)]
-            for target, target_id in targets:
-                if not has_explanation(target):
-                    error('EXPLANATION_MISSING', '该题缺少解析（F7：原卷没有就自己补写并在末尾标注「' + AI_MARK + '」）', target_id, 'explanation')
+        # 用户要求：缺解析直接留空跳过，不再要求补写（F7 旧规则已按用户要求取消）。
         check(item, uid, numbers, listening=listening)
     return {'passed': not errors, 'errors': errors, 'source_sha256': hashes,
             'check': 'upload-content-source-v1',

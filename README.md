@@ -1,4 +1,4 @@
-# 录题工作流 · DSH 插件（独立项目）
+# md upload tiku · DSH 插件（英语录题与题库上传）
 
 把上传工作流做进 **DSH 原生插件面板**。**唯一前端就是 `lib/client.js`**（React 面板，运行在 Harness 里）：所有显示、查看、修改、操作都在插件面板完成，项目里**没有独立的浏览器页面 / 静态站点 / iframe 工作台**。`app/` 只是无界面的 Python 工作流 + REST API 后端，试卷数据保存在本项目目录下（`workflows/`、`inbox/`），不依赖任何外部仓库。模型路由通过 `MUDU_AGENT_CONFIG` + 插件自有 `wf-router.sh` 注入实现。
 
@@ -75,8 +75,8 @@
 
 ```bash
 # 1) 获取插件（私有仓库，需要相应权限）
-git clone <本仓库地址> dsh-wf-plugin
-cd dsh-wf-plugin
+git clone <本仓库地址> md-upload-tiku
+cd md-upload-tiku
 
 # 2) 安装到 DSH profile
 dsh plugin --profile <你的 profile> add "$(pwd)"
@@ -86,7 +86,7 @@ dsh plugin --profile <你的 profile> add "$(pwd)"
 
 ### 安装后
 
-- **重启 Harness**，侧边栏出现「录题工作流」入口。
+- **重启 Harness**，侧边栏出现「录题系统」入口。
 - 首次打开如果提示"未找到可用的 Python"，按提示装 Python 3.12，或设置 `WF_PYTHON` 后重启。
 - 上传一份 `.docx` 试卷验证主流程即可，**不需要**配置 PDF/OCR 也能正常录题。
 
@@ -104,7 +104,7 @@ dsh plugin --profile <你的 profile> add "$(pwd)"
 dsh plugin --profile wf-deepseek add /path/to/插件版
 ```
 
-安装后重启 Harness，侧边栏出现「录题工作流」入口，打开即面板。
+安装后重启 Harness，侧边栏出现「录题系统」入口，打开即面板。
 
 ## 题库连接设置
 
@@ -114,7 +114,7 @@ dsh plugin --profile wf-deepseek add /path/to/插件版
 - 默认连接 `http://127.0.0.1:8089/api`，需先建立本机 SSH 隧道；也接受 HTTPS。拒绝公网明文 HTTP、带账号密码的 URL 和重定向。
 - 高级项：请求超时（默认 30 秒）与可选知识点版本 ID。上传方式和目标属于批次资料，不作为全局连接参数。
 - 密钥输入框不回显已保存值；留空保留，填写新值替换，「清除密钥」显式移除。
-- 私有文件位于 `$DSH_HOME/plugin-state/dsh-wf-plugin/question-bank/`（默认在用户的 `.dsh` 下），目录权限 0700，文件权限 0600；不写入项目、题目 JSON、模型提示词或本地浏览器存储。这是本机文件权限保护，不宣称加密存储。
+- 私有文件位于 `$DSH_HOME/plugin-state/md-upload-tiku/question-bank/`（默认在用户的 `.dsh` 下），目录权限 0700，文件权限 0600；不写入项目、题目 JSON、模型提示词或本地浏览器存储。这是本机文件权限保护，不宣称加密存储。
 - 后端启动时通过 `MUDU_UPLOAD_CONFIG` 和 `MUDU_API_KEY` 注入现有上传客户端。保存不会中断现有任务，新凭据在后端下一次启动时加载；面板连接测试立即使用当前填写值。
 - 「测试连接」只 GET 当前知识点版本目录，不提交题目，也不能据此判断具备 `draft` 上传权限。
 - 云端提交仍遵循预检、冻结及人工批准流程，只写入上传暂存。确认入库和发布由远端人工完成；本设置面板不会上传、确认或发布题目。

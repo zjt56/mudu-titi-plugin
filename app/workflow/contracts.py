@@ -87,7 +87,7 @@ STAGES: tuple[Stage, ...] = (
         depends_on=("types", "answers"),
         produces=("04_knowledge/explanations.json",),
         docs=("docs/content-labeling.md",),
-        description="子智能体1：匹配原卷/附录中的原解析与【文章大意】；确认缺失后才依据实际题干、材料与已验证答案生成，并标注（AI生成，待校对）。",
+        description="子智能体1：逐字匹配原卷/附录中的原解析与【文章大意】；来源没有时不再使用 AI 生成，直接跳过，对应字段填「无」。",
     ),
     Stage(
         id="knowledge",
@@ -102,7 +102,9 @@ STAGES: tuple[Stage, ...] = (
         id="assemble",
         title="批次组装",
         kind=AGENT,
-        depends_on=("audio", "types", "knowledge"),
+        # 组装提示词与导入都会读取 explanations（解析/大意），必须显式依赖，
+        # 否则重跑解析时组装不会失效，batch.json 会留着旧解析。
+        depends_on=("audio", "types", "knowledge", "explanations"),
         produces=("06_batch/batch.json",),
         docs=("references/stages/06-upload.md",),
         description="主流程唯一写入口，合并全部上游产物为正式批次。",
@@ -142,7 +144,7 @@ STAGES: tuple[Stage, ...] = (
     ),
     Stage(
         id="review",
-        title="三轮审核",
+        title="两轮审核（一审全量+二审抽20%）",
         kind=AGENT,
         depends_on=("validate",),
         produces=("07_review/review-rounds.json",

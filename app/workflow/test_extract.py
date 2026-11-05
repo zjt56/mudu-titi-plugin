@@ -21,6 +21,30 @@ class StructureCandidateTest(unittest.TestCase):
         self.assertNotIn('1. A 2. B', main)
         self.assertFalse(structure['coverage_verified'])
 
+    def test_inline_answer_block_before_later_section_keeps_full_paper(self):
+        # 解析版：听力答案插在听力题之后、笔试之前；不能把整段笔试当答案册切掉。
+        text = ('2023年某省初中学业水平考试\n'
+                '第一部分 听力\n'
+                'Ⅰ.关键词语选择(共2小题)\n1. A\n2. B\n'
+                'Ⅱ.短对话理解(共2小题)\n3. C\n4. D\n'
+                'Ⅰ.关键词语选择\n1~2 AB\n'
+                'Ⅱ.短对话理解\n3~4 CD\n'
+                '第二部分 英语知识运用\n'
+                'Ⅵ.单项填空(共2小题)\n'
+                '31. It is ___ for me.\nA.bad B.easy C.hard D.right\n'
+                '32. He is ___ .\nA.tall B.short C.thin D.fat\n')
+        structure, main, appendix = extract.infer_structure(text)
+        self.assertIn('Ⅵ.单项填空', main)
+        self.assertIn('31. It is', main)
+        self.assertNotIn('1~2 AB', main)
+        self.assertIn('1~2 AB', appendix)
+        self.assertIn('3~4 CD', appendix)
+        self.assertEqual([s['type'] for s in structure['sections']],
+                         ['听力关键词语选择', '听力短对话理解', '单项填空'])
+        self.assertEqual({n for s in structure['sections'] for n in s['questions']},
+                         {1, 2, 3, 4, 31, 32})
+        self.assertIn('INLINE_ANSWER_BLOCK', [u['code'] for u in structure['unresolved']])
+
     def test_repeated_paper_title_requires_adjacent_valid_answer_summary(self):
         title = '2023年某省初中学业水平考试'
         prefix = title + '\nⅠ.单项填空(共1小题)\n80. Choose?\nA.Yes B.No\nⅩ.书面表达(共1小题)\nWrite about your town.\n'

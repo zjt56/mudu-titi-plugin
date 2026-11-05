@@ -18,7 +18,7 @@ from .local_agent import _agent_lock, _check_input_hashes, invoke, load_config
 # Bumped whenever the prompt builder or blind context changes, so stale
 # partition states and bindings are never reused silently.
 CONTEXT_VERSION = "blind-context-v8"
-PROMPT_VERSION = "review-prompt-v4"
+PROMPT_VERSION = "review-prompt-v5"
 
 
 ARTIFACT = "review_round"
@@ -111,6 +111,8 @@ def _round_prompt(round_id, targets, context):
         "Give actual question-specific semantic rationale. Structural/nonempty/catalog checks alone cannot justify ok. "
         "Write every rationale and assessment explanation in SIMPLIFIED CHINESE (简体中文), concise and readable; do not use English template prefixes like 'What the question tests' or 'Answer-to-point relation'. " 
         "Actual differences/conflicts/uncertainties use error/uncertain, never create routine human confirmations. "
+        "试卷名、来源、来源类型、分类标签缺失时使用「未提供」是允许的占位，不是试题错误；"
+        "不得仅因此返回 error/uncertain 或要求人工确认，继续审核题干、答案和知识点。"
         "For a specific non-ok issue you may add issue_key: a concise, exact description naming the affected field and defect, independent of review round. Omit it when the issue cannot be uniquely identified; never use a generic category. "
         "Optionally add resolution_key alongside issue_key for a non-ok issue: describe the exact specific corrective action required, including its target and intended outcome. Use identical wording only for the same action; omit it when uncertain or when no specific action can be identified. Do not infer another round's action. "
         "An issue in one target must not stop reviewing the remaining targets. Knowledge review focuses on label semantics; distinguish a proposed label change from missing image/audio evidence and from answer/content defects. "

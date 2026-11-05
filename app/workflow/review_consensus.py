@@ -11,11 +11,14 @@ def _normal(value):
 def compare(batch, plan, records):
     from . import review
     from .agent_tasks import confirmed_units
+    from workbench import taxonomy
     units = {u['unit_id']: u for u in confirmed_units(batch)}
     types = review._load(batch / '03_types/types.json')
     knowledge = review._load(batch / '04_knowledge/knowledge.json')
     answers = review._load(batch / '01_source_ans/answers.json')
     type_rows = {x['unit_id']: x for x in types.get('items', [])}
+    whole_units = {uid for uid, row in type_rows.items()
+                   if taxonomy.whole_unit_type(row.get('type'))}
     knowledge_rows = {x['unit_id']: x for x in knowledge.get('items', [])}
     difficulty = answers.get('difficulty') if isinstance(answers, dict) else None
     if not isinstance(difficulty, dict):
@@ -36,16 +39,27 @@ def compare(batch, plan, records):
         if not isinstance(children, list):
             raise ValueError('Missing original knowledge children for ' + uid)
         by_number = {str(c['number']): c for c in children}
+        group_difficulty = []
         for number in map(str, unit['numbers']):
             value = difficulty.get(number)
             if value not in ('容易', '适中', '困难'):
                 raise ValueError('Missing original difficulty for ' + number)
-            add((uid, number, 'difficulty'), {'origin': 'original', 'input_binding': plan['input_binding']}, value)
-            if unit.get('unit_kind') == 'group':
+            if uid in whole_units:
+                # Whole-passage groups compare difficulty at group level only.
+                group_difficulty.append((number, value))
+            else:
+                add((uid, number, 'difficulty'), {'origin': 'original', 'input_binding': plan['input_binding']}, value)
+            if unit.get('unit_kind') == 'group' and uid not in whole_units:
                 child = by_number.get(number)
                 if not isinstance(child, dict) or not isinstance(child.get('knowledge'), list):
                     raise ValueError('Missing original child knowledge for ' + number)
                 add((uid, number, 'child_knowledge'), {'origin': 'original', 'input_binding': plan['input_binding']}, child['knowledge'])
+        if uid in whole_units and group_difficulty:
+            # Group-level difficulty is compared per question number, so a round
+            # that only sampled some children is not flagged for missing others.
+            add((uid, None, 'difficulty'),
+                {'origin': 'original', 'input_binding': plan['input_binding']},
+                dict(group_difficulty))
     for record in records:
         for check in record['checks']:
             uid = check['unit_id']
@@ -70,19 +84,87 @@ def compare(batch, plan, records):
                 source['source_binding'] = binding
             for field in ('type', 'subtypes', 'knowledge'):
                 add((uid, None, field), source, assessment[field])
-            for item in assessment['difficulty']:
-                add((uid, str(item['number']), 'difficulty'), source, item['value'])
-            for item in assessment['subquestions']:
-                add((uid, str(item['number']), 'child_knowledge'), source, item['knowledge'])
+            if uid in whole_units:
+                add((uid, None, 'difficulty'), source,
+                    {str(item['number']): str(item['value']) for item in assessment['difficulty']
+                     if isinstance(item, dict) and item.get('number') is not None and item.get('value')})
+            else:
+                for item in assessment['difficulty']:
+                    add((uid, str(item['number']), 'difficulty'), source, item['value'])
+            if uid not in whole_units:
+                for item in assessment['subquestions']:
+                    add((uid, str(item['number']), 'child_knowledge'), source, item['knowledge'])
     findings = []
+    _DIFF = {'容易': 0, '适中': 1, '困难': 2}
+
+    def _difficulty_numbers(values):
+        """Numbers whose grade span reaches conflict level (容易 vs 困难)."""
+        by_number = {}
+        for v in values:
+            pairs = v.items() if isinstance(v, dict) else [(None, v)]
+            for n, val in pairs:
+                by_number.setdefault(n, set()).add(_DIFF.get(str(val), None))
+        return sorted(str(n) for n, grades in by_number.items()
+                      if n is not None and len({g for g in grades if g is not None}) >= 2
+                      and max(g for g in grades if g is not None) - min(g for g in grades if g is not None) >= 2)
+
+    def _difficulty_conflict(values):
+        # Compare per number; a difference is only reported across two grades
+        # (容易 vs 困难), never between adjacent grades (容易/适中, 适中/困难).
+        by_number = {}
+        for v in values:
+            pairs = v.items() if isinstance(v, dict) else [(None, v)]
+            for n, val in pairs:
+                by_number.setdefault(n, set()).add(_DIFF.get(str(val), None))
+        for grades in by_number.values():
+            grades = {g for g in grades if g is not None}
+            if grades and max(grades) - min(grades) >= 2:
+                return True
+        return False
+
+    def _knowledge_conflict(values):
+        # Path lists agree unless two sources give different values under the
+        # same dimension root. An extra legal dimension on one side is not a
+        # conflict, and a missing dimension is never a conflict.
+        by_root = {}
+        for v in values:
+            roots = {}
+            for path in (v or []):
+                roots.setdefault(str(path).split('/')[0], set()).add(str(path))
+            for r, vals in roots.items():
+                by_root.setdefault(r, []).append(frozenset(vals))
+        for sets in by_root.values():
+            if len(sets) >= 2 and len(set(sets)) > 1:
+                return True
+        return False
+
+    def agree(field, values):
+        if not values:
+            return True
+        if field == 'difficulty':
+            return not _difficulty_conflict(values)
+        if field == 'knowledge':
+            return not _knowledge_conflict(values)
+        return len({repr(v) for v in values}) <= 1
+
     for (uid, number, field), entries in observations.items():
-        if len({repr(value) for _, value in entries}) <= 1:
+        if agree(field, [value for _, value in entries]):
             continue
         sources = [{**source, 'field': field, 'value': value} for source, value in entries if source.get('round_id')]
         target = ('第%s题' % number) if number is not None else '题组'
+        def _fmt(v):
+            if isinstance(v, dict):
+                return ','.join('%s:%s' % (k, v[k]) for k in sorted(v))
+            return str(v)
         reason = '%s%s判断不一致：%s' % (target, field, '；'.join(
-            ('原标注' if source.get('origin') else source['round_id']) + '=' + str(value)
+            ('原标注' if source.get('origin') else source['round_id']) + '=' + _fmt(value)
             for source, value in entries))
+        if field == 'difficulty' and number is None:
+            # 组级难度聚合成 {小题:等级} 后仍要点明是哪些小题拉开的差距，
+            # 否则人工只看到一长串 1:容易,10:容易,… 无法下手。
+            numbers = _difficulty_numbers([value for _, value in entries])
+            if numbers:
+                reason += '（差异小题：' + '、'.join('第%s题' % n for n in numbers) + '）'
         findings.append({'unit_id': uid, 'field': field, 'severity': 'major', 'reason': reason,
                          'evidence': [], 'round_sources': sources})
     return findings

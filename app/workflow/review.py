@@ -17,8 +17,9 @@ import re
 from pathlib import Path
 
 ROUND_FILE = "review-rounds.json"
-ROUND_IDS = ("labels", "knowledge", "sample")
-ROUND_PROTOCOL = "upload-workflow.review-rounds/v2"
+# 两轮审核：一审全量盲判 + 二审 20% 小题抽样复核（不再单独跑全量知识点轮）。
+ROUND_IDS = ("labels", "sample")
+ROUND_PROTOCOL = "upload-workflow.review-rounds/v3"
 ROUND_INPUTS = (
     "01_source/正文.txt", "01_source/structure.confirmed.json",
     "03_types/types.json", "04_knowledge/knowledge.json",
@@ -166,6 +167,37 @@ def evaluate(batch_dir) -> dict:
                              "message": "没有记录问题；完成情况由绑定当前输入的分轮记录判断"})
 
     rounds = evaluate_rounds(batch_dir)
+    _counts_blocking = len(blocking_findings)
+    _counts_open = len([it for it in (queue_items or []) if _is_open(it)])
+    _counts_required = len(required_unchecked)
+    # Round findings are materialised into the review files above, so the same
+    # issue can appear both as a file finding and as a round error. Count each
+    # finding once: drop file/queue errors whose finding_id the round already
+    # reported.
+    def _round_sig(e):
+        return (e.get("unit_id"), e.get("field"),
+                e.get("reason") or e.get("message") or "")
+    round_sigs = {_round_sig(e) for e in rounds["errors"]
+                  if e.get("code") == "REVIEW_ROUND_FINDING"}
+    if round_sigs:
+        def _file_sig(f):
+            return (f.get("unit_id"), f.get("field"),
+                    f.get("reason") or f.get("message") or "")
+        errors = [e for e in errors
+                  if e.get("code") not in ("REVIEW_FINDING_OPEN", "MANUAL_REVIEW_OPEN")
+                  or _file_sig(e) not in round_sigs]
+        blocking_findings = [b for b in blocking_findings if _file_sig(b) not in round_sigs]
+        if queue is not None:
+            queue_items = [it for it in (queue_items or [])
+                           if _file_sig(it) not in round_sigs]
+    # Deduplicate unchecked items that the round evaluation already reports
+    # under a more specific code (same unit and field).
+    round_typed = {(e.get("unit_id"), e.get("field")) for e in rounds["errors"]
+                   if e.get("code") == "REVIEW_SAMPLE_SOURCE_UNVERIFIED"}
+    if round_typed:
+        errors = [e for e in errors
+                  if e.get("code") != "REQUIRED_CHECK_UNCHECKED"
+                  or (e.get("unit_id"), e.get("field")) not in round_typed]
     errors.extend(rounds["errors"])
     passed = not errors
     return {
@@ -175,9 +207,9 @@ def evaluate(batch_dir) -> dict:
         "errors": errors,
         "warnings": warnings,
         "counts": {
-            "blocking_findings": len(blocking_findings),
-            "open_manual_items": len([it for it in (queue_items or []) if _is_open(it)]),
-            "required_unchecked": len(required_unchecked),
+            "blocking_findings": _counts_blocking,
+            "open_manual_items": _counts_open,
+            "required_unchecked": _counts_required,
         },
         "rule": "阻断项=0 且 人工队列=0 且 必检项无 unchecked",
     }
@@ -300,7 +332,9 @@ def _knowledge_changes(old, assessment):
 def _sample_source_binding(batch, plan, check):
     """Derive target-level source attribution without changing model output."""
     from .agent_tasks import confirmed_units
-    from .review_child_source import prove_child, quote_belongs_to_child
+    from .review_child_source import (prove_child, quote_belongs_to_child,
+                                      quote_belongs_to_child_loose,
+                                      quote_belongs_to_unit_material)
     source_path = Path(batch) / '01_source/正文.txt'
     raw = source_path.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
@@ -310,13 +344,112 @@ def _sample_source_binding(batch, plan, check):
                 'source_path': '01_source/正文.txt', 'source_sha256': digest}
     text = raw.decode('utf-8-sig')
     unit = next((u for u in confirmed_units(batch) if u['unit_id'] == check.get('unit_id')), {})
-    proof = prove_child(text, unit, check.get('number'), source_sha256=digest)
-    if proof['status'] == 'proven' and not any(
-            isinstance(item, dict) and item.get('path') == '01_source/正文.txt'
-            and quote_belongs_to_child(text, unit, check.get('number'), item.get('quote'))
-            for item in check.get('evidence', [])):
-        proof = dict(proof, status='uncertain', reason='原文引证未唯一归属于目标小题')
+    number = check.get('number')
+    proof = prove_child(text, unit, number, source_sha256=digest)
+    if proof['status'] == 'proven':
+        quotes = [item.get('quote') for item in check.get('evidence', [])
+                  if isinstance(item, dict) and item.get('path') == '01_source/正文.txt']
+        methods = []
+        for quote in quotes:
+            if quote_belongs_to_child(text, unit, number, quote):
+                methods.append('child-verbatim')
+            elif quote_belongs_to_child_loose(text, unit, number, quote):
+                methods.append('child-normalized')
+            elif quote_belongs_to_unit_material(text, unit, quote):
+                methods.append('group-material-verbatim')
+        if not methods:
+            proof = dict(proof, status='uncertain', reason='原文引证未唯一归属于目标小题或同组材料')
+        else:
+            proof = dict(proof, evidence_method=methods[0])
     return proof
+
+
+def _sample_number(check):
+    """Resolve a sample target number, tolerating a model that puts it only in
+    assessment.difficulty (a single number) instead of the check top level."""
+    number = check.get("number")
+    if number is not None and str(number).strip():
+        return str(number)
+    assessment = check.get("assessment") if isinstance(check.get("assessment"), dict) else {}
+    difficulty = assessment.get("difficulty")
+    if isinstance(difficulty, list):
+        numbers = {str(item.get("number")) for item in difficulty
+                   if isinstance(item, dict) and item.get("number") is not None}
+        if len(numbers) == 1:
+            return numbers.pop()
+    return None
+
+
+class RoundCheckError(ValueError):
+    """Round checks failed validation; ``issues`` lists the offending targets."""
+
+    def __init__(self, message, issues=None):
+        super().__init__(message)
+        self.issues = list(issues or [])
+
+
+def _localize_quote(quote, text, *, min_ratio=0.92):
+    """Return an exact source line/window for an almost-verbatim quote.
+
+    Only accepts a window whose similarity to the quote is at least min_ratio,
+    so paraphrases are never silently accepted as evidence. The returned value
+    is copied verbatim from the bound text.
+    """
+    if not isinstance(quote, str) or not isinstance(text, str) or not quote.strip():
+        return None
+    import difflib
+    lines = text.splitlines()
+    best, best_ratio = None, 0.0
+    candidates = [[line] for line in lines if line.strip()]
+    candidates += [[lines[i], lines[i + 1]] for i in range(len(lines) - 1)
+                   if lines[i].strip() or lines[i + 1].strip()]
+    for window in candidates:
+        candidate = "\n".join(window)
+        ratio = difflib.SequenceMatcher(None, quote, candidate, autojunk=False).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = candidate, ratio
+    if best is None or best_ratio < min_ratio:
+        return None
+    return best if best != quote else None
+
+
+def _normalize_result_quotes(batch, result):
+    """Replace near-verbatim quotes with the exact bound substring.
+
+    Deterministic and conservative: only quotes whose best source window is at
+    least 92% similar are rewritten, and the original is retained in
+    ``model_quote`` for audit. Paraphrased quotes stay untouched so validation
+    still fails closed.
+    """
+    import copy
+    checks = ((result.get("artifacts") or {}).get("review_round") or {}).get("checks")
+    if not isinstance(checks, list):
+        return result
+    out = copy.deepcopy(result)
+    for check in out["artifacts"]["review_round"]["checks"]:
+        if not isinstance(check, dict):
+            continue
+        for evidence in check.get("evidence") or []:
+            if not isinstance(evidence, dict):
+                continue
+            quote, path = evidence.get("quote"), evidence.get("path")
+            if not isinstance(quote, str) or not isinstance(path, str):
+                continue
+            try:
+                target = batch / path
+                if not target.is_file():
+                    continue
+                text = target.read_text(encoding="utf-8-sig")
+            except (OSError, ValueError):
+                continue
+            if _quote_matches(quote, text):
+                continue
+            localized = _localize_quote(quote, text)
+            if localized:
+                evidence["model_quote"] = quote
+                evidence["quote"] = localized
+                evidence["normalized"] = True
+    return out
 
 
 def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage=False):
@@ -349,7 +482,11 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
         if not isinstance(check, dict):
             raise ValueError("Every target needs a review judgment")
         uid = check.get("unit_id")
-        number = check.get("number") if round_id == "sample" else None
+        number = _sample_number(check) if round_id == "sample" else None
+        if round_id == "sample" and number is not None:
+            # Normalise the resolved target number so every later reader
+            # (coverage, source binding, consensus) sees a consistent value.
+            check["number"] = number
         key = (uid, str(number) if number is not None else None)
         try:
             if key not in expected_set or key in covered:
@@ -471,7 +608,7 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
     findings = []
     for check in checks:
         uid = str(check.get("unit_id")) if check.get("unit_id") is not None else ""
-        num = str(check.get("number")) if (round_id == "sample" and check.get("number") is not None) else None
+        num = _sample_number(check) if round_id == "sample" else None
         verdict = check.get("verdict")
         rationale = check.get("rationale") or ""
         delta = ""
@@ -538,7 +675,7 @@ def _verify_round_sources(batch, plan, record):
                 or binding.get("plan") != plan or binding.get("input_hashes") != state.get("input_hashes")
                 or binding.get("prior_rounds") != state.get("prior_rounds")
                 or binding.get("state_digest") != expected_state_digest
-                or binding.get("context_version") not in ("blind-context-v6", "blind-context-v7")
+                or binding.get("context_version") not in ("blind-context-v7", "blind-context-v8")
                 or task.get("protocol") != ROUND_PROTOCOL or task.get("task_id") != task_id
                 or task.get("round_id") != record["round_id"] or task.get("input_binding") != plan["input_binding"]
                 or task.get("prompt") != state_parts[index].get("prompt")
@@ -564,14 +701,15 @@ def _verify_round_sources(batch, plan, record):
         if not isinstance(checks, list) or (index < len(completed) and checks != entry.get("checks")):
             raise ValueError("Review execution checks mismatch")
         targets = state_parts[index]["targets"]
-        actual = ([{"unit_id": c.get("unit_id"), "number": c.get("number")} for c in checks]
+        actual = ([{"unit_id": c.get("unit_id"), "number": _sample_number(c)} for c in checks]
                   if record["round_id"] == "sample" else [c.get("unit_id") for c in checks])
         if len(actual) != len(targets) or any(target not in actual for target in targets):
             raise ValueError("Review execution response targets mismatch")
         receipt = _load(batch / "workflow/review-bindings" / (task_id + ".receipt.json"))
         if receipt is not None and (not isinstance(receipt, dict) or receipt.get("result_digest") != digest):
             raise ValueError("Review receipt digest mismatch")
-        collected.extend(checks)
+        collected.extend([dict(c, number=_sample_number(c))
+                          for c in checks] if record["round_id"] == "sample" else checks)
     if collected != record["checks"]:
         raise ValueError("Review checks differ from retained responses")
 

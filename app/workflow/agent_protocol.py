@@ -287,7 +287,7 @@ def import_result(batch_dir, task_id, result_path) -> dict:
             raise ValueError("Invalid private task binding")
         stage = binding["stage"]
         if stage == "review":
-            raise ValueError("旧式 AI 初审任务已停用；请重新导出三轮审核任务")
+            raise ValueError("旧式 AI 初审任务已停用；请重新导出审核任务")
         spec = _spec(stage)
         task_path = _path(batch, f"workflow/agent-tasks/{task_id}/task.json")
         if _digest(task_path.read_bytes()) != binding["task_sha256"]:

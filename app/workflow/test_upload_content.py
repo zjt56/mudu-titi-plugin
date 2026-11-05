@@ -387,11 +387,11 @@ class UploadContentTest(unittest.TestCase):
         report = inspect_content(self.batch, self.group(articleSummary='自编的一篇新文章大意。'))
         self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['errors']})
 
-    def test_absent_explanation_now_requires_generation_under_f7(self):
-        # F7：非听力单元缺解析不再放行，提示按 AI 生成补齐并标注。
-        report = inspect_content(self.batch, {'items': [{'unit_id': 'q-1', 'number': 1, 'explanation': ''}]})
-        self.assertFalse(report['passed'])
-        self.assertIn('EXPLANATION_MISSING', {e['code'] for e in report['errors']})
+    def test_absent_explanation_is_allowed_and_unsourced_generation_rejected(self):
+        # 用户规则：非听力单元缺解析填占位（待补充）或留空都放行，不再要求补写。
+        for value in ('', '待补充', '暂无', '无'):
+            report = inspect_content(self.batch, {'items': [{'unit_id': 'q-1', 'number': 1, 'explanation': value}]})
+            self.assertTrue(report['passed'], report)
         # 未标注、无法溯源的生成内容仍拦停。
         report = inspect_content(self.batch, {'items': [{'unit_id': 'q-1', 'number': 1, 'explanation': '原资料未提供逐题解析'}]})
         self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report['errors']})

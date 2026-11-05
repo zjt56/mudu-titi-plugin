@@ -29,7 +29,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import contracts, manifest as mf, preview as preview_mod, report as report_mod, runner as rn
+from . import contracts, manifest as mf, report as report_mod, runner as rn
 
 SKILL_ROOT = rn.SKILL_ROOT
 DEFAULT_INBOX = SKILL_ROOT / "inbox"
@@ -534,7 +534,6 @@ def process(inbox: Path, workflows_root: Path, bridge: dict,
                 outcome["report"] = str(Path(batch_dir) / "07_review" / "notification.txt")
                 outcome["digest"] = (f"无误 {counts['ok']} / 有疑问 {counts['attention']}"
                                      f" / 阻断 {counts['blocked']} / 未核对 {counts['unverified']}")
-                preview_mod.refresh(batch_dir)
             except Exception as exc:  # 通报失败不影响批次推进结果
                 outcome["report_error"] = str(exc)
             results.append(outcome)

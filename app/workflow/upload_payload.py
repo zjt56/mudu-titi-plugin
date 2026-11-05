@@ -482,8 +482,7 @@ class _Builder:
                 text = unescape(re.sub(r"</?(?:b|strong|i|em|u|sup|sub|span|p|div|br|font|small|mark)\b[^>]*>", "", text, flags=re.I))
                 if re.match(r"\s*[*_`~]*\s*" + prefix + r"\s*[*_`~]*\s*[:：]", text, re.I):
                     self.error("CONTENT_PREFIX_INVALID", f"{key} 只保留正文，不重复字段标题前缀", uid)
-        # F3/F5：文章大意可来自原卷，也可由 AI 生成，但生成内容必须标注「（AI生成，待校对）」。
-        # 仅当出现 AI 生成字样却未带完整标注时拦停；可溯源/已标注的摘要由 check_explanations 判定。
+        # 用户规则：缺文章大意填「无」，不生成；历史产物里带 AI 生成字样的仍按旧口径校验标注。
         summary_text = data.get("articleSummary")
         if isinstance(summary_text, str) and re.search(r"AI\s*生成", summary_text, re.I) \
                 and AI_MARK not in summary_text:
@@ -492,7 +491,7 @@ class _Builder:
         if not _nonempty(data.get("explanation")):
             if data.get("explanation") is not None and not isinstance(data.get("explanation"), str):
                 self.error("EXPLANATION_INVALID", "explanation 必须是字符串", uid)
-            self.warning("MISSING_EXPLANATION", "来源未提供解析；按 F7 应自行补齐并标注，发布前需人工校对", uid)
+            self.warning("MISSING_EXPLANATION", "来源未提供解析；按用户规则应在字段填「无」（不生成）", uid)
         for key in ("title", "material", "articleSummary", "curriculum", "explanation"):
             if key in data and not isinstance(data[key], str):
                 self.error("TEXT_FIELD_INVALID", f"{key} 必须是字符串", uid)

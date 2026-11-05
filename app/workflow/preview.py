@@ -1,16 +1,9 @@
 # -*- coding: utf-8 -*-
-"""生成本地预览页：模板 + 数据 → 一页 HTML，双击就能翻整套卷。
+"""原卷切题与批次数据辅助（插件面板 REST API 的数据层）。
 
-拆分方式：
-- workflow/templates/preview.html 是模板，里面只有 __TITLE__ 与 __DATA__ 两个占位；
-- 本模块负责收集数据、替换占位、覆盖写出 <批次>/preview.html。
-
-所以改样式或交互只改模板，改数据字段只改这里，互不影响。
-每次生成都覆盖同一个 preview.html，浏览器刷新即可看到最新状态。
-
-数据来源与通报一致（report.collect），避免"通报说通过、页面说有问题"。
-题目正文按题号从 01_source/正文.txt 机械切片，只用于快速预览，
-不是结构确认的结果，不能替代原卷核对。
+按题号从 01_source/正文.txt 机械切片、识别大题边界与选项行、从批次产物
+投影单元行 —— 供 workbench.server 的详情接口与 workflow 的暂定候选使用。
+本模块只产出数据，不生成任何 HTML／页面；显示一律由 DSH 插件面板完成。
 """
 from __future__ import annotations
 
@@ -18,13 +11,8 @@ import json
 import re
 from pathlib import Path
 
-from . import manifest as mf, report
 from .extract import _plain, guide_numbers, material_label, material_start
 from .denoise import NUMBERED_TITLE
-
-OUT = "preview.html"
-TEMPLATE = Path(__file__).resolve().parent / "templates" / "preview.html"
-MAX_LINES = 12
 
 START_PATTERNS = (
     re.compile(r"[（(]\s*[）)]\s*(\d{1,3})\s*[.．]"),
@@ -32,7 +20,6 @@ START_PATTERNS = (
     re.compile(r"\u3000\s*(\d{1,3})(?!\d)"),
 )
 SECTION = re.compile(r"^\s*(第[一二三四五六七八九十]+(?:部分|节)|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+[.．、]|[一二三四五六七八九十]+[、．.])")
-IMG = re.compile(r"\[IMG\s+([^\]]+)\]")
 # Only a complete numbered exam title is a header; a year can begin a real question.
 TITLE_LIKE = NUMBERED_TITLE
 # 题组导语（「听下面一段对话，回答第8至10题。」）属于下一组，
@@ -287,43 +274,58 @@ def source_slice(batch_dir, numbers, lines: list[str] | None = None) -> list[str
         return []
 
 
+def section_leadin(lines: list[str], numbers, first_line: str | None = None) -> list[str]:
+    """独立题预览辅助：返回该题所属大题的标题行 + 紧随的作答导语行。
+
+    只读、不改切题结果；用于把「Ⅱ.短对话理解(共10小题…)」「你将听到十段对话，…」
+    这类大题题干补到题目上方。优先用 first_line（切片首行）定位，兼容无印刷题号的
+    书面表达；找不到大题标题时返回 []。
+    """
+    nums = [int(n) for n in numbers if str(n).isdigit()]
+    anchor = None
+    if first_line:
+        target = _plain(first_line).strip()
+        if target:
+            for i, line in enumerate(lines):
+                if _plain(line).strip() == target:
+                    anchor = i
+                    break
+    if anchor is None:
+        if len(nums) != 1:
+            return []
+        number = nums[0]
+        anchor = _find(lines, number, strong=True)
+        if anchor is None:
+            anchor = _find(lines, number, strong=False)
+    if anchor is None:
+        return []
+    title_idx = None
+    for i in range(anchor - 1, -1, -1):
+        text = _plain(lines[i]).strip()
+        if not text:
+            continue
+        if SECTION.match(text):
+            title_idx = i
+            break
+    if title_idx is None:
+        return []
+    lead = [lines[title_idx].rstrip()]
+    for i in range(title_idx + 1, len(lines)):
+        line = lines[i]
+        text = _plain(line).strip()
+        if not text:
+            continue
+        if _strong_number(line) is not None or BARE_OPTION.match(line) or OPTION_LINE.match(line):
+            break
+        lead.append(line.rstrip())
+        if len(lead) >= 4:
+            break
+    return lead
+
+
 def batch_rows(batch_dir, review_rows: list[dict]) -> list[dict] | None:
     """按入库单元合并后的行：一个独立题一行，一个题组一行（带 numbers/subquestions）。"""
     return _rows_from_batch(Path(batch_dir), review_rows)
-
-
-def _media_refs(chunk: list[str]) -> list[str]:
-    refs = []
-    for line in chunk:
-        for name in IMG.findall(line):
-            name = name.strip()
-            if name not in refs:
-                refs.append(name)
-    return refs
-
-
-def parse_table(text: str) -> dict | None:
-    """把切片里的 [TABLE …] 块解析成行列，供页面渲染成真正的表格。"""
-    if "[TABLE" not in text:
-        return None
-    lines = text.splitlines()
-    start = next((i for i, l in enumerate(lines) if l.strip().startswith("[TABLE")), None)
-    end = next((i for i, l in enumerate(lines) if l.strip().startswith("[/TABLE]")), None)
-    if start is None or end is None or end <= start:
-        return None
-    rows = []
-    for line in lines[start + 1:end]:
-        if not line.strip():
-            continue
-        cells = [c.strip() for c in line.split("|")]
-        rows.append(cells)
-    if not rows:
-        return None
-    return {
-        "before": "\n".join(lines[:start]).strip(),
-        "rows": rows,
-        "after": "\n".join(lines[end + 1:]).strip(),
-    }
 
 
 SEVERITY_ORDER = {"blocked": 4, "attention": 3, "unverified": 2, "ok": 1}
@@ -482,92 +484,3 @@ def _rows_from_batch(batch_dir: Path, review_rows: list[dict]) -> list[dict] | N
     return rows
 
 
-def build_data(batch_dir) -> dict:
-    batch_dir = Path(batch_dir)
-    data = report.collect(batch_dir)
-    try:
-        manifest = mf.load(batch_dir)
-    except FileNotFoundError:
-        manifest = {}
-
-    text_path = batch_dir / "01_source" / "正文.txt"
-    lines = text_path.read_text(encoding="utf-8").splitlines() if text_path.is_file() else []
-
-    rows = _rows_from_batch(batch_dir, data["rows"])
-    mode = "batch" if rows else "slice"
-
-    if rows is None:
-        rows = []
-        for row in data["rows"]:
-            chunk = source_slice(batch_dir, [int(row["number"])], lines) if row["number"].isdigit() else []
-            text = "\n".join(chunk)
-            rows.append({
-                "unit_id": row["unit_id"],
-                "number": row["number"],
-                "label": row["number"],
-                "type": row["type"],
-                "answer": row["answer"],
-                "difficulty": row["difficulty"],
-                "knowledge": _short_knowledge_list(row.get("knowledge")),
-                "state": row["state"],
-                "rounds": row["rounds"],
-                "verdict": row["verdict"],
-                "open": row["open"],
-                "resolved": row["resolved"],
-                "text": text,
-                "table": parse_table(text),
-                "media": _media_refs(chunk),
-            })
-
-    return {
-        "batch": data["batch"],
-        "batch_dir": str(batch_dir),
-        "mode": mode,
-        "generated_at": data.get("generated_at") or mf.now_iso(),
-        "meta": manifest.get("meta", {}),
-        "status": manifest.get("status"),
-        "total": len(rows) if mode == "batch" else data["total"],
-        "counts": {k: sum(1 for r in rows if r["state"] == k) for k in
-                   ("ok", "attention", "blocked", "unverified")},
-        "coverage": data.get("coverage", {}),
-        "gate": data["gate"],
-        "validation": data["validation"],
-        "rows": rows,
-    }
-
-
-def load_template() -> str:
-    if not TEMPLATE.is_file():
-        raise FileNotFoundError(f"找不到预览模板：{TEMPLATE}")
-    return TEMPLATE.read_text(encoding="utf-8")
-
-
-def render_html(data: dict, template: str | None = None) -> str:
-    tpl = template if template is not None else load_template()
-    for token in ("__TITLE__", "__DATA__"):
-        if token not in tpl:
-            raise ValueError(f"模板缺少占位符 {token}：{TEMPLATE}")
-    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    title = f"{data.get('batch', '批次')} 预览"
-    html_text = tpl.replace("__TITLE__", title).replace("__DATA__", payload)
-    if "__DATA__" in html_text or "__TITLE__" in html_text:
-        raise ValueError("占位符未被完全替换，检查模板里是否重复出现")
-    return html_text
-
-
-def write(batch_dir) -> Path:
-    batch_dir = Path(batch_dir)
-    data = build_data(batch_dir)
-    target = batch_dir / OUT
-    target.write_text(render_html(data), encoding="utf-8")
-    return target
-
-
-def refresh(batch_dir, quiet: bool = True) -> Path | None:
-    """供其它命令调用：生成失败不影响主流程。"""
-    try:
-        return write(batch_dir)
-    except Exception as exc:  # noqa: BLE001 - 预览只是辅助，不能拖垮主流程
-        if not quiet:
-            print(f"  · 预览生成失败：{exc}")
-        return None

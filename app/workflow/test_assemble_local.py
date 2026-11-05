@@ -94,6 +94,22 @@ class AssembleLocalTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("被改动", reason)
 
+    def test_label_only_drift_still_allows_deterministic_rebuild(self):
+        assemble_local.record_guard(self.batch)
+        data = json.loads((self.batch / assemble_local.BATCH).read_text(encoding="utf-8"))
+        # 重新打标签/换解析只改内容字段，结构不变：必须继续走确定性路径。
+        data["items"][0].update(knowledge=["再改一次"], answer="C", explanation="再换解析",
+                                difficulty="困难", knowledgeIds=["X"], knowledge_ids=["X"])
+        _write(self.batch, assemble_local.BATCH, data)
+        ok, reason = assemble_local.guard_status(self.batch)
+        self.assertTrue(ok, reason)
+        self.assertIn("结构未变", reason)
+        self.assertTrue(assemble_local.available(self.batch))
+
+    def test_available_is_false_without_baseline(self):
+        """runner.run 的确定性组装入口依赖 available()，缺失基线时不得误判可用。"""
+        self.assertFalse(assemble_local.available(self.batch))
+
     def test_try_assemble_validates_then_imports_and_records_guard(self):
         assemble_local.record_guard(self.batch)
         calls = []

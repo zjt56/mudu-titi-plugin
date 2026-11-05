@@ -196,7 +196,6 @@
 | `workbench/media_audit.py` | 五类 verdict、长宽比阈值、排除清单、尺寸读取 |
 | `workflow/media-exclusions.json` | 人工排除记录（首次排除时生成） |
 | `workflow/preview.py` | 切片、表格解析、题组范围、媒体引用收集 |
-| `workflow/templates/preview.html` | 卷面预览模板 |
-| `workbench/static/app.css` | 预览字体、行距、题号空位、表格与缩略图样式 |
+| `lib/client.js` | 插件面板渲染样式（原卷版式、题图、表格） |
 | `workflow/structure_checks.py` | 图片引用完整性与归属判定 |
 | `workflow/checks.py` | 体检中的图片、表格、正文保真项 |

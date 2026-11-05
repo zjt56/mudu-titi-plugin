@@ -3,7 +3,7 @@
 这份文档只回答一件事：**怎么在 5 分钟内把工作流跑起来**。分四种用法：
 
 1. 在智能体里接手任务；
-2. 在本机网页端使用 / 打包给别人；
+2. 安装为 DSH 插件使用 / 打包给别人；
 3. 让工作流自动调用本机 Agent 的大模型；
 4. 对接云端题库 API（上传暂存）。
 
@@ -17,7 +17,8 @@
 | --- | --- | --- |
 | Python | 3.9+，建议 3.12 | 核心流程零第三方依赖 |
 | 系统 | macOS / Linux / Windows | 命令里 `python3` 在 Windows 换成 `python` |
-| 可选 | ffmpeg + faster-whisper | 只有听力切段/转写需要 |
+| 可选 | ffmpeg / ffprobe | 核心流程不需要；只有听力切段需要 |
+| 可选 | WhisperX 运行时与模型 | 只有听力切段需要；在插件设置页点「安装」后按需下载到数据根，见 [audio.md](audio.md) |
 | 可选 | 本地 OCR 服务 | 只有扫描版 PDF 需要，见 [extraction.md](extraction.md) |
 
 所有命令都在**仓库根目录**执行（有 `AGENTS.md`、`workflow/` 的那一层）。
@@ -78,19 +79,17 @@ python3 -m workflow.agent import --batch-dir workflows/<批次> \
 
 ---
 
-## 2. 在本机网页端启动
+## 2. 启动 DSH 插件与后端
 
-### 2.1 起审核台
+### 2.1 起后端
+
+后端由 DSH 宿主插件自动拉起（默认端口 8791，只绑回环地址）。手动排查时才直接启动：
 
 ```bash
-python3 -m workbench.server --port 8765
+python3.12 -m workbench.server --host 127.0.0.1 --port 8791
 ```
 
-打开 <http://127.0.0.1:8765>：
-
-- **首页**：上传原卷（docx/pdf，可附答案卷、听力 mp3）→ 自动建批次并开始提取；
-- **试卷审核**：左栏选批次，中栏按单元列题，右侧左边看原卷预览、右边处理待人工问题；
-- 题目列表可用 `↑`/`↓` 或 `k`/`j` 切换。
+插件面板（唯一前端）在 Harness 侧边栏「录题工作流」入口；上传、试卷审核、原卷预览、标签修改、待人工处理都在面板里完成。后端只提供 `/api/*` REST 接口，不提供任何页面。
 
 上传后的后台推进规则：
 
@@ -114,20 +113,14 @@ python3 -m workflow.runner status --batch-dir workflows/<批次>
 只打包**代码与规则**，不要带 `inbox/`、`workflows/`、`.cache/`、`.workbench-trash/`、`deliverables/` 和本机配置（含真实试卷与本机路径）。
 
 ```bash
-# 在仓库根目录执行
+# 在插件项目根目录执行
 zip -r exam-workflow.zip \
-  workflow workbench docs references scripts skills-reference \
-  AGENTS.md README.md .gitignore
+  lib app/workbench app/workflow app/docs app/references app/scripts app/skills-reference \
+  backend config locale \
+  app/AGENTS.md app/README.md README.md package.json cordis.patch.yml icon.svg .gitignore
 ```
 
-对方拿到压缩包后：
-
-```bash
-unzip exam-workflow.zip -d exam-workflow
-cd exam-workflow
-python3 -m workbench.server --port 8765
-# 浏览器打开 http://127.0.0.1:8765，上传自己的试卷即可
-```
+对方拿到压缩包后，按项目根 `README.md` 的「安装」用 `plugin_manager` 安装为 DSH 插件；重启 Harness 后从侧边栏打开面板，后端会自动拉起。
 
 > 如果要连自己的大模型或题库 API，再按第 4、5 节建本机配置；示例配置随包提供，不会带任何人的密钥。
 
@@ -135,7 +128,7 @@ python3 -m workbench.server --port 8765
 
 ## 3. 让工作流自动调用本机 Agent 的大模型
 
-目标：网页/自动推进时，代理阶段由本机已登录的 CLI（DSH、Codex 或任意命令）执行，而不是等人接单。
+目标：插件面板/自动推进时，代理阶段由本机已登录的 CLI（DSH、Codex 或任意命令）执行，而不是等人接单。
 
 ### 3.1 建配置
 
@@ -314,14 +307,14 @@ python3 -m workflow.runner upload --batch-dir workflows/<批次> --yes
 python3 -m workflow.doctor                                   # 环境/规则/契约
 python3 -m workflow.auto scan --inbox inbox                  # 批次识别
 python3 -m workflow.runner status --batch-dir workflows/<批次>  # 当前阶段
-python3 -m workbench.server --port 8765                      # 网页端
+python3.12 -m workbench.server --port 8791                  # REST API 后端（由插件拉起）
 ```
 
 常见问题：
 
 | 现象 | 先查什么 |
 | --- | --- |
-| 网页上传后不动 | 是否停在代理阶段：配了 `local-agent.json` 吗？没配就去 `workflow/agent-tasks/` 领任务 |
+| 面板里上传后不动 | 是否停在代理阶段：配了 `local-agent.json` 吗？没配就去 `workflow/agent-tasks/` 领任务 |
 | 代理调用失败 | `workflow/agent-runs/<阶段>-<编号>/stderr.log`；配额/登录/超时 |
 | 超过输入上限 | 调大 `max_input_chars` 或拆批次；不要截断原卷 |
 | 上传被拒 | `07_upload/preflight.json` 的缺项；媒体是否已部署 |

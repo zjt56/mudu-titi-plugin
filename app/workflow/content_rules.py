@@ -1,4 +1,4 @@
-"""子智能体1：解析匹配、缺解析生成、文章大意匹配、缺大意生成。
+"""子智能体1：解析匹配、文章大意匹配（缺失填占位，不生成）。
 
 独立阶段 `explanations`，独立产物 `04_knowledge/explanations.json`，与知识点
 子智能体（`knowledge`）分开。本模块只提供提示规则与校验，不执行模型、不写台账。
@@ -11,16 +11,28 @@ import re
 AI_MARK = '（AI生成，待校对）'
 SUMMARY_TYPES = frozenset(('阅读理解', '任务型阅读', '读写综合', '完形填空', '语法选择'))
 LISTENING_FILLED = '答案由AI生成（AI生成，待校对）'
+# 用户规则：试卷没有解析/文章大意时不再使用 AI 生成，直接跳过，对应字段一律填「无」。
+# 历史批次里的其它占位写法仍按缺失识别，避免旧产物被误判为编造。
+EMPTY_PLACEHOLDER = '无'
+PLACEHOLDER_TEXTS = frozenset(('无', '待补充', '暂无', '暂无解析', '暂无文章大意', '原卷无解析', '原卷无文章大意'))
+AI_MAX_CJK = 50
+AI_MAX_WORDS = 50
+
+
+def is_placeholder(text) -> bool:
+    """缺失占位：明确标注"没有"，不作为可溯源内容，也不触发 AI 标记校验。"""
+    value = str(text or '').strip()
+    return value == '' or value in PLACEHOLDER_TEXTS
+
 
 RULES = """Artifact: {items:[{unit_id,explanation:string,articleSummary:string,subquestions:[{number,explanation:string}],evidence:[nonempty location strings]}]}.
-你只做四件事，不判题型、不打知识点、不改答案、不改结构：
+你只做匹配与定位，不判题型、不打知识点、不改答案、不改结构，也**不撰写、不生成、不推断**任何解析或文章大意。
 1) 解析匹配：按真实题号、章节和材料边界，在原卷正文、附录、答案册中定位该题原解析，逐字保留（去掉“【解析】”等字段标题），evidence 写明来源文件与行号/题号。
-2) 缺解析生成：确认已提供来源确实没有该题解析后，依据该题实际题干、选项、共享材料和已由上一步验证的答案写出实质解析，末尾必须原样加 （AI生成，待校对）；依据不足返回需要复核。
-3) 文章大意匹配：按实际篇章及其所属题号匹配原【文章大意】，逐字保留并记录来源位置；重复的 A/B 篇号不是唯一标识。
-4) 缺大意生成：阅读理解、任务型阅读、读写综合、完形填空、语法选择缺大意时，依据完整真实材料写成 2–3 句中文，末尾加同一标记。大意只写组级一份，不在每个子题重复。
-约束：有原解析时不得用生成内容替换；生成内容不得与原文矛盾；不得串用其它材料的解析或大意（按题号与材料边界判定）。
-非听力题组的每个子题都要有自己的解析，独立非听力题的解析不能为空；听力不生成内容解析，答案自补时 explanation 只允许一行 答案由AI生成（AI生成，待校对）。
-题组的 explanation 可为空，子题各自填；articleSummary 仅在需要大意的题型填写。"""
+2) 文章大意匹配：按实际篇章及其所属题号匹配原【文章大意】，逐字保留并记录来源位置；重复的 A/B 篇号不是唯一标识。大意只写组级一份，不在每个子题重复。
+3) 缺失处理（用户规则）：确认已提供来源确实没有该题解析或该篇文章大意时，对应字段一律只填字符串「无」，直接跳过；严禁用 AI 生成或自行补写任何内容，也不加任何来源标记。
+约束：有原解析/原大意时逐字复制，不得替换；不得串用其它材料的解析或大意（按题号与材料边界判定）。
+听力不写内容解析：答案来自附录时 explanation 同样填「无」。
+非听力题组每个子题各自填（缺失填「无」）；独立题缺失也填「无」；articleSummary 仅在需要大意的题型填写，缺失填「无」。"""
 
 
 def _number(value):
@@ -62,12 +74,23 @@ def _substantive(text, minimum):
     return len(re.sub(r"\s|[^\w\u4e00-\u9fff]", "", body)) >= minimum
 
 
+def _ai_within_limit(text):
+    """AI 补写上限：中文 ≤50 字，英文 ≤50 词（取较大者判断）。"""
+    body = text.replace(AI_MARK, "").strip()
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", body))
+    words = len(re.findall(r"[A-Za-z][A-Za-z'-]*", body))
+    return cjk <= AI_MAX_CJK and words <= AI_MAX_WORDS
+
+
 def _check_generated(text, label, minimum):
-    """标注只能出现在末尾；标注过的必须是实质内容，不能是占位或套话。"""
+    """标注只能出现在末尾；标注过的必须有实质内容且不超过上限。"""
     if AI_MARK in text and not text.endswith(AI_MARK):
         raise ValueError(f"{label}: AI marker must be the trailing suffix")
-    if text.endswith(AI_MARK) and not _substantive(text, minimum):
-        raise ValueError(f"{label}: generated content is too short or generic")
+    if text.endswith(AI_MARK):
+        if not _substantive(text, minimum):
+            raise ValueError(f"{label}: generated content is too short or generic")
+        if not _ai_within_limit(text):
+            raise ValueError(f"{label}: AI-generated content must be within 50 Chinese characters/words")
 
 
 def validate(payload, units, typed, batch):
@@ -92,26 +115,19 @@ def validate(payload, units, typed, batch):
             _fields(child, ("number", "explanation", "evidence"), ("number", "explanation"))
             if not isinstance(child["explanation"], str):
                 raise ValueError("child explanation must be a string")
-            _check_generated(child["explanation"], "child explanation", 12)
+            if not is_placeholder(child["explanation"]):
+                _check_generated(child["explanation"], "child explanation", 12)
             if "evidence" in child and (not isinstance(child["evidence"], list)
                                         or any(not isinstance(x, str) or not x.strip() for x in child["evidence"])):
                 raise ValueError("child evidence must be a list of nonempty strings")
-        if not listening:
+        if not listening and not is_placeholder(explanation):
             _check_generated(explanation, "explanation", 12)
         if listening:
             if AI_MARK in explanation and explanation.strip() != LISTENING_FILLED:
                 raise ValueError("Listening units may only carry the single AI answer note, not generated explanations")
-        elif unit["unit_kind"] == "standalone":
-            if not explanation.strip():
-                raise ValueError("Standalone non-listening unit requires a nonempty explanation")
-        else:
-            for child in children:
-                if not child["explanation"].strip():
-                    raise ValueError("Every non-listening child requires its own explanation")
-        if qtype in SUMMARY_TYPES:
-            if not summary.strip():
-                raise ValueError(f"{qtype} units require articleSummary (match the source or generate with {AI_MARK})")
-            _check_generated(summary, "articleSummary", 10)
+        # 缺解析/缺大意填占位（用户要求）：占位视为缺失标记，不要求溯源，也不要求 AI 标记。
+        if qtype in SUMMARY_TYPES and not is_placeholder(summary):
+            _check_generated(summary, "articleSummary", 1)
         prepared.append(dict(row, question_type=qtype, numbers=unit["numbers"]))
     audit_ownership(batch, prepared)
     return rows

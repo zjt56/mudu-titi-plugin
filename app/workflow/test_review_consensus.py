@@ -68,20 +68,50 @@ class ConsensusTest(unittest.TestCase):
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_group_disagreement_one_finding_and_knowledge_order_ignored(self, _verify_sources):
         payload = self.payload()
-        payload['rounds'][1]['checks'][0]['assessment']['knowledge'].reverse()
-        for check in payload['rounds'][2]['checks']:
+        # 知识点顺序不是判断差异：反转后仍应视为一致。
+        payload['rounds'][0]['checks'][0]['assessment']['knowledge'].reverse()
+        self.assertTrue(review.evaluate_rounds(self.batch, payload)['passed'])
+        for check in payload['rounds'][1]['checks']:
             check['assessment']['subtypes'] = ['选择4题']
         result = review.evaluate_rounds(self.batch, payload)
         findings = result['findings']
         self.assertEqual(len(findings), 1, result['errors'])
         self.assertEqual(findings[0]['field'], 'subtypes')
-        self.assertEqual(len(findings[0]['round_sources']), 4)
         self.assertFalse(result['passed'])
+
+    @patch.object(review, '_verify_round_sources', return_value=None)
+    def test_group_difficulty_names_the_differing_numbers(self, _verify_sources):
+        payload = self.payload()
+        for check in payload['rounds'][1]['checks']:
+            check['assessment']['difficulty'] = [{'number': check['number'], 'value': '困难'}]
+        result = review.evaluate_rounds(self.batch, payload)
+        findings = [f for f in result['findings'] if f['field'] == 'difficulty']
+        self.assertEqual(len(findings), 1, result['errors'])
+        self.assertIn('差异小题', findings[0]['reason'])
+        for check in payload['rounds'][1]['checks']:
+            self.assertIn('第' + str(check['number']) + '题', findings[0]['reason'])
+
+    @patch.object(review, '_verify_round_sources', return_value=None)
+    def test_listening_passage_group_compares_only_at_group_level(self, _verify_sources):
+        # 听力短文是一材料带多题：小题知识点差异不应再生成逐题 finding。
+        self.put('03_types/types.json', {'items': [{'unit_id': 'g', 'type': '听力短文理解', 'subtypes': ['选择5题']}]})
+        self.plan = review.prepare_round_plan(self.batch)
+        payload = self.payload()
+        for record in payload['rounds']:
+            for check in record['checks']:
+                check['assessment']['type'] = '听力短文理解'
+                check['assessment']['subtypes'] = []
+        sample = payload['rounds'][1]['checks'][0]
+        sample['assessment']['subquestions'] = [
+            {'number': sample['number'], 'knowledge': ['设题角度/听力/推理判断']}]
+        result = review.evaluate_rounds(self.batch, payload)
+        self.assertTrue(result['execution_completed'], result['errors'])
+        self.assertEqual([f for f in result['findings'] if f['field'] == 'child_knowledge'], [])
 
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_uncertain_without_labels_remains_open_but_other_rounds_finish(self, _verify_sources):
         payload = self.payload()
-        check = payload['rounds'][2]['checks'][0]
+        check = payload['rounds'][1]['checks'][0]
         check['verdict'] = 'uncertain'
         check['assessment'] = None
         check['rationale'] = '无法确认该题标签。'
@@ -95,7 +125,7 @@ class ConsensusTest(unittest.TestCase):
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_partition_sources_use_real_execution_ids(self, _verify_sources):
         payload = self.payload()
-        sample = payload['rounds'][2]
+        sample = payload['rounds'][1]
         sample['execution_id'] = 'round-group'
         sample['parts'] = [{'execution_id': 'part-' + str(i), 'targets': [dict(target)]}
                            for i, target in enumerate(self.plan['sample'])]
@@ -230,7 +260,7 @@ class ConsensusTest(unittest.TestCase):
 
     def test_import_persists_cross_round_disagreement(self):
         payload = self.payload()
-        for check in payload['rounds'][2]['checks']:
+        for check in payload['rounds'][1]['checks']:
             check['assessment']['subtypes'] = ['选择4题']
         for record in payload['rounds']:
             task = review_rounds.export_task(self.batch)
@@ -241,7 +271,8 @@ class ConsensusTest(unittest.TestCase):
         queue = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
         self.assertEqual(len(queue), 1)
         self.assertEqual(queue[0]['field'], 'subtypes')
-        self.assertEqual(len(queue[0]['round_sources']), 4)
+        # 原标注 + 一审 + 二审抽中的两个小题 = 3 条来源
+        self.assertEqual(len(queue[0]['round_sources']), 3)
         self.assertEqual(review_rounds.import_result(self.batch, task['task_id'], response), report)
         self.assertEqual(len(json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']), 1)
 

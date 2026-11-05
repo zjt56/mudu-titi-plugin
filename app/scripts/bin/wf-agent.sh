@@ -17,6 +17,11 @@ is_rate_limited() {
   grep -Eiq '429|RATE_LIMIT|rate[_ ]limit|DAILY_LIMIT_EXCEEDED|usage limit has been reached|QUOTA|too many requests' "$1"
 }
 
+# 子进程 dsh 启动时可能因并发写 profile 配置瞬时 EPERM；这类失败重试一次即可。
+is_profile_race() {
+  grep -Eiq 'EPERM|operation not permitted' "$1"
+}
+
 run_once() {
   # $1 profile, $2 stdout target, $3 stderr target
   DEEPSEEK_API_KEY="$key" "$HOME/.local/bin/dsh" --profile "$1" - <"$prompt" >"$2" 2>"$3"
@@ -26,25 +31,35 @@ tmp_out="$(mktemp)"
 tmp_err="$(mktemp)"
 trap 'rm -f "$tmp_out" "$tmp_err"' EXIT
 
-if run_once "$profile" "$tmp_out" "$tmp_err"; then
-  cat "$tmp_out" >"$response"
-  exit 0
-fi
-rc=$?
-
-# 仅在限流/额度错误时换备用通道；其它失败（解析、崩溃）不盲目重跑。
-if is_rate_limited "$tmp_err"; then
-  echo "wf-agent: 通道 $profile 受限，切换到备用通道 $fallback 重试" >&2
-  if run_once "$fallback" "$tmp_out" "$tmp_err"; then
+rc=0
+# 注意：`if run_once; then ... fi` 在条件为假时整体返回 0，不能用 $? 取失败码，
+# 必须在 else 分支里取，否则失败会被吞成 0 且不写响应文件。
+attempt() {
+  if run_once "$1" "$tmp_out" "$tmp_err"; then
     cat "$tmp_out" >"$response"
     exit 0
+  else
+    rc=$?
   fi
-  rc=$?
+}
+
+attempt "$profile"
+
+if [ "$rc" -ne 0 ] && is_profile_race "$tmp_err"; then
+  echo "wf-agent: profile 写入冲突（EPERM），2 秒后重试一次" >&2
+  sleep 2
+  attempt "$profile"
+fi
+
+# 仅在限流/额度错误时换备用通道；其它失败（解析、崩溃）不盲目重跑。
+if [ "$rc" -ne 0 ] && is_rate_limited "$tmp_err"; then
+  echo "wf-agent: 通道 $profile 受限，切换到备用通道 $fallback 重试" >&2
+  attempt "$fallback"
 fi
 
 # 两条通道都失败：保留原始错误信息，交回工作流按 rate_limit/failed 分类处理。
 cat "$tmp_err" >&2
-echo "wf-agent: 代理调用失败（profile=$profile, exit=$rc）" >&2
+echo "wf-agent: 代理调用失败（profile=${profile}, exit=${rc}）" >&2
 # 若失败根因是限流/额度，把标记放在最后一行，便于工作流识别并进入冷却而非判死。
 if is_rate_limited "$tmp_err"; then
   echo "wf-agent: RATE_LIMIT 两条通道均受限（429/quota）" >&2

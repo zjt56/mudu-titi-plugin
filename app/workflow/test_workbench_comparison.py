@@ -40,7 +40,7 @@ class ComparisonTest(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         payload = fixture.payload()
-        sampled = {str(c['number']) for c in payload['rounds'][2]['checks']}
+        sampled = {str(c['number']) for c in payload['rounds'][1]['checks']}
         selected = next(iter(sampled))
         unsampled = next(str(n) for n in range(1, 7) if str(n) not in sampled)
         payload['rounds'][0]['checks'][0]['assessment']['difficulty'][int(selected) - 1]['value'] = '困难'
@@ -48,24 +48,24 @@ class ComparisonTest(unittest.TestCase):
         # This display fixture synthesizes assessments, so only provenance
         # verification is stubbed; plan and input binding validation stay real.
         with patch('workflow.review._verify_round_sources'):
-            self.assertEqual(review.evaluate_rounds(fixture.batch, payload)['checked_rounds'], ['labels', 'knowledge', 'sample'])
+            self.assertEqual(review.evaluate_rounds(fixture.batch, payload)['checked_rounds'], ['labels', 'sample'])
             fixture.write('07_review/review-rounds.json', payload)
             comparison = review_comparison(fixture.batch, 'group-1-6', list(range(1, 7)))
         finding = {'unit_id': 'group-1-6', 'field': 'difficulty', 'reason': '第%s题难度不一致' % selected}
         result = finding_comparison(finding, comparison, list(range(1, 7)), {})
         self.assertEqual(result['original'], '容易')
-        self.assertEqual([r['checks'][0]['value'] for r in result['rounds']], ['困难', '容易', '容易'])
-        self.assertEqual(str(result['rounds'][2]['checks'][0]['number']), selected)
+        self.assertEqual([r['checks'][0]['value'] for r in result['rounds']], ['困难', '容易'])
+        self.assertEqual(str(result['rounds'][1]['checks'][0]['number']), selected)
         group = finding_comparison({'unit_id': 'group-1-6', 'field': 'knowledge'}, comparison, list(range(1, 7)), {})
         self.assertEqual(group['rounds'][0]['checks'][0]['value'], fixture.knowledge['knowledge'])
-        self.assertEqual({str(c['number']) for c in group['rounds'][2]['checks']}, sampled)
-        self.assertGreater(len(group['rounds'][2]['checks']), 1)
+        self.assertEqual({str(c['number']) for c in group['rounds'][1]['checks']}, sampled)
+        self.assertGreater(len(group['rounds'][1]['checks']), 1)
         self.assertEqual(finding_bucket({'field': 'child_knowledge'}), 'label')
         child = finding_comparison({'unit_id': 'group-1-6', 'field': 'child_knowledge',
                                     'reason': '第%s题知识点不一致' % unsampled}, comparison, list(range(1, 7)), {})
         self.assertEqual(child['original'], ['设题角度/阅读/细节理解'])
         self.assertEqual(child['rounds'][0]['checks'][0]['value'], child['original'])
-        self.assertEqual(child['rounds'][2]['status'], '未覆盖')
+        self.assertEqual(child['rounds'][1]['status'], '未覆盖')
         type_comparison = finding_comparison({'unit_id': 'group-1-6', 'field': 'type'}, comparison, list(range(1, 7)), {})
         self.assertEqual(type_comparison['rounds'][1]['checks'][0]['value'], '阅读理解')
         self.assertIsNone(finding_comparison({'unit_id': 'group-1-6', 'field': 'difficulty', 'reason': '无题号'}, comparison, list(range(1, 7)), {}))
@@ -100,11 +100,11 @@ class ComparisonTest(unittest.TestCase):
             with patch.object(server, 'WORKFLOWS', root):
                 result = invoke('GET', '/api/batches/batch_fixture/units/FX-001')
             self.assertEqual([r['status'] for r in result['comparison']['rounds']],
-                             ['待重新审核', '未提供', '待重新审核'])
+                             ['待重新审核', '待重新审核'])
             self.assertTrue(all(not r['checks'] for r in result['comparison']['rounds']))
             self.assertNotIn('历史秘密值', json.dumps(result, ensure_ascii=False))
             finding_rounds = result['label_findings'][0]['comparison']['rounds']
-            self.assertEqual([r['status'] for r in finding_rounds], ['待重新审核', '未提供', '待重新审核'])
+            self.assertEqual([r['status'] for r in finding_rounds], ['待重新审核', '待重新审核'])
 
     def test_unverified_history_is_directory_wide_and_never_exposes_contents(self):
         from workbench import server
@@ -126,8 +126,8 @@ class ComparisonTest(unittest.TestCase):
                 archive.write_text(json.dumps(old, ensure_ascii=False), encoding='utf-8')
                 with patch.object(server, 'WORKFLOWS', root):
                     result = invoke('GET', '/api/batches/batch_fixture/units/FX-001')
-                self.assertEqual([r['status'] for r in result['comparison']['rounds']], ['历史来源未验证'] * 3)
-                self.assertEqual([r['status'] for r in result['label_findings'][0]['comparison']['rounds']], ['历史来源未验证'] * 3)
+                self.assertEqual([r['status'] for r in result['comparison']['rounds']], ['历史来源未验证'] * 2)
+                self.assertEqual([r['status'] for r in result['label_findings'][0]['comparison']['rounds']], ['历史来源未验证'] * 2)
                 self.assertNotIn('历史秘密值', json.dumps(result, ensure_ascii=False))
                 self.assertTrue(all(not r['checks'] for r in result['comparison']['rounds']))
 
@@ -153,19 +153,6 @@ class ComparisonTest(unittest.TestCase):
             (history / ('e' * 32 + '.json')).write_text(target.read_text())
             self.assertTrue(has_unverified_review_history(folder))
             self.assertFalse(has_unverified_review_history(other))
-
-    def test_frontend_round_status_text(self):
-        import shutil
-        import subprocess
-        node = shutil.which('node')
-        if not node:
-            self.skipTest('node unavailable')
-        app = (Path(__file__).resolve().parents[1] / 'workbench/static/app.js').read_text(encoding='utf-8')
-        function = app[app.index('    function roundText('):app.index('    // 只给一句话结论', app.index('    function roundText('))]
-        script = function + "\nconsole.log(JSON.stringify([roundText({status:'待重新审核'}), roundText({status:'历史来源未验证'}), roundText({status:'未提供'}), roundText({status:'未覆盖',round_id:'sample'}), roundText({status:'已提供',round_id:'sample',checks:[{number:'31',value:'真实值'}]})]));"
-        script = "function comparisonText(v) { return String(v); }\n" + script
-        result = subprocess.run([node, '-e', script], check=True, capture_output=True, text=True)
-        self.assertEqual(json.loads(result.stdout), ['历史记录已过期或无法验证，待重新审核', '当前无有效记录；目录有来源未验证的历史文件', '未执行', '未抽中', '抽中第31题：真实值'])
 
     def test_only_identical_open_findings_are_grouped(self):
         import copy
@@ -203,7 +190,7 @@ class ComparisonTest(unittest.TestCase):
             result = review_comparison(self.folder, 'group-1', [1])
         self.assertIsNone(result['original']['source'])
         self.assertEqual(result['original']['labels'], {})
-        self.assertEqual([r['status'] for r in result['rounds']], ['未提供', '待重新审核', '待重新审核'])
+        self.assertEqual([r['status'] for r in result['rounds']], ['未提供', '待重新审核'])
         self.assertTrue(all(not r['checks'] for r in result['rounds']))
 
 

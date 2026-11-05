@@ -1,1 +1,8 @@
-{ "name": "Paper Ingest Workflow", "description": "Embed the upload workflow and review workbench into DSH: choose in-harness models (incl. third-party), set per-round review models, and customize prompts and review policy." }
+{
+  "meta": {
+    "title": "md upload tiku",
+    "description": "English paper intake and question-bank upload: split questions, tag them, run two blind review rounds, resolve issues, and push approved results to the question bank."
+  },
+  "name": "md upload tiku",
+  "description": "English paper intake and question-bank upload: split questions, tag them, run two blind review rounds, resolve issues, and push approved results to the question bank."
+}

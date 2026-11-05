@@ -1,0 +1,42 @@
+{
+  "_comment": "portable runtime binaries vendored into the plugin. fetch_vendor.py downloads+verifies these. sha256 filled by fetch script on first run if empty.",
+  "python": {
+    "darwin-arm64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.11.18+20261026-aarch64-apple-darwin-install_only.tar.gz",
+      "sha256": "",
+      "kind": "tar.gz",
+      "bin": "bin/python3"
+    },
+    "win32-x64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20250311/cpython-3.11.11+20250311-x86_64-pc-windows-msvc-install_only.tar.gz",
+      "sha256": "",
+      "kind": "tar.gz",
+      "bin": "python.exe"
+    }
+  },
+  "ffmpeg": {
+    "darwin-arm64": [
+      {
+        "url": "https://www.osxexperts.net/ffmpeg7arm.zip",
+        "sha256": "",
+        "kind": "zip",
+        "files": { "ffmpeg": "ffmpeg" }
+      },
+      {
+        "url": "https://www.osxexperts.net/ffprobe7arm.zip",
+        "sha256": "",
+        "kind": "zip",
+        "files": { "ffprobe": "ffprobe" }
+      }
+    ],
+    "win32-x64": [
+      {
+        "url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        "sha256": "",
+        "kind": "zip",
+        "strip_prefix": "ffmpeg",
+        "files": { "ffmpeg": "ffmpeg.exe", "ffprobe": "ffprobe.exe" }
+      }
+    ]
+  }
+}

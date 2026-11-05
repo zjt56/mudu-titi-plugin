@@ -131,6 +131,18 @@ class UploadTest(unittest.TestCase):
         again = server.handle_upload({"title": "2026年安徽省中考英语"}, [self._docx("A.docx")])
         self.assertNotEqual(again["name"], result["name"])
 
+    def test_upload_without_title_preserves_original_filename(self):
+        source_name = "【木牍教育】14年安徽中考英语.docx"
+        audio_name = "【木牍教育】14年安徽中考英语音频.mp3"
+        result = server.handle_upload({}, [self._docx(source_name),
+            {"field": "files", "filename": audio_name, "data": b"ID3 test audio"}])
+        self.assertEqual(result["name"], pathlib.Path(source_name).stem)
+        descriptor = json.loads((server.INBOX / result["name"] / "batch.json").read_text())
+        self.assertEqual(descriptor["original_filenames"]["source"], source_name)
+        self.assertEqual(descriptor["original_filenames"]["audio"], audio_name)
+        self.assertEqual(descriptor["source"], "source.docx", "内部文件路径保持稳定")
+        self.assertEqual(self.started, [result["name"]])
+
     def test_upload_requires_document(self):
         with self.assertRaises(ValueError):
             server.handle_upload({"title": "x"}, [{"field": "files", "filename": "a.mp3", "data": b""}])

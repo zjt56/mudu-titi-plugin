@@ -301,5 +301,25 @@ class SourceBoundaryRegressionTest(unittest.TestCase):
         self.assertEqual(len(question_parts(confirmed["units"][0]["stem"].splitlines(), 40)["options"]), 4)
 
 
+    def test_ampersand_inside_option_text_is_not_a_new_option_label(self):
+        # Macon's B&B. 里的 “B.” 不是选项 B，否则会把 88/89 读成 A/B/C/D/B。
+        lines = [
+            '(　　)88.If your friend is coming for a visit,where will he stay for a night?',
+            'A.In J&M Music Store.\tB.In Peth Market.',
+            'C.At Times Coffee Shop.\tD.At Macon’s B&B.',
+            '(　　)89.Which of the following is TRUE according to the passage?',
+            'A.There is no breakfast at Macon’s B&B.',
+            'B.You can’t listen to the CD before you buy it.',
+            'C.Times Coffee Shop offers Jazz music every day.',
+            'D.Kids under 12 can get free ice cream in Peth Market.',
+        ]
+        q88 = question_parts(lines, 88)
+        self.assertEqual([o['label'] for o in q88['options']], ['A', 'B', 'C', 'D'])
+        self.assertIn('B&B.', q88['options'][3]['text'])
+        q89 = question_parts(lines, 89)
+        self.assertEqual([o['label'] for o in q89['options']], ['A', 'B', 'C', 'D'])
+        self.assertIn('B&B.', q89['options'][0]['text'])
+
+
 if __name__ == "__main__":
     unittest.main()

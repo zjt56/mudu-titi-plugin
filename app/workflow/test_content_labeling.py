@@ -76,20 +76,27 @@ class ContentLabelingTest(unittest.TestCase):
         self.assertTrue(self.accept('explanations', self.explanation())['completed'])
         self.assertTrue(self.accept('explanations', self.explanation(articleSummary=SUMMARY + tasks.AI_MARK))['completed'])
 
-    def test_reading_and_cloze_units_require_summary(self):
+    def test_reading_and_cloze_units_allow_placeholder_summary(self):
+        # 用户规则：缺文章大意填占位（待补充），不生成；有 AI 补写时必须标注且不超过 50 字。
         for qtype in sorted(content_rules.SUMMARY_TYPES):
             with self.subTest(qtype=qtype):
                 typed = {'q-1': {'unit_id': 'q-1', 'type': qtype, 'subtypes': [], 'evidence': ['正文 L1']}}
-                with self.assertRaisesRegex(ValueError, 'articleSummary'):
-                    content_rules.validate(self.explanation(), self.units, typed, self.batch)
+                content_rules.validate(self.explanation(articleSummary=content_rules.EMPTY_PLACEHOLDER),
+                                       self.units, typed, self.batch)
+                content_rules.validate(self.explanation(articleSummary=''), self.units, typed, self.batch)
                 content_rules.validate(self.explanation(articleSummary=SUMMARY + tasks.AI_MARK),
                                        self.units, typed, self.batch)
+                too_long = '这是一段很长的文章大意' * 20 + tasks.AI_MARK
+                with self.assertRaisesRegex(ValueError, 'within 50'):
+                    content_rules.validate(self.explanation(articleSummary=too_long),
+                                           self.units, typed, self.batch)
 
-    def test_missing_or_unmarked_explanation_is_rejected(self):
-        for explanation in ('', '自己写的解析没有来源也没有标注。'):
-            with self.subTest(explanation=explanation):
-                with self.assertRaises(ValueError):
-                    self.accept('explanations', self.explanation(explanation=explanation))
+    def test_missing_explanation_uses_placeholder_and_unsourced_generated_is_rejected(self):
+        # 缺解析填「待补充」或留空都合法（用户要求）；来源不明且未标注的自写解析仍拒绝。
+        self.assertTrue(self.accept('explanations', self.explanation(explanation=content_rules.EMPTY_PLACEHOLDER))['completed'])
+        self.assertTrue(self.accept('explanations', self.explanation(explanation=''))['completed'])
+        with self.assertRaises(ValueError):
+            self.accept('explanations', self.explanation(explanation='自己写的解析没有来源也没有标注。'))
         with self.assertRaises(ValueError):
             self.accept('explanations', self.explanation(explanation=tasks.AI_MARK))
 

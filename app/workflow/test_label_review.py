@@ -28,6 +28,18 @@ class TaxonomyTest(unittest.TestCase):
         self.assertEqual(len(resolved["non_leaf"]), 1)
         self.assertEqual(len(resolved["unknown"]), 1)
 
+    def test_resolve_migrates_unique_legacy_leaf_suffix(self):
+        result = taxonomy.resolve_knowledge([
+            "基本读音/字母在单词中的基本读音",
+            "词汇辨析/名词辨析",
+        ])
+        self.assertEqual(
+            [item["path"] for item in result["resolved"]],
+            ["语音/基本读音/字母在单词中的基本读音", "词汇/词汇辨析/名词辨析"],
+        )
+        self.assertEqual(result["unknown"], [])
+        self.assertEqual(result["non_leaf"], [])
+
     def test_check_labels_rejects_values_outside_catalog(self):
         problems = taxonomy.check_labels({
             "type": "不存在的题型",

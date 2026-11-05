@@ -115,6 +115,45 @@ def build_review_files(batch_dir: Path, result: dict) -> dict:
     queue_payload = _load(queue_path) or {"queue_version": "1.0", "items": []}
     queue = queue_payload.get("items", [])
 
+    # 同一批次重新做了完整审查（新的计划绑定）时，上一轮遗留的未处理发现已被
+    # 当前判定取代：继续留在队列/文件里，会把同一单元重复算成多条，人工队列
+    # 越跑越长。已有人工结论的记录保留，作为历史与决定依据。
+    from . import review
+    rounds_payload = result.get("review_rounds")
+    if not isinstance(rounds_payload, dict):
+        stored = _load(review_dir / review.ROUND_FILE)
+        if isinstance(stored, dict):
+            rounds_payload = stored
+    current_binding = None
+    if isinstance(rounds_payload, dict):
+        plan = rounds_payload.get("plan")
+        if isinstance(plan, dict):
+            current_binding = plan.get("input_binding")
+    current_protocol = review.ROUND_PROTOCOL if isinstance(rounds_payload, dict) else None
+
+    def _superseded(record):
+        sources = record.get("round_sources") or []
+        if not sources or not (current_binding or current_protocol):
+            return False
+        rows = [src for src in sources if isinstance(src, dict)]
+        if not rows:
+            return False
+        # 轮次集合变化时，旧观察已不存在于当前协议。
+        if any(src.get("round_id") not in review.ROUND_IDS for src in rows):
+            return True
+        if current_binding:
+            return all(src.get("input_binding") != current_binding for src in rows)
+        return all(src.get("protocol") != current_protocol for src in rows)
+
+    def _open(item):
+        status = str(item.get("status", "")).strip().lower()
+        return not item.get("decided_by") and status in ("", "open", "needs_review")
+
+    if current_binding:
+        for name in existing:
+            existing[name] = [r for r in existing[name] if not _superseded(r)]
+        queue = [item for item in queue if not (_superseded(item) and _open(item))]
+
     # 去重看的是"这条发现是否已存在"，与它有没有被处理无关；
     # 否则重复 ingest 会给未处理的发现再插一条，闸门出现重复阻断。
     handled_keys = {_key(r) for name in existing for r in existing[name]}
@@ -125,7 +164,6 @@ def build_review_files(batch_dir: Path, result: dict) -> dict:
     queue_by_id = {item.get("finding_id"): item for item in queue}
     index = _next_index(records + queue)
 
-    from . import review
     findings = list(result.get("findings") or [])
     if "review_rounds" in result:
         rounds = review.evaluate_rounds(batch_dir, result["review_rounds"])

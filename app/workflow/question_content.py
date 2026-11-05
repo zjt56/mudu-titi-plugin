@@ -11,7 +11,7 @@ from .preview import slice_text
 
 IMAGE = re.compile(r"\[IMG\s+([^\]]+)\]")
 FORBIDDEN = re.compile(r"(?:考试时间|满分\s*\d+分|本试卷共|扫码练听力|答案链接|初中学业水平考试)")
-OPTION = re.compile(r"(?<![A-Za-z])([A-H])[.．、]\s*")
+OPTION = re.compile(r"(?<![A-Za-z0-9&/.\-])([A-H])[.．、]\s*")
 
 CONTRACT = {
     "standalone": ["题号", "题干/作答指令", "本题选项或作答空位（如有）", "答案及来源", "题内图片/图标引用（如有）"],

@@ -43,7 +43,7 @@ detect_stage() {
   head -c 4000 "$prompt" | sed -n 's/^Stage:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' | head -1
 }
 
-# 从提示词判断审核轮次（review 提示词带 "ROUND: labels|knowledge|sample"）。
+# 从提示词判断审核轮次（review 提示词带 "ROUND: labels|sample"）。
 detect_round() {
   head -c 20000 "$prompt" | sed -n 's/^ROUND:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' | head -1
 }

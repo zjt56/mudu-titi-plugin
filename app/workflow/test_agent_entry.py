@@ -159,7 +159,7 @@ class AgentEntryTests(unittest.TestCase):
         batch = self._review_batch()
         attempt = batch / 'workflow/agent-runs/notes-only'
         attempt.mkdir(parents=True)
-        candidate = {'status': 'needs_review', 'artifacts': {}, 'notes': ['初审未能给出完整结论，继续独立三轮'], 'findings': []}
+        candidate = {'status': 'needs_review', 'artifacts': {}, 'notes': ['初审未能给出完整结论，继续独立分轮审核'], 'findings': []}
         (attempt / 'response.json').write_text(json.dumps(candidate), encoding='utf-8')
         first = {'attempt_dir': str(attempt), 'report': {'completed': False}}
         def partial():
@@ -195,7 +195,7 @@ class AgentEntryTests(unittest.TestCase):
         with contextlib.redirect_stdout(output), patch.object(local_agent, "load_config", return_value={"provider": "fixture", "max_input_chars": 600000}), \
              patch.object(review_rounds, "invoke", side_effect=invoke):
             self.assertEqual(agent._review_after(partial, batch, Path("fixture-config")), 3)
-        self.assertEqual(len(set(seen)), 3)
+        self.assertEqual(len(set(seen)), 2)
         report = json.loads(output.getvalue())
         self.assertTrue(report["execution_completed"])
         self.assertFalse(report["ai_review_completed"])
@@ -296,7 +296,7 @@ class AgentEntryTests(unittest.TestCase):
             self.assertEqual(agent._review_after(callback, batch, Path("fixture-config")), 3)
         report = json.loads(output.getvalue())
         self.assertEqual(len(calls), 3)
-        self.assertEqual(len(set(seen)), 3)
+        self.assertEqual(len(set(seen)), 2)
         self.assertTrue(report["execution_completed"])
         self.assertFalse(report["completed"])
         self.assertFalse(report["ai_review_completed"])

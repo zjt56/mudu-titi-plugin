@@ -256,8 +256,26 @@ def _parse_response(text):
                     raise ValueError(f"Duplicate JSON key: {key}")
                 result[key] = value
             return result
-        response = json.loads(text, parse_constant=reject_constant, parse_float=finite_float,
+        def load_json(value):
+            return json.loads(value, parse_constant=reject_constant, parse_float=finite_float,
                               object_pairs_hook=unique_object)
+        try:
+            response = load_json(text)
+        except (ValueError, RecursionError) as exc:
+            # 大结果里模型偶尔少写根对象的最后一个右花括号；内容与嵌套完整时
+            # 补齐后再解析，避免把可用的整份结果当成协议失败。截断的半截 JSON
+            # 不会以 }/] 结尾，不会被误收。
+            repaired = None
+            if text.endswith("}") or text.endswith("]"):
+                for extra in ("}", "}}", "}}}"):
+                    try:
+                        repaired = load_json(text + extra)
+                        break
+                    except (ValueError, RecursionError):
+                        continue
+            if repaired is None:
+                raise exc
+            response = repaired
     except (ValueError, RecursionError) as exc:
         raise AgentError(f"Invalid final JSON response: {exc}", "response") from exc
     if not isinstance(response, dict):
@@ -266,6 +284,20 @@ def _parse_response(text):
         raise AgentError("Final response status must be completed or needs_review", "response")
     if not isinstance(response.get("artifacts"), dict):
         raise AgentError("Final response artifacts must be an object", "response")
+    # 兼容模型把 notes/findings 写进 artifacts（或唯一文件对象）的嵌套错误。
+    artifacts = response["artifacts"]
+    targets = [artifacts]
+    if len(artifacts) == 1:
+        only = next(iter(artifacts.values()))
+        if isinstance(only, dict):
+            targets.append(only)
+    for key in ("notes", "findings"):
+        if key in response:
+            continue
+        for target in targets:
+            if key in target:
+                response[key] = target.pop(key)
+                break
     return response
 
 
@@ -555,7 +587,7 @@ def main(argv=None):
             outcome = assemble_local.try_assemble(batch_dir, config)
             if outcome is not None:
                 return outcome
-        split_enabled = config.get("unit_split", True) and args.stage in ("assemble", "review")
+        split_enabled = config.get("unit_split", True) and args.stage in ("assemble", "review", "explanations", "knowledge")
         try:
             task = agent_tasks.build_task(batch_dir, args.stage, max_input_chars=config["max_input_chars"])
         except ValueError as exc:
@@ -564,10 +596,15 @@ def main(argv=None):
             from workflow import unit_tasks
             task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
                                                  max_units=_part_units(config, args.stage))
-        if split_enabled and parts is None and not task.get("preconditions") and len(agent_tasks.confirmed_units(batch_dir)) > _part_units(config, args.stage):
-            from workflow import unit_tasks
-            task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
-                                                 max_units=_part_units(config, args.stage))
+        if split_enabled and parts is None and not task.get("preconditions"):
+            try:
+                _unit_count = len(agent_tasks.confirmed_units(batch_dir))
+            except (OSError, ValueError, KeyError, TypeError):
+                _unit_count = 0
+            if _unit_count > _part_units(config, args.stage):
+                from workflow import unit_tasks
+                task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
+                                                     max_units=_part_units(config, args.stage))
         attempts = batch_dir / "workflow" / "agent-runs"
         attempts.mkdir(parents=True, exist_ok=True)
         run_dir = Path(tempfile.mkdtemp(prefix=args.stage + "-", dir=attempts))

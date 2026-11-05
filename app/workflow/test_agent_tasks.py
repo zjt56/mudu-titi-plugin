@@ -77,6 +77,20 @@ class AgentTasksTest(unittest.TestCase):
             path = Path(key) if Path(key).is_absolute() else self.batch / key
             self.assertTrue(path.is_file(), key)
 
+    def test_knowledge_task_does_not_bind_explanations(self):
+        # 解析产物变化不能让知识点任务过期：提示词与指纹都不含 explanations。
+        task = tasks.build_task(self.batch, "knowledge")
+        self.assertNotIn(tasks.ARTIFACTS["explanations"], task["input_hashes"])
+        # 规则文本里会提到该产物路径，但解析正文不应被塞进提示词。
+        self.assertNotIn("本题考查动词辨析", task["prompt"])
+        self.assertTrue(self.accept("knowledge", self.knowledge)["completed"])
+        before = dict(task["input_hashes"])
+        changed = explanations_of(self.knowledge)
+        changed["items"][0]["explanation"] = "改写后的解析，与知识点任务无关。" + tasks.AI_MARK
+        self.write(tasks.ARTIFACTS["explanations"], changed)
+        # 解析改写只影响下一次导入时的逐字注入，不再让知识点任务整体过期重跑。
+        self.assertEqual(tasks.build_task(self.batch, "knowledge")["input_hashes"], before)
+
     def test_knowledge_without_appendix_can_accept_ai_explanation(self):
         (self.batch / "01_source/附录.txt").unlink()
         task = tasks.build_task(self.batch, "knowledge")
@@ -237,12 +251,16 @@ class AgentTasksTest(unittest.TestCase):
     def test_knowledge_leaf_scope_ids_and_provenance(self):
         self.assertTrue(self.accept("knowledge", self.knowledge)["completed"])
         for changes in ({"knowledge": ["词汇"]}, {"knowledge": ["主题/不存在"]},
-                        {"knowledge": ["语篇体裁/记叙文/故事"]}, {"knowledgeIds": ["wrong"]},
+                        {"knowledge": ["语篇体裁/记叙文/故事"]},
                         {"answer": "B"}, {"explanation": "unmarked generated explanation"}, {"evidence": []}):
             candidate = copy.deepcopy(self.knowledge)
             candidate["items"][0].update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.accept("knowledge", candidate)
+        # 路径合法的前提下，模型自填的错误 knowledgeIds 会被目录确定性回填纠正，而不是整轮重跑。
+        corrected = copy.deepcopy(self.knowledge)
+        corrected["items"][0]["knowledgeIds"] = ["wrong"]
+        self.assertTrue(self.accept("knowledge", corrected)["completed"])
 
     def group_fixture(self):
         units = _build_units([{"type": "阅读理解", "questions": [[1, 3]]}], [], ["1. Text", "2. Text", "3. Text"])
@@ -305,7 +323,7 @@ class AgentTasksTest(unittest.TestCase):
         stored = json.loads((self.batch / "07_review/content-review.json").read_text())["findings"]
         self.assertEqual(stored, [old])
         unchecked = json.loads((self.batch / "07_review/unchecked.json").read_text())
-        self.assertEqual({r["round_id"] for r in unchecked}, {"labels", "knowledge", "sample"})
+        self.assertEqual({r["round_id"] for r in unchecked}, {"labels", "sample"})
         self.assertTrue(all(r["required"] and r["status"] == "unchecked" for r in unchecked))
 
     def test_incomplete_review_never_creates_empty_unchecked(self):
@@ -385,6 +403,21 @@ class AgentTasksTest(unittest.TestCase):
             candidate["items"][0].update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.accept("assemble", candidate)
+
+    def test_assemble_fills_missing_source_placeholders_without_model_rework(self):
+        self.write("01_source/structure.confirmed.json", {"units": self.units, "meta": {
+            "paper_title": "未提供", "source": "未提供", "source_type": "未提供"}})
+        row = dict(self.knowledge["items"][0], id="q-1", number=1, numbers=[1], unit_kind="standalone",
+                   question_type="单项填空", filterMetadata={"subtypes": ["四个选项"]},
+                   stem="She ______ a book.", material="",
+                   options=[{"label": label, "text": text} for label, text in
+                            (("A", "reads"), ("B", "read"), ("C", "reading"), ("D", "to read"))])
+        self.assertTrue(self.accept("assemble", {"items": [row]})["completed"])
+        installed = json.loads((self.batch / tasks.ARTIFACTS["assemble"]).read_text())
+        filters = installed["items"][0]["filterMetadata"]
+        self.assertEqual(filters["source"], "未提供")
+        self.assertEqual(filters["source_type"], "未提供")
+        self.assertNotIn("year", filters)
 
     def test_assemble_preserves_identified_original_metadata(self):
         self.write("01_source/structure.confirmed.json", {"units": self.units, "meta": {

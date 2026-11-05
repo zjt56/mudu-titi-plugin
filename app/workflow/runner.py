@@ -20,6 +20,7 @@ structure_gate 已改为自动机器闸门（去噪+元信息抽取+按题型结
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -31,9 +32,9 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from workflow import (checks, contracts, doctor, ingest, inventory,  # type: ignore
-                          manifest as mf, preview, report, review)
+                          manifest as mf, report, review)
 else:
-    from . import checks, contracts, doctor, ingest, inventory, independent_review, manifest as mf, preview, report, review
+    from . import checks, contracts, doctor, ingest, inventory, independent_review, manifest as mf, report, review
 
 if __package__ in (None, ""):
     from workflow import independent_review
@@ -255,7 +256,7 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
 
 
 def flowchart_checks(batch_dir: Path, manifest: dict) -> dict:
-    """复核真实切题证据与正式批次；日常三审不要求人工姓名或密钥。"""
+    """复核真实切题证据与正式批次；日常审核不要求人工姓名或密钥。"""
     errors = []
     try:
         from .question_content import audit_batch_source
@@ -283,7 +284,7 @@ def flowchart_checks(batch_dir: Path, manifest: dict) -> dict:
             errors.append({"code": "ORIGINAL_EVIDENCE_STALE", "message": "原卷不存在或原件与切题证据不一致"})
     except (OSError, ValueError, TypeError, ImportError) as exc:
         errors.append({"code": "STRUCTURE_REVIEW_MISSING", "message": str(exc)})
-    # 兼容显式启用的独立验签；不再要求用户为普通三审配置审核人身份。
+    # 兼容显式启用的独立验签；不再要求用户为普通审核配置审核人身份。
     config = os.environ.get("MUDU_REVIEW_CONFIG")
     if config:
         try:
@@ -679,6 +680,45 @@ def _run_batch_locked(batch_dir: Path, fn) -> int:
         return fn()
 
 
+@contextlib.contextmanager
+def _single_run_lock(batch_dir: Path, timeout: float = 2.0):
+    """Only one `runner run` may drive a batch at a time.
+
+    The agent lock guards imports and is held by the very subprocesses a run
+    spawns, so it cannot serialize the run itself: two concurrent runs would
+    either time out on it or interleave manifest writes. This separate lock
+    makes a second invocation fail fast instead of wasting model calls and
+    corrupting the batch.
+    """
+    import errno
+    import time
+    lock_path = batch_dir / "workflow" / ".run.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        if not handle.seek(0, os.SEEK_END):
+            handle.write(b"0")
+            handle.flush()
+        deadline = time.monotonic() + timeout
+        import fcntl
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("该批次已有运行中的流水线（runner run），请等待其结束") from exc
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
 def cmd_mark(args) -> int:
     batch_dir = Path(args.batch_dir).expanduser().resolve()
     return _run_batch_locked(batch_dir, lambda: _cmd_mark_locked(batch_dir, args))
@@ -754,6 +794,15 @@ def _cmd_invalidate_locked(batch_dir: Path, args) -> int:
 
 def cmd_run(args) -> int:
     batch_dir = Path(args.batch_dir).expanduser().resolve()
+    try:
+        with _single_run_lock(batch_dir):
+            return _cmd_run_locked(batch_dir, args)
+    except RuntimeError as exc:
+        print(f"✗ {exc}")
+        return 3
+
+
+def _cmd_run_locked(batch_dir: Path, args) -> int:
     manifest = mf.load(batch_dir)
     order = list(contracts.STAGE_ORDER)
     if args.stage:
@@ -777,6 +826,35 @@ def cmd_run(args) -> int:
         if unmet:
             print(f"⏸ {stage_id} 等待上游：{'、'.join(unmet)}")
             return 0 if args.dry_run else 1
+
+        # 解析与知识点两路打标共享同一已校验上游、互不依赖，并行调用压缩墙钟时间。
+        # 导出/导入仍在批次锁内串行，导入前重新核对输入哈希与上游状态。
+        if (stage.id in ("explanations", "knowledge") and not args.dry_run
+                and not args.stage):
+            pair_ids = ("explanations", "knowledge")
+            ready = []
+            for pid in pair_ids:
+                pstage = contracts.STAGE_BY_ID[pid]
+                prec = manifest["stages"].get(pid, {})
+                if prec.get("status") in TERMINAL and not args.force:
+                    continue
+                if all(manifest["stages"].get(d, {}).get("status") in TERMINAL
+                       for d in pstage.depends_on):
+                    ready.append(pstage)
+            if len(ready) == 2:
+                from workflow import auto as auto_flow
+                from workflow import local_agent
+                try:
+                    config = local_agent.load_config(getattr(args, "config", None))
+                except (OSError, ValueError):
+                    config = None
+                if config:
+                    _print_header("explanations / knowledge · 打标签并行")
+                    outcomes = auto_flow._parallel_ready_agents(batch_dir, ready, config)
+                    manifest = mf.load(batch_dir)
+                    if any(code not in (0, 3) for code in outcomes.values()):
+                        print("  · 并行打标签存在失败，继续按顺序处理其余阶段")
+                    continue
 
         _print_header(f"{stage.id} · {stage.title}（{stage.kind}）")
         if stage.kind == contracts.AGENT:
@@ -811,6 +889,29 @@ def cmd_run(args) -> int:
                     print("  将调用本地代理：" + " ".join(_render(executable.command, batch_dir)))
                     continue
                 code = _execute_command(batch_dir, manifest, executable)
+                if code != 0 and stage.id == "assemble":
+                    # 模型组装未通过源审计：先用确认结构做确定性重建（零模型调用），
+                    # 通过整批校验才安装，避免为一次失败再付一遍模型调用。
+                    from workflow import assemble_local, agent_protocol
+                    try:
+                        payload = assemble_local.build(batch_dir)
+                        with tempfile.TemporaryDirectory() as tmp:
+                            result = Path(tmp) / "result.json"
+                            exported = agent_protocol.export_task(batch_dir, "assemble", max_input_chars=900000)
+                            result.write_text(json.dumps({"protocol": agent_protocol.PROTOCOL,
+                                "task_id": exported["task_id"],
+                                "result": {"status": "completed",
+                                           "artifacts": {contracts.STAGE_BY_ID["assemble"].produces[0]: payload},
+                                           "notes": ["模型组装未通过源审计，改用确认结构的确定性重建"],
+                                           "findings": []}}, ensure_ascii=False), encoding="utf-8")
+                            report = agent_protocol.import_result(batch_dir, exported["task_id"], result)
+                        if report.get("completed"):
+                            assemble_local.record_guard(batch_dir)
+                            print("  ✓ 模型组装失败后改用确定性重建并通过（未再调用模型）")
+                            manifest = mf.load(batch_dir)
+                            continue
+                    except (ValueError, OSError, KeyError, TypeError) as exc:
+                        print("  · 确定性重建也不可用：" + str(exc)[:120])
                 if code != 0:
                     return code
                 continue
@@ -975,9 +1076,6 @@ def cmd_ingest(args) -> int:
         print(f"  ✓ 已登记：{'、'.join(report['marked'])}")
     else:
         print("  · 没有可登记的阶段（正式产物或审核文件尚未生成）")
-    page = preview.refresh(batch_dir)
-    if page:
-        print(f"  预览已刷新：{page.name}")
     return 0
 
 
@@ -1020,29 +1118,8 @@ def cmd_report(args) -> int:
     print(f"已写出：{out / 'notification.txt'}")
     print(f"         {out / 'report.md'}")
     print(f"         {out / 'report.json'}")
-    page = preview.refresh(batch_dir)
-    if page:
-        print(f"预览已刷新：{page}")
     if args.strict and (data["counts"][report.BLOCKED] or data["counts"][report.ATTENTION]):
         return 1
-    return 0
-
-
-def cmd_preview(args) -> int:
-    batch_dir = Path(args.batch_dir).expanduser().resolve()
-    try:
-        target = preview.write(batch_dir)
-    except FileNotFoundError as exc:
-        print(f"✗ {exc}")
-        return 2
-    print(f"✓ 已生成：{target}")
-    print("  双击用浏览器打开即可；不需要服务器，图片走相对路径。")
-    if args.open:
-        try:
-            os.startfile(str(target))  # type: ignore[attr-defined]
-            print("  已尝试用默认浏览器打开。")
-        except (AttributeError, OSError) as exc:
-            print(f"  · 自动打开失败（{exc}），请手动打开上面的路径。")
     return 0
 
 
@@ -1081,6 +1158,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--stage", help="只执行指定阶段")
     p_run.add_argument("--until", help="执行到指定阶段为止")
     p_run.add_argument("--force", action="store_true", help="已完成阶段也重新执行")
+    p_run.add_argument("--config", type=Path)
     p_run.add_argument("--dry-run", action="store_true")
     p_run.set_defaults(func=cmd_run)
 
@@ -1140,11 +1218,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--strict", action="store_true",
                        help="有阻断或有疑问时返回非零退出码")
     p_rep.set_defaults(func=cmd_report)
-
-    p_prev = sub.add_parser("preview", help="生成可直接打开的本地预览页")
-    batch_arg(p_prev)
-    p_prev.add_argument("--open", action="store_true", help="生成后用默认浏览器打开")
-    p_prev.set_defaults(func=cmd_preview)
 
     p_doc = sub.add_parser("doctor", help="自检：环境、规则、契约、闸门、批次")
     p_doc.set_defaults(func=cmd_doctor)

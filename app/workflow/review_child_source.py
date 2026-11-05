@@ -157,3 +157,68 @@ def quote_belongs_to_child(source, unit, number, quote):
     start = source.find(quote)
     return (start >= span[0] and start + len(quote) <= span[1]
             and source.find(quote, start + 1) < 0)
+
+
+def _loose(text):
+    """Whitespace/marker-insensitive form used only to compare spans."""
+    value = re.sub(r'<\s*/?\s*u\s*>', ' ', str(text or ''), flags=re.I)
+    return re.sub(r'[\s\u00a0\u3000]+', ' ', value).strip()
+
+
+def quote_belongs_to_child_loose(source, unit, number, quote):
+    """Same uniqueness rule as quote_belongs_to_child, tolerating blank markers.
+
+    Word-spelling and listening-table targets are reproduced in the source with
+    underline/blank markers that a model legitimately re-quotes without the
+    markers; the offsets still have to stay inside the proven child span.
+    """
+    if not isinstance(quote, str) or not quote.strip():
+        return False
+    span = child_span(source, unit, number)
+    if span is None:
+        return False
+    wanted = _loose(quote)
+    if len(wanted) < 2 or not re.search(r'[^\W\d_]', wanted, re.UNICODE):
+        return False
+    if wanted not in _loose(source[span[0]:span[1]]):
+        return False
+    return _loose(source).count(wanted) == 1
+
+
+def _unit_material_span(source, unit):
+    """Character range of a group's own material, from its confirmed line span."""
+    span = unit.get('source_span') if isinstance(unit, dict) else None
+    if not isinstance(span, dict):
+        return None
+    first, last = span.get('start_line'), span.get('end_line')
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in (first, last)):
+        return None
+    if first < 1 or last < first:
+        return None
+    lines = _source_lines(source)
+    if last > len(lines):
+        return None
+    start = lines[first - 1][0]
+    end = lines[last][0] if last < len(lines) else len(source)
+    return start, end
+
+
+def quote_belongs_to_unit_material(source, unit, quote):
+    """A shared passage quote that provably sits inside this group's material.
+
+    Whole-passage groups (阅读理解/完形填空/任务型阅读…) keep the supporting
+    sentence in the shared material, outside the child's own stem span. The
+    quote is accepted only when it is an exact, unique substring of the source
+    and inside the group's confirmed material lines, never another group's.
+    """
+    if not isinstance(quote, str) or not quote.strip():
+        return False
+    if not re.search(r'[^\W\d_]', quote, re.UNICODE):
+        return False
+    span = _unit_material_span(source, unit)
+    if span is None:
+        return False
+    start = source.find(quote)
+    if start < 0 or source.find(quote, start + 1) >= 0:
+        return False
+    return span[0] <= start and start + len(quote) <= span[1]

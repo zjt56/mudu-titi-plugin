@@ -1,8 +1,9 @@
 # 录题工作流（workflow + workbench）
 
-把一份英语试卷（docx / pdf，可带答案卷与听力音频）整理成题库可以接收的结构化数据，并在本地网页上看题、改标签、处理人工意见。
+把一份英语试卷（docx / pdf，可带答案卷与听力音频）整理成题库可以接收的结构化数据。
+本目录（`app/`）只含**流水线与纯 REST API 后端**：不提供任何网页、静态资源或界面；所有显示与操作都在 DSH 插件面板 `../lib/client.js` 中完成。
 
-本仓库只放**流水线与前后端代码**，不含技能说明（`SKILL.md`、`references/*.md`）与任何真实试卷数据；关键的执行标准另见 `docs/`。
+本仓库只放流水线与后端代码，不含技能说明（`SKILL.md`、`references/*.md`）与任何真实试卷数据；关键的执行标准另见 `docs/`。
 
 录题技能源文的固定提交摘要见 [`skills-reference/`](skills-reference/README.md)，其中记录在线来源、历史冲突与本次明确决定；它不是原文全集，也不自动覆盖用户要求或代码事实。标签的题组/子题规则与计划中的共用校验集成见 [知识点与标签口径](docs/knowledge-tagging.md)。
 
@@ -24,12 +25,10 @@ workflow/           流水线：阶段契约、清单/台账、检查、审核�
   preview.py        原卷切片：按题号/题区间取正文、表格、图片
   ingest.py inventory.py checks.py doctor.py
   pipelines/        工作流脚本（Node 模拟可跑）
-  templates/preview.html
-workbench/          本地审核台（Python 标准库 HTTP 服务 + Vue 3 + Element Plus）
+workbench/          纯 REST API 后端（Python 标准库 HTTP 服务，无页面、无静态文件）
   server.py         REST API：批次、单元、标签、处理意见、图片体检、上传、流程推进
   taxonomy.py       27 个固定题型、子类、难度、分类、知识点目录（只认叶子）
   media_audit.py    图片体检：题目图 / 卷头 / 栏目图 / 未引用 / 已排除
-  static/           前端（本地 vendor，无构建步骤）
 references/         规则数据：题型框架、知识点目录、难度分类、题型-知识点映射
 ```
 
@@ -44,24 +43,20 @@ references/         规则数据：题型框架、知识点目录、难度分类
 
 ## 跑起来
 
-需要 Python 3.9+（开发用 3.12），无第三方依赖；前端库已放 `workbench/static/vendor/`。
+需要 Python 3.9+（开发用 3.12），无第三方依赖；界面由插件项目根的 `lib/client.js` 提供，本目录不需要任何前端依赖。
 
 ```bash
-# 起审核台（默认 8765）
-python -m workbench.server --port 8765
+# 后端由 DSH 宿主插件自动拉起；手动排查时才直接启动（默认 8791）
+python3.12 -m workbench.server --host 127.0.0.1 --port 8791
 
 # 自检：环境、文件、规则、批次
-python -m workflow.doctor
+python3.12 -m workflow.doctor
 
 # 跑一遍自动化（扫描 inbox，推进已有批次，遇闸门停住）
-python -m workflow.auto run --inbox inbox --once
+python3.12 -m workflow.auto run --inbox inbox --once
 ```
 
-打开 <http://127.0.0.1:8765>：
-
-- **首页**：上传原卷（docx/pdf，可附答案卷与听力音频），提交后自动建批次、推进流程，跳到该批次；
-- **试卷审核**：左栏是「需要审核的试卷」，一行一份；中栏按入库单元列题目（题组一行，如 `31–40 10小题`）；右侧左边原卷预览、右边待人工处理。标签按单元改（组题整体一套），处理意见可编辑或「手动修改」。
-- 键盘 `↑`/`↓` 或 `k`/`j` 在题目列表里切换。
+插件面板通过宿主的 `/wf-plugin/api/*` 代理调用后端；后端除 `/api/*` 外不提供任何路由。详情见 [workbench/README.md](workbench/README.md)。
 
 ## 执行标准（docs/）
 
@@ -76,7 +71,7 @@ python -m workflow.auto run --inbox inbox --once
 | [docs/structure.md](docs/structure.md) | 逐题内容边界、六项结构检查 + 内容范围 |
 | [docs/knowledge-tagging.md](docs/knowledge-tagging.md) | 知识点只写叶子、题组/子题分层维度、来源裁决与校验集成 |
 | [docs/review.md](docs/review.md) | 三审与 20% 抽样、人工队列口径、独立复核的边界 |
-| [docs/media.md](docs/media.md) | 图片体检、听力切段、卷面预览样式 |
+| [docs/media.md](docs/media.md) | 图片体检、听力切段、卷面数据结构 |
 
 ## 数据落在哪里
 

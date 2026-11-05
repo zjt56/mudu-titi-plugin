@@ -1,0 +1,15 @@
+{
+  "enabled": false,
+  "asr_model": "small.en",
+  "compute_type": "int8",
+  "device": "cpu",
+  "align_model": "facebook/wav2vec2-base-960h",
+  "vad_method": "pyannote",
+  "skeleton_silence": 3.0,
+  "cut_silence": 0.35,
+  "noise": "-35dB",
+  "venv": "",
+  "data_dir": "",
+  "hf_endpoint": "",
+  "cpu_torch": true
+}

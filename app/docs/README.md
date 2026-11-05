@@ -2,18 +2,18 @@
 
 这篇是 `docs/` 的文档入口。接手工作流的 Agent 先读根目录 [AGENTS.md](../AGENTS.md) 和 [通用 Agent 接口](agent-interface.md)，再按具体阶段查规则。
 
-仓库只有流水线代码（`workflow/`）和本地审核台（`workbench/`），不含真实试卷与历史批次。
+仓库只有流水线代码（`workflow/`）和纯 REST API 后端（`workbench/`），不含真实试卷、历史批次与任何前端页面；界面在项目根的 `lib/client.js`。
 文档里的数字全部按代码核对过；凡与本篇冲突，以代码为准。
 
 ## 文档索引
 
 | 文档 | 管什么 | 先看它的人 |
 | --- | --- | --- |
-| [quickstart.md](quickstart.md) | 快速安装与启动：网页端、智能体、本机 Agent、上传 API | 第一次部署或把项目交给别人使用的人 |
+| [quickstart.md](quickstart.md) | 快速安装与启动：DSH 插件、智能体、本机 Agent、上传 API | 第一次部署或把项目交给别人使用的人 |
 | [agent-interface.md](agent-interface.md) | 通用任务包、结果协议、领取/交回、任意 CLI 适配 | 换电脑、交给其他人或其他 Agent 的使用者 |
 | [local-agent.md](local-agent.md) | 可选本机 CLI 配置、日志与平台限制 | 需要自动调用本机 Agent 的使用者 |
 | [extraction.md](extraction.md) | 原生 Word、PDF 按页路由、本地 OCR 与证据 | 配置原卷提取的使用者 |
-| [workflow-regressions.md](workflow-regressions.md) | 本轮切题、来源、目录、三审问题及强制回归约束 | 所有执行者 |
+| [workflow-regressions.md](workflow-regressions.md) | 本轮切题、来源、目录、审核问题及强制回归约束 | 所有执行者 |
 | [upload-api.md](upload-api.md) | 安全连接、当前目录、API 字段映射、冻结/批准/暂存、防重复 | 对接远端上传的使用者 |
 | [layout-review.md](layout-review.md) | 整页版面 OCR 提交、续查、失败处理及证据边界 | 复核复杂版面的人 |
 | [pipeline.md](pipeline.md) | 16 个阶段、批次目录、自动驱动、代理桥、禁止事项 | 要把一批卷子从头跑到尾的人 |
@@ -22,7 +22,7 @@
 | [knowledge-tagging.md](knowledge-tagging.md) | 知识点只写叶子、按题型的维度表、组题标签 | 打标签、审标签的人 |
 | [content-labeling.md](content-labeling.md) | 打标签四个子智能体：解析与大意、知识点与教材、题型与词数、答案与难度 |
 | [textbook-catalog.md](textbook-catalog.md) | 课时同步练习用教材目录树（三版本 18 册 128 单元） |
-| [review.md](review.md) | 四路打标（解析/知识点/题型/答案）→ AI 审核 → 一审 → 二审 → 三审抽样、人工队列、独立复核 | 做审核、处理队列的人 |
+| [review.md](review.md) | 四路打标（解析/知识点/题型/答案）→ AI 审核 → 一审 → 二审抽样、人工队列、独立复核 | 做审核、处理队列的人 |
 | [media.md](media.md) | 图片 verdict、媒体排除清单、听力切分、PDF 草稿、卷面预览契约 | 处理图片、音频、表格与预览的人 |
 
 ## 十分钟速览
@@ -40,7 +40,7 @@
 | 知识点写法 | **只写叶子** | 写到中间层＝`知识点必须是叶子` |
 | 组题标签 | **单元级一份** | 子题不重复存同一套标签 |
 | 单题标签数 | **2–4 个** | 同维度最多一个 |
-| 三审抽样 | **20%，向上取整** | `ceil(小题数 × 20%)` |
+| 二审抽样 | **20%，向上取整** | `ceil(小题数 × 20%)` |
 | 审核终态 | **`fixed` / `rejected`** | 审核台口径；`review_gate` 把 `accepted` 也算已有决定，见 [review.md](review.md#状态口径) |
 | 本地体检项 | **18 个脚本配置项 + 源头对账** | 缺输入显式说明；源头逐题对账始终阻断缺题与跨材料 |
 | 问题级别 | **3 级** | `blocker` > `major` > `minor` |
@@ -54,7 +54,7 @@
 4. **知识点只写叶子**，并且**名称与 id 必须成对**；只有名字没有 id，题库按知识点筛不到。
 5. **组题标签挂在单元上**（`applies_to=unit`、`inherit_subquestions=true`）；子题只留自己的设题角度，不挂体裁。
 6. **一题 2–4 个标签、同维度最多一个**；组级写全、子题各一，不靠堆标签解决多角度。
-7. **三审抽 20% 小题并向上取整**；抽不中不代表通过，抽样只证明抽中的那些被核对过。
+7. **二审抽 20% 小题并向上取整**；抽不中不代表通过，抽样只证明抽中的那些被核对过。
 8. **审核台里只有 `fixed` / `rejected` 算处理完**，`accepted` 仍留在待处理计数；`review_gate` 另有一套口径（`accepted` 视为已有决定），两者差异见 [review.md](review.md#状态口径)。
 9. **`unchecked` 不是 `failed`**：缺证据是"还没核对"，不是"已判定错误"，补证或转人工。
 10. **上传与发布永远人工**：`upload_gate`、`publish_gate` 不允许被自动标记通过。
@@ -66,7 +66,7 @@ cd E:\录题工作流\upload-workflow
 python -m workflow.doctor                       # 环境/文件/规则/契约/闸门/批次自检
 python -m workflow.auto scan --inbox inbox      # 看收件箱能识别出哪些批次
 python -m workflow.auto run  --inbox inbox --once
-python -m workbench.server --port 8765          # 本地审核台
+python3.12 -m workbench.server --port 8791      # REST API 后端（由插件拉起）
 ```
 
 跑完一轮先看 `workflows/_queue.json`：每条批次停在哪个阶段、为什么停，`action` 字段直接告诉你是等人、等代理、等闸门，还是脚本失败。详见 [pipeline.md](pipeline.md)。
@@ -86,7 +86,7 @@ python -m workbench.server --port 8765          # 本地审核台
 batch.json ──→ batch_meta.json
    │  validate（脚本体检 + 源头逐题对账）
    ▼
-审核（四路打标 → AI → 一审 → 二审 → 三审抽样）
+审核（四路打标 → AI → 一审 → 二审抽样）
    │  review_gate
    ▼
 upload_gate（人工）──→ upload（仓库内阻断）──→ publish_gate（人工）
@@ -109,7 +109,7 @@ upload_gate（人工）──→ upload（仓库内阻断）──→ publish_ga
 | 单元（unit） | 入库的最小对象：一道独立题，或一个题组 |
 | `unit_kind` | 单元类型（独立题 / 题组），上传时定死，事后改不了 |
 | 题组（group） | 一段共享材料下的多道小题，标签挂在单元级 |
-| 小题（subquestion） | 题组里的成员，三审抽样按它计数 |
+| 小题（subquestion） | 题组里的成员，二审抽样按它计数 |
 | 闸门（gate） | 只能由检查结果放行的阶段，不能手工标记通过 |
 | 发现（finding） | 一条待处理的问题，有编号、级别、状态、证据 |
 | `unchecked` | 尚未核对（缺证据），不是已判定错误 |
@@ -135,7 +135,7 @@ upload_gate（人工）──→ upload（仓库内阻断）──→ publish_ga
 | 目录 | 放什么 | 会不会被提交 |
 | --- | --- | --- |
 | `workflow/` | 流水线代码、契约、测试 | 是 |
-| `workbench/` | 本地审核台（前后端） | 是 |
+| `workbench/` | 纯 REST API 后端（无页面、无静态文件） | 是 |
 | `docs/` | 本目录，执行标准与说明 | 是 |
 | `inbox/` | 待处理的原卷、答案、音频 | 否（本地数据） |
 | `workflows/` | 批次产物与台账 | 否（本地数据） |

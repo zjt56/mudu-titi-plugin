@@ -36,6 +36,30 @@ def _unit_id(item: dict) -> str:
     return str(item.get("id") or item.get("unit_id"))
 
 
+# 重新打标签/换解析时这些字段会变，但它们不是结构；结构字段（题干/选项/
+# 材料/子题骨架）一旦被改动就必须交回模型，不能沿用。
+_LABEL_KEYS = frozenset((
+    "knowledge", "knowledgeIds", "knowledge_ids", "answer", "answers",
+    "explanation", "explanations", "articleSummary", "article_summary",
+    "difficulty", "difficultyEvidence", "difficulty_evidence",
+    "filterMetadata", "subtypes", "categories", "tags", "words",
+    "contentComplete", "textbook", "evidence", "review", "reviewNote",
+    "status", "notes", "findings",
+))
+
+
+def _structure_digest(payload) -> str:
+    """SHA-256 over the payload with label-only fields removed, recursively."""
+    def strip(value):
+        if isinstance(value, dict):
+            return {k: strip(v) for k, v in value.items() if k not in _LABEL_KEYS}
+        if isinstance(value, list):
+            return [strip(v) for v in value]
+        return value
+    return hashlib.sha256(json.dumps(strip(payload), ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def record_guard(batch_dir) -> None:
     """在每次组装被接受后登记基线；下一次重跑凭它判断结构是否未变。"""
     batch = Path(batch_dir)
@@ -43,14 +67,16 @@ def record_guard(batch_dir) -> None:
     if not structure.is_file() or not assembled.is_file():
         return
     try:
-        items = _load(assembled).get("items") or []
+        payload = _load(assembled)
+        items = payload.get("items") or []
     except (OSError, ValueError):
         return
-    payload = {"structure_sha256": _sha(structure), "batch_sha256": _sha(assembled),
-               "unit_ids": sorted(_unit_id(i) for i in items)}
+    guard = {"structure_sha256": _sha(structure), "batch_sha256": _sha(assembled),
+             "unit_ids": sorted(_unit_id(i) for i in items),
+             "structure_digest": _structure_digest(payload)}
     target = batch / GUARD
     temporary = target.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    temporary.write_text(json.dumps(guard, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     temporary.replace(target)
 
 
@@ -69,14 +95,38 @@ def guard_status(batch_dir):
         return False, "组装基线不可读"
     if guard.get("structure_sha256") != _sha(batch / STRUCTURE):
         return False, "结构确认已变化：不能沿用旧题干/选项/材料"
+    # 标签产物（types/answers/explanations/knowledge）更新后批次指纹必然变化，
+    # 这正是确定性重组装要覆盖的场景；只有"结构字段"被改动才交回模型。
+    assembled = _load(batch / BATCH)
     if guard.get("batch_sha256") != _sha(batch / BATCH):
-        return False, "批次产物在基线之后被改动：需重新组装"
+        current = _structure_digest(assembled)
+        recorded = guard.get("structure_digest")
+        if recorded:
+            if recorded != current:
+                return False, "批次结构在基线之后被改动：需重新组装"
+        else:
+            # 旧基线没有结构指纹：与确认结构重建结果比对一次，等价才放行。
+            try:
+                rebuilt = _structure_digest(build(batch))
+            except (OSError, ValueError, KeyError, TypeError):
+                return False, "批次产物在基线之后被改动且无法确定性重组装"
+            if rebuilt != current:
+                return False, "批次结构与确认结构不一致：需重新组装"
     from . import agent_tasks
     confirmed = {u["unit_id"] for u in agent_tasks.confirmed_units(batch)}
-    existing = {_unit_id(i) for i in _load(batch / BATCH).get("items", [])}
+    existing = {_unit_id(i) for i in assembled.get("items", [])}
     if not confirmed or confirmed != existing:
         return False, "确认单元集合与已审核批次不一致"
     return True, "结构未变，可确定性重组装"
+
+
+def available(batch_dir) -> bool:
+    """True only when deterministic reassembly is safe for the current batch."""
+    try:
+        ok, _reason = guard_status(batch_dir)
+        return bool(ok)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def _overlay_labels(target: dict, source: dict) -> None:

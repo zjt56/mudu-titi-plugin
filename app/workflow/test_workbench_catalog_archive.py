@@ -237,5 +237,62 @@ class ArchiveTest(unittest.TestCase):
         self.assertTrue(self.folder.exists())
 
 
+class ArchivePluginLayoutTest(unittest.TestCase):
+    """插件版布局：代码在 app/（ROOT），数据根是另一层目录。
+
+    ROOT 是代码根，而 WORKFLOWS/INBOX 通过 WF_WORKFLOWS_DIR/WF_INBOX_DIR 指向插件目录。
+    删除批次的数据边界必须以数据根（workflows/inbox 的共同父目录）为准，
+    不能用 ROOT，否则每次删除都会被误判成"越出工作区"而无法删除。
+    """
+
+    def setUp(self):
+        self.code_tmp = tempfile.TemporaryDirectory()
+        self.data_tmp = tempfile.TemporaryDirectory()
+        self.code_root = Path(self.code_tmp.name).resolve()   # 模拟 .../上传插件版/app
+        self.data_root = Path(self.data_tmp.name).resolve()   # 模拟 .../上传插件版
+        self.patches = [patch.object(server, "ROOT", self.code_root),
+                        patch.object(server, "WORKFLOWS", self.data_root / "workflows"),
+                        patch.object(server, "INBOX", self.data_root / "inbox"),
+                        patch.object(server, "_advance_state", {})]
+        for p in self.patches:
+            p.start()
+        server.WORKFLOWS.mkdir()
+        server.INBOX.mkdir()
+        self.name = "插件布局批次"
+        self.folder = make_batch(server.WORKFLOWS).rename(server.WORKFLOWS / self.name)
+        (self.folder / "workflow").mkdir()
+        server.save_json(self.folder / "workflow" / "manifest.json", {"status": "pending", "stages": {}})
+        self.inbox = server.INBOX / self.name
+        self.inbox.mkdir()
+        (self.inbox / "source.docx").write_bytes(b"original source")
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        self.code_tmp.cleanup()
+        self.data_tmp.cleanup()
+
+    def test_archive_works_when_root_is_not_the_data_root(self):
+        result = server.archive_batch(self.name, self.name)
+        archive = self.data_root / result["archive"]
+        self.assertTrue(result["recoverable"])
+        self.assertEqual(server.load(archive / "receipt.json")["status"], "archived")
+        self.assertTrue((archive / "workflows" / "06_batch" / "batch.json").is_file())
+        self.assertEqual((archive / "inbox" / "source.docx").read_bytes(), b"original source")
+        self.assertFalse(self.folder.exists())
+        self.assertFalse(self.inbox.exists())
+        self.assertTrue((self.data_root / ".workbench-trash").is_dir())
+
+    def test_inbox_outside_data_root_still_rejected(self):
+        with tempfile.TemporaryDirectory() as outside:
+            stray = Path(outside).resolve() / "inbox"
+            stray.mkdir()
+            (stray / self.name).mkdir()
+            with patch.object(server, "INBOX", stray):
+                with self.assertRaisesRegex(ValueError, "越出工作区"):
+                    server.archive_batch(self.name, self.name)
+        self.assertTrue(self.folder.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -174,9 +174,9 @@ const rows = await pipeline(
     if (!classified) return { unit_id: unit.unit_id, classified: null, content: null };
     const content = await agent(
       `你是打标签阶段独立的解析与文章大意子智能体（子智能体1）。原卷：${TEXT}；答案：${ANSWERS}；单元：${JSON.stringify(unit)}；已标注信息：${JSON.stringify(classified)}。` +
-      `只做四件事：按真实题号、章节、材料匹配原解析；确认缺失后生成解析；匹配所属篇章的原文章大意；阅读/任务型/读写综合/完形/语法选择无大意时生成2–3句中文。` +
-      `先查原文，有则逐字保留，不得用AI替代；生成内容必须以（AI生成，待校对）结尾，并说明来源定位与推导依据。题组各子题分别写解析，大意只在组级写一次。` +
-      `重复A/B不是唯一标识，边界不确定时status=needs_review，不生成代替。听力不生成内容解析。不得改答案、知识点、难度、结构或任何文件。`,
+      `只做匹配：按真实题号、章节、材料逐字匹配原解析与所属篇章的原【文章大意】。` +
+      `用户规则：来源没有解析或文章大意时不再使用 AI 生成，直接跳过，对应字段一律填「无」；不撰写、不推断、不加任何来源标记。` +
+      `重复A/B不是唯一标识，边界不确定时status=needs_review。听力不写内容解析（缺失填「无」）。不得改答案、知识点、难度、结构或任何文件。`,
       { schema: CONTENT, label: `解析与大意 ${unit.unit_id}`, phase: "并行标注" }
     );
     return { unit_id: unit.unit_id, classified, content };

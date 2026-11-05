@@ -261,7 +261,9 @@ print(json.dumps(result, ensure_ascii=False))
                     protocol.import_result(self.batch, task_id, self.response(task_id))
                 path.write_bytes(before)
 
-    def test_assemble_audio_sources_are_optional_in_context_and_hash_bound(self):
+    def test_assemble_does_not_bind_full_transcript_or_segments(self):
+        # 组装只搬运四路产物，合法性由导入器程序校验；完整听力转写与切片证据
+        # 只在语义审核阶段需要，不再进入组装上下文，也不再让组装任务因它们变化而失效。
         self.write(agent_tasks.ARTIFACTS['types'], self.payload)
         self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}})
         self.write(agent_tasks.ARTIFACTS['explanations'], {'items': []})
@@ -271,15 +273,14 @@ print(json.dumps(result, ensure_ascii=False))
             mf.touch_stage(state, stage, mf.COMPLETED)
         mf.save(self.batch, state)
         optional = ('02_audio/full-transcript.json', '02_audio/segment-evidence.json')
-        initial = agent_tasks.build_task(self.batch, 'assemble')
-        self.assertEqual(initial['status'], 'ready')
-        self.assertTrue(all(name not in initial['input_hashes'] for name in optional))
         for name in optional:
             self.write(name, {'items': [{'unit_id': 'q-1', 'text': 'Actual AI transcript; pending verification.'}]})
         built = agent_tasks.build_task(self.batch, 'assemble')
+        self.assertEqual(built['status'], 'ready')
         for name in optional:
-            self.assertIn(name, built['prompt'])
-            self.assertEqual(built['input_hashes'][name], mf.sha256_file(self.batch / name))
+            self.assertNotIn(name, built['input_hashes'])
+            self.assertNotIn(name, built['prompt'])
+        # 这些文件变化不应让组装任务失效为 stale。
         for name in optional:
             exported = protocol.export_task(self.batch, 'assemble')
             task_id = exported['task_id']
@@ -288,9 +289,23 @@ print(json.dumps(result, ensure_ascii=False))
             path = self.batch / name
             before = path.read_bytes()
             path.write_bytes(before + b' ')
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'stale'):
+            try:
                 protocol.import_result(self.batch, task_id, response)
-            path.write_bytes(before)
+            finally:
+                path.write_bytes(before)
+
+    def test_review_still_binds_full_transcript_and_segments(self):
+        # 一审/二审需要完整听力转写与切片证据做语义核对，仍必须进入审核上下文。
+        self.write(agent_tasks.ARTIFACTS['types'], self.payload)
+        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}})
+        self.write(agent_tasks.ARTIFACTS['knowledge'], {'items': []})
+        optional = ('02_audio/full-transcript.json', '02_audio/segment-evidence.json')
+        for name in optional:
+            self.write(name, {'items': [{'unit_id': 'q-1', 'text': 'transcript', 'verified': True}]})
+        contexts, hashes, missing, units = agent_tasks._collect(self.batch, 'review')
+        for name in optional:
+            self.assertIn(name, hashes)
+            self.assertIn(name, contexts)
 
     def test_optional_content_inputs_portable_fingerprints_detect_changes(self):
         self.write(agent_tasks.ARTIFACTS['types'], self.payload)

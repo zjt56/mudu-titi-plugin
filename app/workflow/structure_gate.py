@@ -238,12 +238,14 @@ def _prove_single_writing_number(original_path: Path | None, source_text: str,
         return None
     # Only the extractor's explicit answer-key classification may exclude an appendix.
     original_candidate, original_body, appendix = infer_structure(original_text)
-    if appendix and not any(x.get("code") == "ANSWER_APPENDIX_DETECTED"
+    if appendix and not any(x.get("code") in ("ANSWER_APPENDIX_DETECTED", "INLINE_ANSWER_BLOCK")
                             for x in original_candidate.get("unresolved", [])):
         return None
     original_cleaned = denoise.clean_body(original_body)[0]
     normalize = lambda text: [_plain(line).strip() for line in text.splitlines() if _plain(line).strip()]
-    if normalize(original_cleaned) != normalize(source_text):
+    # 两侧都按同一去噪规则比较；正文里的卷名/注意事项属于页眉噪声，不能只清一侧。
+    current_cleaned = denoise.clean_body(source_text)[0]
+    if normalize(original_cleaned) != normalize(current_cleaned):
         return None
     lines = original_cleaned.splitlines()
     headings = [i for i, line in enumerate(lines) if SECTION.match(_plain(line))]
@@ -293,7 +295,7 @@ def _prove_single_writing_number(original_path: Path | None, source_text: str,
             previous = point
         if plain:
             last_nonempty = plain
-    if (not body or not re.search(r"(?:\bwrite\s+\S.+|请[^\n]*写[^\n]*\S|写一[篇封].+)", _plain(body), re.I)
+    if (not body or not re.search(r"(?:\bwrite\s+\S.+|请[^\n]*写[^\n]*\S|写一[篇封].+|(?:写|回)一[篇封][^\n]*(?:电子邮件|邮件)|[^\n]*电子邮件[^\n]*(?:要点|词数))", _plain(body), re.I)
             or not points_valid
             or any(_weak_numbers(line) for line in lines[start + 1:])):
         return None
@@ -368,10 +370,15 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     blockers: list[dict] = []
     checks: dict[str, str] = {}
     resolved_notes: list[dict] = []
+    warnings: list[dict] = []
     # 复合提取器显式提出的 OCR/题号/分组歧义不能被数量自检抹掉。
     # 已经人工/原卷核对、并附带 resolution 依据的条目可放行，但仍记入报告留痕。
     for issue in structure.get("unresolved") or []:
         if isinstance(issue, dict):
+            if issue.get("code") == "SOURCE_METADATA_MISSING":
+                # 兼容旧提取报告：来源缺失采用占位，不作为结构错误或人工必审项。
+                warnings.append({**issue, "blocking": False, "status": "placeholder"})
+                continue
             evidence = issue.get("resolution_evidence") or {}
             bound = (isinstance(evidence, dict) and hashes["source_sha256"] and hashes["original_sha256"]
                      and evidence.get("source_sha256") == hashes["source_sha256"]
@@ -388,6 +395,13 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                 resolved_notes.append({"code": issue.get("code"),
                                        "message": issue.get("message", "文末答案附录"),
                                        "resolution": "文末重复标题之后按题号+答案字母/解析判定为答案册，保留为答案附录候选"})
+                continue
+            if issue.get("code") == "INLINE_ANSWER_BLOCK":
+                # 解析版把答案插在大题之间（听力答案后接笔试）：答案移入附录、
+                # 正文继续解析是确定性切分，不构成结构歧义。
+                resolved_notes.append({"code": issue.get("code"),
+                                       "message": issue.get("message", "分段答案"),
+                                       "resolution": "重复大题后是分段答案、随后仍有新大题；答案移入附录，正文继续解析"})
                 continue
             blockers.append({"code": issue.get("code", "EXTRACTION_UNRESOLVED"),
                              "message": issue.get("message", "提取结果待核验"),
@@ -538,9 +552,14 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
 
     for conflict in meta.get("conflicts") or []:
         blockers.append({"code": "SOURCE_METADATA_CONFLICT", "message": str(conflict)})
-    metadata_missing = [key for key in ("source", "source_type", "year", "region") if not meta.get(key)]
-    if original_path and original_path.is_file() and metadata_missing:
-        blockers.append({"code": "SOURCE_METADATA_MISSING", "message": f"原卷来源字段尚未可靠定位：{metadata_missing}；需复核原卷卷头"})
+    from .metadata_policy import missing_source_fields, with_placeholders
+    metadata_missing = missing_source_fields(meta)
+    meta = with_placeholders(meta)
+    checks["source_metadata"] = "placeholder" if metadata_missing else "passed"
+    if metadata_missing:
+        warnings.append({"code": "SOURCE_METADATA_MISSING", "blocking": False,
+                         "status": "placeholder", "fields": metadata_missing,
+                         "message": "试卷来源信息未可靠识别，缺失文本字段使用「未提供」占位；继续后续打标签和审核。"})
     from .source_answer_only import detect_source_answer_only
     raw_path = batch_dir / "01_source" / "原始正文.txt"
     source_diagnostic = detect_source_answer_only(_read_text(raw_path)) if raw_path.is_file() else None
@@ -620,6 +639,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                          "01_source/structure.json": hashes["structure_sha256"]},
         **hashes,
         "metadata_missing": metadata_missing,
+        "warnings": warnings,
         "source_diagnostic": source_diagnostic,
         "layout_required": layout_required,
         "layout_review_command": "python -m workflow.layout_review --help" if layout_required else None,

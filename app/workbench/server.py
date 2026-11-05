@@ -71,6 +71,8 @@ FORMAT_FIELDS = {"stem", "options", "option", "answer", "material", "materialblo
 SIDE_EFFECTS = ("upload", "publish", "delete")
 _lock = threading.RLock()
 _batches_snapshot = None
+# 听力切段后台任务（安装 / 切段共用一把闸，避免并发下载与切片）。
+_audio_job = {"running": False, "kind": "", "lock": threading.Lock()}
 
 
 def serialized(function):
@@ -389,10 +391,15 @@ def mark_row(row, findings):
 
 def paper_info(folder: Path, report, manifest) -> dict:
     """试卷名取自入库批次；旧批次缺来源时从原卷卷头识别，绝不退回目录名。"""
+    from workflow.metadata_policy import MISSING
+
+    def known(*values):
+        return next((value for value in values if value and str(value).strip() != MISSING), None)
+
     batch = load(folder / "06_batch" / "batch.json", {}) or {}
     meta = (report.get("meta") if isinstance(report, dict) else None) or (manifest or {}).get("meta") or {}
     detected = {}
-    if not (batch.get("source") or meta.get("source") or meta.get("title")):
+    if not known(batch.get("source"), meta.get("source"), meta.get("title")):
         text_path = folder / "01_source" / "正文.txt"
         if text_path.is_file():
             try:
@@ -400,9 +407,12 @@ def paper_info(folder: Path, report, manifest) -> dict:
                 detected = denoise.extract_meta(text_path.read_text(encoding="utf-8-sig").splitlines()) or {}
             except (OSError, ValueError):
                 detected = {}
-    title = str(batch.get("source") or meta.get("source") or meta.get("title")
-                or detected.get("source") or "").strip()
-    return {"title": title or folder.name, "batch": str(batch.get("batch") or folder.name),
+    descriptor = load(INBOX / folder.name / "batch.json", {}) or {}
+    title = known(batch.get("source"), meta.get("source"), meta.get("title"), meta.get("paper_title"),
+                  detected.get("source"), descriptor.get("title"))
+    return {"title": str(title or MISSING), "batch": str(batch.get("batch") or folder.name),
+            "source": str(known(batch.get("source"), meta.get("source"), detected.get("source")) or MISSING),
+            "source_type": str(known(batch.get("source_type"), meta.get("source_type"), detected.get("source_type")) or MISSING),
             "folder": folder.name, "year": batch.get("year") or meta.get("year") or detected.get("year"),
             "region": batch.get("region") or meta.get("region") or detected.get("region"),
             "subject": batch.get("subject") or meta.get("subject") or "english"}
@@ -688,19 +698,32 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
     region = str(fields.get("region") or "").strip()
     title = str(fields.get("title") or "").strip()
     subject = str(fields.get("subject") or "english").strip() or "english"
-    name = _unique_batch_name(_slug(title or f"{region}{year}"))
+    source_type = str(fields.get("source_type") or "").strip()
+    grade = str(fields.get("grade") or "").strip()
+    if source_type and source_type not in taxonomy.sources():
+        raise ValueError("题源分类不在系统目录中")
+    if grade and grade not in ("七年级", "八年级", "九年级"):
+        raise ValueError("年级只能选择七年级、八年级或九年级")
+    # 未填写标题时保留用户上传文件的识别线索，不再一律变成「新试卷」。
+    # 此名称仅用于展示/定位，正式来源仍由原卷卷头识别，不覆盖原文证据。
+    name = _unique_batch_name(_slug(title or Path(source["filename"]).stem or f"{region}{year}"))
     folder = INBOX / name
     folder.mkdir(parents=True, exist_ok=True)
     saved_source = _save_part(folder, source, "source")
     saved_answer = _save_part(folder, answer, "answers") if answer else None
     saved_audio = _save_part(folder, audio, "audio") if audio else None
-    descriptor = {"workflow_id": name, "subject": subject,
+    descriptor = {"workflow_id": name, "subject": subject, "title": title or None,
                   "year": int(year) if year.isdigit() else None, "region": region or None,
+                  "source_type": source_type or None, "grade": grade or None,
                   "source": saved_source.name, "answers": saved_answer.name if saved_answer else None,
-                  "audio": saved_audio.name if saved_audio else None}
+                  "audio": saved_audio.name if saved_audio else None,
+                  "original_filenames": {"source": Path(source["filename"]).name,
+                                         "answers": Path(answer["filename"]).name if answer else None,
+                                         "audio": Path(audio["filename"]).name if audio else None}}
     save_json(folder / "batch.json", descriptor)
     candidate = {"name": name, "folder": str(folder), "subject": subject,
                  "year": descriptor["year"], "region": descriptor["region"],
+                 "source_type": descriptor["source_type"], "grade": descriptor["grade"],
                  "source": str(saved_source), "answers": str(saved_answer) if saved_answer else None,
                  "audio": str(saved_audio) if saved_audio else None}
     batch_folder = auto_flow.ensure_batch(candidate, WORKFLOWS)
@@ -821,6 +844,11 @@ def overview(name):
                          "header": 0, "banner": 0, "excluded": 0}
     stages = [{"id": k, "status": v.get("status"), "notes": v.get("notes", ""), "kind": v.get("kind")}
               for k, v in (manifest.get("stages") or {}).items()]
+    audio_input = (manifest.get("inputs") or {}).get("audio") or {}
+    try:
+        has_audio = bool(audio_input.get("path") and Path(str(audio_input["path"])).expanduser().is_file())
+    except (OSError, ValueError, TypeError):
+        has_audio = False
     batch_findings = [x for x in open_items if not str(x.get("unit_id") or "").strip()]
     advance = advance_state(name)
     return {"name": name, "meta": report.get("meta", manifest.get("meta", {})),
@@ -836,7 +864,7 @@ def overview(name):
             "media": media_summary,
             "extraction": load(folder / "07_review" / "extraction-report.json", {}),
             "structure_gate": load(folder / "07_review" / "structure-gate.json", {}),
-            "stages": stages, "rows": rows,
+            "stages": stages, "rows": rows, "has_audio": has_audio,
             # 已写入云端上传暂存的批次视为完成，试卷审核列表不再展示。
             "uploaded": str(((manifest.get("stages") or {}).get("upload") or {}).get("status") or "") == "completed"}
 
@@ -879,6 +907,78 @@ def cached_list_batches():
 #   1) prepare-upload  读取远端目录、校验并冻结上传请求
 #   2) mark upload_gate approved  绑定冻结文件与目标（actor = 本机操作员）
 #   3) upload --yes    真正写入上传暂存
+# ---------------------------------------------------------------------------
+# 英语听力切段（可选能力）：适配器 + 懒下载。
+# 不点击「安装」不会下载任何依赖；安装与切段都放后台线程，不占用服务锁。
+# 详见 docs/audio.md。
+# ---------------------------------------------------------------------------
+def _audio_modules():
+    from audio import bootstrap as audio_bootstrap
+    from audio import config as audio_config
+    from audio import segment as audio_segment
+    return audio_config, audio_bootstrap, audio_segment
+
+
+def audio_overview():
+    cfgmod, boot, _ = _audio_modules()
+    cfg = cfgmod.load()
+    data_dir = Path(cfgmod.data_dir(cfg))
+    return {"ok": True, "config": cfg, "config_path": str(cfgmod.user_config_path()),
+            "defaults_path": str(cfgmod.config_path()),
+            "data_dir": str(data_dir), "venv_python": str(boot.venv_python(cfg)),
+            "hf_endpoint": cfgmod.resolve_hf_endpoint(cfg),
+            "python_version": sys.version.split()[0],
+            "platform_key": boot.platform_key(),
+            "vendor_python": bool(boot.vendor_python(cfg)),
+            "vendor_ffmpeg": bool((boot.VENDOR_DIR / "ffmpeg" / boot.platform_key() / "bin").is_dir()),
+            "ready": boot.ready(cfg),
+            "ffmpeg": boot.tool_path("ffmpeg"), "ffprobe": boot.tool_path("ffprobe"),
+            "busy": _audio_job["running"], "job": _audio_job["kind"]}
+
+
+def audio_status():
+    cfgmod, boot, _ = _audio_modules()
+    cfg = cfgmod.load()
+    state = boot.read_status(Path(cfgmod.data_dir(cfg)))
+    # 不覆盖 state["ok"]：它是后台任务自己的成功/失败标记。
+    state.update({"request_ok": True, "ready": boot.ready(cfg), "busy": _audio_job["running"],
+                  "job": _audio_job["kind"]})
+    return state
+
+
+def start_audio_job(kind: str, options: dict) -> dict:
+    cfgmod, boot, segment_mod = _audio_modules()
+    cfg = cfgmod.load()
+    data_dir = Path(cfgmod.data_dir(cfg))
+    with _audio_job["lock"]:
+        if _audio_job["running"]:
+            raise ValueError("已有听力任务在运行，请等它结束后再试")
+        _audio_job.update({"running": True, "kind": kind})
+
+    def worker():
+        try:
+            def progress(phase, pct, detail):
+                boot.write_status(data_dir, job=kind, running=True, ok=None,
+                                  phase=phase, pct=pct, detail=detail, error="")
+            boot.write_status(data_dir, job=kind, running=True, ok=None,
+                              phase="start", pct=0, detail="任务开始", error="")
+            if kind == "bootstrap":
+                boot.bootstrap(cfg, force=bool(options.get("force")))
+            else:
+                segment_mod.run(Path(options["folder"]), cfg, options.get("audio"), progress)
+                boot.write_status(data_dir, job=kind, running=False, ok=True,
+                                  phase="done", pct=100, detail="听力切段已完成", error="")
+        except Exception as exc:  # noqa: BLE001 - 后台任务须把失败写进状态文件
+            boot.write_status(data_dir, job=kind, running=False, ok=False,
+                              phase="error", detail="", error=str(exc))
+        finally:
+            with _audio_job["lock"]:
+                _audio_job.update({"running": False, "kind": ""})
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"started": True, "kind": kind}
+
+
 # 结构闸门/审核闸门未过时 runner 会拒绝，错误原样回显。
 #
 # 上传可能持续数分钟（网络 + 远端校验），因此放在后台线程执行，
@@ -985,9 +1085,15 @@ def label_payload(row, batch_item, subs, folder, unit_id=None):
                 if str(path).strip() and str(path).strip() not in knowledge:
                     knowledge.append(str(path).strip())
     resolved = taxonomy.resolve_knowledge(knowledge)
+    # 旧批次可能保存不带顶级维度的叶子路径；展示和维度校验统一使用
+    # 唯一解析出的当前目录全路径，避免加载时误报目录外路径。
+    if resolved["resolved"] and not resolved["unknown"] and not resolved["non_leaf"]:
+        knowledge = list(dict.fromkeys(point["path"] for point in resolved["resolved"]))
+        resolved = taxonomy.resolve_knowledge(knowledge)
+    from workflow.metadata_policy import MISSING
     values = {
-        "source": item.get("source") or filters.get("source") or row.get("source") or "",
-        "source_type": item.get("source_type") or filters.get("source_type") or row.get("source_type") or "",
+        "source": item.get("source") or filters.get("source") or row.get("source") or MISSING,
+        "source_type": item.get("source_type") or filters.get("source_type") or row.get("source_type") or MISSING,
         "year": str(item.get("year") or filters.get("year") or row.get("year") or ""),
         "location": item.get("location") or filters.get("location") or row.get("location") or "",
         "type": unit_labels.get("type") or item.get("question_type") or item.get("type") or row.get("question_type") or row.get("type") or "",
@@ -996,7 +1102,7 @@ def label_payload(row, batch_item, subs, folder, unit_id=None):
                        or taxonomy.difficulty_name(filters.get("difficulty"))
                        or taxonomy.difficulty_name(filters.get("difficultyValue"))
                        or taxonomy.difficulty_name(row.get("difficulty"))),
-        "categories": filters.get("categories") or [],
+        "categories": filters.get("categories") or [MISSING],
         "difficultyValue": filters.get("difficultyValue"),
         "knowledge": knowledge,
         "knowledgeIds": [point["id"] for point in resolved["resolved"]],
@@ -1385,6 +1491,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if decoded_path == "/api/health":
                 return self.send_json({"ok": True})
+            if decoded_path == "/api/audio/config":
+                return self.send_json(audio_overview())
+            if decoded_path == "/api/audio/status":
+                return self.send_json(audio_status())
             if decoded_path == "/api/batches":
                 return self.send_json({"batches": cached_list_batches()})
             if decoded_path == "/api/taxonomy":
@@ -1469,6 +1579,18 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("请求内容必须是对象")
+            if parts == ["api", "audio", "config"]:
+                cfgmod, _, _ = _audio_modules()
+                return self.send_json({"ok": True, "config": cfgmod.save(payload.get("config") or payload)})
+            if parts == ["api", "audio", "bootstrap"]:
+                return self.send_json({"ok": True, **start_audio_job("bootstrap", payload)})
+            if parts == ["api", "audio", "segment"]:
+                name = str(payload.get("name") or "").strip()
+                if not name:
+                    raise ValueError("请指定批次名称")
+                folder = batch_dir(name)
+                return self.send_json({"ok": True, **start_audio_job(
+                    "segment", {"folder": str(folder), "audio": payload.get("audio")})})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "rerun":
                 return self.send_json({"ok": True, **start_rerun(parts[2], str(payload.get("mode") or ""))})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "archive":

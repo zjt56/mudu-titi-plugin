@@ -143,8 +143,8 @@ def _review_after(callback, batch_dir, config_path=None, max_attempts=3, allow_f
     """Retry failed AI calls, then finish independent rounds with honest AI state.
 
     ai_precheck=False（正式 review 执行默认）：跳过独立的“AI 初审”兼容步骤，
-    只跑一审/二审/三审三轮。设计上 AI 审核＝三轮；agent-review.json 仅是旧协议
-    兼容产物，不能代表三轮完成，跑了只会白白耗时并反复失败卡住 review。
+    只跑一审（全量）与二审（抽20%）两轮。设计上 AI 审核＝两轮；agent-review.json 仅是旧协议
+    兼容产物，不能代表两轮完成，跑了只会白白耗时并反复失败卡住 review。
     """
     if not ai_precheck:
         return _run_review_rounds(batch_dir, config_path)

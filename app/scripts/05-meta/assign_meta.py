@@ -102,7 +102,8 @@ def _categories(item, rules):
                     hit = True
         if hit and name not in out:
             out.append(name)
-    return out
+    # 没有命中可靠分类时明确占位，不凭空归入某一类，也不阻断后续审核。
+    return out or ["未提供"]
 
 
 def main() -> int:

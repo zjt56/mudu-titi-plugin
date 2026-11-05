@@ -227,6 +227,43 @@ class LocalAgentTest(unittest.TestCase):
         self.assertEqual(agent._parse_response("```JSON\n" + valid + "\n```"), RESPONSE)
         self.assertEqual(agent._parse_response("```\n" + valid + "\n```"), RESPONSE)
 
+    def test_parse_response_repairs_missing_final_brace_and_hoists_notes(self):
+        # 大结果里模型常见：根对象少一个右花括号，且把 notes/findings 写进文件对象。
+        text = ('{"status":"completed","artifacts":{"04_knowledge/knowledge.json":'
+                '{"items":[],"notes":["n"],"findings":[]}}')
+        parsed = agent._parse_response(text)
+        self.assertEqual(parsed["notes"], ["n"])
+        self.assertEqual(parsed["findings"], [])
+        self.assertEqual(parsed["artifacts"]["04_knowledge/knowledge.json"], {"items": []})
+
+    def test_unit_merge_supports_explanations_and_knowledge_partitions(self):
+        from workflow import unit_tasks
+        parts = [{"unit_ids": ["u1"]}, {"unit_ids": ["u2"]}]
+        explosions = {"status": "completed",
+                      "artifacts": {"04_knowledge/explanations.json": {"items": [
+                          {"unit_id": "u1", "explanation": "待补充", "articleSummary": "", "subquestions": [], "evidence": ["x"]}]}},
+                      "notes": [], "findings": []}
+        exp2 = {"status": "completed",
+                "artifacts": {"04_knowledge/explanations.json": {"items": [
+                    {"unit_id": "u2", "explanation": "待补充", "articleSummary": "", "subquestions": [], "evidence": ["y"]}]}},
+                "notes": [], "findings": []}
+        merged = unit_tasks.merge("explanations", parts, [explosions, exp2])
+        self.assertEqual(sorted(i["unit_id"] for i in merged["artifacts"]["04_knowledge/explanations.json"]["items"]), ["u1", "u2"])
+        kn1 = {"status": "completed",
+               "artifacts": {"04_knowledge/knowledge.json": {"items": [
+                   {"unit_id": "u1", "knowledge": [], "subquestions": [], "evidence": ["x"]}]}},
+               "notes": [], "findings": []}
+        kn2 = {"status": "completed",
+               "artifacts": {"04_knowledge/knowledge.json": {"items": [
+                   {"unit_id": "u2", "knowledge": [], "subquestions": [], "evidence": ["y"]}]}},
+               "notes": [], "findings": []}
+        merged = unit_tasks.merge("knowledge", parts, [kn1, kn2])
+        self.assertEqual(sorted(i["unit_id"] for i in merged["artifacts"]["04_knowledge/knowledge.json"]["items"]), ["u1", "u2"])
+        with self.assertRaises(ValueError):
+            unit_tasks.merge("explanations", parts, [exp2, exp2])  # overlapping/duplicate ids
+        with self.assertRaises(ValueError):
+            unit_tasks.build_parts(self.root, "answers", 1000, max_units=5)
+
     def test_failure_is_classified_saved_and_never_retried(self):
         with patch.object(agent.subprocess, "Popen", side_effect=self.process(stdout="bad", stderr="helpful error", returncode=7)) as spawn:
             with self.assertRaises(agent.AgentError) as caught:

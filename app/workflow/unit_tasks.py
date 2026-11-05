@@ -40,11 +40,14 @@ def compact_extraction(value):
     return _compact_extraction(value)
 
 
+_SPLIT_STAGES = ("assemble", "review", "explanations", "knowledge")
+
+
 def build_parts(batch, stage, max_input_chars, max_units=15):
     if isinstance(max_units, bool) or not isinstance(max_units, int) or max_units < 1:
         raise ValueError("max_units must be a positive integer")
-    if stage not in ("assemble", "review"):
-        raise ValueError("Unit splitting supports assemble and review only")
+    if stage not in _SPLIT_STAGES:
+        raise ValueError("Unit splitting supports assemble, review, explanations and knowledge only")
     base = agent_tasks.build_task(batch, stage, max_input_chars=sys.maxsize)
     if base["preconditions"]:
         return base, []
@@ -135,21 +138,23 @@ def validate_part(batch, stage, part, response):
     semantic validation remains mandatory on the merged whole-batch candidate.
     """
     merged = merge(stage, [part], [response])
-    if stage == "assemble" and response["status"] == "completed":
+    if stage in ("assemble", "explanations", "knowledge") and response["status"] == "completed":
         units = {u["unit_id"]: u for u in agent_tasks.confirmed_units(batch)}
         for row in merged["artifacts"][agent_tasks.ARTIFACTS[stage]]["items"]:
             if row["unit_id"] not in units:
-                raise ValueError("Unknown confirmed unit in assembly partition")
+                raise ValueError("Unknown confirmed unit in partition")
             agent_tasks._children(row, units[row["unit_id"]])
     return merged
 
 
 def merge(stage, parts, responses):
-    if stage not in ("assemble", "review") or len(parts) != len(responses) or not parts:
+    if stage not in _SPLIT_STAGES or len(parts) != len(responses) or not parts:
         raise ValueError("Invalid unit-part responses")
     path = agent_tasks.ARTIFACTS[stage]
-    merged = {"status": "completed", "artifacts": {path: {"items": []} if stage == "assemble" else
-              {"findings": [], "checked_units": [], "unchecked": []}}, "notes": [], "findings": []}
+    item_artifacts = stage in ("assemble", "explanations", "knowledge")
+    merged = {"status": "completed", "artifacts": {path: {"items": []}}, "notes": [], "findings": []}
+    if not item_artifacts:
+        merged["artifacts"][path] = {"findings": [], "checked_units": [], "unchecked": []}
     seen = set()
     for part, response in zip(parts, responses):
         ids = part["unit_ids"]
@@ -164,7 +169,7 @@ def merge(stage, parts, responses):
             raise ValueError("Partition may return only its whitelisted artifact")
         selected_units = [{"unit_id": uid} for uid in ids]
         agent_tasks._findings(response["findings"], selected_units)
-        if response["status"] == "needs_review" and (path not in response["artifacts"] or stage == "assemble"):
+        if response["status"] == "needs_review" and (path not in response["artifacts"] or not item_artifacts):
             # The raw attempt keeps its candidate; do not install incomplete work.
             merged["status"] = "needs_review"
             merged["notes"].extend(response["notes"])
@@ -174,7 +179,7 @@ def merge(stage, parts, responses):
             raise ValueError("Completed partition must return its whitelisted artifact")
         payload = response["artifacts"][path]
         target = merged["artifacts"][path]
-        if stage == "assemble":
+        if item_artifacts:
             agent_tasks._fields(payload, ("items",), ("items",))
             agent_tasks._coverage(payload, selected_units)
             target["items"].extend(payload["items"])

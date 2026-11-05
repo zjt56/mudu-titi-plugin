@@ -83,6 +83,28 @@ class DenoiseTest(unittest.TestCase):
         self.assertEqual(meta["source_type"], "中考真题")
         self.assertTrue(meta["evidence"])
 
+    def test_legacy_junior_exam_titles_identify_real_exam(self):
+        for exam in ("初中毕业学业考试", "初中毕业生学业考试", "初中毕业学业水平考试", "初中学业水平考试"):
+            with self.subTest(exam=exam):
+                title = "2014年安徽省" + exam
+                cleaned, meta, _ = denoise.clean_body("**" + title + "**\nⅠ.单项填空\n1.What?")
+                self.assertEqual(meta["source"], title)
+                self.assertEqual(meta["source_type"], "中考真题")
+                self.assertEqual(meta["year"], 2014)
+                self.assertEqual(meta["region"], "安徽省")
+                self.assertIn("正文第1行：**" + title + "**", meta["evidence"])
+                self.assertNotIn(title, cleaned)
+                self.assertIn("1.What?", cleaned)
+
+    def test_numbered_legacy_exam_title_and_mock_priority(self):
+        meta = denoise.extract_meta(["1.2014年安徽省初中毕业学业考试", "Ⅰ.单项填空"])
+        self.assertEqual(meta["source"], "2014年安徽省初中毕业学业考试")
+        self.assertEqual(meta["source_type"], "中考真题")
+        mock = denoise.extract_meta(["2014年安徽省初中毕业学业考试模拟试卷", "Ⅰ.单项填空"])
+        self.assertEqual(mock["source_type"], "中考模拟")
+        question = denoise.extract_meta(["1.What is 初中毕业学业考试?", "2014年安徽省初中毕业学业考试"])
+        self.assertNotIn("source", question, "题目中的考试词语不能冒充卷头")
+
     def test_section_scores_are_retained_as_question_boundaries(self):
         text = "2022年安徽省初中学业水平考试\nⅡ.长对话理解(共5小题;每小题1分,满分5分)\n6.What?\nⅩ.书面表达(共1小题;满分20分)"
         cleaned, _, _ = denoise.clean_body(text)

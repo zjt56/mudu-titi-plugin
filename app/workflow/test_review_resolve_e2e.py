@@ -8,13 +8,11 @@ from workflow import test_review_consensus
 
 
 class ResolveRoundDecisionTest(test_review_consensus.ConsensusTest):
-    def test_merged_round_observations_resolve_only_recorded_sources(self):
+    def test_round_observations_resolve_independently_in_two_round_review(self):
         payload = self.payload()
-        for record in payload['rounds'][:2]:
+        for record in payload['rounds']:
             record['checks'][0].update(verdict='uncertain', rationale='原文存在同一处歧义。',
                                        issue_key='题目答案冲突', resolution_key='核对题目答案')
-        payload['rounds'][2]['checks'][0].update(verdict='uncertain', rationale='另一处问题。',
-                                                issue_key='另一个问题', resolution_key='核对其他问题')
         for record in payload['rounds']:
             task = review_rounds.export_task(self.batch)
             response = {'status': 'completed', 'artifacts': {'review_round': {'checks': record['checks']}},
@@ -23,29 +21,25 @@ class ResolveRoundDecisionTest(test_review_consensus.ConsensusTest):
         self.assertTrue(report['completed'], report)
         queue_path = self.batch / '07_review/manual-review-queue.json'
         items = json.loads(queue_path.read_text(encoding='utf-8'))['items']
-        merged = next(item for item in items if len(item.get('round_sources', [])) == 2)
-        other = next(item for item in items if item['finding_id'] != merged['finding_id'])
-        result = review.resolve(self.batch, finding_ids=[merged['finding_id']], action='accept',
-                                actor='reviewer', note='已核对两个轮次。', force=True)
+        labels_item = next(item for item in items if item['round_sources'][0]['round_id'] == 'labels')
+        sample_item = next(item for item in items if item['round_sources'][0]['round_id'] == 'sample')
+        result = review.resolve(self.batch, finding_ids=[labels_item['finding_id']], action='accept',
+                                actor='reviewer', note='已核对一审观察。', force=True)
         self.assertEqual(result['resolved'], 1, result)
         evaluated = review.evaluate_rounds(self.batch)
-        self.assertEqual({f['field'] for f in evaluated['resolved_findings']}, {'labels', 'knowledge'})
+        self.assertEqual({f['field'] for f in evaluated['resolved_findings']}, {'labels'})
         self.assertEqual([e['field'] for e in evaluated['errors'] if e['code'] == 'REVIEW_ROUND_FINDING'], ['sample'])
         saved = json.loads(queue_path.read_text(encoding='utf-8'))['items']
-        self.assertEqual(next(i for i in saved if i['finding_id'] == other['finding_id']), other)
-        self.assertEqual([i['round_sources'][0] for i in saved if i['finding_id'].startswith(merged['finding_id'] + '-source-')],
-                         merged['round_sources'])
+        self.assertEqual(next(i for i in saved if i['finding_id'] == sample_item['finding_id']), sample_item)
         # A later changed source is not covered by the earlier decision.
         changed = json.loads((self.batch / '07_review/review-rounds.json').read_text(encoding='utf-8'))
         changed['rounds'][1]['checks'][0]['assessment']['difficulty'][0]['value'] = '困难'
         evaluated = review.evaluate_rounds(self.batch, changed)
-        self.assertNotIn('knowledge', {f['field'] for f in evaluated['resolved_findings']})
-        self.assertFalse(evaluated['execution_completed'])
-        self.assertIn('knowledge', {e['round_id'] for e in evaluated['unchecked']})
+        self.assertIn('sample', {e['round_id'] for e in evaluated['unchecked']})
 
     def test_resolve_requires_exact_sources_and_leaves_other_disagreement_open(self):
         payload = self.payload()
-        for check in payload['rounds'][2]['checks']:
+        for check in payload['rounds'][1]['checks']:
             check['assessment']['subtypes'] = ['选择4题']
         payload['rounds'][1]['checks'][0]['assessment']['difficulty'][0]['value'] = '困难'
         for record in payload['rounds']:

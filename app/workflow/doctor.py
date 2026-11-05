@@ -29,7 +29,6 @@ REQUIRED_FILES = (
     "workflow/inventory.py",
     "workflow/doctor.py",
     "workflow/preview.py",
-    "workflow/templates/preview.html",
     "workflow/auto.py",
     "workflow/pipelines/mudu-question-intake.workflow.js",
 )
@@ -135,7 +134,7 @@ def _fixture(root: Path, findings: list, queue: list) -> Path:
 
 def check_gates() -> list[dict]:
     # 干净批次放行：只构造"无阻断项 / 人工队列为空 / 无必检未核"的审核产物，
-    # 判断闸门对这些自身可核验的维度是否放行。三轮语义审核（labels/knowledge/sample）
+    # 判断闸门对这些自身可核验的维度是否放行。两轮语义审核（labels/sample）
     # 必须来自真实的分别执行，不能由自检伪造，因此这里只要求"除分轮记录未完成外、
     # 没有闸门自身能判定的错误"——这与 review.py 的 fail-closed 语义一致。
     gate_own_errors = {"REVIEW_FINDING_OPEN", "MANUAL_REVIEW_OPEN", "MANUAL_QUEUE_MISSING",

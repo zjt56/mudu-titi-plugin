@@ -13,7 +13,7 @@
 | 3 | `answers` | 子智能体4：对照确认后的题号提取答案、整理答案与解析对应关系并判定难度 | `01_source_ans/answers.json` | agent | `structure_gate` | 无单独答案卷时可用原卷附录；无任何答案证据则待核验 |
 | 4 | `audio` | 按确认后的听力单元切段并核对起止 | `02_audio/audio_map.json` | agent | `structure_gate` | 无音频才跳过 |
 | 5 | `types` | 子智能体3：判题型与子类、统计题目词数、判断内容是否完整 | `03_types/types.json` | agent | `structure_gate` | 等待代理执行 |
-| 6 | `explanations` | 子智能体1：解析匹配、缺解析生成、文章大意匹配、缺大意生成 | `04_knowledge/explanations.json` | agent | `types`、`answers` | 等待代理执行；归属不确定转待核验 |
+| 6 | `explanations` | 子智能体1：解析/文章大意逐字匹配；缺失填「无」，不生成 | `04_knowledge/explanations.json` | agent | `types`、`answers` | 等待代理执行；归属不确定转待核验 |
 | 7 | `knowledge` | 子智能体2：知识点打标与教材知识点匹配，逐字沿用解析与大意 | `04_knowledge/knowledge.json` | agent | `types`、`answers`、`explanations` | 等待代理执行；改写内容即拒绝 |
 | 8 | `assemble` | 组装批次 | `06_batch/batch.json` | agent | `audio`、`types`、`knowledge` | 等待代理执行 |
 | 9 | `meta` | 难度与分类 | `06_batch/batch_meta.json` | command | `assemble` | — |

@@ -118,6 +118,56 @@ def looks_like_answers(lines: list[str]) -> bool:
     return hits >= 2
 
 
+def _next_unseen_heading(lines: list[str], start: int, seen: set) -> int | None:
+    """重复大题之后，第一个还没在正文里出现过的大题标题位置。"""
+    for index in range(start, len(lines)):
+        heading = HEADING.match(_plain(lines[index]).strip())
+        if not heading:
+            continue
+        kind = next((name for hint, name in TYPE_HINTS if hint in heading.group(2)), None)
+        if kind and (heading.group(1), kind) not in seen:
+            return index
+    return None
+
+
+def _question_body_follows(lines: list[str], start: int, window: int = 40) -> bool:
+    """标题之后是否出现“题号 + 至少两个选项”的真实题目（纯答案行不算）。"""
+    tail = lines[start:start + window]
+    for offset, raw in enumerate(tail):
+        if not QUESTION.match(_plain(raw).strip()):
+            continue
+        for follow in tail[offset + 1:offset + 6]:
+            if len(re.findall(r"[A-H][.．]\s*\S", _plain(follow).strip())) >= 2:
+                return True
+    return False
+
+
+def _is_inline_answer_key(lines: list[str], start: int, next_new: int) -> bool:
+    """重复大题后是分段答案、随后又有新大题：答案收进附录，正文继续解析。"""
+    block = [line.strip() for line in lines[start:next_new] if line.strip()]
+    if not block or len(block) > 40:
+        return False
+    if not looks_like_answers(lines[start:next_new]):
+        return False
+    return _question_body_follows(lines, next_new)
+
+
+def _is_answer_explanation_line(line: str) -> bool:
+    """解析版逐题答案行：`31.B 【解析】…` 或 `96.useful 97.duty…`，不是新题。"""
+    if (re.match(r"^\s*\d{1,4}\s*[.．、]\s*[A-H](?:\s|$)", line)
+            and re.search(r"【解析】|【答案】|【分析】|参考答案", line)):
+        return True
+    # 一行多个“题号.答案”（96.useful 97.duty 98.brave）是答案汇总行，不是题干。
+    return len(re.findall(r"(?:^|\s)\d{1,4}\s*[.．]\s*[A-Za-z(（]", line)) >= 2
+
+
+def _is_answer_line_for_body(line: str) -> bool:
+    """正文里夹带的答案行：逐题解析行，或 `71~75 BFEDG` 这类题号区间汇总行。"""
+    if _is_answer_explanation_line(line):
+        return True
+    return bool(re.match(r"^\s*\d{1,4}\s*[~～\-–—]\s*\d{1,4}\s*[A-H]{2,}\s*$", line))
+
+
 def _title_key(line: str) -> str:
     plain = re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", _plain(line)))
     # 卷名行可能带列表前缀（如 **1**.**2017**年…），那不是题号，也不能让文末重复卷名漏删。
@@ -159,9 +209,13 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
     active = None
     seen_headings = set()
     appendix_start = len(lines)
+    appendix_ranges: list[tuple[int, int]] = []
+    skip_until = -1
     from workflow.denoise import extract_meta
     paper_title = _title_key(extract_meta(lines).get("paper_title", ""))
     for index, raw in enumerate(lines):
+        if index < skip_until:
+            continue
         if (active is not None and paper_title and _title_key(raw) == paper_title
                 and _answer_summary_follows(lines[index + 1:])):
             appendix_start = index
@@ -173,9 +227,22 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
         heading = HEADING.match(line)
         kind = next((name for hint, name in TYPE_HINTS if hint in heading.group(2)), None) if heading else None
         if heading and kind:
+            # 书面表达里的“1.词数… 2.请不要逐句翻译…”是写作要求，不是新大题。
+            if active is not None and active.get("type") == "书面表达" and heading.group(1).isdigit():
+                continue
             key = (heading.group(1), kind)
             if key in seen_headings:
                 # 重复大题标题可能是答案附录，也可能是另一份试卷，不能静默并入。
+                # 解析版常把答案插在大题之间（听力答案后紧接“第二部分 笔试”）：
+                # 若后面还有没出现过的新大题，且新大题带真实题干与选项，当前这段
+                # 只是分段答案——收进附录，正文继续解析，不能把整后半卷当答案册。
+                next_new = _next_unseen_heading(lines, index + 1, seen_headings)
+                if next_new is not None and _is_inline_answer_key(lines, index, next_new):
+                    appendix_ranges.append((index, next_new))
+                    skip_until = next_new
+                    unresolved.append({"code": "INLINE_ANSWER_BLOCK", "line": index + 1,
+                                       "message": "重复大题标题后是分段答案，随后仍有新大题；答案保留在附录，正文继续解析"})
+                    continue
                 appendix_start = index
                 if looks_like_answers(lines[index:]):
                     # 明确是答案册（题号+答案字母/解析），保留为可核对的答案附录，不当作第二份卷子。
@@ -200,6 +267,9 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
             boundary_index = material_start(lines, index) if material_label(line) else index
             active["material_boundaries"].append({"label": line, "line": boundary_index + 1,
                                                    "references": references})
+        if _is_answer_explanation_line(line):
+            # 解析版逐题答案行（31.B 【解析】…）不是新题，也不该制造重复题号。
+            continue
         match = QUESTION.match(line)
         if active["type"] == "书面表达":
             # 题号只可能在任务开头；正文里的数字列表不能仅凭连续性视为题号。
@@ -277,13 +347,47 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
                  "image_questions": sorted(set(image_questions)), "unresolved": unresolved,
                  "requires_visual_review": "[IMG " in text or "[TABLE" in text,
                  "coverage_verified": False}
-    body_lines = lines[:appendix_start]
+    body_lines = []
+    moved_answer_lines = []
+    # 解析版常把书面表达的【参考范文】附在正文末尾：范文是答案，不是题目，
+    # 移入附录既能保持正文干净，也让答案校验能在答案文本里找到它。
+    essay_start = next((i for i in range(min(appendix_start, len(lines)))
+                        if re.match(r"^\s*【\s*(?:参考范文|范文|参考作文|作文范文)\s*】", _plain(lines[i]))), None)
+    body_end = essay_start if essay_start is not None else appendix_start
+    current_heading = None      # 当前所属大题标题行（用于在附录补回被移走答案的章节）
+    last_answer_heading = None
+    for i in range(body_end):
+        if any(start <= i < end for start, end in appendix_ranges):
+            continue
+        plain = _plain(lines[i]).strip()
+        heading = HEADING.match(plain)
+        # 只有真正的大题标题（能识别题型）才更新章节；逐题答案行“31.B …”也会被
+        # HEADING 误匹配成 (31,"B…")，不能当标题，否则答案行会被重复写入附录。
+        if heading and next((n for hint, n in TYPE_HINTS if hint in heading.group(2)), None):
+            current_heading = lines[i]
+        if _is_answer_line_for_body(plain):
+            # 解析版把答案夹在正文里：移入附录，正文只留题目，避免题号/选项重复。
+            # 补回所属大题标题，保证答案附录仍能按章节归属（否则溯源会错落到上一节）。
+            if current_heading is not None and current_heading != last_answer_heading:
+                moved_answer_lines.append(current_heading)
+                last_answer_heading = current_heading
+            moved_answer_lines.append(lines[i])
+            continue
+        body_lines.append(lines[i])
+    if essay_start is not None:
+        moved_answer_lines.extend(lines[essay_start:appendix_start])
     # 文末重复卷名属于答案册页眉，不能留在最后一题的正文/题干里。
     while body_lines and not body_lines[-1].strip():
         body_lines.pop()
     if body_lines and paper_title and _title_key(body_lines[-1]) == paper_title:
         body_lines.pop()
-    return structure, "\n".join(body_lines).rstrip() + "\n", "\n".join(lines[appendix_start:]).strip()
+    appendix_blocks = ["\n".join(lines[start:end]).strip() for start, end in appendix_ranges]
+    if moved_answer_lines:
+        appendix_blocks.append("\n".join(moved_answer_lines).strip())
+    if appendix_start < len(lines):
+        appendix_blocks.append("\n".join(lines[appendix_start:]).strip())
+    appendix_text = "\n\n".join(block for block in appendix_blocks if block)
+    return structure, "\n".join(body_lines).rstrip() + "\n", appendix_text
 
 
 def _write(path: Path, value):
@@ -450,7 +554,8 @@ def extract_source(source: Path, destination: Path, config=None) -> dict:
     if mf.sha256_file(source) != original_hash:
         raise ValueError("提取期间原文件发生变化，请重试")
     from workflow import denoise
-    metadata = denoise.extract_meta(text.splitlines())
+    from workflow.metadata_policy import with_placeholders
+    metadata = with_placeholders(denoise.extract_meta(text.splitlines()))
     structure, body, appendix = infer_structure(text)
     for conflict in metadata.get("conflicts") or []:
         structure["unresolved"].append({"code": "SOURCE_METADATA_CONFLICT", "message": str(conflict)})

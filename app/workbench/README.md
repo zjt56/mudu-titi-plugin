@@ -1,120 +1,57 @@
-# 本地录题工作台
+# Python REST API 后端
 
-本地审核看台 + 上传入口：首页提交原卷即建批次并推进流程，工作台里按入库单元看题、改标签、处理人工意见。
+`server.py` 是**纯 REST API 后端**：只提供数据接口，不提供任何页面、静态文件或浏览器工作台。
+唯一的前端是 DSH 插件面板 `../../lib/client.js`，它通过宿主的 `/wf-plugin/api/*` 代理调用这里的接口。
+界面、交互、卷面渲染、弹窗全在插件面板实现；本目录不参与显示。
 
 ## 启动
 
-在技能根目录运行：
+由 DSH 宿主插件自动拉起（`lib/index.js` 的 `ensureBackend`），默认端口 8791、只绑定回环地址。
+手动排查时才需要直接起进程：
 
-```powershell
-python -m workbench.server --port 8765
+```bash
+python3.12 -m workbench.server --host 127.0.0.1 --port 8791
 ```
 
-然后打开 <http://127.0.0.1:8765>。默认只绑定本机回环地址。
+数据目录由 `WF_WORKFLOWS_DIR` / `WF_INBOX_DIR` 指定（宿主注入，指向插件项目根下的 `workflows/`、`inbox/`）。
 
-## 技术选型
+## 接口
 
-界面用 Vue 3 + Element Plus，组件文件放在 `static/vendor/`（本地引入，无构建步骤，不联网）：
-
-| 文件 | 版本 | 用途 |
+| 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `vue.global.prod.js` | 3.5.44 | 运行时 |
-| `element-plus.full.min.js` | 2.14.7 | 组件库 |
-| `element-plus.css` | 2.14.7 | 样式 |
-| `element-plus.zh-cn.min.js` | 2.14.7 | 中文语言包 |
-| `el-icons.iife.min.js` | 2.3.2 | 图标 |
+| GET | `/api/health` | 探活 |
+| GET | `/api/batches` | 批次列表（含统计与单元行） |
+| GET | `/api/batches/{batch}/units/{unit}` | 单元详情：原卷预览块、小题、标签、待人工意见 |
+| POST | `/api/batches/{batch}/units/{unit}` | 保存标签（`{labels}`）或题面草稿（`{items}`、`{unit}`） |
+| GET | `/api/batches/{batch}/pipeline` | 当前推进状态与停留原因 |
+| POST | `/api/batches/{batch}/advance` | 触发流程推进 |
+| POST | `/api/batches/{batch}/decisions` | 人工裁决一条意见（`{item:{finding_id,status,note}}`） |
+| POST | `/api/batches/{batch}/archive` | 归档批次（`{confirm_name}`，可恢复） |
+| GET | `/api/batches/{batch}/media` | 图片体检结果 |
+| POST | `/api/batches/{batch}/media/exclusions` | 标记非题目图 |
+| GET | `/api/batches/{batch}/media/{file}` / `audio/{file}` | 二进制媒体（支持 `?format=data-url`） |
+| GET | `/api/taxonomy` | 题型/子类/难度/分类目录 |
+| GET | `/api/knowledge/tree` | 完整知识点树 |
+| GET | `/api/knowledge?q=` | 知识点搜索 |
+| POST | `/api/uploads` | multipart 上传原卷并建批次 |
 
-服务端仍是 Python 标准库的 `http.server`，只负责数据与静态文件，不引入构建工具链。
+除 `/api/*` 外一律 404；没有首页、没有 hash 路由、没有静态资源服务。
 
-## 页面
+## 数据模型与口径
 
-顶部导航两项：**首页**（`#/`）与**试卷审核**（`#/batch/<批次>?unit=<单元>`）。「试卷审核」已在某份试卷里就留在原地，否则打开待审最多的那份。
+- **一个入库单元一行**：独立题一行一题；题组（完形、阅读、补全对话、信息转换、长对话/短文听力等）合并一行，带小题数与题号区间。合并依据批次里已有的 `subquestions`，不由前端推断。
+- **标签是单元级**：题组整体一套，独立题一题一套；存 `candidates/units/<unit_id>.json`（`applies_to=unit`、`inherit_subquestions`）。保存前只接受目录内叶子值，服务端重新校验。
+- **原卷预览块**：`preview_blocks` 是文字/图片/表格/音频的结构化数据，由插件面板负责渲染成卷面样式。
+- **待人工处理**：只审标签类问题（`knowledge`、`type`、`difficulty`、`source` 等）；`fixed`/`rejected` 才算处理完。写队列只合并 `status`/`note`/`resolution_note`，不覆盖原问题的 `field`/`question`/`severity`，覆盖前留 `.bak` 并追加 `workflow/decisions.jsonl`。
 
-**首页（`#/`）**
+## 流程推进
 
-- 上传试卷：试卷名、年份、地区、科目 + 拖拽选择文件（原卷必填，答案卷/听力音频可选；文件名含「答案/answer/解析」自动认作答案卷）。
-- 提交后依次：写 `inbox/<试卷名>/`（`source.docx`、`answers.*`、`audio.*`、`batch.json`）→ 建 `workflows/<试卷名>/` 台账 → 后台调用 `workflow/auto.py` 推进流程 → 跳到该批次。
-- 试卷台账：每行一份试卷，显示试卷名（取自 `06_batch/batch.json` 的 `source`，没有则退回目录名）、题组/小题数、待审数、流程进度与当前步骤；「进入审核」「继续处理」两个入口。
-
-**试卷审核**
-
-三列：需要审核的试卷与统计 → 题目列表 → 详情。
-
-- 左列：**需要审核的试卷**，一行一份（待审多的排前面，右侧数字是待审标签题数），点一行切换试卷；下面是当前试卷的题组/小题/待审/无误统计。没有「返回试卷列表」按钮，试卷清单常驻左列。
-- 中列：全部 / 待审 / 阻断 / 未核对 四个筛选项 + 搜索 + 紧凑题目行（题号区间、题型、待审数字徽标）。
-- 详情区再分两列：左边「原卷预览」与「小题内容」，右边单独一列「待人工处理」。
-- 键盘 `↑`/`↓`（或 `k`/`j`）在筛选后的列表里上下切换，输入框内不拦截。
-
-## 待人工处理
-
-右列每条意见一张卡：字段名、严重级别、问题说明、**所属题（第 N 题或第 A–B 题组）与当前值**、处理状态，以及「编辑」「手动修改」按钮。
-
-- 「编辑」弹窗可改**处理状态**（待处理/已接受/已修复/驳回）并填**处理意见**，保存写回队列。
-- 「手动修改」直接打开标签弹窗改真值（来源、主类、子类、难度、分类、知识点），保存后自动把这条意见标为 `fixed` 并附注「已手动修改标签并保存」，不用改完再点一次。
-- 快捷按钮「接受 / 已修复 / 驳回」直接改状态，不填意见。
-- 只审标签类问题：`knowledge`、`knowledgeIds`、`type`、`subtype(s)`、`difficulty`、`source`、`source_type`、`year`、`location`、`filterMetadata`。
-- 题面/选项/表格/图片等格式问题属前置流程，工作台**不显示**，只在前置计数里体现。
-- 只有 `status` 为 `fixed` 或 `rejected` 才算处理完；`accepted` 是“知道了但仍有风险”，继续留在待审里。
-- 写队列时只合并 `status`/`note`，不会覆盖原问题的 `field`/`question`/`severity`（有回归测试 `workflow/test_workbench_decisions.py`），覆盖前留 `manual-review-queue.json.bak`，并追加 `workflow/decisions.jsonl`。
-
-## 标签
-
-「修改标签」弹窗，保存前不接受目录外的值：
-
-- 主类只能从 27 个固定类型里选；子类按主类联动；难度只接受 容易/适中/困难；分类只接受 优选题/易错题。
-- 知识点是**单元级**的：完形、阅读、任务型这类题组整体一套，独立题就是那一题一套；存 `candidates/units/<unit_id>.json`（`applies_to=unit`、`numbers`、`inherit_subquestions`）。
-- 知识点使用完整分类树浏览，可按名称或完整路径搜索整棵目录；所有目录节点均由 `GET /api/knowledge/tree` 返回，并显示总节点数与可选叶子数，不使用前 200 条搜索结果冒充完整目录。名称自身带斜线时仍按真实目录父节点组织。
-- 只有叶子显示「添加 / 移除」按钮，已选项可逐个移除；没有自由输入知识点入口。服务端保存前重新校验，目录外路径、非叶子、错误容器及空值会返回 400，拒绝写入标签和题面。现有错误标签仍可见，需移除后再保存；题型维度等其他不完整项继续以提醒方式反馈。
-- 保存会回填 `knowledgeIds` 并保留 `.bak`；写的是 `candidates/` 草稿，不是入库数据。
-- 口径出处：`references/knowledge-tagging.md`「五之二、组题只打一次」与 `references/constraints.md` C21–C26。
-
-## 上传与流程推进
-
-- `POST /api/uploads`（multipart）建批次并启动推进，返回 `{name, inbox, paper, stage}`。
-- `POST /api/batches/{batch}/advance` 再推一次；`GET /api/batches/{batch}/pipeline` 看当前步骤与停留原因。
-- 原卷提取是内置确定性阶段。答案、题型、知识点、组装和审核通过通用 Agent 文件任务交接，有本机配置时自动调用 CLI；不要求指定厂商。结构确认先于答案/听力，长对话按真实对话分别切段。
-- 结构闸门和审核放行是机器检查：证据齐全才通过。三审只把具体差异/冲突/不确定项送人工；缺少执行记录保留未完成，不生成每题人工确认任务。上传确认、发布确认仍由人决定。
-- 已有产物不代表阶段完成。台账、输入或产物摘要不一致时应按正式 runner/import 重新验证或重跑；不能手工回填完成状态掩盖变化。
-
-## 删除本地批次与重新录入
-
-- 首页「本地试卷批次」表或审核页右上角「删除批次」打开确认框。框内明确显示试卷名、批次目录名与归档范围，必须输入完全相同的批次目录名后才能操作。
-- `POST /api/batches/{batch}/archive`，请求 `{"confirm_name":"批次目录名"}`。不永久删除文件：批次目录及同名收件箱分别重命名到 `.workbench-trash/<时间-随机ID>/workflows` 和 `inbox`，`receipt.json` 记录原路径、时间与归档状态。成功后列表刷新，当前批次关闭，可用同名重新上传。
-- 拒绝路径穿越、批次根目录/批次/收件箱/回收目录软链接，目录内部任何软链接也需人工检查后再试。两个目录均预检后才移动；第二次移动失败会回滚第一次，保留收据。进程异常退出时可根据收据检查移动完成情况。
-- 工作台自身的上传、推进注册、草稿/意见写入和归档使用同一个可重入锁；推进任务注册后至后台完成前拒绝归档，台账中任一 `running` 阶段同样拒绝。独立 CLI 或其他服务进程未共享此锁，不要在这些进程运行时归档；无法从工作台原子阻止外部进程同时开始写入。
-- 恢复方式：先停止相关任务，检查收据中的原路径尚未占用，再将归档下的 `workflows` 和（若存在）`inbox` 目录移回收据对应路径。若已重新录入同名批次，先保留新批次并解决名称冲突，避免覆盖。当前没有一键恢复/清空回收目录的接口。
-- 此功能只增加能力；测试使用临时目录，不删除或归档任何现有用户批次。
-
-## 一个入库单元一行
-
-- 独立题一行一题；题组（完形、任务型阅读、补全对话、信息转换、长对话/短文听力等）合并一行，标注小题数与区间（如 `31–40 10小题`），选中后一次显示整组材料与全部小题。
-- 小题内容默认全部收起，点标题展开；保存时整组一起提交（`{"labels":{...},"items":[...]}`）。
-- 合并依据是批次里已有的 `subquestions` 与题号区间，不由前端推断。
-
-## 卷面预览
-
-- 中文宋体、西文 Times New Roman，行距 1.9；`第Ⅱ部分`、`Ⅵ.完形填空` 这类大题标题加粗。
-- 正文里的 `<u>`、`<b>`、`<i>`、`**粗体**`、`__下划线__` 会还原（先转义再解析，不执行正文 HTML）。
-- 全角空格包住的题号（`　31　`）渲染成蓝色下划线空位。
-- 连续的多张题图并排显示，缩略图限高，点击新标签打开原图；缺失图片显式提示文件名。
-- 表格保留边框与表头底色。
-
-## 图片体检（接口）
-
-`GET /api/batches/{batch}/media` 给每张图判 `question`/`header`/`banner`/`unused`/`excluded`；`POST /api/batches/{batch}/media/exclusions` 可把某张图标记为非题目图（写 `workflow/media-exclusions.json`，可恢复）。体检只按引用位置、尺寸比例和文件名判断，不判断图片内容。
-
-## 其他接口
-
-`GET /api/batches`、`GET /api/batches/{batch}/units/{unit}`、`POST /api/batches/{batch}/units/{unit}`（`{labels}` 或 `{items}`）、`POST /api/batches/{batch}/decisions`（`{item:{finding_id,status,note}}`）、`GET /api/taxonomy`、`GET /api/knowledge/tree`（完整树、总节点/叶子数、`complete=true`）、`GET /api/knowledge?q=`（兼容旧搜索，最多 200 叶子，不是完整目录）。
-
-## 缓存与刷新
-
-前端还在改，`/app.js`、`/app.css`、`index.html` 一律 `no-cache, no-store, must-revalidate`，只有 `vendor/` 下的库缓存一天；`index.html` 里脚本样式还带 `?v=` 版本号，改前端时同步加一版，老页面绝不会拿新 HTML 配旧脚本。右上角有一行 `v2026-11-02c` 这样的版本标记，刷新后先看它确认拿到的是最新界面。
-
-调试用深链：`#/batch/<批次>?unit=<单元>`，追加 `&labels=1` 打开标签弹窗、`&find=WF-00xx` 打开处理意见弹窗、`&fix=WF-00xx` 直接进手动修改。
+原卷提取是内置确定性阶段；答案、题型、知识点、组装和审核通过通用 Agent 文件任务交接。
+结构闸门和审核放行是机器检查：证据齐全才通过；三审只把具体差异/冲突/不确定项送人工；缺少执行记录保留未完成。
+上传确认、发布确认仍由人决定。台账、输入或产物摘要不一致时应按正式 runner/import 重新验证或重跑，不能手工回填完成状态。
 
 ## 写入边界
 
 - 只写批次目录内的 `candidates/`、`07_review/`、`workflow/` 与最外层 `inbox/`；覆盖前留 `.bak`。
-- 不向远端上传或发布；本地批次仅在明确确认后移到工作区回收目录，永久删除没有接口。发布与远端上传确认只能人工在流程外完成。
-- 静态预览按钮只读批次里已有的 `preview.html`，不存在时提示先生成。
+- 不向远端上传或发布；本地批次仅在明确确认后移到工作区回收目录，永久删除没有接口。
+- 归档用可重入锁，推进任务注册后至后台完成前拒绝归档；外部独立进程不共享此锁。
