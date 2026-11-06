@@ -33,7 +33,7 @@ ARTIFACTS = {
 REVIEW_FILES = ("content-review.json", "metadata-review.json", "manual-review-queue.json")
 AI_MARK = "（AI生成，待校对）"
 RULES = {
-    "answers": "You are labeling subagent 4 (answers, explanation alignment, difficulty). Artifact: {answers:{question_number:string}, evidence:{question_number:[nonempty location strings]}, difficulty:{question_number:easy|medium|hard in Chinese 容易/适中/困难}, difficultyEvidence:{question_number:[nonempty location strings]}}. Extract only supplied answer text, never solve or guess. Match every confirmed question number exactly; preserve original wording. difficulty is a reasoned judgement from observable features of the actual question (length, sentence complexity, option design, tested knowledge), never a guess from question type alone; state the basis. Missing/conflicting answers => needs_review.",
+    "answers": "You are labeling subagent 4 (answers, explanation alignment, difficulty). Artifact: {answers:{question_number:string}, evidence:{question_number:[nonempty location strings]}, difficulty:{question_number:easy|medium|hard in Chinese 容易/适中/困难}, difficultyEvidence:{question_number:[nonempty location strings]}}. Extract every answer and explanation mapping actually present in all supplied answer materials, including question numbers outside the current tentative structure. Never discard 21~80 merely because the source paper currently contains only listening material. Never solve or guess; preserve original wording. Difficulty is optional and only for questions whose actual stem/options are supplied; leave it empty otherwise. Missing/conflicting answers do not block the stage.",
     "audio": "Artifact: {items:[{unit_id,file,start,end,evidence:[location strings]}]}. Cover exactly the listening units. file is an existing batch-relative already-cut media segment, never the original full recording. For every listening unit copy file, start and end EXACTLY from a 02_audio/segment-evidence.json item whose verified is true; start/end are offsets on the whole-paper recording, never re-based to the segment's own 0. Do not guess, round or adjust them: a proposed time that differs from the verified row is rejected. Without a verified evidence row and an existing segment for that unit return needs_review for it; you cannot listen, cut or create files.",
     "types": "You are labeling subagent 3 (type, word count, content completeness). Artifact: {items:[{unit_id,type,subtypes:[string],words:integer,contentComplete:boolean,evidence:[location strings]}]}. Exactly one row per confirmed unit. Use only catalog main types and their exact subtypes. All applicable subtypes are required; only 单词拼写 permits multiple subtypes. words is the English word count of the unit's own stem/material/options (digits and Chinese not counted); contentComplete is false when the question is truncated, missing options, or its stem does not match the passage. Never rename IDs or change unit boundaries.",
     "knowledge": "You are labeling subagent 2 (knowledge points; textbook matching only for lesson-synced sources). Artifact: {items:[{unit_id,knowledge:[full catalog leaf paths],knowledgeIds:[matching catalog IDs],textbook:{version,book,unit,section,evidence},subquestions:[{number,knowledge:[full leaf paths],knowledgeIds:[]}],evidence:[nonempty location strings]}]}. Output tags ONLY: do not write answer, explanation or articleSummary — the importer injects them verbatim from the validated answers and explanations artifacts, and any content you add is ignored. Assign knowledge tags only. knowledgeIds is optional but must match paths. Use the matching types.json row as type/subtype context. Groups cover each confirmed child number exactly once; standalone subquestions is []. Whole-unit types (阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话) take ONLY group-level tags (genre/theme/content): their subquestions must carry knowledge=[] and are never tagged per child. Per-question types (听力短对话理解, 听力关键词语选择, 单项填空, 单词拼写, 完成句子, 翻译, 情景运用, 语音题 etc.) tag every child separately. textbook placement is ONLY for lesson-synced sources (同步练习/单元测验) whose own title or section header names the textbook unit: use exact strings from the supplied textbook_index and cite paper evidence; otherwise omit. Every knowledge path MUST be copied verbatim from the supplied catalog (references/knowledge-catalog.json); never append an invented child below an existing leaf (e.g. '语用/情景交际' is already a leaf — writing '语用/情景交际/询问目的' is invalid), and never invent names or IDs. When no valid leaf exists for a dimension, omit that dimension. Evidence must be nonempty and refer to supplied text.",
@@ -120,6 +120,32 @@ def _number(value):
     if isinstance(value, bool) or not str(value).isdigit() or int(value) < 1:
         raise ValueError(f"Invalid confirmed question number: {value!r}")
     return str(int(value))
+
+
+def stage_gaps(batch_dir, stage):
+    """Return only missing unit/field work for incremental stage retries."""
+    batch = Path(batch_dir)
+    try:
+        units = confirmed_units(batch)
+    except (OSError, ValueError, TypeError):
+        units = []
+    expected = {str(n) for unit in units for n in unit.get("numbers", [])}
+    if stage == "answers":
+        path = batch / ARTIFACTS[stage]
+        data = _json(path) if path.is_file() else {}
+        answers = data.get("answers") if isinstance(data, dict) else {}
+        difficulty = data.get("difficulty") if isinstance(data, dict) else {}
+        return {"answers": sorted(expected - set(answers or {})),
+                "difficulty": sorted(expected - set(difficulty or {}))}
+    if stage in ("types", "explanations", "knowledge"):
+        path = batch / ARTIFACTS[stage]
+        data = _json(path) if path.is_file() else {}
+        rows = data.get("items") if isinstance(data, dict) else []
+        seen = {str(row.get("unit_id")) for row in rows if isinstance(row, dict)}
+        return {"units": sorted({unit.get("unit_id") for unit in units} - seen)}
+    if stage == "assemble":
+        return {"batch": [] if (batch / ARTIFACTS[stage]).is_file() else ["06_batch/batch.json"]}
+    return {}
 
 
 def confirmed_units(batch_dir):
@@ -216,8 +242,9 @@ def _collect(batch, stage, speculative=False):
     if source_text is not None and not str(source_text).strip():
         missing.append("Prepare nonempty 01_source/正文.txt before running an agent stage")
     gate = add("07_review/structure-gate.json", False) if stage in ("types", "explanations", "knowledge", "assemble", "review") else None
-    if gate is not None and (not isinstance(gate, dict) or gate.get("passed") is not True):
-        missing.append("structure_gate has not passed; resolve its blockers before this stage")
+    # 结构报告是模型上下文，不是代理阶段的硬前置条件。模型负责在候选结构上继续判断。
+    if gate is not None and not isinstance(gate, dict):
+        contexts["structure_gate_warning"] = "结构报告不可用，继续使用原始提取文本判断"
     add("01_source/metadata.json", False)
     # Content validation also consults the unconfirmed structure for unnumbered
     # compositions.  Bind its exact bytes, including when it is not prompt data.
@@ -255,7 +282,7 @@ def _collect(batch, stage, speculative=False):
         if prepared is None and explicit:
             source = Path(explicit).expanduser()
             if source.suffix.lower() != ".txt" or not source.is_file():
-                missing.append("Extract the explicit answers PDF/DOCX into 01_source_ans/正文.txt with the parent extraction helper")
+                contexts["answer_source_warning"] = "答案文件存在但尚未提取为文本；答案字段留空，继续后续模型判断"
             else:
                 raw = source.read_bytes()
                 try:
@@ -265,7 +292,7 @@ def _collect(batch, stage, speculative=False):
                 hashes[str(source.resolve())] = hashlib.sha256(raw).hexdigest()
         elif prepared is None:
             if not add("01_source/附录.txt", False):
-                missing.append("No answer source: supply answers text or prepare 01_source/附录.txt; never guess")
+                contexts["answer_source_warning"] = "未提供答案文本；答案字段留空，不猜答案，继续流程"
     if stage == "knowledge":
         metadata = contexts.get("01_source/metadata.json") or {}
         if textbook.needs_matching(metadata.get("source_type") if isinstance(metadata, dict) else None):
@@ -274,7 +301,7 @@ def _collect(batch, stage, speculative=False):
     if stage in ("explanations", "knowledge", "assemble", "review"):
         if not speculative:
             add(ARTIFACTS["types"])
-            add(ARTIFACTS["answers"])
+            add(ARTIFACTS["answers"], False)
         add("01_source_ans/正文.txt", False)
         add("01_source/附录.txt", False)
     if stage in ("assemble", "review"):
@@ -313,6 +340,12 @@ def _collect(batch, stage, speculative=False):
         contexts["existing_audio_files"] = media
         if not media:
             missing.append("No already-cut audio segments exist inside batch; parent must prepare and verify real cuts")
+    # Every retry receives an explicit gap list so the model can fill only missing
+    # units/fields instead of regenerating a complete artifact.
+    try:
+        contexts["incremental_gaps"] = stage_gaps(batch, stage)
+    except (OSError, ValueError, TypeError, KeyError):
+        contexts["incremental_gaps"] = {}
     if stage == "review":
         add("workflow/media-observations.json", False)
         final = "06_batch/batch_meta.json" if (batch / "06_batch/batch_meta.json").is_file() else ARTIFACTS["assemble"]
@@ -422,7 +455,7 @@ def _build_task_template(stage, max_input_chars, context, hashes, missing, units
         "Return exactly one valid JSON object, no markdown fences or prose. "
         "The outer object has exactly four sibling keys: status, artifacts, notes, findings. "
         "status is completed or needs_review. notes is a list of short strings; findings is [] when none, otherwise each entry is exactly {unit_id:<one confirmed unit id>, severity:blocker|major|minor|info, field:<short string>, reason:<short string>, evidence:[nonempty strings]} — never a bare string and never an unknown unit_id. "
-        "Only the named artifact is allowed. needs_review imports nothing; include precise actionable reasons. "
+        "Only the named artifact is allowed. Missing source fields are optional: preserve empty/无 values and continue; return the best partial artifact available. "
         "Before returning, check braces: notes and findings belong INSIDE the outer object, AFTER artifacts.\n"
     )
     number = str(units[0]["numbers"][0]) if units else "1"
@@ -510,15 +543,25 @@ def _children(row, unit):
 def _types(payload, units):
     rows = _coverage(payload, units)
     for row in rows.values():
-        _fields(row, ("unit_id", "type", "subtypes", "words", "contentComplete", "evidence"),
+        _fields(row, ("unit_id", "type", "subtypes", "words", "contentComplete", "evidence", "warnings"),
                 ("unit_id", "type", "subtypes", "evidence"))
         _evidence(row)
         _strings(row["subtypes"], "subtypes")
         problems = taxonomy.check_labels(row)
-        if row.get("type") not in taxonomy.types() or (taxonomy.subtypes(row.get("type")) and not row["subtypes"]):
-            problems.append("Catalog main type and applicable subtype required")
+        main_type = row.get("type")
+        allowed_subtypes = taxonomy.subtypes(main_type) if main_type in taxonomy.types() else []
+        if main_type not in taxonomy.types():
+            problems.append("Catalog main type is required and must exactly match the catalog")
+        elif allowed_subtypes and not row["subtypes"]:
+            problems.append(
+                "Catalog subtype is required for %s; choose exactly one of: %s"
+                % (main_type, ", ".join(allowed_subtypes))
+            )
+        if problems and os.environ.get("WF_MODEL_FIRST", "1") == "0":
+            raise ValueError("Invalid type labels for %s: %s" %
+                             (row.get("unit_id", "unknown"), "; ".join(problems)))
         if problems:
-            raise ValueError("Invalid type labels: " + "; ".join(problems))
+            row.setdefault("warnings", []).extend(problems)
     return rows
 
 
@@ -528,20 +571,43 @@ def _answer_comparison_text(value):
     return " ".join(value.translate(quotes).split())
 
 
+def _provenance_text(value):
+    """解析来源比对用的归一化：忽略 <u>/<b> 等标记、标点、空白和引号差异。
+
+    解析来自上传材料（原卷/答案册/附录）时常带画线标记或全半角差异；只要内容
+    能在材料里找到即可，不要求逐字（含标记）完全相同。
+    """
+    text = str(value or "")
+    text = re.sub(r"</?(?:u|b|strong|em|i|sup|sub)(?:\s[^>]*)?>", "", text, flags=re.I)
+    text = text.replace(AI_MARK, "")
+    quotes = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
+    text = text.translate(quotes)
+    return re.sub(r"[\s\u3000\*]+", "", text)
+
+
 def _provenance(row, source_text, expected_answer=None):
     answer, explanation = row.get("answer"), row.get("explanation")
-    if not isinstance(answer, str) or not answer.strip() or not isinstance(explanation, str):
-        raise ValueError("answer must be nonempty and explanation must be a string")
+    if not isinstance(answer, str) or not isinstance(explanation, str):
+        raise ValueError("answer and explanation must be strings")
+    # 答案/解析是可选输入：空字符串表示原材料未提供，不是推断错误。
+    if not answer.strip():
+        return
     if AI_MARK in answer:
-        raise ValueError("AI provenance belongs in explanation, never answer")
+        raise ValueError("AI provenance belongs in answer, never answer")
     if expected_answer and _answer_comparison_text(answer) != _answer_comparison_text(expected_answer):
         raise ValueError("Answer differs from validated supplied answers")
-    if not expected_answer and answer not in source_text and AI_MARK not in explanation:
-        raise ValueError("Unsourced answer needs explicit AI provenance in explanation")
-    # 用户规则：缺失填「无」，不是生成内容，不要求溯源/AI 标记。
-    if explanation and not content_rules.is_placeholder(explanation) \
-            and explanation not in source_text and not explanation.endswith(AI_MARK):
-        raise ValueError("Generated explanation must end with AI provenance marker")
+    if not expected_answer and answer not in source_text and not explanation.endswith(AI_MARK):
+        raise ValueError("Unsourced answer needs explicit source or AI provenance in explanation")
+    # 用户规则（2026-11）：有解析就直接用材料里的解析，不再要求 AI 生成、也不要求
+    # 「（AI生成，待校对）」标记；缺失填「无」。解析只需在文本归一化后能在材料中找到
+    # （原卷正文/答案册/附录），允许带入 <u> 画线、首尾标点与全半角差异。
+    if explanation and not content_rules.is_placeholder(explanation):
+        # 明确标注的 AI 生成解析仍允许（历史能力，末尾带标记即可）；
+        if not explanation.endswith(AI_MARK):
+            norm_ex = _provenance_text(explanation)
+            norm_src = _provenance_text(source_text)
+            if norm_ex and norm_ex not in norm_src:
+                raise ValueError("Explanation not found in supplied source material (verbatim after normalizing marks)")
 
 
 def _normalize_blank_text(text):
@@ -583,7 +649,32 @@ def _normalize_payload_blanks(payload):
         _walk(item.get("materialBlocks") or item.get("material_blocks"))
 
 
+def _normalize_knowledge_payload(payload, notes=None):
+    """Drop known upstream label echoes from knowledge rows.
+
+    Some agents echo the type-stage fields while producing knowledge tags. They
+    are already authoritative in ``types.json`` and are not part of the
+    knowledge-stage contract, so removing only these fields is deterministic
+    and safe. Unknown fields remain subject to the strict schema checks below.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        return
+    removed = []
+    for row in payload["items"]:
+        if not isinstance(row, dict):
+            continue
+        for key in ("type", "subtypes"):
+            if key in row:
+                row.pop(key)
+                removed.append(key)
+    if removed and notes is not None:
+        names = ", ".join(sorted(set(removed)))
+        notes.append("知识点产物已删除代理重复回显的上游字段（自动修复）：" + names)
+
+
 def _validate(batch, stage, payload, context, units, *, strict_preserve=True, notes=None):
+    if stage == "knowledge":
+        _normalize_knowledge_payload(payload, notes)
     if stage == "assemble":
         _normalize_payload_blanks(payload)
     numbers = {str(n) for u in units for n in u["numbers"]}
@@ -591,22 +682,22 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
         _fields(payload, ("answers", "evidence", "difficulty", "difficultyEvidence"),
                 ("answers", "evidence"))
         answers, evidence = payload["answers"], payload["evidence"]
-        if not isinstance(answers, dict) or not answers or not isinstance(evidence, dict) or set(answers) != set(evidence):
-            raise ValueError("answers/evidence must be matching nonempty question-number mappings")
-        if any(_number(n) != n for n in answers) or (numbers and set(answers) != numbers):
-            raise ValueError("Answers require exact confirmed question number coverage")
+        if not isinstance(answers, dict) or not isinstance(evidence, dict) or set(answers) != set(evidence):
+            raise ValueError("answers/evidence must be matching question-number mappings")
+        if any(_number(n) != n for n in answers):
+            raise ValueError("Answer keys must use positive numeric question numbers")
         text = "\n".join(str(context.get(k, "")) for k in ("01_source_ans/正文.txt", "answer_source_text", "01_source/附录.txt"))
         for number, answer in answers.items():
             if not isinstance(answer, str) or not answer.strip() or answer not in text:
                 raise ValueError("Answer must be a nonempty verbatim extraction from supplied answer text")
             _strings(evidence[number], "answer evidence", True)
-        if "difficulty" not in payload or "difficultyEvidence" not in payload:
-            raise ValueError("difficulty/difficultyEvidence are required from the answer/difficulty subagent")
+        difficulty = payload.get("difficulty", {})
+        basis = payload.get("difficultyEvidence", {})
+        if not isinstance(difficulty, dict) or not isinstance(basis, dict) or set(difficulty) != set(basis):
+            raise ValueError("difficulty/difficultyEvidence must cover the same optional numbers")
+        if not set(difficulty).issubset(set(answers)):
+            raise ValueError("difficulty may only cover answered numbers")
         if True:
-            difficulty, basis = payload.get("difficulty"), payload.get("difficultyEvidence")
-            if (not isinstance(difficulty, dict) or set(difficulty) != set(answers)
-                    or not isinstance(basis, dict) or set(basis) != set(answers)):
-                raise ValueError("difficulty/difficultyEvidence must cover exactly the answered numbers")
             levels = set(taxonomy.difficulties())
             for number, level in difficulty.items():
                 if level not in levels:
@@ -675,15 +766,20 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
         if explanations_value is None:
             explanations_path = _safe_path(batch, ARTIFACTS["explanations"])
             if not explanations_path.is_file():
-                raise ValueError("Prepare 04_knowledge/explanations.json before knowledge")
-            explanations_value = _json(explanations_path)
+                explanations_value = {"items": [
+                    {"unit_id": u["unit_id"], "explanation": "无", "articleSummary": "无",
+                     "subquestions": [], "evidence": ["未提供解析材料，保留为空"]}
+                    for u in units
+                ]}
+            else:
+                explanations_value = _json(explanations_path)
         explanation_rows = content_rules.validate(explanations_value, units,
                                                   _types(context[ARTIFACTS["types"]], units), batch)
         rows = _coverage(payload, units)
         typed = _types(context[ARTIFACTS["types"]], units)
-        answer_payload = context[ARTIFACTS["answers"]]
+        answer_payload = context.get(ARTIFACTS["answers"], {"answers": {}})
         if not isinstance(answer_payload, dict) or not isinstance(answer_payload.get("answers"), dict):
-            raise ValueError("Upstream answers.json requires an answers mapping")
+            answer_payload = {"answers": {}}
         answers = answer_payload["answers"]
         if any(not isinstance(value, str) or not value.strip() for value in answers.values()):
             raise ValueError("Upstream answer values must be nonempty strings")
@@ -692,7 +788,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             row = rows[unit["unit_id"]]
             children = _children(row, unit)
             if stage == "knowledge":
-                _fields(row, ("unit_id", "knowledge", "knowledgeIds", "textbook", "answer", "explanation", "articleSummary", "subquestions", "evidence"),
+                _fields(row, ("unit_id", "knowledge", "knowledgeIds", "textbook", "answer", "explanation", "articleSummary", "subquestions", "evidence", "warnings"),
                         ("unit_id", "knowledge", "subquestions", "evidence"))
                 _evidence(row)
                 for child in children:
@@ -767,8 +863,10 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                     if list(child.get("knowledge") or []) != list(prior.get("knowledge") or []):
                         raise ValueError("Assemble must preserve validated child field knowledge")
             problems = taxonomy.check_question_labels(label_row)
-            if problems:
+            if problems and os.environ.get("WF_MODEL_FIRST", "1") == "0":
                 raise ValueError("Invalid knowledge labels: " + "; ".join(problems))
+            if problems:
+                row.setdefault("warnings", []).extend(problems)
             if unit["unit_kind"] == "standalone":
                 _provenance(row, source_text, answers.get(str(unit["numbers"][0])))
             elif not isinstance(row.get("answer"), str) or not isinstance(row.get("explanation"), str):
@@ -776,7 +874,12 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             for child in children:
                 _provenance(child, source_text, answers.get(_number(child["number"])))
         if stage == "assemble":
-            from .question_content import audit_batch_source
+            from .question_content import (apply_required_writing_stem, audit_batch_source,
+                                           restore_source_fidelity)
+            # 写作题给定开头句易被模型当范文截断：题干按原卷逐字落回，再做来源审计。
+            apply_required_writing_stem(batch, payload)
+            # 模型常把 <u>n　　　　</u> 磨成 n____、把表格里的 [IMG] 丢掉：按原卷补回保真标记。
+            restore_source_fidelity(batch, payload)
             source_audit = audit_batch_source(batch, payload)
             issues = source_audit["issues"]
             # 可选字段缺失允许推进，原卷已有的题干、选项、图片和材料仍须保真。
@@ -882,6 +985,31 @@ def _install(batch, files):
                 path.unlink()
 
 
+def _merge_incremental_artifact(batch_dir, stage, payload):
+    """Merge a partial retry into the prior artifact without dropping completed work."""
+    path = Path(batch_dir) / ARTIFACTS[stage]
+    if not path.is_file() or not isinstance(payload, dict):
+        return payload
+    try:
+        old = _json(path)
+    except ValueError:
+        return payload
+    if stage == "answers":
+        merged = dict(old)
+        for key in ("answers", "evidence", "difficulty", "difficultyEvidence"):
+            values = dict(old.get(key) or {})
+            values.update(payload.get(key) or {})
+            merged[key] = values
+        return merged
+    if stage in ("types", "explanations", "knowledge"):
+        prior = {str(row.get("unit_id")): row for row in old.get("items", []) if isinstance(row, dict)}
+        for row in payload.get("items", []) or []:
+            if isinstance(row, dict) and row.get("unit_id") is not None:
+                prior[str(row["unit_id"])] = row
+        return {**old, **payload, "items": list(prior.values())}
+    return payload
+
+
 def accept_result(batch_dir, stage, response, *, validate_only=False):
     """Validate complete response before importing any canonical artifacts.
 
@@ -931,6 +1059,16 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
         if not isinstance(candidate["unchecked"], list):
             raise ValueError("unchecked must be an explicit list")
     if result["status"] == "needs_review":
+        # 模型优先模式：部分结果也可进入后续阶段。缺失字段保留为空，
+        # 不把 needs_review 变成整批停止点；正式语义校验仍由后续模型/装配阶段继续完成。
+        if os.environ.get("WF_MODEL_FIRST", "1") != "0" and ARTIFACTS[stage] in artifacts:
+            partial = _merge_incremental_artifact(batch_dir, stage, artifacts[ARTIFACTS[stage]])
+            files = {ARTIFACTS[stage]: partial}
+            if not validate_only:
+                _install(Path(batch_dir), files)
+            report.update(completed=True, status="completed", artifacts=list(files),
+                          notes=report["notes"] + ["模型优先：导入部分结果，缺失字段留空并继续"])
+            return report
         return report
     if stage != "review" and any(f["severity"] in ("blocker", "major") for f in result["findings"]):
         report["status"] = "needs_review"

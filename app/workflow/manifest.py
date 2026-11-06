@@ -19,6 +19,8 @@ from pathlib import Path
 from . import contracts
 
 MANIFEST_VERSION = "1.0"
+DELIVERY_VERSION = "1.0"
+DELIVERY_FILENAME = "delivery.json"
 
 PENDING = "pending"
 RUNNING = "running"
@@ -44,6 +46,10 @@ def manifest_dir(batch_dir: Path) -> Path:
 
 def manifest_path(batch_dir: Path) -> Path:
     return manifest_dir(batch_dir) / "manifest.json"
+
+
+def delivery_path(batch_dir: Path) -> Path:
+    return manifest_dir(batch_dir) / DELIVERY_FILENAME
 
 
 def sha256_file(path) -> str:
@@ -166,7 +172,130 @@ def output_hashes(batch_dir, stage: contracts.Stage) -> dict:
 
 
 def missing_produces(batch_dir, stage: contracts.Stage) -> list[str]:
-    return [rel for rel in stage.produces if not (Path(batch_dir) / rel).exists()]
+    return [rel for rel in stage.produces if not (Path(batch_dir) / rel).is_file()]
+
+
+def _delivery_artifacts(batch_dir, stage: contracts.Stage) -> list[dict]:
+    root = Path(batch_dir)
+    artifacts = []
+    for relative in stage.produces:
+        path = root / relative
+        artifacts.append({
+            "path": relative,
+            "sha256": sha256_file(path),
+            "size": path.stat().st_size if path.is_file() else 0,
+            "required": True,
+            "exists": path.is_file(),
+        })
+    return artifacts
+
+
+def _load_delivery(batch_dir) -> dict:
+    path = delivery_path(batch_dir)
+    if not path.is_file():
+        return {"version": DELIVERY_VERSION, "stages": {}}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return {"version": DELIVERY_VERSION, "stages": {}}
+    return value if isinstance(value, dict) and isinstance(value.get("stages"), dict) else {
+        "version": DELIVERY_VERSION, "stages": {}
+    }
+
+
+def _save_delivery(batch_dir, delivery: dict) -> None:
+    path = delivery_path(batch_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(delivery, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def delivery_status(batch_dir, stage_id: str) -> str:
+    return str(_load_delivery(batch_dir).get("stages", {}).get(stage_id, {}).get("status") or "pending")
+
+
+def reconcile_deliveries(batch_dir, manifest: dict) -> list[str]:
+    """Reconcile the durable hand-off checklist without rerunning valid stages.
+
+    Legacy manifests are migrated from their recorded output hashes. A completed
+    stage with missing or changed declared outputs is invalidated locally and
+    only its dependency descendants are invalidated.
+    """
+    batch = Path(batch_dir)
+    delivery = _load_delivery(batch)
+    delivery["version"] = DELIVERY_VERSION
+    delivery["workflow_id"] = manifest.get("workflow_id", batch.name)
+    delivery.setdefault("stages", {})
+    invalidated = []
+    changed = False
+    for stage in contracts.STAGES:
+        record = manifest.get("stages", {}).get(stage.id, {})
+        status = record.get("status")
+        entry = delivery["stages"].setdefault(stage.id, {})
+        if status == SKIPPED:
+            new = {"status": "skipped", "artifacts": [], "consumed_by": [], "updated_at": now_iso()}
+        elif status in TERMINAL_OK:
+            missing = missing_produces(batch, stage)
+            current = output_hashes(batch, stage)
+            saved = record.get("output_hashes") or {}
+            mismatch = bool(saved) and any(current.get(path) != digest for path, digest in saved.items())
+            if missing or mismatch:
+                reason = ("交付清单发现缺少产物：" + ", ".join(missing)) if missing else "交付清单发现产物指纹变化"
+                if stage.id not in invalidated:
+                    invalidated.append(stage.id)
+                new = {"status": "stale", "reason": reason, "artifacts": _delivery_artifacts(batch, stage),
+                       "consumed_by": entry.get("consumed_by", []), "updated_at": now_iso()}
+            else:
+                # Legacy completed stages with files are accepted and indexed once.
+                if not saved:
+                    record["output_hashes"] = current
+                new = {"status": "delivered", "artifacts": _delivery_artifacts(batch, stage),
+                       "consumed_by": entry.get("consumed_by", []), "updated_at": entry.get("updated_at") or now_iso()}
+        else:
+            new = {"status": "pending", "artifacts": entry.get("artifacts", []),
+                   "consumed_by": entry.get("consumed_by", []), "updated_at": entry.get("updated_at") or now_iso()}
+        if entry != new:
+            delivery["stages"][stage.id] = new
+            changed = True
+    for stage_id in invalidated:
+        record = manifest["stages"].get(stage_id, {})
+        if record.get("status") in TERMINAL_OK and record.get("status") != SKIPPED:
+            touch_stage(manifest, stage_id, INVALIDATED,
+                        notes="交付清单校验失败，局部重跑：" + delivery["stages"][stage_id].get("reason", "产物过期"))
+            invalidate_downstream(batch, manifest, stage_id, "上游阶段交付失效")
+            changed = True
+    if changed:
+        _save_delivery(batch, delivery)
+    return invalidated
+
+
+def record_delivery(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
+    """Write a delivered hand-off after a stage has installed its outputs."""
+    delivery = _load_delivery(batch_dir)
+    delivery["version"] = DELIVERY_VERSION
+    delivery["workflow_id"] = manifest.get("workflow_id", Path(batch_dir).name)
+    delivery.setdefault("stages", {})[stage.id] = {
+        "status": "delivered",
+        "artifacts": _delivery_artifacts(batch_dir, stage),
+        "input_hashes": input_hashes(batch_dir, manifest, stage),
+        "consumed_by": [],
+        "updated_at": now_iso(),
+    }
+    _save_delivery(batch_dir, delivery)
+
+
+def mark_delivery_consumed(batch_dir, stage_id: str) -> None:
+    """Record that a downstream stage has consumed each delivered dependency."""
+    delivery = _load_delivery(batch_dir)
+    for dependency in contracts.STAGE_BY_ID.get(stage_id, contracts.Stage(stage_id, "", "")).depends_on:
+        entry = delivery.get("stages", {}).get(dependency)
+        if not isinstance(entry, dict):
+            continue
+        consumers = entry.setdefault("consumed_by", [])
+        if stage_id not in consumers:
+            consumers.append(stage_id)
+    _save_delivery(batch_dir, delivery)
 
 
 def touch_stage(manifest: dict, stage_id: str, status: str, **fields) -> None:
@@ -225,11 +354,12 @@ def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, s
         current = sha256_file(Path(batch_dir) / rel)
         if current != digest:
             return True, f"产物已变化 {rel}"
-    saved_inputs = record.get("input_hashes") or {}
-    current_inputs = input_hashes(batch_dir, manifest, stage)
-    for key, digest in saved_inputs.items():
-        if current_inputs.get(key) != digest:
-            return True, f"输入已变化 {key}"
+    # Input fingerprints describe the hand-off context, not invalidation by
+    # themselves. A dependency may gain one completed question while all prior
+    # rows remain deliverable. Downstream stages use the durable delivery record
+    # and incremental gap audit; only missing/changed own outputs invalidate a
+    # completed stage. Explicit source/output invalidation still flows through
+    # invalidate_downstream when a producer's deliverable actually changes.
     return False, ""
 
 

@@ -20,6 +20,7 @@ from workflow import manifest as mf
 VERSION = "composite-extract-1"
 QUESTION = re.compile(r"^\s*(?:[（(]\s*[）)]\s*)?(\d{1,4})\s*[.．、)]")
 HEADING = re.compile(r"^\s*([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+|[一二三四五六七八九十]+|\d+)\s*[.．、]\s*(.+)")
+ANSWER_HEADING = re.compile(r"^\s*【?\s*(?:参考答案及解析|参考答案与解析|答案与解析|答案及解析|参考答案|选择题答案|答案速查表|答案速查|答案)\s*】?\s*[:：]?\s*$")
 TYPE_HINTS = (
     ("关键词语选择", "听力关键词语选择"), ("短对话理解", "听力短对话理解"),
     ("长对话理解", "听力长对话理解"), ("短文理解", "听力短文理解"),
@@ -64,8 +65,24 @@ def guide_numbers(line: str) -> list[int]:
     return nums
 
 
+_CN_COUNT = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+             "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _declared_count(line: str) -> int | None:
+    """Read Arabic or Chinese counts in section/instruction lines."""
+    plain = _plain(line)
+    match = re.search(r"(?:共\s*)?(\d+)\s*小题", plain)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"([一二两三四五六七八九十])\s*个\s*小题", plain)
+    return _CN_COUNT.get(match.group(1)) if match else None
+
+
 def material_label(line: str) -> bool:
-    return bool(re.fullmatch(r"[A-H][.．、]?", _plain(line).strip()))
+    # 段落标签可能带插图，如 `A[IMG image11.jpeg]`：去掉尾部图片标记再判定。
+    text = re.sub(r"\[IMG[^\]]*\]", "", _plain(line)).strip()
+    return bool(re.fullmatch(r"[A-H][.．、]?", text))
 
 
 def material_start(lines: list[str], index: int) -> int:
@@ -154,11 +171,19 @@ def _is_inline_answer_key(lines: list[str], start: int, next_new: int) -> bool:
 
 def _is_answer_explanation_line(line: str) -> bool:
     """解析版逐题答案行：`31.B 【解析】…` 或 `96.useful 97.duty…`，不是新题。"""
-    if (re.match(r"^\s*\d{1,4}\s*[.．、]\s*[A-H](?:\s|$)", line)
+    # 选项行（A.… B.… C.…）永远不是“一行多题答案”。例如
+    # “A.Between 8 and 12.  B.Between 11 and 15.  C.Between 12 and 15.”
+    # 里面的 12. 15. 会被旧正则误判成题号，进而把整行选项删掉。
+    if re.match(r"^\s*[A-Ha-h]\s*[.．、)]", line):
+        return False
+    # 逐题解析：题号开头、同行带【解析】/【答案】等标记（不要求紧跟选项字母）。
+    if (re.match(r"^\s*\d{1,4}\s*[.．、]", line)
             and re.search(r"【解析】|【答案】|【分析】|参考答案", line)):
         return True
     # 一行多个“题号.答案”（96.useful 97.duty 98.brave）是答案汇总行，不是题干。
-    return len(re.findall(r"(?:^|\s)\d{1,4}\s*[.．]\s*[A-Za-z(（]", line)) >= 2
+    # 必须以题号开头；否则只是选项/正文里恰好出现“12. B”这类文本。
+    return (bool(re.match(r"^\s*\d{1,4}\s*[.．、]", line))
+            and len(re.findall(r"(?:^|\s)\d{1,4}\s*[.．]\s*[A-Za-z(（]", line)) >= 2)
 
 
 def _is_answer_line_for_body(line: str) -> bool:
@@ -168,10 +193,70 @@ def _is_answer_line_for_body(line: str) -> bool:
     return bool(re.match(r"^\s*\d{1,4}\s*[~～\-–—]\s*\d{1,4}\s*[A-H]{2,}\s*$", line))
 
 
+def _is_numbered_letter_answer(line: str, seen_numbers: set) -> bool:
+    """`1.A`/`2.B` 这种同题号字母答案：只有该题号前面已出现过题目时才算答案。
+
+    避免把极端的“题干本身只有一个字母”的题（如某些听力标记行）误删。
+    """
+    match = QUESTION.match(line)
+    if not match or int(match.group(1)) not in seen_numbers:
+        return False
+    rest = _plain(line)[match.end():].strip()
+    return bool(re.fullmatch(r"[A-Ha-h]\s*[.．]?", rest))
+
+
+def _is_inline_answer_after_question(line: str, previous: str) -> bool:
+    """同一题号紧跟在题目下一行的答案：`91.Mary…` 后的 `91.nature`。
+
+    只认“上一行正文就是同题号题目、当前行没有问句/选项/填空”这种
+    解析版最常见的答案写法；长度不限（阅读理解答案常常是一整句）。
+    其他情况保持原样，交给结构闸门或 AI 复核。
+    """
+    current = QUESTION.match(line)
+    prior = QUESTION.match(previous or "")
+    if not current or not prior or current.group(1) != prior.group(1):
+        return False
+    rest = _plain(line)[current.end():].strip()
+    if not rest or len(rest) > 200:
+        return False
+    if re.search(r"[?？]|\t|(?:^|\s)[A-H][.．]\s*\S", rest):
+        return False
+    if re.search(r"<u>|___|\u3000{2,}", line):
+        return False
+    return bool(re.search(r"[A-Za-z0-9\u4e00-\u9fff]", rest))
+
+
 def _title_key(line: str) -> str:
     plain = re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", _plain(line)))
     # 卷名行可能带列表前缀（如 **1**.**2017**年…），那不是题号，也不能让文末重复卷名漏删。
     return re.sub(r"^\d{1,3}[.．、]", "", plain)
+
+
+def _is_trailing_answer_block(lines: list[str], start: int, seen_headings=None) -> bool:
+    """“参考答案/答案”标题之后是否真的是整段答案，而不是正文里的一句标签。
+
+    条件：后面不再出现新的大题标题；至少出现 2 个编号/区间答案行。这样论文中间
+    的“答案”字样（后面还有新大题）不会被误切，文末整段答案会稳定归入附录。
+    """
+    tail = [line for line in lines[start + 1:start + 60] if _plain(line).strip()]
+    if len(tail) < 2:
+        return False
+    for raw in tail:
+        plain = _plain(raw).strip()
+        heading = HEADING.match(plain)
+        if heading:
+            kind = next((name for hint, name in TYPE_HINTS if hint in heading.group(2)), None)
+            # 答案册常重复已有大题标题；只有“没出现过的新大题”才说明后面还是试卷正文。
+            if kind and (heading.group(1), kind) not in (seen_headings or set()):
+                return False
+    hits = 0
+    for raw in tail:
+        plain = _plain(raw).strip()
+        if QUESTION.match(plain) or re.match(r"^\s*\d{1,4}\s*[~～\-–—]\s*\d{1,4}\b", plain):
+            hits += 1
+        elif re.match(r"^\s*\d{1,4}\s*[.．、]\s*[A-Ha-h]\s*$", plain):
+            hits += 1
+    return hits >= 2
 
 
 def _answer_summary_follows(lines: list[str]) -> bool:
@@ -202,9 +287,14 @@ def _answer_summary_follows(lines: list[str]) -> bool:
                     for cell, count in zip(cells[1:], counts)))
 
 
-def infer_structure(text: str) -> tuple[dict, str, str]:
-    """只生成证据明确的题号/分区候选；推断题号、材料边界列入 unresolved。"""
+def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
+    """只生成证据明确的题号/分区候选；推断题号、材料边界列入 unresolved。
+
+    `skip_lines`：已由 AI/规则确认的答案或解析行（1 基行号）。这些行不参与
+    题号统计，正文循环也会跳过，最后统一并入附录。
+    """
     lines = text.splitlines()
+    skip = {int(n) for n in (skip_lines or []) if str(n).strip().isdigit()}
     sections, unresolved, groups, image_questions = [], [], [], []
     active = None
     seen_headings = set()
@@ -213,8 +303,11 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
     skip_until = -1
     from workflow.denoise import extract_meta
     paper_title = _title_key(extract_meta(lines).get("paper_title", ""))
+    scan_numbers: set[int] = set()
     for index, raw in enumerate(lines):
         if index < skip_until:
+            continue
+        if index + 1 in skip:
             continue
         if (active is not None and paper_title and _title_key(raw) == paper_title
                 and _answer_summary_follows(lines[index + 1:])):
@@ -224,6 +317,11 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
             break
         plain_line = _plain(raw)
         line = plain_line.strip()
+        if ANSWER_HEADING.match(line) and _is_trailing_answer_block(lines, index, seen_headings):
+            appendix_start = index
+            unresolved.append({"code": "ANSWER_APPENDIX_DETECTED", "line": index + 1,
+                               "message": "文末答案标题之后是答案/解析块，已从标题处分离为答案附录候选"})
+            break
         heading = HEADING.match(line)
         kind = next((name for hint, name in TYPE_HINTS if hint in heading.group(2)), None) if heading else None
         if heading and kind:
@@ -270,6 +368,12 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
         if _is_answer_explanation_line(line):
             # 解析版逐题答案行（31.B 【解析】…）不是新题，也不该制造重复题号。
             continue
+        # 单词拼写等题型把答案紧跟在题目下一行（91.题目 / 91.nature）：
+        # 同题号短答案同样不能算第二个题目，否则会制造重复题号。
+        if index and _is_inline_answer_after_question(line, _plain(lines[index - 1]).strip()):
+            continue
+        if _is_numbered_letter_answer(line, scan_numbers):
+            continue
         match = QUESTION.match(line)
         if active["type"] == "书面表达":
             # 题号只可能在任务开头；正文里的数字列表不能仅凭连续性视为题号。
@@ -288,6 +392,7 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
             active["questions"].append(number)
             active["question_locations"].append({"number": number, "line": index + 1,
                                                  "kind": "question" if match else "blank"})
+            scan_numbers.add(int(number))
         if "[IMG " in raw and active["questions"]:
             image_questions.append(active["questions"][-1])
     previous = 0
@@ -302,6 +407,35 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
             unresolved.append({"code": "DUPLICATE_QUESTION_NUMBER", "line": section["source_line"],
                                "message": f"{section['title']} 内题号重复：{duplicates}"})
         section["questions"] = nums = sorted(set(nums))
+        declared = section["declared_count"]
+        # 听力稿常没有逐题行首编号：长对话用“回答第X~Y题”导语，
+        # 短文用“有五个小题”说明题量，信息转换通常承接连续五个空位。
+        if section["type"] in GROUP_TYPES and not nums:
+            guide_refs = sorted({n for boundary in section["material_boundaries"]
+                                 for n in boundary.get("references", [])})
+            if guide_refs:
+                nums = guide_refs
+                section["questions"] = nums
+                section["numbers_inferred"] = True
+                for boundary in section["material_boundaries"]:
+                    for number in boundary.get("references", []):
+                        section["question_locations"].append(
+                            {"number": number, "line": boundary["line"], "kind": "guide"})
+            else:
+                section_start = section["source_line"] - 1
+                section_end = sections[section_index + 1]["source_line"] - 1 if section_index + 1 < len(sections) else appendix_start
+                declared = next((_declared_count(line) for line in lines[section_start:section_end]
+                                 if _declared_count(line) is not None), None)
+                section["declared_count"] = declared
+                if declared and previous:
+                    nums = list(range(previous + 1, previous + declared + 1))
+                    section["questions"] = nums
+                    section["numbers_inferred"] = True
+                elif section["type"] == "听力信息转换" and previous:
+                    nums = list(range(previous + 1, previous + 6))
+                    section["questions"] = nums
+                    section["declared_count"] = 5
+                    section["numbers_inferred"] = True
         declared = section["declared_count"]
         if not nums and declared and previous:
             nums = list(range(previous + 1, previous + declared + 1))
@@ -326,7 +460,9 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
             if boundaries:
                 for offset, boundary in enumerate(boundaries):
                     end = boundaries[offset + 1]["line"] if offset + 1 < len(boundaries) else end_line + 1
-                    members = sorted({x["number"] for x in section["question_locations"] if boundary["line"] < x["line"] < end})
+                    members = (sorted(set(boundary.get("references", [])))
+                               if boundary.get("references") else
+                               sorted({x["number"] for x in section["question_locations"] if boundary["line"] < x["line"] < end}))
                     if boundary.get("references") and members != sorted(set(boundary["references"])):
                         unresolved.append({"code": "GUIDE_QUESTION_MISMATCH", "line": boundary["line"],
                                            "message": f"分段导语题号 {boundary['references']} 与实际题号 {members} 不一致"})
@@ -356,8 +492,12 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
     body_end = essay_start if essay_start is not None else appendix_start
     current_heading = None      # 当前所属大题标题行（用于在附录补回被移走答案的章节）
     last_answer_heading = None
+    prev_body_plain = ""        # 上一行正文（非空），用于识别“同题号紧邻答案”
+    body_numbers: set[int] = set()
     for i in range(body_end):
         if any(start <= i < end for start, end in appendix_ranges):
+            continue
+        if i + 1 in skip:
             continue
         plain = _plain(lines[i]).strip()
         heading = HEADING.match(plain)
@@ -365,7 +505,16 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
         # HEADING 误匹配成 (31,"B…")，不能当标题，否则答案行会被重复写入附录。
         if heading and next((n for hint, n in TYPE_HINTS if hint in heading.group(2)), None):
             current_heading = lines[i]
-        if _is_answer_line_for_body(plain):
+        is_answer = _is_answer_line_for_body(plain)
+        if not is_answer:
+            # 单词拼写等题型会把答案紧跟在题目下一行：91.题目 / 91.nature。
+            # 同题号、紧邻上一行、内容很短且不含问句/选项/空格的，是答案不是重复题。
+            match = QUESTION.match(plain)
+            if match and _is_inline_answer_after_question(plain, prev_body_plain):
+                is_answer = True
+            if not is_answer and _is_numbered_letter_answer(plain, body_numbers):
+                is_answer = True
+        if is_answer:
             # 解析版把答案夹在正文里：移入附录，正文只留题目，避免题号/选项重复。
             # 补回所属大题标题，保证答案附录仍能按章节归属（否则溯源会错落到上一节）。
             if current_heading is not None and current_heading != last_answer_heading:
@@ -374,8 +523,19 @@ def infer_structure(text: str) -> tuple[dict, str, str]:
             moved_answer_lines.append(lines[i])
             continue
         body_lines.append(lines[i])
+        if plain:
+            prev_body_plain = plain
+        match = QUESTION.match(plain)
+        if match:
+            body_numbers.add(int(match.group(1)))
     if essay_start is not None:
         moved_answer_lines.extend(lines[essay_start:appendix_start])
+    # AI/规则确认的答案行：即使不在正文循环内（例如位于附录区间），也要保留到附录。
+    skipped_extra = [lines[n - 1] for n in sorted(skip)
+                     if 1 <= n <= len(lines)
+                     and not any(start <= n - 1 < end for start, end in appendix_ranges)]
+    if skipped_extra:
+        moved_answer_lines.extend(skipped_extra)
     # 文末重复卷名属于答案册页眉，不能留在最后一题的正文/题干里。
     while body_lines and not body_lines[-1].strip():
         body_lines.pop()
@@ -400,11 +560,18 @@ def _write(path: Path, value):
 
 def _pdf(source, out, config):
     from workflow import ocr_backend
+    assist = ocr_backend.ocr_needed(config, ("needs_ocr_page",))
     result = ocr_backend.read_pdf(source, out / "pdf", config=config)
     pages = result["pages"]
     warnings = list(result.get("warnings", []))
     for page in pages:
         if not page.get("needs_ocr"):
+            continue
+        if not assist:
+            # Master switch off: keep the text layer and leave the page-level
+            # doubt for the structure gate; never silently run OCR.
+            page["ocr_skipped"] = True
+            warnings.append(f"第 {page['page']} 页文字层质量不足，但 OCR 辅助未开启；已保留原文字层内容")
             continue
         detected = ocr_backend.recognize(source, out / "ocr", force_ocr=True,
                                          pages=str(page["page"]), config=config)
@@ -490,20 +657,49 @@ def extract_source(source: Path, destination: Path, config=None) -> dict:
         from workflow.docx_extract import extract_docx
         result = extract_docx(source, evidence)
         result.setdefault("pages", [])
-        # 正常 Word 保留原生文字/格式。文字极少的图片型 Word 才补充视觉识别。
-        if len(re.sub(r"\[IMG[^\]]*\]|\s", "", result["text"])) < 80 and result.get("media"):
-            from workflow import ocr_backend
+        # 正常 Word 保留原生文字/格式。以下情况按 OCR 模式决定是否复核：
+        #  - 图片型（文字层极少）：补识别图中文字；
+        #  - 浮动对象/符号字体：XML 顺序/字形可能不一致，逐图 OCR 作为图文位置与符号证据。
+        low_text = len(re.sub(r"\[IMG[^\]]*\]|\s", "", result["text"])) < 80
+        warning_text = " ".join(result.get("warnings", []))
+        triggers = []
+        if low_text and result.get("media"):
+            triggers.append("image_only")
+        if "Floating object" in warning_text:
+            triggers.append("floating_object")
+        if "Symbol font" in warning_text:
+            triggers.append("symbol_font")
+        from workflow import ocr_backend
+        need_ocr = ocr_backend.ocr_needed(config, triggers)
+        has_image_media = any(
+            Path(item["name"]).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+            for item in result.get("media", []))
+        if triggers and need_ocr and has_image_media:
+            result["ocr_auto"] = {"mode": ocr_backend.assist_mode(config), "triggers": triggers}
             supplements = []
             for item in result["media"]:
                 image = evidence / "media" / item["name"]
                 if image.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
-                    result.setdefault("warnings", []).append(f"无法 OCR 的嵌入图片：{image.name}")
+                    if low_text:
+                        result.setdefault("warnings", []).append(f"无法 OCR 的嵌入图片：{image.name}")
                     continue
-                ocr = ocr_backend.recognize(image, evidence / "ocr", config=config)
+                try:
+                    ocr = ocr_backend.recognize(image, evidence / "ocr", config=config)
+                except Exception as exc:  # noqa: BLE001 - 复核失败不阻断，留提示
+                    result.setdefault("warnings", []).append(f"OCR 复核图片失败：{item['name']}：{exc}")
+                    continue
                 supplements.append({"image": item["name"], "pages": ocr["pages"], "artifacts": ocr.get("artifacts")})
-                result["text"] = result["text"].replace(f"[IMG {item['name']}]", f"[IMG {item['name']}]\n" + "\n".join(p.get("text", "") for p in ocr["pages"]))
+                if low_text:
+                    # 图片型 Word：把识别文字并回正文，紧跟原图引用。
+                    result["text"] = result["text"].replace(
+                        f"[IMG {item['name']}]",
+                        f"[IMG {item['name']}]\n" + "\n".join(p.get("text", "") for p in ocr["pages"]))
                 result.setdefault("warnings", []).extend(ocr.get("warnings", []))
-            result["image_ocr"] = supplements
+            if supplements:
+                result["image_ocr"] = supplements
+        elif low_text and result.get("media") and not need_ocr:
+            result.setdefault("warnings", []).append(
+                "OCR 辅助已关闭：图片型 Word 未补充识别图中文字，仅保留图片引用")
         # 给既有预览器兼容的稳定媒体位置，旧同名图片先备份。
         for item in result.get("media", []):
             name = item["name"]
@@ -537,6 +733,10 @@ def extract_source(source: Path, destination: Path, config=None) -> dict:
         result["text"] = "\n\n".join(f"[PAGE {p['page']}]\n{p.get('text', '')}" for p in result["pages"])
     elif source.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
         from workflow import ocr_backend
+        if not ocr_backend.ocr_needed(config, ("image_upload",)):
+            raise ValueError(
+                "这是图片型试卷，但 OCR 辅助已关闭，无法识别。"
+                "请在「模型与设置 → OCR 识别」把模式设为「自动」或「开启」后重新上传。")
         result = ocr_backend.recognize(source, evidence / "ocr", config=config)
         result["text"] = "\n\n".join(p.get("text", "") for p in result["pages"])
     else:
@@ -550,7 +750,10 @@ def extract_source(source: Path, destination: Path, config=None) -> dict:
         result.setdefault("warnings", []).append("该文件为旧版 .doc，已用系统工具转换为 .docx 解析（不含图片保真）。")
     text = result.get("text", "")
     if not text.strip():
-        raise ValueError("提取正文为空，不能完成解析阶段")
+        hint = ""
+        if source.suffix.lower() in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
+            hint = "。如果这是扫描件或图片型 PDF，请在「模型与设置 → OCR 识别」开启 OCR 辅助后重试"
+        raise ValueError("提取正文为空，不能完成解析阶段" + hint)
     if mf.sha256_file(source) != original_hash:
         raise ValueError("提取期间原文件发生变化，请重试")
     from workflow import denoise
@@ -575,6 +778,11 @@ def extract_source(source: Path, destination: Path, config=None) -> dict:
         structure["unresolved"].append({"code": "EXTRACTION_WARNING", "message": "原生/OCR 提取有警告，详见 extraction.json"})
     result.update({"version": VERSION, "source": str(source), "source_sha256": original_hash,
                    "evidence_dir": str(evidence.relative_to(destination)), "structure_status": "candidate"})
+    try:
+        from workflow import ocr_backend
+        result["ocr_assist_enabled"] = ocr_backend.assist_enabled(config)
+    except Exception:  # noqa: BLE001 - evidence field is optional; parsing must not fail here
+        pass
     _write(destination / "原始正文.txt", text)
     _write(destination / "正文.txt", body)
     _write(destination / "附录.txt", appendix)
@@ -595,6 +803,38 @@ def run(batch_dir: Path) -> dict:
     if not source:
         raise ValueError("批次缺少 source 输入")
     result = extract_source(Path(source), batch_dir / "01_source")
+    # 材料分类（用户 2026-11 重设计）：逐份上传文件提取文字层后判定角色
+    # （正文/答案/解析/混排/其他）。非阻断：模型不可用时用确定性兜底，只留证据。
+    try:
+        try:
+            from . import material_classify, local_agent
+        except ImportError:
+            from workflow import material_classify, local_agent
+        invoke = None
+        cfg = None
+        try:
+            from . import agent
+            if agent.configured():
+                cfg = local_agent.load_config()
+                invoke = lambda prompt, run_dir, config: local_agent.invoke(
+                    prompt, run_dir, config)["response"]
+        except Exception:  # noqa: BLE001
+            invoke = None
+        roles = material_classify.classify_documents(batch_dir, invoke_fn=invoke, config=cfg)
+        result["material_roles"] = roles
+        # 明确上传了答案/解析卷、而正文附录为空时，把答案卷文字补到 01_source_ans，
+        # 供 answers 阶段使用（不依赖模型，直接取该文件文字层）。
+        ans_item = (manifest.get("inputs", {}).get("answers") or {})
+        ans_path = str(ans_item.get("path") or "")
+        ans_text = batch_dir / "01_source_ans" / "正文.txt"
+        if ans_path and not ans_text.is_file():
+            try:
+                from . import agent_prepare
+                agent_prepare.prepare_answers(batch_dir)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as exc:  # noqa: BLE001 - 分类失败不影响提取/结构
+        result["material_roles"] = {"error": str(exc)}
     _write(batch_dir / "07_review" / "extraction-report.json", result)
     return result
 

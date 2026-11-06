@@ -11,9 +11,8 @@ const audioConfig = JSON.parse(fs.readFileSync(path.join(root, 'config/audio.jso
 
 test('听力切段默认不安装、不启用', () => {
   assert.equal(audioConfig.enabled, false);
-  // 默认多语种 small：中文卷听力音频含中文播报，纯英语 small.en 会把题号播报
-  // 转成拼音乱码、锚点几乎全丢。
-  assert.equal(audioConfig.asr_model, 'large-v3-turbo');
+  // 当前默认多语种 small：资源优先；纯英语 small.en 会把中文题号播报转成拼音，不能用。
+  assert.equal(audioConfig.asr_model, 'small');
   assert.equal(audioConfig.max_parallel_transcriptions, 1);
   assert.equal(audioConfig.anchor_language, 'zh');
   assert.equal(audioConfig.align_model, 'facebook/wav2vec2-base-960h');
@@ -24,13 +23,17 @@ test('听力切段默认不安装、不启用', () => {
 });
 
 test('设置页有听力切段卡片并挂在 SettingsTab 里', () => {
-  assert.match(client, /function AudioSettings\(\)/);
-  assert.match(client, /h\(AudioSettings\)/);
+  assert.match(client, /function AudioSettings\(/);
+  const settings = client.slice(client.indexOf('function SettingsTab()'));
+  assert.match(settings, /\['audio', '听力切分'\]/);
+  assert.match(settings, /\['audio', AudioSettings\]/);
+  assert.match(settings, /visited\[id\] \? h\(Component, /);
+  assert.match(client, /visible: activeSection === id/);
   assert.match(client, /await post\('bootstrap'/);
   assert.match(client, /await post\('segment'/);
   assert.match(client, /安装运行时与模型/);
   // 未就绪时不允许切段
-  assert.match(client, /disabled: !!busy \|\| running \|\| !info\.ready, onClick: segment/);
+  assert.match(client, /disabled: !!busy \|\| running \|\| !info\.ready \|\| !batch, onClick: segment/);
 });
 
 test('宿主把听力数据根传给后端，与 resolveDataRoot 一致', () => {
@@ -68,4 +71,57 @@ test('文档说明切点来自静音骨架而不是转写时间戳', () => {
   assert.match(doc, /转写时间戳绝不直接当切点/);
   assert.match(doc, /segment-evidence\.json/);
   assert.match(doc, /不需要 HuggingFace token/);
+});
+
+// 每个可选模型都必须带真实下载体积，且体积/语言标签与后端允许列表一一对应。
+function readAsrModels() {
+  const start = client.indexOf('const ASR_MODELS = [');
+  assert.ok(start > 0, 'client.js 缺少 ASR_MODELS');
+  const end = client.indexOf('\n    ];', start);
+  assert.ok(end > start, 'ASR_MODELS 未闭合');
+  const body = client.slice(start, end + '\n    ];'.length);
+  // 纯字面量数组，直接求值即可（不执行任何插件代码）。
+  return new Function(body + '\nreturn ASR_MODELS;')();
+}
+
+test('设置页给每个 ASR 模型标注下载体积', () => {
+  const models = readAsrModels();
+  assert.ok(models.length >= 13, '可选模型不应少于后端允许列表');
+  for (const m of models) {
+    assert.match(m.id, /^(tiny|base|small|medium|large)(\.en)?$|^large-v[123](-turbo)?$/);
+    assert.equal(typeof m.mb, 'number', m.id + ' 缺体积');
+    assert.ok(Number.isInteger(m.mb) && m.mb > 0, m.id + ' 体积必须是正整数 MB');
+    assert.ok(m.note && m.note.length > 4, m.id + ' 缺特点说明');
+    assert.equal(typeof m.en, 'boolean', m.id + ' 缺语言分组');
+  }
+  // 体积排序必须与真实模型一致：tiny < base < small < medium < large，turbo 在 large 与 medium 之间。
+  const by = Object.fromEntries(models.map((m) => [m.id, m.mb]));
+  assert.ok(by.tiny < by.base && by.base < by.small && by.small < by.medium && by.medium < by['large-v3']);
+  assert.ok(by['large-v3-turbo'] > by.medium && by['large-v3-turbo'] < by['large-v3']);
+  assert.equal(by.large, by['large-v3'], 'large 是 large-v3 的别名');
+  assert.equal(by['small.en'], by.small, '英语版与多语种版体积相同');
+  assert.equal(by['medium.en'], by.medium);
+  // 下拉项必须显示 MB，默认项带“默认”标记。
+  assert.match(client, /const asrLabel = \(m\) => m\.id \+ '（' \+ \[m\.tag, m\.lang, '≈' \+ m\.mb \+ ' MB'\]/);
+  assert.match(client, /\{ id: 'large-v3-turbo', mb: 1618, lang: '多语种大模型', tag: '默认'/);
+  assert.match(client, /h\('optgroup'/);
+  assert.match(client, /'各模型体积与特点'/);
+});
+
+test('可选模型与后端允许列表完全一致', () => {
+  const models = readAsrModels().map((m) => m.id);
+  const cfg = fs.readFileSync(path.join(root, 'app/audio/config.py'), 'utf8');
+  const block = cfg.slice(cfg.indexOf('"asr_model": ('));
+  const tuple = block.slice(block.indexOf('(') + 1, block.indexOf(')'));
+  const allowed = tuple.split(',').map((s) => s.trim().replace(/^"|"$/g, '')).filter(Boolean);
+  assert.deepEqual([...models].sort(), [...allowed].sort(),
+    '设置页下拉必须覆盖后端允许的每个模型，不能多也不能少');
+});
+
+test('文档列出每个模型的体积', () => {
+  const doc = fs.readFileSync(path.join(root, 'app/docs/audio.md'), 'utf8');
+  for (const [id, mb] of [['large-v3-turbo', 1618], ['large-v3', 3087], ['medium', 1528],
+                          ['small', 484], ['base', 145], ['tiny', 75]]) {
+    assert.ok(doc.includes('`' + id + '`') && doc.includes(String(mb)), '文档缺 ' + id + ' 的体积');
+  }
 });

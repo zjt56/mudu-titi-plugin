@@ -75,6 +75,21 @@ class DiagnoseTest(unittest.TestCase):
         self.assertIn("audio", item["missing_inputs"])
         self.assertTrue(item["blocking"])
 
+    def test_active_cooldown_is_reported_as_the_first_blocker(self):
+        manifest = self._load_manifest()
+        manifest["stages"]["answers"]["status"] = mf.PENDING
+        manifest["stages"]["answers"]["notes"] = "限流/额度冷却中：rate_limit"
+        mf.save(self.batch, manifest)
+        import time
+        path = self.batch / "workflow/agent-runs/.rate-limit-cooldown"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(time.time() + 120), encoding="utf-8")
+        result = diagnose.diagnose(self.batch)
+        self.assertEqual(result["blocked_at"], "model")
+        self.assertIn("限流", result["summary"])
+        self.assertEqual(result["items"][0]["stage"], "model")
+        self.assertTrue(result["items"][0]["blocking"])
+
     def test_completed_batch_reports_no_blockers(self):
         result = diagnose.diagnose(self.batch)
         self.assertEqual(result["items"], [])

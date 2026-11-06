@@ -1,5 +1,6 @@
 """复合提取路由与证据保留，不依赖 GPU 的回归。"""
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,6 +45,97 @@ class StructureCandidateTest(unittest.TestCase):
         self.assertEqual({n for s in structure['sections'] for n in s['questions']},
                          {1, 2, 3, 4, 31, 32})
         self.assertIn('INLINE_ANSWER_BLOCK', [u['code'] for u in structure['unresolved']])
+
+    def test_listening_script_uses_leadin_ranges_and_chinese_count(self):
+        text = ('Ⅰ.短对话理解\n1. A\n2. B\n3. C\n4. A\n5. B\n'
+                'Ⅱ.长对话理解\n听下面一段对话，回答第6~7题。\n'
+                '对话内容\n听下面一段对话，回答第8~10题。\n对话内容\n'
+                'Ⅲ.短文理解\n短文后有五个小题。\n短文内容\n'
+                'Ⅳ.信息转换\n请填写表格。\n短文内容\n')
+        structure, _, _ = extract.infer_structure(text)
+        self.assertEqual(structure['sections'][1]['questions'], [6, 7, 8, 9, 10])
+        self.assertEqual(structure['sections'][2]['questions'], [11, 12, 13, 14, 15])
+        self.assertEqual(structure['sections'][3]['questions'], [16, 17, 18, 19, 20])
+        self.assertFalse(any(x['code'] == 'QUESTION_BOUNDARY_MISSING' for x in structure['unresolved']))
+
+    def test_answer_line_numbers_are_not_questions(self):
+        # 解析版：答案紧跟在题目下一行（91.题目 / 91.nature），或长答案带【解析】。
+        text = ('Ⅹ.单词拼写(共2小题)\n'
+                '91.Mary has developed a new way of life by getting close to n(自然).\n'
+                '91.nature\n'
+                '92.Frank,take off your w(湿的)jacket.\n'
+                '92.wet\n'
+                'Ⅸ.阅读理解(共1小题)\n'
+                '88.What advantages does rock climbing have?\n'
+                '88.It is fun and it also helps people forget worries.　【解析】根据第一段。\n')
+        structure, main, appendix = extract.infer_structure(text)
+        self.assertIn('91.Mary has developed', main)
+        self.assertNotIn('91.nature', main)
+        self.assertNotIn('88.It is fun', main)
+        self.assertIn('91.nature', appendix)
+        self.assertIn('88.It is fun', appendix)
+        self.assertEqual(structure['sections'][0]['questions'], [91, 92])
+        self.assertEqual(structure['sections'][1]['questions'], [88])
+        self.assertNotIn('DUPLICATE_QUESTION_NUMBER',
+                         [u['code'] for u in structure['unresolved']])
+
+    def test_numbered_letter_answers_after_options_are_moved(self):
+        text = ('Ⅰ.单项填空(共2小题)\n'
+                '1. What do you want?\nA.Yes.\tB.No.\n'
+                '2. Where are you?\nA.Home.\tB.School.\n'
+                '1.A\n2.B\n')
+        structure, main, appendix = extract.infer_structure(text)
+        self.assertNotIn('1.A', main)
+        self.assertNotIn('2.B', main)
+        self.assertIn('1.A', appendix)
+        self.assertIn('2.B', appendix)
+        self.assertEqual(structure['sections'][0]['questions'], [1, 2])
+        self.assertNotIn('DUPLICATE_QUESTION_NUMBER',
+                         [u['code'] for u in structure['unresolved']])
+
+    def test_option_line_with_sentence_numbers_is_kept(self):
+        # “A.Between 8 and 12. B.Between 11 and 15.” 里的 12. 15. 不能被当成题号删除。
+        text = ('Ⅳ.短文理解(共3小题)\n'
+                '(　　)21.Where is Paul\'s school?\n'
+                'A.In America.\tB.In Canada.\tC.In China.\n'
+                '(　　)22.How old are the students in Paul\'s school?\n'
+                'A.Between 8 and 12.\tB.Between 11 and 15.\tC.Between 12 and 15.\n'
+                '(　　)23.Where does Paul begin his day?\n'
+                'A.In the radio station.\tB.In the dining hall.\tC.In his “home class”.\n')
+        structure, main, appendix = extract.infer_structure(text)
+        self.assertIn('Between 8 and 12', main)
+        self.assertIn('Between 12 and 15', main)
+        self.assertEqual(structure['sections'][0]['questions'], [21, 22, 23])
+        self.assertNotIn('A.Between 8 and 12', appendix)
+
+    def test_skip_lines_removes_confirmed_answer_lines(self):
+        text = ('Ⅹ.单词拼写(共2小题)\n'
+                '91.Question one.\n91.answerone\n'
+                '92.Question two.\n92.answertwo\n')
+        structure, main, appendix = extract.infer_structure(text, skip_lines={4})
+        self.assertIn('91.answerone', appendix)
+        self.assertIn('92.answertwo', main)
+        self.assertNotIn('91.answerone', main)
+
+    def test_trailing_answer_heading_block_is_separated(self):
+        text = ('2026年某省中考英语\n'
+                'Ⅰ.单项填空(共2小题;每小题1分,满分2分)\n'
+                '1. What do you want?\nA.Yes.\tB.No.\n'
+                '2. Where are you?\nA.Home.\tB.School.\n'
+                'Ⅱ.单词拼写(共2小题;每小题1分,满分2分)\n'
+                '3.Mary has a n　　　　(自然) life.\n'
+                '4.Frank has a w　　　　(湿的) jacket.\n'
+                '参考答案及解析\n'
+                'Ⅰ.单项填空\n1.A　【解析】根据答语。\n2.B　【解析】根据问句。\n'
+                'Ⅱ.单词拼写\n3.nature\n4.wet\n')
+        structure, main, appendix = extract.infer_structure(text)
+        self.assertTrue(main.rstrip().endswith('jacket.'))
+        self.assertTrue(appendix.lstrip().startswith('参考答案及解析'))
+        self.assertIn('3.nature', appendix)
+        self.assertNotIn('3.nature', main)
+        self.assertEqual([s['questions'] for s in structure['sections']], [[1, 2], [3, 4]])
+        self.assertNotIn('DUPLICATE_QUESTION_NUMBER',
+                         [u['code'] for u in structure['unresolved']])
 
     def test_repeated_paper_title_requires_adjacent_valid_answer_summary(self):
         title = '2023年某省初中学业水平考试'
@@ -152,6 +244,34 @@ class CompositeExtractionTest(unittest.TestCase):
             self.assertIn('OCR_VISUAL_REVIEW', {i['code'] for i in structure['unresolved']})
             self.assertEqual(source.read_bytes(), b'PDF fixture')
 
+    def test_pdf_keeps_text_layer_and_skips_ocr_when_assist_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); source = root / 'source.pdf'; source.write_bytes(b'PDF fixture')
+            native = {'pages': [
+                {'page': 1, 'method': 'text', 'text': 'Ⅰ.单项填空(共1小题)\n1. Read?', 'needs_ocr': False},
+                {'page': 2, 'method': 'text', 'text': 'short', 'needs_ocr': True}], 'warnings': []}
+            state = root / 'assist.json'; state.write_text('{"enabled": false}', encoding='utf-8')
+            with patch.dict(os.environ, {'MUDU_OCR_ASSIST_STATE': str(state)}), \
+                 patch.object(ocr_backend, 'read_pdf', return_value=native), \
+                 patch.object(ocr_backend, 'recognize', side_effect=AssertionError('OCR must not run')):
+                report = extract.extract_source(source, root / 'out')
+            self.assertTrue(report['passed'])
+            evidence = json.loads((root / 'out' / 'extraction.json').read_text())
+            self.assertTrue(evidence['pages'][1]['ocr_skipped'])
+            self.assertEqual(evidence['pages'][1]['text'], 'short')
+            self.assertFalse(evidence['ocr_assist_enabled'])
+            structure = json.loads((root / 'out' / 'structure.json').read_text())
+            self.assertIn('EXTRACTION_WARNING', {i['code'] for i in structure['unresolved']})
+
+    def test_image_source_requires_ocr_assist_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); source = root / 'scan.png'; source.write_bytes(b'image fixture')
+            state = root / 'assist.json'; state.write_text('{"enabled": false}', encoding='utf-8')
+            with patch.dict(os.environ, {'MUDU_OCR_ASSIST_STATE': str(state)}), \
+                 patch.object(ocr_backend, 'recognize', side_effect=AssertionError('OCR must not run')):
+                with self.assertRaisesRegex(ValueError, 'OCR 辅助已关闭'):
+                    extract.extract_source(source, root / 'out')
+
     def test_native_pdf_images_are_preserved_as_reviewable_page_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); source = root / 'source.pdf'; source.write_bytes(b'pdf')
@@ -191,7 +311,8 @@ class CompositeExtractionTest(unittest.TestCase):
             self.assertFalse(report['passed'])
             self.assertIn('configuration missing', report['error'])
 
-    def test_unresolved_ocr_cannot_pass_structure_gate(self):
+    def test_ocr_visual_review_is_non_blocking_but_requires_layout(self):
+        # OCR 复核是版面视觉证据，不阻断结构切题；但必须置 layout_required，上传前走版面复核。
         from workflow import structure_gate
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
@@ -201,8 +322,9 @@ class CompositeExtractionTest(unittest.TestCase):
                 'sections': [{'type': '单项填空', 'questions': [1]}],
                 'unresolved': [{'code': 'OCR_VISUAL_REVIEW', 'message': '需要核对原页'}]}))
             report = structure_gate.run_gate(folder)
-            self.assertFalse(report['passed'])
-            self.assertIn('OCR_VISUAL_REVIEW', [x['code'] for x in report['blockers']])
+            self.assertNotIn('OCR_VISUAL_REVIEW', [x['code'] for x in report['blockers']])
+            self.assertIn('OCR_VISUAL_REVIEW', [x.get('code') for x in report.get('warnings', [])])
+            self.assertTrue(report['layout_required'])
 
     def test_automatic_runner_uses_builtin_extract_without_bridge(self):
         self.assertEqual(contracts.STAGE_BY_ID['extract'].kind, contracts.COMMAND)
@@ -219,8 +341,8 @@ class CompositeExtractionTest(unittest.TestCase):
             with patch.object(runner, '_execute_command', side_effect=completed):
                 result = auto.advance(folder, {})
             self.assertEqual(mf.load(folder)['stages']['extract']['status'], mf.COMPLETED)
-            # 新 DAG 在答案前先验证源头；此 mock 没有产出正文，应停在结构闸门。
-            self.assertEqual(result['stopped_at'], 'structure_gate')
+            # 模型优先模式：结构闸门记录诊断后继续进入答案阶段。
+            self.assertEqual(result['stopped_at'], 'answers')
             gate = json.loads((folder / '07_review/structure-gate.json').read_text())
             self.assertFalse(gate['passed'])
             self.assertIn('SOURCE_EMPTY', {issue['code'] for issue in gate['blockers']})

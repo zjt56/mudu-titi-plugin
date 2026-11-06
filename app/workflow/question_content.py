@@ -177,6 +177,10 @@ def question_parts(lines: list[str], number: int) -> dict:
     end = len(lines)
     for i in range(start + 1, len(lines)):
         plain = _plain(lines[i]).strip()
+        # 【文章大意】/【解析】等字段标题是材料末边界：不能并进最后一道题的选项/题干。
+        if re.match(r"^[\[【]?\s*(?:文章大意|解析|答案|分析)\s*[\]】]?\s*[：:]?", plain):
+            end = i
+            break
         if (_strong_number(plain) is not None or SECTION.match(plain)
                 or material_label(plain) or guide_numbers(plain) or LEADIN.match(plain)):
             end = i
@@ -306,6 +310,99 @@ def _candidate_options(options) -> list[dict]:
     return normalized
 
 
+def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
+    """把原卷的实词下划线与图片引用补回组装产物，避免模型把 `n____` 或表格图标磨掉。
+
+    只在来源确实有、而候选缺失时补：题干按 `question_parts` 逐字还原（保留
+    `<u>…</u>`），图片引用 `[IMG name]` 追加到该单元 material，保证归属到本单元。
+    只补结构保真标记，不改答案/标签，也不猜测任何未出现的内容。返回修正计数。
+    """
+    from . import denoise, structure_gate
+    root = Path(batch_dir)
+    try:
+        source = (root / "01_source/正文.txt").read_text(encoding="utf-8-sig")
+        structure = json.loads((root / "01_source/structure.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return 0
+    cleaned, _, _ = denoise.clean_body(source)
+    lines = cleaned.splitlines()
+    fresh = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], lines)
+    by_numbers = {tuple(u["numbers"]): u for u in fresh}
+    changed = 0
+    for row in batch.get("items") or []:
+        key = tuple(row.get("numbers") or ([row.get("number")] if row.get("number") else []))
+        unit = by_numbers.get(key)
+        if not unit:
+            continue
+        content = "\n".join(_field_text(row.get(k)) for k in
+                             ("stem", "material", "materialBlocks", "material_blocks", "options", "subquestions"))
+        # 图片引用：先按题组共享材料补，再按每道子题独立题干/选项补。
+        # 模型常把题图标记从具体子题里丢掉；必须归还到对应 child，不能只挂在组级 material。
+        src_images = set(_image_names(str(unit.get("stem") or "").splitlines()))
+        present = _image_refs(row)
+        missing = sorted(name for name in src_images if name not in present)
+        if missing:
+            extra = "\n".join(f"[IMG {name}]" for name in missing)
+            row["material"] = (_field_text(row.get("material")).rstrip() + "\n" + extra).strip()
+            changed += 1
+        children = {str(c.get("number")): c for c in (row.get("subquestions") or []) if isinstance(c, dict)}
+        for number in unit.get("numbers") or []:
+            try:
+                part = question_parts(lines, int(number))
+            except (TypeError, ValueError):
+                continue
+            source_images = set(_image_names(str(part.get("stem") or "").splitlines()))
+            for option in part.get("options") or []:
+                source_images.update(_image_names(str(option.get("text") or "").splitlines()))
+            if not source_images:
+                continue
+            target = children.get(str(number)) if children else row
+            if target is None:
+                continue
+            missing_child = sorted(name for name in source_images if name not in _image_refs(target))
+            if missing_child:
+                extra = "\n".join(f"[IMG {name}]" for name in missing_child)
+                target["stem"] = (_field_text(target.get("stem")).rstrip() + "\n" + extra).strip()
+                changed += 1
+    return changed
+
+
+def apply_required_writing_stem(batch_dir: str | Path, batch: dict) -> int:
+    """写作题题干以原卷为准：模型常把给定开头句当成范文正文而截断。
+
+    结构里唯一、单题号、single_writing_section 的写作题，题干直接落回原卷
+    `_required_stem` 的逐字内容（去掉作答空行/页脚残留），不猜测、不补写。
+    返回被修正的题数。
+    """
+    from . import denoise, structure_gate
+    root = Path(batch_dir)
+    try:
+        source = (root / "01_source/正文.txt").read_text(encoding="utf-8-sig")
+        structure = json.loads((root / "01_source/structure.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return 0
+    cleaned, _, _ = denoise.clean_body(source)
+    fresh = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
+    required = {}
+    for unit in fresh:
+        if (unit.get("source_span", {}).get("number_binding") == "single_writing_section"
+                and len(unit.get("numbers") or []) == 1):
+            required[tuple(unit["numbers"])] = _required_stem(unit.get("stem") or "")
+    if not required:
+        return 0
+    changed = 0
+    for row in batch.get("items") or []:
+        key = tuple(row.get("numbers") or ([row.get("number")] if row.get("number") else []))
+        want = required.get(key)
+        if not want:
+            continue
+        current = _field_text(row.get("stem"))
+        if _canonical_image_text(want) not in _canonical_image_text(current + "\n" + _field_text(row.get("material"))):
+            row["stem"] = want
+            changed += 1
+    return changed
+
+
 def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     """Read-only final artifact audit against freshly sliced source units.
 
@@ -373,7 +470,9 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
         if "[TABLE" in required_source and not has_table(item.get("materialBlocks") or item.get("material_blocks")):
             issue("TABLE_STRUCTURE_MISSING", "原卷含表格，正式单元缺少保留网格结构的 materialBlocks 表格", uid)
         for marked in re.findall(r"<u>(.*?)</u>", unit["stem"], flags=re.S):
-            if re.search(r"[A-Za-z\u4e00-\u9fff]", marked):
+            # 空档（<u>n　　　　</u>、<u>　26　</u>）会被空档规范化成 n______/__26__，
+            # 下划线本就不该保留；只校验真正的实词下划线（≥2 个字母/汉字，如 trekked）。
+            if len(re.findall(r"[A-Za-z\u4e00-\u9fff]", marked)) >= 2:
                 preserved = [_canonical(x) for x in re.findall(r"<u>(.*?)</u>", candidate_body, flags=re.S)]
                 if _canonical(marked) not in preserved:
                     issue("SOURCE_UNDERLINE_MISSING", "原卷实词下划线未保留：" + marked[:80], uid)

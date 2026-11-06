@@ -53,7 +53,9 @@ detect_round() {
 # 选择规则：
 #   stage=review 且能识别 round → 用 review.rounds[round]（为空则落回 review.default）
 #   其他（或 review 未配置）     → stages[stage]（为空则 default）
-# 每个条目形如 {"provider":"deepseek-official","model":"deepseek-v4-pro","profile":"wf-deepseek"}
+# 每个条目形如 {"provider":"deepseek-official","model":"deepseek-flash","profile":"wf-deepseek-fast"}
+# 不提供任何“换一个模型”的兜底：配置缺失/损坏/没有默认模型时直接失败，
+# 由用户重新选择模型，绝不静默改用其他模型。
 read_route() {
   stage="$1"; round="$2"
   python3 - "$ROUTER" "$stage" "$round" <<'PY'
@@ -63,9 +65,7 @@ try:
     data = json.load(open(router_path, encoding="utf-8"))
 except Exception as exc:
     sys.stderr.write("wf-router: cannot read model-router.json: %s\n" % exc)
-    # 兜底：默认 deepseek 官方 pro
-    sys.stdout.write("deepseek-official\tdeepseek-v4-pro\twf-deepseek\n")
-    sys.exit(0)
+    sys.exit(1)
 
 def pick(entry, fallback):
     if isinstance(entry, dict) and entry.get("provider") and entry.get("model"):
@@ -75,6 +75,11 @@ def pick(entry, fallback):
 default = data.get("default") or {}
 stages = data.get("stages") or {}
 review = data.get("review") or {}
+
+if not (isinstance(default, dict) and default.get("provider") and default.get("model")):
+    sys.stderr.write("wf-router: model-router.json has no valid default provider/model; "
+                     "select a model again in the plugin settings\n")
+    sys.exit(1)
 
 chosen = None
 if stage == "review":
@@ -86,16 +91,17 @@ if stage == "review":
 else:
     chosen = pick(stages.get(stage), default)
 
-provider = chosen.get("provider") or "deepseek-official"
-model = chosen.get("model") or "deepseek-v4-pro"
-profile = chosen.get("profile") or "wf-deepseek"
+provider = chosen.get("provider")
+model = chosen.get("model")
+profile = chosen.get("profile") or "wf-deepseek-fast"
 sys.stdout.write("%s\t%s\t%s\n" % (provider, model, profile))
 PY
 }
 
 STAGE="$(detect_stage || true)"
 ROUND="$(detect_round || true)"
-ROUTE="$(read_route "$STAGE" "$ROUND")"
+# 路由失败必须终止本次调用；不能继续用其他模型。
+ROUTE="$(read_route "$STAGE" "$ROUND")" || { log "无法确定模型路由，已停止（不切换到其他模型）"; exit 1; }
 PROVIDER="$(printf '%s' "$ROUTE" | cut -f1)"
 MODEL="$(printf '%s' "$ROUTE" | cut -f2)"
 BASE_PROFILE="$(printf '%s' "$ROUTE" | cut -f3)"

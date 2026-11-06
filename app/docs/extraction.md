@@ -12,7 +12,7 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 - DOCX：标准库直接解析文档 XML，按正文顺序读取段落、真实表格网格和图片关系。保留可解析的画线、加粗、上下标及样式继承。页眉、页脚不混入题面；显式分页线索保留在证据中，不猜物理页码。
 - 文字极少而含图片的 DOCX：保留原图，同时尝试用 OCR 补充图中文字。常规 Word 不整页转图片，避免丢失原生格式；图片、表格的归属仍需核对。
 - PDF：通过 OCR 独立环境中的 PyMuPDF 逐页读取文字、原生文字块坐标和嵌入图片。少于 80 个字符、出现替换字符或严重英文粘连的页转视觉 OCR，其余保留文字层。此检测只是路由启发式，不能证明文字质量或多栏顺序。
-- PNG/JPEG/WebP/BMP/TIFF：直接调用本地 OCR。
+- PNG/JPEG/WebP/BMP/TIFF：调用当前配置的 OCR（飞桨 jobs API 或兼容的本地 CLI）。
 - 旧 DOC 不直接支持，应先转为 DOCX。当前网页上传入口仍接收 DOCX/PDF，图片路径可通过批次 source 或 Python API 使用。
 
 ## 本机 OCR 配置
@@ -36,6 +36,16 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 `ocr-config.json` 已被 Git 忽略；示例和适配器不写死某台电脑的路径。迁移时单独安装 OCR 环境和权重，再更新这两条路径。纯文字 Word 路径不需要 OCR 配置；PDF（即使有文字层）需要配置的环境提供 PyMuPDF。
 
 沿用 OCR 现有独立虚拟环境，不向审核台环境安装 torch/transformers，也不升级模型依赖。OCR 命令以参数数组启动，不使用 shell。多个批次调用同一模型脚本时通过操作系统文件锁串行执行，避免同时加载多个模型；直接在工作流外调用原脚本不受此锁控制。
+
+## OCR 辅助总开关
+
+插件「模型与设置 → OCR 识别」里的「启用 OCR 辅助识别」默认关闭。关闭时：
+
+- DOCX 与文字 PDF 完全走原生解析；文字层质量不足的页保留原文字，只记录警告并交给结构闸门。
+- 图片型 Word 不补充图中文字，只保留图片引用。
+- 扫描 PDF/图片无法提取文字时明确失败并提示先开启开关，不会静默产出空正文。
+
+开启后文字提取仍是主路径：文字 PDF 只对质量不足的页 OCR，扫描 PDF/图片由 OCR 识别，图片型 Word 补充图中文字。开关通过私有 `assist.json` 实时生效（`MUDU_OCR_ASSIST_STATE`），不需要重启后端；独立运行工作流而没有该状态文件时保持旧行为，也可用 `MUDU_OCR_ASSIST=0/1` 显式覆盖。
 
 ## 产物与证据
 

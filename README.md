@@ -15,7 +15,7 @@
 |---|---|---|
 | **docx 解析（主流程）** | 只需 **Python 3.9+** | 纯标准库实现，**零 pip 依赖** |
 | **PDF 解析** | Python + **PyMuPDF** | `pip install pymupdf`；装了就能解析纯文本 PDF |
-| **扫描件/图片 OCR** | 外部 OCR 服务（如 PaddleOCR-VL） | **可选**，在 `app/workflow/ocr-config.json` 或 `MUDU_OCR_CONFIG` 配置；不配则只有 PDF/图片 OCR 不可用，docx 主流程不受影响 |
+| **扫描件/图片 OCR** | 飞桨 jobs API 或原有本地 OCR | **默认关闭，可选开启**：在「模型与设置 → OCR 识别」打开总开关；标准库联网无需 requests。关闭时只走文字层/原生解析，扫描件会提示先开启 |
 | **模型调用** | DSH 内可用的模型 | 面板里选择，凭证从 `~/.dsh/.credentials.yaml` 读 |
 
 - Python 由插件**自动探测**（`WF_PYTHON` 环境变量 → 常见路径 → `PATH` 上的 `python3.12`/`python3`），找不到时面板会直接显示"未找到可用的 Python"及解决提示。
@@ -28,8 +28,8 @@
 
 ## 能力
 
-- **选择 harness 内模型（含第三方）**：面板下拉列出 base profile 里的全部模型（DeepSeek 官方 `deepseek-flash`/`deepseek-v4-pro`、Magpie 中转 GPT 系列、Codex 系列）。
-- **分别设置三审模型**：一审(labels)/二审(knowledge)/三审(sample) 可各自指定；默认统一走 `deepseek-v4-pro`。
+- **选择 harness 内模型（含第三方）**：面板下拉列出 base profile 里的全部模型（DeepSeek 官方 `deepseek-flash`/`deepseek-v4-pro`、Magpie 中转 GPT 系列、Codex 系列）。这里的「DeepSeek 官方」是 Harness 里填 API Key 的官方适配器（`deepseek-official`，读 `DEEPSEEK_API_KEY`），不是账号/订阅模型。
+- **默认模型就是所有任务用的模型**：选中后，各阶段与两轮审核默认全部走它；只有你在「各阶段模型 / 两轮审核模型」里显式指定，才会覆盖对应环节。配置缺失或路由损坏时直接报错，不会静默换用其他模型。
 - **自定义内容**：可编辑三审提示词、各阶段补充、审核口径（`config/prompts/*.md`、`config/review-policy.json`）。
 
 ## 原理（非侵入）
@@ -69,7 +69,7 @@
 1. 已安装 **DeepSeek Harness**（DSH）。
 2. 已安装 **Python 3.12**（3.9+ 亦可）。macOS 可用 `brew install python@3.12`，或从 python.org 下载。
 3. （可选）要解析 PDF：`pip install pymupdf`。
-4. （可选）要识别扫描件：自备 OCR 服务并在 `app/workflow/ocr-config.json` 配置。
+4. （可选）要识别扫描件：在「模型与设置 → OCR 识别」配置飞桨 jobs API 和私有 Token；或继续使用 `app/workflow/ocr-config.json` 的本地 OCR。
 
 ### 安装步骤
 
@@ -108,7 +108,7 @@ dsh plugin --profile wf-deepseek add /path/to/插件版
 
 ## 题库连接设置
 
-「模型与设置」采用左右布局：左侧是全局、阶段和两轮审核模型；右侧是题库 API 连接。
+「模型与设置」左侧提供四项分类导航：大模型配置、题库 API、OCR 识别、听力切分；右侧只显示当前板块。已经访问的板块保持挂载，切换分类会保留尚未保存的输入。
 
 - 必填连接项：API Base（以 `/api` 结尾）、API Key、科目 ID（默认 `english`）。
 - 默认连接 `http://127.0.0.1:8089/api`，需先建立本机 SSH 隧道；也接受 HTTPS。拒绝公网明文 HTTP、带账号密码的 URL 和重定向。
@@ -118,6 +118,22 @@ dsh plugin --profile wf-deepseek add /path/to/插件版
 - 后端启动时通过 `MUDU_UPLOAD_CONFIG` 和 `MUDU_API_KEY` 注入现有上传客户端。保存不会中断现有任务，新凭据在后端下一次启动时加载；面板连接测试立即使用当前填写值。
 - 「测试连接」只 GET 当前知识点版本目录，不提交题目，也不能据此判断具备 `draft` 上传权限。
 - 云端提交仍遵循预检、冻结及人工批准流程，只写入上传暂存。确认入库和发布由远端人工完成；本设置面板不会上传、确认或发布题目。
+
+## OCR 识别设置
+
+- **总开关默认关闭**：关闭时只使用文字层/原生解析，OCR 完全不参与，英文文字卷和 DOCX 走原路径。扫描件、图片型 PDF 或需要公式/版面识别时，在「OCR 识别」打开「启用 OCR 辅助识别」。
+- 开启后文字提取为主、OCR 补充：文字 PDF 只对质量不足的页 OCR；扫描 PDF/图片由 OCR 识别；图片型 Word 补充图中文字。开关即时生效，不需要重启后端。
+- 使用飞桨 `PaddleOCR-VL-1.6` jobs API，支持文档方向分类、去扭曲、图表识别、总超时和轮询间隔。
+- Token 单独保存在仓库外私有配置中，界面只显示是否已保存；留空保留，明确清除才移除。保存后工作流按次读取，新 Token 无需重启后端。
+- 「完整测试」支持草稿配置与 URL 或本地文件，执行真实提交、轮询和结果下载；无需先保存，也不受总开关影响。建议仅使用合成小图片测试，可能产生服务额度消耗。
+- REST schema、错误脱敏、依赖和兼容性说明见 [OCR jobs 接口说明](app/docs/ocr-jobs.md)。
+
+## 模型路由
+
+- 面板选择写入 `config/model-router.json`；工作流每次调用 `backend/wf-router.sh`，按 `Stage` / `ROUND` 取默认或指定条目，只把该条目里的 provider/model 写进临时 profile。所有路径都走这一条：答案、题型、解析、知识点、装配、两轮审核、结构 AI 复核。
+- 没有“换一个模型”的兜底：路由配置读不到、缺默认模型或条目无效时直接失败并提示重新选择，绝不静默改用其他模型。
+- 修改默认模型后，下一次模型调用即生效，不需要重启后端；已经启动的分片继续用它启动时的路由。`config/model-router.json` 的 `stages` / `review.rounds` 为空时全部使用默认。
+- 并发：插件生效配置 `part_concurrency` / `review_part_parallel` 默认 16，可在 `backend/local-agent.plugin.json` 调整，上限 64。官方 API 支持更高并发，实际限制是本机同时运行的 dsh 进程与内存。
 
 ## 注意
 

@@ -253,6 +253,8 @@ def _review_after(callback, batch_dir, config_path=None, max_attempts=3, allow_f
                                output_hashes=mf.output_hashes(batch, spec),
                                notes=("AI初审已完成" if ai_completed else "AI初审待核验") + "；分轮审核：" + rounds["action"]
                                      + ("；代理额度用尽，恢复后重跑" if quota_hit else ""))
+                if completed:
+                    mf.record_delivery(batch, manifest, spec)
                 manifest["status"] = mf.derive_status(manifest)
                 mf.save(batch, manifest)
         print(json.dumps({"ai_review": first, "review_rounds": rounds,
@@ -287,6 +289,8 @@ def _run_review_rounds(batch_dir, config_path=None):
                                input_hashes=mf.input_hashes(batch, manifest, spec),
                                output_hashes=mf.output_hashes(batch, spec),
                                notes="分轮审核：" + rounds["action"])
+                if execution_completed:
+                    mf.record_delivery(batch, manifest, spec)
                 manifest["status"] = mf.derive_status(manifest)
                 mf.save(batch, manifest)
         print(json.dumps({"review_rounds": rounds, "completed": execution_completed,

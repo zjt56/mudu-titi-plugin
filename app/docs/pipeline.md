@@ -43,7 +43,14 @@
    （`structure.confirmed.json` 的 `meta`），题目正文里一律不再保留。题库入库时这些值走专门字段。
 3. **按题型结构化**：独立题（单项填空、单词拼写、完成句子等）一题一单元逐题呈现；组合题
    （完形、阅读、任务型阅读、听力信息转换、补全对话等）以题组为一个单元整体呈现，共享材料只出现一次。
-4. **机器自检**：`source_present`、`sections_present`、`coverage`（题号全覆盖无重复）、`denoise`
+4. **解析版答案分离**：正文里夹带的答案、解析先由确定性规则识别（同题号紧邻短答案、
+   `【解析】/【答案】` 行、题号区间答案汇总、`参考答案/答案与解析` 标题后的整段答案等），
+   移入附录；规则拿不准的重复题号再由 `workflow/structure_ai.py` 交给模型判断：
+   逐题混排时返回具体答案行，整卷后附答案时返回连续答案区间。输出必须逐字引用原行、
+   编号必须在前面出现过、区间内不能有问句/选项/填空行；校验通过后带 `skip_lines`
+   重跑确定性结构化，并记录到 `01_source/structure.ai.json`。模型不可用、输出无法校验
+   或没有重复题号时不调用，闸门仍按原规则运行，绝不因 AI 静默放行。
+5. **机器自检**：`source_present`、`sections_present`、`coverage`（题号全覆盖无重复）、`denoise`
    （切片不残留卷头）、`grouping`（题组题号属于合法大题）。任一失败即 `blocked`，列出阻断码
    （`SOURCE_EMPTY`、`NO_SECTIONS`、`MISSING_NUMBERS`、`DUPLICATE_NUMBERS`、`RESIDUAL_HEADER`、
    `GROUP_OUT_OF_SECTION`）。
@@ -240,3 +247,9 @@ python -m workflow.doctor
 | `workflow/checks.py` | `validate` 阶段的 16 项体检调度 |
 | `workflow/review.py` | `review_gate` 的放行规则 |
 | `workflow/independent_review.py` | 独立复核的快照与签名校验 |
+
+## 材料分类与对齐（2026-11 重设计）
+
+结构阶段不再“一上来按题号硬切、切不准就整段否定”。`workflow/material_classify.py` 先把每份上传文件的**文字层**各自提取出来，判定文件角色（`paper` 正文 / `answers` 答案 / `explanations` 解析 / `mix` 混排 / `other`），结果写入 `01_source/material-roles.json`；明确上传的答案卷会在该阶段直接提取到 `01_source_ans/正文.txt`，供答案阶段使用。模型不可用时用确定性规则（题号+选项 vs 题号+答案标记）兜底，只留证据、不阻断流程。
+
+多篇材料（A/B/C/第X篇…）的阅读/对话分区由确定性规则给出边界，`material_classify.partition_paper` 可在有模型时确认每篇包含的题号（严格校验恰好覆盖全部题号才采信，否则回退规则）。段落标签带插图（如 `A[IMG image11.jpeg]`）也按材料标识别，避免首篇材料漏切导致整段被当成一个题组。

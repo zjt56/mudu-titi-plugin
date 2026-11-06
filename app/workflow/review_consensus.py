@@ -123,20 +123,11 @@ def compare(batch, plan, records):
         return False
 
     def _knowledge_conflict(values):
-        # Path lists agree unless two sources give different values under the
-        # same dimension root. An extra legal dimension on one side is not a
-        # conflict, and a missing dimension is never a conflict.
-        by_root = {}
-        for v in values:
-            roots = {}
-            for path in (v or []):
-                roots.setdefault(str(path).split('/')[0], set()).add(str(path))
-            for r, vals in roots.items():
-                by_root.setdefault(r, []).append(frozenset(vals))
-        for sets in by_root.values():
-            if len(sets) >= 2 and len(set(sets)) > 1:
-                return True
-        return False
+        # 知识点差异就是要把「原标签 vs 一审 vs 二审」不同之处交给人工：
+        # 任一来源的知识点路径集合与其它来源不完全相同即为差异
+        # （包括换了维度根，如 语法/副词/… vs 词汇/词汇辨析/…；也包括少打/多打维度）。
+        sets = {frozenset(v or []) for v in values}
+        return len(sets) > 1
 
     def agree(field, values):
         if not values:
@@ -148,6 +139,9 @@ def compare(batch, plan, records):
         return len({repr(v) for v in values}) <= 1
 
     for (uid, number, field), entries in observations.items():
+        # 难度不进入人工审核、不参与比对（用户 2026-11 规则）：难度以首次打标签结果为准。
+        if field == 'difficulty':
+            continue
         if agree(field, [value for _, value in entries]):
             continue
         sources = [{**source, 'field': field, 'value': value} for source, value in entries if source.get('round_id')]

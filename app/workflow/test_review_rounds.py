@@ -115,10 +115,9 @@ class ReviewRoundsTest(unittest.TestCase):
         payload = self.payload()
         payload['rounds'][0]['checks'][0]['assessment']['difficulty'][2]['value'] = '困难'
         result = review.evaluate_rounds(self.batch, payload)
+        # 难度不参与审核比对：难度变化不产生 finding，也不影响通过。
         self.assertTrue(result['execution_completed'])
-        self.assertFalse(result['passed'])
-        self.assertTrue(any(finding.get('field') == 'difficulty' and '困难' in finding['reason']
-                            for finding in result['findings']))
+        self.assertFalse(any(f.get('field') == 'difficulty' for f in result['findings']))
         for bad in ([], [{'number': '1', 'value': '容易'}] * 6,
                     [{'number': str(n), 'value': '未知'} for n in range(1, 7)]):
             record['checks'][0]['assessment']['difficulty'] = bad
@@ -642,6 +641,30 @@ class ReviewRoundsTest(unittest.TestCase):
         payload["rounds"][1]["checks"][0]["assessment"]["knowledge"] = ["语篇体裁/说明文/介绍类短文", "主题/人与自我/生活与学习/日常起居"]
         result = review.evaluate_rounds(self.batch, payload)
         self.assertIn("sample", result["checked_rounds"])
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_visual_gap_uncertain_is_informational_not_manual(self):
+        # 图片占位/看不到图这类“能力受限、无法确认图文对应”不是标签差异：
+        # 只作提示，不进人工队列、不阻断闸门。
+        payload = self.payload()
+        sample = payload["rounds"][1]["checks"][0]
+        sample["verdict"] = "uncertain"
+        sample["rationale"] = "选项为图片占位，无法确认图文对应。"
+        result = review.evaluate_rounds(self.batch, payload)
+        codes = [e["code"] for e in result["errors"] if e.get("unit_id") == sample["unit_id"]]
+        self.assertNotIn("REVIEW_ROUND_FINDING", codes)
+        self.assertTrue(any(str(i.get("unit_id")) == sample["unit_id"] for i in result.get("informational") or []))
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_uncertain_label_conflict_is_a_manual_finding(self):
+        # 真正点名“与原标签不一致/答案冲突”的不确定仍要送人工。
+        payload = self.payload()
+        sample = payload["rounds"][1]["checks"][0]
+        sample["verdict"] = "uncertain"
+        sample["rationale"] = "知识点与原标签不一致：疑似应为说明文主题。"
+        result = review.evaluate_rounds(self.batch, payload)
+        self.assertIn("REVIEW_ROUND_FINDING",
+                      [e["code"] for e in result["errors"] if e.get("unit_id") == sample["unit_id"]])
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_stale_inputs_and_added_answer_evidence_invalidate(self):

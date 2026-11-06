@@ -37,10 +37,10 @@ test('二审标签逐条呈现抽查题号，保留多条结果和核对说明',
  assert.match(rendered,/抽查第 79 题/);
  assert.match(rendered,/新标签/);
  assert.match(rendered,/另一标签/);
+ // 审核说明只保留一句简短原因（越简单越好），不堆原文核对。
  const notes=auditNotes(d).join(' ');
- assert.match(notes,/二审（第 77 题）/);
- assert.match(notes,/依据第一段/);
- assert.match(notes,/与答案一致/);
+ assert.match(notes,/差异原因：/);
+ assert.ok(notes.replace('差异原因：','').length <= 60+4);
 });
 test('未抽中的单元显示未抽中，不伪装为待审核或已通过', () => {
  const rendered=text(labelAuditPanels(detail([], '未覆盖')));
@@ -48,12 +48,14 @@ test('未抽中的单元显示未抽中，不伪装为待审核或已通过', ()
  assert.doesNotMatch(rendered,/待审核/);
 });
 
-test('分类显示题源分类（source_type），不把占位未提供当作分类', () => {
-  const d = { unit_kind: 'standalone', labels: { knowledge: ['主题/原标签'], source_type: '中考真题', categories: ['未提供'] },
+test('审核面板不展示难度/来源/分类等基本标签（不在审核范畴）', () => {
+  const d = { unit_kind: 'standalone', labels: { knowledge: ['主题/原标签'], source_type: '中考真题', categories: ['未提供'], difficulty: '适中' },
     comparison: { original: { labels: { knowledge: ['主题/原标签'] } }, rounds: [] } };
-  const rendered = text(labelAuditPanels(d));
-  assert.match(rendered, /分类\s*中考真题/);
-  assert.doesNotMatch(rendered, /分类\s*未提供/);
+  const all = text(labelAuditPanels(d)) + ' ' + auditNotes(d).join(' ');
+  assert.doesNotMatch(all, /分类/);
+  assert.doesNotMatch(all, /难度/);
+  assert.doesNotMatch(all, /来源/);
+  assert.equal(auditNotes(d).length, 0);
 });
 
 test('不再有单独的红色差异块：不一致直接在知识点标签里标出', () => {
@@ -74,14 +76,11 @@ test('不再有单独的红色差异块：不一致直接在知识点标签里�
   assert.match(rendered, /知识点标签/);
   assert.match(rendered, /社区生活/);              // 一审标签行直接展示不一致
   assert.match(rendered, /不一致/);
-  // 难度不在审核校验范围：只显示第一次打标签的结果，不出现一审的「容易」。
-  assert.match(rendered, /难度\s*适中/);
-  assert.doesNotMatch(rendered, /容易/);
-  // 审核说明不再重复罗列知识点差异，也不再出现难度比对。
+  // 难度不在审核范畴，任何位置都不出现。
+  assert.doesNotMatch(rendered, /难度/);
   const notes = auditNotes(d).join(' ');
-  assert.doesNotMatch(notes, /难度/);
-  assert.doesNotMatch(notes, /知识点与原标签不同/);
-  assert.equal(notes.length, 0);
+  // 有知识点差异时给一句简短原因，不做原文核对罗列。
+  assert.match(notes, /差异原因：/);
   assert.equal(hasKnowledgeDiff(d), true);
   // 有差异时审核说明的空态文案指向知识点标签，而不是错误地说“无差异”。
   assert.match(source, /kpDiff \? '差异已在上方「知识点标签」中标出。'/);
@@ -101,7 +100,7 @@ test('难度即使被审核改动，也只按第一次打标签结果显示', ()
     },
   };
   const rendered = text(labelAuditPanels(d));
-  assert.match(rendered, /难度\s*适中/);
-  assert.doesNotMatch(rendered, /困难/);
-  assert.doesNotMatch(auditNotes(d).join(' '), /难度/);
+  assert.doesNotMatch(rendered, /难度/);
+  assert.doesNotMatch(rendered, /容易|困难/);
+  assert.equal(auditNotes(d).length, 0);
 });

@@ -18,13 +18,16 @@ function load(overrides = {}) {
   const context = {
     backend, WORKBENCH_PORT: backend.port, WORKFLOW_DIR: path.join(root, 'app'),
     process, AbortController, fetch, setTimeout, clearTimeout, randomUUID,
-    createServer: net.createServer, spawn, join: path.join, mkdirSync: fs.mkdirSync,
+    createServer: net.createServer, spawn, join: path.join, resolve: path.resolve, mkdirSync: fs.mkdirSync,
+    execFileSync: () => '', readlinkSync: () => '', Buffer,
     resolveDataRoot: () => os.tmpdir(), resolvePython: () => 'python3',
-    questionBankSettings: { runtimeEnv: () => ({}) }, console: { log() {}, error() {} },
+    questionBankSettings: { runtimeEnv: () => ({}) },
+    ocrSettings: { runtimeEnv: () => ({ MUDU_PADDLE_OCR_CONFIG: path.join(os.tmpdir(), 'wf-ocr-private-fixture', 'ocr-config.json') }) },
+    console: { log() {}, error() {} },
     ...overrides,
   };
   vm.createContext(context);
-  return vm.runInContext(lifecycle + '\n({ backend, ensureBackend, spawnBackend, probeBackend, stopBackend })', context);
+  return vm.runInContext(lifecycle + '\n({ backend, ensureBackend, spawnBackend, probeBackend, stopBackend, pickPort, reapStaleWorkbenchProcesses })', context);
 }
 
 function fake(options = {}) {
@@ -52,6 +55,7 @@ function fake(options = {}) {
       return { ok: true, json: async () => ({ ok: true, instance_id: identity }) };
     },
     spawn: (python, args, opts) => {
+      assert.equal(opts.env.MUDU_PADDLE_OCR_CONFIG, path.join(os.tmpdir(), 'wf-ocr-private-fixture', 'ocr-config.json'));
       const child = new EventEmitter();
       child.pid = 100 + children.length;
       child.exitCode = null;
@@ -229,7 +233,16 @@ test('real Python backend health identity and repeated restart keep one owned po
   await new Promise(resolve => foreign.listen(0, '127.0.0.1', resolve));
   const port = foreign.address().port;
   const data = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-backend-lifecycle-'));
-  const f = load({ resolvePython: () => python, resolveDataRoot: () => data, WORKBENCH_PORT: port });
+  let ocrEnvChecks = 0;
+  const privateOCR = path.join(data, 'private-ocr', 'ocr-config.json');
+  const f = load({ resolvePython: () => python, resolveDataRoot: () => data, WORKBENCH_PORT: port,
+    ocrSettings: { runtimeEnv: () => ({ MUDU_PADDLE_OCR_CONFIG: privateOCR }) },
+    spawn: (executable, args, opts) => {
+      assert.equal(opts.env.MUDU_PADDLE_OCR_CONFIG, privateOCR);
+      ocrEnvChecks++;
+      return spawn(executable, args, opts);
+    },
+  });
   f.backend.port = port;
   const owned = [];
   try {
@@ -247,6 +260,7 @@ test('real Python backend health identity and repeated restart keep one owned po
       assert.ok(child.exitCode !== null || child.signalCode !== null);
       assert.ok(owned.every(c => c.exitCode !== null || c.signalCode !== null));
     }
+    assert.equal(ocrEnvChecks, 4);
     assert.equal((await (await fetch(`http://127.0.0.1:${port}/api/health`)).json()).instance_id, 'foreign');
     assert.equal(await f.stopBackend(), true);
     assert.equal(f.backend.proc, null);
@@ -255,4 +269,26 @@ test('real Python backend health identity and repeated restart keep one owned po
     await new Promise(resolve => foreign.close(resolve));
     fs.rmSync(data, { recursive: true, force: true });
   }
+});
+
+test('port scan skips a long run of occupied ports instead of reusing a busy one', async () => {
+  const busy = new Map(Array.from({ length: 30 }, (_, i) => [18891 + i, 'busy']));
+  const api = load({
+    createServer: () => {
+      const server = new EventEmitter();
+      server.listen = (port) => queueMicrotask(() => server.emit(busy.has(port) ? 'error' : 'listening'));
+      server.close = (done) => done();
+      return server;
+    },
+  });
+  assert.equal(await api.pickPort(18891), 18921);
+});
+
+test('lifecycle kills the process tree and reaps this plugin\'s orphans', () => {
+  assert.match(host, /detached: useGroup/);
+  assert.match(host, /process\.kill\(-child\.pid, signal\)/);
+  assert.match(host, /taskkill/);
+  assert.match(host, /function reapStaleWorkbenchProcesses/);
+  assert.match(host, /process\.kill\(pid, 'SIGTERM'\)/);
+  assert.match(host, /start \+ 100/);
 });

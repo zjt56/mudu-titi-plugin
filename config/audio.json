@@ -1,6 +1,6 @@
 {
   "enabled": false,
-  "asr_model": "large-v3-turbo",
+  "asr_model": "small",
   "cpu_threads": 4,
   "batch_size": 2,
   "max_parallel_transcriptions": 1,

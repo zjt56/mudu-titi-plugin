@@ -15,13 +15,36 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from audio import config, worker
+from audio import bootstrap, config, worker
+
+
+class StatusIsolationTests(unittest.TestCase):
+    def test_each_batch_has_its_own_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            bootstrap.write_status(data_dir, batch="2025卷", job="segment", running=False,
+                                   phase="done", detail="2025 done", error="")
+            bootstrap.write_status(data_dir, batch="2016卷", job="segment", running=False,
+                                   phase="error", detail="", error="2016 failed")
+            first = bootstrap.read_status(data_dir, "2025卷")
+            second = bootstrap.read_status(data_dir, "2016卷")
+            self.assertEqual(first["batch"], "2025卷")
+            self.assertEqual(first["detail"], "2025 done")
+            self.assertEqual(first["error"], "")
+            self.assertEqual(second["batch"], "2016卷")
+            self.assertEqual(second["error"], "2016 failed")
+            # 未指定批次时仍读最近一次任务的全局镜像（安装/旧客户端兼容）。
+            self.assertEqual(bootstrap.read_status(data_dir)["batch"], "2016卷")
+            # 未运行过的批次是 idle，而不是复用别的批次状态。
+            idle = bootstrap.read_status(data_dir, "未运行卷")
+            self.assertEqual(idle["phase"], "idle")
+            self.assertEqual(idle["batch"], "未运行卷")
 
 
 class ConfigResourceTests(unittest.TestCase):
-    def test_multilingual_large_default_and_explicit_legacy_models(self):
-        self.assertEqual(config.DEFAULTS["asr_model"], "large-v3-turbo")
-        self.assertEqual(config.validate({})["asr_model"], "large-v3-turbo")
+    def test_multilingual_small_default_and_explicit_large_model(self):
+        self.assertEqual(config.DEFAULTS["asr_model"], "small")
+        self.assertEqual(config.validate({})["asr_model"], "small")
         self.assertEqual(config.validate({"asr_model": "large-v3"})["asr_model"], "large-v3")
         self.assertEqual(config.validate({"asr_model": "small"})["asr_model"], "small")
         shipped = json.loads((config.PLUGIN_ROOT / "config" / "audio.json").read_text())
@@ -172,6 +195,16 @@ class WorkerContractTests(unittest.TestCase):
             worker.main(["transcribe", "--model-dir", directory, "--audio", "fake.wav",
                          "--out", str(Path(directory) / "fake.json"), "--regions", regions])
         self.assertEqual(transcribe.call_args.args[0].regions, regions)
+
+    def test_trailing_region_slightly_past_decoded_duration_is_clamped(self):
+        # ffprobe 容器时长可比解码采样略长；尾部小误差应夹到真实时长，而不是报错。
+        regions = [{"region_id": 0, "start": 0.0, "end": 1.02}]
+        checked = worker._regions_for_audio(regions, range(worker.SAMPLE_RATE))
+        self.assertAlmostEqual(checked[0]["end"], 1.0)
+        self.assertEqual(checked[0]["sample_end"], worker.SAMPLE_RATE)
+        with self.assertRaises(ValueError):
+            worker._regions_for_audio([{"region_id": 1, "start": 0.0, "end": 3.0}],
+                                      range(worker.SAMPLE_RATE))
 
     def test_regions_json_file_and_actual_sample_offset(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -18,9 +18,9 @@ PLUGIN_ROOT = APP_ROOT.parent
 DEFAULTS = {
     # 默认不启用：不点击「安装」就不会下载任何依赖/模型。
     "enabled": False,
-    # 默认多语种大模型；必须由显式安装流程缓存，失败不降级为 small。
-    "asr_model": "large-v3-turbo",
-    # 大模型 CPU 内存/线程预算：默认一次只运行一份模型。
+    # 默认多语种 small：资源占用更低；用户可在设置页显式切换 large-v3-turbo。
+    "asr_model": "small",
+    # CPU 内存/线程预算：默认一次只运行一份模型。
     "cpu_threads": 4,
     "batch_size": 2,
     "max_parallel_transcriptions": 1,

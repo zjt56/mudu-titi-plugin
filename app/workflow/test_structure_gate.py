@@ -63,6 +63,18 @@ class StructureGateTest(unittest.TestCase):
         # 元信息已抽到 meta，正文不再含卷名
         self.assertEqual(conf["meta"].get("year"), 2026)
 
+    def test_group_without_printed_question_numbers_keeps_section_source(self):
+        sections = [{"type": "听力短文理解", "questions": [11, 12, 13, 14, 15],
+                     "source_line": 1, "source_end_line": 3}]
+        groups = [{"questions": [11, 12, 13, 14, 15]}]
+        units = structure_gate._build_units(sections, groups, [
+            "听下面一段短文。", "The museum opens at nine.", "Please arrive early."
+        ])
+        self.assertEqual(len(units), 1)
+        self.assertEqual(units[0]["unit_kind"], "group")
+        self.assertIn("The museum opens at nine.", units[0]["stem"])
+        self.assertEqual(units[0]["source_span"]["start_line"], 1)
+
     def test_original_website_content_survives_confirmed_structure(self):
         from workflow import extract
         text = ("2024年安徽省中考\nⅠ.单项填空(共1小题)\n"

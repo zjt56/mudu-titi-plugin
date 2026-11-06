@@ -333,13 +333,23 @@ def _regions_for_audio(regions, audio):
     duration = sample_count / SAMPLE_RATE
     output = []
     for region in regions:
-        if region["end"] > duration:
-            raise ValueError(f"region {region['region_id']} 超过音频时长 {duration} 秒")
-        start_sample = int(region["start"] * SAMPLE_RATE)
-        end_sample = int(region["end"] * SAMPLE_RATE)
+        start = float(region["start"])
+        end = float(region["end"])
+        # ffprobe 的容器时长可能比解码后的采样长度略长（mp3 头/尾 padding）。
+        # 尾部仅在这点误差内夹到真实时长；超出太多仍是真错误。
+        if end > duration:
+            if end - duration <= 0.5:
+                end = duration
+            else:
+                raise ValueError(f"region {region['region_id']} 超过音频时长 {duration} 秒")
+        if start >= end:
+            continue
+        start_sample = int(start * SAMPLE_RATE)
+        end_sample = min(int(end * SAMPLE_RATE), sample_count)
         if not 0 <= start_sample < end_sample <= sample_count:
             raise ValueError(f"region {region['region_id']} 没有有效非空音频采样范围")
-        output.append({**region, "sample_start": start_sample, "sample_end": end_sample})
+        output.append({**region, "start": start, "end": end,
+                       "sample_start": start_sample, "sample_end": end_sample})
     return output
 
 

@@ -81,7 +81,7 @@ class BoundaryTruthTest(unittest.TestCase):
             segment._atomic_json(path, {"a": 1})
             self.assertEqual(before, path.stat().st_mtime_ns)
 
-    def test_small_ready_marker_cannot_claim_large_is_ready(self):
+    def test_ready_marker_must_match_selected_model(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); python = root / "python"; python.write_bytes(b"x")
             marker = root / bootstrap.READY_NAME
@@ -89,7 +89,9 @@ class BoundaryTruthTest(unittest.TestCase):
                                           "asr_model": "small", "align_model": config.DEFAULTS["align_model"]}))
             cfg = dict(config.DEFAULTS, data_dir=directory)
             with patch.object(bootstrap, "venv_python", return_value=python):
-                self.assertFalse(bootstrap.ready(cfg))
+                # 默认 small 与 marker 一致时可用；显式切换 large 必须重新 bootstrap。
+                self.assertTrue(bootstrap.ready(cfg))
+                self.assertFalse(bootstrap.ready(dict(cfg, asr_model="large-v3-turbo")))
 
     def region_fixture(self):
         units = [{"unit_id": "a", "numbers": [1], "type": "听力关键词语选择"},

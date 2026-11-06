@@ -99,6 +99,8 @@ def _next(batch, plan, skip_rounds=()):
         # when the current rules yield no findings. Retired comparisons are archived.
         ingest.build_review_files(batch, {'findings': evaluated['findings']}, reconcile_rounds=True)
         evaluated = review.evaluate_rounds(batch, payload)
+        if evaluated.get("execution_completed"):
+            review.write_comparison_snapshot(batch, payload)
     return None, {"action": "complete" if evaluated["execution_completed"] else "blocked",
                   "completed": evaluated["execution_completed"], "quality_passed": evaluated["passed"], "review": evaluated}
 
@@ -836,6 +838,8 @@ def _finish_install(batch, transaction):
     evaluated = review.evaluate_rounds(batch)
     ingest.build_review_files(batch, {'findings': evaluated['findings']})
     evaluated = review.evaluate_rounds(batch)
+    if evaluated.get("execution_completed"):
+        review.write_comparison_snapshot(batch)
     report = {'completed': evaluated['execution_completed'], 'quality_passed': evaluated['passed'],
               'round_completed': record['round_id'],
               'action': 'complete' if evaluated['execution_completed'] else 'continue',
@@ -1306,8 +1310,8 @@ def _run(batch_dir, config=None, portable_max_input_chars=None):
     while True:
         configured_parallel = config.get("review_part_parallel",
                                             config.get("part_concurrency", 1))
-        # 模型调用是网络延迟主导，多开几路能显著压缩墙钟；上限 6 避免打爆额度。
-        parallel = max(1, min(6, int(configured_parallel or 1)))
+        # 官方 API 支持高并发；这里只保留本机进程数的安全边界，不再按接口限流。
+        parallel = max(1, min(64, int(configured_parallel or 1)))
         if parallel > 1:
             # Run every independently payable round at the same time. The two
             # rounds judge the same bound source and never read each other's

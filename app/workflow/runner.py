@@ -93,6 +93,7 @@ def _record_success(batch_dir: Path, manifest: dict, stage: contracts.Stage) -> 
         # keep reporting a previous "passed: false" in the status table.
         notes="",
     )
+    mf.record_delivery(batch_dir, manifest, stage)
 
 
 def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
@@ -107,6 +108,7 @@ def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
     with _agent_lock(timeout):
         current = mf.load(batch_dir)
         mf.touch_stage(current, stage.id, mf.RUNNING, log=str(log.relative_to(batch_dir)))
+        mf.mark_delivery_consumed(batch_dir, stage.id)
         mf.save(batch_dir, current)
         if current is not manifest:  # 同一对象时 clear+update 会把自己清空
             manifest.clear()
@@ -456,6 +458,16 @@ def _structure_inputs(batch_dir: Path, manifest: dict) -> tuple:
 
 def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
     """Compute privately, then publish only if the evidence and gate are unchanged."""
+    # 解析版试卷的答案/解析常混在正文里。先用 AI 复核“哪些编号行是答案”，
+    # 校验通过后带 skip_lines 重跑确定性结构化；模型不可用/失败则静默跳过，
+    # 闸门仍按原规则运行，绝不因为 AI 而放行。
+    try:
+        from . import structure_ai
+        reviewed = structure_ai.auto_review(batch_dir)
+        if reviewed.get("ran") and reviewed.get("skipped"):
+            print(f"  · 结构 AI 复核：已将 {len(reviewed['skipped'])} 行答案/解析移入附录")
+    except (OSError, ValueError, RuntimeError, TypeError) as exc:
+        print(f"  · 结构 AI 复核跳过：{str(exc)[:160]}")
     from .local_agent import _agent_lock
     with _agent_lock(1500):
         current = mf.load(batch_dir)
@@ -677,14 +689,15 @@ def cmd_status(args) -> int:
     print(f"批次：{manifest['workflow_id']}  （{manifest['status']} → {mf.derive_status(manifest)}）")
     print(f"目录：{batch_dir}")
     print(f"技能版本：{manifest['rules'].get('skill_version')}")
-    print(f"\n{'阶段':<16}{'类型':<10}{'状态':<14}说明")
-    print("-" * 78)
+    print(f"\n{'阶段':<16}{'类型':<10}{'状态':<14}{'交付':<12}说明")
+    print("-" * 92)
     for stage in contracts.STAGES:
         record = manifest["stages"].get(stage.id, {})
         status = record.get("status", "pending")
         stale, why = mf.is_stale(batch_dir, manifest, stage) if status in TERMINAL else (False, "")
         suffix = f"  ← 需重跑（{why}）" if stale else ""
-        print(f"{stage.id:<16}{stage.kind:<10}{status:<14}{(record.get('notes') or '')[:28]}{suffix}")
+        delivered = mf.delivery_status(batch_dir, stage.id)
+        print(f"{stage.id:<16}{stage.kind:<10}{status:<14}{delivered:<12}{(record.get('notes') or '')[:28]}{suffix}")
     blocked = mf.blocking_stages(manifest)
     if blocked:
         print("\n阻断：")

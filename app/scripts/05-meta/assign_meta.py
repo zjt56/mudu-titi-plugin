@@ -118,6 +118,16 @@ def main() -> int:
     args = ap.parse_args()
     rules = json.loads(RULES_PATH.read_text(encoding="utf-8"))
     fs = rules["feature_scoring"]
+    if not args.batch.is_file():
+        # 难度/分类是可选补充；上游尚未形成正式 batch 时输出空占位，
+        # 不把缺少组装文件升级为整批失败。
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps({"items": [], "warnings": [
+            "缺少 06_batch/batch.json，难度与分类暂未生成"
+        ]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if args.report:
+            print("未找到批次组装文件，跳过难度与分类")
+        return 0
     data = json.loads(args.batch.read_text(encoding="utf-8"))
     items = data.get("items", [])
     pending = []

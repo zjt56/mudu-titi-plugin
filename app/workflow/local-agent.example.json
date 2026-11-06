@@ -10,6 +10,6 @@
   "unit_split": true,
   "assemble_part_units": 8,
   "review_part_units": 15,
-  "part_concurrency": 1,
+  "part_concurrency": 16,
   "candidate_cache": false
 }

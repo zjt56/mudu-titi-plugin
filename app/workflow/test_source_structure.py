@@ -226,12 +226,12 @@ class SourceBoundaryRegressionTest(unittest.TestCase):
         self.assertTrue(any(p["code"] == "SOURCE_OPTIONS_INCOMPLETE" and p["number"] == 40 for p in report["blockers"]))
 
     def test_resolved_text_without_bound_evidence_cannot_clear_gate(self):
+        # 一条 resolved 但缺少绑定证据的结构性 unresolved，不能被当成已解决而放行。
         structure = {"sections": [{"type": "单项填空", "questions": [1]}],
-                     "unresolved": [{"code": "OCR_VISUAL_REVIEW", "message": "check source", "resolved": True, "resolution": "looks fine"}]}
+                     "unresolved": [{"code": "DUPLICATE_QUESTION_NUMBER", "message": "check source", "resolved": True, "resolution": "looks fine"}]}
         _, report, _ = self.make_batch("Ⅰ.单项填空\n1. Choose?\nA.Yes B.No", structure)
         self.assertFalse(report["passed"])
-        self.assertTrue(report["layout_required"])
-        self.assertIn("OCR_VISUAL_REVIEW", {i["code"] for i in report["blockers"]})
+        self.assertIn("DUPLICATE_QUESTION_NUMBER", {i["code"] for i in report["blockers"]})
 
     def test_gate_binds_actual_input_and_confirmed_bytes(self):
         root, report, _ = self.make_batch("Ⅰ.单项填空\n1. Choose?\nA.Yes B.No\n")

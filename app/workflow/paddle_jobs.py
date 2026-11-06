@@ -1,0 +1,388 @@
+"""PaddleOCR asynchronous jobs adapter; Python standard library only.
+
+Tokens are read from private runtime configuration/environment, never serialized
+into artifacts or error messages. POST is never automatically retried.
+"""
+from __future__ import annotations
+
+import json
+import math
+import mimetypes
+import os
+from pathlib import Path
+import re
+import socket
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+
+DEFAULTS = {
+    "endpoint": "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+    "model": "PaddleOCR-VL-1.6",
+    "useDocOrientationClassify": False,
+    "useDocUnwarping": False,
+    "useChartRecognition": False,
+    "timeout_seconds": 300,
+    "poll_interval_seconds": 2,
+}
+OPTION_KEYS = ("useDocOrientationClassify", "useDocUnwarping", "useChartRecognition")
+MAX_RESPONSE = 64 * 1024 * 1024
+MAX_FILE = 200 * 1024 * 1024
+
+
+def _safe_message(value, token, limit=500):
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        return None
+    value = str(value)[:4096].replace(token, "[REDACTED]") if token else str(value)[:4096]
+    value = re.sub(r"https?://[^\s\"'<>]+", "[URL REDACTED]", value, flags=re.I)
+    value = re.sub(r"Bearer\s+[^\s\"'<>]+", "Bearer [REDACTED]", value, flags=re.I)
+    value = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|token|authorization)\s*[=:]\s*)[^\s,;\"'<>]+", r"\1[REDACTED]", value)
+    return re.sub(r"[\x00-\x1f\x7f]", " ", value).strip()[:limit] or None
+
+
+class PaddleJobsError(RuntimeError):
+    def __init__(self, code, *, http_status=None, error_code=None, error_message=None):
+        self.code = code
+        self.details = {key: value for key, value in {"http_status": http_status, "error_code": error_code, "error_message": error_message}.items() if value is not None}
+        message = {
+            "invalid_config": "Invalid OCR settings or source.",
+            "missing_token": "An OCR token is required.",
+            "http_error": "OCR server rejected the request.",
+            "unsafe_redirect": "OCR redirect refused; use the final endpoint.",
+            "network_error": "Cannot connect to OCR server.",
+            "timeout": "OCR job deadline exceeded; submission is not retried.",
+            "job_failed": "OCR job failed.",
+            "invalid_result": "OCR server returned an invalid or empty result.",
+        }.get(code, "OCR request failed.")
+        super().__init__(message + (" " + error_message if error_message else ""))
+
+
+def _remote_details(payload, token):
+    if not isinstance(payload, dict):
+        return {}
+    candidates = [payload]
+    candidates.extend(payload[key] for key in ("data", "error") if isinstance(payload.get(key), dict))
+    details = {}
+    for item in candidates:
+        for key in ("errorMsg", "errorMessage", "message"):
+            if key in item and "error_message" not in details:
+                value = _safe_message(item[key], token)
+                if value:
+                    details["error_message"] = value
+        for key in ("errorCode", "code"):
+            if key in item and "error_code" not in details:
+                value = _safe_message(item[key], token, limit=128)
+                if value:
+                    details["error_code"] = value
+    return details
+
+
+def safe_url(value, *, endpoint=False):
+    if not isinstance(value, str) or not value or len(value) > 8192 or re.search(r"[\s\\\x00-\x1f\x7f]", value):
+        raise PaddleJobsError("invalid_config")
+    try:
+        url = urllib.parse.urlsplit(value)
+        if url.username or url.password or not url.hostname or url.fragment or url.port == 0:
+            raise ValueError()
+        if url.scheme != "https" and not (url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}):
+            raise ValueError()
+        if endpoint and (url.query or not url.path.endswith("/jobs") or "%" in url.path or "//" in url.path or any(p in {".", ".."} for p in url.path.split("/"))):
+            raise ValueError()
+    except ValueError:
+        raise PaddleJobsError("invalid_config") from None
+    return value
+
+
+def validate_config(config):
+    if not isinstance(config, dict):
+        raise PaddleJobsError("invalid_config")
+    result = {**DEFAULTS, **config}
+    safe_url(result["endpoint"], endpoint=True)
+    model = result["model"]
+    if not isinstance(model, str) or not model.strip() or len(model) > 256 or re.search(r"[\x00-\x1f\x7f]", model):
+        raise PaddleJobsError("invalid_config")
+    for key in OPTION_KEYS:
+        if type(result[key]) is not bool:
+            raise PaddleJobsError("invalid_config")
+    for key, low, high in (("timeout_seconds", 1, 1800), ("poll_interval_seconds", 0.01, 60)):
+        value = result[key]
+        if type(value) not in (float, int) or not math.isfinite(value) or not low <= value <= high:
+            raise PaddleJobsError("invalid_config")
+    if "token" in result and (not isinstance(result["token"], str) or len(result["token"]) > 4096 or re.search(r"[^\x21-\x7e]", result["token"])):
+        raise PaddleJobsError("invalid_config")
+    return result
+
+
+def _token(config):
+    value = config.get("token")
+    if value is None:
+        if config.get("token_file"):
+            try:
+                path = Path(config["token_file"])
+                if path.is_symlink() or path.stat().st_size > 4096:
+                    raise OSError()
+                value = path.read_text(encoding="utf-8")
+            except OSError:
+                raise PaddleJobsError("missing_token") from None
+        else:
+            value = os.environ.get("MUDU_OCR_TOKEN", "")
+    if not value:
+        raise PaddleJobsError("missing_token")
+    if not isinstance(value, str) or len(value) > 4096 or re.search(r"[^\x21-\x7e]", value):
+        raise PaddleJobsError("invalid_config")
+    return value
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def run_job(config, *, file_url=None, file_path=None, pages=None):
+    """Submit once, poll to done, then fetch and normalize JSONL results.
+
+    Result/image URLs receive no Authorization header. Remote images are retained
+    as references, not fetched or represented as locally verified evidence.
+    """
+    config = validate_config(config)
+    token = _token(config)
+    if bool(file_url) == bool(file_path):
+        raise PaddleJobsError("invalid_config")
+    start = time.monotonic()
+    deadline = start + config["timeout_seconds"]
+    opener = urllib.request.build_opener(_NoRedirect())
+
+    def request(url, data=None, content_type=None, *, auth=False, json_result=True):
+        safe_url(url)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PaddleJobsError("timeout")
+        headers = {"Accept": "application/json" if json_result else "application/jsonl, application/x-ndjson, text/plain"}
+        if auth:
+            headers["Authorization"] = "Bearer " + token
+        if content_type:
+            headers["Content-Type"] = content_type
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
+        try:
+            with opener.open(req, timeout=remaining) as response:
+                chunks, total = [], 0
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise PaddleJobsError("timeout")
+                    chunk = response.read(min(65536, MAX_RESPONSE + 1 - total))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > MAX_RESPONSE:
+                        raise PaddleJobsError("invalid_result")
+                text = b"".join(chunks).decode("utf-8-sig")
+            return json.loads(text) if json_result else text
+        except urllib.error.HTTPError as exc:
+            status, details = exc.code, {}
+            # Only whitelisted structured service fields are exposed; never
+            # return the raw body, headers, request URL or redirect target.
+            if not 300 <= status < 400:
+                try:
+                    details = _remote_details(json.loads(exc.read(16384).decode("utf-8")), token)
+                except (ValueError, UnicodeError, OSError):
+                    pass
+            exc.close()
+            raise PaddleJobsError("unsafe_redirect" if 300 <= status < 400 else "http_error", http_status=status, **details) from None
+        except (TimeoutError, socket.timeout):
+            raise PaddleJobsError("timeout") from None
+        except urllib.error.URLError as exc:
+            raise PaddleJobsError("timeout" if isinstance(exc.reason, (TimeoutError, socket.timeout)) else "network_error") from None
+        except (ValueError, UnicodeError):
+            raise PaddleJobsError("invalid_result") from None
+        except OSError:
+            raise PaddleJobsError("network_error") from None
+
+    optional = {key: config[key] for key in OPTION_KEYS}
+    if file_url:
+        body = json.dumps({"fileUrl": safe_url(file_url), "model": config["model"], "optionalPayload": optional}).encode()
+        submitted = request(config["endpoint"], body, "application/json", auth=True)
+    else:
+        try:
+            source = Path(file_path).expanduser().resolve()
+            if not source.is_file() or source.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"} or source.stat().st_size > MAX_FILE:
+                raise OSError()
+            binary = source.read_bytes()
+            if not binary or len(binary) > MAX_FILE:
+                raise OSError()
+        except (OSError, TypeError, ValueError):
+            raise PaddleJobsError("invalid_config") from None
+        boundary = "ocr-" + uuid.uuid4().hex
+        # Fixed safe filename: no local path or user filename is transmitted.
+        parts = []
+        for key, value in (("model", config["model"]), ("optionalPayload", json.dumps(optional))):
+            parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode())
+        mime = mimetypes.guess_type("source" + source.suffix)[0] or "application/octet-stream"
+        parts.extend([(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="source{source.suffix.lower()}"\r\nContent-Type: {mime}\r\n\r\n').encode(), binary, f"\r\n--{boundary}--\r\n".encode()])
+        submitted = request(config["endpoint"], b"".join(parts), "multipart/form-data; boundary=" + boundary, auth=True)
+    data = submitted.get("data") if isinstance(submitted, dict) else None
+    job_id = data.get("jobId") if isinstance(data, dict) else None
+    if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", job_id):
+        raise PaddleJobsError("invalid_result", **_remote_details(submitted, token))
+    while True:
+        status = request(config["endpoint"] + "/" + urllib.parse.quote(job_id, safe=""), auth=True)
+        data = status.get("data") if isinstance(status, dict) else None
+        state = data.get("state", data.get("status")) if isinstance(data, dict) else None
+        if state == "done":
+            result_url = data.get("resultUrl", {}).get("jsonUrl") if isinstance(data.get("resultUrl"), dict) else None
+            if not isinstance(result_url, str):
+                raise PaddleJobsError("invalid_result")
+            raw = request(result_url, json_result=False)
+            break
+        if state == "failed":
+            raise PaddleJobsError("job_failed", **_remote_details(status, token))
+        if state not in {"pending", "running"}:
+            raise PaddleJobsError("invalid_result")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PaddleJobsError("timeout")
+        time.sleep(min(config["poll_interval_seconds"], remaining))
+    normalized = []
+    try:
+        for line in raw.replace(token, "[REDACTED]").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            result = row["result"]
+            layouts = result["layoutParsingResults"]
+            if not isinstance(layouts, list) or not layouts:
+                raise ValueError()
+            for layout in layouts:
+                markdown = layout["markdown"]
+                text = markdown["text"]
+                if not isinstance(text, str):
+                    raise ValueError()
+                images = markdown.get("images", {})
+                output_images = layout.get("outputImages", result.get("outputImages", row.get("outputImages", {})))
+                if not isinstance(images, (dict, list)) or not isinstance(output_images, (dict, list)):
+                    raise ValueError()
+                normalized.append({"page": len(normalized) + 1, "text": text, "method": "ocr", "blocks": [],
+                                   "images": images, "outputImages": output_images, "warnings": ["coordinates_absent", "remote_images_unverified"]})
+    except (ValueError, KeyError, TypeError):
+        raise PaddleJobsError("invalid_result") from None
+    if pages is not None:
+        selection = str(pages)
+        if not re.fullmatch(r"[1-9]\d*(?:-[1-9]\d*)?", selection):
+            raise PaddleJobsError("invalid_config")
+        bounds = list(map(int, selection.split("-")))
+        first, last = bounds[0], bounds[-1]
+        if first > last or last > len(normalized):
+            raise PaddleJobsError("invalid_result")
+        normalized = normalized[first - 1:last]
+    if not normalized:
+        raise PaddleJobsError("invalid_result")
+    return {"pages": normalized, "markdown": "\n\n".join(page["text"] for page in normalized),
+            "job_id": job_id, "seconds": round(time.monotonic() - start, 3),
+            "warnings": ["coordinates_absent", "remote_images_unverified"],
+            "provenance": {"backend": "paddle_jobs", "model": config["model"], "pages_requested": pages}}
+
+
+def _download_images(result, attempt, deadline):
+    """Retain image evidence with generated filenames, never remote paths.
+
+    Image failures remain explicit warnings; a downloaded image still requires
+    visual verification. No Authorization, redirects, arbitrary output paths,
+    or unbounded response bodies are permitted.
+    """
+    opener = urllib.request.build_opener(_NoRedirect())
+    paths, failures, total_bytes, count = [], [], 0, 0
+    suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+    for page in result["pages"]:
+        for category in ("images", "outputImages"):
+            refs = page.get(category, {})
+            entries = list(refs.items()) if isinstance(refs, dict) else list(enumerate(refs))
+            updated = dict(refs) if isinstance(refs, dict) else list(refs)
+            for index, (key, url) in enumerate(entries, 1):
+                count += 1
+                try:
+                    if count > 64 or total_bytes >= 100 * 1024 * 1024:
+                        raise ValueError()
+                    safe_url(url)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError()
+                    request = urllib.request.Request(url, headers={"Accept": "image/*"})
+                    binary = bytearray()
+                    with opener.open(request, timeout=remaining) as response:
+                        mime = response.headers.get_content_type()
+                        # Ignore remote filenames entirely; suffix is a bounded
+                        # allowlisted hint. SVG/HTML cannot become active media.
+                        suffix = Path(urllib.parse.urlsplit(url).path).suffix.lower()
+                        if suffix not in suffixes:
+                            suffix = Path(str(key)).suffix.lower()
+                        if suffix not in suffixes:
+                            suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "image/bmp": ".bmp", "image/tiff": ".tiff"}.get(mime)
+                        if suffix is None or mime in {"image/svg+xml", "text/html", "application/xhtml+xml"}:
+                            raise ValueError()
+                        while True:
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError()
+                            chunk = response.read(65536)
+                            if not chunk:
+                                break
+                            binary.extend(chunk)
+                            if len(binary) > 20 * 1024 * 1024 or total_bytes + len(binary) > 100 * 1024 * 1024:
+                                raise ValueError()
+                    if not binary:
+                        raise ValueError()
+                    relative = f"media/page-{page['page']:04d}-{category.lower()}-{index:03d}{suffix}"
+                    target = attempt / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(binary)
+                    total_bytes += len(binary)
+                    paths.append(str(target))
+                    updated[key] = relative
+                    if category == "images":
+                        # Replace destinations only, so untrusted keys cannot
+                        # rewrite arbitrary prose or escape the attempt folder.
+                        for original in (str(key), url):
+                            page["text"] = page["text"].replace("](" + original + ")", "](" + relative + ")").replace("](<" + original + ">)", "](<" + relative + ">)")
+                except (PaddleJobsError, OSError, ValueError, TypeError):
+                    warning = f"media_download_failed: page={page['page']} category={category} item={index}"
+                    page["warnings"].append(warning)
+                    failures.append(warning)
+            page[category] = updated
+        page["warnings"].append("downloaded_images_require_visual_review")
+    result["warnings"].extend(failures)
+    return paths
+
+
+def recognize(source, output_dir, *, config, pages=None, **kwargs):
+    started = time.monotonic()
+    result = run_job(config, file_path=str(source), pages=pages)
+    root = Path(output_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    attempt = Path(tempfile.mkdtemp(prefix="paddle-ocr-", dir=root))
+    media = _download_images(result, attempt, started + validate_config(config)["timeout_seconds"])
+    markdown, output = attempt / "result.md", attempt / "result.json"
+    result.pop("markdown")
+    markdown.write_text("\n\n".join(page["text"] for page in result["pages"]), encoding="utf-8")
+    result["source"] = str(Path(source).resolve())
+    result["artifacts"] = {"attempt_dir": str(attempt), "markdown": str(markdown), "json": str(output), "images": media}
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
+def main():
+    # Host sends transient draft/token through stdin, never argv or a temp file.
+    import sys
+    try:
+        payload = json.load(sys.stdin)
+        result = run_job(payload["config"], file_url=payload.get("file_url"), file_path=payload.get("file_path"))
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+    except PaddleJobsError as exc:
+        print(json.dumps({"ok": False, "code": exc.code, "message": str(exc), **exc.details}))
+    except Exception:
+        print(json.dumps({"ok": False, "code": "invalid_result", "message": "OCR test failed."}))
+
+
+if __name__ == "__main__":
+    main()

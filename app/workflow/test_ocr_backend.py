@@ -33,6 +33,36 @@ class OCRBackendTest(unittest.TestCase):
         kwargs["stdout"].write("captured diagnostic\n")
         return subprocess.CompletedProcess(command, 0)
 
+    def test_assist_mode_and_auto_ocr_decision(self):
+        import os
+        from unittest.mock import patch
+        state = self.root / "assist.json"
+        # auto 模式：只有命中能力/版面不确定 triggers 才 OCR
+        state.write_text('{"mode": "auto"}', encoding="utf-8")
+        with patch.dict(os.environ, {"MUDU_OCR_ASSIST_STATE": str(state)}):
+            self.assertEqual(backend.assist_mode(), "auto")
+            self.assertTrue(backend.assist_enabled())
+            self.assertFalse(backend.ocr_needed(triggers=()))
+            self.assertFalse(backend.ocr_needed(triggers=("ordinary_text",)))
+            self.assertTrue(backend.ocr_needed(triggers=("floating_object",)))
+            self.assertTrue(backend.ocr_needed(triggers=("image_upload",)))
+        # on：总是 OCR；off：永不 OCR
+        state.write_text('{"mode": "on"}', encoding="utf-8")
+        with patch.dict(os.environ, {"MUDU_OCR_ASSIST_STATE": str(state)}):
+            self.assertTrue(backend.ocr_needed(triggers=()))
+        state.write_text('{"mode": "off"}', encoding="utf-8")
+        with patch.dict(os.environ, {"MUDU_OCR_ASSIST_STATE": str(state)}):
+            self.assertEqual(backend.assist_mode(), "off")
+            self.assertFalse(backend.assist_enabled())
+            self.assertFalse(backend.ocr_needed(triggers=("image_upload",)))
+        # 旧状态文件只有 enabled 布尔值：映射 on/off
+        state.write_text('{"enabled": false}', encoding="utf-8")
+        with patch.dict(os.environ, {"MUDU_OCR_ASSIST_STATE": str(state)}):
+            self.assertEqual(backend.assist_mode(), "off")
+        # 无状态文件时默认 auto（允许但按需）
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(backend.assist_mode(), "auto")
+
     def test_config_precedence_relative_paths_and_defaults(self):
         path = self.root / "config.json"
         path.write_text(json.dumps({"python": sys.executable, "script": self.script.name}), encoding="utf-8")
@@ -171,6 +201,27 @@ class OCRBackendTest(unittest.TestCase):
         self.assertEqual(command[2], "--inspect-pdf")
         self.assertNotIn(str(self.script), command)
         self.assertEqual(result["provenance"]["backend"], "pymupdf")
+
+    def test_assist_switch_reads_live_state_and_gates_ocr(self):
+        state = self.root / "assist.json"
+        with patch.dict(os.environ, {"MUDU_OCR_ASSIST_STATE": str(state)}):
+            state.write_text('{"enabled": false}', encoding="utf-8")
+            self.assertFalse(backend.assist_enabled(self.config))
+            with self.assertRaisesRegex(backend.OCRBackendError, "OCR 辅助未开启"):
+                backend.recognize(self.source, self.output, config=self.config)
+            state.write_text('{"enabled": true}', encoding="utf-8")
+            self.assertTrue(backend.assist_enabled(self.config))
+
+    def test_assist_switch_defaults_to_legacy_without_state_file(self):
+        with patch.dict(os.environ, {}):
+            os.environ.pop("MUDU_OCR_ASSIST_STATE", None)
+            os.environ.pop("MUDU_OCR_ASSIST", None)
+            self.assertTrue(backend.assist_enabled(self.config))
+            os.environ["MUDU_OCR_ASSIST"] = "0"
+            try:
+                self.assertFalse(backend.assist_enabled(self.config))
+            finally:
+                os.environ.pop("MUDU_OCR_ASSIST", None)
 
     @unittest.skipUnless(importlib.util.find_spec("pymupdf"), "PyMuPDF not installed in test interpreter")
     def test_real_pdf_worker_retains_boxes_images_and_scan_preview(self):

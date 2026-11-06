@@ -91,6 +91,16 @@ class AgentTasksTest(unittest.TestCase):
         # 解析改写只影响下一次导入时的逐字注入，不再让知识点任务整体过期重跑。
         self.assertEqual(tasks.build_task(self.batch, "knowledge")["input_hashes"], before)
 
+    def test_knowledge_drops_repeated_type_fields_from_agent_output(self):
+        candidate = copy.deepcopy(self.knowledge)
+        candidate["items"][0].update({"type": "单项填空", "subtypes": ["四个选项"]})
+        report = self.accept("knowledge", candidate)
+        self.assertTrue(report["completed"])
+        saved = json.loads((self.batch / tasks.ARTIFACTS["knowledge"]).read_text())
+        self.assertNotIn("type", saved["items"][0])
+        self.assertNotIn("subtypes", saved["items"][0])
+        self.assertTrue(any("自动修复" in note for note in report["notes"]))
+
     def test_knowledge_without_appendix_can_accept_ai_explanation(self):
         (self.batch / "01_source/附录.txt").unlink()
         task = tasks.build_task(self.batch, "knowledge")
@@ -195,6 +205,13 @@ class AgentTasksTest(unittest.TestCase):
             with self.subTest(candidate=candidate), self.assertRaises(ValueError):
                 self.accept("types", candidate)
 
+    def test_missing_subtype_error_names_unit_type_and_allowed_values(self):
+        candidate = copy.deepcopy(self.types)
+        candidate["items"][0]["subtypes"] = []
+        with patch.dict("os.environ", {"WF_MODEL_FIRST": "0"}):
+            with self.assertRaisesRegex(ValueError, "q-1.*单项填空.*三个选项.*四个选项"):
+                self.accept("types", candidate)
+
     def test_success_backups_and_never_marks_manifest(self):
         self.write("workflow/manifest.json", {"inputs": {}, "stages": {"types": {"status": "pending"}}})
         manifest = (self.batch / "workflow/manifest.json").read_bytes()
@@ -235,6 +252,13 @@ class AgentTasksTest(unittest.TestCase):
         # Source extraction still requires verbatim text, even for equivalent punctuation.
         with self.assertRaisesRegex(ValueError, "Unsourced answer"):
             tasks._provenance({"answer": '"yes"', "explanation": ""}, '“yes”')
+
+    def test_answers_task_uses_appendix_without_explicit_answers_input(self):
+        from workflow import contracts
+        self.assertEqual(contracts.STAGE_BY_ID["answers"].requires, ())
+        task = tasks.build_task(self.batch, "answers")
+        self.assertEqual(task["status"], "ready")
+        self.assertIn("答案: 1. A", task["prompt"])
 
     def test_explicit_docx_requires_prepared_text(self):
         docx = self.batch / "answers.docx"

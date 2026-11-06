@@ -154,6 +154,42 @@ class RunnerAutoTest(unittest.TestCase):
             outcomes = auto._parallel_ready_agents(self.batch, stages, {"max_input_chars": 10000, "retries": 0})
         self.assertEqual(outcomes, {stage.id: 0 for stage in stages})
 
+    def test_rate_limit_wrapper_code_is_authoritative(self):
+        self.assertTrue(auto._is_rate_limited(
+            "Agent subprocess failed (exit 1, rate_limit); inspect stderr.log"))
+        self.assertTrue(auto._is_rate_limited(
+            'wf-agent-result: {"error_code": "rate_limit", "http_status": 429}'))
+        self.assertFalse(auto._is_rate_limited("validation failed: rate_limit is not a field"))
+
+    def test_parallel_rate_limit_becomes_cooldown_not_failed(self):
+        from workflow import agent_protocol, agent_tasks, local_agent
+        stages = [contracts.STAGE_BY_ID[stage] for stage in ("answers", "types")]
+
+        def export(batch, stage, **kwargs):
+            package = self.batch / "packages" / stage
+            package.mkdir(parents=True)
+            (package / "task.json").write_text(json.dumps({"prompt": stage + "\nFILE PROTOCOL: test"}))
+            return {"status": "ready", "task_id": stage, "package_dir": str(package)}
+
+        def invoke(prompt, run_dir, config, permit_parallel=False):
+            raise RuntimeError(
+                "Agent subprocess failed (exit 1, rate_limit); inspect stderr.log\n"
+                'wf-agent-result: {"error_code": "rate_limit", "http_status": 429}')
+
+        with patch("workflow.agent_prepare.prepare_answers"), \
+             patch.object(agent_protocol, "export_task", side_effect=export), \
+             patch.object(agent_tasks, "build_task", side_effect=lambda batch, stage, **kw: {"status": "ready", "prompt": stage}), \
+             patch.object(agent_tasks, "accept_result"), \
+             patch.object(local_agent, "invoke", side_effect=invoke), \
+             patch.object(agent_protocol, "import_result"):
+            outcomes = auto._parallel_ready_agents(self.batch, stages, {"max_input_chars": 10000, "retries": 0})
+        self.assertEqual(outcomes, {stage.id: 4 for stage in stages})
+        manifest = mf.load(self.batch)
+        for stage in stages:
+            self.assertEqual(manifest["stages"][stage.id]["status"], mf.PENDING)
+            self.assertIn("限流", manifest["stages"][stage.id]["notes"])
+        self.assertGreater(auto._read_cooldown(self.batch), 0)
+
     @unittest.skipIf(__import__("os").name == "nt", "Windows byte locks have different thread semantics")
     def test_auto_serializes_two_schedulers_for_same_batch(self):
         first_entered, release, second_entered = threading.Event(), threading.Event(), threading.Event()
@@ -269,8 +305,22 @@ class RunnerAutoTest(unittest.TestCase):
         for stage_id in ("audio", "types"):
             self.assertEqual(manifest["stages"][stage_id]["status"], mf.COMPLETED)
 
+    def test_zero_touch_does_not_promote_missing_agent_artifact(self):
+        self._ready_after_structure()
+        calls = []
+        with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
+                {"assemble": (mf.NEEDS_REVIEW, 3)}, calls)):
+            outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
+        self.assertEqual(calls[-1], "assemble")
+        self.assertEqual(mf.load(self.batch)["stages"]["assemble"]["status"], mf.NEEDS_REVIEW)
+        self.assertEqual(outcome["stopped_at"], "assemble")
+        self.assertEqual(outcome["action"], "review")
+        self.assertFalse((self.batch / "06_batch/batch.json").exists())
+
     def test_audio_needs_review_continues_types_knowledge_but_not_assemble(self):
         self._ready_after_structure()
+        patcher = patch.object(auto, 'ZERO_TOUCH', False)
+        patcher.start(); self.addCleanup(patcher.stop)
         calls = []
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                 {"audio": (mf.NEEDS_REVIEW, 3)}, calls)):
@@ -344,6 +394,8 @@ class RunnerAutoTest(unittest.TestCase):
             self.assertEqual(manifest["stages"][stage_id]["status"], mf.PENDING)
 
     def test_command_failure_continues_independent_validation_and_reports_later_gate(self):
+        patcher = patch.object(auto, 'ZERO_TOUCH', False)
+        patcher.start(); self.addCleanup(patcher.stop)
         for stage in contracts.STAGES:
             if stage.id == "underlines":
                 break
@@ -379,6 +431,8 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(manifest["stages"]["upload"]["status"], mf.PENDING)
 
     def test_no_human_confirmation_never_uploads(self):
+        patcher = patch.object(auto, 'ZERO_TOUCH', False)
+        patcher.start(); self.addCleanup(patcher.stop)
         for stage in contracts.STAGES:
             if stage.id == "upload_gate":
                 break
@@ -396,6 +450,8 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(manifest["human_decisions"], [])
 
     def test_auto_never_submits_upload_even_with_preexisting_approval(self):
+        patcher = patch.object(auto, 'ZERO_TOUCH', False)
+        patcher.start(); self.addCleanup(patcher.stop)
         for stage in contracts.STAGES:
             if stage.id == "upload":
                 break
@@ -669,3 +725,30 @@ class RunnerAutoTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_zero_touch_accepts_audio_candidates_and_continues(self):
+        self._ready_after_structure()
+        calls = []
+        with patch.object(auto, "ZERO_TOUCH", True), \
+             patch.object(runner, "_execute_command", side_effect=self._execute_offline(
+                 {"audio": (mf.NEEDS_REVIEW, 3)}, calls)):
+            outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
+        manifest = mf.load(self.batch)
+        self.assertEqual(manifest["stages"]["audio"]["status"], mf.COMPLETED)
+        self.assertIn("零人工", manifest["stages"]["audio"]["notes"])
+        self.assertNotEqual((outcome["stopped_at"], outcome["action"]), ("audio", "review"))
+
+    def test_zero_touch_never_executes_remote_upload(self):
+        for stage in contracts.STAGES:
+            if stage.id == "upload_gate":
+                break
+            mf.touch_stage(self.manifest, stage.id, mf.COMPLETED)
+        mf.save(self.batch, self.manifest)
+        with patch.object(auto, "ZERO_TOUCH", True), \
+             patch.object(runner, "_execute_command") as execute:
+            auto.advance(self.batch, {"upload": ["offline"]})
+        execute.assert_not_called()
+        manifest = mf.load(self.batch)
+        self.assertEqual(manifest["stages"]["upload_gate"]["status"], mf.SKIPPED)
+        self.assertEqual(manifest["stages"]["upload"]["status"], mf.SKIPPED)
+        self.assertEqual(manifest["stages"]["publish_gate"]["status"], mf.SKIPPED)

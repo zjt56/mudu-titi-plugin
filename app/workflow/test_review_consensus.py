@@ -76,6 +76,17 @@ class ConsensusTest(unittest.TestCase):
         self.assertEqual(result['findings'], [])
 
     @patch.object(review, '_verify_round_sources', return_value=None)
+    def test_extra_knowledge_dimension_is_a_difference(self, _verify_sources):
+        # 只要知识点集合与原标签不完全相同（含多打/少打一个维度），就是差异，必须进人工。
+        payload = self.payload()
+        payload['rounds'][0]['checks'][0]['assessment']['knowledge'] = [
+            '语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/兴趣爱好', '设题角度/阅读/细节理解']
+        result = review.evaluate_rounds(self.batch, payload)
+        findings = [f for f in result['findings'] if f['field'] == 'knowledge']
+        self.assertEqual(len(findings), 1, result['errors'])
+        self.assertFalse(result['passed'])
+
+    @patch.object(review, '_verify_round_sources', return_value=None)
     def test_group_disagreement_one_finding_and_knowledge_order_ignored(self, _verify_sources):
         payload = self.payload()
         # 知识点顺序不是判断差异：反转后仍应视为一致。
@@ -90,18 +101,16 @@ class ConsensusTest(unittest.TestCase):
         self.assertFalse(result['passed'])
 
     @patch.object(review, '_verify_round_sources', return_value=None)
-    def test_group_difficulty_names_the_differing_numbers(self, _verify_sources):
+    def test_difficulty_is_not_a_manual_compare_finding(self, _verify_sources):
+        # 难度不进入人工审核、不参与比对（用户 2026-11 规则）：即使一审难度与原标注相差很大，
+        # 也不生成 difficulty 类 finding。
         payload = self.payload()
-        # 组题只做组级难度核对，但差异仍需点名具体小题号。
         check = payload['rounds'][1]['checks'][0]
         for item in check['assessment']['difficulty']:
             item['value'] = '困难' if item['number'] in {'3', '7'} else '容易'
         result = review.evaluate_rounds(self.batch, payload)
         findings = [f for f in result['findings'] if f['field'] == 'difficulty']
-        self.assertEqual(len(findings), 1, result['errors'])
-        self.assertIn('差异小题', findings[0]['reason'])
-        self.assertIn('第3题', findings[0]['reason'])
-        self.assertIn('第7题', findings[0]['reason'])
+        self.assertEqual(findings, [])
 
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_listening_passage_group_compares_only_at_group_level(self, _verify_sources):
@@ -292,7 +301,8 @@ class ConsensusTest(unittest.TestCase):
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_old_decision_does_not_hide_new_sources(self, _verify_sources):
         payload = self.payload()
-        payload['rounds'][1]['checks'][0]['assessment']['difficulty'][0]['value'] = '困难'
+        # 用知识点差异（真实审核范畴）验证“旧决定不能掩盖新来源”。
+        payload['rounds'][1]['checks'][0]['assessment']['knowledge'] = ['语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/日常活动']
         result = review.evaluate_rounds(self.batch, payload)
         finding = result['findings'][0]
         decision = {**copy.deepcopy(finding), 'status': 'resolved', 'decided_at': 'today', 'decided_by': 'human', 'resolution_note': '已核实'}

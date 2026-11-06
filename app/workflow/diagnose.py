@@ -124,6 +124,10 @@ def _remedy(stage: contracts.Stage, batch_dir: str) -> dict:
     if stage.kind == contracts.COMMAND:
         return {"hint": "确定性脚本执行失败：按日志报错修复输入或环境后重跑。",
                 "command": f"{base} run --batch-dir {batch_dir} --stage {stage.id} --force"}
+    if stage.id == "audio":
+        return {"hint": "听力切段需要先准备切片：在「模型与设置 → 听力切段」启用并切段；"
+                        "如果这批次不需要听力音频，可在音频设置里明确跳过听力。",
+                "command": ""}
     if stage.kind == contracts.AGENT:
         return {"hint": "代理阶段未产出合格产物：先看具体校验错误；多为内容抄写/格式可自动修复，"
                         "重跑一次通常即过。若反复失败，缩小分片（assemble_part_units）或检查模型配置。",
@@ -147,6 +151,25 @@ def diagnose(batch_dir) -> dict:
     inputs = manifest.get("inputs") or {}
     items = []
     first_blocked = None
+    # 限流/额度冷却时，真正的卡点是“模型暂时不可用”，不是某个下游阶段的旧报错。
+    # 把它放在最前面，避免用户看到一堆 failed/needs_review 却一直在重试模型。
+    unfinished = any((record.get("status") or mf.PENDING) not in mf.TERMINAL_OK
+                     for record in stages.values())
+    if unfinished:
+        try:
+            from .auto import _read_cooldown
+            cooldown = _read_cooldown(batch)
+        except (ImportError, OSError, ValueError):
+            cooldown = 0
+        if cooldown > 0:
+            items.append({
+                "stage": "model", "title": "模型调用", "status": mf.BLOCKED, "kind": "agent",
+                "reason": "限流/额度冷却中", "detail": f"约 {int(cooldown)} 秒后可再次尝试；实际额度以服务商返回为准",
+                "hint": "等待额度恢复，或在「模型与设置」里换一个可用模型/Provider；不要连续点重试。",
+                "command": "", "depends_on": [], "unmet": [], "missing_inputs": [],
+                "note": "", "blocking": True,
+            })
+            first_blocked = "model"
     for stage in contracts.STAGES:
         record = stages.get(stage.id) or {}
         status = record.get("status") or mf.PENDING
@@ -192,6 +215,13 @@ def diagnose(batch_dir) -> dict:
                     detail = log_err
             if not detail:
                 detail = note
+            if stage.id == "audio":
+                evidence = _read(batch / "02_audio" / "segment-evidence.json")
+                if isinstance(evidence, dict) and evidence.get("needs_review_units"):
+                    units = "、".join(str(u) for u in evidence["needs_review_units"][:12])
+                    detail = "切片候选已生成，需核对边界的单元：" + units
+                elif not (batch / "02_audio" / "segment-evidence.json").is_file():
+                    detail = "缺少 02_audio/segment-evidence.json：听力切段尚未运行或未启用（可选能力）"
         if unmet:
             reason = reason or "等待上游阶段完成"
             detail = (detail + "；" if detail else "") + "上游未完成：" + "、".join(unmet)

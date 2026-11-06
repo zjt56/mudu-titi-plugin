@@ -42,6 +42,11 @@ except ImportError:  # 看台可以脱离流水线单独跑
     auto_flow = wf_contracts = wf_manifest = None
 
 ROOT = Path(__file__).resolve().parents[1]
+# 插件版：宿主编译生效配置后，让本进程拉起的 runner/auto 子进程也走插件模型路由。
+# 独立运行 app（没有 backend/.local-agent.effective.json）时保持原行为。
+_plugin_agent_config = ROOT.parent / "backend" / ".local-agent.effective.json"
+if _plugin_agent_config.is_file() and not os.environ.get("MUDU_AGENT_CONFIG"):
+    os.environ["MUDU_AGENT_CONFIG"] = str(_plugin_agent_config)
 # 数据目录可用环境变量指定（默认仍是本仓库下的 workflows/inbox）。
 # 插件化独立开发时，代码放在插件版/app，数据仍指向用户真实批次目录，
 # 无需软链接（软链接会被 batch_dir 拒绝），只覆盖数据根即可。
@@ -72,7 +77,7 @@ SIDE_EFFECTS = ("upload", "publish", "delete")
 _lock = threading.RLock()
 _batches_snapshot = None
 # 听力切段后台任务（安装 / 切段共用一把闸，避免并发下载与切片）。
-_audio_job = {"running": False, "kind": "", "lock": threading.Lock()}
+_audio_job = {"running": False, "kind": "", "batch": "", "lock": threading.Lock()}
 
 
 def serialized(function):
@@ -706,8 +711,17 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
     docs = [f for f in files if Path(f["filename"]).suffix.lower() in DOC_SUFFIXES]
     if not docs:
         raise ValueError("请至少上传一个试卷文件（仅支持 .docx 或 .pdf）")
-    audio = next((f for f in files if Path(f["filename"]).suffix.lower() in AUDIO_SUFFIXES), None)
-    answer = next((f for f in docs if re.search(r"答案|answer|解析", Path(f["filename"]).stem, re.I)), None)
+    audio_files = [f for f in files if Path(f["filename"]).suffix.lower() in AUDIO_SUFFIXES]
+    if len(audio_files) > 1:
+        raise ValueError("一批最多上传一个音频文件；检测到多个音频，未保存任何文件")
+    audio = audio_files[0] if audio_files else None
+    answer_candidates = [f for f in docs if re.search(r"答案|answer|解析", Path(f["filename"]).stem, re.I)]
+    if len(answer_candidates) > 1:
+        raise ValueError("一批最多上传一个答案/解析文档；请合并后再上传，未保存任何文件")
+    answer = answer_candidates[0] if answer_candidates else None
+    if len(docs) > 2:
+        names = "、".join(Path(f["filename"]).name for f in docs)
+        raise ValueError("一批最多支持正文+答案/解析两个文档；检测到多余文档：" + names + "，未保存任何文件")
     source = next((f for f in docs if f is not answer), docs[0])
     year = str(fields.get("year") or "").strip()
     region = str(fields.get("region") or "").strip()
@@ -943,7 +957,10 @@ def overview(name):
     review_status_value = str(((manifest.get("stages") or {}).get("review") or {}).get("status") or "")
     gate_status_value = str(((manifest.get("stages") or {}).get("review_gate") or {}).get("status") or "")
     flow_done = review_status_value in TERMINAL_OK or gate_status_value in TERMINAL_OK
-    uploaded = str(((manifest.get("stages") or {}).get("upload") or {}).get("status") or "") == "completed"
+    upload_stage_done = str(((manifest.get("stages") or {}).get("upload") or {}).get("status") or "") == "completed"
+    receipt = load(folder / "receipt.json", {})
+    upload_pending = bool(upload_stage_done and isinstance(receipt, dict) and receipt.get("remote_confirmation_required"))
+    uploaded = bool(upload_stage_done and not upload_pending)
     stage_info = stage_cards(manifest, bool(rows), bool(advance.get("running")), diagnostics)
     # 审核已真实执行、只剩人工决定时，卡点提示要指向“去处理差异”，不能写成“等待执行”。
     if (stage_info.get("current") or {}).get("id") == "review_gate" and label_open:
@@ -968,7 +985,7 @@ def overview(name):
             # 自动流程是否结束（二审完成）；上传页排队区按此移除，并提示人工确认。
             "flow_done": flow_done,
             # 已写入云端上传暂存的批次视为完成，试卷审核列表不再展示。
-            "uploaded": uploaded}
+            "uploaded": uploaded, "upload_pending_confirmation": upload_pending}
 
 
 def list_batches():
@@ -1038,51 +1055,115 @@ def audio_overview():
             "busy": _audio_job["running"], "job": _audio_job["kind"]}
 
 
-def audio_status():
+def audio_status(batch: str | None = None):
     cfgmod, boot, _ = _audio_modules()
     cfg = cfgmod.load()
-    state = boot.read_status(Path(cfgmod.data_dir(cfg)))
+    state = boot.read_status(Path(cfgmod.data_dir(cfg)), batch)
     # 不覆盖 state["ok"]：它是后台任务自己的成功/失败标记。
     state.update({"request_ok": True, "ready": boot.ready(cfg), "busy": _audio_job["running"],
                   "job": _audio_job["kind"]})
+    if batch:
+        state["batch"] = batch
     return state
+
+
+# 后台听力任务稳定性的时间参数（秒）：心跳在 progress 里刷新。
+_AUDIO_STALE_SECONDS = 600          # 状态文件 running 但 >10min 无心跳：判定为僵死，允许重开
+_AUDIO_WATCHDOG_SECONDS = 900       # 看门狗：>15min 无心跳则把任务判失败并清理，避免永久卡住
+_AUDIO_WATCHDOG_TICK = 30
+
+
+def _audio_has_live_worker(data_dir: Path) -> bool:
+    """是否还有本机 audio/worker.py 子进程在跑（用于区分“真在跑”与“线程/进程已死”）。"""
+    try:
+        import subprocess
+        out = subprocess.run(["ps", "-Axo", "command"], capture_output=True, text=True, timeout=5).stdout
+        return "audio/worker.py" in out
+    except Exception:  # noqa: BLE001
+        return True  # 无法判断时保守地当作仍在跑，不误判重开
+
+
+def _audio_reap_stale(kind: str, batch, data_dir: Path, boot) -> None:
+    """清理“状态 running 但线程/进程已死”的僵死任务，避免永久卡住无法重开。
+
+    只有当状态文件 running 且心跳超时、且本机确实没有 worker.py 在跑时才清理。
+    """
+    state = boot.read_status(data_dir, batch)
+    if not state.get("running"):
+        return
+    age = time() - float(state.get("updated") or 0)
+    if age < _AUDIO_STALE_SECONDS:
+        return
+    if _audio_has_live_worker(data_dir):
+        return  # 有真实进程在跑，交给看门狗，不抢占
+    boot.write_status(data_dir, batch=batch, job=state.get("job") or kind, running=False,
+                      ok=False, phase="error",
+                      detail="", error="切段任务异常中断（进程已退出、心跳超时），已自动重置，可重跑")
 
 
 def start_audio_job(kind: str, options: dict) -> dict:
     cfgmod, boot, segment_mod = _audio_modules()
     cfg = cfgmod.load()
     data_dir = Path(cfgmod.data_dir(cfg))
+    batch = Path(options["folder"]).name if kind == "segment" and options.get("folder") else None
+    if batch:
+        _audio_reap_stale(kind, batch, data_dir, boot)
+        current = boot.read_status(data_dir, batch)
+        if current.get("running") and time() - float(current.get("updated") or 0) < _AUDIO_STALE_SECONDS:
+            raise ValueError("该批次已有切段任务在运行，请等它结束")
     with _audio_job["lock"]:
         if _audio_job["running"]:
             raise ValueError("已有听力任务在运行，请等它结束后再试")
-        _audio_job.update({"running": True, "kind": kind})
+        _audio_job.update({"running": True, "kind": kind, "batch": batch})
+
+    # 每个任务独立的“最后心跳”标记，供看门狗判断是否卡死。
+    beat = {"at": time()}
 
     def worker():
+        watchdog_stop = threading.Event()
+
+        def watchdog():
+            while not watchdog_stop.wait(_AUDIO_WATCHDOG_TICK):
+                if time() - beat["at"] > _AUDIO_WATCHDOG_SECONDS:
+                    try:
+                        boot.write_status(data_dir, batch=batch, job=kind, running=False, ok=False,
+                                          phase="error", detail="",
+                                          error=f"切段任务超过 {_AUDIO_WATCHDOG_SECONDS}s 无进展，判定僵死并清理；可重跑")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
+
+        threading.Thread(target=watchdog, daemon=True).start()
         try:
             def progress(phase, pct, detail):
-                boot.write_status(data_dir, job=kind, running=True, ok=None,
+                beat["at"] = time()
+                boot.write_status(data_dir, batch=batch, job=kind, running=True, ok=None,
                                   phase=phase, pct=pct, detail=detail, error="")
-            boot.write_status(data_dir, job=kind, running=True, ok=None,
+            beat["at"] = time()
+            boot.write_status(data_dir, batch=batch, job=kind, running=True, ok=None,
                               phase="start", pct=0, detail="任务开始", error="")
             if kind == "bootstrap":
                 boot.bootstrap(cfg, force=bool(options.get("force")))
+                boot.write_status(data_dir, batch=batch, job=kind, running=False, ok=True,
+                                  phase="done", pct=100, detail="运行时就绪", error="")
             else:
                 result = segment_mod.run(Path(options["folder"]), cfg, options.get("audio"), progress)
                 pending = result.get("needs_review_units") or []
                 passed = result.get("ok") is True and not pending
-                boot.write_status(data_dir, job=kind, running=False, ok=passed,
+                boot.write_status(data_dir, batch=batch, job=kind, running=False, ok=passed,
                                   phase="done" if passed else "needs_review", pct=100,
                                   detail=("听力切段已完成" if passed else
                                           "候选切片已保存，边界待核对：" + "、".join(pending[:12])), error="")
         except Exception as exc:  # noqa: BLE001 - 后台任务须把失败写进状态文件
-            boot.write_status(data_dir, job=kind, running=False, ok=False,
+            boot.write_status(data_dir, batch=batch, job=kind, running=False, ok=False,
                               phase="error", detail="", error=str(exc))
         finally:
+            watchdog_stop.set()
             with _audio_job["lock"]:
-                _audio_job.update({"running": False, "kind": ""})
+                _audio_job.update({"running": False, "kind": "", "batch": ""})
 
     threading.Thread(target=worker, daemon=True).start()
-    return {"started": True, "kind": kind}
+    return {"started": True, "kind": kind, "batch": batch}
 
 
 # 结构闸门/审核闸门未过时 runner 会拒绝，错误原样回显。
@@ -1299,20 +1380,46 @@ def has_unverified_review_history(folder: Path) -> bool:
 def review_comparison(folder: Path, unit_id, numbers):
     """读取输入绑定有效的两轮判断及其原始标签，保留逐题抽样范围。"""
     uid = str(unit_id or "")
-    payload = load(folder / "07_review/review-rounds.json", {})
-    records = payload.get("rounds", []) if isinstance(payload, dict) else []
-    try:
-        from workflow import review
-        evaluated = review.evaluate_rounds(folder, payload)
-        checked = set(evaluated.get("checked_rounds", []))
-        plan = evaluated.get("plan") or {}
-    except (ImportError, OSError, ValueError, TypeError, KeyError):
-        checked, plan = set(), {}
+    snapshot = load(folder / "07_review/review-comparison.json", {})
+    snapshot_valid = (isinstance(snapshot, dict) and snapshot.get("version") == 1
+                      and snapshot.get("execution_completed") is True
+                      and isinstance(snapshot.get("plan"), dict)
+                      and isinstance(snapshot.get("rounds"), list))
+    if snapshot_valid:
+        payload = snapshot
+        records = snapshot.get("rounds", [])
+        checked = {"labels", "sample"}
+        plan = snapshot.get("plan") or {}
+        snapshot_original = snapshot.get("original") or {}
+        source_name = "07_review/review-comparison.json"
+        try:
+            from workflow import review as _review
+            current_plan = _review.prepare_round_plan(folder)
+            snapshot_stale = current_plan.get("input_binding") != snapshot.get("input_binding")
+        except (ImportError, OSError, ValueError, TypeError, KeyError):
+            snapshot_stale = False
+    else:
+        snapshot_stale = False
+        payload = load(folder / "07_review/review-rounds.json", {})
+        records = payload.get("rounds", []) if isinstance(payload, dict) else []
+        try:
+            from workflow import review
+            evaluated = review.evaluate_rounds(folder, payload)
+            checked = set(evaluated.get("checked_rounds", []))
+            plan = evaluated.get("plan") or {}
+        except (ImportError, OSError, ValueError, TypeError, KeyError):
+            checked, plan = set(), {}
+        snapshot_original = {}
+        source_name = "07_review/review-rounds.json"
 
-    # Only use originals that are inputs to the validated plan; batch.json may
-    # be a derived or subsequently edited representation of the same labels.
+    # Prefer the last successful immutable snapshot. Current review rounds may
+    # be stale/in-progress after an input change; that must not blank the UI.
     hashes = plan.get("input_hashes") or {}
     def bound(relative):
+        if snapshot_valid:
+            key = {"03_types/types.json": "types", "04_knowledge/knowledge.json": "knowledge",
+                   "01_source_ans/answers.json": "answers"}.get(relative)
+            return snapshot_original.get(key, {}) if key else {}
         return load(folder / relative, {}) if checked and relative in hashes else {}
     def unique_row(data):
         rows = data.get("items", []) if isinstance(data, dict) else []
@@ -1334,13 +1441,17 @@ def review_comparison(folder: Path, unit_id, numbers):
             if str(n).isdigit() and str(int(n)) in difficulty:
                 originals.setdefault(str(int(n)), {})["difficulty"] = difficulty[str(int(n))]
     result = {"original": {"source": "审核输入" if checked else None, "unit_id": uid,
-                           "labels": labels, "subquestions": originals}, "rounds": []}
+                           "labels": labels, "subquestions": originals}, "rounds": [],
+              "stale": bool(snapshot_stale),
+              "snapshot_source": source_name}
     wanted = {str(int(n)) for n in numbers if str(n).isdigit()}
     history_exists = has_unverified_review_history(folder)
     for rid, name in (("labels", "一审"), ("sample", "二审")):
         matches = [r for r in records if isinstance(r, dict) and r.get("round_id") == rid] if isinstance(records, list) else []
         entry = {"round_id": rid, "name": name,
-                 "status": "待重新审核" if matches else ("历史来源未验证" if history_exists else "未提供"), "checks": []}
+                 "status": ("上一版审核快照" if snapshot_stale else
+                            ("待重新审核" if matches else ("历史来源未验证" if history_exists else "未提供"))),
+                 "checks": []}
         if rid in checked and len(matches) == 1:
             record = matches[0]
             for check in record.get("checks", []):
@@ -1360,7 +1471,7 @@ def review_comparison(folder: Path, unit_id, numbers):
                                         "verdict": check.get("verdict"), "rationale": check.get("rationale"),
                                         "assessment": assessment, "evidence": check.get("evidence")})
             entry["status"] = "已提供" if entry["checks"] else "未覆盖"
-            entry["source"] = "07_review/review-rounds.json"
+            entry["source"] = source_name
             entry["execution_id"] = record.get("execution_id")
         result["rounds"].append(entry)
     return result
@@ -1614,7 +1725,8 @@ class Handler(BaseHTTPRequestHandler):
             if decoded_path == "/api/audio/config":
                 return self.send_json(audio_overview())
             if decoded_path == "/api/audio/status":
-                return self.send_json(audio_status())
+                query = parse_qs(parsed.query)
+                return self.send_json(audio_status((query.get("batch") or [""])[0] or None))
             if decoded_path == "/api/batches":
                 return self.send_json({"batches": cached_list_batches()})
             if decoded_path == "/api/taxonomy":
@@ -1867,6 +1979,12 @@ class Handler(BaseHTTPRequestHandler):
                     shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
                 save_json(path, merged)
                 saved.append(str(path.relative_to(folder)))
+        # Any题面/标签编辑 invalidates review and downstream upload gates. Keep the
+        # previous comparison snapshot for display, but never reuse it for approval.
+        if saved and wf_manifest is not None and (folder / "workflow" / "manifest.json").is_file():
+            current = wf_manifest.load(folder)
+            wf_manifest.invalidate_downstream(folder, current, "review", "工作台编辑了题面或标签，旧审核结果失效")
+            wf_manifest.save(folder, current)
         return {"saved": saved, "warnings": warnings}
 
 

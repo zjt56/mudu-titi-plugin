@@ -93,6 +93,23 @@ def _build_units(sections: list[dict], groups: list[dict], source_lines: list[st
 
     units: list[dict] = []
     covered: set[int] = set()
+
+    def make_group(type_name, numbers, source_start=None, source_end=None):
+        unit = _make_unit("group", type_name, list(numbers), source_lines)
+        if not str(unit.get("stem") or "").strip() and isinstance(source_start, int):
+            end = source_end if isinstance(source_end, int) else len(source_lines)
+            if 1 <= source_start <= end <= len(source_lines):
+                chunk = source_lines[source_start - 1:end]
+                unit["stem"] = "\n".join(line for line in chunk if not material_label(line)).strip()
+                unit["source_span"] = {"start_line": source_start, "end_line": end,
+                                       "basis": "section_source"}
+        return unit
+
+    group_spans = {}
+    for group in groups:
+        nums = tuple(_section_numbers({"questions": group.get("questions") or []}))
+        if nums:
+            group_spans[nums] = (group.get("source_start_line"), group.get("source_end_line"))
     for section in sections:
         type_name = _section_type_label(section.get("type"))
         nums = _section_numbers(section)
@@ -104,11 +121,13 @@ def _build_units(sections: list[dict], groups: list[dict], source_lines: list[st
         partitions = source_group_partitions(source_lines, nums) if group_flag else []
         if partitions:
             for part in partitions:
-                unit = _make_unit("group", type_name, part["questions"], source_lines)
-                chunk = source_lines[part["source_start_line"] - 1:part["source_end_line"]]
-                unit["stem"] = "\n".join(line for line in chunk if not material_label(line)).strip()
-                unit["source_span"] = {"start_line": part["source_start_line"], "end_line": part["source_end_line"],
-                                       "basis": "cleaned_source"}
+                start_line = part.get("source_start_line") or section.get("source_line")
+                end_line = part.get("source_end_line") or section.get("source_end_line")
+                unit = make_group(type_name, part["questions"], start_line, end_line)
+                if isinstance(part.get("source_start_line"), int) and isinstance(part.get("source_end_line"), int):
+                    unit["source_span"] = {"start_line": part["source_start_line"],
+                                           "end_line": part["source_end_line"],
+                                           "basis": "cleaned_source"}
                 units.append(unit)
             continue
         grouped = set().union(*[set(g) for g in declared_groups]) if declared_groups else set()
@@ -126,17 +145,25 @@ def _build_units(sections: list[dict], groups: list[dict], source_lines: list[st
             # 未声明成组但按题型应成组的整段题号，合并成一个组
             if declared_groups:
                 for g in declared_groups:
-                    units.append(_make_unit("group", type_name, list(g), source_lines))
+                    span = group_spans.get(tuple(g))
+                    if not span or not all(isinstance(value, int) for value in span):
+                        span = (section.get("source_line"), section.get("source_end_line"))
+                    units.append(make_group(type_name, list(g), *span))
                     covered.update(g)
                 if loose:
-                    units.append(_make_unit("group", type_name, loose, source_lines))
+                    units.append(make_group(type_name, loose,
+                                            section.get("source_line"), section.get("source_end_line")))
                     covered.update(loose)
             else:
-                units.append(_make_unit("group", type_name, loose, source_lines))
+                units.append(make_group(type_name, loose,
+                                        section.get("source_line"), section.get("source_end_line")))
                 covered.update(loose)
         else:
             for g in declared_groups:
-                units.append(_make_unit("group", type_name, list(g), source_lines))
+                span = group_spans.get(tuple(g))
+                if not span or not all(isinstance(value, int) for value in span):
+                    span = (section.get("source_line"), section.get("source_end_line"))
+                units.append(make_group(type_name, list(g), *span))
                 covered.update(g)
             for n in loose:
                 units.append(_make_unit("standalone", type_name, [n], source_lines))
@@ -215,7 +242,8 @@ def _load_structure(structure_path: Path) -> dict:
 
 
 def _prove_single_writing_number(original_path: Path | None, source_text: str,
-                                 sections: list[dict], issue: dict, hashes: dict) -> dict | None:
+                                 sections: list[dict], issue: dict, hashes: dict,
+                                 *, allow_warnings: bool = False) -> dict | None:
     """Prove a narrow text-only inference from the original, never candidate counts alone."""
     from .extract import infer_structure
     from .preview import SECTION, _strong_number, _weak_numbers
@@ -227,7 +255,7 @@ def _prove_single_writing_number(original_path: Path | None, source_text: str,
             from .docx_extract import extract_docx
             with tempfile.TemporaryDirectory(prefix="structure-number-proof-") as temp:
                 native = extract_docx(original_path, Path(temp))
-            if native["warnings"]:
+            if native["warnings"] and not allow_warnings:
                 return None
             original_text, method = native["text"], "docx-native"
         elif original_path.suffix.lower() == ".txt":
@@ -356,6 +384,9 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     sections = structure.get("sections") if isinstance(structure.get("sections"), list) else []
     groups = structure.get("groups") if isinstance(structure.get("groups"), list) else []
     image_questions = structure.get("image_questions") if isinstance(structure.get("image_questions"), list) else []
+    # 听力稿可能只含材料/导语，题干与选项由后续模型从其他材料合并；
+    # 普通整卷仍使用原有确定性完整性闸门。
+    model_structure_only = any("听力" in str(section.get("type") or "") for section in sections)
 
     from . import manifest as mf
     original_path = None
@@ -396,6 +427,12 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                                        "message": issue.get("message", "文末答案附录"),
                                        "resolution": "文末重复标题之后按题号+答案字母/解析判定为答案册，保留为答案附录候选"})
                 continue
+            if issue.get("code") in ("EXTRACTION_WARNING", "OCR_VISUAL_REVIEW"):
+                # 提取告警/OCR复核结果都是“版面视觉”层面，不是结构（题号/选项/材料）错误：
+                # 保留为非阻断告警，并强制 layout_required 走整页渲染/版面复核（上传前必过），
+                # 不让 OCR 补充证据反过来阻断结构切题。
+                warnings.append({**issue, "blocking": False, "status": "layout_review_required"})
+                continue
             if issue.get("code") == "INLINE_ANSWER_BLOCK":
                 # 解析版把答案插在大题之间（听力答案后接笔试）：答案移入附录、
                 # 正文继续解析是确定性切分，不构成结构歧义。
@@ -403,10 +440,14 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                                        "message": issue.get("message", "分段答案"),
                                        "resolution": "重复大题后是分段答案、随后仍有新大题；答案移入附录，正文继续解析"})
                 continue
-            blockers.append({"code": issue.get("code", "EXTRACTION_UNRESOLVED"),
-                             "message": issue.get("message", "提取结果待核验"),
-                             "source_line": issue.get("line")})
-    checks["extraction_evidence"] = "failed" if blockers else "passed"
+            # 听力稿只负责保留材料和诊断；边界由后续模型结构化阶段判断。
+            if model_structure_only:
+                warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
+            else:
+                blockers.append({"code": issue.get("code", "EXTRACTION_UNRESOLVED"),
+                                 "message": issue.get("message", "提取结果待核验"),
+                                 "source_line": issue.get("line")})
+    checks["extraction_evidence"] = "passed" if model_structure_only or not blockers else "failed"
 
     if not raw_text.strip():
         blockers.append({"code": "SOURCE_EMPTY", "message": "正文为空，无法结构化"})
@@ -425,7 +466,11 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         nums = _section_numbers(section)
         count = section.get("declared_count")
         if count is not None and count != len(nums):
-            blockers.append({"code": "QUESTION_COUNT_MISMATCH", "message": f"大题 {section.get('title') or section.get('type')} 声明 {count} 小题，结构定位 {len(nums)} 题"})
+            issue = {"code": "QUESTION_COUNT_MISMATCH", "message": f"大题 {section.get('title') or section.get('type')} 声明 {count} 小题，当前提取定位 {len(nums)} 题；交模型结构化"}
+            if model_structure_only:
+                warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
+            else:
+                blockers.append(issue)
     units = _build_units(sections, groups, source_lines) if sections else []
 
     # 题号覆盖：section 声明的题号应被 units 完整覆盖，无重复
@@ -487,17 +532,25 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     unseen = sorted(set(declared) - observed - writing_numbers)
     extra = sorted(observed - set(declared))
     if unseen:
-        blockers.append({"code": "SOURCE_NUMBERS_MISSING", "message": f"结构声明但原文未定位到实际题号/空位：{unseen}"})
+        issue = {"code": "SOURCE_NUMBERS_MISSING", "message": f"结构声明但原文未定位到实际题号/空位：{unseen}"}
+        (warnings if model_structure_only else blockers).append({**issue, "blocking": False, "status": "model_structure_pending"} if model_structure_only else issue)
     if extra:
-        blockers.append({"code": "SOURCE_NUMBERS_UNDECLARED", "message": f"原文实际题号未纳入结构：{extra}"})
-    checks["source_number_coverage"] = "failed" if unseen or extra or duplicate_source else "passed"
+        issue = {"code": "SOURCE_NUMBERS_UNDECLARED", "message": f"原文实际题号未纳入结构：{extra}"}
+        (warnings if model_structure_only else blockers).append({**issue, "blocking": False, "status": "model_structure_pending"} if model_structure_only else issue)
+    checks["source_number_coverage"] = "passed" if model_structure_only and not duplicate_source else ("warning" if duplicate_source else "failed" if unseen or extra else "passed")
     content_problems = []
     for unit in units:
         if not unit["stem"].strip():
             content_problems.append({"code": "SOURCE_UNIT_EMPTY", "message": f"源头单元 {unit['numbers']} 内容为空"})
         content_problems.extend(audit_source_unit(unit)["issues"])
-    blockers.extend(content_problems)
-    checks["source_content"] = "failed" if content_problems else "passed"
+    # 听力稿可能只有材料；题干/选项由模型从其他材料合并。
+    if model_structure_only:
+        for problem in content_problems:
+            warnings.append({**problem, "blocking": False, "status": "model_structure_pending"})
+        checks["source_content"] = "passed"
+    else:
+        blockers.extend(content_problems)
+        checks["source_content"] = "failed" if content_problems else "passed"
 
     # 导语里的范围也必须被完整定位，不能把缺少第 10 题的 8–10 导语当成 8–9 一组。
     guide_problems = []
@@ -505,8 +558,13 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         refs = guide_numbers(line)
         if refs and (not set(refs).issubset(observed) or not any(set(u["numbers"]) == set(refs) for u in units)):
             guide_problems.append({"code": "GUIDE_GROUP_MISMATCH", "message": f"分段导语与实际独立题组不一致：{line.strip()}"})
-    blockers.extend(guide_problems)
-    checks["group_guides"] = "failed" if guide_problems else "passed"
+    if model_structure_only:
+        for problem in guide_problems:
+            warnings.append({**problem, "blocking": False, "status": "model_structure_pending"})
+        checks["group_guides"] = "passed"
+    else:
+        blockers.extend(guide_problems)
+        checks["group_guides"] = "failed" if guide_problems else "passed"
 
     # 去噪自检：切片里不应再残留元信息/噪声 行
     residual = []
@@ -542,7 +600,11 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
             section_nums = _section_numbers(section)
             partitions = source_group_partitions(source_lines, section_nums) if is_group_type(section.get("type")) else []
             if partitions and set(nums).issubset(section_nums) and not any(set(nums) == set(p["questions"]) for p in partitions):
-                blockers.append({"code": "GROUP_BOUNDARY_MISMATCH", "message": f"题组 {nums} 与原文材料/分段导语的独立范围不一致"})
+                issue = {"code": "GROUP_BOUNDARY_MISMATCH", "message": f"题组 {nums} 与原文材料/分段导语的独立范围不一致"}
+                if model_structure_only:
+                    warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
+                else:
+                    blockers.append(issue)
     if bad_group:
         blockers.append({"code": "GROUP_OUT_OF_SECTION",
                          "message": "题组题号不属于任何大题：" + str(bad_group)})
@@ -594,7 +656,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         checks["extraction_evidence"] = "failed"
     # Resolve only this one deterministic ambiguity after all independent gate checks pass.
     if len(blockers) == 1 and blockers[0]["code"] == "QUESTION_NUMBER_INFERRED" and len(inferred) == 1:
-        note = _prove_single_writing_number(original_path, cleaned_text, sections, inferred[0], hashes)
+        note = _prove_single_writing_number(original_path, cleaned_text, sections, inferred[0], hashes, allow_warnings=True)
         if note and mf.sha256_file(source_path) == hashes["source_sha256"]:
             resolved_notes.append(note)
             blockers.clear()
@@ -621,7 +683,10 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                 and _original_matches_cleaned(original_path, cleaned_text, hashes["original_sha256"])):
             blockers[0]["affected_numbers"] = nums
     layout_required = ("[IMG " in raw_text or "[TABLE" in raw_text
-                       or any(issue.get("code") in {"OCR_VISUAL_REVIEW", "EXTRACTION_WARNING"} for issue in blockers))
+                       or any(w.get("code") in {"OCR_VISUAL_REVIEW", "EXTRACTION_WARNING"}
+                              for w in warnings)
+                       or any(issue.get("code") in {"OCR_VISUAL_REVIEW", "EXTRACTION_WARNING"}
+                              for issue in blockers))
     checks["grouping"] = "failed" if any("GROUP" in b["code"] for b in blockers) else "passed"
     passed = not blockers and bool(units)
 

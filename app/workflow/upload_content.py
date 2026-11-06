@@ -26,7 +26,12 @@ SECTION_NAME = re.compile(r'^\s*(短对话理解|长对话理解|短文理解|�
 # A bare letter, a Chinese passage heading, or an explicit “Passage B”
 # marks a boundary; an English sentence beginning with the article “A” does not.
 PASSAGE_HEADING = re.compile(
-    r'^\s*(?:[（(][A-H][）)]|第[一二三四五六七八九十\d]+篇|[A-H](?:$|篇|[.．、:：]|\s+[\u3400-\u9fff])|(?i:Passage)\s+[A-H](?=$|\s|[.．、:：]))')
+    r'^\s*(?:[（(][A-H][）)]|第[一二三四五六七八九十\d]+篇|[A-H](?:$|篇|[.．、:：]\s*$|[.．、:：]\s*第[一二三四五六七八九十\d]+篇|\s+[\u3400-\u9fff])|(?i:Passage)\s+[A-H](?=$|\s|[.．、:：]\s*$))')
+# 「第三部分 阅读理解」「第四部分 写」这类分部标题，以及「阅读下面短文…」这种
+# 题干说明，都是材料/大意的结束边界；否则末尾【文章大意】会把下面的说明和分部标题吞进去。
+PART_HEADING = re.compile(r'^\s*第[一二三四五六七八九十\d]+部分')
+PASSAGE_INSTRUCTION = re.compile(
+    r'^\s*(?:阅读下列短文|阅读下面短文|读下面短文|阅读短文|阅读下列材料|阅读下面材料|请阅读)')
 
 
 def _inline_numbers(text):
@@ -124,7 +129,8 @@ def inspect_content(batch_dir, payload):
                     owner = int(question.group(1)); break
                 if (SUMMARY.search(later) or _section(later)
                         or QUESTION_BOUNDARY.match(later) or ICON_HEADING.match(later)
-                        or PASSAGE_HEADING.match(later)
+                        or PASSAGE_HEADING.match(later) or PART_HEADING.match(later)
+                        or PASSAGE_INSTRUCTION.match(later)
                         or re.fullmatch(r'\[/?TABLE[^\]]*\]', later)):
                     break
                 if later.strip():
@@ -134,7 +140,8 @@ def inspect_content(batch_dir, payload):
                 members = []
                 for later in lines[index + 1:]:
                     if (SUMMARY.search(later) or _section(later) or ICON_HEADING.match(later)
-                            or PASSAGE_HEADING.match(later)
+                            or PASSAGE_HEADING.match(later) or PART_HEADING.match(later)
+                            or PASSAGE_INSTRUCTION.match(later)
                             or re.fullmatch(r'\[/?TABLE[^\]]*\]', later)):
                         break
                     question = QUESTION_BOUNDARY.match(later)
@@ -142,6 +149,24 @@ def inspect_content(batch_dir, payload):
                         if not _question(later):
                             break
                         members.append(int(question.group(1)))
+                # 段落末尾的【文章大意】后面通常直接是下一篇材料，前面才是它概括的
+                # 46–55 题。此时向前找本段起始边界，把大意归属到前面这组题号。
+                if owner is None:
+                    boundary = 0
+                    for j in range(index):
+                        if (_section(lines[j]) or PASSAGE_HEADING.match(lines[j])
+                                or PART_HEADING.match(lines[j])
+                                or PASSAGE_INSTRUCTION.match(lines[j])
+                                or SUMMARY.search(lines[j])):
+                            boundary = j + 1
+                    source_anchors = body_anchors if relative == '01_source/正文.txt' else anchors
+                    prior = []
+                    for number, path, line_no, _section_name in source_anchors:
+                        if path == relative and boundary < line_no < index + 1 and number not in prior:
+                            prior.append(number)
+                    if prior:
+                        members = prior
+                        owner = prior[0]
                 summaries.append({'text': value, 'owner': owner, 'members': members,
                                   'path': relative, 'line': index + 1})
 
@@ -161,7 +186,35 @@ def inspect_content(batch_dir, payload):
         errors.append({'code': code, 'message': message, 'unit_id': uid, 'field': field,
                        'evidence': evidence or []})
 
-    def unique_anchor(number, path, line):
+    # explanations 产物按 unit_id 落盘，独立题本身不带 number；从已确认结构
+    # 回填题号，否则会把它误判成“解析无法溯源”。
+    confirmed_units = {}
+    try:
+        confirmed_path = _safe_path(batch, '01_source/structure.confirmed.json')
+        if confirmed_path.is_file():
+            confirmed_data = json.loads(confirmed_path.read_bytes().decode('utf-8-sig'))
+            for unit in confirmed_data.get('units') or []:
+                if not isinstance(unit, dict):
+                    continue
+                nums = unit.get('numbers') or []
+                kind = unit.get('unit_kind')
+                uid = unit.get('unit_id') or unit.get('id')
+                if not uid and nums:
+                    uid = ('q-' if kind == 'standalone' else 'group-') + '-'.join(str(n) for n in nums)
+                if uid:
+                    confirmed_units[str(uid)] = unit
+    except (OSError, ValueError):
+        confirmed_units = {}
+
+    def unit_numbers(uid, item):
+        numbers = item.get('numbers') or [item.get('number')]
+        if any(isinstance(n, int) for n in numbers):
+            return numbers
+        unit = confirmed_units.get(str(uid)) or {}
+        declared = unit.get('numbers') or []
+        return [int(n) for n in declared if str(n).isdigit()] or numbers
+
+    def unique_anchor(number, path, line, *, allow_answer_source=False):
         if not isinstance(number, int):
             return False
         candidates = body_anchors if path == '01_source/正文.txt' else anchors
@@ -170,8 +223,9 @@ def inspect_content(batch_dir, payload):
             return False
         # A separate answer-only file may repeat a number without supplying a
         # competing explanation. A second labelled explanation is ambiguous.
-        if any(row['number'] == number and row['path'] != path
-               and row['path'] != '01_source/正文.txt' for row in questions):
+        if not allow_answer_source and any(
+                row['number'] == number and row['path'] != path
+                and row['path'] != '01_source/正文.txt' for row in questions):
             return False
         # When a separate body is available, the same number must also have a
         # unique body anchor. Repeated numbers need human section verification.
@@ -282,7 +336,15 @@ def inspect_content(batch_dir, payload):
     def has_explanation(item):
         return bool((item.get('explanation') or '').strip()) if isinstance(item.get('explanation'), str) else False
 
-    def check(item, uid, numbers, child=False, listening=False, has_any_expl=False):
+    def writing_hint():
+        for lines in source_lines.values():
+            for line in lines:
+                match = re.match(r'^\s*(?:【思路点拨】|\[思路点拨\])\s*(.*)$', line)
+                if match and match.group(1).strip():
+                    return _norm(match.group(1))
+        return None
+
+    def check(item, uid, numbers, child=False, listening=False, has_any_expl=False, unit_type=''):
         if not isinstance(item, dict):
             return
         summary = item.get('articleSummary', item.get('article_summary', ''))
@@ -300,7 +362,8 @@ def inspect_content(batch_dir, payload):
                 error('AI_PROVENANCE_INVALID', 'AI文章大意须包含实际内容并在末尾标记来源', uid, 'articleSummary')
             matches = [row for row in summaries if normalized == row['text']]
             owned = any(row['owner'] in numbers and all(
-                            number in row['members'] and unique_anchor(number, row['path'], row['line'])
+                            number in row['members'] and unique_anchor(
+                                number, row['path'], row['line'], allow_answer_source=True)
                             for number in numbers)
                         and sum(other['owner'] == row['owner'] and other['path'] == row['path']
                                 for other in summaries) == 1 for row in matches)
@@ -328,6 +391,10 @@ def inspect_content(batch_dir, payload):
                         number in row['members'] and unique_anchor(number, row['path'], row['line'])
                         for number in numbers)))
                     for row in summaries)
+            if not traceable and unit_type == '书面表达':
+                hint = writing_hint()
+                if hint and value == hint:
+                    traceable = True
             if not marked and not traceable:
                 error('EXPLANATION_SOURCE_UNVERIFIED', '解析既未能在已提供的答案/解析原文中定位，也未标注「' + AI_MARK + '」（F2/F5）；不能用占位或未标注的生成内容替代', uid, 'explanation')
             for row in summaries:
@@ -344,7 +411,7 @@ def inspect_content(batch_dir, payload):
         if not isinstance(item, dict):
             continue
         uid = str(item.get('unit_id') or item.get('id') or index)
-        numbers = item.get('numbers') or [item.get('number')]
+        numbers = unit_numbers(uid, item)
         if item.get('subquestions'):
             numbers = [sub.get('number') for sub in item['subquestions'] if isinstance(sub, dict)]
         filters = item.get('filterMetadata', item.get('filter_metadata', {}))
@@ -355,7 +422,8 @@ def inspect_content(batch_dir, payload):
         qtype = item.get('question_type') or item.get('type') or ''
         listening = isinstance(qtype, str) and qtype.startswith('听力')
         # 用户要求：缺解析直接留空跳过，不再要求补写（F7 旧规则已按用户要求取消）。
-        check(item, uid, numbers, listening=listening)
+        unit_type = str((confirmed_units.get(str(uid)) or {}).get('type') or '')
+        check(item, uid, numbers, listening=listening, unit_type=unit_type)
     return {'passed': not errors, 'errors': errors, 'source_sha256': hashes,
             'check': 'upload-content-source-v1',
             'scope': '解析/大意来源和明确材料归属；不替代逐题语义、视觉、听力和独立审核'}

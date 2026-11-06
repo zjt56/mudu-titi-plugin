@@ -19,7 +19,7 @@
 | 系统 | macOS / Linux / Windows | 命令里 `python3` 在 Windows 换成 `python` |
 | 可选 | ffmpeg / ffprobe | 核心流程不需要；只有听力切段需要 |
 | 可选 | WhisperX 运行时与模型 | 只有听力切段需要；在插件设置页点「安装」后按需下载到数据根，见 [audio.md](audio.md) |
-| 可选 | 本地 OCR 服务 | 只有扫描版 PDF 需要，见 [extraction.md](extraction.md) |
+| 可选 | OCR 服务（飞桨 jobs API 或本地） | 默认关闭；只有扫描版 PDF、图片型试卷或公式识别需要，在插件「OCR 识别」打开总开关，见 [extraction.md](extraction.md) |
 
 所有命令都在**仓库根目录**执行（有 `AGENTS.md`、`workflow/` 的那一层）。
 

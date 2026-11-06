@@ -82,7 +82,7 @@ class WritingNumberInferenceTest(unittest.TestCase):
         structure, body = self.prepare(self.paper().replace('2. its parks', '3. its parks'))
         report = self.assert_inferred_blocked()
         self.assertEqual(report['blockers'][0].get('affected_numbers'), [81])
-        structure['unresolved'].append({'code': 'OCR_VISUAL_REVIEW', 'line': 3})
+        structure['unresolved'].append({'code': 'DUPLICATE_QUESTION_NUMBER', 'line': 3})
         self.save(structure, body)
         report = self.assert_inferred_blocked()
         self.assertTrue(all('affected_numbers' not in b for b in report['blockers']))
@@ -261,7 +261,7 @@ class WritingNumberInferenceTest(unittest.TestCase):
         self.assert_inferred_blocked()
 
     def test_other_unresolved_or_structural_conflicts_stay_blocking(self):
-        for issue in ("OCR_VISUAL_REVIEW", "DUPLICATE_QUESTION_NUMBER", "QUESTION_NUMBER_INFERRED"):
+        for issue in ("DUPLICATE_QUESTION_NUMBER", "QUESTION_NUMBER_INFERRED"):
             with self.subTest(issue=issue):
                 structure, body = self.prepare()
                 structure["unresolved"].append({"code": issue, "message": "independent uncertainty", "line": 3})

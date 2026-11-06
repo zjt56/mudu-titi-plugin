@@ -160,6 +160,7 @@ upload_gate（人工）──→ upload（仓库内阻断）──→ publish_ga
 | `workflow/checks.py` | 18 项本地体检的调度 |
 | `workflow/structure_checks.py` | 七项结构核对与证据绑定 |
 | `workflow/structure_gate.py` | 结构自动闸门：去噪+元信息+按题型结构化+自检 |
+| `workflow/structure_ai.py` | 结构 AI 复核：判定解析版答案行，校验后重跑结构化并移入附录 |
 | `workflow/denoise.py` | 正文去噪与卷名/年份/时长等元信息抽取 |
 | `workflow/question_content.py` | 逐题内容边界的机器问题码 |
 | `workflow/review.py` | 审核放行规则 |

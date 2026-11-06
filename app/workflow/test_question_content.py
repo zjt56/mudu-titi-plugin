@@ -70,5 +70,32 @@ class InlineOptionTest(unittest.TestCase):
         self.assertEqual(result["shared_options"][0]["text"], "Well done!")
 
 
+class OptionBoundaryTest(unittest.TestCase):
+    def test_trailing_summary_is_not_absorbed_into_last_option(self):
+        from workflow.question_content import question_parts
+        unit_stem = ("(　　)55.A.realize\tB.enjoy\t\tC.forget\tD.celebrate\n"
+                     "【文章大意】本文是一篇记叙文。")
+        part = question_parts(unit_stem.splitlines(), 55)
+        self.assertEqual([o["label"] for o in part["options"]], list("ABCD"))
+        self.assertEqual(part["options"][-1]["text"], "celebrate")
+
+    def test_writing_stem_is_restored_verbatim_when_model_truncates(self):
+        import json, tempfile
+        from pathlib import Path
+        from workflow.question_content import apply_required_writing_stem
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            (batch / "01_source").mkdir()
+            (batch / "01_source/正文.txt").write_text(
+                "Ⅺ.书面表达\n假定你是李华,写一封回信。要点如下:\n1.大胆自信;\n"
+                "注意:词数80~100。\nDear Jack,\nHow is everything going?\n", encoding="utf-8")
+            (batch / "01_source/structure.json").write_text(json.dumps({
+                "sections": [{"type": "书面表达", "questions": [96]}], "groups": []}), encoding="utf-8")
+            payload = {"items": [{"numbers": [96], "number": 96, "stem": "假定你是李华,写一封回信。"}]}
+            # 结构无法派生 single_writing_section 时不擅自改写；有可解析单元时才落回原文。
+            changed = apply_required_writing_stem(batch, payload)
+            self.assertIn(changed, (0, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

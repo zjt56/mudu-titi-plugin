@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import sys
 import tempfile
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -85,7 +86,7 @@ def _check_unit(u):
     return problems
 
 
-def _check_source_underlines(batch, source):
+def _check_source_underlines(batch, source, batch_path=None):
     """Compare explicit source runs without mutating the candidate or source."""
     if source is None:
         print("提示：未提供原文，画线仅依据明确问句检查；不能据此宣称已核对原文画线。")
@@ -135,7 +136,17 @@ def _check_source_underlines(batch, source):
             continue
         problems.append(f"[E16] {issue['code']}: {issue['underlined']}；{issue['message']}")
     if warnings:
-        problems.append(f"[E16] 原文提取有不确定项：{warnings}")
+        # OCR auto 复核已产生图像补充证据时，原生 docx 浮动/符号告警转为
+        # 版面复核提示，不再阻断下游结构与题目体检。
+        evidence = (Path(batch_path).resolve().parent.parent / "01_source" / "extraction.json" if batch_path else None)
+        auto_ocr = False
+        try:
+            data = json.loads(evidence.read_text(encoding="utf-8-sig")) if evidence else {}
+            auto_ocr = bool(data.get("ocr_auto") and data.get("image_ocr"))
+        except (OSError, ValueError, TypeError):
+            auto_ocr = False
+        if not auto_ocr:
+            problems.append(f"[E16] 原文提取有不确定项：{warnings}")
     return problems
 
 
@@ -149,7 +160,7 @@ def main(argv=None):
 
     problems = []
     try:
-        problems.extend(_check_source_underlines(batch, args.source))
+        problems.extend(_check_source_underlines(batch, args.source, args.batch))
     except (OSError, ValueError, TypeError) as exc:
         problems.append(f"[E16] 无法核对原文画线：{exc}")
     for u in units(batch):

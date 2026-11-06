@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import hashlib
 from pathlib import Path
 
 from . import config as cfgmod
@@ -23,26 +24,51 @@ STATUS_NAME = "status.json"
 READY_NAME = "READY.json"
 
 
-def status_path(data_dir: Path) -> Path:
+def status_path(data_dir: Path, batch: str | None = None) -> Path:
+    """Per-batch status keeps unrelated papers from sharing one progress line.
+
+    The global status.json remains for bootstrap/install jobs and old clients.
+    A batch name maps to a stable digest so Chinese names never become paths.
+    """
+    if batch:
+        digest = hashlib.sha256(str(batch).encode("utf-8")).hexdigest()[:16]
+        return Path(data_dir) / "status" / (digest + ".json")
     return Path(data_dir) / STATUS_NAME
 
 
-def read_status(data_dir: Path) -> dict:
+def _read_status_path(path: Path) -> dict:
     try:
-        return json.loads(status_path(data_dir).read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {"job": "", "running": False, "ok": None, "phase": "idle", "pct": 0, "detail": "", "error": ""}
 
 
-def write_status(data_dir: Path, **fields) -> dict:
-    path = status_path(data_dir)
+def read_status(data_dir: Path, batch: str | None = None) -> dict:
+    state = _read_status_path(status_path(data_dir, batch))
+    if batch:
+        state.setdefault("batch", batch)
+    return state
+
+
+def _write_status_path(path: Path, state: dict) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
-    state = read_status(data_dir)
-    state.update(fields)
     state["updated"] = time.time()
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+    return state
+
+
+def write_status(data_dir: Path, batch: str | None = None, **fields) -> dict:
+    # Per-batch state is authoritative for the panel; the global file mirrors the
+    # latest job for bootstrap/install and old clients.
+    state = read_status(data_dir, batch)
+    state.update(fields)
+    if batch:
+        state["batch"] = batch
+    state = _write_status_path(status_path(data_dir, batch), state)
+    if batch:
+        _write_status_path(status_path(data_dir), dict(state))
     return state
 
 

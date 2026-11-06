@@ -28,6 +28,82 @@ class OCRBackendError(RuntimeError):
     """Terminal configuration, execution or result failure; safe to report."""
 
 
+ASSIST_OFF_MESSAGE = (
+    "OCR 辅助未开启：请在插件「模型与设置 → OCR 识别」打开「启用 OCR 辅助识别」后重试。"
+)
+
+
+def assist_enabled(config=None) -> bool:
+    """Master switch for OCR participation.
+
+    The plugin writes a private state file and points MUDU_OCR_ASSIST_STATE at
+    it, so toggling takes effect without restarting the backend. Standalone
+    callers without that file keep the previous behaviour (OCR available when a
+    local or cloud configuration exists). Read PDF/native extraction is never
+    gated by this switch.
+    """
+    # 允许调用 OCR 的总开关：off 之外（auto/on）都允许，具体是否调用由 ocr_needed 决定。
+    return assist_mode(config) != "off"
+
+
+def _assist_state() -> dict:
+    """Read the live OCR assist state file (plugin-private) if present."""
+    state = os.environ.get("MUDU_OCR_ASSIST_STATE")
+    if not state:
+        return {}
+    try:
+        data = json.loads(Path(state).expanduser().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def assist_mode(config=None) -> str:
+    """OCR 参与模式：'auto'（AI 自动判断是否需要复核）、'on'、'off'。
+
+    优先读 assist.json 的 mode；旧文件只有 enabled 布尔值时映射为 on/off。
+    未提供状态文件时回退 MUDU_OCR_ASSIST / config.enabled，再退回 'auto'。
+    """
+    data = _assist_state()
+    mode = data.get("mode")
+    if mode in ("auto", "on", "off"):
+        return mode
+    if type(data.get("enabled")) is bool:
+        return "on" if data["enabled"] else "off"
+    flag = os.environ.get("MUDU_OCR_ASSIST")
+    if flag is not None:
+        return "on" if flag.strip().lower() not in {"0", "false", "off", "no"} else "off"
+    if isinstance(config, dict) and type(config.get("enabled")) is bool:
+        return "on" if config["enabled"] else "off"
+    return "auto"
+
+
+# 触发自动 OCR 复核的情形（AI/规则判断“文字层不足以可靠切题/看图”时）。
+OCR_TRIGGERS = {
+    "image_only",        # 文字层极少、基本是图片
+    "floating_object",   # docx 浮动对象，XML 顺序可能与视觉顺序不一致
+    "symbol_font",       # 符号字体，字形未确定
+    "needs_ocr_page",    # PDF 页无文字层
+    "image_upload",      # 直接上传图片
+    "layout_uncertain",  # 版面/图文归属不确定
+}
+
+
+def ocr_needed(config=None, triggers=()) -> bool:
+    """按模式判断这次是否要调用 OCR。
+
+    - off：永不调用；
+    - on：总是调用；
+    - auto：仅当命中 triggers（能力/版面不确定）时调用。
+    """
+    mode = assist_mode(config)
+    if mode == "off":
+        return False
+    if mode == "on":
+        return True
+    return any(t in OCR_TRIGGERS for t in (triggers or ()))
+
+
 def _number(value, name, low, high, *, integer=False):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise OCRBackendError(f"{name} must be a number")
@@ -42,6 +118,12 @@ def _validate_config(data, base):
     if not isinstance(data, dict):
         raise OCRBackendError("OCR configuration must be a JSON object")
     config = dict(data)
+    if config.get("backend") == "paddle_jobs":
+        from .paddle_jobs import validate_config, PaddleJobsError
+        try:
+            return validate_config(config)
+        except PaddleJobsError as exc:
+            raise OCRBackendError(str(exc)) from None
     for key in ("python", "script"):
         value = config.get(key)
         if not isinstance(value, str) or not value.strip():
@@ -71,7 +153,9 @@ def load_config(config_path=None) -> dict:
 
     Missing/invalid explicit configuration is terminal; no implicit model search.
     """
-    chosen = config_path if config_path is not None else os.environ.get("MUDU_OCR_CONFIG")
+    private = os.environ.get("MUDU_PADDLE_OCR_CONFIG")
+    chosen = config_path if config_path is not None else (
+        private if private and Path(private).is_file() else os.environ.get("MUDU_OCR_CONFIG"))
     path = Path(chosen).expanduser() if chosen else Path(__file__).with_name("ocr-config.json")
     path = path.absolute()
     try:
@@ -197,6 +281,21 @@ def recognize(source: Path, output_dir: Path, *, force_ocr=False, pages=None,
     return success. Empty recognized text remains empty; no content is invented.
     """
     settings = _config(config)
+    if not assist_enabled(settings):
+        raise OCRBackendError(ASSIST_OFF_MESSAGE)
+    if settings.get("backend") == "paddle_jobs":
+        from .paddle_jobs import recognize as recognize_jobs, PaddleJobsError
+        if task not in {"ocr", "table", "formula", "chart", "spotting", "seal"}:
+            raise OCRBackendError("Unsupported OCR task")
+        if pages is not None:
+            selection = str(pages)
+            if not re.fullmatch(r"[1-9]\d*(?:-[1-9]\d*)?", selection) or int(selection.split("-")[-1]) < int(selection.split("-")[0]):
+                raise OCRBackendError("pages must be a positive page or ascending inclusive range")
+        try:
+            return recognize_jobs(_source(source), output_dir, config=settings, pages=pages,
+                                  task=task, force_ocr=force_ocr)
+        except PaddleJobsError as exc:
+            raise OCRBackendError(str(exc)) from None
     if settings.get("fallback"):
         raise OCRBackendError(
             "OCR 识别未配置：当前只有 PDF 文本解析可用（未找到 ocr-config.json）。"
@@ -256,6 +355,18 @@ def read_pdf(source: Path, output_dir: Path, config=None) -> dict:
     Embedded image bytes are retained, with every occurrence's page bbox.
     """
     settings = _config(config)
+    if settings.get("backend") == "paddle_jobs":
+        # Cloud OCR must not replace the model-free native PDF interpreter.
+        # Retain the existing local CLI environment (often supplies PyMuPDF).
+        legacy = Path(__file__).with_name("ocr-config.json")
+        explicit_local = os.environ.get("MUDU_OCR_CONFIG")
+        native = Path(explicit_local) if explicit_local else legacy
+        if native.is_file():
+            local = load_config(native)
+            if local.get("backend") != "paddle_jobs":
+                settings = local
+        if settings.get("backend") == "paddle_jobs":
+            settings = _validate_config({"python": sys.executable, "script": str(Path(__file__).resolve())}, Path.cwd())
     source = _source(source)
     if source.suffix.lower() != ".pdf":
         raise OCRBackendError("read_pdf requires a PDF source")

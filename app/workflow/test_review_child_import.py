@@ -73,9 +73,9 @@ class ChildImportTest(unittest.TestCase):
         unchecked = [x for x in evaluated['unchecked'] if x['code'] == 'REVIEW_SAMPLE_SOURCE_UNVERIFIED']
         self.assertEqual({x['number'] for x in unchecked}, {'1', wrong['number']})
         self.assertTrue(all(x['source_binding']['source_sha256'] == self.plan['input_hashes']['01_source/正文.txt'] for x in unchecked))
+        # 难度不参与审核比对：即使难度被改成困难，也不产生 difficulty finding。
         findings = [f for f in evaluated['findings'] if f['field'] == 'difficulty']
-        self.assertEqual(len(findings), 1)
-        self.assertIn('第' + valid['number'] + '题', findings[0]['reason'])
+        self.assertEqual(findings, [])
         retained = list((self.batch / 'workflow/review-results' / task['task_id']).glob('*.json'))
         self.assertTrue(any(json.loads(p.read_text()) == response for p in retained))
         self.assertEqual(json.loads((self.batch / '07_review/review-rounds.json').read_text())['rounds'][-1]['checks'], checks)

@@ -14,8 +14,19 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 
+# 人工审核范围（产品规则，2026-11）：
+#   只把“标签差异”和“基本差异”送人工，用户不需要全文重审：
+#     ① 知识点标签差异：原标签 / 一审 / 二审 打的知识点不同；
+#     ② 基本差异：题型/子类等基础标签不同，或答案/解析/题面与原文不符等实质差异。
+#   以下不属于人工审核范畴，只作提示（informational），不进队列、不阻断闸门：
+#     · 图片/音频等视觉听觉能力受限导致“看不到图、无法确认图文对应”的不确定。
+#   依据：AI 无法看图/听音是能力边界，不是标签分歧；审这些只是浪费人工时间。
+MANUAL_REVIEW_SCOPE = "label_and_basic_differences_only"
+_CAPABILITY_GAP = re.compile(r"图片|占位|图像|音频|听不|看不见|看不到|无法(?:核对|确认|查看).{0,8}(?:图|音频|图图)")
+_LABEL_CONFLICT = re.compile(r"不一致|不同|冲突|不符|错误|矛盾|判断有出入|与原(?:标)?注")
 ROUND_FILE = "review-rounds.json"
 # 两轮审核：一审全量盲判 + 二审抽样复核（不再单独跑全量知识点轮）。
 # 抽样口径：整组题型（阅读/完形/补全对话/信息转换等）按整组抽、只做组级核对；
@@ -779,6 +790,80 @@ def _verify_round_sources(batch, plan, record):
         raise ValueError("Review checks differ from retained responses")
 
 
+def _is_capability_gap(finding) -> bool:
+    """This finding is only the model admitting it cannot see an image / hear audio.
+
+    Such uncertainty is a capability boundary, not a label/basic difference, so it
+    must not enter manual review or block the gate. A finding that actually names a
+    label/answer conflict still counts even if it also mentions an image.
+    """
+    source = (finding.get("round_sources") or [{}])[0]
+    text = " ".join(str(source.get("rationale") or "").split())
+    reason = str(finding.get("reason") or "")
+    blob = text + " " + reason
+    if not _CAPABILITY_GAP.search(blob):
+        return False
+    if _LABEL_CONFLICT.search(text):
+        return False
+    if source.get("verdict") == "error":
+        return False
+    return True
+
+
+COMPARISON_SNAPSHOT_FILE = "07_review/review-comparison.json"
+
+
+def write_comparison_snapshot(batch_dir, payload=None) -> dict | None:
+    """Atomically persist the last fully executed comparison for UI consumption.
+
+    This snapshot is deliberately independent of the current review binding: a
+    later rerun may be in progress or stale while the UI must continue showing
+    the last successful original/labels/sample comparison. A newly completed
+    review replaces it atomically.
+    """
+    batch = Path(batch_dir)
+    payload = payload if isinstance(payload, dict) else _load(batch / REVIEW_DIR / ROUND_FILE)
+    if not isinstance(payload, dict) or not isinstance(payload.get("plan"), dict):
+        return None
+    records = payload.get("rounds")
+    if not isinstance(records, list) or {r.get("round_id") for r in records if isinstance(r, dict)} != set(ROUND_IDS):
+        return None
+    try:
+        plan = prepare_round_plan(batch)
+        evaluated = evaluate_rounds(batch, payload)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not evaluated.get("execution_completed") or set(evaluated.get("checked_rounds", [])) != set(ROUND_IDS):
+        return None
+    def read(relative):
+        path = batch / relative
+        try:
+            return json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return {}
+    snapshot = {
+        "version": 1,
+        "input_binding": plan.get("input_binding"),
+        "input_hashes": plan.get("input_hashes", {}),
+        "plan": plan,
+        "original": {
+            "types": read("03_types/types.json"),
+            "knowledge": read("04_knowledge/knowledge.json"),
+            "answers": read("01_source_ans/answers.json"),
+        },
+        "rounds": records,
+        "execution_completed": True,
+        "quality_passed": bool(evaluated.get("passed")),
+        "saved_at": time.time(),
+    }
+    target = batch / COMPARISON_SNAPSHOT_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(snapshot, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    temporary.replace(target)
+    return snapshot
+
+
 def evaluate_rounds(batch_dir, payload=None) -> dict:
     """Fail closed on missing/stale/invalid rounds; emit no invented review data."""
     batch = Path(batch_dir)
@@ -818,6 +903,12 @@ def evaluate_rounds(batch_dir, payload=None) -> dict:
             findings.extend(compare(batch, plan, records))
         except (ValueError, OSError, KeyError, TypeError) as exc:
             errors.append(_round_issue("comparison", str(exc)))
+    # 用户规则：只有“与原标注不一致”才送人工。抽查/一审模型常因看不到图片占位
+    # 而给出 uncertain，但它的判断和原标签完全一致——这种不是标签分歧，不应进
+    # 人工队列（也不会阻断闸门）。真正的差异/错误仍然保留为待审发现。
+    # 能力受限（看不到图/听不到音频）不是标签差异：只作提示，不进人工、不阻断。
+    informational_findings = [f for f in findings if _is_capability_gap(f)]
+    findings = [f for f in findings if not _is_capability_gap(f)]
     # Source attribution is a program conclusion, separate from model verdicts
     # and from manually resolved findings. Keep execution and other targets.
     sample_source_bindings = []
@@ -828,12 +919,17 @@ def evaluate_rounds(batch_dir, payload=None) -> dict:
             sample_source_bindings.append({**proof, 'evidence': check['evidence']})
             if proof['status'] != 'proven':
                 number = str(check['number'])
-                errors.append({'code': 'REVIEW_SAMPLE_SOURCE_UNVERIFIED', 'round_id': 'sample',
-                               'unit_id': check['unit_id'], 'number': number,
-                               'field': 'review_rounds.sample.source', 'required': True,
-                               'status': 'unchecked', 'message': proof['reason'],
-                               'reason': proof['reason'], 'source_binding': proof,
-                               'evidence': check['evidence']})
+                entry = {'code': 'REVIEW_SAMPLE_SOURCE_UNVERIFIED', 'round_id': 'sample',
+                         'unit_id': check['unit_id'], 'number': number,
+                         'field': 'review_rounds.sample.source', 'required': True,
+                         'status': 'unchecked', 'message': proof['reason'],
+                         'reason': proof['reason'], 'source_binding': proof,
+                         'evidence': check['evidence']}
+                # 选项是图片等导致“无法用文字证明图文对应”，属能力受限，不阻断人工。
+                if _CAPABILITY_GAP.search(" ".join(str(check.get('rationale') or '').split())) and not _LABEL_CONFLICT.search(str(check.get('rationale') or '')):
+                    informational_findings.append(entry)
+                else:
+                    errors.append(entry)
     # Keep immutable round observations, but honor a subsequent attributed,
     # evidence-backed decision on that exact observation. A bare status or a
     # different reason must never hide a round finding.
@@ -856,6 +952,7 @@ def evaluate_rounds(batch_dir, payload=None) -> dict:
     return {"passed": not errors, "resolved_findings": resolved_findings, "execution_completed": checked == list(ROUND_IDS) and not any(e["code"] == "REVIEW_ROUND_UNCHECKED" for e in errors), "errors": errors,
             "unchecked": [e for e in errors if e["code"] in ("REVIEW_ROUND_UNCHECKED", "REVIEW_SAMPLE_SOURCE_UNVERIFIED")],
             "findings": findings, "checked_rounds": checked, "plan": plan,
+            "informational": informational_findings,
             "sample_source_bindings": sample_source_bindings}
 
 

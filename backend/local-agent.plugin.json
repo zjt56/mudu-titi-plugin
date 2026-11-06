@@ -9,8 +9,10 @@
   ],
   "timeout_seconds": 1500,
   "max_input_chars": 900000,
-  "part_concurrency": 2,
+  "part_concurrency": 16,
+  "review_part_parallel": 16,
   "response_mode": "file",
-  "retries": 1,
+  "retries": 2,
+  "retry_feedback_chars": 1600,
   "review_max_attempts": 1
 }

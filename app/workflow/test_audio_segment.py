@@ -37,8 +37,8 @@ def _batch(root: Path, numbers=(1, 2, 3)) -> Path:
 
 class ConfigTest(unittest.TestCase):
     def test_defaults_and_validation(self):
-        # 默认多语种大模型：不能因 small 更快而静默降级。
-        self.assertEqual(cfgmod.DEFAULTS["asr_model"], "large-v3-turbo")
+        # 默认多语种 small：资源占用低；large-v3-turbo 可显式选择。
+        self.assertEqual(cfgmod.DEFAULTS["asr_model"], "small")
         self.assertEqual(cfgmod.DEFAULTS["anchor_language"], "zh")
         self.assertFalse(cfgmod.DEFAULTS["enabled"])
         self.assertEqual(cfgmod.DEFAULTS["align_model"], "facebook/wav2vec2-base-960h")

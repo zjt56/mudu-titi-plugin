@@ -115,11 +115,19 @@ def run_all(skill_root: Path, batch_json: Path, inputs: dict,
     # 没有单独上传答案卷时仍检查已提取的原卷附录答案；不能静默跳过答案比对。
     effective_inputs = dict(inputs)
     answer_input = inputs.get("answers", {})
-    pdf_answers = Path(str(answer_input.get("path") or "")).suffix.lower() == ".pdf"
-    if not answer_input.get("exists") or pdf_answers:
+    answer_suffix = Path(str(answer_input.get("path") or "")).suffix.lower()
+    pdf_answers = answer_suffix == ".pdf"
+    # 独立答案 DOCX/PDF 可能含表格、图片或浮动对象；答案阶段已经经过文字层/OCR
+    # 与题号校验并产出 answers.json，后续确定性核验应使用该正式产物，不能再次把原 DOCX
+    # 当作纯文本解析并误报“含表格/图片”。
+    use_prepared_answers = (not answer_input.get("exists") or answer_suffix in {".pdf", ".docx"})
+    if use_prepared_answers:
         prepared_answers = batch_json.parent.parent / "01_source_ans" / "answers.json"
         if prepared_answers.is_file():
             effective_inputs["answers"] = {"path": str(prepared_answers), "exists": True}
+            if answer_suffix == ".docx":
+                pdf_answers = True  # 复用同一 input_basis 说明：使用正式提取 JSON
+
     runnable, skipped = [], []
     for check in selected:
         missing = [key for key in check.needs if not effective_inputs.get(key, {}).get("exists")]

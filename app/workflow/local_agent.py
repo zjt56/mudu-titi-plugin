@@ -34,7 +34,7 @@ import time
 
 MAX_FINAL_BYTES = 8 * 1024 * 1024
 DEFAULTS = {"provider": "dsh", "timeout_seconds": 900, "max_input_chars": 180000,
-            "retries": 1, "retry_feedback_chars": 1200, "unit_split": True,
+            "retries": 2, "retry_feedback_chars": 1600, "unit_split": True,
             # 每片更小，减少单次模型上下文压力；审核片默认可稍大但仍可调。
             "assemble_part_units": 8, "review_part_units": 15}
 
@@ -631,12 +631,16 @@ def _store_part_snapshot(batch_dir, stage, part, hashes, config, candidate):
 
 
 def _part_concurrency(config):
-    """分片并发度：默认 1（保持原有串行行为），上限 8，避免把接口打到限流。"""
+    """分片并发度：默认 1；上限 64，只作为本机进程数的安全边界。
+
+    官方 API 可承受高并发，真正的限制是本机同时运行的 dsh 进程/内存。
+    需要更高并发时调高配置，而不是在这里按接口限流。
+    """
     value = config.get("part_concurrency", 1)
     if isinstance(value, bool) or not isinstance(value, int):
         raise AgentError("part_concurrency must be an integer", "config")
-    if value < 1 or value > 8:
-        raise AgentError("part_concurrency must be between 1 and 8", "config")
+    if value < 1 or value > 64:
+        raise AgentError("part_concurrency must be between 1 and 64", "config")
     return value
 
 

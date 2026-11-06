@@ -242,10 +242,20 @@ def main(argv=None):
         with tempfile.TemporaryDirectory(prefix="underline-docx-") as directory:
             source = extract_docx(args.docx, Path(directory))
         candidate, report = restore(batch, source["text"])
-        # Extraction warnings identify unsupported visual/text cases, not success.
+        # OCR auto 复核已经为浮动对象/符号字体留下补充证据时，原生提取告警
+        # 不再阻断画线机械恢复；版面核对仍由 layout_required/上传前复核负责。
+        extraction_meta = args.batch.parent.parent / "01_source" / "extraction.json"
+        auto_ocr = False
+        try:
+            data = json.loads(extraction_meta.read_text(encoding="utf-8-sig"))
+            auto_ocr = bool(data.get("ocr_auto") and data.get("image_ocr"))
+        except (OSError, ValueError):
+            auto_ocr = False
         if source.get("warnings"):
-            report["issues"].append({"code": "DOCX_EXTRACTION_UNCERTAIN", "message": source["warnings"]})
-            report["passed"] = False
+            report["issues"].append({"code": "DOCX_EXTRACTION_UNCERTAIN", "message": source["warnings"],
+                                     "blocking": not auto_ocr})
+            if not auto_ocr:
+                report["passed"] = False
         if report["passed"] and args.apply and report["changes"]:
             # Resolve the exact existing target and refuse source/batch aliasing.
             target = args.batch.resolve(strict=True)

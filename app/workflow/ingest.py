@@ -168,10 +168,14 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
                                         *evaluated.get("resolved_findings", [])]}
         def obsolete(item):
             sources = item.get("round_sources") or []
-            return (_open(item) and bool(sources)
-                    and all(isinstance(s, dict) and s.get("field")
-                            and s.get("input_binding") == current_binding for s in sources)
-                    and signature(item) not in active)
+            if not (_open(item) and sources):
+                return False
+            # 抽样发现可能没有 field，只用 round_id 标识来源；按 round_id 或 field
+            # 绑定到当前输入即可判定是否属于本轮可重投影的范围。
+            def bound(src):
+                return (isinstance(src, dict) and (src.get("field") or src.get("round_id"))
+                        and src.get("input_binding") == current_binding)
+            return all(bound(s) for s in sources) and signature(item) not in active
         retired = [dict(item, retired_from=name) for name, entries in existing.items()
                    for item in entries if obsolete(item)]
         retired.extend(dict(item, retired_from="manual-review-queue.json")

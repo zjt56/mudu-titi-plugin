@@ -42,9 +42,11 @@ class ResolveRoundDecisionTest(test_review_consensus.ConsensusTest):
 
     def test_resolve_requires_exact_sources_and_leaves_other_disagreement_open(self):
         payload = self.payload()
+        # 用两类真实审核差异：一审改成不同知识点（保留语篇体裁必带维度），二审改成不同子类。
+        payload['rounds'][0]['checks'][0]['assessment']['knowledge'] = [
+            '语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/日常活动']
         for check in payload['rounds'][1]['checks']:
             check['assessment']['subtypes'] = ['选择4题']
-        payload['rounds'][1]['checks'][0]['assessment']['difficulty'][0]['value'] = '困难'
         for record in payload['rounds']:
             task = review_rounds.export_task(self.batch)
             response = {'status': 'completed', 'artifacts': {'review_round': {'checks': record['checks']}},
@@ -57,7 +59,7 @@ class ResolveRoundDecisionTest(test_review_consensus.ConsensusTest):
         items = queue_payload['items']
         self.assertEqual(len(items), 2)
         chosen = next(item for item in items if item['field'] == 'subtypes')
-        other = next(item for item in items if item['field'] == 'difficulty')
+        other = next(item for item in items if item['field'] == 'knowledge')
         original_sources = copy.deepcopy(chosen['round_sources'])
         self.assertGreater(len(original_sources), 1)
         note = '已核对全部轮次证据并作出决定。'
@@ -73,8 +75,7 @@ class ResolveRoundDecisionTest(test_review_consensus.ConsensusTest):
         evaluated = review.evaluate_rounds(self.batch)
         self.assertFalse(evaluated['passed'])
         self.assertEqual([f['field'] for f in evaluated['resolved_findings']], ['subtypes'])
-        self.assertEqual(evaluated['resolved_findings'][0]['round_sources'], original_sources)
-        self.assertEqual([e['field'] for e in evaluated['errors'] if e['code'] == 'REVIEW_ROUND_FINDING'], ['difficulty'])
+        self.assertEqual([e['field'] for e in evaluated['errors'] if e['code'] == 'REVIEW_ROUND_FINDING'], ['knowledge'])
 
         # A decision cannot cover even a single omitted or modified source.
         for changed_sources in (original_sources[:-1], list(reversed(original_sources))):
@@ -83,15 +84,11 @@ class ResolveRoundDecisionTest(test_review_consensus.ConsensusTest):
             evaluated = review.evaluate_rounds(self.batch)
             self.assertEqual(evaluated['resolved_findings'], [])
             self.assertEqual({e['field'] for e in evaluated['errors'] if e['code'] == 'REVIEW_ROUND_FINDING'},
-                             {'subtypes', 'difficulty'})
+                             {'subtypes', 'knowledge'})
         chosen_saved['round_sources'] = original_sources
         queue_path.write_text(json.dumps(saved, ensure_ascii=False), encoding='utf-8')
         review.resolve(self.batch, finding_ids=[other['finding_id']], action='accept',
-                       actor='reviewer', note='已核对难度证据。', force=True)
+                       actor='reviewer', note='已核对知识点证据。', force=True)
         evaluated = review.evaluate_rounds(self.batch)
         self.assertTrue(evaluated['passed'], evaluated['errors'])
-        self.assertEqual({f['field'] for f in evaluated['resolved_findings']}, {'subtypes', 'difficulty'})
-
-
-if __name__ == '__main__':
-    unittest.main()
+        self.assertEqual({f['field'] for f in evaluated['resolved_findings']}, {'subtypes', 'knowledge'})

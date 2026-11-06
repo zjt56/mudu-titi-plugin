@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from contextlib import contextmanager
 
 from . import bootstrap, config as cfgmod
 
@@ -850,7 +851,39 @@ def cut(audio: Path, out_dir: Path, item: dict) -> list[str]:
     return evidence
 
 
+@contextmanager
+def _batch_segment_lock(batch: Path):
+    """Cross-process lock shared by automatic and manual audio segmentation."""
+    lock_path = Path(batch) / "02_audio" / ".segment.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as handle:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            handle.write("0")
+            handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def run(batch: Path, cfg: dict | None = None, audio: str | None = None,
+        progress=None) -> dict:
+    with _batch_segment_lock(Path(batch)):
+        return _run_locked(batch, cfg, audio, progress)
+
+
+def _run_locked(batch: Path, cfg: dict | None = None, audio: str | None = None,
         progress=None) -> dict:
     """执行完整切段；返回摘要。progress(phase, pct, detail) 可选。"""
     cfg = cfg or cfgmod.load()

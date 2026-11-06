@@ -20,6 +20,14 @@ BRIDGE = Path(__file__).resolve().parents[1] / "scripts" / "bin" / "wf-agent.sh"
 
 
 class FailureClassificationTest(unittest.TestCase):
+    def test_part_concurrency_accepts_high_parallel_values(self):
+        self.assertEqual(agent._part_concurrency({"part_concurrency": 16}), 16)
+        self.assertEqual(agent._part_concurrency({"part_concurrency": 64}), 64)
+        with self.assertRaises(agent.AgentError):
+            agent._part_concurrency({"part_concurrency": 65})
+        with self.assertRaises(agent.AgentError):
+            agent._part_concurrency({"part_concurrency": 0})
+
     def test_ordinary_numbers_and_quota_words_are_not_transport_errors(self):
         for text in ("question 429", "QUOTA", "RATE_LIMIT", "quota exceeded in question text",
                      'payload {"artifacts":{"code":"quota"}}',
