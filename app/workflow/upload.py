@@ -65,6 +65,51 @@ def _mapping(source, catalog, options=None):
     return upload_payload.build_payload(source, catalog, **(options or {}))
 
 
+def _media_map(batch):
+    """Deployed-media map (local filename -> /source-media/... URL), if present."""
+    import json as _json
+    for relative in ("06_batch/media-map.json", "07_upload/media-map.json"):
+        path = Path(batch) / relative
+        if not path.is_file():
+            continue
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        result = {}
+        for key, value in data.items():
+            if isinstance(value, str) and value.startswith("/source-media/"):
+                result[key] = value
+            elif isinstance(value, dict):
+                url = value.get("url")
+                if isinstance(url, str) and url.startswith("/source-media/"):
+                    result[str(value.get("name") or key)] = url
+        if result:
+            break
+    else:
+        result = {}
+    # 未提供映射文件时，按已约定的部署目录生成候选映射；
+    # 是否真的可访问仍由提交前的 HEAD 校验决定（不会因为生成了 URL 就放行）。
+    from urllib.parse import quote
+    base = Path(batch).name
+    generated = {}
+    for relative in ("01_source/media", "01_source_ans/media", "02_audio"):
+        folder = Path(batch) / relative
+        if not folder.is_dir():
+            continue
+        for item in sorted(folder.iterdir()):
+            if not item.is_file():
+                continue
+            if item.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".mp3", ".wav", ".m4a", ".ogg"}:
+                continue
+            generated[item.name] = f"/source-media/{quote(base)}/{quote(item.name)}"
+    for name, url in generated.items():
+        result.setdefault(name, url)
+    return result or None
+
+
 def _media(payload):
     urls = {}
     def visit(value):
@@ -98,6 +143,10 @@ def prepare(batch_dir, *, catalog=None, config=None, check_media=True, **options
             raise
         manifest = mf.load(batch)
         options = {key: value for key, value in options.items() if value is not None}
+        if "media_map" not in options:
+            media_map = _media_map(batch)
+            if media_map:
+                options["media_map"] = media_map
         if not source.get('batch_id') and not options.get('batch_id'):
             options['batch_id'] = manifest['workflow_id']
         # 标题可从已绑定当前正文的元信息确定性继承，不使用目录名或上传年份猜测。

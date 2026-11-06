@@ -4,7 +4,7 @@
   "counts": {
     "versions": 3,
     "books": 18,
-    "units": 128
+    "units": 138
   },
   "catalog": [
     {
@@ -2954,6 +2954,12 @@
           ]
         },
         {
+          "unit": "Project 1 A video about my new school life",
+          "topic": "",
+          "path": "译林版/牛津译林版七年级上册/Project 1 A video about my new school life",
+          "sections": []
+        },
+        {
           "unit": "Unit 5 A healthy lifestyle",
           "topic": "健康饮食",
           "path": "译林版/牛津译林版七年级上册/Unit 5 A healthy lifestyle",
@@ -3092,11 +3098,13 @@
               "items": []
             }
           ]
+        },
+        {
+          "unit": "Project 2 A party plan to celebrate New Year",
+          "topic": "",
+          "path": "译林版/牛津译林版七年级上册/Project 2 A party plan to celebrate New Year",
+          "sections": []
         }
-      ],
-      "extras": [
-        "Project 1 A video about my new school life",
-        "Project 2 A party plan to celebrate New Year"
       ]
     },
     {
@@ -3247,6 +3255,12 @@
           ]
         },
         {
+          "unit": "Project 1 A travel guide to my hometown",
+          "topic": "",
+          "path": "译林版/牛津译林版七年级下册/Project 1 A travel guide to my hometown",
+          "sections": []
+        },
+        {
           "unit": "Unit 5 Animal friends",
           "topic": "动物朋友",
           "path": "译林版/牛津译林版七年级下册/Unit 5 Animal friends",
@@ -3385,11 +3399,13 @@
               "items": []
             }
           ]
+        },
+        {
+          "unit": "Project 2 A school newspaper about nature",
+          "topic": "",
+          "path": "译林版/牛津译林版七年级下册/Project 2 A school newspaper about nature",
+          "sections": []
         }
-      ],
-      "extras": [
-        "Project 1 A travel guide to my hometown",
-        "Project 2 A school newspaper about nature"
       ]
     },
     {
@@ -3540,6 +3556,12 @@
           ]
         },
         {
+          "unit": "Project 1 A class booklet about best friends",
+          "topic": "",
+          "path": "译林版/牛津译林版八年级上册/Project 1 A class booklet about best friends",
+          "sections": []
+        },
+        {
           "unit": "Unit 5 Wild animals",
           "topic": "野生动物及其保护",
           "path": "译林版/牛津译林版八年级上册/Unit 5 Wild animals",
@@ -3678,11 +3700,13 @@
               "items": []
             }
           ]
+        },
+        {
+          "unit": "Project 2 An audio campaign to help nature",
+          "topic": "",
+          "path": "译林版/牛津译林版八年级上册/Project 2 An audio campaign to help nature",
+          "sections": []
         }
-      ],
-      "extras": [
-        "Project 1 A class booklet about best friends",
-        "Project 2 An audio campaign to help nature"
       ]
     },
     {
@@ -3817,6 +3841,12 @@
           ]
         },
         {
+          "unit": "Project 1 An information folder about a country",
+          "topic": "",
+          "path": "译林版/牛津译林版八年级下册/Project 1 An information folder about a country",
+          "sections": []
+        },
+        {
           "unit": "Unit 5 Good manners",
           "topic": "礼仪",
           "path": "译林版/牛津译林版八年级下册/Unit 5 Good manners",
@@ -3939,11 +3969,13 @@
               "items": []
             }
           ]
+        },
+        {
+          "unit": "Project 2 A leaflet about how to be a good citizen",
+          "topic": "",
+          "path": "译林版/牛津译林版八年级下册/Project 2 A leaflet about how to be a good citizen",
+          "sections": []
         }
-      ],
-      "extras": [
-        "Project 1 An information folder about a country",
-        "Project 2 A leaflet about how to be a good citizen"
       ]
     },
     {
@@ -4078,6 +4110,12 @@
           ]
         },
         {
+          "unit": "Project 1 A poster about yourself",
+          "topic": "",
+          "path": "译林版/牛津译林版九年级上册/Project 1 A poster about yourself",
+          "sections": []
+        },
+        {
           "unit": "Unit 5 Music speaks",
           "topic": "音乐",
           "path": "译林版/牛津译林版九年级上册/Unit 5 Music speaks",
@@ -4200,11 +4238,13 @@
               "items": []
             }
           ]
+        },
+        {
+          "unit": "Project 2 A video about an art form",
+          "topic": "",
+          "path": "译林版/牛津译林版九年级上册/Project 2 A video about an art form",
+          "sections": []
         }
-      ],
-      "extras": [
-        "Project 1 A poster about yourself",
-        "Project 2 A video about an art form"
       ]
     },
     {

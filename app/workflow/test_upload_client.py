@@ -299,3 +299,128 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HumanSessionUploadTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.origin = f"http://127.0.0.1:{cls.server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+
+    def setUp(self):
+        self.server.calls = []
+        self.server.reply = default_reply
+        self.env = patch.dict(os.environ, {"MUDU_API_KEY": TOKEN})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.client = ApiClient({"base_url": self.origin + "/api"})
+
+    def _reply(self, login=200, upload=(201, {"id": "upload-session", "stage": "pending_confirmation"})):
+        def reply(method, path, body):
+            if path == "/api/auth/login":
+                return login, {"Set-Cookie": "mudu_session=synthetic; Path=/"}, {"user": {"username": "admin"}}
+            if path == "/api/uploads":
+                return upload[0], {}, upload[1]
+            return default_reply(method, path, body)
+        return reply
+
+    def test_login_then_submit_with_session_cookie(self):
+        self.server.reply = self._reply()
+        payload = json.dumps({"items": [{"id": "x"}]}).encode()
+        with patch.dict(os.environ, {"MUDU_UPLOAD_ACCOUNT": "admin", "MUDU_UPLOAD_PASSWORD": "synthetic-pass"}):
+            client = ApiClient({"base_url": self.origin + "/api"})
+            result = client.submit(payload)
+        self.assertEqual(result, {"id": "upload-session", "stage": "pending_confirmation"})
+        calls = [(m, p) for m, p, _, _ in self.server.calls]
+        self.assertEqual(calls[0], ("POST", "/api/auth/login"))
+        self.assertEqual(calls[1], ("POST", "/api/uploads"))
+        upload_headers = self.server.calls[1][2]
+        self.assertIn("mudu_session=synthetic", upload_headers.get("Cookie", ""))
+        self.assertNotIn("Authorization", upload_headers)
+
+    def test_bad_login_fails_without_upload(self):
+        self.server.reply = self._reply(login=401)
+        payload = json.dumps({"items": [{"id": "x"}]}).encode()
+        with patch.dict(os.environ, {"MUDU_UPLOAD_ACCOUNT": "admin", "MUDU_UPLOAD_PASSWORD": "wrong"}):
+            client = ApiClient({"base_url": self.origin + "/api"})
+            with self.assertRaises(APIError) as caught:
+                client.submit(payload)
+        self.assertEqual(caught.exception.code, "login_failed")
+        self.assertEqual([(m, p) for m, p, _, _ in self.server.calls], [("POST", "/api/auth/login")])
+
+    def test_harness_403_is_reported_as_human_session_required(self):
+        def reply(method, path, body):
+            if path == "/api/uploads":
+                return 403, {}, {"error": "human_confirmation_required"}
+            return default_reply(method, path, body)
+        self.server.reply = reply
+        payload = json.dumps({"items": [{"id": "x"}]}).encode()
+        with self.assertRaises(APIError) as caught:
+            self.client.submit(payload)
+        self.assertEqual(caught.exception.code, "human_session_required")
+
+    def test_duplicate_batch_id_blocks_second_submission(self):
+        def reply(method, path, body):
+            if path == "/api/auth/login":
+                return 200, {"Set-Cookie": "mudu_session=synthetic; Path=/"}, {"user": {"username": "admin"}}
+            if path == "/api/uploads" and method == "GET":
+                return 200, {}, {"items": [{"id": "existing", "batch_id": "b1", "stage": "pending_confirmation"}]}
+            if path == "/api/uploads":
+                return 201, {}, {"id": "upload-session", "stage": "pending_confirmation"}
+            return default_reply(method, path, body)
+        self.server.reply = reply
+        payload = json.dumps({"batch_id": "b1", "items": [{"id": "x"}]}).encode()
+        with patch.dict(os.environ, {"MUDU_UPLOAD_ACCOUNT": "admin", "MUDU_UPLOAD_PASSWORD": "synthetic-pass"}):
+            client = ApiClient({"base_url": self.origin + "/api"})
+            with self.assertRaises(APIError) as caught:
+                client.submit(payload)
+        self.assertEqual(caught.exception.code, "duplicate_batch_pending")
+        self.assertEqual(caught.exception.details["staging_id"], "existing")
+        self.assertNotIn(("POST", "/api/uploads"), [(m, p) for m, p, _, _ in self.server.calls])
+
+    def test_duplicate_guard_can_be_disabled_explicitly(self):
+        def reply(method, path, body):
+            if path == "/api/auth/login":
+                return 200, {"Set-Cookie": "mudu_session=synthetic; Path=/"}, {"user": {"username": "admin"}}
+            if path == "/api/uploads" and method == "GET":
+                return 200, {}, {"items": [{"id": "existing", "batch_id": "b1", "stage": "pending_confirmation"}]}
+            if path == "/api/uploads":
+                return 201, {}, {"id": "upload-session", "stage": "pending_confirmation"}
+            return default_reply(method, path, body)
+        self.server.reply = reply
+        payload = json.dumps({"batch_id": "b1", "items": [{"id": "x"}]}).encode()
+        with patch.dict(os.environ, {"MUDU_UPLOAD_ACCOUNT": "admin", "MUDU_UPLOAD_PASSWORD": "synthetic-pass",
+                                     "MUDU_ALLOW_DUPLICATE_UPLOAD": "1"}):
+            client = ApiClient({"base_url": self.origin + "/api"})
+            result = client.submit(payload)
+        self.assertEqual(result["id"], "upload-session")
+
+    def test_expired_session_relogins_once(self):
+        state = {"uploads": 0}
+        def reply(method, path, body):
+            if path == "/api/auth/login":
+                return 200, {"Set-Cookie": "mudu_session=synthetic; Path=/"}, {"user": {"username": "admin"}}
+            if path == "/api/uploads" and method == "GET":
+                return 200, {}, {"items": []}
+            if path == "/api/uploads":
+                state["uploads"] += 1
+                if state["uploads"] == 1:
+                    return 401, {}, {"error": "unauthorized"}
+                return 201, {}, {"id": "upload-session", "stage": "pending_confirmation"}
+            return default_reply(method, path, body)
+        self.server.reply = reply
+        payload = json.dumps({"batch_id": "b2", "items": [{"id": "x"}]}).encode()
+        with patch.dict(os.environ, {"MUDU_UPLOAD_ACCOUNT": "admin", "MUDU_UPLOAD_PASSWORD": "synthetic-pass"}):
+            client = ApiClient({"base_url": self.origin + "/api"})
+            result = client.submit(payload)
+        self.assertEqual(result["id"], "upload-session")
+        logins = [1 for m, p, _, _ in self.server.calls if p == "/api/auth/login"]
+        self.assertEqual(len(logins), 2)

@@ -251,12 +251,11 @@ def audio_map(folder: Path) -> dict:
     """unit_id → 已切好的听力片段；读取 02_audio/audio_map.json，文件存在才纳入。"""
     path = folder / "02_audio" / "audio_map.json"
     mapping = {}
-    if not path.is_file():
+    from audio.consistency import pair_is_consistent, read_pair
+    pair = read_pair(folder)
+    if not pair_is_consistent(folder, pair):
         return mapping
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig")) or {}
-    except (ValueError, OSError):
-        return mapping
+    data = pair[0] or {}
     for item in data.get("items") or []:
         if not isinstance(item, dict):
             continue
@@ -412,7 +411,8 @@ def paper_info(folder: Path, report, manifest) -> dict:
                 detected = denoise.extract_meta(text_path.read_text(encoding="utf-8-sig").splitlines()) or {}
             except (OSError, ValueError):
                 detected = {}
-    descriptor = load(INBOX / folder.name / "batch.json", {}) or {}
+    descriptor = (load(folder / "attachments" / "batch.json", {})
+                  or load(INBOX / folder.name / "batch.json", {}) or {})
     title = known(batch.get("source"), meta.get("source"), meta.get("title"), meta.get("paper_title"),
                   detected.get("source"), descriptor.get("title"))
     return {"title": str(title or MISSING), "batch": str(batch.get("batch") or folder.name),
@@ -711,18 +711,25 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
     docs = [f for f in files if Path(f["filename"]).suffix.lower() in DOC_SUFFIXES]
     if not docs:
         raise ValueError("请至少上传一个试卷文件（仅支持 .docx 或 .pdf）")
+    unsupported = [f["filename"] for f in files
+                   if Path(f["filename"]).suffix.lower() not in DOC_SUFFIXES + AUDIO_SUFFIXES]
+    if unsupported:
+        raise ValueError("不支持的附件：" + "、".join(unsupported) + "；请使用 DOCX、PDF 或音频，未保存任何文件")
     audio_files = [f for f in files if Path(f["filename"]).suffix.lower() in AUDIO_SUFFIXES]
-    if len(audio_files) > 1:
-        raise ValueError("一批最多上传一个音频文件；检测到多个音频，未保存任何文件")
     audio = audio_files[0] if audio_files else None
+    extra_audio = audio_files[1:]
     answer_candidates = [f for f in docs if re.search(r"答案|answer|解析", Path(f["filename"]).stem, re.I)]
-    if len(answer_candidates) > 1:
-        raise ValueError("一批最多上传一个答案/解析文档；请合并后再上传，未保存任何文件")
     answer = answer_candidates[0] if answer_candidates else None
-    if len(docs) > 2:
-        names = "、".join(Path(f["filename"]).name for f in docs)
-        raise ValueError("一批最多支持正文+答案/解析两个文档；检测到多余文档：" + names + "，未保存任何文件")
-    source = next((f for f in docs if f is not answer), docs[0])
+    main_candidates = [f for f in docs if f is not answer]
+    # When the same upload includes Word and PDF, retain Word as the native
+    # source and classify the PDF as supporting material, not an answer key.
+    source = next((f for f in main_candidates if Path(f['filename']).suffix.lower() == '.docx'),
+                  main_candidates[0] if main_candidates else docs[0])
+    if answer is source:
+        answer = None
+    if answer is None:
+        answer = next((f for f in docs if f is not source
+                       and Path(f['filename']).suffix.lower() == Path(source['filename']).suffix.lower()), None)
     year = str(fields.get("year") or "").strip()
     region = str(fields.get("region") or "").strip()
     title = str(fields.get("title") or "").strip()
@@ -736,25 +743,38 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
     # 未填写标题时保留用户上传文件的识别线索，不再一律变成「新试卷」。
     # 此名称仅用于展示/定位，正式来源仍由原卷卷头识别，不覆盖原文证据。
     name = _unique_batch_name(_slug(title or Path(source["filename"]).stem or f"{region}{year}"))
-    folder = INBOX / name
-    folder.mkdir(parents=True, exist_ok=True)
+    batch_folder = WORKFLOWS / name
+    batch_folder.mkdir(parents=True, exist_ok=False)
+    folder = batch_folder / "attachments"
+    folder.mkdir()
     saved_source = _save_part(folder, source, "source")
     saved_answer = _save_part(folder, answer, "answers") if answer else None
     saved_audio = _save_part(folder, audio, "audio") if audio else None
+    saved_extra_audio = [_save_part(folder, item, f"audio_{index:03d}")
+                         for index, item in enumerate(extra_audio, 1)]
+    extra_docs = [f for f in docs if f is not source and f is not answer]
+    saved_extras = [_save_part(folder, item, f"attachment_{index:03d}")
+                    for index, item in enumerate(extra_docs, 1)]
     descriptor = {"workflow_id": name, "subject": subject, "title": title or None,
                   "year": int(year) if year.isdigit() else None, "region": region or None,
                   "source_type": source_type or None, "grade": grade or None,
                   "source": saved_source.name, "answers": saved_answer.name if saved_answer else None,
                   "audio": saved_audio.name if saved_audio else None,
+                  "extra_audio": [{"path": path.name, "original_filename": Path(item['filename']).name}
+                                  for path, item in zip(saved_extra_audio, extra_audio)],
+                  "extra_documents": [{"path": path.name, "original_filename": Path(item['filename']).name}
+                                      for path, item in zip(saved_extras, extra_docs)],
                   "original_filenames": {"source": Path(source["filename"]).name,
                                          "answers": Path(answer["filename"]).name if answer else None,
                                          "audio": Path(audio["filename"]).name if audio else None}}
     save_json(folder / "batch.json", descriptor)
     candidate = {"name": name, "folder": str(folder), "subject": subject,
-                 "year": descriptor["year"], "region": descriptor["region"],
+                 "title": descriptor["title"], "year": descriptor["year"], "region": descriptor["region"],
                  "source_type": descriptor["source_type"], "grade": descriptor["grade"],
                  "source": str(saved_source), "answers": str(saved_answer) if saved_answer else None,
-                 "audio": str(saved_audio) if saved_audio else None}
+                 "audio": str(saved_audio) if saved_audio else None,
+                 "extra_documents": [str(path) for path in saved_extras],
+                 "extra_audio": [str(path) for path in saved_extra_audio]}
     batch_folder = auto_flow.ensure_batch(candidate, WORKFLOWS)
     start_advance(batch_folder.name)
     manifest = wf_manifest.load(batch_folder) if wf_manifest else {}
@@ -764,7 +784,9 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
         inbox_rel = str(folder)
     return {"name": batch_folder.name, "inbox": inbox_rel,
             "paper": paper_info(batch_folder, {}, manifest),
-            "stage": stage_cards(manifest), "files": [saved_source.name]}
+            "stage": stage_cards(manifest),
+            "files": [path.name for path in (saved_source, saved_answer, saved_audio) if path]
+                     + [path.name for path in saved_extras + saved_extra_audio]}
 
 
 def _archive_preflight(path: Path):

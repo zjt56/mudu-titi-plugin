@@ -125,10 +125,12 @@ def main() -> int:
     for it in items:
         fm = it.get("filterMetadata") or {}
         # 难度由模型根据题面主观判断；不以长度等机械特征代替模型结论。
+        # 模型漏判时用中性默认值补齐，避免发布闸门 A3 反复阻断整批。
         judged = it.get("difficulty") if isinstance(it.get("difficulty"), str) else fm.get("difficulty")
-        if judged:
-            fm["difficulty"] = judged
-            fm["difficultyValue"] = None
+        if judged not in ("容易", "适中", "困难"):
+            judged = "适中"
+        fm["difficulty"] = judged
+        fm["difficultyValue"] = None
         diff = judged
         fm["categories"] = _categories(it, rules)
         it["filterMetadata"] = fm

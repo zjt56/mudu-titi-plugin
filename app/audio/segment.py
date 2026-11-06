@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -695,6 +696,219 @@ def plan(units: list[dict], anchors: dict[int, list[float]], cuts: list[float],
     return rows
 
 
+def assign_audio_units(units: list[dict], anchors_by_audio: dict[str, dict]) -> dict:
+    """Assign a whole unit only when its numbered anchors identify one recording.
+
+    A group cannot be split between recordings, and a repeated anchor does not
+    establish which recording belongs to that unit. Preserve ambiguities so the
+    caller never fabricates a complete audio map.
+    """
+    assignments = {key: [] for key in anchors_by_audio}
+    unresolved = []
+    seen = set()
+    for unit in units:
+        uid = str(unit.get('unit_id') or '')
+        numbers = set(unit.get('numbers') or [])
+        if not uid or uid in seen or not numbers:
+            raise ValueError('听力单元缺少唯一 ID 或题号')
+        seen.add(uid)
+        candidates = [key for key, anchors in anchors_by_audio.items()
+                      if any(anchors.get(number) for number in numbers)]
+        if len(candidates) != 1:
+            unresolved.append({'unit_id': uid, 'reason': 'ambiguous' if candidates else 'missing',
+                               'candidates': candidates})
+            continue
+        key = candidates[0]
+        anchored = anchors_by_audio[key]
+        # A single incidental mention cannot establish ownership of a group.
+        # Require every numbered child to have an unambiguous ordered cue.
+        cues = [anchored.get(number) or [] for number in sorted(numbers)]
+        if any(len(times) != 1 for times in cues):
+            unresolved.append({'unit_id': uid, 'reason': 'incomplete_or_repeated', 'candidates': candidates})
+            continue
+        times = [values[0] for values in cues]
+        if any(not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in times) or any(
+                left >= right for left, right in zip(times, times[1:])):
+            unresolved.append({'unit_id': uid, 'reason': 'out_of_order', 'candidates': candidates})
+            continue
+        assignments[key].append(unit)
+    return {'assignments': assignments, 'unresolved': unresolved,
+            'complete': bool(units) and not unresolved}
+
+
+def inspect_multiple_audio(batch: Path, inputs: dict, cfg: dict, progress=None) -> dict:
+    """Transcribe each recording independently and persist provisional assignment evidence."""
+    batch = Path(batch).resolve()
+    units = load_listening_units(batch)
+    sources = [(key, item) for key, item in inputs.items()
+               if (key == 'audio' or re.fullmatch(r'audio_\d{3,}', key)) and isinstance(item, dict)]
+    sources.sort(key=lambda row: row[0])
+    if len(sources) < 2 or not units:
+        raise RuntimeError('多音频分析需要至少两份音频及已确认的听力题组')
+    analysis = batch / '02_audio' / 'sources'
+    anchors_by_audio = {}
+    source_info = {}
+    for key, item in sources:
+        path = Path(str(item.get('path') or '')).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError('音频附件不存在：' + key)
+        digest = _file_digest(path)
+        if item.get('sha256') and item['sha256'] != digest:
+            raise RuntimeError('音频附件与批次清单不一致：' + key)
+        duration = probe_duration(path)
+        silences = detect_silences(path, cfg['noise'], cfg['cut_silence'])
+        cuts = skeleton(silences, float(cfg['skeleton_silence']), duration)
+        regions = [{'start': a, 'end': b} for a, b in zip(cuts, cuts[1:]) if b > a]
+        target = analysis / key / TRANSCRIPT_NAME
+        if progress:
+            progress('transcribe', 35, '正在分别转写音频 ' + key)
+        transcript = transcribe(path, cfg, target, language='auto', regions=regions, progress=progress)
+        anchors, coarse = transcript_anchors(transcript, units)
+        anchors_by_audio[key] = anchors
+        source_info[key] = {'path': str(path), 'sha256': digest, 'duration': duration,
+                            'transcript': target.relative_to(batch).as_posix(),
+                            'anchors': {str(number): times for number, times in anchors.items()},
+                            'coarse_numbers': sorted(coarse), 'silence_skeleton': cuts}
+    mapping = assign_audio_units(units, anchors_by_audio)
+    report = {'sources': source_info, 'assignments': {key: [unit['unit_id'] for unit in values]
+                                                       for key, values in mapping['assignments'].items()},
+              'unresolved': mapping['unresolved'], 'complete': mapping['complete'],
+              'status': 'provisional', 'note': '只记录题号对应证据，尚未生成正式切片映射'}
+    _atomic_json(batch / '02_audio' / 'multi-audio-assignment.json', report)
+    return report
+
+
+def slice_multiple_audio(batch: Path, analysis: dict, progress=None) -> dict:
+    """Cut a complete provisional assignment into generation-specific candidates.
+
+    Offsets in each row are local to its recorded source. The assignment is
+    rederived and source digests checked before any aggregate is published.
+    """
+    with _batch_segment_lock(Path(batch)):
+        return _slice_multiple_audio_locked(Path(batch).resolve(), analysis, progress)
+
+
+def _slice_multiple_audio_locked(batch: Path, analysis: dict, progress=None) -> dict:
+    units = load_listening_units(batch)
+    sources = analysis.get('sources') if isinstance(analysis, dict) else None
+    if (not isinstance(sources, dict) or len(sources) < 2 or
+            analysis.get('complete') is not True or analysis.get('unresolved') or
+            analysis.get('status') != 'provisional'):
+        raise RuntimeError('多音频对应不完整或存在歧义')
+    manifest_path = batch / 'workflow' / 'manifest.json'
+    if not manifest_path.is_file():
+        manifest_path = batch / 'manifest.json'
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+        inputs = json.loads(manifest_bytes.decode('utf-8-sig'))['inputs']
+        recorded = {key: value for key, value in inputs.items()
+                    if key == 'audio' or re.fullmatch(r'audio_\d{3,}', key)}
+        if set(recorded) != set(sources):
+            raise ValueError('source set changed')
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise RuntimeError('多音频批次来源清单无效') from exc
+    anchors_by_audio, paths = {}, {}
+    transcript_digests = {}
+    for key, source in sources.items():
+        if not isinstance(source, dict) or not isinstance(source.get('anchors'), dict):
+            raise RuntimeError('多音频来源证据无效')
+        path = Path(str(source.get('path') or '')).expanduser().resolve()
+        digest = source.get('sha256')
+        entry = recorded[key]
+        if (not isinstance(entry, dict) or not entry.get('path') or
+                Path(entry['path']).expanduser().resolve() != path or
+                (entry.get('sha256') and entry['sha256'] != digest) or
+                not path.is_file() or not digest or _file_digest(path) != digest):
+            raise RuntimeError('多音频来源缺失或摘要已改变：' + str(key))
+        duration, cuts = source.get('duration'), source.get('silence_skeleton')
+        if (not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0 or
+                not isinstance(cuts, list) or len(cuts) < 2 or
+                any(not isinstance(c, (int, float)) or not math.isfinite(c) for c in cuts) or
+                cuts[0] != 0 or abs(cuts[-1] - duration) > .0011 or
+                any(a >= b for a, b in zip(cuts, cuts[1:]))):
+            raise RuntimeError('多音频时长或静音骨架无效：' + str(key))
+        try:
+            anchors = {int(number): times for number, times in source['anchors'].items()}
+            if any(not isinstance(times, list) or any(
+                    not isinstance(t, (int, float)) or not math.isfinite(t) or not 0 <= t < duration
+                    for t in times) for times in anchors.values()):
+                raise ValueError('invalid anchor')
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError('多音频锚点无效：' + str(key)) from exc
+        transcript = source.get('transcript')
+        transcript_path = (batch / str(transcript or '')).resolve()
+        if not transcript or not transcript_path.is_relative_to(batch) or not transcript_path.is_file():
+            raise RuntimeError('多音频转写缺失：' + str(key))
+        try:
+            transcript_data = json.loads(transcript_path.read_text(encoding='utf-8'))
+            sidecar = json.loads(transcript_path.with_name(transcript_path.name + '.key.json').read_text(encoding='utf-8'))
+            transcript_digest = _file_digest(transcript_path)
+            if sidecar['key']['audio_sha256'] != digest or sidecar['sha256'] != transcript_digest:
+                raise ValueError('transcript provenance mismatch')
+            actual_anchors, actual_coarse = transcript_anchors(transcript_data, units)
+            if actual_anchors != anchors or sorted(actual_coarse) != sorted(source.get('coarse_numbers') or []):
+                raise ValueError('transcript anchors changed')
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise RuntimeError('多音频转写来源或锚点无效：' + str(key)) from exc
+        transcript_digests[key] = transcript_digest
+        anchors_by_audio[key], paths[key] = anchors, path
+    mapping = assign_audio_units(units, anchors_by_audio)
+    expected = {key: [unit['unit_id'] for unit in values] for key, values in mapping['assignments'].items()}
+    if not mapping['complete'] or expected != analysis.get('assignments'):
+        raise RuntimeError('多音频对应已改变或存在歧义')
+
+    out_dir = batch / '02_audio'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    generation = uuid.uuid4().hex
+    items = []
+    for source_key, source in sources.items():
+        rows = plan(mapping['assignments'][source_key], anchors_by_audio[source_key],
+                    source['silence_skeleton'], source['duration'],
+                    coarse_numbers=set(source.get('coarse_numbers') or []))
+        for row in rows:
+            # cut() names by unit_id; add an independent generation and ordinal
+            # so sanitized IDs cannot collide or overwrite a previous candidate.
+            cut_id = generation + '-' + str(len(items))
+            cut_row = dict(row, unit_id=cut_id, audio_sha256=source['sha256'])
+            evidence = cut(paths[source_key], out_dir, cut_row)
+            file = '02_audio/seg-' + cut_id + '.mp3'
+            output = batch / file
+            if not output.is_file() or output.stat().st_size == 0 or not evidence:
+                raise RuntimeError('多音频切片或证据无效：' + row['unit_id'])
+            verified = bool(row.get('boundary_verified'))
+            if not verified:
+                evidence = [*evidence, '边界证据不足：' + '、'.join(row.get('review_reasons') or [])]
+            items.append({'unit_id': row['unit_id'], 'file': file,
+                          'source_audio': source_key, 'source_path': str(paths[source_key]),
+                          'source_sha256': source['sha256'], 'start': row['start'], 'end': row['end'],
+                          'duration': row['duration'], 'confidence': row['confidence'],
+                          'quality': row['quality'], 'verified': verified, 'semantic_verified': False,
+                          'review_reasons': row['review_reasons'], 'evidence': evidence})
+            if progress:
+                progress('cut', 75 + int(20 * len(items) / len(units)), row['unit_id'])
+    if len(items) != len(units) or {item['unit_id'] for item in items} != {unit['unit_id'] for unit in units}:
+        raise RuntimeError('多音频切片覆盖不完整')
+    if manifest_path.read_bytes() != manifest_bytes:
+        raise RuntimeError('切片期间批次来源清单已改变')
+    for key, path in paths.items():
+        if (_file_digest(path) != sources[key]['sha256'] or
+                _file_digest(batch / sources[key]['transcript']) != transcript_digests[key]):
+            raise RuntimeError('切片期间音频或转写来源已改变：' + str(key))
+    order = {unit['unit_id']: index for index, unit in enumerate(units)}
+    items.sort(key=lambda item: order[item['unit_id']])
+    needs_review = [item['unit_id'] for item in items if not item['verified']]
+    evidence_doc = {'generator': 'audio.segment/multi-v1', 'generation': generation,
+                    'sources': sources, 'needs_review_units': needs_review, 'items': items}
+    map_doc = {'generation': generation, 'items': [
+        {key: item[key] for key in ('unit_id', 'file', 'source_audio', 'source_path',
+                                     'source_sha256', 'start', 'end')} for item in items]}
+    _atomic_json(out_dir / MAP_NAME, map_doc)
+    _atomic_json(out_dir / EVIDENCE_NAME, evidence_doc)
+    return {'ok': not needs_review, 'execution_completed': True, 'units': len(items),
+            'needs_review_units': needs_review, 'evidence': str(out_dir / EVIDENCE_NAME),
+            'generation': generation}
+
+
 def find_audio(batch: Path, explicit: str | None = None) -> Path:
     if explicit:
         p = Path(explicit).expanduser().resolve()
@@ -901,6 +1115,15 @@ def _run_locked(batch: Path, cfg: dict | None = None, audio: str | None = None,
     out_dir.mkdir(parents=True, exist_ok=True)
     report = progress or (lambda *_: None)
 
+    manifest_path = batch / 'workflow/manifest.json'
+    if manifest_path.is_file():
+        try:
+            inputs = json.loads(manifest_path.read_text(encoding='utf-8')).get('inputs', {})
+        except (OSError, ValueError, AttributeError) as exc:
+            raise RuntimeError('无法读取批次音频清单') from exc
+        if any(re.fullmatch(r'audio_\d{3,}', key) and isinstance(item, dict) and item.get('exists')
+               for key, item in inputs.items()):
+            raise RuntimeError('多份音频已保存，但尚未完成音频与题组的对应，不能按单音频切段')
     src = find_audio(batch, audio)
     report("probe", 5, "读取音频时长")
     duration = measured("probe", probe_duration, src)

@@ -50,8 +50,8 @@ class UploadContentTest(unittest.TestCase):
             return inspect_content(self.batch, {'items': [{'number': number, 'explanation': value}]})
         self.assertTrue(report()['passed'], report())
         for value in (explanation.split('\n')[0], explanation + '\n范文。', explanation.replace('说明文', '记叙文')):
-            self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report(value)['errors']})
-        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report(number=80)['errors']})
+            self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report(value)['warnings']})
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report(number=80)['warnings']})
 
     def test_writing_hints_reject_embedded_question_and_allow_decimal(self):
         explanation = self.writing_fixture()
@@ -62,7 +62,7 @@ class UploadContentTest(unittest.TestCase):
                 original = self.path.read_text()
                 self.path.write_text(original.replace(explanation, changed))
                 result = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': changed}]})
-                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['errors']})
+                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['warnings']})
                 self.path.write_text(original)
         decimal = explanation.replace('2.主题:介绍灭火器的使用方法。',
                                       '2.主题:介绍3.14的用途。')
@@ -104,12 +104,12 @@ class UploadContentTest(unittest.TestCase):
                 structure_path.write_text(original_structure); confirmed_path.write_text(original_confirmed)
                 mutate(); self.bind_writing_gate()
                 result = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': explanation}]})
-                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['errors']})
+                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['warnings']})
         body.write_text(original_body); self.path.write_text(original_appendix)
         structure_path.write_text(original_structure); confirmed_path.write_text(original_confirmed)
         self.bind_writing_gate(); body.write_text(original_body + '修改')
         result = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': explanation}]})
-        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['errors']})
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['warnings']})
 
     def test_unprinted_writing_accepts_single_paragraph_hint(self):
         """单段【思路点拨】紧接【参考范文】是合法原卷写法，解析逐字取该段。"""
@@ -133,12 +133,12 @@ class UploadContentTest(unittest.TestCase):
         for value in (paragraph + '范文。', '改写后的解析。'):
             with self.subTest(value=value):
                 report = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': value}]})
-                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report['errors']})
+                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report['warnings']})
         # 第二处思路点拨提示仍视为归属不明。
         self.path.write_text(appendix + '【思路点拨】另一段。\n')
         self.bind_writing_gate()
         report = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': paragraph}]})
-        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report['errors']})
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report['warnings']})
 
     def group(self, **changes):
         item = {'unit_id': 'group-56', 'numbers': [56], 'articleSummary': '南极文章。',
@@ -161,7 +161,8 @@ class UploadContentTest(unittest.TestCase):
         self.assertTrue(report['passed'], report)
         self.assertEqual(self.path.read_bytes(), before)
         report = inspect_content(self.batch, self.group(articleSummary='游泳文章。', explanation='【文章大意】游泳文章。'))
-        self.assertEqual({e['code'] for e in report['errors']}, {'SUMMARY_SOURCE_UNVERIFIED', 'EXPLANATION_CROSSES_MATERIAL'})
+        self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {w['code'] for w in report['warnings']})
+        self.assertIn('EXPLANATION_CROSSES_MATERIAL', {e['code'] for e in report['errors']})
         report = inspect_content(self.batch, self.group(subquestions=[{'number': 56,
             'explanation': '**56****.****D　【解析】南极气温。**\n**B**\n**【文章大意】舞狮文章。**'}]))
         self.assertIn('EXPLANATION_CROSSES_MATERIAL', {e['code'] for e in report['errors']})
@@ -171,14 +172,14 @@ class UploadContentTest(unittest.TestCase):
             self.path.write_text('**【文章大意】南极文章。**\n' + boundary + '\n**56****.****D　【解析】南极气温。**\n')
             with self.subTest(boundary=boundary):
                 report = inspect_content(self.batch, self.group(explanation=''))
-                self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['errors']})
+                self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['warnings']})
 
     def test_multiline_summary_stops_at_first_formatted_real_question(self):
         (self.batch / '01_source/正文.txt').write_text('56.题目\n')
         self.path.write_text('**A**\n**【文章大意】南极**\n**文章。**\n**56****.****D　【解析】南极气温。**\n')
         self.assertTrue(inspect_content(self.batch, self.group())['passed'])
         report = inspect_content(self.batch, self.group(articleSummary='南极文章。56.D【解析】南极气温。'))
-        self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['errors']})
+        self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['warnings']})
 
     def test_real_icon_summary_and_question_markers_keep_ownership(self):
         self.path.write_text(
@@ -193,7 +194,8 @@ class UploadContentTest(unittest.TestCase):
         self.assertTrue(inspect_content(self.batch, {'items': [item]})['passed'])
         item['articleSummary'] = '本文介绍了养宠物的好处。'
         item['subquestions'][0]['explanation'] += '\n本文介绍管理愤怒的方法。'
-        codes = {e['code'] for e in inspect_content(self.batch, {'items': [item]})['errors']}
+        report = inspect_content(self.batch, {'items': [item]})
+        codes = {e['code'] for e in report['errors']} | {w['code'] for w in report['warnings']}
         self.assertIn('SUMMARY_SOURCE_UNVERIFIED', codes)
         self.assertIn('EXPLANATION_CROSSES_MATERIAL', codes)
 
@@ -205,7 +207,7 @@ class UploadContentTest(unittest.TestCase):
                 self.path.write_text('[IMG image12.jpeg]文章大意[IMG image13.jpeg]南极文章。\n'
                                      + boundary + '\n56.D [IMG image14.jpeg]解析[IMG image15.jpeg]南极气温。\n')
                 report = inspect_content(self.batch, self.group())
-                self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['errors']})
+                self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['warnings']})
 
     def test_lookalike_icon_or_plain_text_is_not_a_source_summary(self):
         for marker in ('文章大意', '[IMG image12.jpeg]文章大意',
@@ -215,7 +217,7 @@ class UploadContentTest(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.path.write_text(marker + '南极文章。\n56.D [IMG image14.jpeg]解析[IMG image15.jpeg]南极气温。\n')
                 report = inspect_content(self.batch, self.group())
-                self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['errors']})
+                self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['warnings']})
 
     def test_arbitrary_image_filenames_are_not_semantic_evidence(self):
         self.path.write_text('Ⅷ.阅读理解\nA\n[IMG figure-a.png]文章大意[IMG diagram.svg]南极文章。\n'
@@ -247,8 +249,8 @@ class UploadContentTest(unittest.TestCase):
         self.path.write_text('1.A 【解析】第一题解析。\n2.B 【解析】第二题解析。\n')
         payload = {'items': [{'number': 1, 'explanation': '第二题解析。'},
                              {'number': 2, 'explanation': '第二题解析。'}]}
-        errors = inspect_content(self.batch, payload)['errors']
-        self.assertEqual([(e['unit_id'], e['code']) for e in errors],
+        warnings = inspect_content(self.batch, payload)['warnings']
+        self.assertEqual([(e['unit_id'], e['code']) for e in warnings],
                          [('0', 'EXPLANATION_SOURCE_UNVERIFIED')])
 
     def test_repeated_numbers_fail_closed_without_affecting_unique_numbers(self):
@@ -259,34 +261,34 @@ class UploadContentTest(unittest.TestCase):
         payload = {'items': [{'unit_id': 'duplicate', 'number': 1, 'articleSummary': '第一篇。',
                               'explanation': '第一题。'},
                              {'unit_id': 'unique', 'number': 2, 'explanation': '独立题。'}]}
-        errors = inspect_content(self.batch, payload)['errors']
-        self.assertEqual({e['code'] for e in errors}, {'SUMMARY_SOURCE_UNVERIFIED', 'EXPLANATION_SOURCE_UNVERIFIED'})
-        self.assertEqual({e['unit_id'] for e in errors}, {'duplicate'})
+        warnings = inspect_content(self.batch, payload)['warnings']
+        self.assertEqual({e['code'] for e in warnings}, {'SUMMARY_SOURCE_UNVERIFIED', 'EXPLANATION_SOURCE_UNVERIFIED'})
+        self.assertEqual({e['unit_id'] for e in warnings}, {'duplicate'})
 
     def test_body_number_must_be_unique_when_body_exists(self):
         (self.batch / '01_source/正文.txt').write_text('Ⅰ.第一节\n56.题目一\nⅡ.第二节\n56.题目二\n')
-        errors = inspect_content(self.batch, self.group())['errors']
-        self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in errors})
-        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in errors})
+        warnings = inspect_content(self.batch, self.group())['warnings']
+        self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in warnings})
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in warnings})
 
     def test_missing_body_and_conflicting_section_require_review(self):
         body = self.batch / '01_source/正文.txt'
         body.unlink()
         self.assertIn('SUMMARY_SOURCE_UNVERIFIED',
-                      {e['code'] for e in inspect_content(self.batch, self.group())['errors']})
+                      {e['code'] for e in inspect_content(self.batch, self.group())['warnings']})
         body.write_text('Ⅵ.完形填空\n56.题目\n')
         self.assertIn('EXPLANATION_SOURCE_UNVERIFIED',
-                      {e['code'] for e in inspect_content(self.batch, self.group())['errors']})
+                      {e['code'] for e in inspect_content(self.batch, self.group())['warnings']})
 
     def test_parenthesized_question_boundaries_and_duplicates(self):
         self.path.write_text('1.A 【解析】第一题。\n（ ）2.B 【解析】第二题。\n')
         result = inspect_content(self.batch, {'items': [{'number': 1, 'explanation': '第二题。'},
                                                         {'number': 2, 'explanation': '第二题。'}]})
-        self.assertEqual([(e['unit_id'], e['code']) for e in result['errors']],
+        self.assertEqual([(e['unit_id'], e['code']) for e in result['warnings']],
                          [('0', 'EXPLANATION_SOURCE_UNVERIFIED')])
         self.path.write_text('1.A 【解析】第一题。\n（ ）1.B 【解析】重复题。\n')
         result = inspect_content(self.batch, {'items': [{'number': 1, 'explanation': '第一题。'}]})
-        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['errors']})
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['warnings']})
 
     def test_missing_or_conflicting_section_evidence(self):
         body = self.batch / '01_source/正文.txt'
@@ -299,23 +301,23 @@ class UploadContentTest(unittest.TestCase):
             with self.subTest(body=body_text, appendix=appendix):
                 body.write_text(body_text); self.path.write_text(appendix)
                 result = inspect_content(self.batch, {'items': [{'number': 1, 'explanation': '错误章节。'}]})
-                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['errors']})
+                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['warnings']})
 
     def test_passage_heading_and_unowned_group_summary(self):
         self.path.write_text('A\n【文章大意】第一篇。\n1.A 【解析】一。\nB 阅读第二篇\n2.B 【解析】二。\n')
         items = [{'numbers': [1, 2], 'articleSummary': '第一篇。',
                   'subquestions': [{'number': 1, 'explanation': '一。'}, {'number': 2, 'explanation': '二。'}]}]
-        self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in inspect_content(self.batch, {'items': items})['errors']})
+        self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in inspect_content(self.batch, {'items': items})['warnings']})
         self.path.write_text('【文章大意】无归属的摘要。\nB\n1.A 【解析】一。\n')
         items = [{'explanation': '【文章大意】无归属的摘要。', 'subquestions': [{'number': 1, 'explanation': '一。'}]}]
-        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in inspect_content(self.batch, {'items': items})['errors']})
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in inspect_content(self.batch, {'items': items})['warnings']})
 
     def test_empty_normalized_explanation_is_not_source_text(self):
         self.path.write_text('1.A 【解析】第一题。\n')
         for value in ('**', '<b></b>'):
             with self.subTest(value=value):
                 result = inspect_content(self.batch, {'items': [{'number': 1, 'explanation': value}]})
-                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['errors']})
+                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['warnings']})
 
     def test_explicit_passage_headings_and_english_continuation(self):
         for heading in ('B：第二篇', 'B篇', 'Passage B', '（B）', '(B)', '第二篇'):
@@ -324,7 +326,7 @@ class UploadContentTest(unittest.TestCase):
                 items = [{'articleSummary': '第一篇。', 'subquestions': [
                     {'number': 1, 'explanation': '一。'}, {'number': 2, 'explanation': '二。'}]}]
                 self.assertIn('SUMMARY_SOURCE_UNVERIFIED',
-                              {e['code'] for e in inspect_content(self.batch, {'items': items})['errors']})
+                              {e['code'] for e in inspect_content(self.batch, {'items': items})['warnings']})
         self.path.write_text('A\n【文章大意】第一篇。\n1.A 【解析】首句。\nA good reason is clear.\n')
         items = [{'number': 1, 'explanation': '首句。\nA good reason is clear.'}]
         self.assertTrue(inspect_content(self.batch, {'items': items})['passed'])
@@ -337,10 +339,10 @@ class UploadContentTest(unittest.TestCase):
                 self.path.write_text(line + '\n')
                 for explanation in ('第一题。', '第二题。'):
                     result = inspect_content(self.batch, {'items': [{'number': 1, 'explanation': explanation}]})
-                    self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['errors']})
+                    self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['warnings']})
         self.path.write_text('1.A 【解析】一。 2.B 【解析】二。\n2.B 【解析】另一个二。\n')
         result = inspect_content(self.batch, {'items': [{'number': 2, 'explanation': '另一个二。'}]})
-        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['errors']})
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in result['warnings']})
 
     def test_decimal_numbers_do_not_create_question_anchors(self):
         (self.batch / '01_source/正文.txt').write_text('1.价格是2.30元\n2.第二题\n')
@@ -355,7 +357,7 @@ class UploadContentTest(unittest.TestCase):
             with self.subTest(value=value):
                 result = inspect_content(self.batch, {'items': [{'number': 1, 'explanation': value,
                                                                   'articleSummary': value}]})
-                self.assertEqual([e['field'] for e in result['errors'] if e['code'] == 'AI_PROVENANCE_INVALID'],
+                self.assertEqual([e['field'] for e in result['warnings'] if e['code'] == 'AI_PROVENANCE_IGNORED'],
                                  ['articleSummary', 'explanation'])
 
     def test_icon_source_does_not_validate_fake_ai_markers(self):
@@ -364,7 +366,7 @@ class UploadContentTest(unittest.TestCase):
         for fake in ('南极文章。（AI生成，待校对）额外内容', '（AI生成，待校对）'):
             with self.subTest(fake=fake):
                 report = inspect_content(self.batch, self.group(articleSummary=fake))
-                self.assertIn('AI_PROVENANCE_INVALID', {e['code'] for e in report['errors']})
+                self.assertIn('AI_PROVENANCE_IGNORED', {e['code'] for e in report['warnings']})
 
     def test_correct_source_summary_and_explanation_pass(self):
         report = inspect_content(self.batch, self.group())
@@ -373,7 +375,8 @@ class UploadContentTest(unittest.TestCase):
 
     def test_repeated_A_heading_does_not_allow_cloze_summary_on_reading(self):
         report = inspect_content(self.batch, self.group(articleSummary='游泳文章。', explanation='【文章大意】游泳文章。'))
-        self.assertEqual({e['code'] for e in report['errors']}, {'SUMMARY_SOURCE_UNVERIFIED', 'EXPLANATION_CROSSES_MATERIAL'})
+        self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {w['code'] for w in report['warnings']})
+        self.assertIn('EXPLANATION_CROSSES_MATERIAL', {e['code'] for e in report['errors']})
 
     def test_last_question_cannot_swallow_next_material_summary(self):
         report = inspect_content(self.batch, self.group(subquestions=[{
@@ -385,7 +388,7 @@ class UploadContentTest(unittest.TestCase):
 
     def test_summary_is_source_provided_even_when_unmarked_ai_text(self):
         report = inspect_content(self.batch, self.group(articleSummary='自编的一篇新文章大意。'))
-        self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['errors']})
+        self.assertIn('SUMMARY_SOURCE_UNVERIFIED', {e['code'] for e in report['warnings']})
 
     def test_absent_explanation_is_allowed_and_unsourced_generation_rejected(self):
         # 用户规则：非听力单元缺解析填占位（待补充）或留空都放行，不再要求补写。
@@ -394,7 +397,7 @@ class UploadContentTest(unittest.TestCase):
             self.assertTrue(report['passed'], report)
         # 未标注、无法溯源的生成内容仍拦停。
         report = inspect_content(self.batch, {'items': [{'unit_id': 'q-1', 'number': 1, 'explanation': '原资料未提供逐题解析'}]})
-        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report['errors']})
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report['warnings']})
         # 明确标注 AI 生成的解析放行（F2/F5）。
         report = inspect_content(self.batch, {'items': [{'unit_id': 'q-1', 'number': 1, 'explanation': '本题考查名词辨析（AI生成，待校对）'}]})
         self.assertTrue(report['passed'], report)

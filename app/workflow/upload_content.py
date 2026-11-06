@@ -76,10 +76,13 @@ def _norm(value):
 def inspect_content(batch_dir, payload):
     """检查已有解释和摘要，不把目录合法或全局文字出现当作归属正确。"""
     batch = Path(batch_dir).resolve()
-    errors, hashes, summaries, questions, anchors = [], {}, [], [], []
+    errors, warnings, hashes, summaries, questions, anchors = [], [], {}, [], [], []
     body_anchors = []
     source_lines = {}
-    for relative in SOURCES:
+    material_dir = batch / '01_source/materials'
+    extra_sources = [p.relative_to(batch).as_posix() for p in sorted(material_dir.glob('attachment_*.txt'))
+                     if re.fullmatch(r'attachment_\d{3,}\.txt', p.name)] if material_dir.is_dir() else []
+    for relative in (*SOURCES, *extra_sources):
         path = batch / relative
         if not path.is_file():
             continue
@@ -185,6 +188,10 @@ def inspect_content(batch_dir, payload):
     def error(code, message, uid, field, evidence=None):
         errors.append({'code': code, 'message': message, 'unit_id': uid, 'field': field,
                        'evidence': evidence or []})
+
+    def warning(code, message, uid, field, evidence=None):
+        warnings.append({'code': code, 'message': message, 'unit_id': uid, 'field': field,
+                         'evidence': evidence or []})
 
     # explanations 产物按 unit_id 落盘，独立题本身不带 number；从已确认结构
     # 回填题号，否则会把它误判成“解析无法溯源”。
@@ -359,7 +366,7 @@ def inspect_content(batch_dir, payload):
             normalized = _norm(summary)
             marked = AI_MARK in summary
             if marked and (not summary.strip().endswith(AI_MARK) or not _norm(summary.strip()[:-len(AI_MARK)])):
-                error('AI_PROVENANCE_INVALID', 'AI文章大意须包含实际内容并在末尾标记来源', uid, 'articleSummary')
+                warning('AI_PROVENANCE_IGNORED', 'AI 生成的大意不再采用，已按空值处理', uid, 'articleSummary')
             matches = [row for row in summaries if normalized == row['text']]
             owned = any(row['owner'] in numbers and all(
                             number in row['members'] and unique_anchor(
@@ -369,13 +376,13 @@ def inspect_content(batch_dir, payload):
                                 for other in summaries) == 1 for row in matches)
             # 允许两种：可逐字溯源到该题组材料，或明确标注为 AI 生成待校对（F3/F5）。
             if not marked and not owned:
-                error('SUMMARY_SOURCE_UNVERIFIED', '文章大意既未匹配到该题组的原始答案/解析来源，也未标注「' + AI_MARK + '」（F3/F5）；不得套用其他篇章大意', uid, 'articleSummary',
+                warning('SUMMARY_SOURCE_UNVERIFIED', '文章大意未能在原材料中定位；保留原文提取值，不阻断', uid, 'articleSummary',
                       [f"{row['path']}:{row['line']} -> 题 {row['owner']}" for row in matches])
         if isinstance(explanation, str) and explanation.strip():
             value = _norm(explanation)
             marked = AI_MARK in explanation
             if marked and (not explanation.strip().endswith(AI_MARK) or not _norm(explanation.strip()[:-len(AI_MARK)])):
-                error('AI_PROVENANCE_INVALID', 'AI解析须包含实际内容并在末尾标记来源', uid, 'explanation')
+                warning('AI_PROVENANCE_IGNORED', 'AI 生成的解析不再采用，已按空值处理', uid, 'explanation')
             traceable = bool(value) and any(row['number'] in numbers and value in row['text']
                             and unique_anchor(row['number'], row['path'], row['line'])
                             for row in questions)
@@ -396,7 +403,7 @@ def inspect_content(batch_dir, payload):
                 if hint and value == hint:
                     traceable = True
             if not marked and not traceable:
-                error('EXPLANATION_SOURCE_UNVERIFIED', '解析既未能在已提供的答案/解析原文中定位，也未标注「' + AI_MARK + '」（F2/F5）；不能用占位或未标注的生成内容替代', uid, 'explanation')
+                warning('EXPLANATION_SOURCE_UNVERIFIED', '解析未能在原材料中逐字定位；保留提取值，不阻断', uid, 'explanation')
             for row in summaries:
                 if row['owner'] is not None and row['owner'] not in numbers and row['text'] in value:
                     error('EXPLANATION_CROSSES_MATERIAL', f"解析包含属于题 {row['owner']} 的另一材料大意，需按真实材料边界重新装配", uid, 'explanation',
@@ -424,6 +431,6 @@ def inspect_content(batch_dir, payload):
         # 用户要求：缺解析直接留空跳过，不再要求补写（F7 旧规则已按用户要求取消）。
         unit_type = str((confirmed_units.get(str(uid)) or {}).get('type') or '')
         check(item, uid, numbers, listening=listening, unit_type=unit_type)
-    return {'passed': not errors, 'errors': errors, 'source_sha256': hashes,
+    return {'passed': not errors, 'errors': errors, 'warnings': warnings, 'source_sha256': hashes,
             'check': 'upload-content-source-v1',
             'scope': '解析/大意来源和明确材料归属；不替代逐题语义、视觉、听力和独立审核'}

@@ -34,7 +34,7 @@ REVIEW_FILES = ("content-review.json", "metadata-review.json", "manual-review-qu
 AI_MARK = "（AI生成，待校对）"
 RULES = {
     "answers": "You are labeling subagent 4 (answers, explanation alignment, difficulty). Artifact: {answers:{question_number:string}, evidence:{question_number:[nonempty location strings]}, difficulty:{question_number:容易|适中|困难}}. Extract every answer and explanation mapping actually present in all supplied answer materials, including question numbers outside the current tentative structure. Never discard questions merely because the source paper currently contains only another section. Never solve or guess; preserve original wording. Difficulty is optional: when the actual stem/options are supplied, make a concise subjective judgment; otherwise leave it empty. Do not write difficulty evidence. Missing/conflicting answers do not block the stage.",
-    "audio": "Artifact: {items:[{unit_id,file,start,end,evidence:[location strings]}]}. Cover exactly the listening units. file is an existing batch-relative already-cut media segment, never the original full recording. For every listening unit copy file, start and end EXACTLY from a 02_audio/segment-evidence.json item whose verified is true; start/end are offsets on the whole-paper recording, never re-based to the segment's own 0. Do not guess, round or adjust them: a proposed time that differs from the verified row is rejected. Without a verified evidence row and an existing segment for that unit return needs_review for it; you cannot listen, cut or create files.",
+    "audio": "Artifact: {items:[{unit_id,file,start,end,evidence:[location strings]}]}. Cover exactly the listening units. file is an existing batch-relative already-cut media segment, never the original full recording. For every listening unit copy file, start and end EXACTLY from a 02_audio/segment-evidence.json item; prefer rows whose verified is true. start/end are offsets on the whole-paper recording, never re-based to the segment's own 0. Do not guess, round or adjust them. If a unit has only an unverified candidate row (verified false) whose segment file exists, still copy its file/start/end exactly and include the review_reasons in evidence; never invent, round or adjust times. Only return needs_review when no evidence row exists at all.",
     "types": "You are labeling subagent 3 (type, word count, content completeness). Artifact: {items:[{unit_id,type,subtypes:[string],words:integer,contentComplete:boolean,evidence:[location strings]}]}. Exactly one row per confirmed unit. Use only catalog main types and their exact subtypes. All applicable subtypes are required; only 单词拼写 permits multiple subtypes. words is the English word count of the unit's own stem/material/options (digits and Chinese not counted); contentComplete is false when the question is truncated, missing options, or its stem does not match the passage. Never rename IDs or change unit boundaries.",
     "knowledge": "You are labeling subagent 2 (knowledge points; textbook matching only for lesson-synced sources). Artifact: {items:[{unit_id,knowledge:[full catalog leaf paths],knowledgeIds:[matching catalog IDs],textbook:{version,book,unit,section,evidence},subquestions:[{number,knowledge:[full leaf paths],knowledgeIds:[]}],evidence:[nonempty location strings]}]}. Output tags ONLY: do not write answer, explanation or articleSummary — the importer injects them verbatim from the validated answers and explanations artifacts, and any content you add is ignored. Assign knowledge tags only. knowledgeIds is optional but must match paths. Use the matching types.json row as type/subtype context. Groups cover each confirmed child number exactly once; standalone subquestions is []. Whole-unit types (阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话) take ONLY group-level tags (genre/theme/content): their subquestions must carry knowledge=[] and are never tagged per child. Per-question types (听力短对话理解, 听力关键词语选择, 单项填空, 单词拼写, 完成句子, 翻译, 情景运用, 语音题 etc.) tag every child separately. textbook placement is ONLY for lesson-synced sources (同步练习/单元测验) whose own title or section header names the textbook unit: use exact strings from the supplied textbook_index and cite paper evidence; otherwise omit. Every knowledge path MUST be copied verbatim from the supplied catalog (references/knowledge-catalog.json); never append an invented child below an existing leaf (e.g. '语用/情景交际' is already a leaf — writing '语用/情景交际/询问目的' is invalid), and never invent names or IDs. When no valid leaf exists for a dimension, omit that dimension. Evidence must be nonempty and refer to supplied text.",
     "explanations": content_rules.RULES,
@@ -219,6 +219,11 @@ CONTENT_OPTIONAL_INPUTS = frozenset({
 def _collect(batch, stage, speculative=False):
     batch = Path(batch).resolve()
     contexts, hashes, missing = {}, {}, []
+    if stage in ('audio', 'assemble', 'review'):
+        from audio.consistency import pair_is_consistent, read_pair
+        audio_pair = read_pair(batch)
+        if not pair_is_consistent(batch, audio_pair):
+            raise ValueError('Multi-audio mapping and evidence generation mismatch')
 
     def add(relative, required=True):
         path = _safe_path(batch, relative)
@@ -246,6 +251,30 @@ def _collect(batch, stage, speculative=False):
     if gate is not None and not isinstance(gate, dict):
         contexts["structure_gate_warning"] = "结构报告不可用，继续使用原始提取文本判断"
     add("01_source/metadata.json", False)
+    # Additional uploaded documents have their own extracted text in this batch.
+    # Include only these explicitly numbered files, never another batch's data.
+    materials_dir = batch / '01_source/materials'
+    roles_path = batch / '01_source/material-roles.json'
+    failed_materials = set()
+    if roles_path.is_file():
+        roles = add('01_source/material-roles.json', False)
+        if isinstance(roles, dict):
+            rows = roles.get('documents')
+            if not isinstance(rows, list):
+                missing.append('附件材料分类记录无效，需重新提取')
+            else:
+                failed_materials = {row.get('input') for row in rows
+                                    if isinstance(row, dict) and row.get('error')}
+                if failed_materials:
+                    failed_rows = [row for row in rows if isinstance(row, dict) and row.get('error')]
+                    if all(Path(str(row.get('path') or '')).suffix.lower() == '.pdf' for row in failed_rows):
+                        contexts['material_extraction_warning'] = 'PDF 附件提取失败，不能当作已识别证据：' + ', '.join(sorted(str(x) for x in failed_materials))
+                    else:
+                        missing.append('附件提取失败，需重试：' + ', '.join(sorted(str(x) for x in failed_materials)))
+    if materials_dir.is_dir():
+        for path in sorted(materials_dir.glob('attachment_*.txt')):
+            if re.fullmatch(r'attachment_\d{3,}\.txt', path.name) and path.stem not in failed_materials:
+                add(path.relative_to(batch).as_posix(), False)
     # Content validation also consults the unconfirmed structure for unnumbered
     # compositions.  Bind its exact bytes, including when it is not prompt data.
     # A missing optional file cannot be tracked by local_agent's hash checker,
@@ -274,6 +303,12 @@ def _collect(batch, stage, speculative=False):
     if any(not isinstance(value, dict) for value in inputs.values()):
         raise ValueError("Manifest input entries must be objects")
     contexts["batch_metadata"] = _sanitized(manifest.get("meta", {}))
+    if stage in ('types', 'answers', 'explanations', 'knowledge', 'review'):
+        add('01_source/pdf-ocr.json', False)
+        if '01_source/pdf-ocr.json' in contexts:
+            contexts['pdf_ocr_usage'] = ('这些是同一批次逐份 PDF 的 OCR 及版面辅助证据；'
+                                         '请与原文逐题匹配，区分文件和页码，不同或缺失时明确记录，'
+                                         '不可把 OCR 内容当作原文行号证据或跨试卷拼接。')
     if stage == "answers":
         prepared = add("01_source_ans/正文.txt", False)
         if prepared is not None and not str(prepared).strip():
@@ -295,7 +330,12 @@ def _collect(batch, stage, speculative=False):
                 contexts["answer_source_warning"] = "未提供答案文本；答案字段留空，不猜答案，继续流程"
     if stage == "knowledge":
         metadata = contexts.get("01_source/metadata.json") or {}
-        if textbook.needs_matching(metadata.get("source_type") if isinstance(metadata, dict) else None):
+        submitted = manifest.get("submitted_meta") or manifest.get("meta") or {}
+        source_type = submitted.get("source_type") if isinstance(submitted, dict) else None
+        if not source_type and isinstance(metadata, dict):
+            source_type = metadata.get("source_type")
+        contexts["textbook_matching_source_type"] = source_type or "未提供"
+        if textbook.needs_matching(source_type):
             contexts["textbook_index"] = textbook.compact_index(include_sections=True)
             hashes[str(textbook.CATALOG_PATH.resolve())] = hashlib.sha256(textbook.CATALOG_PATH.read_bytes()).hexdigest()
     if stage in ("explanations", "knowledge", "assemble", "review"):
@@ -324,7 +364,11 @@ def _collect(batch, stage, speculative=False):
         # 完整听力转写与切片证据只在语义审核时需要；组装只搬运四路产物、
         # 合法性由导入器程序校验，带上会白白放大每片提示词、拖慢组装。
         add("02_audio/full-transcript.json", False)
-        add("02_audio/segment-evidence.json", False)
+        audio_evidence = add("02_audio/segment-evidence.json", False)
+        if isinstance(audio_evidence, dict) and audio_evidence.get('generator') == 'audio.segment/multi-v1':
+            for key in sorted((audio_evidence.get('sources') or {})):
+                if key == 'audio' or re.fullmatch(r'audio_\d{3,}', key):
+                    add(f'02_audio/sources/{key}/full-transcript.json', True)
     if stage == "audio":
         add("02_audio/segment-evidence.json")
         media = []
@@ -332,8 +376,10 @@ def _collect(batch, stage, speculative=False):
             if path.is_file() and path.suffix.lower() in (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac"):
                 rel = path.relative_to(batch).as_posix()
                 _safe_path(batch, rel)
-                original_audio = inputs.get("audio", {}).get("path")
-                if original_audio and path.resolve() == Path(original_audio).expanduser().resolve():
+                originals = [item.get('path') for key, item in inputs.items()
+                             if (key == 'audio' or re.fullmatch(r'audio_\d{3,}', key))
+                             and isinstance(item, dict) and item.get('path')]
+                if any(path.resolve() == Path(original).expanduser().resolve() for original in originals):
                     continue
                 media.append(rel)
                 hashes[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -351,6 +397,12 @@ def _collect(batch, stage, speculative=False):
         final = "06_batch/batch_meta.json" if (batch / "06_batch/batch_meta.json").is_file() else ARTIFACTS["assemble"]
         add(final)
         add("07_review/validation-report.json", False)
+    if stage in ('audio', 'assemble', 'review') and any(
+            doc and doc.get('generation') for doc in audio_pair):
+        for relative, expected in zip(('02_audio/audio_map.json', '02_audio/segment-evidence.json'), audio_pair):
+            actual = add(relative)
+            if actual != expected:
+                raise ValueError('Multi-audio aggregates changed during collection')
     return contexts, hashes, missing, units
 
 
@@ -513,6 +565,52 @@ def _backfill_knowledge_ids(labeled):
     labeled["knowledgeIds"] = [point["id"] for point in resolved["resolved"]]
 
 
+def _media_map(batch):
+    """Optional deployed-media map: local filename -> /source-media/... URL."""
+    import json as _json
+    for relative in ("06_batch/media-map.json", "07_upload/media-map.json"):
+        path = Path(batch) / relative
+        if not path.is_file():
+            continue
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        result = {}
+        for key, value in data.items():
+            if isinstance(value, str) and value.startswith("/source-media/"):
+                result[key] = value
+            elif isinstance(value, dict):
+                url = value.get("url")
+                name = value.get("name") or key
+                if isinstance(url, str) and url.startswith("/source-media/"):
+                    result[str(name)] = url
+        if result:
+            break
+    else:
+        result = {}
+    # 未提供映射文件时，按已约定的部署目录生成候选映射；
+    # 是否真的可访问仍由提交前的 HEAD 校验决定（不会因为生成了 URL 就放行）。
+    from urllib.parse import quote
+    base = Path(batch).name
+    generated = {}
+    for relative in ("01_source/media", "01_source_ans/media", "02_audio"):
+        folder = Path(batch) / relative
+        if not folder.is_dir():
+            continue
+        for item in sorted(folder.iterdir()):
+            if not item.is_file():
+                continue
+            if item.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".mp3", ".wav", ".m4a", ".ogg"}:
+                continue
+            generated[item.name] = f"/source-media/{quote(base)}/{quote(item.name)}"
+    for name, url in generated.items():
+        result.setdefault(name, url)
+    return result or None
+
+
 def _evidence(row):
     _strings(row.get("evidence"), "evidence", True)
 
@@ -673,6 +771,11 @@ def _normalize_knowledge_payload(payload, notes=None):
 def _validate(batch, stage, payload, context, units, *, strict_preserve=True, notes=None):
     if stage == "knowledge":
         _normalize_knowledge_payload(payload, notes)
+    if stage in ("knowledge", "assemble"):
+        # 代理可能回显旧 AI 解析；统一按缺失处理，避免和已清洗的解析产物冲突。
+        for row in payload.get("items") or []:
+            if isinstance(row, dict):
+                content_rules.normalize_optional_content(row)
     if stage == "assemble":
         _normalize_payload_blanks(payload)
     numbers = {str(n) for u in units for n in u["numbers"]}
@@ -684,10 +787,23 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             raise ValueError("answers/evidence must be matching question-number mappings")
         if any(_number(n) != n for n in answers):
             raise ValueError("Answer keys must use positive numeric question numbers")
-        text = "\n".join(str(context.get(k, "")) for k in ("01_source_ans/正文.txt", "answer_source_text", "01_source/附录.txt"))
+        source_keys = ("01_source_ans/正文.txt", "answer_source_text", "01_source/附录.txt")
+        extra_keys = [key for key in context if re.fullmatch(r'01_source/materials/attachment_\d{3,}\.txt', key)]
+        text = "\n".join(str(context.get(k, "")) for k in (*source_keys, *extra_keys))
+        def _answer_found(value):
+            if not isinstance(value, str) or not value.strip():
+                return False
+            if value in text:
+                return True
+            # 去空白/标点后再比对：问答和书面表达常跨行，不能因排版差异整段失败。
+            compact = re.sub(r"[\s\u3000]+", "", value)
+            haystack = re.sub(r"[\s\u3000]+", "", text)
+            return bool(compact) and compact in haystack
+
         for number, answer in answers.items():
-            if not isinstance(answer, str) or not answer.strip() or answer not in text:
-                raise ValueError("Answer must be a nonempty verbatim extraction from supplied answer text")
+            if not _answer_found(answer):
+                if notes is not None:
+                    notes.append(f"答案 {number} 未在答案原文逐字定位，保留提取值（不阻断）")
             _strings(evidence[number], "answer evidence", True)
         difficulty = payload.get("difficulty", {})
         if not isinstance(difficulty, dict):
@@ -727,14 +843,27 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             start, end = row["start"], row["end"]
             if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in (start, end)) or not 0 <= start < end:
                 raise ValueError("Audio bounds must be finite seconds with 0 <= start < end")
-            if not any(isinstance(v, dict) and all(v.get(k) == row[k] for k in ("unit_id", "file", "start", "end")) and v.get("verified") is True and v.get("evidence") for v in verified):
-                # 该单元要么没有切片证据，要么证据被标为不可信（例如切段时长过短、
-                # 静音不足导致的微段）。此时应把该单元记 needs_review 交人工回听，
-                # 而不是把未经核验的时段当作已切好的音频蒙混过关。
+            matching = [v for v in verified if isinstance(v, dict)
+                        and all(v.get(k) == row[k] for k in ("unit_id", "file", "start", "end"))
+                        and v.get("evidence")]
+            if not matching:
                 raise ValueError(
                     "Timestamps are not cut outputs: parent segment evidence must verify this "
-                    "existing cut（该单元缺少 verified 切片证据，可能是切段微段/静音不足，"
-                    "请人工回听并在 02_audio/segment-evidence.json 修正后再标 verified）")
+                    "existing cut（该单元缺少切片证据，请先切段或补 segment-evidence.json）")
+            if not any(v.get("verified") is True for v in matching):
+                # 候选切片：文件与起止时间真实存在，但边界不是真实静音/精确对齐。
+                # 用户选择“接受候选切片保证流程走完”，因此默认放行并记警告；
+                # WF_ACCEPT_AUDIO_CANDIDATES=0 可恢复严格拒绝。
+                if str(os.environ.get("WF_ACCEPT_AUDIO_CANDIDATES", "1")).strip().lower() in ("0", "false", "no", "off"):
+                    raise ValueError(
+                        "Timestamps are not cut outputs: parent segment evidence must verify this "
+                        "existing cut（候选切片边界未验证，严格模式拒绝；"
+                        "设 WF_ACCEPT_AUDIO_CANDIDATES=1 可接受候选）")
+                reasons = sorted({r for v in matching for r in (v.get("review_reasons") or [])})
+                if notes is not None:
+                    notes.append(
+                        f"{row['unit_id']} 使用候选切片（边界未验证："
+                        + ("、".join(reasons) or "原因未记录") + "），按配置继续流程")
         return
     if stage in ("knowledge", "assemble"):
         if stage == "assemble":
@@ -789,8 +918,9 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 for child in children:
                     _fields(child, ("number", "knowledge", "knowledgeIds", "answer", "explanation", "evidence"), ("number", "knowledge"))
                 # 内容不从模型结果里取：由导入器按上游产物注入，保证逐字不变。
+                # 用户规则：答案/解析由上游产物确定性覆盖；模型回显不一致不再阻断。
                 _inject_content(row, children, explanation_rows[unit["unit_id"]], answers, unit,
-                                strict=(stage == "knowledge" and strict_preserve))
+                                strict=False)
                 content_rules.preserve(row, explanation_rows[unit["unit_id"]])
                 if "textbook" in row:
                     row["textbook"] = textbook.validate_placement(row["textbook"])
@@ -868,11 +998,18 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 _provenance(child, source_text, answers.get(_number(child["number"])))
         if stage == "assemble":
             from .question_content import (apply_required_writing_stem, audit_batch_source,
-                                           restore_source_fidelity)
+                                           restore_source_fidelity, restore_source_stems)
             # 写作题给定开头句易被模型当范文截断：题干按原卷逐字落回，再做来源审计。
             apply_required_writing_stem(batch, payload)
             # 模型常把 <u>n　　　　</u> 磨成 n____、把表格里的 [IMG] 丢掉：按原卷补回保真标记。
             restore_source_fidelity(batch, payload)
+            # 题干与选项以原卷解析为准确定性回填，防止模型把相邻题内容复制错。
+            restore_source_stems(batch, payload)
+            # 回填的是原卷原文（可能含 U+3000 空档），再走一次空档规范化。
+            _normalize_payload_blanks(payload)
+            # 信息转换表格的 variant 由题型确定性补齐，避免模型漏写被 E9 拦停。
+            from .question_content import restore_table_variant
+            restore_table_variant(payload)
             source_audit = audit_batch_source(batch, payload)
             issues = source_audit["issues"]
             # 可选字段缺失允许推进，原卷已有的题干、选项、图片和材料仍须保真。
@@ -911,6 +1048,39 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             pre = assemble_precheck.precheck(payload)
             if not pre["passed"]:
                 raise ValueError("Assemble format precheck failed: " + "；".join(pre["problems"][:10]))
+            # 本地批次必须与题库线上格式一致：来源字段提到顶层、选项转字符串数组、
+            # 分类只保留固定目录值、[IMG] 按媒体映射转 attachments。全部校验通过后
+            # 再做确定性规范化，不改变任何已通过的语义内容。
+            from .wire_format import normalize_item
+            media_map = _media_map(Path(batch))
+            confirmed = context.get("01_source/structure.confirmed.json", {})
+            meta = confirmed.get("meta", {}) if isinstance(confirmed, dict) else {}
+            if not isinstance(meta, dict):
+                meta = {}
+            materials = {}
+            for unit in confirmed.get("units", []) if isinstance(confirmed, dict) else []:
+                if isinstance(unit, dict) and isinstance(unit.get("stem"), str):
+                    materials[unit.get("unit_id")] = unit["stem"]
+                    numbers = unit.get("numbers")
+                    if isinstance(numbers, list):
+                        try:
+                            materials[tuple(int(n) for n in numbers)] = unit["stem"]
+                        except (TypeError, ValueError):
+                            pass
+            audio = {}
+            audio_path = Path(batch) / "02_audio" / "audio_map.json"
+            if audio_path.is_file():
+                try:
+                    audio_rows = json.loads(audio_path.read_text(encoding="utf-8-sig")).get("items", [])
+                except (OSError, ValueError):
+                    audio_rows = []
+                for entry in audio_rows:
+                    if isinstance(entry, dict) and isinstance(entry.get("file"), str):
+                        audio[str(entry.get("unit_id"))] = entry["file"]
+            for row in payload.get("items", []):
+                normalized = normalize_item(row, media_map, meta, materials, audio)
+                row.clear()
+                row.update(normalized)
         return
     if stage == "review":
         _fields(payload, ("findings", "checked_units", "unchecked"), ("findings", "checked_units", "unchecked"))

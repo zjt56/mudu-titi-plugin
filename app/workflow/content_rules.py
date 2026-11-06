@@ -101,10 +101,15 @@ def normalize_optional_content(row):
         value = row.get(key)
         if value is None or (isinstance(value, str) and is_placeholder(value)):
             row[key] = EMPTY_PLACEHOLDER
+        elif isinstance(value, str) and (AI_MARK in value or value.strip() == LISTENING_FILLED):
+            # 用户规则：不再采用任何 AI 生成解析/大意，直接按缺失处理。
+            row[key] = EMPTY_PLACEHOLDER
     for child in row.get("subquestions") or []:
         if isinstance(child, dict):
             value = child.get("explanation")
             if value is None or (isinstance(value, str) and is_placeholder(value)):
+                child["explanation"] = EMPTY_PLACEHOLDER
+            elif isinstance(value, str) and AI_MARK in value:
                 child["explanation"] = EMPTY_PLACEHOLDER
 
 
@@ -147,16 +152,40 @@ def validate(payload, units, typed, batch):
             _check_generated(summary, "articleSummary", 1)
         prepared.append(dict(row, question_type=qtype, numbers=unit["numbers"]))
     audit_ownership(batch, prepared)
-    return rows
+    # 返回审计/清洗后的同一批对象，避免调用方拿到未清洗的旧 rows。
+    return {row["unit_id"]: row for row in prepared}
 
 
 def audit_ownership(batch, rows):
-    """复用 upload_content 的题号锚点与跨材料归属检查（只读）。"""
+    """复用 upload_content 的题号锚点与跨材料归属检查。
+
+    用户规则：提取不到原解析/原大意就按缺失处理，不再用校验失败阻断阶段。
+    未溯源的文本在这里清成「无」；AI 生成的文本更早一步已丢弃。
+    """
     from .upload_content import inspect_content
     report = inspect_content(batch, {"items": rows})
     if not report["passed"]:
         raise ValueError("Content source/ownership check failed: "
                          + json.dumps(report["errors"], ensure_ascii=False))
+    clearing = {"SUMMARY_SOURCE_UNVERIFIED", "EXPLANATION_SOURCE_UNVERIFIED", "AI_PROVENANCE_IGNORED"}
+    by_uid = {row.get("unit_id"): row for row in rows}
+    for warning in report.get("warnings") or []:
+        if warning.get("code") not in clearing:
+            continue
+        uid, _, child = str(warning.get("unit_id") or "").partition("/")
+        row = by_uid.get(uid)
+        if not row:
+            continue
+        field = warning.get("field")
+        if field == "articleSummary":
+            row["articleSummary"] = EMPTY_PLACEHOLDER
+        elif field == "explanation":
+            if child:
+                for item in row.get("subquestions") or []:
+                    if str(item.get("number")) == child:
+                        item["explanation"] = EMPTY_PLACEHOLDER
+            else:
+                row["explanation"] = EMPTY_PLACEHOLDER
 
 
 def preserve(row, upstream):

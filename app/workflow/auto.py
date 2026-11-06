@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -48,7 +49,7 @@ RATE_LIMIT_BACKOFF_SECONDS = 300.0
 
 DOCX_SUFFIXES = (".docx", ".doc")
 PDF_SUFFIXES = (".pdf",)
-AUDIO_SUFFIXES = (".mp3", ".wav", ".m4a", ".aac")
+AUDIO_SUFFIXES = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
 
 ANSWER_HINTS = ("答案", "answer", "key", "解析")
 
@@ -72,10 +73,16 @@ def _guess(folder: Path) -> dict | None:
     source = sources[0] if sources else (docs[0] if docs else None)
     if source is None:
         return None
+    audio_files = [p for p in files if p.suffix.lower() in AUDIO_SUFFIXES]
+    answer = next((p for p in answers if p != source), None)
+    if answer is None:
+        answer = next((p for p in docs if p != source), None)
     return {
         "source": str(source),
-        "answers": str(answers[0]) if answers else None,
-        "audio": str(_pick(files, AUDIO_SUFFIXES)) if _pick(files, AUDIO_SUFFIXES) else None,
+        "answers": str(answer) if answer else None,
+        "audio": str(audio_files[0]) if audio_files else None,
+        "extra_audio": [str(path) for path in audio_files[1:]],
+        "extra_documents": [str(path) for path in docs if path != source and path != answer],
     }
 
 
@@ -94,10 +101,18 @@ def discover(inbox: Path) -> list[dict]:
                 continue
             candidate = {"name": data.get("workflow_id") or folder.name,
                          "folder": str(folder), "year": data.get("year"),
-                         "region": data.get("region"), "subject": data.get("subject", "english")}
+                         "region": data.get("region"), "subject": data.get("subject", "english"),
+                         "title": data.get("title"), "source_type": data.get("source_type"),
+                         "grade": data.get("grade")}
             for key in ("source", "answers", "audio", "docx"):
                 value = data.get(key)
                 candidate[key] = str((folder / value).resolve()) if value else None
+            candidate['extra_audio'] = [str((folder / item['path']).resolve())
+                                        for item in data.get('extra_audio', [])
+                                        if isinstance(item, dict) and item.get('path')]
+            candidate['extra_documents'] = [str((folder / item['path']).resolve())
+                                            for item in data.get('extra_documents', [])
+                                            if isinstance(item, dict) and item.get('path')]
             found.append(candidate)
             continue
         guessed = _guess(folder)
@@ -113,16 +128,100 @@ def discover(inbox: Path) -> list[dict]:
 def ensure_batch(candidate: dict, workflows_root: Path) -> Path:
     batch_dir = Path(workflows_root) / candidate["name"]
     if mf.manifest_path(batch_dir).is_file():
+        descriptor_path = batch_dir / 'attachments/batch.json'
+        if descriptor_path.is_file():
+            try:
+                prior = json.loads(descriptor_path.read_text(encoding='utf-8-sig'))
+            except (OSError, ValueError) as exc:
+                raise ValueError('批次附件描述文件不可读取，无法确认试卷归属') from exc
+            origin = prior.get('origin_folder') if isinstance(prior, dict) else None
+            if origin and candidate.get('folder') and Path(origin).resolve() != Path(candidate['folder']).resolve():
+                raise ValueError('批次名已属于另一份上传，拒绝复用已有试卷数据')
+        state = mf.load(batch_dir)
+        old_source = state.get('inputs', {}).get('source', {}).get('path')
+        new_source = candidate.get('source')
+        if old_source and new_source and Path(new_source).is_file() and (
+                not Path(old_source).is_file() or mf.sha256_file(old_source) != mf.sha256_file(new_source)):
+            raise ValueError('批次名已存在且原卷不同，拒绝复用已有试卷数据')
         return batch_dir
+    attachment_dir = batch_dir / "attachments"
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    localized = {}
+    by_source = {}
+    extra_values = candidate.get('extra_documents') or []
+    extra_audio_values = candidate.get('extra_audio') or []
+    input_values = [(key, candidate.get(key)) for key in ("source", "answers", "audio", "docx")]
+    input_values += [(f'attachment_{index:03d}', value) for index, value in enumerate(extra_values, 1)]
+    input_values += [(f'audio_{index:03d}', value) for index, value in enumerate(extra_audio_values, 1)]
+    for key, value in input_values:
+        if not value:
+            localized[key] = None
+            continue
+        source = Path(value).expanduser().resolve(strict=True)
+        if not source.is_file():
+            raise ValueError(f"附件不是文件：{source}")
+        if source in by_source:
+            localized[key] = by_source[source]
+            continue
+        if source.parent == attachment_dir.resolve():
+            target = source
+        else:
+            target = attachment_dir / (key + source.suffix.lower())
+            if target.exists():
+                if not target.is_file() or mf.sha256_file(target) != mf.sha256_file(source):
+                    raise ValueError(f"批次附件已存在且内容不同：{target.name}")
+            else:
+                with tempfile.NamedTemporaryFile(prefix='.attachment-', dir=attachment_dir, delete=False) as stream:
+                    temporary = Path(stream.name)
+                    try:
+                        with source.open('rb') as original:
+                            shutil.copyfileobj(original, stream)
+                        stream.flush()
+                    except Exception:
+                        temporary.unlink(missing_ok=True)
+                        raise
+                try:
+                    if mf.sha256_file(temporary) != mf.sha256_file(source):
+                        raise ValueError(f'附件复制时发生变化：{source.name}')
+                    temporary.replace(target)
+                finally:
+                    temporary.unlink(missing_ok=True)
+        by_source[source] = str(target.resolve())
+        localized[key] = by_source[source]
+    descriptor_path = attachment_dir / "batch.json"
+    if not descriptor_path.exists():
+        descriptor = {"workflow_id": candidate["name"], "title": candidate.get("title"),
+                      "origin_folder": str(Path(candidate['folder']).resolve()) if candidate.get('folder') else None,
+                      "year": candidate.get("year"), "region": candidate.get("region"),
+                      "subject": candidate.get("subject") or "english",
+                      "source_type": candidate.get("source_type"), "grade": candidate.get("grade"),
+                      "original_filenames": {key: Path(candidate[key]).name if candidate.get(key) else None
+                                             for key in ("source", "answers", "audio")}}
+        for key in ("source", "answers", "audio", "docx"):
+            descriptor[key] = Path(localized[key]).name if localized.get(key) else None
+        descriptor['extra_audio'] = [
+            {'path': Path(localized[f'audio_{index:03d}']).name,
+             'original_filename': Path(value).name}
+            for index, value in enumerate(extra_audio_values, 1)]
+        descriptor['extra_documents'] = [
+            {'path': Path(localized[f'attachment_{index:03d}']).name,
+             'original_filename': Path(value).name}
+            for index, value in enumerate(extra_values, 1)]
+        descriptor_path.write_text(json.dumps(descriptor, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     args = argparse.Namespace(
         batch_dir=str(batch_dir),
-        source=candidate.get("source"),
-        answers=candidate.get("answers"),
-        audio=candidate.get("audio"),
-        docx=candidate.get("docx"),
+        source=localized.get("source"),
+        answers=localized.get("answers"),
+        audio=localized.get("audio"),
+        docx=localized.get("docx"),
         year=candidate.get("year"),
         region=candidate.get("region"),
         subject=candidate.get("subject") or "english",
+        title=candidate.get("title"),
+        source_type=candidate.get("source_type"),
+        grade=candidate.get("grade"),
+        extra_documents=[localized[f'attachment_{index:03d}'] for index in range(1, len(extra_values) + 1)],
+        extra_audio=[localized[f'audio_{index:03d}'] for index in range(1, len(extra_audio_values) + 1)],
         workflow_id=candidate["name"],
     )
     code = rn.cmd_init(args)
@@ -306,24 +405,29 @@ def _auto_prepare_audio(batch_dir: Path, manifest: dict) -> dict:
            for dep in stage.depends_on):
         return {"status": "waiting"}
     inputs = manifest.get("inputs") or {}
+    multiple_audio = any(re.fullmatch(r'audio_\d{3,}', key) and value.get('exists')
+                         for key, value in inputs.items() if isinstance(value, dict))
     if not (inputs.get("audio") or {}).get("exists"):
         return {"status": "no_audio"}
     evidence = batch_dir / "02_audio" / "segment-evidence.json"
-    if evidence.is_file():
+    if evidence.is_file() and not multiple_audio:
         return {"status": "evidence"}
     try:
         from audio import bootstrap as audio_boot
         from audio import config as audio_config
         from audio import segment as audio_segment
     except (ImportError, OSError) as exc:
-        return {"status": "unavailable", "message": "听力切段模块不可用：" + str(exc)[:160]}
+        return {"status": "multiple_audio" if multiple_audio else "unavailable",
+                "message": "听力切段模块不可用：" + str(exc)[:160]}
     cfg = audio_config.load()
     if not cfg.get("enabled"):
-        return {"status": "disabled", "message": "听力切段未启用；请在「听力切分」打开启用开关"}
+        return {"status": "multiple_audio" if multiple_audio else "disabled",
+                "message": "听力切段未启用；请在「听力切分」打开启用开关"}
     # 不强制要求 READY 标记与当前模型完全一致：模型缓存已在时切换小模型也能直接切；
     # 真正缺 venv/依赖时 segment.run 会给出明确错误，而不是在这里假装未安装。
     if not Path(audio_boot.venv_python(cfg)).is_file():
-        return {"status": "not_ready", "message": "听力运行时未安装；请先在「听力切分」完成安装"}
+        return {"status": "multiple_audio" if multiple_audio else "not_ready",
+                "message": "听力运行时未安装；请先在「听力切分」完成安装"}
     data_dir = Path(audio_config.data_dir(cfg))
     batch_name = batch_dir.name
     current = audio_boot.read_status(data_dir, batch_name)
@@ -345,11 +449,26 @@ def _auto_prepare_audio(batch_dir: Path, manifest: dict) -> dict:
     audio_boot.write_status(data_dir, batch=batch_name, job="segment", running=True, ok=None,
                             phase="start", pct=0, detail="上传后自动切段", error="")
     try:
+        if multiple_audio:
+            analysis = audio_segment.inspect_multiple_audio(batch_dir, inputs, cfg, progress)
+            if not analysis.get('complete'):
+                detail = '多音频题组对应存在缺失或冲突，详见批次分析记录'
+                audio_boot.write_status(data_dir, batch=batch_name, job='segment', running=False, ok=False,
+                                        phase='needs_review', pct=100, detail=detail, error='')
+                return {'status': 'multiple_audio', 'message': detail}
+            result = audio_segment.slice_multiple_audio(batch_dir, analysis, progress)
+            pending = result.get('needs_review_units') or []
+            passed = result.get('ok') is True and not pending
+            detail = '多音频切段已完成' if passed else '多音频候选切片已保存，边界待核对：' + '、'.join(pending[:12])
+            audio_boot.write_status(data_dir, batch=batch_name, job='segment', running=False, ok=passed,
+                                    phase='done' if passed else 'needs_review', pct=100, detail=detail, error='')
+            return {'status': 'ready' if passed else 'needs_review', 'pending': pending}
         result = audio_segment.run(batch_dir, cfg, None, progress)
     except Exception as exc:  # noqa: BLE001 - 切段失败不能让整批推进崩溃
         audio_boot.write_status(data_dir, batch=batch_name, job="segment", running=False, ok=False,
                                 phase="error", detail="", error=str(exc))
-        return {"status": "error", "message": "自动切段失败：" + str(exc)[:200]}
+        return {"status": "multiple_audio" if multiple_audio else "error",
+                "message": "自动切段失败：" + str(exc)[:200]}
     pending = result.get("needs_review_units") or []
     passed = result.get("ok") is True and not pending
     audio_boot.write_status(data_dir, batch=batch_name, job="segment", running=False, ok=passed,
@@ -499,7 +618,7 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                 continue
             if stage.id == "audio":
                 prep_status = audio_prep.get("status")
-                if prep_status in {"disabled", "not_ready", "error", "unavailable", "needs_review", "running"}:
+                if prep_status in {"disabled", "not_ready", "error", "unavailable", "needs_review", "running", "multiple_audio"}:
                     if ZERO_TOUCH and prep_status == "needs_review":
                         # 候选切片已经写出，只是边界证据不足。零人工模式下直接采用候选，
                         # 不再停在“待回听”，把未验证边界记录在阶段备注里。
@@ -542,6 +661,8 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                     if stop_at and candidate.id == stop_at:
                         break
                     if candidate.id == "assemble" or candidate.kind != contracts.AGENT:
+                        continue
+                    if candidate.id == 'audio' and audio_prep.get('status') == 'multiple_audio':
                         continue
                     default = ["{python}", "-m", "workflow.agent", "run", "--stage", candidate.id,
                                "--batch-dir", "{batch_dir}"]

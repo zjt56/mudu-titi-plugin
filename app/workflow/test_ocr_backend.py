@@ -63,6 +63,17 @@ class OCRBackendTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(backend.assist_mode(), "auto")
 
+    def test_mandatory_uploaded_pdf_ocr_bypasses_general_assist_off(self):
+        state = self.root / 'assist.json'
+        state.write_text('{"mode":"off"}', encoding='utf-8')
+        with patch.dict(os.environ, {'MUDU_OCR_ASSIST_STATE': str(state)}), \
+             patch('subprocess.run', side_effect=self.success):
+            result = backend.recognize(self.source, self.output, force_ocr=True,
+                                       config=self.config, mandatory_pdf=True)
+            self.assertEqual(result['pages'][0]['text'], 'recognized')
+            with self.assertRaises(backend.OCRBackendError):
+                backend.recognize(self.source, self.output, config=self.config)
+
     def test_config_precedence_relative_paths_and_defaults(self):
         path = self.root / "config.json"
         path.write_text(json.dumps({"python": sys.executable, "script": self.script.name}), encoding="utf-8")

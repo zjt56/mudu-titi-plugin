@@ -23,7 +23,7 @@ class TextbookCatalogTest(unittest.TestCase):
     def test_source_parses_to_expected_counts(self):
         builder = _loader()
         data = builder.parse(textbook.SOURCE_PATH.read_text(encoding="utf-8-sig"))
-        self.assertEqual(data["counts"], {"versions": 3, "books": 18, "units": 128})
+        self.assertEqual(data["counts"], {"versions": 3, "books": 18, "units": 138})
         self.assertEqual(sorted({row["version"] for row in data["catalog"]}), ["人教版", "外研版", "译林版"])
 
     def test_generated_json_matches_source(self):
@@ -31,10 +31,13 @@ class TextbookCatalogTest(unittest.TestCase):
         self.assertEqual(builder.parse(textbook.SOURCE_PATH.read_text(encoding="utf-8-sig")),
                          json.loads(textbook.CATALOG_PATH.read_text(encoding="utf-8-sig")))
 
-    def test_projects_are_not_units(self):
+    def test_projects_are_first_class_units(self):
         yilin = textbook.book("牛津译林版七年级上册")
-        self.assertIn("Project 1 A video about my new school life", yilin.get("extras", []))
-        self.assertEqual(len(yilin["units"]), 8)
+        names = [unit["unit"] for unit in yilin["units"]]
+        self.assertIn("Project 1 A video about my new school life", names)
+        self.assertIn("Project 2 A party plan to celebrate New Year", names)
+        self.assertEqual(len(names), 10)
+        self.assertNotIn("extras", yilin)
 
     def test_exact_resolution(self):
         placement = textbook.resolve("人教版", "人教版七年级上册", "Unit 1 You and Me", "Section A")
@@ -113,6 +116,32 @@ class KnowledgeTextbookWiringTest(unittest.TestCase):
         self.assertEqual(task["status"], "ready")
         self.assertIn("textbook_index", task["prompt"])
         self.assertIn("Unit 2 We're Family!", task["prompt"])
+
+    def test_submitted_source_type_controls_textbook_index(self):
+        self.write('01_source/metadata.json', {'source_type': '未提供'})
+        self.write('workflow/manifest.json', {'inputs': {}, 'meta': {'source_type': '同步练习', 'grade': '七年级'}})
+        task = tasks.build_task(self.batch, 'knowledge')
+        self.assertIn('"textbook_index":', task['prompt'])
+        self.assertIn('七年级', task['prompt'])
+        self.write('workflow/manifest.json', {'inputs': {}, 'meta': {'source_type': '中考真题'}})
+        self.write('01_source/metadata.json', {'source_type': '同步练习'})
+        task = tasks.build_task(self.batch, 'knowledge')
+        self.assertNotIn('"textbook_index":', task['prompt'])
+
+    def test_extra_batch_documents_are_visible_only_in_own_task(self):
+        self.write('01_source/materials/attachment_001.txt', '配套解析：第1题专属材料')
+        self.write('workflow/manifest.json', {'inputs': {'attachment_001': {'path': 'unused', 'exists': True}},
+                                              'meta': {'source_type': '中考真题'}})
+        task = tasks.build_task(self.batch, 'knowledge')
+        self.assertIn('配套解析：第1题专属材料', task['prompt'])
+        self.assertIn('01_source/materials/attachment_001.txt', task['input_hashes'])
+
+    def test_types_task_receives_batch_pdf_ocr_evidence(self):
+        self.write('01_source/pdf-ocr.json', {'sources': [{'input': 'attachment_001',
+                   'pages': [{'page': 1, 'text': 'PDF 题组版面证据'}]}]})
+        task = tasks.build_task(self.batch, 'types')
+        self.assertIn('PDF 题组版面证据', task['prompt'])
+        self.assertIn('01_source/pdf-ocr.json', task['input_hashes'])
 
     def test_exam_paper_task_has_no_textbook_index(self):
         self.write("01_source/metadata.json", {"source_type": "中考真题"})

@@ -40,7 +40,7 @@ test('OCR Token 只在密码框提交，不落浏览器存储', () => {
 
 test('OCR 板块为三态策略（自动/开启/关闭），默认自动、可即时切换', () => {
   assert.match(client, /'OCR 复核策略'/);
-  assert.match(client, /OCR_MODE_TEXT/);
+  assert.doesNotMatch(client, /OCR_MODE_TEXT/);
   assert.match(client, /\[\['auto', '自动（AI 判断）'\], \['on', '始终开启'\], \['off', '关闭'\]\]/);
   assert.match(client, /setMode\(value\)/);
   assert.match(client, /await request\('POST', \{ mode: next \}\)/);

@@ -33,10 +33,16 @@ test('DOM 分层：container 内含 layout，左右两栏为 grid 子项', () =>
   assert.match(client, /className: 'wf-review-notes'/);
 });
 
-test('选项配图使用固定 A-D 网格位置和等比例容器', () => {
+test('选项配图使用固定 A-D 网格位置和统一尺寸容器', () => {
   assert.match(client, /\.wf-opt-row\{display:grid;grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
   assert.match(client, /gridColumn: String\(\(optionIndex % 4\) \+ 1\)/);
-  assert.match(client, /\.wf-opt-frame\{[^}]*aspect-ratio:4\/3/);
+  assert.match(client, /\.wf-opt-row\{[^}]*max-width:504px/);
+  assert.match(client, /\.wf-opt-frame\{[^}]*height:90px/);
+  const optionLabel = new Function('return (' + client.match(/function optionLabel\(text\) \{[\s\S]*?\n      \}/)[0] + ')')();
+  assert.equal(optionLabel('**A****.****'), 'A.');
+  assert.equal(optionLabel('****\t****B****.****'), 'B.');
+  assert.equal(optionLabel('C.'), 'C.');
+  assert.equal(optionLabel('正文内容'), null);
   assert.match(client, /\.wf-opt-frame \.wf-img\{[^}]*object-fit:contain/);
 });
 

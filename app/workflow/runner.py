@@ -654,6 +654,10 @@ def cmd_init(args) -> int:
     register("answers", args.answers, False)
     register("audio", args.audio, False)
     register("docx", args.docx or args.source, False)
+    for index, path in enumerate(getattr(args, 'extra_documents', None) or [], 1):
+        register(f'attachment_{index:03d}', path, False)
+    for index, path in enumerate(getattr(args, 'extra_audio', None) or [], 1):
+        register(f'audio_{index:03d}', path, False)
     if "source" not in inputs:
         print("✗ 必须提供存在的 --source 原卷"); return 2
     if conflicts:
@@ -661,6 +665,10 @@ def cmd_init(args) -> int:
 
     workflow_id = args.workflow_id or batch_dir.name
     meta = {"year": args.year, "region": args.region, "subject": args.subject or "english"}
+    for key in ("title", "source_type", "grade"):
+        value = getattr(args, key, None)
+        if value:
+            meta[key] = value
     manifest = mf.new_manifest(workflow_id, batch_dir, inputs,
                                {"skill_version": _skill_version(),
                                 "constraints": "references/constraints.md"}, meta)
@@ -1157,11 +1165,23 @@ def cmd_prepare_upload(args) -> int:
 def cmd_upload(args) -> int:
     batch_dir = Path(args.batch_dir).expanduser().resolve()
     manifest = mf.load(batch_dir)
+    dry_run = getattr(args, "dry_run", False)
     gate = manifest["stages"].get("upload_gate", {}).get("status")
+    # 预演只读，不需要人工批准；正式提交才要求 upload_gate 已批准。
+    if dry_run:
+        from workflow import upload as upload_flow
+        try:
+            frozen = upload_flow.verify(batch_dir)
+        except (OSError, ValueError, upload_client.APIError) as exc:
+            print(f"✗ 本地预演未通过：{exc}")
+            return 2
+        print("✓ 本地上传预演通过，冻结摘要：" + frozen["plan"]["payload_sha256"]
+              + "；远端连通性、目录及媒体将在提交前复核")
+        return 0
     if gate != mf.APPROVED:
         print("✗ 上传前必须由人工确认：mark --stage upload_gate --status approved --actor <人>")
         return 2
-    if not args.yes and not getattr(args, "dry_run", False):
+    if not args.yes:
         print("✗ 上传会写入远端上传暂存，需要显式加 --yes")
         return 2
     approved_hash = manifest["stages"]["upload_gate"].get("approved_batch_sha256")
@@ -1185,13 +1205,6 @@ def cmd_upload(args) -> int:
         return 1
     from workflow import upload as upload_flow, upload_client
     try:
-        if getattr(args, "dry_run", False):
-            frozen = upload_flow.verify(batch_dir)
-            binding = upload_flow.approval_binding(batch_dir)
-            if any(manifest["stages"]["upload_gate"].get(key) != value for key, value in binding.items()):
-                raise ValueError("当前冻结请求或目标未获批准，请重新人工确认")
-            print("✓ 本地上传预演通过，冻结摘要：" + frozen["plan"]["payload_sha256"] + "；远端连通性、目录及媒体将在提交前复核")
-            return 0
         receipt = upload_flow.submit_approved(batch_dir, manifest)
     except (OSError, ValueError, upload_client.APIError) as exc:
         mf.touch_stage(manifest, "upload", mf.BLOCKED, notes=str(exc))

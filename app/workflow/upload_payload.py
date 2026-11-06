@@ -19,6 +19,8 @@ from workbench import taxonomy
 from workflow import label_audit
 
 SOURCE_ALIASES = {"精品资料": "精品题源", "模拟卷": "中考模拟", "历年考题": "中考真题", "课本原创": "课本原创"}
+TYPE_ALIASES = {"单项选择": "单项填空", "短对话理解": "听力短对话理解", "长对话理解": "听力长对话理解",
+                "短文理解": "听力短文理解", "信息转换": "听力信息转换"}
 AI_MARK = "（AI生成，待校对）"
 DIFFICULTIES = {"容易": "易", "适中": "中", "困难": "难", "易": "易", "中": "中", "难": "难"}
 SOURCE_FIELDS = ("source_type", "source", "location", "version", "authorization", "year", "institution", "school", "regional_version")
@@ -63,6 +65,10 @@ def _local_audit_view(batch):
         for alias, key in ALIASES.items():
             if alias in item and key not in item:
                 item[key] = deepcopy(item[alias])
+        if isinstance(item.get("type"), str):
+            item["type"] = TYPE_ALIASES.get(item["type"], item["type"])
+        if isinstance(item.get("source_type"), str):
+            item["source_type"] = SOURCE_ALIASES.get(item["source_type"], item["source_type"])
         filters = item.get("filterMetadata", {})
         if "difficulty" not in item and isinstance(filters, dict) and "difficulty" in filters:
             item["difficulty"] = filters["difficulty"]
@@ -112,7 +118,8 @@ def _safe_blocks(blocks):
 
 
 class _Builder:
-    def __init__(self):
+    def __init__(self, media_map=None):
+        self.media_map = media_map if isinstance(media_map, dict) else None
         self.errors = []
         self.warnings = []
         self.summary = {"units": 0, "questions": 0, "attachments": 0}
@@ -246,9 +253,19 @@ class _Builder:
             data["filterMetadata"] = {k: v for k, v in filters.items() if k in FILTER_FIELDS}
         return data
 
-    def knowledge(self, data, output, uid):
+    def knowledge(self, data, output, uid, allow_empty=False):
         paths = data.get("knowledge")
-        if not isinstance(paths, list) or not paths or any(not _nonempty(p) for p in paths):
+        if paths is None and allow_empty:
+            output["knowledge"] = []
+            return
+        if not isinstance(paths, list) or any(not _nonempty(p) for p in paths):
+            self.error("KNOWLEDGE_REQUIRED", "knowledge 必须是完整叶子路径数组", uid)
+            return
+        if not paths:
+            # 整篇/整组题型只在组级打知识点；子题为空是本地既定规则。
+            if allow_empty:
+                output["knowledge"] = []
+                return
             self.error("KNOWLEDGE_REQUIRED", "knowledge 必须是非空完整叶子路径数组", uid)
             return
         paths = [_path(p) for p in paths]
@@ -431,8 +448,8 @@ class _Builder:
             if isinstance(option, str):
                 result.append(option)
             elif isinstance(option, dict):
-                self.unknown(option, {"label", "text"}, uid, "options.")
-                label, text = option.get("label"), option.get("text")
+                self.unknown(option, {"label", "text", "key"}, uid, "options.")
+                label, text = option.get("label", option.get("key")), option.get("text")
                 if not isinstance(label, str) or not re.fullmatch(r"[A-Z]", label) or label in labels or not isinstance(text, str):
                     self.error("OPTION_INVALID", "对象选项需要唯一的大写 label 和字符串 text", uid)
                 else:
@@ -459,6 +476,15 @@ class _Builder:
             return {}
         self.unknown(raw, WIRE_FIELDS | set(ALIASES) | LOCAL_FIELDS | {"textbookMappings"}, uid, "子题." if child else "题目.")
         data = self.canonical(raw, uid)
+        # 服务端接受旧称/简称；本地在映射入口就归一，后续标签校验与落库都用正式名。
+        if isinstance(data.get("type"), str):
+            data["type"] = TYPE_ALIASES.get(data["type"], data["type"])
+        if isinstance(data.get("source_type"), str):
+            data["source_type"] = SOURCE_ALIASES.get(data["source_type"], data["source_type"])
+        # 用户规则：AI 生成的解析/大意一律不采用，按缺失处理，不再做 AI 标记校验。
+        for key in ("explanation", "articleSummary"):
+            if isinstance(data.get(key), str) and ("AI生成" in data[key] or "AI 生成" in data[key]):
+                data[key] = ""
         output = {k: deepcopy(v) for k, v in data.items() if k in WIRE_FIELDS or k == "textbookMappings"}
         if child:
             output["number"] = raw.get("number")
@@ -482,12 +508,7 @@ class _Builder:
                 text = unescape(re.sub(r"</?(?:b|strong|i|em|u|sup|sub|span|p|div|br|font|small|mark)\b[^>]*>", "", text, flags=re.I))
                 if re.match(r"\s*[*_`~]*\s*" + prefix + r"\s*[*_`~]*\s*[:：]", text, re.I):
                     self.error("CONTENT_PREFIX_INVALID", f"{key} 只保留正文，不重复字段标题前缀", uid)
-        # 用户规则：缺文章大意填「无」，不生成；历史产物里带 AI 生成字样的仍按旧口径校验标注。
-        summary_text = data.get("articleSummary")
-        if isinstance(summary_text, str) and re.search(r"AI\s*生成", summary_text, re.I) \
-                and AI_MARK not in summary_text:
-            self.error("GENERATED_ARTICLE_SUMMARY",
-                       f"文章大意为 AI 生成但未标注「{AI_MARK}」；请按 F5 在末尾补齐标记", uid)
+        # 用户规则：缺文章大意填「无」，不生成；AI 生成文本在上方已丢弃。
         if not _nonempty(data.get("explanation")):
             if data.get("explanation") is not None and not isinstance(data.get("explanation"), str):
                 self.error("EXPLANATION_INVALID", "explanation 必须是字符串", uid)
@@ -496,12 +517,19 @@ class _Builder:
             if key in data and not isinstance(data[key], str):
                 self.error("TEXT_FIELD_INVALID", f"{key} 必须是字符串", uid)
         if not child:
+            if isinstance(data.get("source_type"), str):
+                data["source_type"] = SOURCE_ALIASES.get(data["source_type"], data["source_type"])
             output.setdefault("articleSummary", "")
-            for key in ("source_type", "source", "location", "version", "authorization"):
+            for key in ("source_type", "source"):
                 if not _nonempty(data.get(key)):
                     self.error("MISSING_" + key.upper(), f"缺少显式来源字段 {key}，不得推定或补占位值", uid)
+            # 服务端对以下字段有默认值（空串/待核实），不因本地未提供而阻断上传；
+            # 仍保留警告，提醒编辑在草稿里补齐。
+            for key in ("location", "version", "authorization"):
+                if not _nonempty(data.get(key)):
+                    self.warning("SOURCE_FIELD_EMPTY", f"未提供 {key}；服务端允许留空，建议编辑补齐", uid)
             if data.get("source_type") not in [*taxonomy.sources(), "精品题源", "课本原创"]:
-                self.error("SOURCE_TYPE_INVALID", "source_type 不在正式 11 类和兼容旧值中", uid)
+                self.error("SOURCE_TYPE_INVALID", "source_type 不在正式题源目录中", uid)
             if data.get("source_type") in ("中考真题", "中考模拟") and not (_positive(data.get("year")) and data["year"] <= 9999):
                 self.error("MISSING_YEAR", "真题/模拟需要有来源证据的整数年份", uid)
             if data.get("source_type") == "中考模拟":
@@ -537,6 +565,8 @@ class _Builder:
         # Local taxonomy checks normalize whitespace for editing. Wire names must
         # already match the fixed catalog exactly; never trim them into validity.
         main_type = data.get("type", parent_type if child else None)
+        if isinstance(main_type, str):
+            main_type = TYPE_ALIASES.get(main_type, main_type)
         if not isinstance(main_type, str) or main_type not in taxonomy.types():
             self.error("TYPE_INVALID", "type 必须精确匹配固定题型目录名称", uid)
         allowed_subtypes = taxonomy.subtypes(main_type) if isinstance(main_type, str) else []
@@ -554,6 +584,30 @@ class _Builder:
             output["options"] = self.options(data["options"], uid)
         if "attachments" in data:
             output["attachments"] = self.attachments(data["attachments"], uid)
+        if self.media_map:
+            # 兼容尚未经过装配规范化的历史批次：按已部署媒体映射把 [IMG name]
+            # 转成 attachments 并从正文移除标记；未映射的标记继续留在原处，
+            # 由 scan_media 报错，绝不自动猜测 URL。
+            from .wire_format import OPTION_PREFIX, replace_images
+            attachments = list(output.get("attachments") or [])
+            for key, placement in (("stem", "question"), ("material", "material")):
+                if isinstance(output.get(key), str):
+                    output[key] = replace_images(output[key], placement, None,
+                                                 self.media_map, attachments)
+            if isinstance(output.get("options"), list):
+                normalized = []
+                for option in output["options"]:
+                    match = OPTION_PREFIX.match(option)
+                    if match:
+                        text = replace_images(option[match.end():], "option", match.group(1),
+                                              self.media_map, attachments)
+                        normalized.append(f"{match.group(1)}. {text}".rstrip())
+                    else:
+                        normalized.append(replace_images(option, "option", None,
+                                                         self.media_map, attachments))
+                output["options"] = normalized
+            if attachments:
+                output["attachments"] = attachments
         if not child and isinstance(main_type, str) and main_type.startswith("听力"):
             if not any(a.get("kind") == "audio" for a in output.get("attachments", [])):
                 self.error("MISSING_AUDIO_ATTACHMENT", "听力单元必须在父题 attachments 提供对应切分音频；子题音频不能代替共享音频", uid)
@@ -565,7 +619,9 @@ class _Builder:
             output["materialBlocks"] = _safe_blocks(data["materialBlocks"])
         if "relations" in data and (not isinstance(data["relations"], list) or any(not _nonempty(x) for x in data["relations"])):
             self.error("RELATIONS_INVALID", "relations 必须是关系名称字符串数组", uid)
-        self.knowledge(data, output, uid)
+        self.knowledge(data, output, uid,
+                       allow_empty=bool(child and isinstance(parent_type, str)
+                                        and taxonomy.whole_unit_type(parent_type)))
         self.mappings(data, output, uid)
         children = data.get("subquestions", [])
         if not isinstance(children, list):
@@ -628,19 +684,32 @@ class _Builder:
             self.summary["questions"] += len(children)
         elif not child:
             self.summary["questions"] += 1
+        # 空档统一成库侧写法：<u>　26　</u> → __26__，纯空档 → ______。
+        # 装配阶段已归一化；这里兜底历史批次，避免把 <u> 原样写进题库。
+        from .wire_format import normalize_blank_text
+        for key in ("stem", "material"):
+            if isinstance(output.get(key), str):
+                output[key] = normalize_blank_text(output[key])
+        blocks = output.get("materialBlocks")
+        if isinstance(blocks, list):
+            for block in blocks:
+                for row in block.get("rows", []) if isinstance(block, dict) else []:
+                    for cell in row.get("cells", []) if isinstance(row, dict) else []:
+                        if isinstance(cell.get("text"), str):
+                            cell["text"] = normalize_blank_text(cell["text"])
         self.scan_media({k: v for k, v in output.items() if k not in {"attachments", "subquestions"}}, uid)
         return output
 
 
 def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, name=None,
-                  upload_mode=None, upload_target=None) -> dict:
+                  upload_mode=None, upload_target=None, media_map=None) -> dict:
     """Return validation evidence and an allowlisted staging batch; never mutate input.
 
     ``catalog_sha256`` binds canonical version/points JSON (full metadata), excluding
     transport metadata such as fetched_at. ``payload`` on failure is preview only.
     Known workflow controls are omitted; unknown extensions block readiness.
     """
-    builder = _Builder()
+    builder = _Builder(media_map)
     if not isinstance(batch, dict):
         builder.error("BATCH_INVALID", "批次必须是 JSON 对象")
         batch = {}

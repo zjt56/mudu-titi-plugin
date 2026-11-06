@@ -30,7 +30,7 @@ def question():
             "filterMetadata": {"subtypes": ["四个选项"], "difficultyValue": 0.65},
             "stem": "Choose the correct word.", "options": [{"label": "A", "text": "go"}, {"label": "B", "text": "see"},
                                                        {"label": "C", "text": "read"}, {"label": "D", "text": "write"}],
-            "answer": "A", "explanation": "本题考查动词辨析，根据句意选 go。（AI生成，待校对）", "knowledge": [path],
+            "answer": "A", "explanation": "本题考查动词辨析，根据句意选 go。", "knowledge": [path],
             "knowledgeIds": [taxonomy.knowledge_index()[0][path]["id"]],
             "source_type": "中考真题", "year": 2024, "source": "2024 安徽英语原卷",
             "location": "第一部分 第1题", "version": "原卷扫描版", "authorization": "已获授权"}
@@ -43,10 +43,10 @@ def batch(item=None):
 def reading_group():
     q = question()
     q.update(unit_kind="group", number=56, numbers=[56, 57, 58], question_type="阅读理解", material="Two children visit a museum.",
-             articleSummary="两个孩子去博物馆参观。（AI生成，待校对）",
+             articleSummary="两个孩子去博物馆参观。",
              knowledge=["语篇体裁/记叙文/故事", "主题/人与自我/生活与学习/学校生活"],
              subquestions=[{"number": n, "stem": "What did they visit?", "options": ["A. Museum", "B. Park"],
-                            "answer": "A", "explanation": "根据第一段可知参观了博物馆。（AI生成，待校对）", "knowledge": [path]}
+                            "answer": "A", "explanation": "根据第一段可知参观了博物馆。", "knowledge": [path]}
                            for n, path in ((56, "设题角度/阅读/细节理解"), (57, "设题角度/阅读/推理判断"),
                                            (58, "设题角度/阅读/主旨大意"))])
     q.pop("knowledgeIds")
@@ -189,8 +189,11 @@ class UploadPayloadTest(unittest.TestCase):
             q.pop(key)
         report = self.build(batch(q))
         self.assertFalse(report["passed"])
-        for key in ("SOURCE_TYPE", "SOURCE", "LOCATION", "VERSION", "AUTHORIZATION"):
+        for key in ("SOURCE_TYPE", "SOURCE"):
             self.assertIn("MISSING_" + key, self.codes(report))
+        # 服务端对 location/version/authorization 有默认值：本地不再硬阻断，
+        # 只保留警告，避免为可选来源字段反复重跑。
+        self.assertEqual([w["code"] for w in report["warnings"]].count("SOURCE_FIELD_EMPTY"), 3)
         self.assertNotIn("source_type", report["payload"]["items"][0])
 
     def test_mock_metadata_and_year_must_be_truthful(self):
@@ -598,8 +601,8 @@ class UploadPayloadTest(unittest.TestCase):
                         wire = report["payload"]["items"][0]
                         self.assertEqual((wire["subquestions"][0] if child else wire)[field], value)
 
-    def test_generated_summary_markers_block_without_rewriting(self):
-        # 未带完整 F5 标注的「AI生成」摘要仍拦停（F5：必须写成完整「（AI生成，待校对）」）。
+    def test_generated_summary_is_dropped_without_gate(self):
+        # 用户规则：不采用 AI 生成大意，直接按缺失处理，不再校验 AI 标记。
         for child in (False, True):
             for summary in ("AI生成", "AI生成待校对：故事梗概", "摘要（AI生成）"):
                 with self.subTest(child=child, summary=summary):
@@ -607,22 +610,20 @@ class UploadPayloadTest(unittest.TestCase):
                     target = q["subquestions"][0] if child else q
                     target["articleSummary"] = summary
                     report = self.build(batch(q))
-                    self.assertIn("GENERATED_ARTICLE_SUMMARY", self.codes(report))
+                    self.assertNotIn("GENERATED_ARTICLE_SUMMARY", self.codes(report))
                     wire = report["payload"]["items"][0]
-                    self.assertEqual((wire["subquestions"][0] if child else wire)["articleSummary"], summary)
+                    self.assertEqual((wire["subquestions"][0] if child else wire)["articleSummary"], "")
 
-    def test_generated_summary_with_full_f5_marker_passes(self):
-        # 带完整「（AI生成，待校对）」的 AI 生成文章大意放行（F3/F5）。
+    def test_generated_summary_with_full_f5_marker_is_also_dropped(self):
+        # 即使带完整旧标记，也不采用 AI 生成内容。
         for child in (False, True):
             with self.subTest(child=child):
                 q = reading_group()
                 target = q["subquestions"][0] if child else q
                 target["articleSummary"] = "本文讲述一个人靠坚持实现梦想的小故事。（AI生成，待校对）"
                 report = self.build(batch(q))
-                self.assertNotIn("GENERATED_ARTICLE_SUMMARY", self.codes(report))
                 wire = report["payload"]["items"][0]
-                self.assertEqual((wire["subquestions"][0] if child else wire)["articleSummary"],
-                                 target["articleSummary"])
+                self.assertEqual((wire["subquestions"][0] if child else wire)["articleSummary"], "")
 
     def test_sqlite_active_integers_accept_all_one_reject_selected_zero(self):
         catalog = deepcopy(self.catalog)
@@ -665,3 +666,55 @@ class UploadPayloadTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_group_children_may_omit_knowledge_for_whole_unit(self):
+        q = question()
+        q.update(id="g1", unit_id="g1", unit_kind="group", numbers=[1, 2], number=1,
+                 question_type="听力长对话理解",
+                 filterMetadata={"subtypes": ["选择2题"]},
+                 stem="听下面一段对话，回答第1、2题。", material="M: Hello.",
+                 answer="", options=[],
+                 attachments=[{"kind": "audio", "url": "/source-media/batch/seg-1.mp3"}])
+        q["subquestions"] = [
+            {"number": 1, "stem": "Q1", "options": [{"label": "A", "text": "a"}], "answer": "A"},
+            {"number": 2, "stem": "Q2", "options": [{"label": "A", "text": "a"}], "answer": "B"},
+        ]
+        report = self.build(batch(q))
+        self.assertTrue(report["passed"], report["errors"])
+
+
+class AliasAlignmentTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.catalog = catalog_snapshot()
+
+    def build(self, item):
+        data = batch(item)
+        data["upload_mode"] = "manual"
+        data["upload_target"] = ""
+        return upload_payload.build_payload(data, self.catalog)
+
+    def test_source_alias_and_type_alias_are_normalized(self):
+        item = question()
+        item.update(source_type="精品资料", question_type="单项选择", type="单项选择")
+        item.pop("question_type", None)
+        report = self.build(item)
+        self.assertTrue(report["passed"], report["errors"])
+        wired = report["payload"]["items"][0]
+        self.assertEqual(wired["source_type"], "精品题源")
+        self.assertEqual(wired["type"], "单项填空")
+
+    def test_legacy_source_aliases_are_normalized(self):
+        for alias, canonical in (("历年考题", "中考真题"), ("模拟卷", "中考模拟")):
+            item = question()
+            item["source_type"] = alias
+            if canonical == "中考模拟":
+                item.update(institution="某校", school="某中学", regional_version="安徽")
+            report = self.build(item)
+            self.assertTrue(report["passed"], report["errors"])
+            self.assertEqual(report["payload"]["items"][0]["source_type"], canonical)
+
+    def test_taxonomy_sources_include_server_only_entries(self):
+        self.assertIn("精品题源", taxonomy.sources())
+        self.assertIn("课本原创", taxonomy.sources())
+        self.assertEqual(len(taxonomy.sources()), 13)

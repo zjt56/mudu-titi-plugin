@@ -24,7 +24,7 @@ function invalid(settings, payload) {
 
 test('defaults, persistence, private atomic files, public read and runtime env', t => {
   const { settings, stateDir } = fixture(t);
-  assert.deepEqual(settings.read(), { base_url: 'http://127.0.0.1:8089/api', subject_id: 'english', timeout_seconds: 30, knowledge_version_id: '', has_api_key: false });
+  assert.deepEqual(settings.read(), { base_url: 'http://127.0.0.1:8089/api', subject_id: 'english', timeout_seconds: 30, knowledge_version_id: '', account: '001', has_api_key: false, has_password: false });
   const saved = settings.save({ base_url: 'https://question-bank.example/api', subject_id: 'math', timeout_seconds: 12.5, api_key: SYNTHETIC_KEY });
   noLeak(saved);
   assert.equal(saved.has_api_key, true);
@@ -208,4 +208,27 @@ test('timeout aborts the GET and does not expose transport errors', async t => {
   assert.equal(signal.aborted, true);
   assert.ok(Date.now() - start < 3000);
   noLeak(result);
+});
+
+test('admin account and login password persist privately and reach runtime env', t => {
+  const { settings, stateDir } = fixture(t);
+  const saved = settings.save({ account: 'admin-recovery-20261022', password: 'synthetic-login-pass' });
+  assert.equal(saved.has_password, true);
+  assert.equal(saved.account, 'admin-recovery-20261022');
+  assert.equal(JSON.stringify(saved).includes('synthetic-login-pass'), false);
+  const directory = path.join(stateDir, 'question-bank');
+  assert.equal(fs.statSync(path.join(directory, 'login-password')).mode & 0o777, 0o600);
+  const runtime = settings.runtimeEnv();
+  assert.equal(runtime.MUDU_UPLOAD_ACCOUNT, 'admin-recovery-20261022');
+  assert.equal(runtime.MUDU_UPLOAD_PASSWORD, 'synthetic-login-pass');
+  const config = JSON.parse(fs.readFileSync(runtime.MUDU_UPLOAD_CONFIG, 'utf8'));
+  assert.equal(config.account, 'admin-recovery-20261022');
+  assert.equal(JSON.stringify(config).includes('synthetic-login-pass'), false);
+  settings.save({ clear_password: true });
+  assert.equal(settings.read().has_password, false);
+  assert.equal(Object.hasOwn(settings.runtimeEnv(), 'MUDU_UPLOAD_PASSWORD'), false);
+  assert.throws(() => settings.save({ clear_password: true, password: 'x' }), { code: 'invalid_config' });
+  for (const password of ['', 'a\nb', 'x'.repeat(4097)]) {
+    assert.throws(() => settings.save({ password }), { code: 'invalid_config' });
+  }
 });

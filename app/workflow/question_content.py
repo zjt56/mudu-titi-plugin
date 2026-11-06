@@ -403,6 +403,79 @@ def apply_required_writing_stem(batch_dir: str | Path, batch: dict) -> int:
     return changed
 
 
+def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
+    """按原卷解析结果回填题干与选项，避免模型把相邻题内容复制错。
+
+    只回填原卷确实解析到的题干/选项；不改材料、答案、解析和标签。
+    """
+    root = Path(batch_dir)
+    try:
+        confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return 0
+    by_numbers = {tuple(u.get("numbers") or []): u for u in confirmed.get("units") or [] if isinstance(u, dict)}
+    changed = 0
+
+    def lookup(parsed, number):
+        for key in (number, str(number)):
+            if key in parsed:
+                return parsed[key]
+        return None
+
+    def fill(target, parsed):
+        nonlocal changed
+        if not isinstance(parsed, dict) or not parsed.get("found"):
+            return
+        stem = parsed.get("stem")
+        if isinstance(stem, str) and stem.strip() and target.get("stem") != stem:
+            target["stem"] = stem
+            changed += 1
+        options = parsed.get("options")
+        if options:
+            filled = [{"key": option.get("label"), "text": option.get("text")} for option in options]
+            if target.get("options") != filled:
+                target["options"] = filled
+                changed += 1
+
+    for row in batch.get("items") or []:
+        key = tuple(row.get("numbers") or ([row.get("number")] if row.get("number") else []))
+        unit = by_numbers.get(key)
+        if not unit:
+            continue
+        parsed = audit_source_unit(unit).get("questions") or {}
+        if unit.get("unit_kind") == "standalone":
+            fill(row, lookup(parsed, unit["numbers"][0]))
+        else:
+            for child in row.get("subquestions") or []:
+                fill(child, lookup(parsed, child.get("number")))
+    return changed
+
+
+def restore_table_variant(batch: dict) -> int:
+    """信息转换表格缺 variant 时按题型确定性补 information-conversion。"""
+    changed = 0
+    for row in batch.get("items") or []:
+        qtype = str(row.get("question_type") or row.get("type") or "")
+        if "信息转换" not in qtype:
+            continue
+        for block in (row.get("materialBlocks") or row.get("material_blocks") or []):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "table" and not block.get("variant"):
+                block["variant"] = "information-conversion"
+                changed += 1
+            for table_row in block.get("rows") or []:
+                cells = table_row.get("cells") if isinstance(table_row, dict) else table_row
+                for cell in cells or []:
+                    if not isinstance(cell, dict) or cell.get("text") or not isinstance(cell.get("items"), list):
+                        continue
+                    # 服务端表格单元格只认 text；把 items 要点合并成文本，保留空档标记。
+                    cell["text"] = "\n".join(str(item) for item in cell["items"])
+                    cell.pop("items", None)
+                    changed += 1
+    return changed
+
+
 def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     """Read-only final artifact audit against freshly sliced source units.
 
@@ -512,11 +585,46 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
             check_option_images(shared_options, item)
             if [(o["label"], _canonical_image_text(o["text"])) for o in shared_options] != [(o["label"], _canonical_image_text(o["text"])) for o in actual_shared]:
                 issue("SHARED_OPTIONS_MISMATCH", "共享选项标签、数量或内容与原卷不一致，必须归于当前题组", uid)
-        candidate_material = "\n".join(_field_text(item.get(k)) for k in ("material", "materialBlocks", "material_blocks", "stem"))
+        candidate_material = "\n".join(
+            _field_text(item.get(k)) for k in ("material", "materialBlocks", "material_blocks", "stem"))
+        # 补全对话/信息匹配的 A–G 选项在正式批次里归入 options，
+        # 但原卷里它们常与材料同段；审计必须把 options 也视为“已呈现”。
+        candidate_material += "\n" + "\n".join(
+            _canonical_image_text(f"{option['label']}. {option['text']}" if option['label'] else option['text'])
+            for option in _candidate_options(item.get("options")))
+        # 表格材料在正式批次里是 materialBlocks 的单元格；按原卷的“|”列分隔还原，
+        # 否则整行比对会因为单元格被拆开而误报缺失。
+        for block in (item.get("materialBlocks") or item.get("material_blocks") or []):
+            for row in (block.get("rows") or []) if isinstance(block, dict) else []:
+                cells = row.get("cells") if isinstance(row, dict) else row
+                if not isinstance(cells, list):
+                    continue
+                texts = []
+                for cell in cells:
+                    if not isinstance(cell, dict):
+                        continue
+                    text = cell.get("text")
+                    if not text and isinstance(cell.get("items"), list):
+                        text = " ".join(str(item) for item in cell["items"])
+                    if text:
+                        texts.append(str(text))
+                if texts:
+                    candidate_material += "\n" + " | ".join(texts)
         if unit["unit_kind"] == "group":
+            candidate_text = _canonical_image_text(candidate_material)
             for line in materials[key]:
+                # 表格行常把多个单元格/要点用 | 或 <br> 写在一行；逐段比对，
+                # 不能要求整行作为一个连续字符串出现。
+                parts = [part for part in re.split(r"\s*\|\s*|<br\s*/?>", line)
+                         if _canonical_image_text(part)]
+                if len(parts) > 1:
+                    missing = [part for part in parts if _canonical_image_text(part) not in candidate_text]
+                    if missing:
+                        issue("SOURCE_MATERIAL_MISSING",
+                              "共享材料/分段作答指令缺失或改写：" + "；".join(p[:60] for p in missing[:3]), uid)
+                    continue
                 text = _canonical_image_text(line)
-                if text and text not in _canonical_image_text(candidate_material):
+                if text and text not in candidate_text:
                     issue("SOURCE_MATERIAL_MISSING", "共享材料/分段作答指令缺失或改写：" + line[:100], uid)
             for other, lines in materials.items():
                 if other == key:

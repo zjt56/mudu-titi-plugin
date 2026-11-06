@@ -117,7 +117,7 @@ class ArchiveTest(unittest.TestCase):
         with patch.object(server, "start_advance", return_value={"running": False}):
             upload = server.handle_upload({"title": self.name}, [{"filename": "paper.pdf", "data": b"%PDF-fixture"}])
         self.assertEqual(upload["name"], self.name)
-        self.assertTrue((server.INBOX / self.name / "source.pdf").exists())
+        self.assertTrue((server.WORKFLOWS / self.name / "attachments/source.pdf").exists())
         self.assertTrue((server.WORKFLOWS / self.name / "workflow" / "manifest.json").exists())
         self.assertTrue((archive / "inbox" / "source.docx").exists())
 

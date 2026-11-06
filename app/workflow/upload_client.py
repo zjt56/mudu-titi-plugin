@@ -7,6 +7,7 @@ must be reconciled by an operator before attempting the same submission again.
 from __future__ import annotations
 
 from http.client import HTTPException
+from http.cookiejar import CookieJar
 import json
 import math
 import os
@@ -70,7 +71,7 @@ def _base_url(value):
 
 
 def _validate_config(values):
-    if not isinstance(values, dict) or set(values) - (set(DEFAULT_CONFIG) | {"knowledge_version_id"}):
+    if not isinstance(values, dict) or set(values) - (set(DEFAULT_CONFIG) | {"knowledge_version_id", "account"}):
         raise _invalid_config()
     config = dict(DEFAULT_CONFIG, **values)
     _base_url(config["base_url"])
@@ -85,6 +86,10 @@ def _validate_config(values):
     for field in ("subject_id", "knowledge_version_id"):
         if field in config and (not isinstance(config[field], str) or not config[field].strip()):
             raise _invalid_config()
+    account = config.get("account")
+    if account is not None and (not isinstance(account, str) or len(account) > 256
+                                or re.search(r"[\x00-\x1f\x7f]", account)):
+        raise _invalid_config()
     return config
 
 
@@ -167,10 +172,15 @@ class ApiClient:
         self._base = self.config["base_url"]
         parts = parse.urlsplit(self._base)
         self._origin = f"{parts.scheme}://{parts.netloc}"
-        handlers = [_NoRedirect()]
+        self._cookies = CookieJar()
+        handlers = [_NoRedirect(), request.HTTPCookieProcessor(self._cookies)]
         if parts.hostname in {"localhost", "127.0.0.1", "::1"}:
             handlers.append(request.ProxyHandler({}))
         self._opener = request.build_opener(*handlers)
+        # 人工账号会话：API Key 被服务端视为 harness，不能创建上传暂存。
+        self._account = (os.environ.get("MUDU_UPLOAD_ACCOUNT") or self.config.get("account") or "").strip()
+        self._password = os.environ.get("MUDU_UPLOAD_PASSWORD", "")
+        self._logged_in = False
 
     def _request(self, method, route, payload=None, *, media=False):
         allowed = ((method == "GET" and route in {"/catalog/knowledge-versions"}) or
@@ -231,6 +241,32 @@ class ApiClient:
             # Never expose urllib's URL, exception message or response headers.
             raise APIError("submission_unknown" if submitting else "network_error") from None
 
+    def _media_get(self, route):
+        """Bounded GET probe used when the static handler rejects HEAD."""
+        req = request.Request(self._origin + route, method="GET",
+                              headers={"Range": "bytes=0-0", "Accept": "*/*"})
+        try:
+            with self._opener.open(req, timeout=self.config["timeout_seconds"]) as response:
+                status = response.status
+                if not 200 <= status < 300:
+                    raise APIError("http_error", status)
+                content_type = response.headers.get("Content-Type", "")
+                length = response.headers.get("Content-Length")
+                total = re.search(r"/(\d+)\s*$", response.headers.get("Content-Range") or "")
+                if total:
+                    length = total.group(1)
+                try:
+                    response.read(1)
+                except (OSError, ValueError):
+                    pass
+                return {"content_type": content_type, "content_length": length}
+        except error.HTTPError as exc:
+            status = exc.code
+            exc.close()
+            raise APIError("http_error", status) from None
+        except (error.URLError, TimeoutError, socket.timeout, HTTPException, OSError, ValueError):
+            raise APIError("network_error") from None
+
     def fetch_catalog(self):
         versions = _rows(self._request("GET", "/catalog/knowledge-versions"), ("versions", "items"))
         candidates = []
@@ -260,6 +296,86 @@ class ApiClient:
         return {"version": version, "points": points,
                 "fetched_at": datetime.now(timezone.utc).isoformat()}
 
+    def _login(self):
+        """Create a human session when admin account/password are configured."""
+        if self._logged_in:
+            return
+        if not self._account or not self._password:
+            raise APIError("human_session_required")
+        body = json.dumps({"username": self._account, "password": self._password}).encode("utf-8")
+        req = request.Request(self._base + "/auth/login", data=body, method="POST",
+                              headers={"Content-Type": "application/json", "Accept": "application/json"})
+        try:
+            with self._opener.open(req, timeout=self.config["timeout_seconds"]) as response:
+                if response.status != 200:
+                    raise APIError("login_failed", response.status)
+                response.read(4096)
+        except error.HTTPError as exc:
+            status = exc.code
+            exc.close()
+            raise APIError("login_failed", status) from None
+        except (error.URLError, TimeoutError, socket.timeout, HTTPException, OSError, ValueError):
+            raise APIError("network_error") from None
+        self._logged_in = True
+
+    def _pending_by_batch(self, batch_id):
+        """Return an existing pending staging id with the same batch_id, if any."""
+        if not batch_id:
+            return None
+        req = request.Request(self._base + "/uploads", method="GET",
+                              headers={"Accept": "application/json"})
+        try:
+            with self._opener.open(req, timeout=self.config["timeout_seconds"]) as response:
+                if response.status != 200:
+                    return None
+                value = json.loads(response.read(self.config["max_response_bytes"] + 1))
+        except (error.HTTPError, error.URLError, TimeoutError, socket.timeout,
+                HTTPException, OSError, ValueError):
+            return None
+        rows = value.get("items") if isinstance(value, dict) else None
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("batch_id") or "") == str(batch_id) \
+                    and row.get("stage") in (None, "pending_confirmation"):
+                return str(row.get("id") or "")
+        return None
+
+    def _session_submit(self, payload, retry=True):
+        req = request.Request(self._base + "/uploads", data=payload, method="POST",
+                              headers={"Content-Type": "application/json", "Accept": "application/json"})
+        try:
+            with self._opener.open(req, timeout=self.config["timeout_seconds"]) as response:
+                status = response.status
+                if not 200 <= status < 300:
+                    raise APIError("rejected", status)
+                raw = response.read(self.config["max_response_bytes"] + 1)
+                value = json.loads(raw)
+                if (not isinstance(value, dict) or not isinstance(value.get("id"), str)
+                        or not value["id"].strip() or value.get("stage") != "pending_confirmation"):
+                    raise APIError("submission_unknown", status)
+                return {"id": value["id"], "stage": value["stage"]}
+        except error.HTTPError as exc:
+            status = exc.code
+            try:
+                raw = exc.read(self.config["max_response_bytes"] + 1)
+            except (OSError, ValueError):
+                raw = b""
+            finally:
+                exc.close()
+            # 会话 8 小时过期后，重新登录一次再提交（仅一次，避免循环）。
+            if status == 401 and retry and self._account and self._password:
+                self._logged_in = False
+                self._login()
+                return self._session_submit(payload, retry=False)
+            details = _error_details(raw, "")
+            if status == 403 and details.get("error") == "human_confirmation_required":
+                raise APIError("human_session_required", status, details) from None
+            code = "submission_unknown" if status >= 500 or status in {408, 425, 429} else "rejected"
+            raise APIError(code, status, details) from None
+        except (error.URLError, TimeoutError, socket.timeout, HTTPException, OSError, ValueError):
+            raise APIError("submission_unknown") from None
+
     def submit(self, payload):
         if not isinstance(payload, bytes) or not payload or len(payload) > MAX_UPLOAD_BYTES:
             raise APIError("invalid_payload")
@@ -269,7 +385,24 @@ class ApiClient:
             raise APIError("invalid_payload") from None
         if not isinstance(value, dict) or not isinstance(value.get("items"), list) or not value["items"]:
             raise APIError("invalid_payload")
-        value = self._request("POST", "/uploads", payload)
+        if self._account and self._password:
+            self._login()
+            try:
+                batch_id = json.loads(payload).get("batch_id")
+            except (ValueError, UnicodeError):
+                batch_id = None
+            allow_duplicate = str(os.environ.get("MUDU_ALLOW_DUPLICATE_UPLOAD", "0")).strip().lower() in ("1", "true", "yes", "on")
+            existing = None if allow_duplicate else self._pending_by_batch(batch_id)
+            if existing:
+                raise APIError("duplicate_batch_pending", 409, {"batch_id": batch_id, "staging_id": existing})
+            return self._session_submit(payload)
+        try:
+            value = self._request("POST", "/uploads", payload)
+        except APIError as exc:
+            if exc.code == "rejected" and exc.http_status == 403 and \
+                    (exc.details or {}).get("error") == "human_confirmation_required":
+                raise APIError("human_session_required", 403, exc.details) from None
+            raise
         return {"id": value["id"], "stage": value["stage"]}
 
     def check_media(self, url, kind=None):
@@ -301,7 +434,14 @@ class ApiClient:
                 "\\" in decoded or "//" in decoded or "%" in decoded or
                 any(segment in {".", ".."} for segment in decoded.split("/"))):
             raise APIError("invalid_media_url")
-        info = self._request("HEAD", path, media=True)
+        try:
+            info = self._request("HEAD", path, media=True)
+        except APIError as exc:
+            # 该题库的静态目录由后端处理，HEAD 返回 501/405；用带 Range 的 GET
+            # 探测存在性与类型，只读 1 字节，不下载整文件，也不发送凭据。
+            if exc.http_status not in (405, 501):
+                raise
+            info = self._media_get(path)
         content_type = info["content_type"].split(";", 1)[0].strip().lower()
         if kind and not content_type.startswith(kind + "/"):
             raise APIError("media_type_mismatch")

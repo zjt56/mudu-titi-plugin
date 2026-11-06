@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import uuid
 from datetime import datetime
@@ -170,6 +171,26 @@ def input_hashes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
         if item:
             path = item.get("path")
             hashes[f"input:{key}"] = (sha256_file(path) if path and Path(path).is_file() else "missing")
+    extra_inputs = {key: value for key, value in manifest.get('inputs', {}).items()
+                    if re.fullmatch(r'attachment_\d{3,}', key)}
+    if stage.id == 'audio':
+        for key, item in sorted(manifest.get('inputs', {}).items()):
+            if re.fullmatch(r'audio_\d{3,}', key) and isinstance(item, dict):
+                path = item.get('path')
+                hashes[f'input:{key}'] = sha256_file(path) if path and Path(path).is_file() else 'missing'
+    if stage.id == 'extract':
+        for key, item in sorted(extra_inputs.items()):
+            path = item.get('path') if isinstance(item, dict) else None
+            hashes[f'input:{key}'] = sha256_file(path) if path and Path(path).is_file() else 'missing'
+    if stage.id in ('structure_gate', 'answers', 'types', 'explanations', 'knowledge', 'assemble', 'review', 'review_gate'):
+        pdf_ocr = Path(batch_dir) / '01_source/pdf-ocr.json'
+        hashes['direct:01_source/pdf-ocr.json'] = sha256_file(pdf_ocr) if pdf_ocr.is_file() else 'missing'
+    if stage.id in ('answers', 'types', 'explanations', 'knowledge', 'assemble', 'review', 'review_gate'):
+        roles_path = Path(batch_dir) / '01_source/material-roles.json'
+        hashes['material:roles'] = sha256_file(roles_path) if roles_path.is_file() else 'missing'
+        for key in sorted(extra_inputs):
+            path = Path(batch_dir) / '01_source' / 'materials' / (key + '.txt')
+            hashes[f'material:{key}'] = sha256_file(path) if path.is_file() else 'missing'
     if stage.id == "underlines":
         docx = manifest.get("inputs", {}).get("docx", {}).get("path")
         hashes["input:docx"] = sha256_file(docx) if docx and Path(docx).is_file() else "missing"
@@ -193,6 +214,11 @@ def input_hashes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
         for rel in review.ROUND_RULES:
             path = root / rel
             hashes[f"rule:{rel}"] = sha256_file(path) if path.is_file() else "missing"
+        audio_sources = Path(batch_dir) / '02_audio/sources'
+        if audio_sources.is_dir():
+            for path in sorted(audio_sources.glob('*/full-transcript.json')):
+                if path.parent.name == 'audio' or re.fullmatch(r'audio_\d{3,}', path.parent.name):
+                    hashes[f'review:{path.relative_to(batch_dir).as_posix()}'] = sha256_file(path)
         observations = Path(batch_dir) / 'workflow/media-observations.json'
         if observations.is_file():
             try:

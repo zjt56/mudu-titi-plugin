@@ -35,13 +35,14 @@ _ROLE_PROMPT = """你是试卷材料分类器。下面是一份上传文件的�
 {text}
 >>>
 
-返回严格 JSON：
-{{"role": "paper|answers|explanations|mix|other",
-  "confidence": 0.0-1.0,
+返回严格 JSON（遵循代理结果协议）：
+{{"status":"completed","artifacts":{{"classification":{{
+  "role": "paper|answers|explanations|mix|other",
+  "confidence": 0.0,
   "heading": "该文件开头的卷名/标题（原文片段，找不到填空串）",
-  "has_questions": true/false,
-  "has_answer_markers": true/false,
-  "reason": "一句话说明依据"}}
+  "has_questions": true,
+  "has_answer_markers": false,
+  "reason": "一句话说明依据"}}}},"notes":[],"findings":[]}}
 """
 
 _PARTITION_PROMPT = """你是试卷材料分段器。下面是一份英语试卷正文的文字层。请判断这份试卷里
@@ -101,7 +102,7 @@ def _parse_json(reply):
 # ---------------------------------------------------------------------------
 # 文档角色分类
 # ---------------------------------------------------------------------------
-def classify_documents(batch_dir: Path, invoke_fn=None, config=None) -> dict:
+def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=None) -> dict:
     """对批次里每份上传文件判定角色，结果写到 01_source/material-roles.json。
 
     文档来源：manifest.inputs 中 source / answers / explanations / docx，以及
@@ -114,16 +115,27 @@ def classify_documents(batch_dir: Path, invoke_fn=None, config=None) -> dict:
     seen = {}
     docs = []
     # 优先收集显式声明的答案/解析，再是正文，最后是其它文档。
-    for key in ("answers", "explanations", "source", "docx"):
+    extra_keys = sorted(key for key in inputs if re.fullmatch(r'attachment_\d{3,}', key))
+    for key in ("answers", "explanations", "source", "docx", *extra_keys):
         item = inputs.get(key) or {}
         path = str(item.get("path") or "")
-        if path and Path(path).suffix.lower() in (".docx", ".pdf", ".doc") and path not in seen:
-            seen[path] = key
+        resolved = Path(path).expanduser() if path else None
+        if resolved is not None and not resolved.is_absolute():
+            resolved = batch / resolved
+        identity = str(resolved.resolve()) if resolved is not None else ""
+        if path and Path(path).suffix.lower() in (".docx", ".pdf", ".doc") and identity not in seen:
+            seen[identity] = key
             docs.append((key, path))
     results = []
     for key, path in docs:
-        text = _document_text(batch, path)
+        source_path = Path(path).expanduser()
+        if not source_path.is_absolute():
+            source_path = batch / source_path
+        text = (_document_text(batch, str(source_path)) if ocr_report is None else
+                _document_text(batch, str(source_path), ocr_report=ocr_report))
         if text is None:
+            results.append({"input": key, "path": path, "role": "other", "source": "unavailable",
+                            "error": "文档文字提取失败，原附件已保留，不能视为已完成解析"})
             continue
         role, source = _classify_one(text, invoke_fn, config)
         # Preserve every uploaded document's complete text layer as an independent
@@ -133,20 +145,24 @@ def classify_documents(batch_dir: Path, invoke_fn=None, config=None) -> dict:
         material_path = material_dir / f"{key}.txt"
         material_path.write_text(text, encoding="utf-8")
         results.append({"input": key, "path": path, "role": role, "source": source,
-                        "chars": len(text), "text_sha256": mf.sha256_file(Path(path)),
+                        "chars": len(text), "source_sha256": mf.sha256_file(source_path),
+                        "text_sha256": mf.sha256_file(material_path),
                         "text_path": material_path.relative_to(batch).as_posix()})
     _write(batch / "01_source" / ROLE_FILE, {"documents": results})
     return {"documents": results}
 
 
-def _document_text(batch: Path, source: str) -> str | None:
+def _document_text(batch: Path, source: str, ocr_report=None) -> str | None:
     """把一份文档的文字层提取出来（答案卷在 answers/explanations 时用原始正文）。"""
     try:
         from . import extract
         import tempfile
         src = Path(source).expanduser().resolve(strict=True)
+        ocr_result, warning = (None, None)
+        if src.suffix.lower() == ".pdf":
+            ocr_result, warning = extract._pdf_ocr_for_source(batch, src, ocr_report)
         with tempfile.TemporaryDirectory(prefix="role-") as tmp:
-            report = extract.extract_source(src, Path(tmp))
+            report = extract.extract_source(src, Path(tmp), ocr_result=ocr_result, ocr_warning=warning)
             for name in ("原始正文.txt", "正文.txt"):
                 cand = Path(tmp) / name
                 if cand.is_file():
@@ -164,6 +180,8 @@ def _classify_one(text: str, invoke_fn, config) -> tuple[str, str]:
             with tempfile.TemporaryDirectory(prefix="role-run-") as run_dir:
                 reply = invoke_fn(prompt, Path(run_dir), config or {})
             data = _parse_json(reply)
+            if isinstance(data, dict) and isinstance(data.get("artifacts"), dict):
+                data = data["artifacts"].get("classification", {}) if data.get("status") == "completed" else {}
             role = str(data.get("role") or "").strip()
             if role in ROLES:
                 return role, "model"

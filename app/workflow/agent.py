@@ -334,7 +334,7 @@ def _audio_evidence_ready(batch_dir) -> bool:
         if len(payload["items"]) != len(items):
             return False
         context, _, missing, units = agent_tasks._collect(batch, "audio")
-        if missing:
+        if missing or context.get('02_audio/segment-evidence.json') != document:
             return False
         agent_tasks._validate(batch, "audio", payload, context, units)
     except (OSError, ValueError, KeyError, TypeError):

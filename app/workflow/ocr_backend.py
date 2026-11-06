@@ -274,14 +274,14 @@ def _read_result(path):
 
 
 def recognize(source: Path, output_dir: Path, *, force_ocr=False, pages=None,
-              task="ocr", config=None) -> dict:
+              task="ocr", config=None, mandatory_pdf=False) -> dict:
     """Run local CLI once under a shared model lock, returning pages/artifacts.
 
     Failure and timeout raise OCRBackendError (with log path), never retry or
     return success. Empty recognized text remains empty; no content is invented.
     """
     settings = _config(config)
-    if not assist_enabled(settings):
+    if not assist_enabled(settings) and not (mandatory_pdf and Path(source).suffix.lower() == '.pdf'):
         raise OCRBackendError(ASSIST_OFF_MESSAGE)
     if settings.get("backend") == "paddle_jobs":
         from .paddle_jobs import recognize as recognize_jobs, PaddleJobsError

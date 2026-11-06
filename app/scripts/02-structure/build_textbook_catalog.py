@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "references" / "textbook-catalog-1.0.md"
 OUTPUT = ROOT / "references" / "textbook-catalog.json"
-EXPECTED = {"versions": 3, "books": 18, "units": 128}
+EXPECTED = {"versions": 3, "books": 18, "units": 138}
 
 LINE = re.compile(r"^( *)- (.*?)\s*$")
 TOPIC = re.compile(r"^(.*?)（(.*)）$")
@@ -78,8 +78,8 @@ def parse(text: str):
             raise ValueError(f"目录树层级缺少册次：{name}")
         book = grade["books"][-1]
         if depth == 3:
-            if PROJECT.match(name) or not UNIT.match(name):
-                # 译林版把 Project 1/2 与单元并列；它们不是课时单元，单列保留。
+            if not (UNIT.match(name) or PROJECT.match(name)):
+                # Project 1/2 与单元并列，按远端 chapter 口径作为独立单元保留。
                 book.setdefault("extras", []).append(name)
                 continue
             unit_name, topic = _split_topic(name)

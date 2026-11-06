@@ -52,6 +52,11 @@ class StructureAiClassifyTest(unittest.TestCase):
             second = structure_ai.auto_classify(batch, invoke_fn=invoke, force=True)
             self.assertTrue(second['reused'])
             self.assertEqual(len(calls), 1)
+            (source / 'pdf-ocr.json').write_text(json.dumps({'documents': [{'page': 1, 'text': 'OCR proof'}]}), encoding='utf-8')
+            third = structure_ai.auto_classify(batch, invoke_fn=invoke, force=True)
+            self.assertTrue(third['ran'])
+            self.assertEqual(len(calls), 2)
+            self.assertIn('OCR proof', calls[-1])
 
     def test_classify_uses_real_local_agent_protocol(self):
         from workflow import local_agent

@@ -558,33 +558,62 @@ def _write(path: Path, value):
     path.write_text(data, encoding="utf-8")
 
 
-def _pdf(source, out, config):
+def _pdf_ocr_for_source(batch, source, report):
+    """Load only a completed acquisition bound to these exact source bytes."""
+    batch, source = Path(batch).resolve(), Path(source).resolve()
+    digest = mf.sha256_file(source)
+    for item in (report or {}).get("sources", []):
+        value = item.get("path")
+        if not value:
+            continue
+        path = Path(value).expanduser()
+        path = (path if path.is_absolute() else batch / path).resolve()
+        if path != source:
+            continue
+        if item.get("status") != "completed":
+            error = item.get("error") or {}
+            return None, f"PDF OCR 获取失败：{error.get('message', '未知错误')}"
+        if item.get("sha256") != digest:
+            return None, "PDF OCR 来源摘要不匹配"
+        try:
+            result_path = (batch / item["result_path"]).resolve()
+            result_path.relative_to(batch)
+            data = json.loads(result_path.read_text(encoding="utf-8"))
+            result = data["result"]
+            if data.get("source_sha256") != digest or not isinstance(result.get("pages"), list):
+                raise ValueError("来源或页面无效")
+            if any(not isinstance(p, dict) or not isinstance(p.get("text"), str) for p in result["pages"]):
+                raise ValueError("页面文字无效")
+            return result, None
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return None, f"PDF OCR 结果不可用：{exc}"
+    return None, "PDF OCR 报告中没有此来源"
+
+
+def _pdf(source, out, config, ocr_result=None, ocr_warning=None):
     from workflow import ocr_backend
-    assist = ocr_backend.ocr_needed(config, ("needs_ocr_page",))
     result = ocr_backend.read_pdf(source, out / "pdf", config=config)
     pages = result["pages"]
     warnings = list(result.get("warnings", []))
+    if ocr_warning:
+        warnings.append(ocr_warning)
+    if ocr_result is not None:
+        result["pdf_ocr"] = ocr_result
+        warnings.extend(ocr_result.get("warnings", []))
+    ocr_pages = {p.get("page"): p for p in (ocr_result or {}).get("pages", [])}
     for page in pages:
         if not page.get("needs_ocr"):
             continue
-        if not assist:
-            # Master switch off: keep the text layer and leave the page-level
-            # doubt for the structure gate; never silently run OCR.
+        recognized = ocr_pages.get(page.get("page"))
+        if not recognized or not recognized.get("text", "").strip():
             page["ocr_skipped"] = True
-            warnings.append(f"第 {page['page']} 页文字层质量不足，但 OCR 辅助未开启；已保留原文字层内容")
+            warnings.append(f"第 {page['page']} 页文字层质量不足，且没有可用的 OCR 文字；已保留原文字层内容")
             continue
-        detected = ocr_backend.recognize(source, out / "ocr", force_ocr=True,
-                                         pages=str(page["page"]), config=config)
-        recognized = next((p for p in detected["pages"] if p["page"] == page["page"]), None)
-        if not recognized or not str(recognized.get("text", "")).strip():
-            raise ValueError(f"第 {page['page']} 页 OCR 没有文字结果")
         page["native_text"] = page.get("text", "")
         page["native_blocks"] = page.get("blocks", [])
-        page["blocks"] = []  # 文字层坐标不能冒充 OCR 文字的坐标。
+        page["blocks"] = []
         page["text"] = recognized["text"]
         page["method"] = "ocr"
-        page["ocr_artifacts"] = detected.get("artifacts")
-        warnings.extend(detected.get("warnings", []))
     result["warnings"] = warnings
     result["text"] = "\n\n".join(f"[PAGE {p['page']}]\n{p.get('text', '')}" for p in pages)
     return result
@@ -639,7 +668,7 @@ def _doc_to_docx(source: Path, evidence: Path):
     )
 
 
-def extract_source(source: Path, destination: Path, config=None) -> dict:
+def extract_source(source: Path, destination: Path, config=None, ocr_result=None, ocr_warning=None) -> dict:
     """原件只读，原生/OCR 结果留存；不伪造答案、题号覆盖或审核通过。"""
     source = Path(source).expanduser().resolve(strict=True)
     destination = Path(destination)
@@ -711,7 +740,7 @@ def extract_source(source: Path, destination: Path, config=None) -> dict:
                 shutil.copy2(target, target.with_name(target.name + ".bak"))
             shutil.copy2(evidence / "media" / name, target)
     elif source.suffix.lower() == ".pdf":
-        result = _pdf(source, evidence, config)
+        result = _pdf(source, evidence, config, ocr_result, ocr_warning)
         # 文字型 PDF 的题图保留为可预览引用；坐标在证据中，图文归属不凭猜测放行。
         for page in result.get("pages", []):
             if page.get("method") == "ocr":
@@ -749,7 +778,7 @@ def extract_source(source: Path, destination: Path, config=None) -> dict:
                 "如需保留题图，请用 Word/WPS 另存为 .docx 后重新上传（.docx 保真且无需安装任何工具）。")
         result.setdefault("warnings", []).append("该文件为旧版 .doc，已用系统工具转换为 .docx 解析（不含图片保真）。")
     text = result.get("text", "")
-    if not text.strip():
+    if not re.sub(r"\[PAGE\s+\d+\]", "", text).strip():
         hint = ""
         if source.suffix.lower() in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
             hint = "。如果这是扫描件或图片型 PDF，请在「模型与设置 → OCR 识别」开启 OCR 辅助后重试"
@@ -802,7 +831,32 @@ def run(batch_dir: Path) -> dict:
     source = manifest.get("inputs", {}).get("source", {}).get("path")
     if not source:
         raise ValueError("批次缺少 source 输入")
-    result = extract_source(Path(source), batch_dir / "01_source")
+    from workflow import pdf_ocr
+    try:
+        ocr_report = pdf_ocr.run(batch_dir, manifest)
+    except Exception as exc:  # acquisition failure must remain visible; do not retry
+        ocr_report = {"status": "failed", "sources": [], "error": str(exc)}
+    source_path = Path(source).expanduser()
+    if not source_path.is_absolute():
+        source_path = batch_dir / source_path
+    ocr_result, ocr_warning = (None, None)
+    if source_path.suffix.lower() == ".pdf":
+        ocr_result, ocr_warning = _pdf_ocr_for_source(batch_dir, source_path, ocr_report)
+    try:
+        result = extract_source(source_path, batch_dir / "01_source", ocr_result=ocr_result,
+                                ocr_warning=ocr_warning)
+    except Exception as exc:
+        if ocr_warning or ocr_report.get("status") == "failed":
+            raise ValueError(f"{exc}；PDF OCR 获取失败：{ocr_warning or ocr_report.get('error', '详见 PDF OCR 报告')}") from exc
+        raise
+    result["pdf_ocr"] = ocr_report
+    if ocr_report.get("status") == "failed":
+        message = "PDF OCR 获取失败，请查看 pdf_ocr 报告：" + str(ocr_report.get("error", "部分来源获取失败"))
+        if source_path.suffix.lower() == '.docx':
+            result.setdefault('warnings', []).append(message + '；继续使用 Word 原文处理')
+        else:
+            result["passed"] = False
+            result["error"] = message
     # 材料分类（用户 2026-11 重设计）：逐份上传文件提取文字层后判定角色
     # （正文/答案/解析/混排/其他）。非阻断：模型不可用时用确定性兜底，只留证据。
     try:
@@ -820,8 +874,19 @@ def run(batch_dir: Path) -> dict:
                     prompt, run_dir, config)["response"]
         except Exception:  # noqa: BLE001
             invoke = None
-        roles = material_classify.classify_documents(batch_dir, invoke_fn=invoke, config=cfg)
+        roles = material_classify.classify_documents(batch_dir, invoke_fn=invoke, config=cfg,
+                                                     ocr_report=ocr_report)
         result["material_roles"] = roles
+        failures = [row.get('input', 'unknown') for row in roles.get('documents', [])
+                    if isinstance(row, dict) and row.get('error')]
+        if failures:
+            failed_rows = [row for row in roles.get('documents', []) if row.get('error')]
+            if (source_path.suffix.lower() == '.docx' and ocr_report.get('status') == 'failed'
+                    and all(Path(str(row.get('path') or '')).suffix.lower() == '.pdf' for row in failed_rows)):
+                result.setdefault('warnings', []).append('PDF 材料提取失败：' + '、'.join(failures) + '；继续使用 Word 原文处理')
+            else:
+                result['passed'] = False
+                result['error'] = '附件解析失败，请重试：' + '、'.join(failures)
         # 明确上传了答案/解析卷、而正文附录为空时，把答案卷文字补到 01_source_ans，
         # 供 answers 阶段使用（不依赖模型，直接取该文件文字层）。
         ans_item = (manifest.get("inputs", {}).get("answers") or {})
@@ -829,10 +894,26 @@ def run(batch_dir: Path) -> dict:
         ans_text = batch_dir / "01_source_ans" / "正文.txt"
         if ans_path and not ans_text.is_file():
             try:
-                from . import agent_prepare
-                agent_prepare.prepare_answers(batch_dir)
-            except Exception:  # noqa: BLE001
-                pass
+                if Path(ans_path).suffix.lower() == ".pdf":
+                    answer = next((row for row in roles.get("documents", [])
+                                   if row.get("input") == "answers" and row.get("text_path")), None)
+                    if answer:
+                        ans_text.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(batch_dir / answer["text_path"], ans_text)
+                        answer_source = Path(ans_path).expanduser()
+                        if not answer_source.is_absolute():
+                            answer_source = batch_dir / answer_source
+                        _write(ans_text.parent / "preparation.json", {
+                            "source": str(answer_source.resolve()),
+                            "source_sha256": mf.sha256_file(answer_source),
+                            "text_sha256": mf.sha256_file(ans_text),
+                            "extraction_report": {"source": "material_classify"}})
+                else:
+                    from . import agent_prepare
+                    agent_prepare.prepare_answers(batch_dir)
+            except Exception as exc:  # noqa: BLE001
+                result["passed"] = False
+                result["error"] = f"答案卷准备失败：{exc}"
     except Exception as exc:  # noqa: BLE001 - 分类失败不影响提取/结构
         result["material_roles"] = {"error": str(exc)}
     _write(batch_dir / "07_review" / "extraction-report.json", result)
@@ -850,6 +931,9 @@ def main(argv=None):
         print(f"原卷提取失败：{exc}", file=sys.stderr)
         return 1
     print(f"复合提取完成：{report['characters']} 字符，{report['sections']} 个分区，{report['questions']} 个候选题号；{len(report['unresolved'])} 项待核验")
+    if not report.get('passed'):
+        print(report.get('error', '附件解析未完成'), file=sys.stderr)
+        return 1
     return 0
 
 

@@ -35,7 +35,7 @@ API Key 由所属科目的上传账号绑定，上传只需要适当的 `draft` 
 本地 `06_batch/batch_meta.json` 保持只读。API 副本的转换是确定性的：
 
 - 本地 `question_type` 映射为 `type`，容易/适中/困难映射为易/中/难。顶层字段与 `filterMetadata` 中的别名冲突会阻断，不静默覆盖。
-- 组题保留共享材料、完整子题、共用选项、题图、表格 `materialBlocks`、合并单元格和 `articleSummary`；不重新切题。文章大意原卷没有时填「无」，不生成（历史 AI 生成产物仍须带 `（AI生成，待校对）` 标记）。
+- 组题保留共享材料、完整子题、共用选项、题图、表格 `materialBlocks`、合并单元格和 `articleSummary`；不重新切题。文章大意原卷没有时留空或填「无」，不生成；历史 AI 生成内容直接丢弃。
 - 来源、位置、版本与授权须有明确字段，不猜授权、不填占位。真题/模拟题需要年份；模拟题还需要机构、学校与地区试卷版本。
 - `answer`、`explanation` 不重复答案/解析前缀。来源没有解析时按用户规则在 `explanation` 填「无」，不再使用 AI 生成；不可溯源且非占位的自撰解析仍会拦停。`answer` 字段只写答案本身。
 - 本地题组的 `answer` 可以为空，答案保存在全部结构化子题。仅在 API 副本中，确认子题号为唯一正整数、完整覆盖组级 `numbers` 且各子题答案非空后，按题号升序生成 `6. C\n7. A` 形式的组级答案；子题原顺序和答案、本地正式文件均保留。已提供的非空组级答案不覆盖；缺题号、覆盖不符或空子题答案仍阻断。此转换兼容开发文档的组级答案字段，不代表已实测远端暂存接口拒绝空组级答案。
@@ -53,8 +53,8 @@ API Key 由所属科目的上传账号绑定，上传只需要适当的 `draft` 
 - 听力单元必须有自己的 `audio` 附件；共享听力题组在组级关联对应片段，不能只在子题随意挂一个音频来冒充整组覆盖。
 - 附件统一走受控 `attachments`。正文中的 HTML `img/audio/video/source` 和 Markdown 图片也会阻断，避免无引号或外链媒体绕过路径及 HEAD 检查；普通文本链接、`<u>` 等文字格式不因此删除。
 - 带 Markdown、HTML 或括号包装的“答案／解析”标题同样会报错，不静默删掉源内容。
-- `upload_content` 只读检查已提供的答案/解析原文。解析与文章大意按「可逐字溯源」或「明确占位『无』（及兼容的历史占位写法）」放行；历史带 `（AI生成，待校对）` 标注的产物兼容放行，但不再新产生（F2/F3/F5 已改写）。文章大意按其后真实题号确定所属材料，重复 A/B 标记不当作唯一 ID；明确混入其他材料大意的解析会报 `EXPLANATION_CROSSES_MATERIAL`。
-- 明确占位「无」（及兼容的历史占位写法）不参与溯源校验：它表示原卷确实没有，不是来源主张。非空、非占位的解析既不能定位到给定来源、又没有历史 AI 标注时报告 `EXPLANATION_SOURCE_UNVERIFIED`；`check_explanations` 体检仍会对真正留空的解析报「解析为空」（F7 新口径：缺失应显式填「无」）。
+- `upload_content` 只读检查已提供的答案/解析原文。解析与文章大意是可选字段：能逐字溯源就保留；为空、占位或历史 AI 内容都按缺失处理，不阻断。文章大意按其后真实题号确定所属材料，重复 A/B 标记不当作唯一 ID；明确混入其他材料大意的解析会报 `EXPLANATION_CROSSES_MATERIAL`。
+- 明确占位「无」（及兼容的历史占位写法）不参与溯源校验：它表示原卷确实没有，不是来源主张。不可溯源的解析只记录 `EXPLANATION_SOURCE_UNVERIFIED` 提示并清为「无」；`check_explanations` 只统计可溯源/缺失/未溯源数量，不再报「解析为空」或阻断流程。
 - 地理地区应写入 `filterMetadata.region`；只有省份名称的 `location` 不代表原卷中的题号、页码或章节位置。
 
 大意/解析来源文件摘要也加入冻结计划。来源变化后，原批准不能继续提交。批次名称可以从**绑定当前正文摘要**的已识别 `metadata.paper_title` 继承，不从文件夹年份猜测；版本和授权不自动补造。
@@ -141,3 +141,26 @@ python -m unittest workflow.test_upload_client workflow.test_upload_payload work
 测试使用隔离本地模拟服务器及合成批次，核对实际 HTTP 路由、Bearer、请求字节、精确大小边界、禁止重定向、错误分类、目录匹配、冻结及批准摘要、防重复与暂存回执。模拟测试不能证明远端密钥有效、SSH 已建立或真实试卷已获授权；这些需在使用者的受控本机另行验证。
 
 整卷 `paperId`、题序、无印刷题号作文的 null 范围和固定选项列数仍需独立原卷清单。API 上传暂存并不自动建立整卷档案；真实题目尚未经远端人工确认时，不凭暂存 ID 猜造题目数据库 ID，也不擅自创建试卷档案。
+
+## 本地装配与线上格式的对应（2026-11-06）
+
+装配阶段在全部校验通过后，会对每道题做一次确定性规范化，保证 `06_batch/batch.json` / `batch_meta.json` 本身就是题库线上格式，而不是等到上传时才临时转换：
+
+- 来源字段 `source`、`source_type`、`year` 提升到题目顶层；缺失时用已识别的卷面元信息补齐，不猜测。
+- `year` 统一为整数，`filterMetadata.year` 同步，避免上传映射报 `ALIAS_CONFLICT`。
+- `options` 统一为字符串数组（如 `"A. go"`）；输入可以是字符串、`{label,text}` 或 `{key,text}`。
+- `filterMetadata.categories` 只保留固定目录值（如 `优选题`、`易错题`），丢弃 `未提供` 等本地占位。
+- `materialBlocks` 仅保留 `type`、`variant`、`rows`、`cells` 的 `text/items/rowspan/colspan/header`，剔除 `column` 等本地字段。
+- 正文、来源行、选项、解析里的 `[IMG name]` 按媒体映射转成 `attachments`（选项图带 `optionKey`），并从文本移除标记；未映射的标记继续阻断。
+- 听力单元按 `02_audio/audio_map.json` 关联对应切分音频。
+- 题组缺少 `material` 时，用已确认结构中的原文补回（去掉与 `stem` 重复的指令行）。
+
+媒体映射文件（可选）放在 `06_batch/media-map.json` 或 `07_upload/media-map.json`：
+
+```json
+{"image3.jpeg": "/source-media/<批次目录>/image3.jpeg", "seg-6-7.mp3": "/source-media/<批次目录>/seg-6-7.mp3"}
+```
+
+也接受 `{"images": {...}, "audio": {...}}` 包装。没有映射文件时，按 `/source-media/<批次目录>/<文件名>` 生成候选映射；**生成 URL 不等于已部署**，提交前仍会逐个 HEAD 校验，未部署就不放行。
+
+`location`、`version`、`authorization` 缺失时只报警告：服务端对这三项有默认值（空串/待核实），不再因为本地未填写而阻断上传；`source`、`source_type`、年份、题型、知识点、媒体和音频仍是硬性检查。

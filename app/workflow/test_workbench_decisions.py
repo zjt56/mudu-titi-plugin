@@ -4,6 +4,7 @@ import pathlib
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 from workbench import server
 
@@ -123,13 +124,35 @@ class UploadTest(unittest.TestCase):
         )
         self.assertEqual(result["name"], "2026年安徽省中考英语")
         self.assertEqual(result["paper"]["title"], "2026年安徽省中考英语")
-        inbox = server.INBOX / result["name"]
-        self.assertTrue((inbox / "source.docx").exists())
-        self.assertTrue((inbox / "batch.json").exists())
+        attachments = server.WORKFLOWS / result["name"] / "attachments"
+        self.assertTrue((attachments / "source.docx").exists())
+        self.assertTrue((attachments / "batch.json").exists())
         self.assertEqual(self.started, [result["name"]])
         # 试卷名不填时用地区+年份兜底，重名自动加后缀
         again = server.handle_upload({"title": "2026年安徽省中考英语"}, [self._docx("A.docx")])
         self.assertNotEqual(again["name"], result["name"])
+
+    def test_upload_keeps_paper_data_and_metadata_isolated_per_batch(self):
+        first = server.handle_upload(
+            {"title": "同名练习", "source_type": "同步练习", "grade": "七年级"},
+            [self._docx("first.docx")])
+        second = server.handle_upload(
+            {"title": "同名练习", "source_type": "中考真题", "grade": "九年级"},
+            [self._docx("second.docx")])
+        self.assertNotEqual(first['name'], second['name'])
+        for result, expected_type, grade in ((first, '同步练习', '七年级'),
+                                              (second, '中考真题', '九年级')):
+            name = result['name']
+            descriptor = json.loads((server.WORKFLOWS / name / 'attachments/batch.json').read_text())
+            manifest = json.loads((server.WORKFLOWS / name / 'workflow/manifest.json').read_text())
+            self.assertEqual(manifest['meta']['source_type'], expected_type)
+            self.assertEqual(manifest['meta']['grade'], grade)
+            self.assertEqual(descriptor['source_type'], expected_type)
+            self.assertEqual(pathlib.Path(manifest['inputs']['source']['path']),
+                             (server.WORKFLOWS / name / 'attachments/source.docx').resolve())
+        self.assertEqual(self.started, [first['name'], second['name']])
+        self.assertFalse((server.INBOX / first['name']).exists())
+        self.assertFalse((server.INBOX / second['name']).exists())
 
     def test_upload_without_title_preserves_original_filename(self):
         source_name = "【木牍教育】14年安徽中考英语.docx"
@@ -137,11 +160,95 @@ class UploadTest(unittest.TestCase):
         result = server.handle_upload({}, [self._docx(source_name),
             {"field": "files", "filename": audio_name, "data": b"ID3 test audio"}])
         self.assertEqual(result["name"], pathlib.Path(source_name).stem)
-        descriptor = json.loads((server.INBOX / result["name"] / "batch.json").read_text())
+        descriptor = json.loads((server.WORKFLOWS / result["name"] / "attachments/batch.json").read_text())
         self.assertEqual(descriptor["original_filenames"]["source"], source_name)
         self.assertEqual(descriptor["original_filenames"]["audio"], audio_name)
         self.assertEqual(descriptor["source"], "source.docx", "内部文件路径保持稳定")
         self.assertEqual(self.started, [result["name"]])
+
+    def test_all_supported_attachments_saved_with_batch_and_no_unhinted_document_lost(self):
+        source = self._docx('paper.docx')
+        extra = self._docx('supporting.docx')
+        more = self._docx('解析.docx')
+        audio = {'field': 'files', 'filename': 'sound.mp3', 'data': b'ID3 audio'}
+        result = server.handle_upload({'title': '练习'}, [source, extra, more, audio])
+        batch = server.WORKFLOWS / result['name']
+        attachments = batch / 'attachments'
+        state = json.loads((batch / 'workflow/manifest.json').read_text())
+        self.assertEqual((attachments / 'source.docx').read_bytes(), source['data'])
+        self.assertEqual((attachments / 'answers.docx').read_bytes(), more['data'])
+        self.assertEqual((attachments / 'attachment_001.docx').read_bytes(), extra['data'])
+        self.assertEqual((attachments / 'audio.mp3').read_bytes(), audio['data'])
+        for key in ('source', 'answers', 'attachment_001', 'audio', 'docx'):
+            self.assertEqual(pathlib.Path(state['inputs'][key]['path']).parent, attachments.resolve())
+        from workflow import material_classify
+        with patch.object(material_classify, '_document_text', side_effect=lambda batch, path: pathlib.Path(path).name):
+            roles = material_classify.classify_documents(batch)
+        self.assertEqual({row['input'] for row in roles['documents']}, {'source', 'answers', 'attachment_001'})
+        self.assertTrue((batch / '01_source/materials/attachment_001.txt').is_file())
+        with patch.object(material_classify, '_document_text', return_value=None):
+            failed = material_classify.classify_documents(batch)
+        self.assertTrue(all(row.get('error') for row in failed['documents']))
+        self.assertTrue((attachments / 'attachment_001.docx').exists())
+        self.assertEqual(self.started, [result['name']])
+
+    def test_discovered_inbox_batch_copies_inputs_into_its_workspace(self):
+        from workflow import auto
+        inbox = server.INBOX / '手工收件'
+        inbox.mkdir()
+        (inbox / 'paper.pdf').write_bytes(b'%PDF original')
+        (inbox / 'answer.pdf').write_bytes(b'%PDF answer')
+        (inbox / 'batch.json').write_text(json.dumps({
+            'source': 'paper.pdf', 'answers': 'answer.pdf', 'source_type': '同步练习',
+            'grade': '七年级'}, ensure_ascii=False), encoding='utf-8')
+        candidate = auto.discover(server.INBOX)[0]
+        batch = auto.ensure_batch(candidate, server.WORKFLOWS)
+        state = json.loads((batch / 'workflow/manifest.json').read_text())
+        for key, content in (('source', b'%PDF original'), ('answers', b'%PDF answer')):
+            path = pathlib.Path(state['inputs'][key]['path'])
+            self.assertEqual(path.parent, (batch / 'attachments').resolve())
+            self.assertEqual(path.read_bytes(), content)
+        self.assertEqual(state['meta']['source_type'], '同步练习')
+        self.assertTrue((batch / 'attachments/batch.json').is_file())
+        self.assertEqual(auto.ensure_batch(candidate, server.WORKFLOWS), batch)
+        other = server.INBOX / '另一份试卷'
+        other.mkdir()
+        (other / 'paper.pdf').write_bytes(b'%PDF different')
+        with self.assertRaisesRegex(ValueError, '另一份上传'):
+            auto.ensure_batch({'name': candidate['name'], 'folder': str(other),
+                               'source': str(other / 'paper.pdf')}, server.WORKFLOWS)
+        self.assertEqual(pathlib.Path(state['inputs']['source']['path']).read_bytes(), b'%PDF original')
+
+    def test_multiple_audio_files_are_saved_without_fabricating_mapping(self):
+        from workflow import auto
+        from audio import segment
+        source = self._docx('paper.docx')
+        files = [source, {'filename': 'a.mp3', 'data': b'first'},
+                 {'filename': 'b.wav', 'data': b'second'}]
+        result = server.handle_upload({}, files)
+        batch = server.WORKFLOWS / result['name']
+        state = json.loads((batch / 'workflow/manifest.json').read_text())
+        self.assertEqual(pathlib.Path(state['inputs']['audio']['path']).read_bytes(), b'first')
+        self.assertEqual(pathlib.Path(state['inputs']['audio_001']['path']).read_bytes(), b'second')
+        with self.assertRaisesRegex(RuntimeError, '多份音频'):
+            segment.run(batch, cfg={})
+        self.assertFalse((batch / '02_audio/audio_map.json').exists())
+
+    def test_word_and_pdf_upload_keeps_word_source_regardless_of_order(self):
+        pdf = {'filename': 'print.pdf', 'data': b'%PDF fixture'}
+        word = self._docx('paper.docx')
+        result = server.handle_upload({'title': '配套试卷'}, [pdf, word])
+        batch = server.WORKFLOWS / result['name']
+        state = json.loads((batch / 'workflow/manifest.json').read_text())
+        self.assertEqual(pathlib.Path(state['inputs']['source']['path']).read_bytes(), word['data'])
+        self.assertEqual(pathlib.Path(state['inputs']['attachment_001']['path']).read_bytes(), pdf['data'])
+        self.assertNotIn('answers', state['inputs'])
+
+    def test_unsupported_attachment_does_not_create_batch(self):
+        with self.assertRaisesRegex(ValueError, '不支持的附件'):
+            server.handle_upload({}, [self._docx('paper.docx'),
+                                      {'filename': 'notes.txt', 'data': b'notes'}])
+        self.assertEqual(list(server.WORKFLOWS.iterdir()), [])
 
     def test_upload_requires_document(self):
         with self.assertRaises(ValueError):

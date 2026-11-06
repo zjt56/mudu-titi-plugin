@@ -74,6 +74,11 @@ def _argv(check: Check, skill_root: Path, batch_json: Path, inputs: dict) -> lis
             text = batch_dir / relative
             if text.is_file() and str(text) not in argv:
                 argv += ["--source", str(text)]
+        materials = batch_dir / '01_source/materials'
+        if materials.is_dir():
+            for text in sorted(materials.glob('attachment_*.txt')):
+                if text.is_file() and text.stem.removeprefix('attachment_').isdigit():
+                    argv += ['--source', str(text)]
     return argv
 
 

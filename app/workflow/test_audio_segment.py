@@ -35,6 +35,193 @@ def _batch(root: Path, numbers=(1, 2, 3)) -> Path:
     return batch
 
 
+class MultiAudioAssignmentTest(unittest.TestCase):
+    def test_assigns_complete_units_to_unique_recordings(self):
+        units = [{'unit_id': 'group-1-2', 'numbers': [1, 2]},
+                 {'unit_id': 'q-3', 'numbers': [3]}]
+        result = segment.assign_audio_units(units, {'audio': {1: [1.2], 2: [3.0]},
+                                                    'audio_001': {3: [4.0]}})
+        self.assertTrue(result['complete'])
+        self.assertEqual([u['unit_id'] for u in result['assignments']['audio']], ['group-1-2'])
+        self.assertEqual([u['unit_id'] for u in result['assignments']['audio_001']], ['q-3'])
+
+    def test_does_not_invent_missing_or_ambiguous_assignments(self):
+        units = [{'unit_id': 'group-1-2', 'numbers': [1, 2]}, {'unit_id': 'q-3', 'numbers': [3]}]
+        result = segment.assign_audio_units(units, {'audio': {1: [1.0]}, 'audio_001': {2: [2.0]}})
+        self.assertFalse(result['complete'])
+        self.assertEqual([row['reason'] for row in result['unresolved']], ['ambiguous', 'missing'])
+        self.assertTrue(all(not rows for rows in result['assignments'].values()))
+
+
+    def test_separate_transcripts_are_bound_to_their_audio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = _batch(Path(tmp), numbers=(1, 2))
+            first = batch / 'first.mp3'
+            second = batch / 'second.mp3'
+            first.write_bytes(b'audio one')
+            second.write_bytes(b'audio two')
+            inputs = {'audio': {'path': str(first)}, 'audio_001': {'path': str(second)}}
+            cfg = {'noise': '-30dB', 'cut_silence': 0.3, 'skeleton_silence': 1.0}
+            def transcribe(source, _cfg, target, **kwargs):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('{}')
+                return {'words': [{'word': 'Question', 'start': 0.1},
+                                  {'word': '1' if source == first else '2', 'start': 0.2}]}
+            with mock.patch.object(segment, 'probe_duration', return_value=5), \
+                 mock.patch.object(segment, 'detect_silences', return_value=[]), \
+                 mock.patch.object(segment, 'transcribe', side_effect=transcribe), \
+                 mock.patch.object(segment, 'transcript_anchors', side_effect=[({1: [1.0]}, set()), ({2: [2.0]}, set())]):
+                report = segment.inspect_multiple_audio(batch, inputs, cfg)
+            self.assertTrue(report['complete'])
+            self.assertEqual(report['assignments'], {'audio': ['q-1'], 'audio_001': ['q-2']})
+            self.assertNotEqual(report['sources']['audio']['sha256'], report['sources']['audio_001']['sha256'])
+            self.assertTrue((batch / report['sources']['audio']['transcript']).is_file())
+            self.assertTrue((batch / report['sources']['audio_001']['transcript']).is_file())
+            self.assertFalse((batch / '02_audio/audio_map.json').exists())
+
+    def test_group_requires_complete_ordered_unrepeated_cues(self):
+        units = [{'unit_id': 'group-1-2', 'numbers': [1, 2]}]
+        for anchors in ({1: [1.0]}, {1: [1.0, 2.0], 2: [3.0]}, {1: [4.0], 2: [3.0]}):
+            with self.subTest(anchors=anchors):
+                result = segment.assign_audio_units(units, {'audio': anchors, 'audio_001': {}})
+                self.assertFalse(result['complete'])
+                self.assertEqual(result['assignments']['audio'], [])
+
+
+class MultiAudioSlicingTest(unittest.TestCase):
+    def _analysis(self, batch):
+        sources = {}
+        for key, number in [('audio', 1), ('audio_001', 2)]:
+            path = batch / (key + '.mp3')
+            path.write_bytes(key.encode())
+            transcript = batch / (key + '.json')
+            transcript.write_text(json.dumps({'words': [{'word': 'Question', 'start': 2.0},
+                                                        {'word': str(number), 'start': 2.1}]}))
+            transcript.with_name(transcript.name + '.key.json').write_text(json.dumps({
+                'key': {'audio_sha256': segment._file_digest(path)}, 'sha256': segment._file_digest(transcript)}))
+            sources[key] = {'path': str(path), 'sha256': segment._file_digest(path),
+                            'duration': 10.0, 'transcript': transcript.name,
+                            'anchors': {str(number): [2.0]}, 'coarse_numbers': [],
+                            'silence_skeleton': [0.0, 10.0]}
+        (batch / 'workflow/manifest.json').write_text(json.dumps({'inputs': {
+            key: {'path': value['path'], 'sha256': value['sha256']} for key, value in sources.items()}}))
+        return {'sources': sources, 'assignments': {'audio': ['q-1'], 'audio_001': ['q-2']},
+                'unresolved': [], 'complete': True, 'status': 'provisional'}
+
+    @staticmethod
+    def _cut(audio, out_dir, item):
+        (out_dir / ('seg-' + item['unit_id'] + '.mp3')).write_bytes(audio.read_bytes())
+        return ['cut source at requested offsets']
+
+    def test_complete_sources_publish_flat_immutable_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = _batch(Path(tmp), numbers=(1, 2))
+            analysis = self._analysis(batch)
+            with mock.patch.object(segment, 'cut', side_effect=self._cut):
+                first = segment.slice_multiple_audio(batch, analysis)
+                evidence = json.loads((batch / '02_audio' / segment.EVIDENCE_NAME).read_text())
+                amap = json.loads((batch / '02_audio' / segment.MAP_NAME).read_text())
+                first_paths = [batch / row['file'] for row in evidence['items']]
+                second = segment.slice_multiple_audio(batch, analysis)
+            self.assertTrue(first['ok'])
+            self.assertNotEqual(first['generation'], second['generation'])
+            self.assertEqual(amap['generation'], evidence['generation'])
+            for row, mapped in zip(evidence['items'], amap['items']):
+                source = analysis['sources'][row['source_audio']]
+                self.assertEqual(Path(row['source_path']), Path(source['path']).resolve())
+                self.assertEqual(row['source_sha256'], source['sha256'])
+                self.assertEqual((row['start'], row['end']), (0.0, 10.0))
+                self.assertEqual(mapped['file'], row['file'])
+                self.assertEqual((batch / row['file']).parent, batch / '02_audio')
+                self.assertTrue(row['verified'])
+                self.assertFalse(row['semantic_verified'])
+            self.assertTrue(all(path.is_file() for path in first_paths))
+
+    def test_failure_or_ambiguity_preserves_existing_aggregates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = _batch(Path(tmp), numbers=(1, 2))
+            analysis = self._analysis(batch)
+            with mock.patch.object(segment, 'cut', side_effect=self._cut):
+                segment.slice_multiple_audio(batch, analysis)
+            evidence = batch / '02_audio' / segment.EVIDENCE_NAME
+            amap = batch / '02_audio' / segment.MAP_NAME
+            previous = (evidence.read_bytes(), amap.read_bytes())
+            analysis['sources']['audio_001']['anchors']['1'] = [1.0]
+            with self.assertRaises(RuntimeError):
+                segment.slice_multiple_audio(batch, analysis)
+            self.assertEqual(previous, (evidence.read_bytes(), amap.read_bytes()))
+            analysis['sources']['audio_001']['anchors'].pop('1')
+            def fail_second(audio, out_dir, item):
+                if audio.name == 'audio_001.mp3':
+                    raise RuntimeError('cut failed')
+                return self._cut(audio, out_dir, item)
+            with mock.patch.object(segment, 'cut', side_effect=fail_second):
+                with self.assertRaisesRegex(RuntimeError, 'cut failed'):
+                    segment.slice_multiple_audio(batch, analysis)
+            self.assertEqual(previous, (evidence.read_bytes(), amap.read_bytes()))
+            Path(analysis['sources']['audio']['path']).write_bytes(b'changed')
+            with self.assertRaises(RuntimeError):
+                segment.slice_multiple_audio(batch, analysis)
+            self.assertEqual(previous, (evidence.read_bytes(), amap.read_bytes()))
+
+    def test_interrupted_publication_rejected_by_all_readers(self):
+        from workflow import agent, agent_tasks
+        from workbench import server
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = _batch(Path(tmp), numbers=(1, 2))
+            analysis = self._analysis(batch)
+            with mock.patch.object(segment, 'cut', side_effect=self._cut):
+                segment.slice_multiple_audio(batch, analysis)
+                old_evidence = (batch / '02_audio/segment-evidence.json').read_bytes()
+                segment.slice_multiple_audio(batch, analysis)
+            (batch / '02_audio/segment-evidence.json').write_bytes(old_evidence)
+            self.assertFalse(agent._audio_evidence_ready(batch))
+            with self.assertRaisesRegex(ValueError, 'generation mismatch'):
+                agent_tasks._collect(batch, 'audio')
+            with self.assertRaisesRegex(ValueError, 'generation mismatch'):
+                agent_tasks._collect(batch, 'assemble')
+            self.assertEqual(server.audio_map(batch), {})
+
+    def test_manifest_and_transcript_provenance_are_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = _batch(Path(tmp), numbers=(1, 2))
+            analysis = self._analysis(batch)
+            manifest = batch / 'workflow/manifest.json'
+            original = manifest.read_text()
+            data = json.loads(original)
+            data['inputs']['audio']['path'] = analysis['sources']['audio_001']['path']
+            manifest.write_text(json.dumps(data))
+            with self.assertRaisesRegex(RuntimeError, '来源'):
+                segment.slice_multiple_audio(batch, analysis)
+            manifest.write_text(original)
+            analysis['sources']['audio']['anchors']['1'] = [3.0]
+            with self.assertRaisesRegex(RuntimeError, '锚点'):
+                segment.slice_multiple_audio(batch, analysis)
+            analysis['sources']['audio']['anchors']['1'] = [2.0]
+            transcript = batch / analysis['sources']['audio']['transcript']
+            transcript.write_text('{}')
+            with self.assertRaisesRegex(RuntimeError, '转写'):
+                segment.slice_multiple_audio(batch, analysis)
+
+    def test_coarse_anchor_is_retained_as_unverified_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = _batch(Path(tmp), numbers=(1, 2))
+            analysis = self._analysis(batch)
+            analysis['sources']['audio']['coarse_numbers'] = [1]
+            transcript = batch / analysis['sources']['audio']['transcript']
+            transcript.write_text(json.dumps({'segments': [{'text': 'Question 1', 'start': 2.0, 'end': 3.0}]}))
+            sidecar = transcript.with_name(transcript.name + '.key.json')
+            data = json.loads(sidecar.read_text())
+            data['sha256'] = segment._file_digest(transcript)
+            sidecar.write_text(json.dumps(data))
+            with mock.patch.object(segment, 'cut', side_effect=self._cut):
+                result = segment.slice_multiple_audio(batch, analysis)
+            self.assertFalse(result['ok'])
+            doc = json.loads((batch / '02_audio' / segment.EVIDENCE_NAME).read_text())
+            self.assertEqual(result['needs_review_units'], ['q-1'])
+            self.assertIn('segment_precision_anchor', doc['items'][0]['review_reasons'])
+
+
 class ConfigTest(unittest.TestCase):
     def test_defaults_and_validation(self):
         # 默认多语种 small：资源占用低；large-v3-turbo 可显式选择。

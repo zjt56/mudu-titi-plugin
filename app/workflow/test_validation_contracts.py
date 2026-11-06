@@ -81,9 +81,8 @@ class ValidationContractsTest(unittest.TestCase):
         argv = checks._argv(check, Path('.'), self.batch, {'source': {'path': str(self.source)}})
         self.assertEqual(argv[-2:], ['--source', str(self.source)])
 
-    def test_group_with_marked_explanations_passes_but_empty_group_is_f7_violation(self):
-        # 新口径（F7）：非听力单元至少要有一条解析（组级或子题），缺失即拦停；
-        # 组级可留空但子题各自带已标注解析则放行。答案是否为空由 check_answers 负责，这里不管。
+    def test_group_with_marked_explanations_passes_and_empty_group_also_passes(self):
+        # 用户规则：解析是可选字段，缺失不再拦停；历史 AI 标记也不再校验。
         row = {'id': 'group', 'unit_kind': 'group', 'answer': '', 'explanation': '',
                'subquestions': [{'number': 1, 'answer': 'A', 'explanation': '本题考查时态（AI生成，待校对）'},
                                 {'number': 2, 'answer': 'B', 'explanation': '本题考查搭配（AI生成，待校对）'}]}
@@ -93,23 +92,18 @@ class ValidationContractsTest(unittest.TestCase):
         empty = {'id': 'group', 'unit_kind': 'group', 'answer': 'A', 'explanation': '',
                  'subquestions': [{'number': 1, 'answer': 'A', 'explanation': ''}]}
         code, output = self.run_script(explanations, [empty])
-        self.assertEqual(code, 1, output)
-        self.assertIn('F7', output)
-
-    def test_standalone_and_group_units_needing_explanation_fail(self):
-        # 非听力单元没有解析一律拦停（F7）；带完整 AI 标注则放行。
-        for row in ({'id': 'single', 'unit_kind': 'standalone', 'answer': 'A', 'explanation': ''},
-                    {'id': 'group', 'unit_kind': 'group', 'answer': 'A', 'subquestions': []}):
-            code, output = self.run_script(explanations, [row])
-            self.assertEqual(code, 1, output)
-        # 只写「AI生成」而缺完整标注，仍未通过（F5 要求整串「（AI生成，待校对）」）。
-        code, output = self.run_script(explanations, [{'id': 'single', 'unit_kind': 'standalone',
-            'answer': 'A', 'explanation': '由AI生成，本题根据上下文判断。'}])
-        self.assertEqual(code, 1, output)
-        # 完整标注放行。
-        code, output = self.run_script(explanations, [{'id': 'single', 'unit_kind': 'standalone',
-            'answer': 'A', 'explanation': '本题根据上下文判断（AI生成，待校对）'}])
         self.assertEqual(code, 0, output)
+
+    def test_missing_or_ai_explanations_never_block(self):
+        # 解析可为空；AI 旧标记也不校验、不阻断。
+        for row in ({'id': 'single', 'unit_kind': 'standalone', 'answer': 'A', 'explanation': ''},
+                    {'id': 'group', 'unit_kind': 'group', 'answer': 'A', 'subquestions': []},
+                    {'id': 'single', 'unit_kind': 'standalone', 'answer': 'A',
+                     'explanation': '由AI生成，本题根据上下文判断。'},
+                    {'id': 'single', 'unit_kind': 'standalone', 'answer': 'A',
+                     'explanation': '本题根据上下文判断（AI生成，待校对）'}):
+            code, output = self.run_script(explanations, [row])
+            self.assertEqual(code, 0, output)
 
 
 if __name__ == '__main__':

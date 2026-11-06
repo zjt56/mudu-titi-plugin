@@ -241,10 +241,11 @@ class AgentTasksTest(unittest.TestCase):
         partial = {"answers": {"2": "A"}, "evidence": {"2": ["附录 L1"]},
                    "difficulty": {"1": "容易"}}
         self.assertTrue(self.accept("answers", partial)["completed"])
-        for candidate in ({"answers": {"1": "fabricated"}, "evidence": {"1": ["L1"]}},
-                          {"answers": {"1": "A"}, "evidence": {"2": ["L1"]}}):
-            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
-                self.accept("answers", candidate)
+        # 用户规则：答案只要非空就保留，不因未逐字命中而阻断整段。
+        self.assertTrue(self.accept("answers", {"answers": {"1": "fabricated"},
+                                                "evidence": {"1": ["L1"]}})["completed"])
+        with self.assertRaises(ValueError):
+            self.accept("answers", {"answers": {"1": "A"}, "evidence": {"2": ["L1"]}})
 
     def test_answer_comparison_only_normalizes_quotes_and_whitespace(self):
         expected = 'He said, “It’s  fine.”'
@@ -277,12 +278,17 @@ class AgentTasksTest(unittest.TestCase):
     def test_knowledge_leaf_scope_ids_and_provenance(self):
         self.assertTrue(self.accept("knowledge", self.knowledge)["completed"])
         for changes in ({"knowledge": ["词汇"]}, {"knowledge": ["主题/不存在"]},
-                        {"knowledge": ["语篇体裁/记叙文/故事"]},
-                        {"answer": "B"}, {"explanation": "unmarked generated explanation"}, {"evidence": []}):
+                        {"knowledge": ["语篇体裁/记叙文/故事"]}, {"evidence": []}):
             candidate = copy.deepcopy(self.knowledge)
             candidate["items"][0].update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.accept("knowledge", candidate)
+        # 用户规则：答案/解析由上游产物确定性覆盖，模型回显不一致不再阻断。
+        for changes in ({"answer": "B"}, {"explanation": "unmarked generated explanation"}):
+            candidate = copy.deepcopy(self.knowledge)
+            candidate["items"][0].update(changes)
+            with self.subTest(changes=changes):
+                self.assertTrue(self.accept("knowledge", candidate)["completed"])
         # 路径合法的前提下，模型自填的错误 knowledgeIds 会被目录确定性回填纠正，而不是整轮重跑。
         corrected = copy.deepcopy(self.knowledge)
         corrected["items"][0]["knowledgeIds"] = ["wrong"]
@@ -305,11 +311,11 @@ class AgentTasksTest(unittest.TestCase):
         valid = self.group_fixture()
         valid['items'][0]['articleSummary'] = '本文讲述校园生活中的一段经历，并说明了同学之间的互助。（AI生成，待校对）'
         self.assertTrue(self.accept('knowledge', valid)['completed'])
-        for malformed in ('', [], {'text': 'summary'}):
-            candidate = copy.deepcopy(valid)
-            candidate['items'][0]['articleSummary'] = malformed
-            with self.assertRaisesRegex(ValueError, 'articleSummary'):
-                self.accept('knowledge', candidate)
+        # 空字符串现在表示“没有大意”，按可选字段接受。
+        candidate = copy.deepcopy(valid)
+        candidate['items'][0]['articleSummary'] = ''
+        self.assertTrue(self.accept('knowledge', candidate)['completed'])
+        # 非字符串类型仍由常规字段校验拦截；空值不再拦截。
 
     def test_group_child_exact_coverage_and_reading_scope(self):
         valid = self.group_fixture()
@@ -370,6 +376,14 @@ class AgentTasksTest(unittest.TestCase):
             self.assertFalse((folder / "agent-review.json").exists())
             self.assertFalse((folder / "content-review.json").exists())
 
+    def test_extra_original_audio_is_never_offered_as_a_cut(self):
+        original = self.batch / 'attachments/audio_001.mp3'
+        original.parent.mkdir(parents=True, exist_ok=True)
+        original.write_bytes(b'original recording')
+        self.write('workflow/manifest.json', {'inputs': {'audio_001': {'path': str(original), 'exists': True}}})
+        context, _, _, _ = tasks._collect(self.batch, 'audio')
+        self.assertNotIn('attachments/audio_001.mp3', context.get('existing_audio_files', []))
+
     def test_audio_timestamps_without_existing_verified_cuts_rejected(self):
         self.units[0]["type"] = "听力短对话理解"
         self.write("01_source/structure.confirmed.json", {"units": self.units})
@@ -383,6 +397,30 @@ class AgentTasksTest(unittest.TestCase):
         row["start"] = -1
         with self.assertRaises(ValueError):
             self.accept("audio", {"items": [row]})
+
+    def test_audio_candidate_slices_accepted_with_warning(self):
+        self.units[0]["type"] = "听力短对话理解"
+        self.write("01_source/structure.confirmed.json", {"units": self.units})
+        self.write("02_audio/segment.mp3", "existing audio fixture")
+        row = {"unit_id": "q-1", "file": "02_audio/segment.mp3", "start": 0, "end": 5,
+               "evidence": ["candidate cut"]}
+        self.write("02_audio/segment-evidence.json", {"items": [
+            dict(row, verified=False, review_reasons=["unsupported_end"])]})
+        report = self.accept("audio", {"items": [row]})
+        self.assertTrue(report["completed"])
+        self.assertTrue(any("候选切片" in note for note in report.get("notes", [])))
+
+    def test_audio_candidate_slices_rejected_in_strict_mode(self):
+        self.units[0]["type"] = "听力短对话理解"
+        self.write("01_source/structure.confirmed.json", {"units": self.units})
+        self.write("02_audio/segment.mp3", "existing audio fixture")
+        row = {"unit_id": "q-1", "file": "02_audio/segment.mp3", "start": 0, "end": 5,
+               "evidence": ["candidate cut"]}
+        self.write("02_audio/segment-evidence.json", {"items": [
+            dict(row, verified=False, review_reasons=["unsupported_end"])]})
+        with patch.dict("os.environ", {"WF_ACCEPT_AUDIO_CANDIDATES": "0"}):
+            with self.assertRaisesRegex(ValueError, "候选切片边界未验证"):
+                self.accept("audio", {"items": [row]})
 
     def test_audio_prompt_requires_copying_verified_timestamps(self):
         self.units[0]["type"] = "听力短对话理解"
@@ -426,8 +464,7 @@ class AgentTasksTest(unittest.TestCase):
         self.assertEqual(installed["items"][0]["knowledge_ids"], installed["items"][0]["knowledgeIds"])
         for changes in ({"numbers": [2]}, {"number": 2}, {"status": "published"}, {"knowledge": ["词汇"]},
                         {"filterMetadata": {"subtypes": ["三个选项"]}},
-                        {"knowledgeIds": ["invented"]}, {"knowledge_ids": ["invented"]},
-                        {"stem": "Foreign question text"}, {"options": []}):
+                        {"knowledgeIds": ["invented"]}, {"knowledge_ids": ["invented"]}, {"options": []}):
             candidate = copy.deepcopy(payload)
             candidate["items"][0].update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -442,6 +479,15 @@ class AgentTasksTest(unittest.TestCase):
         installed = json.loads((self.batch / tasks.ARTIFACTS["assemble"]).read_text())
         self.assertEqual(installed["items"][0]["answer"], upstream_answer)
         self.assertNotEqual(installed["items"][0]["explanation"], "编造的解析")
+        # 题干/选项按原卷确定性回填，模型抄错不再整批失败。
+        for changes in ({"stem": "Foreign question text"},):
+            drifted = copy.deepcopy(payload)
+            drifted["items"][0].update(changes)
+            with self.subTest(changes=changes):
+                self.assertTrue(self.accept("assemble", drifted)["completed"])
+            installed = json.loads((self.batch / tasks.ARTIFACTS["assemble"]).read_text())
+            self.assertEqual(installed["items"][0]["stem"], "She ______ a book.")
+            self.assertEqual(installed["items"][0]["stem"], "She ______ a book.")
 
     def test_assemble_fills_missing_source_placeholders_without_model_rework(self):
         self.write("01_source/structure.confirmed.json", {"units": self.units, "meta": {

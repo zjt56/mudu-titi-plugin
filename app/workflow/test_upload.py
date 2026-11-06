@@ -164,7 +164,7 @@ class UploadFlowTest(unittest.TestCase):
         self.client.return_value.submit.assert_not_called()
 
     def test_mapping_failure_never_posts_or_freezes(self):
-        source = valid_batch(); source['items'][0].pop('authorization')
+        source = valid_batch(); source['items'][0].pop('source')
         self.source.write_text(json.dumps(source, ensure_ascii=False))
         report = upload.prepare(self.batch, catalog=self.catalog, config=self.settings)
         self.assertFalse(report['passed'])

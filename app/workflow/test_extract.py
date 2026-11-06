@@ -9,6 +9,23 @@ from unittest.mock import patch
 from workflow import auto, contracts, extract, manifest as mf, ocr_backend, runner
 
 
+class MaterialRoleAgentTest(unittest.TestCase):
+    def test_role_classification_uses_local_agent_envelope(self):
+        from workflow import local_agent, material_classify
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / 'agent.py'
+            result = {'status': 'completed', 'artifacts': {'classification': {'role': 'answers'}},
+                      'notes': [], 'findings': []}
+            script.write_text('import sys\nsys.stdin.read()\nprint(' + repr(json.dumps(result)) + ')\n', encoding='utf-8')
+            config = local_agent._validate_config({'provider': 'command', 'command': ['{python}', str(script)],
+                                                   'timeout_seconds': 10}, root)
+            def invoke(prompt, run_dir, cfg):
+                return local_agent.invoke(prompt, run_dir, cfg)['response']
+            role, source = material_classify._classify_one('1. A\n2. B', invoke, config)
+            self.assertEqual((role, source), ('answers', 'model'))
+
+
 class StructureCandidateTest(unittest.TestCase):
     def test_writing_bullets_not_question_numbers_and_appendix_is_separate(self):
         body = ('Ⅰ.单项填空(共2小题)\n1. First?\n2. Second?\n'
@@ -231,12 +248,10 @@ class CompositeExtractionTest(unittest.TestCase):
                 {'page': 2, 'method': 'text', 'text': 'bad', 'needs_ocr': True}], 'warnings': []}
             recognized = {'pages': [{'page': 2, 'method': 'ocr', 'text': 'Ⅰ.单项填空(共1小题)\n1. Read?'}], 'warnings': [], 'artifacts': {}}
             with patch.object(ocr_backend, 'read_pdf', return_value=native), \
-                 patch.object(ocr_backend, 'recognize', return_value=recognized) as recognize:
-                report = extract.extract_source(source, root / 'out')
+                 patch.object(ocr_backend, 'recognize') as recognize:
+                report = extract.extract_source(source, root / 'out', ocr_result=recognized)
             self.assertTrue(report['passed'])
-            self.assertEqual(recognize.call_count, 1)
-            self.assertEqual(recognize.call_args.kwargs['pages'], '2')
-            self.assertTrue(recognize.call_args.kwargs['force_ocr'])
+            recognize.assert_not_called()
             evidence = json.loads((root / 'out' / 'extraction.json').read_text())
             self.assertEqual(evidence['pages'][1]['native_text'], 'bad')
             self.assertEqual(evidence['pages'][0]['text'], 'native page')

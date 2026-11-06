@@ -286,7 +286,15 @@ def prepare_round_plan(batch_dir) -> dict:
         raise ValueError("Missing round inputs: " + ", ".join(missing))
     root = Path(__file__).resolve().parents[1]
     hashes = {}
-    for base, paths, prefix in ((batch, ROUND_INPUTS, ""), (root, ROUND_RULES, "rules:")):
+    materials = batch / '01_source/materials'
+    extra_inputs = tuple(path.relative_to(batch).as_posix()
+                         for path in sorted(materials.glob('attachment_*.txt'))
+                         if re.fullmatch(r'attachment_\d{3,}\.txt', path.name)) if materials.is_dir() else ()
+    audio_sources = batch / '02_audio/sources'
+    audio_transcripts = tuple(path.relative_to(batch).as_posix()
+                              for path in sorted(audio_sources.glob('*/full-transcript.json'))
+                              if path.parent.name == 'audio' or re.fullmatch(r'audio_\d{3,}', path.parent.name)) if audio_sources.is_dir() else ()
+    for base, paths, prefix in ((batch, (*ROUND_INPUTS, *extra_inputs, *audio_transcripts), ""), (root, ROUND_RULES, "rules:")):
         for relative in paths:
             path = base / relative
             if path.is_symlink():
