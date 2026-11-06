@@ -500,6 +500,16 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
     mf.reconcile_deliveries(batch_dir, manifest)
     mf.save(batch_dir, manifest)
     manifest = mf.load(batch_dir)
+    # 卡点自愈：先收集诊断证据，再由已配置模型选择受限的重试动作。
+    # 模型不可用或返回非法计划时只留痕，不阻断本轮自动调度。
+    try:
+        from . import self_heal
+        healed = self_heal.recover(batch_dir)
+        if healed.get("changed"):
+            manifest = mf.load(batch_dir)
+            print(f"  · {healed.get('stage')} 已触发模型自愈：重新进入自动执行")
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+        print(f"  · 模型自愈记录失败，不影响主流程：{str(exc)[:160]}")
     blockers = []
     provisional_result = None
     parallel_done = {}

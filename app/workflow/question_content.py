@@ -556,6 +556,49 @@ def _validated_ai_units(units, fresh, lines):
     return result if seen == expected_set else None
 
 
+def restore_table_blocks_from_structure(batch_dir: str | Path, batch: dict) -> int:
+    """Restore empty table blocks from the confirmed Word structure.
+
+    The model may preserve only the table marker while omitting its cells. The
+    confirmed Word slice is authoritative, so this is a deterministic repair,
+    not generated content or an audit waiver.
+    """
+    root = Path(batch_dir)
+    confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
+    by_numbers = {tuple(u.get("numbers") or []): u for u in confirmed.get("units") or []}
+    repaired = 0
+    for item in batch.get("items") or []:
+        blocks = item.get("materialBlocks") or item.get("material_blocks")
+        if not isinstance(blocks, list) or not any(isinstance(b, dict) and b.get("type") == "table" and not b.get("rows") for b in blocks):
+            continue
+        unit = by_numbers.get(tuple(item.get("numbers") or []))
+        if not unit:
+            continue
+        stem = str(unit.get("stem") or "")
+        match = re.search(r"\[TABLE\s+\d+\](.*?)\[/TABLE\]", stem, re.S)
+        if not match:
+            continue
+        rows = []
+        for raw in match.group(1).splitlines():
+            line = raw.strip()
+            if not line or "|" not in line:
+                continue
+            cells = []
+            for cell in line.split("|"):
+                text = re.sub(r"<br\s*/?>", "\n", cell, flags=re.I)
+                text = re.sub(r"[ \t]+", " ", text).strip()
+                cells.append({"text": text, "items": []})
+            if cells:
+                rows.append({"cells": cells})
+        if rows:
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "table" and not block.get("rows"):
+                    block["rows"] = rows
+                    repaired += 1
+                    break
+    return repaired
+
+
 def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     """Read-only final artifact audit against freshly sliced source units.
 

@@ -185,11 +185,38 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
         mf.save(batch_dir, manifest)
         print(f"  ✗ {report['error']}；报告：{target.relative_to(batch_dir)}")
         return 1
+    # Deterministically restore empty table blocks from confirmed Word slices
+    # before validation; this repairs model formatting loss without weakening audit.
+    try:
+        from .question_content import restore_table_blocks_from_structure
+        batch_data = json.loads(batch_json.read_text(encoding="utf-8-sig"))
+        repaired = restore_table_blocks_from_structure(batch_dir, batch_data)
+        if repaired:
+            batch_json.write_text(json.dumps(batch_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            meta_json = batch_dir / "06_batch" / "batch_meta.json"
+            if meta_json.is_file():
+                meta_data = json.loads(meta_json.read_text(encoding="utf-8-sig"))
+                restore_table_blocks_from_structure(batch_dir, meta_data)
+                meta_json.write_text(json.dumps(meta_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            print(f"  · 自动恢复 {repaired} 个原卷表格块")
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print(f"  · 表格自动恢复未执行：{exc}")
     final_batch_hash = mf.sha256_file(batch_json)
     stage = contracts.STAGE_BY_ID["validate"]
     mf.touch_stage(manifest, "validate", mf.RUNNING)
     evidence_before = _validate_inputs(batch_dir, manifest)
     report = checks.run_all(SKILL_ROOT, batch_json, manifest.get("inputs", {}))
+    # 上传前本地预检前移到 validate：不访问网络、不冻结文件，但提前暴露最终批次、
+    # 解析来源、媒体引用和 payload 大小问题，避免用户点击上传后才第一次发现。
+    try:
+        from . import upload as upload_flow
+        report["upload_local_preflight"] = upload_flow.local_preflight(batch_dir)
+    except (OSError, ValueError, TypeError) as exc:
+        report["upload_local_preflight"] = {"passed": False, "network_checked": False,
+                                             "errors": [{"code": "LOCAL_PREFLIGHT_ERROR", "message": str(exc)}]}
+    # 这是提前提示，不替代现有 validate 阻断契约；真正上传时仍由 prepare/verify 严格拦截。
+    if not report["upload_local_preflight"].get("passed"):
+        report.setdefault("warnings", []).append("UPLOAD_LOCAL_PREFLIGHT")
     # 脚本的字段/目录体检不能代替原卷逐题覆盖与材料归属复核。
     try:
         audit = source_audit_for_batch(batch_dir, json.loads(batch_json.read_text(encoding="utf-8-sig")))
