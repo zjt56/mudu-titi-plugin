@@ -177,7 +177,8 @@ def _classify_deterministic(text: str) -> str:
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     answer_rows = sum(1 for line in lines
                       if re.match(r"^\s*\d{1,4}\s*[.．、)]\s*[A-H]\b", line)
-                      or re.search(r"【解析】|【答案】|【分析】|参考答案", line))
+                      or re.search(r"答案及解析|参考答案|答案速查|【解析】|【答案】|【分析】", line)
+                      or re.search(r"\d{1,4}\s*[~～\-–—]\s*\d{1,4}\s+[A-H]{2,}", line))
     question_rows = sum(1 for line in lines
                         if re.match(r"^\s*(?:[（(]\s*[）)]\s*)?\d{1,4}\s*[.．、)]\s*\S", line))
     option_rows = sum(1 for line in lines if len(re.findall(r"[A-H][.．]\s*\S", line)) >= 2)
