@@ -1276,9 +1276,9 @@ def _stage_upload_media(folder):
     source = folder / '06_batch' / 'batch_meta.json'
     if not source.exists():
         return None
-    # Workbench edits and workflow imports use these locks. Independent external
-    # writers are detected by the stable reads and digest comparison below.
-    with _lock, _agent_lock(1500):
+    # Serialize with workflow imports. Workbench and independent external edits
+    # are detected by the stable reads and digest comparisons below.
+    with _agent_lock(1500):
         root_fd = media_transfer._open_root(folder)
         try:
             raw = media_transfer._read_file(root_fd, '06_batch/batch_meta.json')
@@ -1298,7 +1298,7 @@ def _stage_upload_media(folder):
     mapping = media_transfer.stage_media(folder, refs,
         static_root='/home/ubuntu/mudu-quiz/static/source-media', batch_id=batch_id,
         settings=destination)
-    with _lock, _agent_lock(1500):
+    with _agent_lock(1500):
         if media_inventory.referenced_media(folder, metadata) != refs:
             raise ValueError('批次媒体在暂存期间发生变化，请重新上传')
         root_fd = media_transfer._open_root(folder)

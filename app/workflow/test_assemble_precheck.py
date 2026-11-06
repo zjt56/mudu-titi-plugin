@@ -37,10 +37,11 @@ class AssemblePrecheckTest(unittest.TestCase):
         result = assemble_precheck.precheck({"items": [unit()]})
         self.assertTrue(result["passed"], result["problems"])
 
-    def test_cloze_child_without_number_is_reported(self):
+    def test_cloze_child_blank_only_is_accepted_when_material_has_number(self):
         group = unit(
             unit_id="group-1-2", id="group-1-2", unit_kind="group", number=1, numbers=[1, 2],
             question_type="完形填空", filterMetadata={"subtypes": ["10空"]},
+            knowledge=["语篇体裁/记叙文/故事", "主题/人与自我/生活与学习/日常活动"],
             stem="阅读下列短文，从每小题所给的A、B、C、D四个选项中选出一个最佳选项。",
             material="Tom is a boy. He __1__ to school and __2__ back.",
             options=[],
@@ -55,8 +56,20 @@ class AssemblePrecheckTest(unittest.TestCase):
                  "knowledge": ["词汇/词汇辨析/动词辨析"], "answer": "B", "explanation": "x"},
             ])
         result = assemble_precheck.precheck({"items": [group]})
+        self.assertTrue(result["passed"], result["problems"])
+
+    def test_cloze_numbered_child_still_rejects_mismatched_number(self):
+        group = unit(
+            unit_id="group-1-2", id="group-1-2", unit_kind="group", number=1, numbers=[1, 2],
+            question_type="完形填空", filterMetadata={"subtypes": ["10空"]},
+            stem="指令", material="材料", options=[],
+            subquestions=[{"number": 2, "stem": "1.", "options": [
+                {"label": "A", "text": "a"}, {"label": "B", "text": "b"},
+                {"label": "C", "text": "c"}, {"label": "D", "text": "d"}],
+                "knowledge": ["词汇/词汇辨析/动词辨析"], "answer": "A", "explanation": "x"}])
+        result = assemble_precheck.precheck({"items": [group]})
         self.assertFalse(result["passed"])
-        self.assertTrue(any("[D3]" in problem for problem in result["problems"]), result["problems"])
+        self.assertTrue(any("[D8]" in problem for problem in result["problems"]), result["problems"])
 
 
 class DifficultyCheckTest(unittest.TestCase):

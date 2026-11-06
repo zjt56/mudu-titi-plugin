@@ -22,8 +22,12 @@ NO_SUB_OPTIONS = ("选词填空", "短文填空", "教材语篇填空")
 READING_GROUP = ("阅读理解", "任务型阅读", "读写综合")
 # 完形/语法选择：组级需 语篇体裁* + 主题*
 CLOZE_GRAMMAR_GROUP = ("完形填空", "语法选择")
-# D3/D8：形如 "31." 或 "31. ______"（含题号）
+# D3/D8：完形子题允许两种合法表示：
+# 1) 题号已在共享材料中时只写非空作答空位（如 "______"）；
+# 2) 旧版/特殊版式保留题号前缀（如 "31." 或 "31. ______"）。
+# 不应因采用当前 D3 的空位表示而误报格式错误。
 NUMBER_PREFIX = re.compile(r"^\s*(\d+)\s*[\.．]")
+BLANK_ONLY = re.compile(r"^\s*(?:_{2,}|[＿－—\-\s]{2,})\s*$")
 
 
 def _has_prefix(knowledge, prefix):
@@ -81,20 +85,22 @@ def _check_unit(u):
             if c.get("options"):
                 problems.append(f"[C12] {uid} ({qt}) 子题 {n}: 不应有 options，现有 {len(c.get('options') or [])} 个")
 
-    # D3/D8：完形子题 stem 应含题号，形如 "31." 或 "31. ______"，不应为空串
+    # D3/D8：共享材料已带题号时，子题 stem 写非空空位即可；保留题号前缀的
+    # 旧版格式也兼容，但若存在前缀必须与子题号一致。
     if qt == CLOZE:
         for c in subs:
             n = c.get("number")
             stem = c.get("stem")
             if stem is None or not str(stem).strip():
-                problems.append(f"[D3] {uid} 完形子题 {n}: stem 为空串，应为 '31.' 或 '31. ______'")
+                problems.append(f"[D3] {uid} 完形子题 {n}: stem 为空串，应为 '______' 或 '31.'")
                 continue
             s = plain(str(stem)).strip()
             m = NUMBER_PREFIX.match(s)
-            if not m:
-                problems.append(f"[D3] {uid} 完形子题 {n}: stem「{s[:20]}」未以题号形式开头（应形如 '31.' 或 '31. ______'）")
-            elif n is not None and str(n).strip() and m.group(1) != str(n).strip():
-                problems.append(f"[D8] {uid} 完形子题 {n}: stem 题号「{m.group(1)}.」与子题号 {n} 不一致")
+            if m:
+                if n is not None and str(n).strip() and m.group(1) != str(n).strip():
+                    problems.append(f"[D8] {uid} 完形子题 {n}: stem 题号「{m.group(1)}.」与子题号 {n} 不一致")
+            elif not BLANK_ONLY.match(s):
+                problems.append(f"[D3] {uid} 完形子题 {n}: stem「{s[:20]}」不是合法空位或题号格式（应为 '______' 或 '31.'）")
 
     # C15：组级 / 子题必带维度
     if kind == "group" and qt in READING_GROUP:

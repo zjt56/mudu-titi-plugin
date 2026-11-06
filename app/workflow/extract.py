@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -590,9 +591,11 @@ def _pdf_ocr_for_source(batch, source, report):
     return None, "PDF OCR 报告中没有此来源"
 
 
-def _pdf(source, out, config, ocr_result=None, ocr_warning=None):
+def _pdf(source, out, config, ocr_result=None, ocr_warning=None, ocr_wait=None):
     from workflow import ocr_backend
     result = ocr_backend.read_pdf(source, out / "pdf", config=config)
+    if ocr_wait is not None:
+        ocr_result, ocr_warning = ocr_wait()
     pages = result["pages"]
     warnings = list(result.get("warnings", []))
     if ocr_warning:
@@ -668,7 +671,7 @@ def _doc_to_docx(source: Path, evidence: Path):
     )
 
 
-def extract_source(source: Path, destination: Path, config=None, ocr_result=None, ocr_warning=None) -> dict:
+def extract_source(source: Path, destination: Path, config=None, ocr_result=None, ocr_warning=None, pdf_ocr_wait=None) -> dict:
     """原件只读，原生/OCR 结果留存；不伪造答案、题号覆盖或审核通过。"""
     source = Path(source).expanduser().resolve(strict=True)
     destination = Path(destination)
@@ -740,7 +743,7 @@ def extract_source(source: Path, destination: Path, config=None, ocr_result=None
                 shutil.copy2(target, target.with_name(target.name + ".bak"))
             shutil.copy2(evidence / "media" / name, target)
     elif source.suffix.lower() == ".pdf":
-        result = _pdf(source, evidence, config, ocr_result, ocr_warning)
+        result = _pdf(source, evidence, config, ocr_result, ocr_warning, pdf_ocr_wait)
         # 文字型 PDF 的题图保留为可预览引用；坐标在证据中，图文归属不凭猜测放行。
         for page in result.get("pages", []):
             if page.get("method") == "ocr":
@@ -832,23 +835,35 @@ def run(batch_dir: Path) -> dict:
     if not source:
         raise ValueError("批次缺少 source 输入")
     from workflow import pdf_ocr
-    try:
-        ocr_report = pdf_ocr.run(batch_dir, manifest)
-    except Exception as exc:  # acquisition failure must remain visible; do not retry
-        ocr_report = {"status": "failed", "sources": [], "error": str(exc)}
     source_path = Path(source).expanduser()
     if not source_path.is_absolute():
         source_path = batch_dir / source_path
-    ocr_result, ocr_warning = (None, None)
-    if source_path.suffix.lower() == ".pdf":
-        ocr_result, ocr_warning = _pdf_ocr_for_source(batch_dir, source_path, ocr_report)
-    try:
-        result = extract_source(source_path, batch_dir / "01_source", ocr_result=ocr_result,
-                                ocr_warning=ocr_warning)
-    except Exception as exc:
-        if ocr_warning or ocr_report.get("status") == "failed":
-            raise ValueError(f"{exc}；PDF OCR 获取失败：{ocr_warning or ocr_report.get('error', '详见 PDF OCR 报告')}") from exc
-        raise
+
+    def acquire():
+        try:
+            return pdf_ocr.run(batch_dir, manifest)
+        except Exception as exc:  # acquisition failure must remain visible; do not retry
+            return {"status": "failed", "sources": [], "error": str(exc)}
+
+    # Acquisition and native extraction write to distinct evidence directories.
+    # Only the main thread merges PDF pages and writes the extraction outputs.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(acquire)
+        def pdf_ocr_wait():
+            return _pdf_ocr_for_source(batch_dir, source_path, future.result())
+
+        try:
+            if source_path.suffix.lower() == ".pdf":
+                result = extract_source(source_path, batch_dir / "01_source", pdf_ocr_wait=pdf_ocr_wait)
+            else:
+                result = extract_source(source_path, batch_dir / "01_source")
+        except Exception as exc:
+            ocr_report = future.result()
+            ocr_warning = pdf_ocr_wait()[1] if source_path.suffix.lower() == ".pdf" else None
+            if ocr_warning or ocr_report.get("status") == "failed":
+                raise ValueError(f"{exc}；PDF OCR 获取失败：{ocr_warning or ocr_report.get('error', '详见 PDF OCR 报告')}") from exc
+            raise
+        ocr_report = future.result()
     result["pdf_ocr"] = ocr_report
     if ocr_report.get("status") == "failed":
         message = "PDF OCR 获取失败，请查看 pdf_ocr 报告：" + str(ocr_report.get("error", "部分来源获取失败"))

@@ -2,6 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -66,6 +67,77 @@ class PdfOcrIntegrationTest(unittest.TestCase):
         self.assertEqual(calls.call_count, 1)
         self.assertEqual(result['pdf_ocr']['sources'][0]['status'], 'failed')
         self.assertIn('Word question', (self.batch / '01_source/原始正文.txt').read_text())
+
+    def test_native_and_pdf_ocr_overlap_before_outputs_are_written(self):
+        manifest = {'inputs': {'source': self.entry(self.pdf)}}
+        native_started = threading.Event()
+        ocr_started = threading.Event()
+
+        def native(source, out, config=None):
+            native_started.set()
+            self.assertTrue(ocr_started.wait(5), 'OCR did not start concurrently')
+            return self.native(source, out, config)
+
+        def recognize(source, out, **kwargs):
+            ocr_started.set()
+            self.assertTrue(native_started.wait(5), 'native extraction did not start concurrently')
+            self.assertFalse((self.batch / '01_source/原始正文.txt').exists())
+            return self.recognize(source, out, **kwargs)
+
+        with patch.object(extract.mf, 'load', return_value=manifest), \
+             patch('workflow.agent.configured', return_value=False), \
+             patch.object(pdf_ocr.ocr_backend, 'recognize', side_effect=recognize), \
+             patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=native):
+            result = extract.run(self.batch)
+        self.assertTrue(result['passed'])
+        self.assertIn('Paper question', (self.batch / '01_source/原始正文.txt').read_text())
+
+    def test_word_extraction_overlaps_attachment_pdf_ocr(self):
+        manifest = {'inputs': {'source': self.entry(self.word), 'answers': self.entry(self.pdf)}}
+        native_started = threading.Event()
+        ocr_started = threading.Event()
+
+        def word(source, evidence):
+            native_started.set()
+            self.assertTrue(ocr_started.wait(5), 'OCR did not start concurrently')
+            return {'text': '一、单项选择\n1. Word question?', 'media': [], 'warnings': []}
+
+        def recognize(source, out, **kwargs):
+            ocr_started.set()
+            self.assertTrue(native_started.wait(5), 'Word extraction did not start concurrently')
+            return self.recognize(source, out, **kwargs)
+
+        with patch.object(extract.mf, 'load', return_value=manifest), \
+             patch('workflow.agent.configured', return_value=False), \
+             patch('workflow.docx_extract.extract_docx', side_effect=word), \
+             patch.object(pdf_ocr.ocr_backend, 'recognize', side_effect=recognize), \
+             patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=self.native):
+            result = extract.run(self.batch)
+        self.assertTrue(result['passed'])
+        self.assertIn('Word question', (self.batch / '01_source/原始正文.txt').read_text())
+
+    def test_native_failure_waits_for_ocr_and_preserves_both_errors(self):
+        manifest = {'inputs': {'source': self.entry(self.pdf)}}
+        native_started = threading.Event()
+        ocr_finished = threading.Event()
+
+        def native(source, out, config=None):
+            native_started.set()
+            raise ValueError('native failed')
+
+        def recognize(source, out, **kwargs):
+            self.assertTrue(native_started.wait(5))
+            ocr_finished.set()
+            raise RuntimeError('offline')
+
+        with patch.object(extract.mf, 'load', return_value=manifest), \
+             patch.object(pdf_ocr.ocr_backend, 'recognize', side_effect=recognize), \
+             patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=native):
+            with self.assertRaisesRegex(ValueError, 'native failed.*PDF OCR'):
+                extract.run(self.batch)
+        self.assertTrue(ocr_finished.is_set())
+        self.assertFalse((self.batch / '01_source/原始正文.txt').exists())
+        self.assertTrue((self.batch / '01_source/pdf-ocr.json').is_file())
 
     def test_empty_scanned_pdf_does_not_become_page_marker_text(self):
         with patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=self.native):

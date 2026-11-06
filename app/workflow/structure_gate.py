@@ -682,7 +682,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         checks["extraction_evidence"] = "failed"
     # Resolve only this one deterministic ambiguity after all independent gate checks pass.
     if len(blockers) == 1 and blockers[0]["code"] == "QUESTION_NUMBER_INFERRED" and len(inferred) == 1:
-        note = _prove_single_writing_number(original_path, cleaned_text, sections, inferred[0], hashes, allow_warnings=True)
+        note = _prove_single_writing_number(original_path, raw_text, sections, inferred[0], hashes)
         if note and mf.sha256_file(source_path) == hashes["source_sha256"]:
             resolved_notes.append(note)
             blockers.clear()

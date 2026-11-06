@@ -958,7 +958,9 @@ def _skip_agent_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
             if stage.id == "explanations":
                 # 跳过解析提取时必须留下确定性空产物，装配仍可继续。
                 from .optional_inputs import write_empty_explanations
-                write_empty_explanations(batch_dir)
+                # 结构尚未产出时只记录跳过；正式结构完成后才生成逐题空解析产物。
+                if (batch_dir / "01_source/structure.confirmed.json").is_file():
+                    write_empty_explanations(batch_dir)
             mf.touch_stage(current, stage.id, mf.SKIPPED, notes=reason)
             mf.save(batch_dir, current)
         if current is not manifest:

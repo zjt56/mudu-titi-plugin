@@ -1,12 +1,12 @@
-"""Media staging uses mocked local reads and SSH; no local or remote writes."""
+"""Media staging uses mocked SSH and isolated local filesystem tests."""
 import base64
 import hashlib
-import io
 import json
 import os
 import stat
 import subprocess
-import types
+import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -112,75 +112,100 @@ class MediaTransferTests(unittest.TestCase):
 
 
 class RemoteScriptTests(unittest.TestCase):
-    def execute_remote(self, *, existing=False, corrupt=False, swapped=False):
-        content = b'actual media'
-        digest = hashlib.sha256(content).hexdigest()
-        request = {'root': '/srv/media', 'files': [{'name': 'target.png', 'sha256': digest,
-                   'data': base64.b64encode(content).decode()}]}
-        fake = types.ModuleType('os')
-        for key in ('O_RDONLY', 'O_DIRECTORY', 'O_NOFOLLOW', 'O_CREAT', 'O_EXCL', 'O_RDWR', 'O_NONBLOCK', 'SEEK_SET'):
-            setattr(fake, key, getattr(os, key))
-        data = bytearray(content if existing else b'')
-        position = [0]
-        opens = []
-        def open_file(path, flags, *args, **kwargs):
-            opens.append((path, flags))
-            if flags & os.O_CREAT:
-                if existing:
-                    raise FileExistsError()
-                return 50
-            return 10
-        def write(fd, value):
-            data.extend(bytes(value))
-            return len(value)
-        def read(fd, size):
-            value = bytes(data[position[0]:position[0] + size])
-            position[0] += len(value)
-            return b'wrong' if corrupt and value else value
-        def entry(*args, **kwargs):
-            return types.SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=2 if swapped else 1,
-                                         st_size=len(data), st_mtime_ns=1, st_ctime_ns=1)
-        fake.open = open_file
-        fake.close = lambda fd: None
-        fake.write = write
-        fake.read = read
-        fake.fsync = lambda fd: None
-        fake.lseek = lambda fd, pos, whence: position.__setitem__(0, pos)
-        fake.fstat = lambda fd: types.SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=1,
-                                                     st_size=len(data), st_mtime_ns=1, st_ctime_ns=1)
-        fake.stat = entry
-        output = io.StringIO()
-        import sys
-        with patch.dict(sys.modules, {'os': fake}), patch.object(sys, 'stdin', io.StringIO(json.dumps(request))), \
-             patch.object(sys, 'stdout', output):
-            try:
-                exec(media._REMOTE, {})
-                succeeded = True
-            except SystemExit:
-                succeeded = False
-        return succeeded, output.getvalue(), opens, digest
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.realpath(self.tmp.name)
+        self.target = os.path.join(self.root, 'target.png')
+        self.content = b'actual media'
+        self.digest = hashlib.sha256(self.content).hexdigest()
 
-    def test_remote_exclusive_creation_and_readback(self):
-        success, output, opens, digest = self.execute_remote()
-        self.assertTrue(success)
-        self.assertEqual(json.loads(output), [digest])
-        flags = opens[-1][1]
-        self.assertTrue(flags & os.O_EXCL)
-        self.assertTrue(flags & os.O_NOFOLLOW)
-        self.assertTrue(all(flags & os.O_NOFOLLOW for _, flags in opens))
+    def run_script(self, setup='', root=None):
+        request = {'root': root or self.root, 'files': [{'name': 'target.png', 'sha256': self.digest,
+                   'data': base64.b64encode(self.content).decode()}]}
+        return subprocess.run([sys.executable, '-c', 'import os\n' + setup + '\n' + media._REMOTE],
+                              input=json.dumps(request).encode(), stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, check=False)
 
-    def test_existing_content_is_verified_without_overwrite(self):
-        success, output, opens, digest = self.execute_remote(existing=True)
-        self.assertTrue(success)
-        self.assertEqual(json.loads(output), [digest])
-        self.assertFalse(opens[-1][1] & os.O_CREAT)
+    def assert_clean(self):
+        self.assertFalse(any(n.startswith('.media-transfer-') for n in os.listdir(self.root)))
 
-    def test_remote_races_and_different_bytes_fail(self):
-        for kwargs in ({'corrupt': True}, {'swapped': True}, {'existing': True, 'corrupt': True}):
-            with self.subTest(kwargs=kwargs):
-                success, output, _, _ = self.execute_remote(**kwargs)
-                self.assertFalse(success)
-                self.assertEqual(output, '')
+    def test_atomic_publication_with_partial_writes(self):
+        setup = """
+real_write = os.write
+def checked(fd, data):
+    assert not os.path.exists(%r)
+    assert os.fstat(fd).st_mode & 0o777 == 0o600
+    return real_write(fd, data[:3])
+os.write = checked
+""" % self.target
+        result = self.run_script(setup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [self.digest])
+        with open(self.target, 'rb') as f:
+            self.assertEqual(f.read(), self.content)
+        self.assertEqual(stat.S_IMODE(os.stat(self.target).st_mode), 0o644)
+        self.assert_clean()
+
+    def test_existing_content_verified_without_overwrite(self):
+        with open(self.target, 'wb') as f:
+            f.write(self.content)
+        inode = os.stat(self.target).st_ino
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(os.stat(self.target).st_ino, inode)
+        with open(self.target, 'wb') as f:
+            f.write(b'different')
+        self.assertNotEqual(self.run_script().returncode, 0)
+        with open(self.target, 'rb') as f:
+            self.assertEqual(f.read(), b'different')
+        self.assert_clean()
+
+    def test_failed_write_and_corrupt_read_cleanup(self):
+        for setup in ("""
+real_write = os.write
+def failed(fd, data):
+    real_write(fd, data[:3])
+    raise OSError('failure')
+os.write = failed
+""", """
+real_read = os.read
+def corrupt(fd, size):
+    data = real_read(fd, size)
+    return b'bad' if data else data
+os.read = corrupt
+"""):
+            with self.subTest(setup=setup):
+                self.assertNotEqual(self.run_script(setup).returncode, 0)
+                self.assertFalse(os.path.lexists(self.target))
+                self.assert_clean()
+
+    def test_symlink_target_rejected(self):
+        os.symlink('missing', self.target)
+        self.assertNotEqual(self.run_script().returncode, 0)
+        self.assertTrue(os.path.islink(self.target))
+        self.assert_clean()
+
+    def test_disappearing_competing_target_retried(self):
+        setup = """
+real_link = os.link
+calls = [0]
+def race(src, dst, **kwargs):
+    calls[0] += 1
+    if calls[0] == 1:
+        raise FileExistsError()
+    return real_link(src, dst, **kwargs)
+os.link = race
+"""
+        result = self.run_script(setup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_clean()
+
+    def test_directory_symlink_and_traversal_rejected(self):
+        link = os.path.join(self.root, 'alias')
+        os.symlink(self.root, link)
+        for root in (link, self.root + '/../' + os.path.basename(self.root)):
+            self.assertNotEqual(self.run_script(root=root).returncode, 0)
+        self.assert_clean()
 
 
 if __name__ == '__main__':

@@ -5,21 +5,21 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const client = fs.readFileSync(path.join(__dirname, '../lib/client.js'), 'utf8');
-function harness(review, confirm) {
+function harness(review, confirm, postError) {
   const start = client.indexOf('      async function doUpload(name) {');
   const end = client.indexOf('\n      // 重新执行', start);
   assert.ok(start >= 0 && end > start);
-  const requests = [], prompts = [];
+  const requests = [], prompts = [], alerts = [];
   const context = vm.createContext({
-    window: { confirm: (text) => { prompts.push(text); return confirm; } },
+    window: { confirm: (text) => { prompts.push(text); return confirm; }, alert: (text) => alerts.push(text) },
     uploadStatesRef: { current: { batch: { state: 'idle', requiresUnreviewedConfirmation: review, unreviewedRevision: 'review-revision' } } },
     uploadGeneration: { current: {} },
     setUploadState(name, state) { context.uploadStatesRef.current[name] = state; },
-    async jpost(url, body) { requests.push({ url, body }); },
+    async jpost(url, body) { requests.push({ url, body }); if (postError) throw postError; },
     async checkUpload() {},
   });
   vm.runInContext(client.slice(start, end), context);
-  return { context, requests, prompts };
+  return { context, requests, prompts, alerts };
 }
 
 test('unreviewed upload requires explicit confirmation and sends override only after consent', async () => {
@@ -43,6 +43,14 @@ test('reviewed upload omits override and unknown review state blocks submission'
   await unknown.context.doUpload('batch');
   assert.equal(unknown.requests.length, 0);
   assert.equal(unknown.prompts.length, 0);
+});
+
+test('definitive rejected request permits status refresh instead of unknown submission', async () => {
+  const error = Object.assign(new Error('审核状态已变化，请重新确认'), { httpStatus: 400 });
+  const rejected = harness(true, true, error);
+  await rejected.context.doUpload('batch');
+  assert.match(rejected.alerts[0], /审核状态已变化/);
+  assert.equal(rejected.context.uploadStatesRef.current.batch.state, 'checking');
 });
 
 test('upload notification exposes accessible live feedback', () => {

@@ -27,35 +27,68 @@ class MediaTransferError(Exception):
     """A deliberately sanitized staging failure."""
 
 
-# No caller-controlled text is interpolated into the shell command. All input
-# travels on stdin. Open every directory without following symlinks, then create
-# each leaf exclusively. Read back both the open file and its directory entry.
+# Input travels on stdin; all filesystem operations are relative to a verified
+# directory descriptor. A public name is linked only to fully verified content.
 _REMOTE = r'''
-import base64, hashlib, json, os, stat, sys
+import base64, hashlib, json, os, secrets, stat, sys
+
+def fingerprint(s):
+    return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+
+def verify(fd, name, expected, directory):
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_size > 8 * 1024 * 1024:
+        raise ValueError()
+    entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if fingerprint(entry) != fingerprint(before):
+        raise ValueError()
+    os.lseek(fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise ValueError()
+    if (fingerprint(os.fstat(fd)) != fingerprint(before) or
+            fingerprint(os.stat(name, dir_fd=directory, follow_symlinks=False)) != fingerprint(before)):
+        raise ValueError()
+
 try:
     request = json.load(sys.stdin)
+    root = request['root']
+    if not isinstance(root, str) or not root.startswith('/') or any(p in ('', '.', '..') for p in root[1:].split('/')):
+        raise ValueError()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     directory = os.open('/', flags)
-    for part in request['root'].split('/')[1:]:
+    for part in root[1:].split('/'):
         next_fd = os.open(part, flags, dir_fd=directory)
         os.close(directory)
         directory = next_fd
-    opened = []
+    results = []
     for item in request['files']:
         name = item['name']
-        if not name or '/' in name or name in ('.', '..'):
+        if not isinstance(name, str) or not name or '/' in name or name in ('.', '..'):
             raise ValueError()
         data = base64.b64decode(item['data'], validate=True)
-        if hashlib.sha256(data).hexdigest() != item['sha256']:
+        expected = item['sha256']
+        if len(data) > 8 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != expected:
             raise ValueError()
+        temp = None
+        fd = None
         try:
-            fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o644, dir_fd=directory)
-            created = True
-        except FileExistsError:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-            created = False
-        opened.append((fd, name, item['sha256']))
-        if created:
+            # Random names plus exclusive creation keep concurrent attempts separate.
+            for _ in range(10):
+                candidate = '.media-transfer-' + secrets.token_hex(16)
+                try:
+                    fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                    temp = candidate
+                    break
+                except FileExistsError:
+                    continue
+            if fd is None:
+                raise ValueError()
             view = memoryview(data)
             while view:
                 count = os.write(fd, view)
@@ -63,31 +96,45 @@ try:
                     raise ValueError()
                 view = view[count:]
             os.fsync(fd)
-    for fd, name, expected in opened:
-        original = os.fstat(fd)
-        if not stat.S_ISREG(original.st_mode) or original.st_size > 8 * 1024 * 1024:
-            raise ValueError()
-        entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
-        if not stat.S_ISREG(entry.st_mode) or (entry.st_dev, entry.st_ino) != (original.st_dev, original.st_ino):
-            raise ValueError()
-        os.lseek(fd, 0, os.SEEK_SET)
-        digest = hashlib.sha256()
-        while True:
-            chunk = os.read(fd, 1024 * 1024)
-            if not chunk:
+            verify(fd, temp, expected, directory)
+            # A concurrent publisher can win, or disappear during reconciliation.
+            for _ in range(10):
+                try:
+                    os.link(temp, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+                    os.fchmod(fd, 0o644)
+                    os.fsync(fd)
+                except FileExistsError:
+                    pass
+                try:
+                    existing = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                except FileNotFoundError:
+                    continue
+                try:
+                    verify(existing, name, expected, directory)
+                finally:
+                    os.close(existing)
                 break
-            digest.update(chunk)
-        if digest.hexdigest() != expected:
-            raise ValueError()
-        entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
-        after = os.fstat(fd)
-        fingerprint = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-        if fingerprint(entry) != fingerprint(original) or fingerprint(after) != fingerprint(original):
-            raise ValueError()
-    print(json.dumps([item[2] for item in opened]))
+            else:
+                raise ValueError()
+            results.append(expected)
+        finally:
+            if temp is not None:
+                # Never remove a directory entry that no longer identifies our file.
+                try:
+                    entry = os.stat(temp, dir_fd=directory, follow_symlinks=False)
+                    own = os.fstat(fd)
+                    if (entry.st_dev, entry.st_ino) == (own.st_dev, own.st_ino):
+                        os.unlink(temp, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+            if fd is not None:
+                os.close(fd)
+    os.close(directory)
+    print(json.dumps(results))
 except Exception:
     sys.exit(1)
 '''
+
 
 
 def _settings():

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 from xml.sax.saxutils import escape
 
 from workflow import extract, manifest as mf, structure_gate
@@ -56,6 +57,14 @@ class WritingNumberInferenceTest(unittest.TestCase):
         self.assertFalse(any(n.get("resolution_evidence", {}).get("method") == "deterministic_single_writing_number"
                              for n in report["resolved_evidence"]))
         return report
+
+    def test_repeated_denoising_does_not_reject_matching_original(self):
+        # A trailing repeated exam title is removed only on the second cleaning pass.
+        text = self.paper() + "\n52018年安徽省初中学业水平考试"
+        self.prepare(text)
+        report = structure_gate.run_gate(self.batch)
+        self.assertTrue(report['passed'], report['blockers'])
+        self.assertEqual(report['resolved_evidence'][-1]['resolution_evidence']['original_text_method'], 'docx-native')
 
     def test_unique_final_writing_automatically_binds_current_original_and_source(self):
         structure, _ = self.prepare()
@@ -231,6 +240,16 @@ class WritingNumberInferenceTest(unittest.TestCase):
         self.assertTrue(structure_gate.run_gate(self.batch)["passed"])
         self.original_docx(self.paper().replace("37. Complete word 37.\n", ""))
         self.assert_inferred_blocked()
+
+    def test_native_extraction_warning_cannot_prove_number(self):
+        self.prepare()
+        with patch('workflow.docx_extract.extract_docx', wraps=extract_docx) as native:
+            def warned(*args, **kwargs):
+                result = extract_docx(*args, **kwargs)
+                result['warnings'] = ['unreadable document content']
+                return result
+            native.side_effect = warned
+            self.assert_inferred_blocked()
 
     def test_missing_or_unreadable_original_blocks(self):
         self.prepare()
