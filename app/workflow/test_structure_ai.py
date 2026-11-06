@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """结构 AI 复核：只接受逐字、题号明确、位于重复题号范围内的答案行。"""
 import json
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from workflow import structure_ai
@@ -12,6 +14,70 @@ def reply(lines):
     return {"status": "completed",
             "artifacts": {"structure": {"answer_lines": lines}},
             "notes": [], "findings": []}
+
+
+class StructureAiClassifyTest(unittest.TestCase):
+    def test_accepts_evidence_bound_units(self):
+        raw = ["1. What is it?", "A. A", "B. B", "2. Shared material", "3. Next line"]
+        candidate = {"sections": [{"questions": [1, 2, 3]}]}
+        reply_value = {"units": [
+            {"unit_kind": "standalone", "type": "单项填空", "numbers": [1],
+             "stem": "1. What is it?\nA. A\nB. B", "source_span": {"start_line": 1, "end_line": 3},
+             "source_parts": [{"kind": "stem", "start_line": 1, "end_line": 1},
+                              {"kind": "option", "start_line": 2, "end_line": 3}]},
+            {"unit_kind": "group", "type": "阅读理解", "numbers": [2, 3],
+             "stem": "2. Shared material\n3. Next line", "source_span": {"start_line": 4, "end_line": 5}},
+        ]}
+        got = structure_ai._sanitize_classified(reply_value, "\n".join(raw), candidate)
+        self.assertEqual([row["numbers"] for row in got], [[1], [2, 3]])
+        self.assertEqual([part['kind'] for part in got[0]['source_parts']], ['stem', 'option'])
+
+    def test_auto_classify_accepts_local_agent_envelope_and_reuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            source = batch / '01_source'
+            source.mkdir()
+            (source / '正文.txt').write_text('1. What is it?\nA. Yes.\n', encoding='utf-8')
+            (source / 'structure.json').write_text('{"sections": []}', encoding='utf-8')
+            calls = []
+            def invoke(prompt, run_dir, config):
+                calls.append(prompt)
+                return {'response': {'status': 'completed', 'artifacts': {'structure': {'units': [
+                    {'unit_kind': 'standalone', 'type': '单项填空', 'numbers': [1],
+                     'stem': '1. What is it?\nA. Yes.',
+                     'source_span': {'start_line': 1, 'end_line': 2}}
+                ]}}, 'notes': [], 'findings': []}}
+            first = structure_ai.auto_classify(batch, invoke_fn=invoke, force=True)
+            self.assertEqual(first['units'][0]['numbers'], [1])
+            second = structure_ai.auto_classify(batch, invoke_fn=invoke, force=True)
+            self.assertTrue(second['reused'])
+            self.assertEqual(len(calls), 1)
+
+    def test_classify_uses_real_local_agent_protocol(self):
+        from workflow import local_agent
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            source = batch / '01_source'
+            source.mkdir()
+            (source / '正文.txt').write_text('1. What is it?\nA. Yes.\n', encoding='utf-8')
+            (source / 'structure.json').write_text('{"sections": []}', encoding='utf-8')
+            result = {'status': 'completed', 'artifacts': {'structure': {'units': [
+                {'unit_kind': 'standalone', 'type': '单项填空', 'numbers': [1],
+                 'stem': '1. What is it?\nA. Yes.', 'source_span': {'start_line': 1, 'end_line': 2}}
+            ]}}, 'notes': [], 'findings': []}
+            script = batch / 'fake_agent.py'
+            script.write_text('import sys\nsys.stdin.read()\nprint(' + repr(json.dumps(result, ensure_ascii=False)) + ')\n', encoding='utf-8')
+            config = local_agent._validate_config({'provider': 'command', 'command': ['{python}', str(script)],
+                                                   'timeout_seconds': 10}, batch)
+            classified = structure_ai.auto_classify(batch, invoke_fn=local_agent.invoke, config=config, force=True)
+            self.assertEqual(classified['units'][0]['numbers'], [1])
+
+    def test_rejects_non_contiguous_or_unknown_source_span(self):
+        raw = ["1. Question", "2. Other"]
+        candidate = {"sections": [{"questions": [1, 2]}]}
+        reply_value = {"units": [{"unit_kind": "group", "type": "阅读理解", "numbers": [1, 2],
+                                   "stem": "not source", "source_span": {"start_line": 1, "end_line": 2}}]}
+        self.assertEqual(structure_ai._sanitize_classified(reply_value, "\n".join(raw), candidate), [])
 
 
 class StructureAiSanitizeTest(unittest.TestCase):
@@ -89,6 +155,7 @@ class StructureAiRangeTest(unittest.TestCase):
         self.assertEqual(structure_ai.sanitize_ranges(self.reply([{"start": 1, "end": 2}]), raw), [])
 
 
+@patch.dict(os.environ, {'WF_STRUCTURE_AI': '1'})
 class StructureAiApplyTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

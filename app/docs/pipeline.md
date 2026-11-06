@@ -13,12 +13,12 @@
 | 3 | `answers` | 子智能体4：对照确认后的题号提取答案、整理答案与解析对应关系并判定难度 | `01_source_ans/answers.json` | agent | `structure_gate` | 无单独答案卷时可用原卷附录；无任何答案证据则待核验 |
 | 4 | `audio` | 按确认后的听力单元切段并核对起止 | `02_audio/audio_map.json` | agent | `structure_gate` | 无音频才跳过 |
 | 5 | `types` | 子智能体3：判题型与子类、统计题目词数、判断内容是否完整 | `03_types/types.json` | agent | `structure_gate` | 等待代理执行 |
-| 6 | `explanations` | 子智能体1：解析/文章大意逐字匹配；缺失填「无」，不生成 | `04_knowledge/explanations.json` | agent | `types`、`answers` | 等待代理执行；归属不确定转待核验 |
-| 7 | `knowledge` | 子智能体2：知识点打标与教材知识点匹配，逐字沿用解析与大意 | `04_knowledge/knowledge.json` | agent | `types`、`answers`、`explanations` | 等待代理执行；改写内容即拒绝 |
-| 8 | `assemble` | 组装批次 | `06_batch/batch.json` | agent | `audio`、`types`、`knowledge` | 等待代理执行 |
-| 9 | `meta` | 难度与分类 | `06_batch/batch_meta.json` | command | `assemble` | — |
-| 10 | `underlines` | 从 docx 字符格式补画线 | `06_batch/batch_meta.json` | command | `meta` | 来源非 docx 则跳过 |
-| 11 | `validate` | 本地脚本体检（18 个配置项）+ 源头逐题对账 | `07_review/validation-report.json` | gate | `meta` | 失败即阻断 |
+| 6 | `explanations` | 子智能体1：解析/文章大意逐字匹配；缺失填「无」，不生成 | `04_knowledge/explanations.json` | agent | `types` | 答案为可选上下文；归属不确定转待核验 |
+| 7 | `knowledge` | 子智能体2：知识点打标与同步教材课时匹配 | `04_knowledge/knowledge.json` | agent | `types` | 答案及解析为可选上下文；最终组装核对来源 |
+| 8 | `assemble` | 组装批次 | `06_batch/batch.json` | agent | `audio`、`types`、`knowledge`、`explanations` | 等待代理执行 |
+| 9 | `meta` | 难度与分类 | `06_batch/batch_meta.base.json` | command | `assemble` | — |
+| 10 | `underlines` | 从 DOCX 字符格式补画线并生成最终批次 | `06_batch/batch_meta.json` | command | `meta` | 无 DOCX 时保留原有内容 |
+| 11 | `validate` | 本地脚本体检 + 源头逐题对账 | `07_review/validation-report.json` | gate | `underlines` | 失败保留质量阻断 |
 | 12 | `review` | 三类审核与人工队列 | `07_review/manual-review-queue.json` | agent | `validate` | 等待代理执行 |
 | 13 | `review_gate` | 审核放行判断 | `07_review/review-gate.json` | gate | `review` | 失败即阻断 |
 | 14 | `upload_gate` | 上传前人工确认 | 无（写入台账） | human | `review_gate` | 必须人工确认 |
@@ -27,15 +27,20 @@
 
 要点：
 
-- 第 9 阶段的产物仍是 `batch_meta.json`，它只改文件内容，不另存副本。
+- 第 9 阶段生成基础批次，第 10 阶段独立生成最终批次；体检读取最终批次。
 - 第 10 阶段运行目录/排版/表格等本地脚本，并额外直接执行源头逐题对账。部分脚本为本项目补充实现，不能视为已验证等价于发布侧原脚本；任何缺脚本、源题选项丢失、跨材料或表格/画线缺失都必须如实报告，不能调低检查来换取通过。
 - 第 14 阶段现通过[上传 API 对接](upload-api.md)实现：`prepare-upload` 读取当前目录、校验并冻结 API 请求，人工批准绑定最终文件与目标，再由 `upload --yes` 原样提交到暂存；普通 run/auto 不提交。缺凭据、媒体、来源或复核证据时仍阻断，远端人工确认后才生成草稿。
 - 第 15 阶段永远是最后一步，`publish_gate` 通过也不会让批次变成已发布；发布动作在发布侧执行。
 
-## 结构自动闸门（第 2 阶段）
+## 结构归类与确认（第 2 阶段）
 
-`structure_gate` 是**自动机器闸门**，不再需要人工确认。执行 `run`/`auto run` 时由
-`workflow/structure_gate.py` 自动完成：
+`extract` 只负责保留原始文字、版面、图片、表格和页/行证据；题号、题干、材料、选项、答案/解析归属和题组边界由结构 AI 主路径判断。执行 `run`/`auto run` 时，`workflow/structure_ai.py` 先生成带原文行号与 `source_span` 的候选结构，再由 `workflow/structure_gate.py` 做安全校验和证据留痕。
+
+确定性规则只作为证据整理和模型不可用时的保底视图，不再把结构猜测本身当作题目语义结论。模型输出不满足题号覆盖、原文连续片段或边界校验时丢弃候选，保留原始提取结果并把原因写入报告；不得凭确定性切题结果伪造题干或选项。
+
+`structure_gate` 是自动机器闸门，不需要人工点击确认，但结构候选可交付不代表题干/选项完整，也不代表后续质量通过。
+
+执行 `run`/`auto run` 时由 `workflow/structure_gate.py` 自动完成：
 
 1. **去噪**：`workflow/denoise.py` 把广告、扫码、水印、页眉 logo、分隔线、页码等与题目无关的
    行整行剔除，并记入 `structure-gate.json` 的 `removed_count` 供审计，不静默删除。
@@ -247,6 +252,18 @@ python -m workflow.doctor
 | `workflow/checks.py` | `validate` 阶段的 16 项体检调度 |
 | `workflow/review.py` | `review_gate` 的放行规则 |
 | `workflow/independent_review.py` | 独立复核的快照与签名校验 |
+
+## 难度与教材匹配口径
+
+答案阶段的难度只保留 `容易/适中/困难` 主观等级；`difficultyEvidence` 不再是必填字段，也不要求模型编写解释性难度证据。实际题干/选项缺失时难度可以留空，不得凭题型硬猜。
+
+教材匹配只适用于来源类型为「同步练习」或「单元测验」的材料，并按教材版本、册次、单元、课时/Section 精确匹配。普通中考真题、模拟卷和来源不明试卷不强制教材匹配，`textbook` 应省略，不因缺少教材映射阻断流程。
+
+## 阶段交付清单
+
+每个批次的 `workflow/delivery.json` 记录阶段声明产物、SHA-256、交付状态和消费关系。`completed` 只表示阶段质量通过且产物已安装；`delivered` 表示声明产物存在且指纹匹配；`delivered_unqualified` 表示执行产物已交付但质量仍待复核/失败；`quality_status`/`release_ready` 单独表示质量和放行状态。零人工模式可以继续生成本地候选，但不能把质量失败改写成质量通过。
+
+`meta` 写入 `batch_meta.base.json`；`underlines` 读取基础批次并独立写入 `batch_meta.json`，无 DOCX 时保留原有内容。旧批次缺基础文件时重新执行相应阶段。
 
 ## 材料分类与对齐（2026-11 重设计）
 

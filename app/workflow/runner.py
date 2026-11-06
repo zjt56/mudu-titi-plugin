@@ -67,6 +67,7 @@ def _render(argv: tuple, batch_dir: Path) -> list[str]:
         "{batch_dir}": str(batch_dir),
         "{batch_json}": str(batch_dir / "06_batch" / "batch.json"),
         "{batch_meta}": str(batch_dir / "06_batch" / "batch_meta.json"),
+        "{batch_meta_base}": str(batch_dir / "06_batch" / "batch_meta.base.json"),
         "{media_dir}": str(batch_dir / "media_upload"),
         "{docx}": "",
         "{python}": sys.executable,
@@ -94,6 +95,7 @@ def _record_success(batch_dir: Path, manifest: dict, stage: contracts.Stage) -> 
         notes="",
     )
     mf.record_delivery(batch_dir, manifest, stage)
+    mf.mark_delivery_consumed(batch_dir, stage.id)
 
 
 def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
@@ -108,7 +110,6 @@ def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
     with _agent_lock(timeout):
         current = mf.load(batch_dir)
         mf.touch_stage(current, stage.id, mf.RUNNING, log=str(log.relative_to(batch_dir)))
-        mf.mark_delivery_consumed(batch_dir, stage.id)
         mf.save(batch_dir, current)
         if current is not manifest:  # 同一对象时 clear+update 会把自己清空
             manifest.clear()

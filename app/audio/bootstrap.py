@@ -147,13 +147,25 @@ def base_python(cfg: dict | None = None) -> str:
     return str(vp) if vp else sys.executable
 
 
-def preflight() -> None:
-    """安装前检查：Python 版本与 ffmpeg/ffprobe 是否可得。失败抛 RuntimeError。"""
-    # whisperx 3.8.6 要求 Python >=3.10,<3.14；插件主流程只要求 >=3.9。
-    if not (3, 10) <= sys.version_info[:2] < (3, 14):
+def preflight(cfg: dict | None = None) -> None:
+    """检查实际用于安装的解释器及 ffmpeg/ffprobe。"""
+    existing = venv_python(cfg)
+    python = str(existing) if existing.is_file() else base_python(cfg)
+    if Path(python).resolve() == Path(sys.executable).resolve():
+        version = tuple(sys.version_info[:2])
+    else:
+        try:
+            result = subprocess.run([python, '-c', 'import sys; print("%d.%d" % sys.version_info[:2])'],
+                                    capture_output=True, text=True, timeout=15, check=True)
+            version = tuple(int(part) for part in result.stdout.strip().split('.'))
+            if len(version) != 2:
+                raise ValueError('invalid version')
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"无法检查音频 Python 解释器：{python}: {exc}") from exc
+    if not (3, 10) <= version < (3, 14):
         raise RuntimeError(
-            f"WhisperX 需要 Python 3.10–3.13，当前是 {sys.version.split()[0]}；"
-            "请设置环境变量 WF_PYTHON 指向 3.10–3.13 的解释器后重启插件")
+            f"WhisperX 需要 Python 3.10–3.13，当前是 {version[0]}.{version[1]}；"
+            "请配置 3.10–3.13 的音频解释器或虚拟环境")
     for tool in ("ffmpeg", "ffprobe"):
         if not tool_path(tool):
             raise RuntimeError(
@@ -213,7 +225,7 @@ def bootstrap(cfg: dict | None = None, force: bool = False) -> dict:
                             detail="已安装，无需重复下载", error="")
 
     try:
-        preflight()
+        preflight(cfg)
         if not py.is_file():
             if cfg.get("venv"):
                 raise RuntimeError("配置的 venv 不存在可用的 Python：" + str(py))

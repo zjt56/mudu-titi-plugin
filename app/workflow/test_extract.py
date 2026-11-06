@@ -341,8 +341,8 @@ class CompositeExtractionTest(unittest.TestCase):
             with patch.object(runner, '_execute_command', side_effect=completed):
                 result = auto.advance(folder, {})
             self.assertEqual(mf.load(folder)['stages']['extract']['status'], mf.COMPLETED)
-            # 模型优先模式：结构闸门记录诊断后继续进入答案阶段。
-            self.assertEqual(result['stopped_at'], 'answers')
+            # 正文与结构均为空时没有可交付候选，必须等待有效提取结果。
+            self.assertEqual(result['stopped_at'], 'structure_gate')
             gate = json.loads((folder / '07_review/structure-gate.json').read_text())
             self.assertFalse(gate['passed'])
             self.assertIn('SOURCE_EMPTY', {issue['code'] for issue in gate['blockers']})

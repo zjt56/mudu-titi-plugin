@@ -222,23 +222,27 @@ class AgentTasksTest(unittest.TestCase):
         self.assertEqual(Path(str(target) + ".bak").read_bytes(), old)
         self.assertEqual((self.batch / "workflow/manifest.json").read_bytes(), manifest)
 
-    def test_needs_review_imports_nothing(self):
+    def test_needs_review_candidate_remains_unqualified(self):
         target = self.batch / tasks.ARTIFACTS["types"]
-        old = target.read_bytes()
+        old = json.loads(target.read_text())
         report = tasks.accept_result(self.batch, "types", self.result("types", {"items": []}, "needs_review"))
         self.assertFalse(report["completed"])
-        self.assertEqual(report["artifacts"], [])
-        self.assertEqual(target.read_bytes(), old)
+        self.assertEqual(report["status"], "needs_review")
+        self.assertEqual(report["artifacts"], [tasks.ARTIFACTS["types"]])
+        self.assertEqual(json.loads(target.read_text()), old)
 
     def test_malformed_json_and_duplicate_keys(self):
         for raw in ('```json\n{}\n```', '{"status":"completed","status":"needs_review"}', '{"a":NaN}', '[]'):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 tasks.accept_result(self.batch, "types", raw)
 
-    def test_answer_shape_source_and_exact_number_coverage(self):
+    def test_answer_shape_allows_partial_mapping_without_difficulty_evidence(self):
         self.assertTrue(self.accept("answers", self.answers)["completed"])
-        for candidate in ({"1": "A"}, {"answers": {"2": "A"}, "evidence": {"2": ["L1"]}},
-                          {"answers": {"1": "fabricated"}, "evidence": {"1": ["L1"]}}):
+        partial = {"answers": {"2": "A"}, "evidence": {"2": ["附录 L1"]},
+                   "difficulty": {"1": "容易"}}
+        self.assertTrue(self.accept("answers", partial)["completed"])
+        for candidate in ({"answers": {"1": "fabricated"}, "evidence": {"1": ["L1"]}},
+                          {"answers": {"1": "A"}, "evidence": {"2": ["L1"]}}):
             with self.subTest(candidate=candidate), self.assertRaises(ValueError):
                 self.accept("answers", candidate)
 
@@ -260,15 +264,13 @@ class AgentTasksTest(unittest.TestCase):
         self.assertEqual(task["status"], "ready")
         self.assertIn("答案: 1. A", task["prompt"])
 
-    def test_explicit_docx_requires_prepared_text(self):
+    def test_unprepared_answers_docx_keeps_warning_and_continues(self):
         docx = self.batch / "answers.docx"
         docx.write_bytes(b"binary")
         self.write("workflow/manifest.json", {"inputs": {"answers": {"path": str(docx)}}})
         task = tasks.build_task(self.batch, "answers")
-        self.assertEqual(task["status"], "needs_review")
-        self.assertIn("parent extraction helper", task["preconditions"][0])
-        with self.assertRaisesRegex(ValueError, "preconditions"):
-            self.accept("answers", self.answers)
+        self.assertEqual(task["status"], "ready")
+        self.assertIn("答案文件存在但尚未提取", task["prompt"])
         self.write("01_source_ans/正文.txt", "1. A")
         self.assertEqual(tasks.build_task(self.batch, "answers")["status"], "ready")
 
@@ -393,11 +395,14 @@ class AgentTasksTest(unittest.TestCase):
         self.assertIn("copy file, start and end EXACTLY", prompt)
         self.assertIn("never re-based to the segment's own 0", prompt)
 
-    def test_failed_structure_gate_blocks_completed_import(self):
-        self.write("07_review/structure-gate.json", {"passed": False, "blockers": [{"code": "UNCERTAIN"}]})
-        self.assertEqual(tasks.build_task(self.batch, "types")["status"], "needs_review")
-        with self.assertRaisesRegex(ValueError, "structure_gate has not passed"):
-            self.accept("types", self.types)
+    def test_failed_structure_gate_remains_visible_to_continuing_agent(self):
+        gate = {"passed": False, "blockers": [{"code": "UNCERTAIN"}]}
+        self.write("07_review/structure-gate.json", gate)
+        task = tasks.build_task(self.batch, "types")
+        self.assertEqual(task["status"], "ready")
+        self.assertIn("UNCERTAIN", task["prompt"])
+        self.assertTrue(self.accept("types", self.types)["completed"])
+        self.assertEqual(json.loads((self.batch / "07_review/structure-gate.json").read_text()), gate)
 
     def test_completed_nonreview_with_blocker_imports_nothing(self):
         target = self.batch / tasks.ARTIFACTS["types"]

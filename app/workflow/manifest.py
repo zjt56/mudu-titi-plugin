@@ -22,6 +22,24 @@ MANIFEST_VERSION = "1.0"
 DELIVERY_VERSION = "1.0"
 DELIVERY_FILENAME = "delivery.json"
 
+# Inputs consumed directly by a stage but not represented by its immediate
+# dependency's declared outputs. Keeping these bindings here prevents stale
+# review conclusions when source/labels change without a stage rerun.
+EXTRA_STAGE_INPUTS = {
+    "review": (
+        "01_source/正文.txt", "01_source/structure.confirmed.json",
+        "03_types/types.json", "04_knowledge/knowledge.json",
+        "04_knowledge/explanations.json", "01_source_ans/answers.json",
+        "06_batch/batch_meta.json", "02_audio/full-transcript.json",
+        "02_audio/audio_map.json", "02_audio/segment-evidence.json",
+    ),
+    "review_gate": (
+        "07_review/review-rounds.json", "07_review/content-review.json",
+        "07_review/metadata-review.json", "07_review/manual-review-queue.json",
+        "07_review/unchecked.json", "07_review/validation-report.json",
+    ),
+}
+
 PENDING = "pending"
 RUNNING = "running"
 COMPLETED = "completed"
@@ -150,7 +168,11 @@ def input_hashes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
     for key in stage.requires:
         item = manifest.get("inputs", {}).get(key)
         if item:
-            hashes[f"input:{key}"] = item.get("sha256") or ""
+            path = item.get("path")
+            hashes[f"input:{key}"] = (sha256_file(path) if path and Path(path).is_file() else "missing")
+    if stage.id == "underlines":
+        docx = manifest.get("inputs", {}).get("docx", {}).get("path")
+        hashes["input:docx"] = sha256_file(docx) if docx and Path(docx).is_file() else "missing"
     for dep in stage.depends_on:
         stage_spec = contracts.STAGE_BY_ID.get(dep)
         if not stage_spec:
@@ -159,6 +181,29 @@ def input_hashes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
             full = Path(batch_dir) / rel
             if full.exists():
                 hashes[f"artifact:{rel}"] = sha256_file(full)
+    for rel in EXTRA_STAGE_INPUTS.get(stage.id, ()):
+        full = Path(batch_dir) / rel
+        hashes[f"direct:{rel}"] = sha256_file(full) if full.is_file() else "missing"
+    if stage.id in ("review", "review_gate"):
+        from . import review
+        root = Path(__file__).resolve().parents[1]
+        for rel in review.ROUND_INPUTS:
+            path = Path(batch_dir) / rel
+            hashes[f"review:{rel}"] = sha256_file(path) if path.is_file() else "missing"
+        for rel in review.ROUND_RULES:
+            path = root / rel
+            hashes[f"rule:{rel}"] = sha256_file(path) if path.is_file() else "missing"
+        observations = Path(batch_dir) / 'workflow/media-observations.json'
+        if observations.is_file():
+            try:
+                from .agent_tasks import _safe_path
+                data = json.loads(observations.read_text(encoding='utf-8'))
+                for entry in data.get('observations', []):
+                    rel = entry['path']
+                    path = _safe_path(Path(batch_dir), rel)
+                    hashes[f"media:{rel}"] = sha256_file(path) if path.is_file() else "missing"
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                hashes['media:invalid'] = 'invalid'
     return hashes
 
 
@@ -252,6 +297,11 @@ def reconcile_deliveries(batch_dir, manifest: dict) -> list[str]:
                     record["output_hashes"] = current
                 new = {"status": "delivered", "artifacts": _delivery_artifacts(batch, stage),
                        "consumed_by": entry.get("consumed_by", []), "updated_at": entry.get("updated_at") or now_iso()}
+        elif record.get("execution_completed") and record.get("continue_unqualified"):
+            new = {"status": "delivered_unqualified", "artifacts": _delivery_artifacts(batch, stage),
+                   "quality_status": record.get("quality_status", "pending"),
+                   "release_ready": bool(record.get("release_ready")),
+                   "consumed_by": entry.get("consumed_by", []), "updated_at": entry.get("updated_at") or now_iso()}
         else:
             new = {"status": "pending", "artifacts": entry.get("artifacts", []),
                    "consumed_by": entry.get("consumed_by", []), "updated_at": entry.get("updated_at") or now_iso()}
@@ -275,8 +325,12 @@ def record_delivery(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
     delivery = _load_delivery(batch_dir)
     delivery["version"] = DELIVERY_VERSION
     delivery["workflow_id"] = manifest.get("workflow_id", Path(batch_dir).name)
+    stage_record = manifest.get("stages", {}).get(stage.id, {})
+    qualified = stage_record.get("status") in TERMINAL_OK
     delivery.setdefault("stages", {})[stage.id] = {
-        "status": "delivered",
+        "status": "delivered" if qualified else "delivered_unqualified",
+        "quality_status": stage_record.get("quality_status", "passed" if qualified else "pending"),
+        "release_ready": bool(stage_record.get("release_ready", qualified)),
         "artifacts": _delivery_artifacts(batch_dir, stage),
         "input_hashes": input_hashes(batch_dir, manifest, stage),
         "consumed_by": [],
@@ -302,6 +356,11 @@ def touch_stage(manifest: dict, stage_id: str, status: str, **fields) -> None:
     record = manifest["stages"].setdefault(stage_id, {})
     previous = record.get("status")
     record["status"] = status
+    if status not in (BLOCKED, NEEDS_REVIEW):
+        record.pop("execution_completed", None)
+        record.pop("continue_unqualified", None)
+        record.pop("quality_status", None)
+        record.pop("release_ready", None)
     if status == RUNNING:
         record["started_at"] = now_iso()
     if status in (COMPLETED, APPROVED, FAILED, BLOCKED, SKIPPED, INVALIDATED):
@@ -344,7 +403,7 @@ def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, s
     record = manifest["stages"].get(stage.id, {})
     if record.get("status") == SKIPPED:
         return False, ""
-    if record.get("status") not in TERMINAL_OK:
+    if record.get("status") not in TERMINAL_OK and not dependency_satisfied(manifest, stage.id, allow_unqualified=True):
         return True, f"状态为 {record.get('status')}"
     missing = missing_produces(batch_dir, stage)
     if missing:
@@ -354,23 +413,30 @@ def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, s
         current = sha256_file(Path(batch_dir) / rel)
         if current != digest:
             return True, f"产物已变化 {rel}"
-    # Input fingerprints describe the hand-off context, not invalidation by
-    # themselves. A dependency may gain one completed question while all prior
-    # rows remain deliverable. Downstream stages use the durable delivery record
-    # and incremental gap audit; only missing/changed own outputs invalidate a
-    # completed stage. Explicit source/output invalidation still flows through
-    # invalidate_downstream when a producer's deliverable actually changes.
+    saved_inputs = record.get("input_hashes") or {}
+    current_inputs = input_hashes(batch_dir, manifest, stage)
+    for key, digest in saved_inputs.items():
+        if current_inputs.get(key) != digest:
+            return True, f"输入已变化 {key}"
     return False, ""
 
 
-def ready_stages(batch_dir, manifest: dict) -> list[str]:
+def dependency_satisfied(manifest: dict, stage_id: str, *, allow_unqualified: bool = False) -> bool:
+    record = manifest.get("stages", {}).get(stage_id, {})
+    if record.get("status") in TERMINAL_OK:
+        return True
+    return bool(allow_unqualified and record.get("status") in (BLOCKED, NEEDS_REVIEW)
+                and record.get("execution_completed") and record.get("continue_unqualified"))
+
+
+def ready_stages(batch_dir, manifest: dict, *, allow_unqualified: bool = False) -> list[str]:
     """依赖全部满足、可以开始执行的阶段。"""
     ready = []
     for stage in contracts.STAGES:
         record = manifest["stages"].get(stage.id, {})
         if record.get("status") in TERMINAL_OK:
             continue
-        if any(manifest["stages"].get(dep, {}).get("status") not in TERMINAL_OK
+        if any(not dependency_satisfied(manifest, dep, allow_unqualified=allow_unqualified)
                for dep in stage.depends_on):
             continue
         if stage.requires:
@@ -402,11 +468,6 @@ def skip_reason(manifest: dict, stage: contracts.Stage) -> str:
             if (types and all(isinstance(value, str) and value.strip() for value in types)
                     and not any(value.strip().startswith("听力") for value in types)):
                 return "确认结构无听力题，无需音频切段"
-    if stage.id == "underlines":
-        docx = manifest.get("inputs", {}).get("docx", {})
-        path = str(docx.get("path") or "")
-        if not path.lower().endswith(".docx"):
-            return "来源不是 .docx，无法从字符格式补画线"
     return ""
 
 
@@ -449,6 +510,13 @@ def derive_status(manifest: dict) -> str:
         return "staged"
     if any(s in (FAILED,) for s in statuses.values()):
         return "failed"
+    blocked_unqualified = [sid for sid, status in statuses.items()
+                           if status in (BLOCKED, NEEDS_REVIEW)
+                           and manifest.get("stages", {}).get(sid, {}).get("continue_unqualified")]
+    if blocked_unqualified and all(dependency_satisfied(manifest, stage.id, allow_unqualified=True)
+                                   for stage in contracts.STAGES if stage.id not in
+                                   ("upload_gate", "upload", "publish_gate")):
+        return "pending_confirmation"
     if any(s in (BLOCKED,) for s in statuses.values()):
         return "blocked"
     if statuses.get("review_gate") in TERMINAL_OK:

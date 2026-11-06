@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""按可观测特征给批次打难度与分类（difficulty / filterMetadata.categories）。
+"""保留模型判断的难度，并为批次补充分类（filterMetadata.categories）。
 
-规则来源：references/difficulty-category.json 的 feature_scoring 与 categories。
-特征不足（无文字）的单元留空并计入待编辑清单，不按题型硬造。
+分类规则来源：references/difficulty-category.json。难度未提供时留空。
 用法：assign_meta.py --batch <batch.json> --out <batch_meta.json> [--report]
 """
 from __future__ import annotations
@@ -117,34 +116,20 @@ def main() -> int:
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args()
     rules = json.loads(RULES_PATH.read_text(encoding="utf-8"))
-    fs = rules["feature_scoring"]
     if not args.batch.is_file():
-        # 难度/分类是可选补充；上游尚未形成正式 batch 时输出空占位，
-        # 不把缺少组装文件升级为整批失败。
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps({"items": [], "warnings": [
-            "缺少 06_batch/batch.json，难度与分类暂未生成"
-        ]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        if args.report:
-            print("未找到批次组装文件，跳过难度与分类")
-        return 0
+        print("未找到批次组装文件，等待组装完成")
+        return 1
     data = json.loads(args.batch.read_text(encoding="utf-8"))
     items = data.get("items", [])
     pending = []
     for it in items:
-        computed, val, basis = _score(it, fs)
         fm = it.get("filterMetadata") or {}
-        # 子智能体4已判定的难度优先保留；脚本只补可解释的分值，不覆盖代理结论。
+        # 难度由模型根据题面主观判断；不以长度等机械特征代替模型结论。
         judged = it.get("difficulty") if isinstance(it.get("difficulty"), str) else fm.get("difficulty")
         if judged:
             fm["difficulty"] = judged
-            # 子智能体4的难度判定是语义结论；脚本特征分与之分档不同会产生
-            # difficulty/difficultyValue 冲突。保留标签，不明知冲突还写分值。
             fm["difficultyValue"] = None
-        elif computed is not None:
-            fm["difficulty"] = computed
-            fm["difficultyValue"] = val
-        diff = judged or computed
+        diff = judged
         fm["categories"] = _categories(it, rules)
         it["filterMetadata"] = fm
         if diff is None:

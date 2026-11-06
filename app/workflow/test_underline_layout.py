@@ -37,6 +37,32 @@ STEM = 'The word “remove” in the second paragraph probably means______in Chi
 
 
 class UnderlineLayoutTest(unittest.TestCase):
+    def test_separate_output_without_docx_preserves_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / 'batch_meta.base.json'
+            final = Path(tmp) / 'batch_meta.json'
+            data = {'items': [{'stem': 'A question'}]}
+            base.write_text(json.dumps(data), encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(underline.main(['--batch', str(base), '--out', str(final),
+                                                 '--docx', '', '--apply']), 0)
+            self.assertEqual(json.loads(final.read_text()), data)
+            self.assertEqual(json.loads(base.read_text()), data)
+
+    def test_separate_output_with_docx_keeps_base_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base, final, paper = root / 'base.json', root / 'final.json', root / 'paper.docx'
+            data = {'items': [{'stem': 'Choose the word remove.'}]}
+            base.write_text(json.dumps(data), encoding='utf-8')
+            docx(paper, ['Choose the word <u>remove</u>.'])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(underline.main(['--batch', str(base), '--out', str(final),
+                                                 '--docx', str(paper), '--apply']), 0)
+            self.assertEqual(json.loads(base.read_text()), data)
+            self.assertEqual(json.loads(final.read_text())['items'][0]['stem'],
+                             'Choose the word <u>remove</u>.')
+
     def test_actual_2014_prompt_existing_mark_is_idempotent(self):
         batch = {'items': [{'number': 91, 'subquestions': [
             {'number': 92, 'stem': STEM.replace('remove', '<u>remove</u>')}]}]}

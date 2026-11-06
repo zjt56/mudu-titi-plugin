@@ -33,7 +33,7 @@ ARTIFACTS = {
 REVIEW_FILES = ("content-review.json", "metadata-review.json", "manual-review-queue.json")
 AI_MARK = "（AI生成，待校对）"
 RULES = {
-    "answers": "You are labeling subagent 4 (answers, explanation alignment, difficulty). Artifact: {answers:{question_number:string}, evidence:{question_number:[nonempty location strings]}, difficulty:{question_number:easy|medium|hard in Chinese 容易/适中/困难}, difficultyEvidence:{question_number:[nonempty location strings]}}. Extract every answer and explanation mapping actually present in all supplied answer materials, including question numbers outside the current tentative structure. Never discard 21~80 merely because the source paper currently contains only listening material. Never solve or guess; preserve original wording. Difficulty is optional and only for questions whose actual stem/options are supplied; leave it empty otherwise. Missing/conflicting answers do not block the stage.",
+    "answers": "You are labeling subagent 4 (answers, explanation alignment, difficulty). Artifact: {answers:{question_number:string}, evidence:{question_number:[nonempty location strings]}, difficulty:{question_number:容易|适中|困难}}. Extract every answer and explanation mapping actually present in all supplied answer materials, including question numbers outside the current tentative structure. Never discard questions merely because the source paper currently contains only another section. Never solve or guess; preserve original wording. Difficulty is optional: when the actual stem/options are supplied, make a concise subjective judgment; otherwise leave it empty. Do not write difficulty evidence. Missing/conflicting answers do not block the stage.",
     "audio": "Artifact: {items:[{unit_id,file,start,end,evidence:[location strings]}]}. Cover exactly the listening units. file is an existing batch-relative already-cut media segment, never the original full recording. For every listening unit copy file, start and end EXACTLY from a 02_audio/segment-evidence.json item whose verified is true; start/end are offsets on the whole-paper recording, never re-based to the segment's own 0. Do not guess, round or adjust them: a proposed time that differs from the verified row is rejected. Without a verified evidence row and an existing segment for that unit return needs_review for it; you cannot listen, cut or create files.",
     "types": "You are labeling subagent 3 (type, word count, content completeness). Artifact: {items:[{unit_id,type,subtypes:[string],words:integer,contentComplete:boolean,evidence:[location strings]}]}. Exactly one row per confirmed unit. Use only catalog main types and their exact subtypes. All applicable subtypes are required; only 单词拼写 permits multiple subtypes. words is the English word count of the unit's own stem/material/options (digits and Chinese not counted); contentComplete is false when the question is truncated, missing options, or its stem does not match the passage. Never rename IDs or change unit boundaries.",
     "knowledge": "You are labeling subagent 2 (knowledge points; textbook matching only for lesson-synced sources). Artifact: {items:[{unit_id,knowledge:[full catalog leaf paths],knowledgeIds:[matching catalog IDs],textbook:{version,book,unit,section,evidence},subquestions:[{number,knowledge:[full leaf paths],knowledgeIds:[]}],evidence:[nonempty location strings]}]}. Output tags ONLY: do not write answer, explanation or articleSummary — the importer injects them verbatim from the validated answers and explanations artifacts, and any content you add is ignored. Assign knowledge tags only. knowledgeIds is optional but must match paths. Use the matching types.json row as type/subtype context. Groups cover each confirmed child number exactly once; standalone subquestions is []. Whole-unit types (阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话) take ONLY group-level tags (genre/theme/content): their subquestions must carry knowledge=[] and are never tagged per child. Per-question types (听力短对话理解, 听力关键词语选择, 单项填空, 单词拼写, 完成句子, 翻译, 情景运用, 语音题 etc.) tag every child separately. textbook placement is ONLY for lesson-synced sources (同步练习/单元测验) whose own title or section header names the textbook unit: use exact strings from the supplied textbook_index and cite paper evidence; otherwise omit. Every knowledge path MUST be copied verbatim from the supplied catalog (references/knowledge-catalog.json); never append an invented child below an existing leaf (e.g. '语用/情景交际' is already a leaf — writing '语用/情景交际/询问目的' is invalid), and never invent names or IDs. When no valid leaf exists for a dimension, omit that dimension. Evidence must be nonempty and refer to supplied text.",
@@ -461,7 +461,7 @@ def _build_task_template(stage, max_input_chars, context, hashes, missing, units
     number = str(units[0]["numbers"][0]) if units else "1"
     uid = units[0]["unit_id"] if units else "q-1"
     example_payloads = {
-        "answers": {"answers": {number: "A"}, "evidence": {number: ["附录 L1"]}, "difficulty": {number: "容易"}, "difficultyEvidence": {number: ["单句、四个等长选项"]}},
+        "answers": {"answers": {number: "A"}, "evidence": {number: ["附录 L1"]}, "difficulty": {number: "容易"}},
         "types": {"items": [{"unit_id": uid, "type": "单项填空", "subtypes": ["四个选项"], "words": 5, "contentComplete": True, "evidence": ["正文 L1"]}]},
         "explanations": {"items": [{"unit_id": uid, "explanation": "无", "articleSummary": "无", "subquestions": [], "evidence": ["正文 L1；附录 L1 仅给答案，无原解析/原大意"]}]},
         "knowledge": {"items": [{"unit_id": uid, "knowledge": ["词汇/词汇辨析/动词辨析"], "answer": "A", "explanation": "无", "articleSummary": "无", "subquestions": [], "evidence": ["正文 L1；解析与大意取自 explanations 产物"]}]},
@@ -557,11 +557,9 @@ def _types(payload, units):
                 "Catalog subtype is required for %s; choose exactly one of: %s"
                 % (main_type, ", ".join(allowed_subtypes))
             )
-        if problems and os.environ.get("WF_MODEL_FIRST", "1") == "0":
+        if problems:
             raise ValueError("Invalid type labels for %s: %s" %
                              (row.get("unit_id", "unknown"), "; ".join(problems)))
-        if problems:
-            row.setdefault("warnings", []).extend(problems)
     return rows
 
 
@@ -692,17 +690,14 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 raise ValueError("Answer must be a nonempty verbatim extraction from supplied answer text")
             _strings(evidence[number], "answer evidence", True)
         difficulty = payload.get("difficulty", {})
-        basis = payload.get("difficultyEvidence", {})
-        if not isinstance(difficulty, dict) or not isinstance(basis, dict) or set(difficulty) != set(basis):
-            raise ValueError("difficulty/difficultyEvidence must cover the same optional numbers")
-        if not set(difficulty).issubset(set(answers)):
-            raise ValueError("difficulty may only cover answered numbers")
-        if True:
-            levels = set(taxonomy.difficulties())
-            for number, level in difficulty.items():
-                if level not in levels:
-                    raise ValueError(f"Difficulty must be one of {sorted(levels)}")
-                _strings(basis[number], "difficulty evidence", True)
+        if not isinstance(difficulty, dict):
+            raise ValueError("difficulty must be an optional question-number mapping")
+        if any(_number(n) != n for n in difficulty):
+            raise ValueError("Difficulty keys must use positive numeric question numbers")
+        levels = set(taxonomy.difficulties())
+        for number, level in difficulty.items():
+            if level not in levels:
+                raise ValueError(f"Difficulty must be one of {sorted(levels)}")
         return
     if stage == "types":
         rows = _types(payload, units)
@@ -863,10 +858,8 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                     if list(child.get("knowledge") or []) != list(prior.get("knowledge") or []):
                         raise ValueError("Assemble must preserve validated child field knowledge")
             problems = taxonomy.check_question_labels(label_row)
-            if problems and os.environ.get("WF_MODEL_FIRST", "1") == "0":
-                raise ValueError("Invalid knowledge labels: " + "; ".join(problems))
             if problems:
-                row.setdefault("warnings", []).extend(problems)
+                raise ValueError("Invalid knowledge labels: " + "; ".join(problems))
             if unit["unit_kind"] == "standalone":
                 _provenance(row, source_text, answers.get(str(unit["numbers"][0])))
             elif not isinstance(row.get("answer"), str) or not isinstance(row.get("explanation"), str):
@@ -1061,13 +1054,19 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
     if result["status"] == "needs_review":
         # 模型优先模式：部分结果也可进入后续阶段。缺失字段保留为空，
         # 不把 needs_review 变成整批停止点；正式语义校验仍由后续模型/装配阶段继续完成。
-        if os.environ.get("WF_MODEL_FIRST", "1") != "0" and ARTIFACTS[stage] in artifacts:
+        if (stage != "review" and not missing and os.environ.get("WF_MODEL_FIRST", "1") != "0"
+                and ARTIFACTS[stage] in artifacts):
             partial = _merge_incremental_artifact(batch_dir, stage, artifacts[ARTIFACTS[stage]])
+            try:
+                _validate(Path(batch_dir), stage, partial, context, units, notes=report["notes"])
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                report["notes"] = report["notes"] + ["候选未通过产物校验：" + str(exc)[:200]]
+                return report
             files = {ARTIFACTS[stage]: partial}
             if not validate_only:
                 _install(Path(batch_dir), files)
-            report.update(completed=True, status="completed", artifacts=list(files),
-                          notes=report["notes"] + ["模型优先：导入部分结果，缺失字段留空并继续"])
+            report.update(artifacts=list(files),
+                          notes=report["notes"] + ["已保存可继续处理的候选；质量状态仍为待复核"])
             return report
         return report
     if stage != "review" and any(f["severity"] in ("blocker", "major") for f in result["findings"]):

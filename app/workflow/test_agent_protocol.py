@@ -28,6 +28,9 @@ class AgentProtocolTest(unittest.TestCase):
         self.batch.mkdir()
         self.write("01_source/正文.txt", "1. She ___ a book. A. reads B. read C. reading D. to read")
         self.write("01_source/structure.json", {"sections": [], "groups": []})
+        self.write("01_source/extraction.json", {})
+        self.write("01_source/metadata.json", {})
+        self.write("07_review/extraction-report.json", {})
         self.write("01_source/structure.confirmed.json", {"units": [
             {"unit_kind": "standalone", "numbers": [1], "type": "单项填空"}]})
         self.write("07_review/structure-gate.json", {"passed": True})
@@ -146,6 +149,7 @@ print(json.dumps(result, ensure_ascii=False))
         with self.assertRaisesRegex(ValueError, "consumed"):
             protocol.import_result(self.batch, task_id, self.response(task_id, altered))
 
+    @patch.dict(os.environ, {"WF_MODEL_FIRST": "0"})
     def test_needs_review_consumes_task_without_importing_artifact(self):
         task_id = self.export()["task_id"]
         value = self.envelope(task_id, "needs_review")
@@ -234,6 +238,7 @@ print(json.dumps(result, ensure_ascii=False))
             self.assertEqual(mf.manifest_path(self.batch).read_bytes(), manifest_before)
         self.assertTrue(protocol.import_result(self.batch, task_id, self.response(task_id))["completed"])
 
+    @patch.dict(os.environ, {"WF_MODEL_FIRST": "0"})
     def test_bad_inner_fields_and_extra_artifacts_do_not_consume_task(self):
         task_id = self.export()["task_id"]
         for edit in ("extra_field", "manifest_artifact", "invalid_type"):
@@ -573,6 +578,7 @@ print(json.dumps(result, ensure_ascii=False))
         mf.save(self.batch, manifest)
         self.assertEqual(protocol.next_task(self.batch), {"action": "human", "stage": "upload_gate"})
 
+    @patch.dict(os.environ, {"WF_MODEL_FIRST": "0"})
     def test_cli_errors_return_two_and_review_returns_three(self):
         with redirect_stderr(io.StringIO()):
             self.assertEqual(protocol.main(["export", "--batch-dir", str(self.batch), "--stage", "upload"]), 2)

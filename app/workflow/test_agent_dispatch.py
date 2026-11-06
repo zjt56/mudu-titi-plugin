@@ -16,6 +16,11 @@ class AgentDispatchTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.folder = Path(self.temp.name)
         self.state = mf.new_manifest('fixture', self.folder, {}, {})
+        for rel in (*contracts.STAGE_BY_ID['extract'].produces,
+                    *contracts.STAGE_BY_ID['structure_gate'].produces):
+            path = self.folder / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}', encoding='utf-8')
         self.state['stages']['extract']['status'] = mf.COMPLETED
         self.state['stages']['structure_gate']['status'] = mf.COMPLETED
         mf.save(self.folder, self.state)

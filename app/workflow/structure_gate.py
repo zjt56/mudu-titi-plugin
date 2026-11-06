@@ -386,7 +386,10 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     image_questions = structure.get("image_questions") if isinstance(structure.get("image_questions"), list) else []
     # 听力稿可能只含材料/导语，题干与选项由后续模型从其他材料合并；
     # 普通整卷仍使用原有确定性完整性闸门。
-    model_structure_only = any("听力" in str(section.get("type") or "") for section in sections)
+    # This flag is enabled only after a complete, evidence-bound AI structure
+    # candidate is accepted; the mere presence of a listening section must not
+    # weaken checks for unrelated written sections.
+    model_structure_only = False
 
     from . import manifest as mf
     original_path = None
@@ -402,6 +405,16 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     checks: dict[str, str] = {}
     resolved_notes: list[dict] = []
     warnings: list[dict] = []
+    ai_classified = None
+    try:
+        from . import structure_ai
+        ai_classified = structure_ai.auto_classify(batch_dir)
+        if ai_classified.get("units"):
+            warnings.append({"code": "AI_STRUCTURE_CLASSIFIED", "blocking": False,
+                             "status": "candidate", "message": ai_classified.get("reason", "AI结构归类已采用")})
+    except (OSError, ValueError, RuntimeError, TypeError) as exc:
+        warnings.append({"code": "AI_STRUCTURE_UNAVAILABLE", "blocking": False,
+                         "status": "fallback", "message": str(exc)[:160]})
     # 复合提取器显式提出的 OCR/题号/分组歧义不能被数量自检抹掉。
     # 已经人工/原卷核对、并附带 resolution 依据的条目可放行，但仍记入报告留痕。
     for issue in structure.get("unresolved") or []:
@@ -472,6 +485,10 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
             else:
                 blockers.append(issue)
     units = _build_units(sections, groups, source_lines) if sections else []
+    # AI is the primary structure judge when a complete evidence-bound view was accepted.
+    # The deterministic view remains an evidence-preserving fallback.
+    if isinstance(ai_classified, dict) and ai_classified.get("units"):
+        units = ai_classified["units"]
 
     # 题号覆盖：section 声明的题号应被 units 完整覆盖，无重复
     declared = sorted({n for s in sections for n in _section_numbers(s)})

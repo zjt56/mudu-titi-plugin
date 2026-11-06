@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -128,6 +129,7 @@ class AgentEntryTests(unittest.TestCase):
         self.assertEqual(report["summary"]["report_json"], "07_review/overall-review-report.json")
         self.assertEqual(mf.load(batch)["stages"]["review"]["status"], mf.COMPLETED)
 
+    @patch.dict(os.environ, {"WF_MODEL_FIRST": "0"})
     def test_partial_ai_continues_rounds_without_installing_completed_ai(self):
         batch = self._review_batch()
         first = self._partial_ai(batch)
@@ -203,6 +205,7 @@ class AgentEntryTests(unittest.TestCase):
         self.assertEqual(report["summary"]["open_manual_items"], 1)
         self.assertEqual(review.evaluate_rounds(batch)["checked_rounds"], list(review.ROUND_IDS))
 
+    @patch.dict(os.environ, {"WF_MODEL_FIRST": "0"})
     def test_partial_protocol_ai_continues_without_changing_receipt(self):
         batch = self._review_batch()
         local = self._partial_ai(batch)

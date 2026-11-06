@@ -379,6 +379,9 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
     def blocked(stage_id, reason, action="", **details):
         blockers.append({"stage": stage_id, "action": action, "reason": reason, **details})
 
+    def dep_ready(stage_id):
+        return mf.dependency_satisfied(manifest, stage_id, allow_unqualified=ZERO_TOUCH)
+
     # 若上一轮撞到限流/额度并登记了冷却，且当前仍在冷却期，本轮不再调用模型：
     # 只报告等待，不读写阶段状态，避免把可恢复的限额失败当成永久失败反复重试。
     cooldown = _read_cooldown(batch_dir)
@@ -394,18 +397,19 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
         # 让上传后的流程真正自动完成切段，而不是等用户点按钮。
         if stop_at is None and audio_prep.get("status") == "waiting":
             deps = contracts.STAGE_BY_ID["audio"].depends_on
-            if all(manifest["stages"].get(d, {}).get("status") in mf.TERMINAL_OK for d in deps):
+            if all(dep_ready(d) for d in deps):
                 audio_prep = _auto_prepare_audio(batch_dir, manifest)
         if stop_at and stage.id == stop_at:
             break
         if stage.id in parallel_done:
             code = parallel_done[stage.id]
             if code:
-                if ZERO_TOUCH and code == 3:
-                    mf.touch_stage(manifest, stage.id, mf.COMPLETED,
+                if ZERO_TOUCH and code == 3 and _stage_has_outputs(batch_dir, stage):
+                    mf.touch_stage(manifest, stage.id, mf.NEEDS_REVIEW,
                                    input_hashes=mf.input_hashes(batch_dir, manifest, stage),
                                    output_hashes=mf.output_hashes(batch_dir, stage),
-                                   notes="全自动：接受代理部分结果（模型优先模式）")
+                                   execution_completed=True, continue_unqualified=True,
+                                   notes="全自动：接受代理部分结果，质量状态保留待复核")
                     if _stage_has_outputs(batch_dir, stage):
                         mf.record_delivery(batch_dir, manifest, stage)
                     mf.save(batch_dir, manifest)
@@ -416,6 +420,14 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
             continue
         record = manifest["stages"].get(stage.id, {})
         status = record.get("status")
+        if (ZERO_TOUCH and status in (mf.NEEDS_REVIEW, mf.BLOCKED)
+                and record.get("execution_completed") and record.get("continue_unqualified")):
+            stale, reason = mf.is_stale(batch_dir, manifest, stage)
+            if not stale:
+                continue
+            mf.invalidate_downstream(batch_dir, manifest, stage.id, reason)
+            mf.save(batch_dir, manifest)
+            status = mf.INVALIDATED
         if status == mf.SKIPPED and not mf.skip_reason(manifest, stage):
             mf.touch_stage(manifest, stage.id, mf.PENDING, notes="跳过条件已消失，恢复执行")
             mf.save(batch_dir, manifest)
@@ -459,8 +471,7 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                     continue
             else:
                 continue
-        unmet = [d for d in stage.depends_on
-                 if manifest["stages"].get(d, {}).get("status") not in mf.TERMINAL_OK]
+        unmet = [d for d in stage.depends_on if not dep_ready(d)]
         if unmet:
             blocked(stage.id, "等待上游：" + "、".join(unmet), unmet_dependencies=unmet)
             continue
@@ -497,7 +508,12 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                         if pending:
                             note += "（" + "、".join(pending[:12]) + "）"
                         if (batch_dir / "02_audio" / "audio_map.json").is_file():
-                            mf.touch_stage(manifest, "audio", mf.COMPLETED, notes=note[:600])
+                            mf.touch_stage(manifest, "audio", mf.NEEDS_REVIEW,
+                                           execution_completed=True, continue_unqualified=True,
+                                           quality_status="unverified", release_ready=False,
+                                           notes=note[:600])
+                            if (batch_dir / "02_audio" / "audio_map.json").is_file():
+                                mf.record_delivery(batch_dir, manifest, contracts.STAGE_BY_ID["audio"])
                             mf.save(batch_dir, manifest)
                             print("  · audio 自动采用候选切片（零人工）")
                             continue
@@ -533,8 +549,7 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                             and manifest["stages"].get(candidate.id, {}).get("status") not in mf.TERMINAL_OK
                             and candidate.id not in parallel_done
                             and not mf.skip_reason(manifest, candidate)
-                            and all(manifest["stages"].get(dep, {}).get("status") in mf.TERMINAL_OK
-                                    for dep in candidate.depends_on)):
+                            and all(dep_ready(dep) for dep in candidate.depends_on)):
                         eligible.append(candidate)
                 if len(eligible) > 1 and agent.configured():
                     config = local_agent.load_config()
@@ -547,7 +562,15 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                             return _result(batch_dir, manifest, stage.id,
                                            "限流/额度冷却中，约 " + str(int(RATE_LIMIT_BACKOFF_SECONDS)) + "s 后重试",
                                            "cooldown")
-                        if code:
+                        if code == 3 and ZERO_TOUCH and _stage_has_outputs(batch_dir, stage):
+                            mf.touch_stage(manifest, stage.id, mf.NEEDS_REVIEW,
+                                           input_hashes=mf.input_hashes(batch_dir, manifest, stage),
+                                           output_hashes=mf.output_hashes(batch_dir, stage),
+                                           execution_completed=True, continue_unqualified=True,
+                                           notes="全自动：接受代理部分结果，质量状态保留待复核")
+                            mf.record_delivery(batch_dir, manifest, stage)
+                            mf.save(batch_dir, manifest)
+                        elif code:
                             blocked(stage.id, "代理任务等待接单、补充证据或处理" if code == 3 else "代理桥执行失败",
                                     "review" if code == 3 else "failed")
                         continue
@@ -563,10 +586,11 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                 if ZERO_TOUCH and pending and _stage_has_outputs(batch_dir, stage):
                     # 模型优先：有正式产物的部分结果允许继续，缺失字段由后续阶段补判。
                     # 没有产物时不能伪造完成，否则下游只会以 FileNotFoundError 失败。
-                    mf.touch_stage(manifest, stage.id, mf.COMPLETED,
+                    mf.touch_stage(manifest, stage.id, mf.NEEDS_REVIEW,
                                    input_hashes=mf.input_hashes(batch_dir, manifest, stage),
                                    output_hashes=mf.output_hashes(batch_dir, stage),
-                                   notes="全自动：接受代理 needs_review（零人工模式）")
+                                   execution_completed=True, continue_unqualified=True,
+                                   notes="全自动：接受代理部分结果，质量状态保留待复核")
                     if _stage_has_outputs(batch_dir, stage):
                         mf.record_delivery(batch_dir, manifest, stage)
                     mf.save(batch_dir, manifest)
@@ -605,8 +629,7 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                 record = manifest["stages"].get(stage.id, {})
                 if record.get("status") in mf.TERMINAL_OK:
                     continue
-                unmet = [d for d in stage.depends_on
-                         if manifest["stages"].get(d, {}).get("status") not in mf.TERMINAL_OK]
+                unmet = [d for d in stage.depends_on if not dep_ready(d)]
                 if unmet:
                     blocked(stage.id, "等待上游：" + "、".join(unmet), unmet_dependencies=unmet)
                     continue
@@ -617,9 +640,8 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                     if missing:
                         reason = "缺少输入：" + "、".join(missing)
                 if stage.id == "meta" and not (batch_dir / "06_batch" / "batch.json").is_file():
-                    # 难度/来源分类是补充字段；组装尚未产出正式 batch 时不应
-                    # 把可选分类脚本错误升级为整批失败，记录后继续轮询后续阶段。
-                    reason = "缺少 06_batch/batch.json，跳过难度与分类补充"
+                    blocked(stage.id, "等待组装产物 06_batch/batch.json", "agent")
+                    continue
                 if reason:
                     print(f"  · {stage.id} 跳过（{reason}）")
                     mf.touch_stage(manifest, stage.id, mf.SKIPPED, notes=reason)
@@ -652,11 +674,21 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                 code = rn.do_review_gate(batch_dir, manifest)
             manifest = mf.load(batch_dir)
             if code != 0:
-                if ZERO_TOUCH:
+                gate_record = manifest.get("stages", {}).get(stage.id, {})
+                has_candidate = _stage_has_outputs(batch_dir, stage)
+                if stage.id == "structure_gate" and has_candidate:
+                    try:
+                        candidate = json.loads((batch_dir / "01_source/structure.confirmed.json").read_text(encoding="utf-8"))
+                        has_candidate = isinstance(candidate, dict) and bool(candidate.get("units"))
+                    except (OSError, ValueError, TypeError):
+                        has_candidate = False
+                if ZERO_TOUCH and gate_record.get("status") == mf.BLOCKED and has_candidate:
                     note = "全自动：闸门未通过但按模型优先继续（" + stage.id + "）"
-                    mf.touch_stage(manifest, stage.id, mf.COMPLETED,
+                    mf.touch_stage(manifest, stage.id, mf.BLOCKED,
                                    input_hashes=mf.input_hashes(batch_dir, manifest, stage),
                                    output_hashes=mf.output_hashes(batch_dir, stage),
+                                   execution_completed=True, continue_unqualified=True,
+                                   quality_status="failed", release_ready=False,
                                    notes=note[:600])
                     mf.record_delivery(batch_dir, manifest, stage)
                     mf.save(batch_dir, manifest)
@@ -792,7 +824,8 @@ def poll_batch(batch_dir: Path, bridge: dict, *, interval: float = 5.0,
         manifest = mf.load(batch_dir)
         statuses = [manifest.get("stages", {}).get(stage.id, {}).get("status")
                     for stage in contracts.STAGES]
-        if all(status in mf.TERMINAL_OK for status in statuses):
+        if all(mf.dependency_satisfied(manifest, stage.id, allow_unqualified=ZERO_TOUCH)
+               for stage in contracts.STAGES):
             break
         # A cooldown or a running external task needs time before the next check;
         # ordinary pending/failed stages are retried on the next poll immediately.

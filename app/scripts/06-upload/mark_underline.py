@@ -231,7 +231,8 @@ def restore(batch, source_text):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch", required=True, type=Path)
-    parser.add_argument("--docx", required=True, type=Path)
+    parser.add_argument("--docx", default="")
+    parser.add_argument("--out", type=Path, help="独立输出文件；无 DOCX 时保留原批次")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -239,9 +240,16 @@ def main(argv=None):
         batch = json.loads(original)
         if not isinstance(batch, dict) or not isinstance(batch.get("items"), list) or not batch["items"]:
             raise ValueError("batch.items 必须为非空数组")
-        with tempfile.TemporaryDirectory(prefix="underline-docx-") as directory:
-            source = extract_docx(args.docx, Path(directory))
-        candidate, report = restore(batch, source["text"])
+        docx = Path(args.docx) if args.docx and args.docx.lower().endswith('.docx') else None
+        if docx:
+            with tempfile.TemporaryDirectory(prefix="underline-docx-") as directory:
+                source = extract_docx(docx, Path(directory))
+            candidate, report = restore(batch, source["text"])
+        else:
+            source = {}
+            candidate = batch
+            report = {"passed": True, "changes": [], "issues": [],
+                      "visual_review_claimed": False, "note": "无 DOCX，保留原有画线"}
         # OCR auto 复核已经为浮动对象/符号字体留下补充证据时，原生提取告警
         # 不再阻断画线机械恢复；版面核对仍由 layout_required/上传前复核负责。
         extraction_meta = args.batch.parent.parent / "01_source" / "extraction.json"
@@ -256,12 +264,14 @@ def main(argv=None):
                                      "blocking": not auto_ocr})
             if not auto_ocr:
                 report["passed"] = False
-        if report["passed"] and args.apply and report["changes"]:
-            # Resolve the exact existing target and refuse source/batch aliasing.
-            target = args.batch.resolve(strict=True)
-            if args.batch.is_symlink() or target == args.docx.resolve(strict=True):
-                raise ValueError("不允许写入软链接或覆盖原卷")
-            if target.read_text(encoding="utf-8-sig") != original:
+        if report["passed"] and args.apply and (report["changes"] or args.out):
+            target_path = args.out or args.batch
+            if target_path.is_symlink():
+                raise ValueError("不允许写入软链接")
+            target = target_path.resolve()
+            if docx and target == docx.resolve():
+                raise ValueError("不允许覆盖原卷")
+            if args.batch.read_text(encoding="utf-8-sig") != original:
                 raise ValueError("批次在校验期间发生变化，请重试")
             fd, name = tempfile.mkstemp(prefix=".underline-", suffix=".json", dir=str(target.parent))
             with os.fdopen(fd, "w", encoding="utf-8") as stream:

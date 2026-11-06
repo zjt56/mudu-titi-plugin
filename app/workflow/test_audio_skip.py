@@ -20,6 +20,11 @@ class AudioSkipTest(unittest.TestCase):
         self.batch = Path(self.temp.name) / "batch"
         self.manifest = mf.new_manifest("batch", self.batch, {
             "audio": {"exists": True, "path": "unused-test-recording.mp3"}}, {})
+        for rel in (*contracts.STAGE_BY_ID['extract'].produces,
+                    *contracts.STAGE_BY_ID['structure_gate'].produces):
+            path = self.batch / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}', encoding='utf-8')
         for stage in ("extract", "structure_gate"):
             mf.touch_stage(self.manifest, stage, mf.COMPLETED)
         mf.save(self.batch, self.manifest)

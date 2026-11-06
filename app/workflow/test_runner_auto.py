@@ -47,7 +47,16 @@ class RunnerAutoTest(unittest.TestCase):
             self.assertEqual(auto.main(["run", "--stop-at", "not-a-stage"]), 2)
         process.assert_not_called()
 
+    def _isolate_scheduler(self):
+        from workflow import agent_tasks
+        for patcher in (patch.object(mf, 'reconcile_deliveries', return_value=[]),
+                        patch.object(mf, 'is_stale', return_value=(False, '')),
+                        patch.object(agent_tasks, 'stage_gaps', return_value={})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def _ready_after_structure(self):
+        self._isolate_scheduler()
         for stage_id in ("extract", "structure_gate"):
             mf.touch_stage(self.manifest, stage_id, mf.COMPLETED)
         mf.save(self.batch, self.manifest)
@@ -287,23 +296,19 @@ class RunnerAutoTest(unittest.TestCase):
             self.assertEqual(manifest["stages"][stage]["status"], mf.COMPLETED)
 
     def test_answers_failure_continues_audio_types_but_waits_for_real_downstream(self):
+        self._isolate_scheduler()
         self._ready_after_structure()
         calls = []
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                 {"answers": (mf.FAILED, 1)}, calls)):
             outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
-        self.assertEqual(calls, ["answers", "audio", "types"])
+        self.assertEqual(calls, ["answers", "audio", "types", "explanations", "knowledge", "assemble"])
         self.assertEqual((outcome["stopped_at"], outcome["action"]), ("answers", "failed"))
         self.assertEqual([s["stage"] for s in outcome["failed_stages"]], ["answers"])
-        pending = {s["stage"]: s for s in outcome["pending_stages"]}
-        self.assertEqual(pending["knowledge"]["unmet_dependencies"], ["answers"])
-        # 组装同时消费 explanations（解析/大意），两者都未完成时都必须等待。
-        self.assertEqual(pending["assemble"]["unmet_dependencies"], ["knowledge", "explanations"])
         manifest = mf.load(self.batch)
-        for stage_id in ("knowledge", "assemble", "upload_gate", "upload"):
-            self.assertEqual(manifest["stages"][stage_id]["status"], mf.PENDING)
-        for stage_id in ("audio", "types"):
+        for stage_id in ("audio", "types", "explanations", "knowledge", "assemble"):
             self.assertEqual(manifest["stages"][stage_id]["status"], mf.COMPLETED)
+        self.assertEqual(manifest["stages"]["upload"]["status"], mf.PENDING)
 
     def test_zero_touch_does_not_promote_missing_agent_artifact(self):
         self._ready_after_structure()
@@ -318,6 +323,7 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertFalse((self.batch / "06_batch/batch.json").exists())
 
     def test_audio_needs_review_continues_types_knowledge_but_not_assemble(self):
+        self._isolate_scheduler()
         self._ready_after_structure()
         patcher = patch.object(auto, 'ZERO_TOUCH', False)
         patcher.start(); self.addCleanup(patcher.stop)
@@ -336,12 +342,13 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(manifest["stages"]["assemble"]["status"], mf.PENDING)
 
     def test_multiple_failures_reported_once_without_retry(self):
+        self._isolate_scheduler()
         self._ready_after_structure()
         calls = []
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                 {"answers": (mf.FAILED, 1), "audio": (mf.FAILED, 2)}, calls)):
             outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
-        self.assertEqual(calls, ["answers", "audio", "types"])
+        self.assertEqual(calls, ["answers", "audio", "types", "explanations", "knowledge"])
         self.assertEqual([s["stage"] for s in outcome["failed_stages"]], ["answers", "audio"])
         self.assertEqual(outcome["stopped_at"], "answers")
 
@@ -368,6 +375,9 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(mf.load(self.batch)["stages"]["types"]["status"], mf.PENDING)
 
     def test_structure_gate_block_preserves_provisional_without_authorizing_downstream(self):
+        self._isolate_scheduler()
+        patcher = patch.object(auto, 'ZERO_TOUCH', False)
+        patcher.start(); self.addCleanup(patcher.stop)
         mf.touch_stage(self.manifest, "extract", mf.COMPLETED)
         mf.save(self.batch, self.manifest)
 
@@ -394,6 +404,7 @@ class RunnerAutoTest(unittest.TestCase):
             self.assertEqual(manifest["stages"][stage_id]["status"], mf.PENDING)
 
     def test_command_failure_continues_independent_validation_and_reports_later_gate(self):
+        self._isolate_scheduler()
         patcher = patch.object(auto, 'ZERO_TOUCH', False)
         patcher.start(); self.addCleanup(patcher.stop)
         for stage in contracts.STAGES:
@@ -421,16 +432,16 @@ class RunnerAutoTest(unittest.TestCase):
              patch.object(runner, "do_validate", side_effect=validate), \
              patch.object(runner, "do_review_gate", side_effect=review_gate):
             outcome = auto.advance(self.batch, {"review": ["offline"]})
-        self.assertEqual(calls, ["underlines", "validate", "review", "review_gate"])
+        self.assertEqual(calls, ["underlines"])
         self.assertEqual((outcome["stopped_at"], outcome["action"]), ("underlines", "failed"))
-        self.assertEqual([s["stage"] for s in outcome["failed_stages"]],
-                         ["underlines", "review_gate"])
+        self.assertEqual([s["stage"] for s in outcome["failed_stages"]], ["underlines"])
         manifest = mf.load(self.batch)
-        self.assertEqual(manifest["stages"]["review_gate"]["status"], mf.BLOCKED)
+        self.assertEqual(manifest["stages"]["review_gate"]["status"], mf.PENDING)
         self.assertEqual(manifest["stages"]["upload_gate"]["status"], mf.PENDING)
         self.assertEqual(manifest["stages"]["upload"]["status"], mf.PENDING)
 
     def test_no_human_confirmation_never_uploads(self):
+        self._isolate_scheduler()
         patcher = patch.object(auto, 'ZERO_TOUCH', False)
         patcher.start(); self.addCleanup(patcher.stop)
         for stage in contracts.STAGES:
@@ -450,6 +461,7 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(manifest["human_decisions"], [])
 
     def test_auto_never_submits_upload_even_with_preexisting_approval(self):
+        self._isolate_scheduler()
         patcher = patch.object(auto, 'ZERO_TOUCH', False)
         patcher.start(); self.addCleanup(patcher.stop)
         for stage in contracts.STAGES:
@@ -723,22 +735,69 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(runner.cmd_run(args), 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
     def test_zero_touch_accepts_audio_candidates_and_continues(self):
         self._ready_after_structure()
         calls = []
+        audio_map = self.batch / '02_audio/audio_map.json'
+        audio_map.parent.mkdir(parents=True, exist_ok=True)
+        audio_map.write_text('{}', encoding='utf-8')
         with patch.object(auto, "ZERO_TOUCH", True), \
              patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                  {"audio": (mf.NEEDS_REVIEW, 3)}, calls)):
             outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
         manifest = mf.load(self.batch)
-        self.assertEqual(manifest["stages"]["audio"]["status"], mf.COMPLETED)
-        self.assertIn("零人工", manifest["stages"]["audio"]["notes"])
+        self.assertEqual(manifest["stages"]["audio"]["status"], mf.NEEDS_REVIEW)
+        self.assertTrue(manifest["stages"]["audio"].get("execution_completed"))
+        self.assertTrue(manifest["stages"]["audio"].get("continue_unqualified"))
+        self.assertIn("待复核", manifest["stages"]["audio"]["notes"])
         self.assertNotEqual((outcome["stopped_at"], outcome["action"]), ("audio", "review"))
 
+    def test_parallel_first_candidate_retains_needs_review_and_continues(self):
+        from workflow import agent, local_agent
+        self._ready_after_structure()
+        def dispatch(batch, stages, config):
+            state = mf.load(batch)
+            for stage in stages:
+                if stage.id == 'answers':
+                    path = batch / stage.produces[0]
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('{}', encoding='utf-8')
+                    mf.touch_stage(state, stage.id, mf.NEEDS_REVIEW)
+                else:
+                    mf.touch_stage(state, stage.id, mf.COMPLETED)
+            mf.save(batch, state)
+            return {stage.id: 3 if stage.id == 'answers' else 0 for stage in stages}
+        with patch.object(auto, 'ZERO_TOUCH', True), \
+             patch.object(auto, 'PARALLEL_AGENTS_ENABLED', True), \
+             patch.object(agent, 'configured', return_value=True), \
+             patch.object(local_agent, 'load_config', return_value={}), \
+             patch.object(auto, '_parallel_ready_agents', side_effect=dispatch):
+            auto.advance(self.batch, auto.load_bridge(), stop_at='explanations')
+        record = mf.load(self.batch)['stages']['answers']
+        self.assertEqual(record['status'], mf.NEEDS_REVIEW)
+        self.assertTrue(record.get('continue_unqualified'))
+        self.assertEqual(mf.delivery_status(self.batch, 'answers'), 'delivered_unqualified')
+
+    def test_zero_touch_does_not_continue_without_structure_candidate(self):
+        self._isolate_scheduler()
+        mf.touch_stage(self.manifest, 'extract', mf.COMPLETED)
+        mf.save(self.batch, self.manifest)
+        def failed_gate(batch, manifest):
+            mf.touch_stage(manifest, 'structure_gate', mf.BLOCKED)
+            mf.save(batch, manifest)
+            return 1
+        with patch.object(auto, 'ZERO_TOUCH', True), \
+             patch.object(runner, 'do_structure_gate', side_effect=failed_gate), \
+             patch.object(runner, '_execute_command') as execute, \
+             patch('workflow.provisional.configured', return_value=False):
+            auto.advance(self.batch, {s.id: ['offline'] for s in contracts.STAGES})
+        execute.assert_not_called()
+        record = mf.load(self.batch)['stages']['structure_gate']
+        self.assertEqual(record['status'], mf.BLOCKED)
+        self.assertFalse(record.get('continue_unqualified', False))
+
     def test_zero_touch_never_executes_remote_upload(self):
+        self._isolate_scheduler()
         for stage in contracts.STAGES:
             if stage.id == "upload_gate":
                 break

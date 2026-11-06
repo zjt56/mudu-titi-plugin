@@ -358,15 +358,31 @@ class BootstrapTest(unittest.TestCase):
             cfgmod.validate({"hf_endpoint": "not-a-url"})
 
     def test_preflight_rejects_old_python_and_missing_ffmpeg(self):
-        with mock.patch.object(bootstrap.sys, "version_info", (3, 9, 0)):
+        with mock.patch.object(bootstrap.sys, "version_info", (3, 9, 0)), \
+             mock.patch.object(bootstrap, 'venv_python', return_value=Path('/nonexistent/audio-python')), \
+             mock.patch.object(bootstrap, 'base_python', return_value=bootstrap.sys.executable):
             with self.assertRaisesRegex(RuntimeError, "Python 3.10"):
                 bootstrap.preflight()
-        with mock.patch.object(bootstrap, "tool_path", return_value=None):
+        with mock.patch.object(bootstrap.sys, "version_info", (3, 12, 0)), \
+             mock.patch.object(bootstrap, "tool_path", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "ffmpeg"):
                 bootstrap.preflight()
         # 版本与工具都满足时不应抛错
-        with mock.patch.object(bootstrap, "tool_path", return_value="/x/ffmpeg"):
+        with mock.patch.object(bootstrap.sys, "version_info", (3, 12, 0)), \
+             mock.patch.object(bootstrap, "tool_path", return_value="/x/ffmpeg"):
             bootstrap.preflight()
+
+    def test_preflight_checks_selected_python_not_host_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            python = Path(tmp) / 'python'
+            python.write_text('placeholder')
+            completed = mock.Mock(stdout='3.12\n')
+            with mock.patch.object(bootstrap, 'venv_python', return_value=python), \
+                 mock.patch.object(bootstrap.sys, 'version_info', (3, 9, 0)), \
+                 mock.patch.object(bootstrap.subprocess, 'run', return_value=completed) as run, \
+                 mock.patch.object(bootstrap, 'tool_path', return_value='/bin/tool'):
+                bootstrap.preflight({'venv': tmp})
+            self.assertEqual(run.call_args.args[0][0], str(python))
 
     def test_platform_key_is_sane(self):
         key = bootstrap.platform_key()
@@ -390,6 +406,7 @@ class BootstrapTest(unittest.TestCase):
     def test_missing_vendor_and_system_ffmpeg_reports_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(bootstrap, "VENDOR_DIR", Path(tmp) / "none"), \
+                 mock.patch.object(bootstrap.sys, "version_info", (3, 12, 0)), \
                  mock.patch.object(bootstrap.shutil, "which", return_value=None):
                 with self.assertRaisesRegex(RuntimeError, "fetch_vendor"):
                     bootstrap.preflight()
