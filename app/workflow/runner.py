@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -580,7 +581,24 @@ def _review_inputs(batch_dir: Path, manifest: dict) -> dict:
     return evidence
 
 
-def do_review_gate(batch_dir: Path, manifest: dict) -> int:
+def unreviewed_summary(batch_dir: Path, manifest: dict) -> dict:
+    """Read-only description and revision of the review state being confirmed."""
+    result = review.evaluate(batch_dir)
+    evidence = _review_inputs(batch_dir, manifest)
+    for rel in review.ROUND_INPUTS:
+        evidence[rel] = mf.sha256_file(batch_dir / rel)
+    for rel in review.ROUND_RULES:
+        evidence['rule:' + rel] = mf.sha256_file(SKILL_ROOT / rel)
+    config = os.environ.get('MUDU_REVIEW_CONFIG', '')
+    evidence['review_config_sha256'] = mf.sha256_file(config) if config else ''
+    description = {'passed': result.get('passed') is True,
+                   'counts': result.get('counts', {}), 'errors': result.get('errors', [])}
+    raw = json.dumps({'evidence': evidence, 'review': description}, sort_keys=True,
+                     ensure_ascii=False, default=str).encode('utf-8')
+    return {**description, 'revision': hashlib.sha256(raw).hexdigest()}
+
+
+def do_review_gate(batch_dir: Path, manifest: dict, *, lock_held=False) -> int:
     evidence_before = _review_inputs(batch_dir, manifest)
     result = review.evaluate(batch_dir)
     # 放行时重新检查实际批次，不能仅凭旧审核文件宣称标签正确。
@@ -601,7 +619,7 @@ def do_review_gate(batch_dir: Path, manifest: dict) -> int:
         print(f"    …另有 {len(result['errors']) - 10} 条")
     # 提交前锁内重读台账并复核审核证据；并发的无关更新必须保留，过期判断不放行。
     from .local_agent import _agent_lock
-    with _agent_lock(1500):
+    with (contextlib.nullcontext() if lock_held else _agent_lock(1500)):
         try:
             current = mf.load(batch_dir)
         except FileNotFoundError:
@@ -851,7 +869,21 @@ def _cmd_mark_locked(batch_dir: Path, args) -> int:
     if stage.id == "upload_gate" and status == mf.APPROVED:
         if not args.actor or args.actor == "unknown":
             print("✗ 上传确认必须填写人工 --actor"); return 2
-        if do_review_gate(batch_dir, manifest) != 0:
+        unreviewed_revision = getattr(args, 'unreviewed_revision', '')
+        attempt_token = getattr(args, 'unreviewed_attempt', '')
+        if bool(unreviewed_revision) != bool(attempt_token):
+            print('✗ 未审核上传须同时提供本次确认的版本与尝试标识'); return 2
+        if unreviewed_revision:
+            if unreviewed_summary(batch_dir, manifest)['revision'] != unreviewed_revision:
+                print('✗ 审核状态已变化，请重新查看并确认'); return 2
+            from workflow.label_audit import inspect_file
+            labels = inspect_file(batch_dir / '06_batch' / 'batch_meta.json')
+            flow = flowchart_checks(batch_dir, manifest)
+            stale, reason = mf.is_stale(batch_dir, manifest, contracts.STAGE_BY_ID['validate'])
+            if (not labels['passed'] or not flow['passed'] or stale
+                    or manifest['stages'].get('validate', {}).get('status') != mf.COMPLETED):
+                print('✗ 数据、结构或校验未通过：' + str(reason if stale else (labels.get('errors') or flow.get('errors')))); return 2
+        elif do_review_gate(batch_dir, manifest, lock_held=True) != 0:
             print("✗ 审核未通过，不能确认上传"); return 2
         upload_file = batch_dir / "06_batch" / "batch_meta.json"
         if not upload_file.is_file():
@@ -863,6 +895,11 @@ def _cmd_mark_locked(batch_dir: Path, args) -> int:
             print(f"✗ 上传冻结预检未通过：{exc}"); return 2
         manifest["stages"][stage.id].update(binding)
         manifest["stages"][stage.id]["approved_batch_sha256"] = mf.sha256_file(upload_file)
+        manifest["stages"][stage.id].pop('unreviewed_confirmation', None)
+        if unreviewed_revision:
+            manifest["stages"][stage.id]['unreviewed_confirmation'] = {
+                'revision': unreviewed_revision,
+                'attempt_sha256': hashlib.sha256(attempt_token.encode()).hexdigest()}
     mf.touch_stage(manifest, stage.id, status, notes=args.note or "")
     if stage.kind == contracts.HUMAN:
         mf.record_decision(manifest, stage.id, status, args.actor or "unknown",
@@ -918,6 +955,10 @@ def _skip_agent_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
         if not reason:
             return False
         if current["stages"].get(stage.id, {}).get("status") not in mf.TERMINAL_OK:
+            if stage.id == "explanations":
+                # 跳过解析提取时必须留下确定性空产物，装配仍可继续。
+                from .optional_inputs import write_empty_explanations
+                write_empty_explanations(batch_dir)
             mf.touch_stage(current, stage.id, mf.SKIPPED, notes=reason)
             mf.save(batch_dir, current)
         if current is not manifest:
@@ -1164,6 +1205,10 @@ def cmd_prepare_upload(args) -> int:
 
 def cmd_upload(args) -> int:
     batch_dir = Path(args.batch_dir).expanduser().resolve()
+    return _run_batch_locked(batch_dir, lambda: _cmd_upload_locked(batch_dir, args))
+
+
+def _cmd_upload_locked(batch_dir: Path, args) -> int:
     manifest = mf.load(batch_dir)
     dry_run = getattr(args, "dry_run", False)
     gate = manifest["stages"].get("upload_gate", {}).get("status")
@@ -1189,7 +1234,15 @@ def cmd_upload(args) -> int:
     if not approved_hash or not actual_hash or approved_hash != actual_hash:
         print("✗ 上传文件与人工批准时不一致，须重新审核并批准")
         return 2
-    for stage_id in ("validate", "review_gate", "upload_gate"):
+    confirmation = manifest['stages']['upload_gate'].get('unreviewed_confirmation')
+    attempt_token = getattr(args, 'unreviewed_attempt', '')
+    unreviewed = bool(confirmation and attempt_token and
+                      confirmation.get('attempt_sha256') == hashlib.sha256(attempt_token.encode()).hexdigest())
+    if confirmation and not unreviewed:
+        print('✗ 未审核上传确认不属于本次尝试，请重新确认'); return 2
+    if unreviewed and unreviewed_summary(batch_dir, manifest)['revision'] != confirmation.get('revision'):
+        print('✗ 审核状态已变化，请重新查看并确认'); return 2
+    for stage_id in (("validate", "upload_gate") if unreviewed else ("validate", "review_gate", "upload_gate")):
         stale, reason = mf.is_stale(batch_dir, manifest, contracts.STAGE_BY_ID[stage_id])
         if stale:
             print(f"✗ {stage_id} 不可复用：{reason}，请重新检查和确认")
@@ -1200,12 +1253,20 @@ def cmd_upload(args) -> int:
         for error in flow["errors"]:
             print(f"✗ {error['code']}: {error['message']}")
         return 1
-    if not result["passed"]:
+    if not result["passed"] and not unreviewed:
         print("✗ 审核闸门未通过，拒绝上传；先处理 07_review/manual-review-queue.json")
         return 1
+    if unreviewed:
+        from workflow.label_audit import inspect_file
+        if (manifest['stages'].get('validate', {}).get('status') != mf.COMPLETED
+                or not inspect_file(batch_dir / '06_batch' / 'batch_meta.json')['passed']):
+            print('✗ 数据校验或标签审计未通过'); return 1
+        # Consume before submitting: a failed or interrupted attempt needs a new click.
+        manifest['stages']['upload_gate'].pop('unreviewed_confirmation', None)
+        mf.save(batch_dir, manifest)
     from workflow import upload as upload_flow, upload_client
     try:
-        receipt = upload_flow.submit_approved(batch_dir, manifest)
+        receipt = upload_flow.submit_approved(batch_dir, manifest, lock_held=True)
     except (OSError, ValueError, upload_client.APIError) as exc:
         mf.touch_stage(manifest, "upload", mf.BLOCKED, notes=str(exc))
         manifest["status"] = mf.derive_status(manifest)
@@ -1366,6 +1427,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_mark.add_argument("--actor", default="")
     p_mark.add_argument("--allow-missing", action="store_true")
     p_mark.add_argument("--invalidate-downstream", action="store_true")
+    p_mark.add_argument('--unreviewed-revision', default='')
+    p_mark.add_argument('--unreviewed-attempt', default='')
     p_mark.set_defaults(func=cmd_mark)
 
     p_inv = sub.add_parser("invalidate", help="让阶段及其下游失效")
@@ -1434,6 +1497,7 @@ def build_parser() -> argparse.ArgumentParser:
     batch_arg(p_up)
     p_up.add_argument("--yes", action="store_true", help="确认会写入远端上传暂存")
     p_up.add_argument("--dry-run", action="store_true")
+    p_up.add_argument('--unreviewed-attempt', default='')
     p_up.set_defaults(func=cmd_upload)
     return parser
 

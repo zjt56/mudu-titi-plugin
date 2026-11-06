@@ -9,7 +9,7 @@ const host = fs.readFileSync(path.join(root, 'lib/index.js'), 'utf8');
 const settings = client.slice(client.indexOf('function SettingsTab()'));
 
 test('设置页用左侧四项导航，顺序固定', () => {
-  assert.match(settings, /const sections = \[\['models', '大模型配置'\], \['api', '题库 API'\], \['ocr', 'OCR 识别'\], \['audio', '听力切分'\]\]/);
+  assert.match(settings, /const sections = \[\['models', '大模型配置'\], \['api', '上传设置'\], \['ocr', 'OCR 识别'\], \['audio', '听力切分'\]\]/);
   assert.match(settings, /role: 'tablist'/);
   assert.match(settings, /role: 'tab'/);
   assert.match(settings, /role: 'tabpanel'/);

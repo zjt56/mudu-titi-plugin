@@ -1,7 +1,9 @@
 """Strict child evidence extraction, using synthetic source only."""
 import unittest
 
-from workflow.review_child_source import prove_child, quote_belongs_to_child
+import hashlib
+
+from workflow.review_child_source import prove_child, quote_belongs_to_child, quote_belongs_to_unit_material
 
 
 class ChildSourceTest(unittest.TestCase):
@@ -97,6 +99,22 @@ class ChildSourceTest(unittest.TestCase):
         proof = prove_child(source, {'numbers': [1], 'stem': stem}, 1)
         self.assertEqual(proof['status'], 'uncertain')
         self.assertTrue(proof['reason'])
+
+    def test_material_span_maps_cleaned_lines_to_raw_and_rejects_stale(self):
+        source = ('2025年上海市中考\r\nShared passage.\r\n第 1 页 共 2 页\r\n'
+                  '1. Question?\r\nA. Answer\r\nNext group passage.\r\n2. Other?\r\n')
+        unit = {'stem': 'Shared passage.\n1. Question?\nA. Answer',
+                'source_span': {'start_line': 1, 'end_line': 3, 'basis': 'ai_classified',
+                                'text_sha256': hashlib.sha256(source.encode()).hexdigest()}}
+        self.assertTrue(quote_belongs_to_unit_material(source, unit, 'Shared passage.'))
+        self.assertTrue(quote_belongs_to_unit_material(source, unit, 'A. Answer'))
+        self.assertFalse(quote_belongs_to_unit_material(source, unit, 'Next group passage.'))
+        self.assertFalse(quote_belongs_to_unit_material(source + 'changed', unit, 'Shared passage.'))
+        for basis in ('section_source', 'cleaned_source'):
+            unit['source_span']['basis'] = basis
+            self.assertTrue(quote_belongs_to_unit_material(source, unit, 'Shared passage.'))
+        unit['source_span']['basis'] = 'original_pdf'
+        self.assertFalse(quote_belongs_to_unit_material(source, unit, 'Shared passage.'))
 
     def test_missing_or_duplicate_unit_or_question_remains_uncertain(self):
         self.assertEqual(prove_child(self.source + self.stem, self.unit, 1)['status'], 'uncertain')

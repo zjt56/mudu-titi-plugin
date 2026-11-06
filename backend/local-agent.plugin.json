@@ -14,5 +14,5 @@
   "response_mode": "file",
   "retries": 2,
   "retry_feedback_chars": 1600,
-  "review_max_attempts": 1
+  "review_max_attempts": 2
 }

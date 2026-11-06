@@ -1,5 +1,6 @@
 """Trust-boundary and domain validation tests for JSON-only local agent tasks."""
 import copy
+import hashlib
 import json
 import tempfile
 import unittest
@@ -76,6 +77,30 @@ class AgentTasksTest(unittest.TestCase):
         for key in task["input_hashes"]:
             path = Path(key) if Path(key).is_absolute() else self.batch / key
             self.assertTrue(path.is_file(), key)
+
+    def test_assemble_prompt_binds_word_and_pdf_ocr_as_structure_evidence(self):
+        word = "1. She reads a book. A. reads B. read"
+        ocr = {"documents": [{"file": "paper.pdf", "pages": [
+            {"page": 1, "text": "1. She reacs a book. A. reacs B. read", "hierarchy": "Section I / question 1"}]}]}
+        self.write("01_source/正文.txt", word)
+        self.write("01_source/pdf-ocr.json", ocr)
+
+        task = tasks.build_task(self.batch, "assemble")
+        self.assertIn(word, task["prompt"])
+        self.assertIn("She reacs a book", task["prompt"])
+        self.assertIn("Section I / question 1", task["prompt"])
+        self.assertIn("copy its wording, spelling, punctuation and options exactly", task["prompt"])
+        self.assertIn("use PDF OCR only as a guide to hierarchy and layout", task["prompt"])
+        self.assertIn("never to replace, correct or rewrite Word text", task["prompt"])
+        for relative in ("01_source/正文.txt", "01_source/pdf-ocr.json"):
+            self.assertEqual(task["input_hashes"][relative],
+                             hashlib.sha256((self.batch / relative).read_bytes()).hexdigest())
+        ocr["documents"][0]["pages"][0]["hierarchy"] = "Section II / question 1"
+        self.write("01_source/pdf-ocr.json", ocr)
+        updated = tasks.build_task(self.batch, "assemble")
+        self.assertNotEqual(task["input_hashes"]["01_source/pdf-ocr.json"],
+                            updated["input_hashes"]["01_source/pdf-ocr.json"])
+        self.assertIn("Section II / question 1", updated["prompt"])
 
     def test_knowledge_task_does_not_bind_explanations(self):
         # 解析产物变化不能让知识点任务过期：提示词与指纹都不含 explanations。
@@ -451,6 +476,19 @@ class AgentTasksTest(unittest.TestCase):
         self.assertFalse(report["completed"])
         self.assertEqual(report["status"], "needs_review")
         self.assertEqual(target.read_bytes(), old)
+
+    def test_assemble_preserves_word_options_when_pdf_ocr_misreads_them(self):
+        self.write('01_source/pdf-ocr.json', {'sources': [{'input': 'attachment_001',
+                   'status': 'completed', 'pages': [{'page': 1, 'text': '1. She reads a book. A. breads B. red'}]}]})
+        row = dict(self.knowledge['items'][0], id='q-1', number=1, numbers=[1], unit_kind='standalone',
+                   question_type='单项填空', filterMetadata={'subtypes': ['四个选项']},
+                   stem='She ______ a book.', material='',
+                   options=[{'label': label, 'text': text} for label, text in
+                            (('A', 'reads'), ('B', 'read'), ('C', 'reading'), ('D', 'to read'))])
+        self.assertTrue(self.accept('assemble', {'items': [row]})['completed'])
+        installed = json.loads((self.batch / tasks.ARTIFACTS['assemble']).read_text())['items'][0]
+        self.assertEqual(installed['options'], ['A. reads', 'B. read', 'C. reading', 'D. to read'])
+        self.assertNotIn('breads', json.dumps(installed, ensure_ascii=False))
 
     def test_assemble_preserves_upstream_and_strict_labels(self):
         row = dict(self.knowledge["items"][0], id="q-1", number=1, numbers=[1], unit_kind="standalone",

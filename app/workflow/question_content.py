@@ -327,33 +327,46 @@ def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
     cleaned, _, _ = denoise.clean_body(source)
     lines = cleaned.splitlines()
     fresh = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], lines)
-    by_numbers = {tuple(u["numbers"]): u for u in fresh}
+    # Confirmed units carry the AI-checked grouping and Word line spans. Prefer
+    # those for assembly, so an OCR-informed grouping is not discarded by a
+    # second deterministic reconstruction of the old candidate structure.
+    confirmed_path = root / '01_source/structure.confirmed.json'
+    try:
+        confirmed = json.loads(confirmed_path.read_text(encoding='utf-8-sig'))
+        confirmed_units = confirmed.get('units') if isinstance(confirmed, dict) else None
+        if isinstance(confirmed_units, list) and confirmed_units:
+            fresh = [unit for unit in confirmed_units if isinstance(unit, dict) and unit.get('numbers')]
+    except (OSError, ValueError, TypeError):
+        pass
+    counts = Counter(tuple(u['numbers']) for u in fresh)
+    by_numbers = {tuple(u['numbers']): u for u in fresh if counts[tuple(u['numbers'])] == 1}
     changed = 0
     for row in batch.get("items") or []:
         key = tuple(row.get("numbers") or ([row.get("number")] if row.get("number") else []))
         unit = by_numbers.get(key)
         if not unit:
             continue
-        content = "\n".join(_field_text(row.get(k)) for k in
-                             ("stem", "material", "materialBlocks", "material_blocks", "options", "subquestions"))
-        # 图片引用：先按题组共享材料补，再按每道子题独立题干/选项补。
-        # 模型常把题图标记从具体子题里丢掉；必须归还到对应 child，不能只挂在组级 material。
-        src_images = set(_image_names(str(unit.get("stem") or "").splitlines()))
-        present = _image_refs(row)
-        missing = sorted(name for name in src_images if name not in present)
-        if missing:
-            extra = "\n".join(f"[IMG {name}]" for name in missing)
-            row["material"] = (_field_text(row.get("material")).rstrip() + "\n" + extra).strip()
-            changed += 1
+        span = unit.get('source_span') or {}
+        start, end = span.get('start_line'), span.get('end_line')
+        if span.get('basis') == 'ai_classified':
+            if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
+                continue
+            unit_lines = lines[start - 1:end]
+        else:
+            unit_lines = str(unit.get('stem') or '').splitlines()
+        # Child-specific images belong to their own question; only remaining
+        # source images are shared material. Never take markers from OCR output.
         children = {str(c.get("number")): c for c in (row.get("subquestions") or []) if isinstance(c, dict)}
+        child_images = set()
         for number in unit.get("numbers") or []:
             try:
-                part = question_parts(lines, int(number))
+                part = question_parts(unit_lines, int(number))
             except (TypeError, ValueError):
                 continue
             source_images = set(_image_names(str(part.get("stem") or "").splitlines()))
             for option in part.get("options") or []:
                 source_images.update(_image_names(str(option.get("text") or "").splitlines()))
+            child_images.update(source_images)
             if not source_images:
                 continue
             target = children.get(str(number)) if children else row
@@ -364,6 +377,12 @@ def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
                 extra = "\n".join(f"[IMG {name}]" for name in missing_child)
                 target["stem"] = (_field_text(target.get("stem")).rstrip() + "\n" + extra).strip()
                 changed += 1
+        shared_images = set(_image_names(unit_lines)) - child_images
+        missing_shared = sorted(shared_images - _image_refs(row))
+        if missing_shared:
+            extra = '\n'.join(f'[IMG {name}]' for name in missing_shared)
+            row['material'] = (_field_text(row.get('material')).rstrip() + '\n' + extra).strip()
+            changed += 1
     return changed
 
 
@@ -476,6 +495,67 @@ def restore_table_variant(batch: dict) -> int:
     return changed
 
 
+def _validated_ai_units(units, fresh, lines):
+    """Accept AI grouping only when its complete Word-source bindings are provable."""
+    from .extract import guide_numbers
+    from .preview import _find, _strong_number, _weak_numbers
+
+    if not isinstance(units, list) or not units:
+        return None
+    expected = [n for unit in fresh for n in unit.get("numbers", [])]
+    if not expected or any(type(n) is not int or n < 1 for n in expected):
+        return None
+    if len(set(expected)) != len(expected):
+        return None
+    expected_set = set(expected)
+    seen, occupied, result = set(), set(), []
+    for unit in units:
+        if not isinstance(unit, dict):
+            return None
+        nums, span, stem = unit.get("numbers"), unit.get("source_span"), unit.get("stem")
+        if (not isinstance(nums, list) or not nums or
+                any(type(n) is not int or n < 1 for n in nums) or
+                len(set(nums)) != len(nums) or seen.intersection(nums) or
+                unit.get("unit_kind") not in ("standalone", "group") or
+                (unit.get("unit_kind") == "standalone" and len(nums) != 1) or
+                not isinstance(span, dict) or span.get("basis") != "ai_classified" or
+                not isinstance(stem, str) or not stem.strip()):
+            return None
+        start, end = span.get("start_line"), span.get("end_line")
+        if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
+            return None
+        positions = set(range(start, end + 1))
+        chunk = lines[start - 1:end]
+        if occupied.intersection(positions) or stem not in "\n".join(chunk):
+            return None
+        # A number must be evidenced in both the declared span and the retained
+        # stem, not merely invented by the classifier or borrowed from elsewhere.
+        stem_lines = stem.splitlines()
+        if any(_find(stem_lines, n) is None and _find(stem_lines, n, strong=False) is None for n in nums):
+            return None
+        visible = set()
+        guides = []
+        for line in chunk:
+            number = _strong_number(line)
+            if number is not None:
+                visible.add(number)
+            visible.update(_weak_numbers(line))
+            guide = set(guide_numbers(line)) & expected_set
+            if guide:
+                guides.append(guide)
+        if (visible & expected_set) - set(nums):
+            return None
+        # Explicit, independent source guides are stronger than an AI merge.
+        if any(guide - set(nums) for guide in guides) or len({tuple(sorted(g)) for g in guides}) > 1:
+            return None
+        seen.update(nums)
+        occupied.update(positions)
+        # Audit the whole bound source span so a shortened but exact substring
+        # cannot hide material, options, images or instructions from the audit.
+        result.append({**unit, "stem": "\n".join(chunk).strip()})
+    return result if seen == expected_set else None
+
+
 def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     """Read-only final artifact audit against freshly sliced source units.
 
@@ -507,8 +587,18 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     actual_sets = [tuple(row.get("numbers") or ([row.get("number")] if row.get("number") else [])) for row in items]
     if Counter(expected_sets) != Counter(actual_sets):
         issue("BATCH_NUMBER_COVERAGE", "正式批次单元题号及分组与确认结构不一致")
-    # A merged legacy group cannot conceal independently guided source groups.
-    if Counter(expected_sets) != Counter(list(by_numbers)):
+    # AI grouping is usable only after rechecking its bindings against the
+    # current cleaned Word source; a failed AI claim never falls back silently.
+    ai_claimed = any(isinstance(u, dict) and isinstance(u.get("source_span"), dict)
+                     and u["source_span"].get("basis") == "ai_classified" for u in expected_units)
+    if ai_claimed:
+        validated = _validated_ai_units(expected_units, fresh, cleaned.splitlines())
+        if validated is None:
+            issue("SOURCE_GROUP_BOUNDARY_MISMATCH", "AI确认结构的原卷行号、题号或分组证据无效；须重跑结构闸门")
+        else:
+            by_numbers = {tuple(u["numbers"]): u for u in validated}
+    elif Counter(expected_sets) != Counter(list(by_numbers)):
+        # A merged legacy group cannot conceal independently guided source groups.
         issue("SOURCE_GROUP_BOUNDARY_MISMATCH", "确认结构与原卷材料/分段导语的实际分组不一致；须重跑结构闸门")
     materials = {}
     for key, unit in by_numbers.items():

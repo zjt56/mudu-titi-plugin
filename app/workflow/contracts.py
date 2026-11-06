@@ -57,6 +57,7 @@ STAGES: tuple[Stage, ...] = (
         depends_on=("structure_gate",),
         produces=("01_source_ans/answers.json",),
         docs=("references/stages/01-extract.md",),
+        optional=True,
         description="子智能体4：有答案就提取答案并保留来源；没有答案则输出空映射和说明，不猜测、不阻断后续流程。",
     ),
     Stage(
@@ -86,6 +87,7 @@ STAGES: tuple[Stage, ...] = (
         depends_on=("types",),
         produces=("04_knowledge/explanations.json",),
         docs=("docs/content-labeling.md",),
+        optional=True,
         description="子智能体1：有原解析/文章大意就逐字提取；没有则填「无」，不生成、不阻断流程。",
     ),
     Stage(

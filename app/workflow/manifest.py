@@ -476,6 +476,18 @@ def ready_stages(batch_dir, manifest: dict, *, allow_unqualified: bool = False) 
 
 def skip_reason(manifest: dict, stage: contracts.Stage) -> str:
     """按输入形态判断阶段是否应当跳过（不是失败）。"""
+    if stage.id == "answers":
+        batch_dir = manifest.get("batch_dir")
+        if batch_dir:
+            from .optional_inputs import has_answer_source
+            if not has_answer_source(batch_dir):
+                return "未提供答案来源；答案按空值继续，不调用答案提取"
+    if stage.id == "explanations":
+        batch_dir = manifest.get("batch_dir")
+        if batch_dir:
+            from .optional_inputs import has_explanation_source
+            if not has_explanation_source(batch_dir):
+                return "未提供原解析/文章大意；按空值继续，不调用解析提取"
     if stage.id == "audio":
         # 用户显式选择跳过听力：批次内放 02_audio/SKIP_LISTENING 标记即可，
         # 不污染全局配置，也不影响其它批次；听力音频以后可单独补切。

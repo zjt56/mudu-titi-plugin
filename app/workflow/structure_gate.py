@@ -485,10 +485,18 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
             else:
                 blockers.append(issue)
     units = _build_units(sections, groups, source_lines) if sections else []
-    # AI is the primary structure judge when a complete evidence-bound view was accepted.
-    # The deterministic view remains an evidence-preserving fallback.
+    # A stale candidate group may differ from the final AI grouping. Only the
+    # same complete Word-bound proof used by the downstream source audit can
+    # make that candidate boundary comparison obsolete.
+    ai_bound = False
     if isinstance(ai_classified, dict) and ai_classified.get("units"):
-        units = ai_classified["units"]
+        from .question_content import _validated_ai_units
+        ai_units = ai_classified["units"]
+        ai_bound = _validated_ai_units(ai_units, units, source_lines) is not None
+        units = ai_units
+        if not ai_bound:
+            blockers.append({"code": "AI_SOURCE_BINDING_INVALID",
+                             "message": "AI结构的原文行号、题号或分组证据不完整或存在冲突"})
 
     # 题号覆盖：section 声明的题号应被 units 完整覆盖，无重复
     declared = sorted({n for s in sections for n in _section_numbers(s)})
@@ -616,7 +624,8 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         for section in sections:
             section_nums = _section_numbers(section)
             partitions = source_group_partitions(source_lines, section_nums) if is_group_type(section.get("type")) else []
-            if partitions and set(nums).issubset(section_nums) and not any(set(nums) == set(p["questions"]) for p in partitions):
+            if (not ai_bound and partitions and set(nums).issubset(section_nums)
+                    and not any(set(nums) == set(p["questions"]) for p in partitions)):
                 issue = {"code": "GROUP_BOUNDARY_MISMATCH", "message": f"题组 {nums} 与原文材料/分段导语的独立范围不一致"}
                 if model_structure_only:
                     warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})

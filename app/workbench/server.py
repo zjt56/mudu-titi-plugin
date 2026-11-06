@@ -979,9 +979,11 @@ def overview(name):
     review_status_value = str(((manifest.get("stages") or {}).get("review") or {}).get("status") or "")
     gate_status_value = str(((manifest.get("stages") or {}).get("review_gate") or {}).get("status") or "")
     flow_done = review_status_value in TERMINAL_OK or gate_status_value in TERMINAL_OK
+    upload = upload_state(name)
     upload_stage_done = str(((manifest.get("stages") or {}).get("upload") or {}).get("status") or "") == "completed"
-    receipt = load(folder / "receipt.json", {})
-    upload_pending = bool(upload_stage_done and isinstance(receipt, dict) and receipt.get("remote_confirmation_required"))
+    receipt = upload.get("receipt") or load(folder / "receipt.json", {})
+    upload_pending = bool(isinstance(receipt, dict) and (receipt.get("remote_confirmation_required")
+                          or receipt.get("stage") == "pending_confirmation"))
     uploaded = bool(upload_stage_done and not upload_pending)
     stage_info = stage_cards(manifest, bool(rows), bool(advance.get("running")), diagnostics)
     # 审核已真实执行、只剩人工决定时，卡点提示要指向“去处理差异”，不能写成“等待执行”。
@@ -1007,7 +1009,8 @@ def overview(name):
             # 自动流程是否结束（二审完成）；上传页排队区按此移除，并提示人工确认。
             "flow_done": flow_done,
             # 已写入云端上传暂存的批次视为完成，试卷审核列表不再展示。
-            "uploaded": uploaded, "upload_pending_confirmation": upload_pending}
+            "uploaded": uploaded, "upload_pending_confirmation": upload_pending,
+            "upload_status": upload}
 
 
 def list_batches():
@@ -1202,7 +1205,113 @@ def _run_runner(args):
                           env=dict(os.environ))
 
 
-def _run_batch_upload(name, actor):
+def _prepare_failure_summary(report):
+    """Summarize blocking findings without letting advisory warnings bury them."""
+    if not isinstance(report, dict):
+        return ""
+    errors = report.get("errors") or ([report["error"]] if report.get("error") else [])
+    if not isinstance(errors, list):
+        errors = [errors]
+    groups = {}
+    for item in errors:
+        if isinstance(item, dict):
+            message = str(item.get("message") or item.get("code") or "上传预检错误")
+            code = str(item.get("code") or "")
+            field = str(item.get("field") or "")
+            unit = str(item.get("unit_id") or "")
+        else:
+            message, code, field, unit = str(item), "", "", ""
+        key = (code, message, field)
+        group = groups.setdefault(key, {"count": 0, "units": []})
+        group["count"] += 1
+        if unit and unit not in group["units"] and len(group["units"]) < 3:
+            group["units"].append(unit)
+    lines = [f"上传准备未通过：{len(errors)} 项阻断错误"] if errors else ["上传预检未通过"]
+    for (code, message, field), group in groups.items():
+        detail = message + (f" [{code}]" if code and code != message else "")
+        detail += f"（{group['count']} 项"
+        if field:
+            detail += f"，字段：{field}"
+        if group["units"]:
+            detail += "，示例单元：" + "、".join(group["units"])
+        lines.append("- " + detail + "）")
+    warnings = report.get("warnings")
+    content = report.get("content_source")
+    content_warnings = content.get("warnings") if isinstance(content, dict) else None
+    count = (len(warnings) if isinstance(warnings, list) else 0) + (len(content_warnings) if isinstance(content_warnings, list) else 0)
+    if count:
+        lines.append(f"另有 {count} 项非阻断警告。")
+    return "\n".join(lines)
+
+
+def _check_upload_preconditions(folder, unreviewed_revision, attempt_token):
+    """Check existing evidence before any remote media is written."""
+    from workflow import contracts, manifest, runner
+    from workflow.label_audit import inspect_file
+    state = manifest.load(folder)
+    summary = runner.unreviewed_summary(folder, state)
+    if attempt_token:
+        if not unreviewed_revision or summary.get('revision') != unreviewed_revision:
+            raise ValueError('审核状态已变化，请重新查看并确认上传')
+    elif not summary.get('passed'):
+        raise ValueError('该批次尚未完成审核，请先确认是否上传')
+    stale, reason = manifest.is_stale(folder, state, contracts.STAGE_BY_ID['validate'])
+    if state.get('stages', {}).get('validate', {}).get('status') != manifest.COMPLETED or stale:
+        raise ValueError('批次校验未通过或已过期：' + str(reason or '请重新校验'))
+    labels = inspect_file(folder / '06_batch' / 'batch_meta.json')
+    if not labels.get('passed'):
+        raise ValueError('批次标签校验未通过，请先检查标签')
+    flow = runner.flowchart_checks(folder, state)
+    if not flow.get('passed'):
+        first = next(iter(flow.get('errors') or []), {})
+        raise ValueError('试卷结构校验未通过：' + str(first.get('message') or '请检查原卷'))
+
+
+def _stage_upload_media(folder):
+    """Stage only media referenced by a stable final batch, after the upload click."""
+    import hashlib
+    from workflow import media_inventory, media_transfer, upload
+    from workflow.local_agent import _agent_lock
+
+    source = folder / '06_batch' / 'batch_meta.json'
+    if not source.exists():
+        return None
+    # Workbench edits and workflow imports use these locks. Independent external
+    # writers are detected by the stable reads and digest comparison below.
+    with _lock, _agent_lock(1500):
+        root_fd = media_transfer._open_root(folder)
+        try:
+            raw = media_transfer._read_file(root_fd, '06_batch/batch_meta.json')
+        finally:
+            os.close(root_fd)
+        from workflow.agent_protocol import _load
+        metadata = _load(raw)
+        refs = media_inventory.referenced_media(folder, metadata)
+        if not refs:
+            return None
+        destination = media_transfer._settings()
+        if destination[0] != 'ubuntu@101.43.1.57':
+            raise ValueError('此 SSH 目标没有经过验证的媒体目录，无法自动暂存媒体')
+        batch_id = metadata.get('batch_id') or wf_manifest.load(folder)['workflow_id']
+    # Do not hold the UI/workflow locks while SSH is transferring files: status
+    # requests must remain responsive. Revalidate both metadata and every file.
+    mapping = media_transfer.stage_media(folder, refs,
+        static_root='/home/ubuntu/mudu-quiz/static/source-media', batch_id=batch_id,
+        settings=destination)
+    with _lock, _agent_lock(1500):
+        if media_inventory.referenced_media(folder, metadata) != refs:
+            raise ValueError('批次媒体在暂存期间发生变化，请重新上传')
+        root_fd = media_transfer._open_root(folder)
+        try:
+            if media_transfer._read_file(root_fd, '06_batch/batch_meta.json') != raw:
+                raise ValueError('正式批次在媒体暂存期间发生变化，请重新上传')
+        finally:
+            os.close(root_fd)
+        upload._write(upload._path(folder, 'media-map.json'), upload._bytes(mapping))
+        return mapping, hashlib.sha256(raw).hexdigest()
+
+
+def _run_batch_upload(name, actor, unreviewed_revision='', attempt_token=''):
     job = _upload_jobs[name]
 
     def step(label, args):
@@ -1210,23 +1319,55 @@ def _run_batch_upload(name, actor):
         proc = _run_runner(args)
         out = ((proc.stdout or "") + (proc.stderr or "")).strip()
         job["output"] = out[-4000:]
-        return proc.returncode, out
+        return proc.returncode, out, proc.stdout or ""
 
     try:
         folder = batch_dir(name)
-        rc, out = step("准备上传（冻结请求）", ["prepare-upload", "--batch-dir", str(folder)])
+        job["step"] = "检查连接，必要时启动 SSH 隧道"
+        from workbench import ssh_tunnel
+        job["output"] = ssh_tunnel.ensure_upload_connection()
+        job['step'] = '检查批次与确认状态'
+        _check_upload_preconditions(folder, unreviewed_revision, attempt_token)
+        job["step"] = "暂存引用的媒体"
+        staged = _stage_upload_media(folder)
+        if staged:
+            from workflow import upload as upload_flow
+            mapping, source_hash = staged
+            job["step"] = "准备上传（冻结请求）"
+            report = upload_flow.prepare(folder, media_map=mapping)
+            if report.get('source_sha256') != source_hash:
+                raise ValueError('正式批次在媒体暂存后发生变化，请重新上传')
+            rc = 0 if report.get('passed') is True else 1
+            stdout = json.dumps(report, ensure_ascii=False)
+            out = stdout
+            job["output"] = out[-4000:]
+        else:
+            rc, out, stdout = step("准备上传（冻结请求）", ["prepare-upload", "--batch-dir", str(folder)])
         if rc != 0:
-            job.update(ok=False, error="上传准备未通过：" + (out.splitlines()[-1] if out else str(rc)))
+            try:
+                report = json.loads(stdout)
+            except (ValueError, TypeError):
+                report = None
+            if isinstance(report, dict) and (report.get("passed") is False or report.get("errors")):
+                job.update(ok=False, error=_prepare_failure_summary(report), output="")
+            else:
+                job.update(ok=False, error="上传准备未通过：" + (out.splitlines()[-1] if out else str(rc)))
             return
-        rc, out = step("确认上传闸门", ["mark", "--batch-dir", str(folder), "--stage", "upload_gate",
-                                        "--status", "approved", "--actor", actor,
-                                        "--note", "通过插件「上传批次」按钮确认"])
+        mark_args = ["mark", "--batch-dir", str(folder), "--stage", "upload_gate",
+                     "--status", "approved", "--actor", actor,
+                     "--note", "通过插件「上传批次」按钮确认" + ("（含未审核内容）" if attempt_token else "")]
+        if attempt_token:
+            mark_args += ['--unreviewed-revision', unreviewed_revision, '--unreviewed-attempt', attempt_token]
+        rc, out, _ = step("确认上传闸门", mark_args)
         if rc != 0:
             job.update(ok=False, error="上传确认失败：" + (out.splitlines()[-1] if out else str(rc)))
             return
-        rc, out = step("写入云端上传暂存", ["upload", "--batch-dir", str(folder), "--yes"])
+        upload_args = ["upload", "--batch-dir", str(folder), "--yes"]
+        if attempt_token:
+            upload_args += ['--unreviewed-attempt', attempt_token]
+        rc, out, _ = step("写入云端上传暂存", upload_args)
         if rc != 0:
-            job.update(ok=False, error="上传被拒绝：" + (out.splitlines()[-1] if out else str(rc)))
+            job.update(ok=False, error="上传未完成：" + (out.splitlines()[-1] if out else str(rc)))
             return
         job.update(ok=True, step="已上传")
     except Exception as exc:  # noqa: BLE001 - 后台任务，错误回显给面板
@@ -1236,23 +1377,93 @@ def _run_batch_upload(name, actor):
         job["finished_at"] = time()
 
 
-def start_batch_upload(name, actor="本机操作员"):
-    batch_dir(name)  # 批次不存在直接抛错
+def start_batch_upload(name, actor="本机操作员", *, allow_unreviewed=False, unreviewed_revision=''):
+    folder = batch_dir(name)  # 批次不存在直接抛错
+    if type(allow_unreviewed) is not bool:
+        raise ValueError('allow_unreviewed 必须是布尔值')
+    if allow_unreviewed:
+        from workflow.runner import unreviewed_summary
+        current = unreviewed_summary(folder, wf_manifest.load(folder))
+        if not isinstance(unreviewed_revision, str) or not unreviewed_revision or current['revision'] != unreviewed_revision:
+            raise ValueError('审核状态已变化，请重新查看并确认')
+    elif unreviewed_revision:
+        raise ValueError('未明确确认不能指定未审核版本')
+    attempt_token = uuid.uuid4().hex if allow_unreviewed else ''
+    existing = upload_state(name)
+    if existing.get('state') == 'unknown':
+        raise ValueError('上次上传结果未知，请先在远端核实，不能重复上传')
+    if existing.get('state') == 'accepted':
+        raise ValueError('该批次已有上传暂存回执，请勿重复上传')
     with _lock:
         job = _upload_jobs.get(name)
         if job and job.get("running"):
             raise ValueError("该批次正在上传中，请稍候")
         _upload_jobs[name] = {"running": True, "ok": None, "step": "开始", "output": "",
                               "error": "", "started_at": time()}
-    threading.Thread(target=_run_batch_upload, args=(name, actor), daemon=True).start()
+    threading.Thread(target=_run_batch_upload, args=(name, actor, unreviewed_revision, attempt_token), daemon=True).start()
     return {"started": True}
 
 
 def upload_state(name):
-    job = _upload_jobs.get(name)
-    if not job:
-        return {"running": False, "ok": None, "step": "", "output": "", "error": ""}
-    return dict(job)
+    """Project in-memory progress and durable upload evidence after a restart."""
+    folder = batch_dir(name)
+    with _lock:
+        job = dict(_upload_jobs.get(name) or {})
+    result = {"running": False, "ok": None, "step": "", "output": "", "error": "",
+              "state": "idle", "receipt": None}
+    result.update(job)
+    try:
+        from workflow.runner import unreviewed_summary
+        result['unreviewed'] = unreviewed_summary(folder, wf_manifest.load(folder))
+        if result['unreviewed'].get('revision'):
+            result['requires_unreviewed_confirmation'] = not result['unreviewed']['passed']
+    except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
+        result['unreviewed'] = {'passed': False, 'revision': '', 'counts': {},
+                                'errors': [{'message': str(exc)}]}
+    receipt = load(folder / "07_upload" / "receipt.json")
+    receipt = receipt if isinstance(receipt, dict) and receipt.get("id") else None
+    attempts = []
+    for path in (folder / "07_upload" / "attempts").glob("*.json"):
+        item = load(path)
+        if isinstance(item, dict):
+            attempts.append(item)
+    if not receipt:
+        receipt = next((a.get("receipt") for a in attempts if a.get("state") == "accepted"
+                        and isinstance(a.get("receipt"), dict) and a["receipt"].get("id")), None)
+    result["receipt"] = receipt
+    # A receipt is written before its attempt becomes accepted. It settles that
+    # attempt, but cannot settle a different in-flight payload.
+    uncertain = next((a for a in attempts if a.get("state") in ("submitting", "unknown")
+                      and not (receipt and a.get("payload_sha256")
+                               and a.get("payload_sha256") == receipt.get("payload_sha256"))), None)
+    rejected = next((a for a in attempts if a.get("state") == "rejected"), None)
+    preflight = load(folder / "07_upload" / "preflight.json")
+    if result["running"]:
+        result["state"] = "running"
+    elif uncertain:
+        result.update(state="unknown", ok=False)
+        result["step"] = result["step"] or "提交结果未知"
+        result["error"] = result["error"] or str(uncertain.get("details") or uncertain.get("error_code")
+                                                or "提交结果未知，请先在远端工作台核实")
+    elif receipt:
+        # A later preflight failure cannot erase evidence of an accepted upload.
+        # Keep its diagnostic visible without enabling a duplicate submission.
+        result.update(state="accepted", ok=True)
+        result["step"] = "已暂存，等待远端确认"
+    elif job.get("ok") is False:
+        result["state"] = "failed"
+    elif rejected:
+        result.update(state="failed", ok=False)
+        result["step"] = result["step"] or "上传被拒绝"
+        result["error"] = result["error"] or str(rejected.get("details") or rejected.get("error_code")
+                                                or "上传被拒绝")
+    elif isinstance(preflight, dict) and preflight.get("passed") is False:
+        result.update(state="failed", ok=False)
+        result["step"] = result["step"] or "上传准备未通过"
+        result["error"] = result["error"] or _prepare_failure_summary(preflight)
+    elif job.get("ok") is True:
+        result.update(state="unknown", ok=False, error="上传完成但未找到暂存回执，请先在远端核实")
+    return result
 
 
 def unit_label_path(folder: Path, unit_id) -> Path:
@@ -1827,12 +2038,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, **handle_upload(fields, files)})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "advance":
                 return self.send_json({"ok": True, **start_advance(parts[2])})
-            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "upload":
-                return self.send_json({"ok": True, **start_batch_upload(parts[2])})
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("请求内容必须是对象")
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "upload":
+                return self.send_json({"ok": True, **start_batch_upload(
+                    parts[2], allow_unreviewed=payload.get('allow_unreviewed', False),
+                    unreviewed_revision=payload.get('unreviewed_revision', ''))})
             if parts == ["api", "audio", "config"]:
                 cfgmod, _, _ = _audio_modules()
                 return self.send_json({"ok": True, "config": cfgmod.save(payload.get("config") or payload)})
@@ -2016,6 +2229,15 @@ def main():
     parser.add_argument("--port", type=int, default=8791)
     args = parser.parse_args()
     print(f"Workbench: http://{args.host}:{args.port}")
+    # 内置 SSH 配置：后端启动即尝试建立本机隧道，让目录读取和上传都不再要求
+    # 用户手工执行 ssh -L。失败不阻断后端，上传时会再次尝试并返回安全错误。
+    def _warm_tunnel():
+        try:
+            from workbench import ssh_tunnel
+            ssh_tunnel.ensure_upload_connection(timeout=8)
+        except Exception:  # noqa: BLE001 - 启动预热失败不影响本地工作台
+            pass
+    threading.Thread(target=_warm_tunnel, daemon=True).start()
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
 
 

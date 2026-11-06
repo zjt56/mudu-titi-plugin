@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 from pathlib import Path
@@ -260,11 +261,11 @@ def approval_binding(batch_dir, *, config=None):
             'approved_api_base': frozen['plan']['api_base']}
 
 
-def submit_approved(batch_dir, manifest, *, config=None):
+def submit_approved(batch_dir, manifest, *, config=None, lock_held=False):
     """只提交已由 runner 确认的冻结字节；远端结果未知时禁止自动重复。"""
     batch = Path(batch_dir).resolve()
     settings = _config(config)
-    with _agent_lock(10):
+    with (contextlib.nullcontext() if lock_held else _agent_lock(10)):
         frozen = verify(batch, config=settings)
         plan = frozen['plan']; gate = manifest['stages']['upload_gate']
         if (gate.get('status') != mf.APPROVED or gate.get('approved_batch_sha256') != plan['source_sha256']

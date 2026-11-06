@@ -116,16 +116,42 @@ if [ ! -d "$BASE_DIR" ]; then
 fi
 [ -d "$BASE_DIR" ] || { log "no base profile found under $DSH_HOME/profiles"; exit 1; }
 
-# 生成一次性临时 profile（复制基础 profile，仅改 agent-default-model 的 provider/model）。
-TMP_PROFILE="wf-plugin-run-$$-$(date +%s)"
+# 复用按路由生成的 profile。每个分片仍是独立 dsh 进程，但不再重复复制
+# 整个基础 profile、改写 YAML；路由或基础 patch 变化时通过 key 自动换缓存。
+ROUTE_KEY="$(python3 - "$BASE_DIR" "$PROVIDER" "$MODEL" <<'PY'
+import hashlib, pathlib, sys
+base, provider, model = sys.argv[1:]
+patch = pathlib.Path(base) / "cordis.patch.yml"
+stat = patch.stat()
+value = "\\0".join((str(patch.resolve()), provider, model, str(stat.st_mtime_ns), str(stat.st_size)))
+print(hashlib.sha256(value.encode()).hexdigest()[:24])
+PY
+)"
+TMP_PROFILE="wf-plugin-route-$ROUTE_KEY"
 TMP_DIR="$DSH_HOME/profiles/$TMP_PROFILE"
-cleanup() { rm -rf "$TMP_DIR" 2>/dev/null || true; }
-trap cleanup EXIT INT TERM
-
-cp -R "$BASE_DIR" "$TMP_DIR"
 PATCH="$TMP_DIR/cordis.patch.yml"
+READY="$TMP_DIR/.wf-route-ready"
+INIT_LOCK="$TMP_DIR.init"
+NEEDS_PATCH=0
+if [ ! -f "$READY" ]; then
+  if mkdir "$INIT_LOCK" 2>/dev/null; then
+    trap 'rm -rf "$INIT_LOCK" 2>/dev/null || true' EXIT INT TERM
+    mkdir -p "$TMP_DIR"
+    cp -R "$BASE_DIR"/. "$TMP_DIR"/
+    NEEDS_PATCH=1
+  else
+    # 另一分片正在初始化同一路由；等待完整 patch（不是只等目录出现）。
+    for _ in $(seq 1 100); do
+      [ -f "$READY" ] && break
+      sleep 0.02
+    done
+  fi
+fi
+[ -f "$PATCH" ] || { log "route profile initialization timed out"; exit 1; }
 
 # 用 python 精确替换/追加 agent-default-model 行里的 provider 与 model。
+# 只有初始化 owner 执行一次；后续分片直接复用已经就绪的 profile。
+if [ "$NEEDS_PATCH" -eq 1 ]; then
 python3 - "$PATCH" "$PROVIDER" "$MODEL" <<'PY'
 import sys, re
 path, provider, model = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -186,6 +212,10 @@ else:
 open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 print("patched agent-default-model -> %s / %s" % (provider, model), file=sys.stderr)
 PY
+  # 标记必须最后写入，读者看到它时 patch 已完整落盘。
+  : > "$READY"
+  rmdir "$INIT_LOCK" 2>/dev/null || true
+fi
 
 # 注入该 provider 对应的凭证环境变量。
 case "$PROVIDER" in

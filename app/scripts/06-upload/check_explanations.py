@@ -28,7 +28,7 @@ AI_MARK = "（AI生成，待校对）"
 LISTENING_NOTE = "答案由AI生成" + AI_MARK        # 历史产物兼容，不再新产生
 # 用户规则：缺失统一填「无」；其它写法兼容旧批次，均视为明确缺失占位。
 ABSENT = "无"
-PLACEHOLDER_TEXTS = frozenset(("无", "待补充", "暂无", "暂无解析", "暂无文章大意", "原卷无解析", "原卷无文章大意"))
+PLACEHOLDER_TEXTS = frozenset(("无", "无解析", "无答案", "待补充", "暂无", "暂无解析", "暂无文章大意", "原卷无解析", "原卷无文章大意"))
 
 
 def is_placeholder(text):

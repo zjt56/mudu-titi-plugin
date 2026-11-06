@@ -133,14 +133,16 @@ class UploadPayloadTest(unittest.TestCase):
         self.assertTrue(report['passed'], report['errors'])
         self.assertEqual(report['payload']['items'][0]['answer'], q['answer'])
         q['subquestions'][0]['answer'] = ''
-        self.assertIn('MISSING_ANSWER', self.codes(self.build(batch(q))))
+        report = self.build(batch(q))
+        self.assertTrue(report['passed'], report['errors'])
+        self.assertEqual(report['payload']['items'][0]['subquestions'][0]['answer'], '无答案')
         q['subquestions'][0]['answer'] = 'A'
         q['numbers'] = [56, 57, 59]
         self.assertIn('GROUP_NUMBER_COVERAGE', self.codes(self.build(batch(q))))
 
     def test_group_aggregate_rejects_missing_duplicate_invalid_numbers_and_answers(self):
         for change in ('missing_child', 'duplicate_child', 'missing_number', 'bool_number',
-                       'duplicate_expected', 'wrong_expected', 'missing_expected', 'blank_answer', 'no_children'):
+                       'duplicate_expected', 'wrong_expected', 'missing_expected'):
             q = reading_group()
             q['answer'] = ''
             if change == 'missing_child': q['subquestions'].pop()
@@ -150,8 +152,7 @@ class UploadPayloadTest(unittest.TestCase):
             elif change == 'duplicate_expected': q['numbers'] = [56, 56, 58]
             elif change == 'wrong_expected': q['numbers'] = [56, 57, 59]
             elif change == 'missing_expected': q.pop('numbers')
-            elif change == 'blank_answer': q['subquestions'][0]['answer'] = '  '
-            elif change == 'no_children': q['subquestions'] = []
+
             before = deepcopy(q)
             report = self.build(batch(q))
             with self.subTest(change=change):
@@ -238,17 +239,19 @@ class UploadPayloadTest(unittest.TestCase):
         q["filterMetadata"]["year"] = 2023
         self.assertIn("ALIAS_CONFLICT", self.codes(self.build(batch(q))))
 
-    def test_blank_explanation_warns_but_missing_answer_blocks(self):
+    def test_missing_answer_is_filled_with_placeholder(self):
         report = self.build()
         self.assertTrue(report["passed"])
         q = question()
         q["answer"] = ""
-        self.assertIn("MISSING_ANSWER", self.codes(self.build(batch(q))))
+        report = self.build(batch(q))
+        self.assertTrue(report["passed"], report["errors"])
+        self.assertEqual(report["payload"]["items"][0]["answer"], "无答案")
         q = reading_group()
         q["subquestions"][1]["answer"] = ""
         report = self.build(batch(q))
-        error = next(e for e in report["errors"] if e["code"] == "MISSING_ANSWER")
-        self.assertEqual(error["unit_id"], "Q1/57")
+        self.assertTrue(report["passed"], report["errors"])
+        self.assertEqual(report["payload"]["items"][0]["subquestions"][1]["answer"], "无答案")
 
     def test_catalog_required_offline_and_invalid_snapshots_block(self):
         report = upload_payload.build_payload(batch())
@@ -309,6 +312,93 @@ class UploadPayloadTest(unittest.TestCase):
         self.assertTrue(report["passed"], report["errors"])
         self.assertEqual(report["payload"]["items"][0]["attachments"], q["attachments"])
         self.assertEqual(report["summary"]["attachments"], 2)
+
+    def test_existing_media_map_remaps_parent_and_child_without_mutation(self):
+        q = reading_group()
+        q['attachments'] = [
+            {'kind': 'audio', 'url': '/source-media/old/cut.mp3', 'placement': 'material'},
+            {'kind': 'image', 'url': '/source-media/old/picture%20A.png', 'placement': 'option', 'optionKey': 'B'},
+            {'kind': 'image', 'url': '/source-media/other/unrelated.png'},
+        ]
+        q['subquestions'][0]['attachments'] = [
+            {'kind': 'image', 'url': '/source-media/old/picture%20A.png', 'placement': 'option', 'optionKey': 'A'}]
+        data = batch(q)
+        before = deepcopy(data)
+        options = {'media_map': {'cut.mp3': '/source-media/new/cut.mp3',
+                                 'picture A.png': '/source-media/new/picture%20A.png',
+                                 'different.png': '/source-media/new/unrelated.png'}}
+        report = self.build(data, **options)
+        self.assertTrue(report['passed'], report['errors'])
+        wire = report['payload']['items'][0]
+        self.assertEqual(wire['attachments'][0], {**q['attachments'][0], 'url': options['media_map']['cut.mp3']})
+        self.assertEqual(wire['attachments'][1], {**q['attachments'][1], 'url': options['media_map']['picture A.png']})
+        self.assertEqual(wire['attachments'][2], q['attachments'][2])
+        self.assertEqual(wire['subquestions'][0]['attachments'][0],
+                         {**q['subquestions'][0]['attachments'][0], 'url': options['media_map']['picture A.png']})
+        self.assertEqual(data, before)
+        self.assertEqual(self.build(data, **json.loads(json.dumps(options)))['payload'], report['payload'])
+        self.assertEqual(self.build(data)['payload']['items'][0]['attachments'], q['attachments'])
+
+    def test_upload_verify_replays_frozen_media_mapping_options(self):
+        from pathlib import Path
+        import tempfile
+        from workflow import manifest, upload, upload_client
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / '06_batch' / 'batch_meta.json'
+            source.parent.mkdir()
+            q = question()
+            q['attachments'] = [{'kind': 'image', 'url': '/source-media/old/a.png',
+                                 'placement': 'option', 'optionKey': 'B'}]
+            data = batch(q)
+            source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+            manifest.save(root, manifest.new_manifest('fixture-upload', root, {}, {}))
+            options = {'a.png': '/source-media/new/a.png'}
+            settings = upload_client.load_config()
+            content = {'passed': True, 'errors': [], 'source_sha256': {}}
+            with patch.object(upload_client, 'ApiClient') as client, \
+                    patch('workflow.upload_content.inspect_content', return_value=content):
+                client.return_value.check_media.return_value = {'url': options['a.png']}
+                report = upload.prepare(root, catalog=self.catalog, config=settings, media_map=options)
+                self.assertTrue(report['passed'], report)
+                result = upload.verify(root, config=settings)
+            self.assertEqual(result['plan']['mapping_options']['media_map'], options)
+            self.assertEqual(json.loads(result['payload'])['items'][0]['attachments'][0]['url'], options['a.png'])
+            self.assertEqual(json.loads(source.read_text(encoding='utf-8')), data)
+            client.return_value.check_media.assert_called_once_with(options['a.png'], kind='image')
+            client.return_value.submit.assert_not_called()
+
+    def test_ambiguous_basename_does_not_remap(self):
+        q = reading_group()
+        q['attachments'] = [{'kind': 'image', 'url': '/source-media/first/a.png'}]
+        q['subquestions'][0]['attachments'] = [{'kind': 'image', 'url': '/source-media/second/a.png'}]
+        report = self.build(batch(q), media_map={'a.png': '/source-media/new/a.png'})
+        self.assertIn('MEDIA_MAP_AMBIGUOUS', self.codes(report))
+        wire = report['payload']['items'][0]
+        self.assertEqual(wire['attachments'][0]['url'], '/source-media/first/a.png')
+        self.assertEqual(wire['subquestions'][0]['attachments'][0]['url'], '/source-media/second/a.png')
+
+    def test_mapping_never_hides_unsafe_source_or_destination(self):
+        for source in ('https://evil.test/source-media/a.png', '/other/a.png',
+                       '/source-media/%252e%252e/a.png', '/source-media/folder%252fa.png',
+                       '/source-media/a.png?x=1'):
+            with self.subTest(source=source):
+                q = question()
+                q['attachments'] = [{'kind': 'image', 'url': source}]
+                report = self.build(batch(q), media_map={'a.png': '/source-media/new/a.png'})
+                self.assertIn('ATTACHMENT_URL_INVALID', self.codes(report))
+                self.assertNotIn('url', report['payload']['items'][0]['attachments'][0])
+        for target in ('https://evil.test/a.png', '/source-media/../a.png', '/source-media/a.png?x=1', None):
+            with self.subTest(target=target):
+                q = question()
+                q['attachments'] = [{'kind': 'image', 'url': '/source-media/old/a.png'}]
+                report = self.build(batch(q), media_map={'a.png': target})
+                self.assertIn('ATTACHMENT_URL_INVALID', self.codes(report))
+        q = question()
+        q['stem'] = 'Look at [IMG a.png]'
+        report = self.build(batch(q), media_map={'a.png': 'https://evil.test/a.png'})
+        self.assertIn('ATTACHMENT_URL_INVALID', self.codes(report))
 
     def test_invalid_media_paths_and_option_keys_rejected(self):
         for url in ("file:///tmp/a.png", "/Users/me/a.png", "https://example.com/source-media/a.png", "//example.com/a.png",
@@ -497,6 +587,33 @@ class UploadPayloadTest(unittest.TestCase):
                 self.assertFalse(report["passed"])
                 self.assertTrue(any(e["code"] == code and e["unit_id"] == "Q1/56" for e in report["errors"]))
 
+    def test_missing_category_placeholder_is_removed_only_from_wire(self):
+        q = reading_group()
+        q["filterMetadata"]["categories"] = ["未提供", "优选题", "未提供"]
+        q["subquestions"][0]["filterMetadata"] = {"categories": ["未提供"]}
+        data = batch(q)
+        before = deepcopy(data)
+        report = self.build(data)
+        self.assertTrue(report["passed"], report["errors"])
+        wire = report["payload"]["items"][0]
+        self.assertEqual(wire["filterMetadata"]["categories"], ["优选题"])
+        self.assertEqual(wire["subquestions"][0]["filterMetadata"]["categories"], [])
+        self.assertEqual(data, before)
+
+    def test_missing_category_placeholder_does_not_hide_invalid_values(self):
+        for invalid in (" 未提供", "未提供 ", "自造分类", "", None):
+            with self.subTest(invalid=invalid):
+                q = question()
+                q["filterMetadata"]["categories"] = ["未提供", "优选题", invalid]
+                data = batch(q)
+                before = deepcopy(data)
+                report = self.build(data)
+                self.assertFalse(report["passed"])
+                self.assertIn("CATEGORY_INVALID", self.codes(report))
+                self.assertEqual(report["payload"]["items"][0]["filterMetadata"]["categories"],
+                                 ["优选题", invalid])
+                self.assertEqual(data, before)
+
     def test_parent_label_audit_remains_required(self):
         q = reading_group()
         q["knowledge"] = ["语篇体裁/记叙文/故事"]
@@ -528,9 +645,12 @@ class UploadPayloadTest(unittest.TestCase):
             with self.subTest(grouped=grouped):
                 q = self.listening(grouped)
                 report = self.build(batch(q))
-                self.assertEqual(self.codes(report), {"MISSING_AUDIO_ATTACHMENT"})
+                self.assertTrue(report["passed"], report["errors"])
+                self.assertIn("MISSING_AUDIO_ATTACHMENT", {w["code"] for w in report["warnings"]})
                 q["attachments"] = [{"kind": "image", "url": "/source-media/picture.png"}]
-                self.assertIn("MISSING_AUDIO_ATTACHMENT", self.codes(self.build(batch(q))))
+                report = self.build(batch(q))
+                self.assertTrue(report["passed"], report["errors"])
+                self.assertIn("MISSING_AUDIO_ATTACHMENT", {w["code"] for w in report["warnings"]})
                 q["attachments"].append({"kind": "audio", "url": "/source-media/corresponding-cut.mp3"})
                 data = batch(q)
                 before = deepcopy(data)
@@ -544,7 +664,7 @@ class UploadPayloadTest(unittest.TestCase):
             child["attachments"] = [{"kind": "audio", "url": "/source-media/child-cut.mp3"}]
         q["audio"] = {"file": "whole-paper.mp3", "verified": True}
         report = self.build(batch(q))
-        self.assertIn("MISSING_AUDIO_ATTACHMENT", self.codes(report))
+        self.assertIn("MISSING_AUDIO_ATTACHMENT", {w["code"] for w in report["warnings"]})
         self.assertIn("MEDIA_DEPLOYMENT_REQUIRED", self.codes(report))
         self.assertNotIn("attachments", report["payload"]["items"][0])
 

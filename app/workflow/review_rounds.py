@@ -20,7 +20,7 @@ from .local_agent import _agent_lock, _check_input_hashes, invoke, load_config
 
 # Bumped whenever the prompt builder or blind context changes, so stale
 # partition states and bindings are never reused silently.
-CONTEXT_VERSION = "blind-context-v9"
+CONTEXT_VERSION = "blind-context-v10"
 PROMPT_VERSION = "review-prompt-v8"
 
 
@@ -177,25 +177,20 @@ def _source_excerpts(source, selected):
                   if line.strip() and not material_label(line)]
         if not needle:
             return source
-        matches = [i for i, value in enumerate(values) if value == needle[0]
-                   and values[i:i + len(needle)] == needle]
-        if len(matches) != 1:
-            return source
-        first = indexed[matches[0]][0]
-        last = indexed[matches[0] + len(needle) - 1][0]
         span = unit.get('source_span')
         if span is not None:
-            if (not isinstance(span, dict)
-                    or span.get('path', '01_source/正文.txt') != '01_source/正文.txt'
-                    or span.get('source_path', '01_source/正文.txt') != '01_source/正文.txt'
-                    or span.get('basis', 'cleaned_source') != 'cleaned_source'):
+            from .review_child_source import _raw_unit_lines
+            indices = _raw_unit_lines(source, unit)
+            if indices is None:
                 return source
-            start, end = span.get('start_line'), span.get('end_line')
-            if (any(isinstance(n, bool) or not isinstance(n, int) for n in (start, end))
-                    or not 1 <= start <= first + 1 <= last + 1 <= end <= len(lines)):
-                return source
-            first, last = start - 1, end - 1
+            first, last = indices
         else:
+            matches = [i for i, value in enumerate(values) if value == needle[0]
+                       and values[i:i + len(needle)] == needle]
+            if len(matches) != 1:
+                return source
+            first = indexed[matches[0]][0]
+            last = indexed[matches[0] + len(needle) - 1][0]
             # Without an explicit full-unit span, a bare group question is not
             # proof that its shared passage was included in the confirmed stem.
             if unit.get('unit_kind') == 'group' and _strong_number(needle[0]) is not None:

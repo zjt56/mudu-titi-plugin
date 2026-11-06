@@ -344,6 +344,18 @@ class ReviewRecoveryTest(unittest.TestCase):
         self.assertEqual(stem_only['spans'][0]['text'], excerpt['spans'][0]['text'])
         self.assertEqual(stem_only['spans'][1]['text'], excerpt['spans'][1]['text'])
 
+    def test_cleaned_line_spans_excerpt_exact_raw_source(self):
+        source = ('2025年上海市中考\r\nShared passage.\r\n第 1 页 共 2 页\r\n'
+                  '1. Question?\r\nA. Answer\r\n2. Other?\r\n' + 'Other content. ' * 200)
+        unit = {'stem': 'Shared passage.\n1. Question?\nA. Answer',
+                'source_span': {'start_line': 1, 'end_line': 3, 'basis': 'ai_classified'}}
+        excerpt = review_rounds._source_excerpts(source, [unit])
+        self.assertTrue(excerpt['excerpted'])
+        self.assertEqual(excerpt['spans'][0]['text'],
+                         'Shared passage.\r\n第 1 页 共 2 页\r\n1. Question?\r\nA. Answer\r\n')
+        unit['source_span']['text_sha256'] = 'stale'
+        self.assertEqual(review_rounds._source_excerpts(source, [unit]), source)
+
     def test_unknown_ambiguous_partial_and_stale_source_locations_keep_full_source(self):
         cases = [
             ('1. Known?\n2. Other?', {'unit_id': 'u1', 'unit_kind': 'standalone', 'numbers': [1], 'stem': 'missing text'}),

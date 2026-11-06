@@ -759,7 +759,7 @@ def _verify_round_sources(batch, plan, record):
                 or binding.get("plan") != plan or binding.get("input_hashes") != state.get("input_hashes")
                 or binding.get("prior_rounds") != state.get("prior_rounds")
                 or binding.get("state_digest") != expected_state_digest
-                or binding.get("context_version") not in ("blind-context-v8", "blind-context-v9")
+                or binding.get("context_version") not in ("blind-context-v8", "blind-context-v9", "blind-context-v10")
                 or task.get("protocol") != ROUND_PROTOCOL or task.get("task_id") != task_id
                 or task.get("round_id") != record["round_id"] or task.get("input_binding") != plan["input_binding"]
                 or task.get("prompt") != state_parts[index].get("prompt")

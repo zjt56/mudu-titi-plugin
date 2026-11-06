@@ -185,22 +185,63 @@ def quote_belongs_to_child_loose(source, unit, number, quote):
     return _loose(source).count(wanted) == 1
 
 
-def _unit_material_span(source, unit):
-    """Character range of a group's own material, from its confirmed line span."""
+def _raw_unit_lines(source, unit):
+    """Map confirmed cleaned-source lines to raw line indices, or fail closed."""
+    from . import denoise
+    from .extract import material_label
+
     span = unit.get('source_span') if isinstance(unit, dict) else None
-    if not isinstance(span, dict):
+    if not isinstance(source, str) or not isinstance(span, dict):
+        return None
+    if (span.get('basis', 'cleaned_source') not in ('cleaned_source', 'ai_classified', 'section_source')
+            or span.get('path', '01_source/正文.txt') != '01_source/正文.txt'
+            or span.get('source_path', '01_source/正文.txt') != '01_source/正文.txt'):
+        return None
+    # File-byte hashes cannot be reconstructed reliably from decoded text (BOM,
+    # newline translation); do not silently ignore one attached to the span.
+    if 'source_sha256' in span:
+        return None
+    if ('text_sha256' in span and span['text_sha256'] !=
+            hashlib.sha256(source.encode('utf-8')).hexdigest()):
         return None
     first, last = span.get('start_line'), span.get('end_line')
     if any(isinstance(v, bool) or not isinstance(v, int) for v in (first, last)):
         return None
-    if first < 1 or last < first:
+    cleaned, _, removed = denoise.clean_body(source)
+    raw_lines = source.splitlines(keepends=True)
+    removed_lines = {row['line_no'] for row in removed}
+    mapping = [i for i in range(len(raw_lines)) if i + 1 not in removed_lines]
+    clean_lines = cleaned.splitlines()
+    if not 1 <= first <= last <= len(clean_lines) or len(mapping) < len(clean_lines):
+        return None
+    if [raw_lines[i].rstrip('\r\n') for i in mapping[:len(clean_lines)]] != clean_lines:
+        return None
+    stem = unit.get('stem')
+    if not isinstance(stem, str) or not stem.strip():
+        return None
+    needle = [line.strip() for line in stem.splitlines() if line.strip() and not material_label(line)]
+    indexed = [(i, line.strip()) for i, line in enumerate(clean_lines)
+               if line.strip() and not material_label(line)]
+    values = [line for _, line in indexed]
+    matches = [i for i, value in enumerate(values)
+               if needle and value == needle[0] and values[i:i + len(needle)] == needle]
+    if len(matches) != 1:
+        return None
+    start = indexed[matches[0]][0]
+    end = indexed[matches[0] + len(needle) - 1][0]
+    if not first - 1 <= start <= end <= last - 1:
+        return None
+    return mapping[first - 1], mapping[last - 1]
+
+
+def _unit_material_span(source, unit):
+    """Character range of a group's material in the raw source text."""
+    indices = _raw_unit_lines(source, unit)
+    if indices is None:
         return None
     lines = _source_lines(source)
-    if last > len(lines):
-        return None
-    start = lines[first - 1][0]
-    end = lines[last][0] if last < len(lines) else len(source)
-    return start, end
+    first, last = indices
+    return lines[first][0], lines[last + 1][0] if last + 1 < len(lines) else len(source)
 
 
 def quote_belongs_to_unit_material(source, unit, quote):

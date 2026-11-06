@@ -137,7 +137,11 @@ def load_answers(path):
 def inspect(batch, answers):
     actual = collect_json({"items": batch.get("items")})
     issues = []
+    placeholders = {"无答案", "无解析"}
     for n in sorted(actual, key=int):
+        if str(actual[n]["value"]).strip() in placeholders:
+            # 用户规则：缺答案填「无答案」，保留待补，不作为答案冲突阻断。
+            continue
         if n not in answers:
             issues.append({"code": "ANSWER_SOURCE_MISSING", "number": int(n), "message": "独立答案未覆盖此题号"})
         elif actual[n]["normalized"] != answers[n]["normalized"]:

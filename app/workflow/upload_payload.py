@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlsplit
 
 from workbench import taxonomy
 from workflow import label_audit
+from workflow.metadata_policy import MISSING
 
 SOURCE_ALIASES = {"精品资料": "精品题源", "模拟卷": "中考模拟", "历年考题": "中考真题", "课本原创": "课本原创"}
 TYPE_ALIASES = {"单项选择": "单项填空", "短对话理解": "听力短对话理解", "长对话理解": "听力长对话理解",
@@ -117,9 +118,36 @@ def _safe_blocks(blocks):
     return result
 
 
+def _media_path(url):
+    """Return a decoded safe source-media path, or None for unsafe URLs."""
+    if not isinstance(url, str):
+        return None
+    decoded = url
+    for _ in range(8):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    try:
+        parts = urlsplit(decoded)
+        if (decoded.startswith('/source-media/') and len(decoded) > len('/source-media/')
+                and not decoded.endswith('/') and not parts.scheme and not parts.netloc
+                and not parts.query and not parts.fragment and '?' not in decoded and '#' not in decoded
+                and '\\' not in decoded and '//' not in decoded
+                and all(part not in ('.', '..') for part in decoded.split('/'))
+                and not any(ord(c) < 32 or ord(c) == 127 for c in decoded)
+                and '%' not in decoded
+                and decoded.count('/') == url.count('/')):
+            return decoded
+    except ValueError:
+        pass
+    return None
+
+
 class _Builder:
     def __init__(self, media_map=None):
         self.media_map = media_map if isinstance(media_map, dict) else None
+        self.media_sources = {}
         self.errors = []
         self.warnings = []
         self.summary = {"units": 0, "questions": 0, "attachments": 0}
@@ -323,7 +351,24 @@ class _Builder:
                                       if k in {"textbookId", "knowledgeVersionId", "knowledgeIds", "curriculum"}}
                                      for mapping in mappings if isinstance(mapping, dict)]
 
-    def attachments(self, attachments, uid):
+    def collect_media_sources(self, value):
+        """Collect distinct source URLs before mapping, including child attachments."""
+        if isinstance(value, dict):
+            attachments = value.get('attachments')
+            if isinstance(attachments, list):
+                for attachment in attachments:
+                    url = attachment.get('url') if isinstance(attachment, dict) else None
+                    path = _media_path(url)
+                    if path:
+                        self.media_sources.setdefault(path.rsplit('/', 1)[-1], set()).add(url)
+            for key, child in value.items():
+                if key != 'attachments':
+                    self.collect_media_sources(child)
+        elif isinstance(value, list):
+            for child in value:
+                self.collect_media_sources(child)
+
+    def attachments(self, attachments, uid, remap=True):
         if not isinstance(attachments, list):
             self.error("ATTACHMENTS_INVALID", "attachments 必须是数组", uid)
             return []
@@ -339,27 +384,15 @@ class _Builder:
             if attachment.get("kind") not in ("audio", "image"):
                 self.error("ATTACHMENT_KIND_INVALID", "附件 kind 仅允许 audio/image", uid)
             url = attachment.get("url")
-            valid = isinstance(url, str)
-            if valid:
-                decoded = url
-                # Nested encoding must not conceal traversal or separators.
-                for _ in range(8):
-                    next_value = unquote(decoded)
-                    if next_value == decoded:
-                        break
-                    decoded = next_value
-                try:
-                    parts = urlsplit(decoded)
-                    valid = (decoded.startswith("/source-media/") and len(decoded) > len("/source-media/")
-                             and not decoded.endswith("/") and not parts.scheme and not parts.netloc
-                             and not parts.query and not parts.fragment and "?" not in decoded and "#" not in decoded
-                             and "\\" not in decoded and "//" not in decoded
-                             and all(part not in (".", "..") for part in decoded.split("/"))
-                             and not any(ord(c) < 32 or ord(c) == 127 for c in decoded)
-                             and "%" not in decoded)
-                except ValueError:
-                    valid = False
-            if not valid:
+            path = _media_path(url)
+            if path and remap and self.media_map is not None:
+                name = path.rsplit('/', 1)[-1]
+                if name in self.media_map:
+                    if len(self.media_sources.get(name, ())) > 1:
+                        self.error("MEDIA_MAP_AMBIGUOUS", f"媒体文件名对应多个来源路径：{name}", uid)
+                    else:
+                        safe["url"] = self.media_map[name]
+            if not _media_path(safe.get("url")):
                 self.error("ATTACHMENT_URL_INVALID", "附件必须使用已部署的相对 /source-media/ 文件路径；禁止外链、本地路径和路径穿越", uid)
                 safe.pop("url", None)
             if "name" in attachment and not isinstance(attachment["name"], str):
@@ -481,6 +514,12 @@ class _Builder:
             data["type"] = TYPE_ALIASES.get(data["type"], data["type"])
         if isinstance(data.get("source_type"), str):
             data["source_type"] = SOURCE_ALIASES.get(data["source_type"], data["source_type"])
+        # 用户规则：缺答案/缺解析不阻断，显式填「无答案」「无解析」占位。
+        if not _nonempty(data.get("answer")) and not (
+                not child and data.get("unit_kind") == "group" and data.get("subquestions")):
+            data["answer"] = "无答案"
+        if not _nonempty(data.get("explanation")):
+            data["explanation"] = "无解析"
         # 用户规则：AI 生成的解析/大意一律不采用，按缺失处理，不再做 AI 标记校验。
         for key in ("explanation", "articleSummary"):
             if isinstance(data.get(key), str) and ("AI生成" in data[key] or "AI 生成" in data[key]):
@@ -550,6 +589,10 @@ class _Builder:
             else:
                 output["difficulty"] = DIFFICULTIES[difficulty]
         filters = output.get("filterMetadata", {})
+        # Historical local batches use this marker for a missing category. Remove
+        # only the exact marker on the wire; other values still require validation.
+        if isinstance(filters.get("categories"), list):
+            filters["categories"] = [category for category in filters["categories"] if category != MISSING]
         if "difficultyValue" in filters and filters["difficultyValue"] is not None:
             value = filters["difficultyValue"]
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or not 0 <= value <= 1:
@@ -606,11 +649,16 @@ class _Builder:
                         normalized.append(replace_images(option, "option", None,
                                                          self.media_map, attachments))
                 output["options"] = normalized
+            existing_count = len(output.get("attachments") or [])
+            if len(attachments) > existing_count:
+                attachments[existing_count:] = self.attachments(attachments[existing_count:], uid, remap=False)
             if attachments:
                 output["attachments"] = attachments
         if not child and isinstance(main_type, str) and main_type.startswith("听力"):
             if not any(a.get("kind") == "audio" for a in output.get("attachments", [])):
-                self.error("MISSING_AUDIO_ATTACHMENT", "听力单元必须在父题 attachments 提供对应切分音频；子题音频不能代替共享音频", uid)
+                # 服务端上传暂存不强制音频；缺音频只记警告，允许先上传、后续补音频。
+                self.warning("MISSING_AUDIO_ATTACHMENT",
+                             "听力单元没有音频附件；按缺音频继续上传，可在题库后续补传", uid)
         for key in ("audio", "images", "image", "audio_map", "image_map"):
             if raw.get(key):
                 self.error("MEDIA_DEPLOYMENT_REQUIRED", f"本地 {key} 不能自动生成公开 URL；请显式提供已部署 attachments", uid)
@@ -715,6 +763,7 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
         batch = {}
     builder.unknown(batch, {"items", "batch_id", "id", "name", "title", "subject_id", "upload_mode", "upload_target", "status", "warnings", "human_confirmed"}, "", "批次.")
     builder.catalog(catalog)
+    builder.collect_media_sources(batch.get("items", []))
     items = batch.get("items", [])
     if not isinstance(items, list) or not items:
         builder.error("BATCH_ITEMS_INVALID", "batch.items 必须是非空数组")

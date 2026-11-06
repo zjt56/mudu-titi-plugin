@@ -77,6 +77,16 @@ class StructureAiClassifyTest(unittest.TestCase):
             classified = structure_ai.auto_classify(batch, invoke_fn=local_agent.invoke, config=config, force=True)
             self.assertEqual(classified['units'][0]['numbers'], [1])
 
+    def test_classified_stem_uses_word_whitespace_and_rejects_ocr_word_changes(self):
+        raw = "1. What's\n   your name?\nA. It's Ann."
+        row = {'unit_kind': 'standalone', 'type': '单项填空', 'numbers': [1],
+               'stem': "1. What's your name? A. It's Ann.",
+               'source_span': {'start_line': 1, 'end_line': 3}}
+        classified = structure_ai._sanitize_classified({'units': [row]}, raw, {})
+        self.assertEqual(classified[0]['stem'], raw)
+        row['stem'] = "1. Whats your name? A. It's Ann."
+        self.assertEqual(structure_ai._sanitize_classified({'units': [row]}, raw, {}), [])
+
     def test_rejects_non_contiguous_or_unknown_source_span(self):
         raw = ["1. Question", "2. Other"]
         candidate = {"sections": [{"questions": [1, 2]}]}

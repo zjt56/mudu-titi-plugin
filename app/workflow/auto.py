@@ -618,6 +618,13 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                 continue
             if stage.id == "audio":
                 prep_status = audio_prep.get("status")
+                if prep_status == "no_audio":
+                    # 用户规则：听力卷没有音频也继续，不切段、不阻断，只记缺音频。
+                    mf.touch_stage(manifest, "audio", mf.SKIPPED,
+                                   notes="未提供音频，按无音频继续（audio_absent）")
+                    mf.save(batch_dir, manifest)
+                    print("  · audio 跳过（未提供音频，继续）")
+                    continue
                 if prep_status in {"disabled", "not_ready", "error", "unavailable", "needs_review", "running", "multiple_audio"}:
                     if ZERO_TOUCH and prep_status == "needs_review":
                         # 候选切片已经写出，只是边界证据不足。零人工模式下直接采用候选，

@@ -24,7 +24,7 @@ function invalid(settings, payload) {
 
 test('defaults, persistence, private atomic files, public read and runtime env', t => {
   const { settings, stateDir } = fixture(t);
-  assert.deepEqual(settings.read(), { base_url: 'http://127.0.0.1:8089/api', subject_id: 'english', timeout_seconds: 30, knowledge_version_id: '', account: '001', has_api_key: false, has_password: false });
+  assert.deepEqual(settings.read(), { base_url: 'http://127.0.0.1:8089/api', subject_id: 'english', timeout_seconds: 30, knowledge_version_id: '', account: '001', ssh_host: '', ssh_port: 22, ssh_identity: '', ssh_remote_port: 89, has_api_key: false, has_password: false });
   const saved = settings.save({ base_url: 'https://question-bank.example/api', subject_id: 'math', timeout_seconds: 12.5, api_key: SYNTHETIC_KEY });
   noLeak(saved);
   assert.equal(saved.has_api_key, true);
@@ -41,6 +41,35 @@ test('defaults, persistence, private atomic files, public read and runtime env',
   assert.equal(fs.statSync(directory).mode & 0o777, 0o700);
   assert.deepEqual(fs.readdirSync(directory).sort(), ['api-key', 'upload-config.json']);
   for (const name of fs.readdirSync(directory)) assert.equal(fs.statSync(path.join(directory, name)).mode & 0o777, 0o600);
+});
+
+test('SSH settings persist privately and propagate only when enabled', t => {
+  const { settings, stateDir } = fixture(t);
+  assert.equal(path.isAbsolute(settings.runtimeEnv().MUDU_UPLOAD_SSH_CONFIG), true);
+  assert.equal(Object.hasOwn(settings.runtimeEnv(), 'MUDU_UPLOAD_SSH_HOST'), false);
+  const saved = settings.save({ ssh_host: 'alice@bank.example', ssh_port: 2222, ssh_identity: '/tmp/key with spaces', ssh_remote_port: 90 });
+  assert.equal(createQuestionBankSettings({ stateDir, env: {} }).read().ssh_host, saved.ssh_host);
+  const runtime = settings.runtimeEnv();
+  assert.deepEqual(Object.fromEntries(Object.entries(runtime).filter(([key]) => key.startsWith('MUDU_UPLOAD_SSH_'))), {
+    MUDU_UPLOAD_SSH_CONFIG: path.join(stateDir, 'question-bank', 'ssh-settings.json'),
+    MUDU_UPLOAD_SSH_HOST: 'alice@bank.example', MUDU_UPLOAD_SSH_PORT: '2222', MUDU_UPLOAD_SSH_IDENTITY: '/tmp/key with spaces', MUDU_UPLOAD_SSH_REMOTE_PORT: '90',
+  });
+  assert.equal(fs.statSync(path.join(stateDir, 'question-bank', 'ssh-settings.json')).mode & 0o777, 0o600);
+  assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(runtime.MUDU_UPLOAD_CONFIG, 'utf8')), 'ssh_host'), false);
+  settings.save({ ssh_host: '', ssh_identity: '' });
+  assert.equal(settings.runtimeEnv().MUDU_UPLOAD_SSH_HOST, '');
+  assert.equal(settings.runtimeEnv().MUDU_UPLOAD_SSH_IDENTITY, '');
+  settings.save({ ssh_host: 'host' });
+  assert.equal(settings.runtimeEnv().MUDU_UPLOAD_SSH_IDENTITY, '');
+});
+
+test('SSH settings reject option injection, credentials, control characters and invalid ports', t => {
+  const { settings } = fixture(t);
+  for (const ssh_host of ['-oProxyCommand=x', 'user:password@host', 'host other', 'host\nother', 'ssh://host', 'a@b@c']) invalid(settings, { ssh_host });
+  for (const ssh_port of [0, 65536, 1.5, '22', null]) invalid(settings, { ssh_port });
+  for (const ssh_remote_port of [0, 65536, 1.5, '89', null]) invalid(settings, { ssh_remote_port });
+  for (const ssh_identity of ['key\nfile', null, 'x'.repeat(4097)]) invalid(settings, { ssh_identity });
+  assert.equal(settings.save({ ssh_host: 'alice@[::1]' }).ssh_host, 'alice@[::1]');
 });
 
 test('runtime config loads through the actual Python upload_client without a request', t => {

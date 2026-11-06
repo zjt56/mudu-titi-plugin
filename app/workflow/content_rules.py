@@ -14,7 +14,7 @@ LISTENING_FILLED = '答案由AI生成（AI生成，待校对）'
 # 用户规则：试卷没有解析/文章大意时不再使用 AI 生成，直接跳过，对应字段一律填「无」。
 # 历史批次里的其它占位写法仍按缺失识别，避免旧产物被误判为编造。
 EMPTY_PLACEHOLDER = '无'
-PLACEHOLDER_TEXTS = frozenset(('无', '待补充', '暂无', '暂无解析', '暂无文章大意', '原卷无解析', '原卷无文章大意'))
+PLACEHOLDER_TEXTS = frozenset(('无', '无答案', '无解析', '待补充', '暂无', '暂无解析', '暂无文章大意', '原卷无解析', '原卷无文章大意'))
 AI_MAX_CJK = 50
 AI_MAX_WORDS = 50
 

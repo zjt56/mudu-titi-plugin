@@ -337,8 +337,11 @@ def _classify_prompt(raw_text: str, candidate: dict, pdf_ocr=None) -> str:
         "题干、A-H选项、答案和解析；答案/解析不应伪装成题干。缺少题干/选项时保留可见材料，"
         "在notes说明，不要编造。返回 JSON：{\"status\":\"completed\",\"artifacts\":{\"structure\":{\"units\":[...]}},\"notes\":[],\"findings\":[]}，不要 markdown。行号从1开始。\n"
         "候选结构仅供参考，不能覆盖原文证据：" + json.dumps(candidate, ensure_ascii=False) +
-        ("\n同批次 PDF 的 OCR 文字和版面证据（用于与原文匹配、理解题号、分组及题型；"
-         "OCR 可能有误，不得把不同文件的内容未经核对混为一题。最终 source_span 和 stem 仍须来自下方原文）：\n"
+        ("\n同批次 PDF 的 OCR 是版面辅助证据：先比对卷名、章节、题号与上下文，"
+         "只将对应的 PDF 页用于理解题号、共享材料、题干和选项的层级及分组；"
+         "有 Word 时，以 Word 原文为文字、拼写、标点和选项的依据，OCR 识别不同不得覆盖 Word。"
+         "对于匹配不确定、文件不一致或缺字的情况记录差异，不得猜测或跨文件拼接。"
+         "最终 source_span、source_parts 的行号和 stem 必须逐字来自下方原文）：\n"
          + json.dumps(pdf_ocr, ensure_ascii=False) if pdf_ocr else "") +
         "\n原文（每行前的行号仅用于定位，不属于原文）：\n" +
         "\n".join(f"{index}: {line}" for index, line in enumerate(raw_text.splitlines(), 1))
@@ -379,8 +382,16 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict) -> list[dict]:
         if occupied.intersection(positions):
             return []
         source_chunk = "\n".join(lines[start - 1:end])
-        if not _norm(stem) or _norm(stem) not in _norm(source_chunk):
+        # The model chooses the range, never the stored wording. Map its exact
+        # non-whitespace characters back to the Word text so punctuation,
+        # spelling, formatting and line breaks remain source-authentic.
+        char_positions = [index for index, character in enumerate(source_chunk) if not character.isspace()]
+        compact = ''.join(source_chunk[index] for index in char_positions)
+        compact_stem = _norm(stem)
+        match_at = compact.find(compact_stem) if compact_stem else -1
+        if match_at < 0 or compact.find(compact_stem, match_at + 1) >= 0:
             continue
+        stem = source_chunk[char_positions[match_at]:char_positions[match_at + len(compact_stem) - 1] + 1]
         # When the paper visibly numbers a unit, its numbers must occur in that
         # unit's source span. Unnumbered listening material stays a candidate.
         visible_numbers = {int(m.group(1)) for line in lines

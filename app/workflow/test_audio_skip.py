@@ -25,6 +25,7 @@ class AudioSkipTest(unittest.TestCase):
             path = self.batch / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('{}', encoding='utf-8')
+        (self.batch / "01_source/附录.txt").write_text("1.A", encoding="utf-8")
         for stage in ("extract", "structure_gate"):
             mf.touch_stage(self.manifest, stage, mf.COMPLETED)
         mf.save(self.batch, self.manifest)
