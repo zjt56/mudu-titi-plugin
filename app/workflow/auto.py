@@ -266,9 +266,15 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
         try:
             if stage.id == "answers":
                 prepare_answers(batch_dir)
+            # 解析/大意与知识点需要整卷题干、材料和答案附录做题号匹配。
+            # 180k 的通用传输预算会把正常的大卷误判为“证据不足”；提高本阶段
+            # 的上下文预算，仍由模型返回校验和导入器做最终覆盖/分片约束。
+            stage_budget = config["max_input_chars"]
+            if stage.id in {"explanations", "knowledge"}:
+                stage_budget = max(stage_budget, 600000)
             exported = agent_protocol.export_task(batch_dir, stage.id,
-                                                  max_input_chars=config["max_input_chars"])
-            task = agent_tasks.build_task(batch_dir, stage.id, max_input_chars=config["max_input_chars"])
+                                                  max_input_chars=stage_budget)
+            task = agent_tasks.build_task(batch_dir, stage.id, max_input_chars=stage_budget)
             if exported["status"] != "ready" or task["status"] != "ready":
                 outcomes[stage.id] = (3, "任务输入或证据不足")
                 continue
@@ -285,11 +291,14 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
             outcomes[stage.id] = (1, str(exc))
 
     def invoke(item):
-        _, task, run_dir = item
-        return local_agent.invoke(task["prompt"], run_dir, config, permit_parallel=True)
+        stage_id, (_, task, run_dir) = item
+        invoke_config = dict(config)
+        if stage_id in {"explanations", "knowledge"}:
+            invoke_config["max_input_chars"] = max(int(invoke_config.get("max_input_chars", 180000)), 600000)
+        return local_agent.invoke(task["prompt"], run_dir, invoke_config, permit_parallel=True)
 
     with ThreadPoolExecutor(max_workers=min(4, max(1, len(prepared)))) as executor:
-        futures = {stage_id: executor.submit(invoke, item) for stage_id, item in prepared.items()}
+        futures = {stage_id: executor.submit(invoke, (stage_id, item)) for stage_id, item in prepared.items()}
         for stage in stages:
             if stage.id not in futures:
                 continue
