@@ -1,7 +1,7 @@
 {
   "default": {
-    "provider": "deepseek-official",
-    "model": "deepseek-flash",
+    "provider": "magpie",
+    "model": "auto/deepseek-v4.1-flash",
     "profile": "wf-deepseek-fast"
   },
   "stages": {},
