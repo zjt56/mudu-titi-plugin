@@ -38,6 +38,7 @@
 10. **不动用户数据**：不重跑/改写已归档批次；不直接编辑 `workflow/manifest.json` 造完成态；不自动删除用户试卷。
 11. **卡点必须指明批次**：任何卡点、待复核、失败或“继续处理”错误，必须同时显示具体批次名称和可定位的批次目录；收到泛化错误反馈时不得猜测或拉起其他批次。
 12. **原卷预览图片显示**：表格单元格里的图片必须与该单元格文字在同一单元格内显示，不得拆到单独的行尾/额外单元格；表格必须自适应容器宽度并自动断行（`width:100%`、`table-layout:fixed`、`word-break:break-word`），不得因内容撑宽导致左右滑动；原图（尤其表格内图）缩得很小（表格内缩略图约 36×28，正文图 `max-width:200px`）。只影响预览渲染，不改题目数据。落地：`app/workbench/server.py::source_blocks`/`attach_media`、`lib/client.js` 表格样式。
+13. **题组材料必须在题号前完整绑定**：group（题组）从原卷绑定来源时，必须使用**完整 confirmed span 窗口（文章/表格/导语 + 题目）**；定位 stem 只能证明其在窗内，绝不得据此从首个题号起截取、把题号前的材料丢掉（否则 group 的 `material` 为空、装配报 A8）。`source_span.basis` 为 `ai_classified` 或 `cleaned_source` 均属可信边界；standalone 仍只绑定自身题干。表格材料用 `[TABLE ...]` 原样保留。落地：`app/workflow/question_draft.py::_bound_source`。
 
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 

@@ -46,3 +46,11 @@
   - `lib/client.js` 表格 `width:100%; table-layout:fixed`，单元格 `overflow-wrap:anywhere; word-break:break-word; white-space:normal`；`.wf-table-imgcell` 不再 `nowrap`；表格外容器去掉 `overflow-x:auto`；正文图 `width:100%; max-width:200px`；表格内缩略图极小（约 36×28）。
   - 图片能力受限仍只作 informational，不进人工、不阻断。
 - 关联记录：`CHANGELOG/2026-11-08-table-image-in-cell.md`、`2026-11-08-table-responsive-wrap.md`、`2026-11-08-preview-table-image-and-size.md`。
+
+## 2026-11-08 题组材料必须在题号前完整绑定（用户强调）
+
+- 原话要点：把这类题目产生的问题写进修复规则，避免下次再出现（2024 卷 group-56-57-58 阅读理解因表格材料丢失报 A8「题组 unit_kind=group 但 material 为空」）。
+- 根因：`question_draft._bound_source` 只对 `span.basis==ai_classified` 走整窗绑定；本卷 basis 为 `cleaned_source`，退回按 stem 唯一匹配定位。stem 只含题干（从首个题号起），定位把题号前的文章/表格材料切掉，group 的 material 变空。
+- 规则：group（题组）绑定来源时必须使用**完整 confirmed span 窗口（材料 + 题目）**，定位 stem 只能证明其在窗内，不得据此缩短范围、丢弃题号前的材料（文章/表格/导语）。`source_span.basis` 为 `ai_classified` 或 `cleaned_source` 均属可信边界。standalone 仍只绑定自身题干。
+- 落地：`app/workflow/question_draft.py::_bound_source` 增加 group span 整窗分支；`CHANGELOG/2026-11-08-group-material-table-span.md`。
+- 边界：只修 group 材料绑定；不改题目内容/答案/标签；表格材料用 `[TABLE ...]` 原样保留，A8 要求 group 有 material + subquestions。
