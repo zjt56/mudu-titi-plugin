@@ -115,10 +115,15 @@ STAGES: tuple[Stage, ...] = (
         kind=AGENT,
         # 组装提示词与导入都会读取 explanations（解析/大意），必须显式依赖，
         # 否则重跑解析时组装不会失效，batch.json 会留着旧解析。
-        depends_on=("answers", "audio", "types", "knowledge", "explanations"),
+        #
+        # 听力（audio）刻意不在这里依赖：听力切段/转写耗时最长，而组装本身不读
+        # 音频内容（音频只由 audio 阶段写入 attachments，缺映射时按“待部署媒体”记录）。
+        # 因此听力与解析/知识点/组装可以并行推进；只有内容审核（review）必须等听力
+        # 完成，见 review 阶段对 audio 的显式依赖。
+        depends_on=("answers", "types", "knowledge", "explanations"),
         produces=("06_batch/batch.json",),
         docs=("references/stages/06-upload.md",),
-        description="固化前置批次已填字段并执行原有保真与格式校验；沿用既有题目身份、题干、选项和分组，不重新组题。旧批次仍支持原有确定性合并路径。通关才登记正式填充完成。",
+        description="固化前置批次已填字段并执行原有保真与格式校验；沿用既有题目身份、题干、选项和分组，不重新组题。旧批次仍支持原有确定性合并路径。通关才登记正式填充完成。不等待听力，听力完成后由审核阶段另行消费。",
     ),
     Stage(
         id="meta",
@@ -156,7 +161,9 @@ STAGES: tuple[Stage, ...] = (
         id="review",
         title="两轮审核（一审全量+二审抽20%）",
         kind=AGENT,
-        depends_on=("validate",),
+        # 内容审核必须等听力完成：审核要读 02_audio/full-transcript.json 核对听力语义，
+        # 听力未完成时审核不完整（这是唯一需要等待听力完成的下游节点）。
+        depends_on=("validate", "audio"),
         produces=("07_review/review-rounds.json",
                   "07_review/content-review.json", "07_review/metadata-review.json",
                   "07_review/manual-review-queue.json", "07_review/unchecked.json"),

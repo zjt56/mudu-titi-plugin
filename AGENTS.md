@@ -44,6 +44,8 @@
 14. **预览不得丢题组材料**：原卷预览按题号切出的片段必须包含题号之前的共享材料（文章、`[TABLE N]` 表格、`※Notes` 备注、分段 A/B 标签）；预览切片不得因“段落标签/弱题号”把表格或正文截掉，也不得把材料排到题目之后。只影响预览与只读核对，不改题目数据。落地：`app/workflow/preview.py::slice_range`。
     **数据完整 ≠ 展示完整**：修复“内容丢失”类问题必须同时验证①批次数据字段、②每一层消费/展示输出（预览切片、`source_blocks`、payload），只验证一层不算通过；并且必须补一条覆盖该链路的回归测试，避免同类问题再次漏检。
 
+15. **听力并行、只有内容审核等听力**：听力（audio）切段/转写耗时最长，不得阻塞答案、题型、解析、知识点、组装（assemble）及后续 meta/underlines/validate。`assemble.depends_on` **不含 audio**；只有内容审核（`review`）显式依赖 audio（审核要读 `02_audio/full-transcript.json` 核对听力语义）。即：答案→题型→解析/知识点→组装可先跑完，听力可与之并行；到内容审核必须等听力完成。落地：`app/workflow/contracts.py`（assemble / review 的 `depends_on`）。
+
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 
 ## 三、变更记录制度（强制）

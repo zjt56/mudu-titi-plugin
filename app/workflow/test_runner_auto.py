@@ -398,7 +398,8 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(outcome["action"], "review")
         self.assertFalse((self.batch / "06_batch/batch.json").exists())
 
-    def test_audio_needs_review_continues_types_knowledge_but_not_assemble(self):
+    def test_audio_needs_review_does_not_block_assemble_but_blocks_review(self):
+        """听力待复核不阻断解析/知识点/组装；只有内容审核(review)必须等听力完成。"""
         self._isolate_scheduler()
         self._ready_after_structure()
         patcher = patch.object(auto, 'ZERO_TOUCH', False)
@@ -407,15 +408,16 @@ class RunnerAutoTest(unittest.TestCase):
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                 {"audio": (mf.NEEDS_REVIEW, 3)}, calls)):
             outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
-        self.assertEqual((outcome["stopped_at"], outcome["action"]), ("audio", "review"))
-        self.assertEqual(calls, ["answers", "types", "audio", "explanations", "knowledge"])
-        self.assertEqual(outcome["failed_stages"], [])
+        # 听力不再挡组装：assemble 会执行；但 review 因 audio 未完成而等待。
+        self.assertIn("assemble", calls)
+        self.assertNotIn("review", calls)
+        self.assertIn("audio", calls)
         pending = {s["stage"]: s for s in outcome["pending_stages"]}
-        self.assertEqual(pending["assemble"]["unmet_dependencies"], ["audio"])
+        self.assertIn("audio", pending["review"]["unmet_dependencies"])
         manifest = mf.load(self.batch)
         self.assertEqual(manifest["stages"]["audio"]["status"], mf.NEEDS_REVIEW)
-        self.assertEqual(manifest["stages"]["knowledge"]["status"], mf.COMPLETED)
-        self.assertEqual(manifest["stages"]["assemble"]["status"], mf.PENDING)
+        self.assertEqual(manifest["stages"]["assemble"]["status"], mf.COMPLETED)
+        self.assertEqual(manifest["stages"]["review"]["status"], mf.PENDING)
 
     def test_multiple_failures_reported_once_without_retry(self):
         self._isolate_scheduler()
