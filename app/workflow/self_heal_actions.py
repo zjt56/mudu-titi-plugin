@@ -72,7 +72,7 @@ def _rule_hashes():
     paths = {*format_gate.RULE_FILES, *label_audit.RULE_FILES, Path(taxonomy.__file__),
              Path(__file__), Path(__file__).with_name("self_heal.py"), Path(__file__).with_name("preview.py"),
              *(Path(module.__file__) for module in
-               (legacy_format, question_content, structure_gate, denoise, extract))}
+               (legacy_format, question_content, question_draft, structure_gate, denoise, extract))}
     base = Path(__file__).resolve().parents[1]
     return {path.relative_to(base).as_posix(): format_gate._sha(path.read_bytes())
             for path in sorted(paths)}
@@ -249,8 +249,56 @@ def _prepare_tables(root):
         before = question_content.audit_batch_source(root, original)
         candidate = deepcopy(original)
         count = question_content.restore_table_blocks_from_structure(root, candidate)
+        # Earlier drafts dropped Word gridBefore/gridAfter while retaining the
+        # other cells/spans. Repair only an exact replay of that known projection;
+        # never infer missing positions from unequal row widths alone.
+        extraction_raw = _raw(root, "01_source/extraction.json")
+        extraction = format_gate._load(extraction_raw) if extraction_raw else {}
+        padded = set()
+        for index, (old, current) in enumerate(zip(original["items"], candidate["items"])):
+            if old != current:
+                continue
+            field = "materialBlocks" if old.get("materialBlocks") else "material_blocks"
+            blocks = old.get(field)
+            if not isinstance(blocks, list) or not blocks:
+                continue
+            unit = legacy_format._bound_unit(old, by_key, rebuilt)
+            expected_blocks = deepcopy(blocks)
+            changed = False
+            for position, block in enumerate(blocks):
+                if not isinstance(block, dict) or block.get("type") != "table":
+                    continue
+                source_tables = {"\n".join(line.rstrip() for line in m.group(0).strip().splitlines())
+                                 for m in question_draft._TABLE.finditer(unit["stem"])}
+                matches = [t for t in extraction.get("tables", []) if isinstance(t, dict)
+                    and "\n".join(line.rstrip() for line in str(t.get("text") or "").strip().splitlines()) in source_tables
+                    and question_draft._source_table_rows(t, include_omitted=False) == block.get("rows")]
+                if len(matches) != 1:
+                    continue
+                full = question_draft._source_table_rows(matches[0])
+                if full != block["rows"]:
+                    expected_blocks[position]["rows"] = full
+                    changed = True
+            if changed:
+                if "materialBlocks" in old and "material_blocks" in old:
+                    raise ValueError("Ambiguous table material aliases")
+                source_path = extraction.get("source")
+                if not isinstance(source_path, str) or not source_path:
+                    raise ValueError("Word table grid needs original source binding")
+                source_path = format_gate._safe(Path(source_path) if Path(source_path).is_absolute() else root / source_path)
+                if (not source_path.is_file() or
+                        format_gate._sha(source_path.read_bytes()) != extraction.get("source_sha256")):
+                    raise ValueError("Word table grid extraction does not match current original source")
+                current[field] = expected_blocks
+                padded.add(index)
         for index, (old, current) in enumerate(zip(original["items"], candidate["items"])):
             if old == current:
+                continue
+            if index in padded:
+                result["changes"].append({"file": relative, "item_index": index,
+                    "unit_id": old.get("unit_id") or old.get("id"),
+                    "numbers": list(legacy_format._key(old)),
+                    "action": "restore_word_omitted_grid_columns"})
                 continue
             unit = legacy_format._bound_unit(old, by_key, rebuilt)
             matches = re.findall(r"\[TABLE\s+\d+\](.*?)\[/TABLE\]", unit["stem"], re.S)

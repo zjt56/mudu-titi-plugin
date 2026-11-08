@@ -99,6 +99,103 @@ class DiagnoseTest(unittest.TestCase):
         self.assertIn("check_tables", item["detail"])
         self.assertTrue(item["blocking"])
 
+    def _fail_format(self):
+        manifest = self._load_manifest()
+        manifest["stages"]["format_gate"].update(status=mf.FAILED, notes="最终格式检查未通过")
+        mf.save(self.batch, manifest)
+
+    def _format_report(self):
+        return {
+            "passed": False, "status": "failed", "scope": "local_upload_format",
+            "errors": [{"code": "MATERIAL_TABLE_GRID_INVALID", "unit_id": "group-75-76-77-78",
+                        "message": "表格网格存在空洞或行宽不一致"}],
+            "warnings": [{"code": "FORMAT_WARNING", "message": "告警：无需阻断"}],
+            "deferred": [
+                {"code": "CATALOG_REQUIRED", "message": "必须提供远端知识点目录", "checked_by": "prepare-upload"},
+                {"code": "REMOTE_MEDIA_AND_FREEZE_VERIFICATION",
+                 "message": "远端媒体部署、可达性和冻结一致性仍由真实 prepare-upload/verify 检查；本报告不证明线上就绪。",
+                 "checked_by": "prepare-upload/verify"}],
+        }
+
+    def _format_log(self, text):
+        path = self.batch / "workflow/logs/format_gate.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def _assert_table_failure(self, item):
+        self.assertIn("MATERIAL_TABLE_GRID_INVALID", item["detail"])
+        self.assertIn("group-75-76-77-78", item["detail"])
+        self.assertIn("表格网格存在空洞或行宽不一致", item["detail"])
+        self.assertNotIn("CATALOG_REQUIRED", item["detail"])
+        self.assertNotIn("FORMAT_WARNING", item["detail"])
+        self.assertNotIn("REMOTE_MEDIA_AND_FREEZE_VERIFICATION", item["detail"])
+        self.assertIn("06_batch/batch_meta.json", item["hint"])
+        self.assertIn("materialBlocks[].rows[].cells", item["hint"])
+        self.assertIn("rowspan/colspan", item["hint"])
+        self.assertTrue(item["blocking"])
+        self.assertTrue(item["command"].endswith("--stage format_gate --force"))
+
+    def test_format_report_errors_override_real_deferred_log_tail(self):
+        self._fail_format()
+        report = self._format_report()
+        _write(self.batch, "07_review/upload-format.json", report)
+        text = json.dumps(report, ensure_ascii=False, indent=2)
+        # 复现旧路径：pretty JSON 日志尾的“必须”被误判为失败原因。
+        self.assertIn("远端知识点目录", diagnose._last_error_line(text[-1200:]))
+        self._format_log(text)
+        self._assert_table_failure(diagnose.explain(self.batch, "format_gate"))
+        self.assertNotIn("CATALOG_REQUIRED", diagnose.diagnose(self.batch)["summary"])
+        # 报告必须优先于日志，不能被另一条脚本异常覆盖。
+        self._format_log("ValueError: unrelated old log failure\n")
+        self._assert_table_failure(diagnose.explain(self.batch, "format_gate"))
+
+    def test_format_missing_or_damaged_report_falls_back_to_error_log(self):
+        self._fail_format()
+        self._format_log("执行：format_gate\nTraceback (most recent call last):\n"
+                         "ValueError: final batch cannot be read\n" + json.dumps({
+                             "warnings": [{"code": "FORMAT_WARNING", "message": "必须提示但不阻断"}],
+                             "deferred": self._format_report()["deferred"]}, ensure_ascii=False, indent=2))
+        path = self.batch / "07_review/upload-format.json"
+        for content in (None, "{broken", "[]", "{}", '{"errors": null}', '{"errors": [null]}'):
+            with self.subTest(report=content):
+                if content is not None:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(content, encoding="utf-8")
+                item = diagnose.explain(self.batch, "format_gate")
+                self.assertTrue(item["detail"].startswith("ValueError: final batch cannot be read"))
+                self.assertNotIn("CATALOG_REQUIRED", item["detail"])
+                self.assertNotIn("FORMAT_WARNING", item["detail"])
+                self.assertTrue(item["blocking"])
+
+    def test_format_missing_report_uses_json_log_errors_before_deferred(self):
+        self._fail_format()
+        self._format_log(json.dumps(self._format_report(), ensure_ascii=False, indent=2))
+        self._assert_table_failure(diagnose.explain(self.batch, "format_gate"))
+
+    def test_format_empty_errors_never_promotes_warnings_or_deferred(self):
+        self._fail_format()
+        report = self._format_report()
+        report["errors"] = []
+        _write(self.batch, "07_review/upload-format.json", report)
+        self._format_log(json.dumps(report, ensure_ascii=False, indent=2))
+        item = diagnose.explain(self.batch, "format_gate")
+        self.assertIn("errors 为空", item["detail"])
+        self.assertNotIn("CATALOG_REQUIRED", item["detail"])
+        self.assertNotIn("FORMAT_WARNING", item["detail"])
+        # 报告与失败台账矛盾时，只解释证据不足，不擅自改为成功。
+        self.assertEqual(item["status"], mf.FAILED)
+        self.assertTrue(item["blocking"])
+
+    def test_format_deferred_only_log_does_not_become_blocker_detail(self):
+        self._fail_format()
+        self._format_log(json.dumps({"deferred": self._format_report()["deferred"],
+                                    "warnings": [{"code": "FORMAT_WARNING", "message": "必须提示"}]},
+                                   ensure_ascii=False, indent=2))
+        item = diagnose.explain(self.batch, "format_gate")
+        self.assertIn("缺少可读取", item["detail"])
+        self.assertNotIn("CATALOG_REQUIRED", item["detail"])
+        self.assertNotIn("必须提示", item["detail"])
+
     def test_missing_input_reported(self):
         manifest = self._load_manifest()
         manifest["stages"]["audio"]["status"] = mf.PENDING

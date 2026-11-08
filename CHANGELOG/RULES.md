@@ -1,5 +1,12 @@
 # RULES — 规则与强调台账
 
+## 2026-11-08 表格空列与格式诊断规则固化（用户强调）
+
+- 原话：“将这个修复的规则写到插件里，避免下次出现此类问题。同时提交到GitHub。”
+- Word 表格必须保留原件 `grid_before/grid_after` 明确记录的行首/行尾空白位置，转换为空单元格，不为凑行宽猜改 `rowspan/colspan`。存量恢复须有原件摘要匹配、唯一来源绑定及旧投影逐项相等的证据，经事务备份、来源审计与格式复验后安装。
+- 格式诊断以结构化 `errors` 为本地失败依据，显示错误码与题组；`deferred/warnings` 不得误当阻断。报告缺损才回退日志的结构化错误，知识点目录快照/媒体部署等远端准备校验仍保留。
+- 落地：根 AGENTS.md 硬规则16/17；`app/workflow/question_draft.py::_source_table_rows`、`self_heal_actions.py::_prepare_tables`、`diagnose.py::_format_detail`；`app/docs/workflow-regressions.md`；回归 `test_question_draft/test_self_heal_actions/test_diagnose`；详见 `CHANGELOG/2026-11-08-format-table-grid-diagnosis.md`。
+
 ## 2026-11-08 能力提示不得吞掉真实标签差异（2015 卷第 6–10 题）
 
 - 用户纠正：一审与原标签不同却没有待审核标记，第 6 题及后续多题均如此。

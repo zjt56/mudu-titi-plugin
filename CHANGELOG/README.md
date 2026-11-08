@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-08 | [2026-11-08-format-table-grid-diagnosis.md](2026-11-08-format-table-grid-diagnosis.md) | 修复Word空白网格列丢失及格式诊断误读deferred，2017卷体检和最终格式已通过 |
 | 2026-11-08 | [2026-11-08-source-type-select.md](2026-11-08-source-type-select.md) | 修改标签的来源类型改为目录下拉选择，具体来源名称保留文本输入 |
 | 2026-11-08 | [2026-11-08-writing-preview-no-duplicate.md](2026-11-08-writing-preview-no-duplicate.md) | 书面表达预览只补切片之前的导语，修复题干/要求/配图重复，原始与正式数据不变 |
 | 2026-11-08 | [2026-11-08-review-capability-keeps-differences.md](2026-11-08-review-capability-keeps-differences.md) | 修复图片能力提示吞掉程序标签差异；2015 卷第 6–10 题补回待审，整卷队列 14 条逐项一致 |

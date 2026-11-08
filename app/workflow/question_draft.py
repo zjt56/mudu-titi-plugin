@@ -339,6 +339,34 @@ def _table_blank_cells(rows, unit_type):
     return converted
 
 
+def _source_table_rows(table, *, include_omitted=True):
+    """Keep Word's explicitly omitted edge columns in the wire grid.
+
+    gridBefore/gridAfter are empty layout positions, not missing text. The wire
+    format has no row-offset fields, so encode those positions as empty cells.
+    Existing vertical-merge continuations stay implicit via their origin spans.
+    """
+    rows = []
+    for row in table.get("rows") or []:
+        cells = []
+        before, after = row.get("grid_before", 0), row.get("grid_after", 0)
+        if any(type(value) is not int or not 0 <= value <= 1000 for value in (before, after)):
+            raise ValueError("Invalid Word table omitted-column evidence")
+        if include_omitted:
+            cells.extend({"text": "", "rowspan": 1, "colspan": 1} for _ in range(before))
+        for cell in row.get("cells") or []:
+            if cell.get("merge_origin") is not None:
+                continue
+            value = {k: cell[k] for k in ("text", "rowspan", "colspan", "header") if k in cell}
+            if isinstance(value.get("text"), str):
+                value["text"] = _skeleton_text(value["text"])
+            cells.append(value)
+        if include_omitted:
+            cells.extend({"text": "", "rowspan": 1, "colspan": 1} for _ in range(after))
+        rows.append({"cells": cells})
+    return rows
+
+
 def _table_blocks(text, extraction, issues, uid, unit_type=""):
     blocks = []
     for match in _TABLE.finditer(text):
@@ -348,16 +376,7 @@ def _table_blocks(text, extraction, issues, uid, unit_type=""):
                  and str(table.get("text") or "").strip() == match.group(0).strip()]
         rows = []
         if len(exact) == 1:
-            for row in exact[0].get("rows") or []:
-                cells = []
-                for cell in row.get("cells") or []:
-                    if cell.get("merge_origin") is not None:
-                        continue
-                    value = {k: cell[k] for k in ("text", "rowspan", "colspan", "header") if k in cell}
-                    if isinstance(value.get("text"), str):
-                        value["text"] = _skeleton_text(value["text"])
-                    cells.append(value)
-                rows.append({"cells": cells})
+            rows = _source_table_rows(exact[0])
         else:
             # Physical newlines inside an underline belong to its cell, not to
             # a new table row. Keep them through row splitting, then normalize.

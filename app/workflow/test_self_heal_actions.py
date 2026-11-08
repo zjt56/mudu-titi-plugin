@@ -366,6 +366,75 @@ class SelfHealActionsTest(unittest.TestCase):
             self.put(rel, original)
         return original
 
+    def test_source_table_action_repairs_only_proven_omitted_columns(self):
+        original = self.table_fixture()
+        source = (self.root / legacy_format.SOURCE_PATHS[0]).read_text()
+        table_text = next(actions.question_draft._TABLE.finditer(source)).group(0)
+        current_table = '[TABLE 1]\n | Poem A | Poem B | Poem C\nNotes |  |  | \n[/TABLE]'
+        evidence_rows = [
+            {'grid_before': 1, 'grid_after': 0, 'cells': [
+                {'text': text, 'rowspan': 1, 'colspan': 1} for text in ('Poem A', 'Poem B', 'Poem C')]},
+            {'grid_before': 0, 'grid_after': 0, 'cells': [{'text': 'Notes', 'rowspan': 1, 'colspan': 4}]}]
+        # Same sparse four-column geometry as the original 2017 Word table.
+        source_new = source.replace(table_text, current_table)
+        (self.root / legacy_format.SOURCE_PATHS[0]).write_text(source_new)
+        structure, cleaned, _ = actions.extract.infer_structure(source_new)
+        units = actions.structure_gate._build_units(structure.get('sections') or [],
+            structure.get('groups') or [], actions.denoise.clean_body(cleaned)[0].splitlines())
+        self.put(legacy_format.SOURCE_PATHS[1], structure)
+        self.put(legacy_format.SOURCE_PATHS[2], {'units': units})
+        # Only one source row carries the omitted leading column.
+        for row in evidence_rows[1:]:
+            row['grid_before'] = 0
+        current_table = next(actions.question_draft._TABLE.finditer(source_new)).group(0)
+        source_file = self.root / 'original-table.docx'
+        source_file.write_bytes(b'isolated-original-source-binding')
+        evidence = {'source': str(source_file), 'source_sha256': mf.sha256_file(source_file),
+                    'tables': [{'number': 1, 'text': current_table, 'rows': evidence_rows}]}
+        self.put('01_source/extraction.json', evidence)
+        original['items'][0]['material'] = original['items'][0]['material'].replace(table_text, current_table)
+        # Remove an unrelated legacy paragraph-block defect from this fixture.
+        original['items'][0]['materialBlocks'] = [original['items'][0]['materialBlocks'][1]]
+        old_rows = question_draft._source_table_rows(evidence['tables'][0], include_omitted=False)
+        original['items'][0]['materialBlocks'][0]['rows'] = old_rows
+        for rel in legacy_format.BATCH_PATHS:
+            self.put(rel, original)
+        before = self.raw_files()
+        result = actions.apply_source_table_repair(self.root)
+        self.assertTrue(result['passed'], result)
+        self.assertTrue(result['installed'])
+        self.assertTrue(result['format_passed'], result)
+        self.assertTrue(self.load(format_gate.REPORT_PATH)['passed'])
+        expected = deepcopy(original)
+        expected['items'][0]['materialBlocks'][0]['rows'][0]['cells'].insert(0, {'text': '', 'rowspan': 1, 'colspan': 1})
+        for rel in legacy_format.BATCH_PATHS:
+            self.assertEqual(self.load(rel), expected)
+            self.assertEqual((self.root / self.receipt(result)['files'][rel]['backup_path']).read_bytes(), before[rel])
+        self.assertEqual(actions.apply_source_table_repair(self.root)['status'], 'noop')
+        # Conflicting aliases must be refused before either can be rewritten.
+        aliases = deepcopy(original)
+        aliases['items'][0]['material_blocks'] = deepcopy(aliases['items'][0]['materialBlocks'])
+        for rel in legacy_format.BATCH_PATHS:
+            self.put(rel, aliases)
+        with self.assertRaisesRegex(ValueError, 'aliases'):
+            actions._prepare_tables(self.root)
+        self.assertEqual(self.load(format_gate.FINAL_PATH), aliases)
+        for rel in legacy_format.BATCH_PATHS:
+            self.put(rel, original)
+        source_file.write_bytes(b'changed-original-source')
+        with self.assertRaisesRegex(ValueError, 'does not match current original'):
+            actions._prepare_tables(self.root)
+        self.assertEqual(self.load(format_gate.FINAL_PATH), original)
+        source_file.write_bytes(b'isolated-original-source-binding')
+        # Nonempty-cell content changes cannot be repaired by grid padding.
+        bad = deepcopy(original)
+        bad['items'][0]['materialBlocks'][0]['rows'][0]['cells'][0]['text'] = 'invented'
+        for rel in legacy_format.BATCH_PATHS:
+            self.put(rel, bad)
+        prepared = actions._prepare_tables(self.root)
+        self.assertEqual(prepared['changes'], [])
+        self.assertEqual(self.load(format_gate.FINAL_PATH), bad)
+
     def test_source_table_action_restores_real_rows_preserves_existing_format_failure(self):
         original = self.table_fixture()
         old = self.raw_files()

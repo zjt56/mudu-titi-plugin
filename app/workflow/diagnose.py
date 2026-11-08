@@ -12,6 +12,7 @@ import-report、validation-report 或 structure-gate 报告里，用户要自己
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from . import contracts
@@ -27,10 +28,11 @@ def _read(path: Path):
     return None
 
 
-def _tail_file(path: Path, limit: int = 1200) -> str:
+def _tail_file(path: Path, limit: int | None = 1200) -> str:
     try:
         if path.is_file():
-            return path.read_text(encoding="utf-8", errors="replace")[-limit:]
+            text = path.read_text(encoding="utf-8", errors="replace")
+            return text[-limit:] if limit is not None else text
     except OSError:
         pass
     return ""
@@ -103,6 +105,47 @@ def _structure_blockers(batch: Path) -> list[str]:
     return out
 
 
+def _format_errors(report) -> list[str] | None:
+    """只解释 errors；None 表示报告缺损，空列表不代表可忽略台账失败。"""
+    if not isinstance(report, dict) or not isinstance(report.get("errors"), list):
+        return None
+    out = []
+    for item in report["errors"]:
+        if not isinstance(item, dict) or not item.get("code") or not item.get("message"):
+            return None
+        unit = f" [{item['unit_id']}]" if item.get("unit_id") else ""
+        out.append(f"{item['code']}{unit}：{item['message']}")
+    return out
+
+
+def _format_detail(batch: Path) -> str:
+    errors = _format_errors(_read(batch / "07_review" / "upload-format.json"))
+    if errors is not None:
+        return "；".join(errors) if errors else "格式报告 errors 为空；阶段失败原因未记录，需重新检查格式阶段日志。"
+    text = _tail_file(batch / "workflow" / "logs" / "format_gate.log", limit=None)
+    # CLI 输出的是带缩进的 JSON，日志尾部常为 deferred；即使外框截断也优先取 errors 数组。
+    decoder = json.JSONDecoder()
+    for match in reversed(list(re.finditer(r'"errors"\s*:\s*', text))):
+        try:
+            value, _ = decoder.raw_decode(text[match.end():])
+        except ValueError:
+            continue
+        errors = _format_errors({"errors": value})
+        if errors is not None:
+            return "；".join(errors) if errors else "格式日志 errors 为空；阶段失败原因未记录。"
+    # 缺损报告回退普通异常日志前，剔除非阻断数组；数组本身损坏时丢弃其后残片。
+    for match in reversed(list(re.finditer(r'"(?:deferred|warnings)"\s*:\s*', text))):
+        try:
+            _, end = decoder.raw_decode(text[match.end():])
+        except ValueError:
+            text = text[:match.start()]
+        else:
+            text = text[:match.start()] + text[match.end() + end:]
+    text = "\n".join(line for line in text.splitlines()
+                     if not re.fullmatch(r'[\s{}\[\],]*', line))
+    return _last_error_line(text) or "格式阶段失败，缺少可读取的 errors 报告及错误日志。"
+
+
 def _open_manual_items(batch: Path) -> int:
     queue = _read(batch / "07_review" / "manual-review-queue.json")
     if not isinstance(queue, dict):
@@ -151,6 +194,14 @@ def _remedy(stage: contracts.Stage, batch_dir: str, detail: str = "") -> dict:
                     "command": f"{base} run --batch-dir {batch_dir} --stage {stage.id} --force"}
         return {"hint": "确定性检查未过：按上面列出的阻断项修复对应问题后重跑该阶段。",
                 "command": f"{base} run --batch-dir {batch_dir} --stage {stage.id}"}
+    if stage.id == "format_gate":
+        hint = "查看 07_review/upload-format.json 的 errors，按 code、unit_id、message 定位本地格式错误后重跑。"
+        if "MATERIAL_TABLE_" in detail:
+            hint += ("定位 06_batch/batch_meta.json 中该 unit_id 的 materialBlocks[].rows[].cells，"
+                     "对照原卷表格核对 rowspan/colspan 与单元格排列：合并后的各行须覆盖相同列，"
+                     "不得有空洞、重叠或跨出末行；保留原文与真实合并关系，不补造单元格内容。")
+        return {"hint": hint,
+                "command": f"{base} run --batch-dir {batch_dir} --stage {stage.id} --force"}
     if stage.kind == contracts.COMMAND:
         return {"hint": "确定性脚本执行失败：按日志报错修复输入或环境后重跑。",
                 "command": f"{base} run --batch-dir {batch_dir} --stage {stage.id} --force"}
@@ -238,6 +289,8 @@ def diagnose(batch_dir) -> dict:
                 bl = _structure_blockers(batch)
                 if bl:
                     detail = "；".join(bl)
+            if stage.id == "format_gate":
+                detail = _format_detail(batch)
             if stage.id in ("validate",):
                 bl = _validation_blockers(batch)
                 if bl:

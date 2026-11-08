@@ -230,6 +230,25 @@ class QuestionDraftTest(unittest.TestCase):
         self.assertEqual(row["materialBlocks"][0]["rows"][0]["cells"][0]["colspan"], 2)
         self.assertNotIn("TABLE_LAYOUT_UNVERIFIED", [p["code"] for p in result["issues"]])
 
+    def test_word_omitted_edge_columns_survive_draft_and_payload_validation(self):
+        from workflow import upload_payload
+        table = '[TABLE 1]\n | Poem A | Poem B | Poem C\nNotes |  |  | \n[/TABLE]'
+        extraction = {'tables': [{'number': 1, 'text': table, 'grid_columns': 4, 'rows': [
+            {'grid_before': 1, 'grid_after': 0, 'cells': [
+                {'text': text, 'rowspan': 1, 'colspan': 1} for text in ('Poem A', 'Poem B', 'Poem C')]},
+            {'grid_before': 0, 'grid_after': 0, 'cells': [{'text': 'Notes', 'rowspan': 1, 'colspan': 4}]}]}]}
+        blocks = question_draft._table_blocks(table, extraction, [], 'poems')
+        rows = blocks[0]['rows']
+        self.assertEqual([c['text'] for c in rows[0]['cells']], ['', 'Poem A', 'Poem B', 'Poem C'])
+        self.assertEqual(rows[1]['cells'][0]['colspan'], 4)
+        result = upload_payload.build_payload({'items': [{'id': 'poems', 'unit_kind': 'standalone',
+            'number': 1, 'numbers': [1], 'question_type': '阅读理解', 'stem': 'Read.',
+            'knowledge': [], 'materialBlocks': blocks}]}, catalog=None)
+        self.assertNotIn('MATERIAL_TABLE_GRID_INVALID', [e['code'] for e in result['errors']])
+        after = {'rows': [{'grid_before': 0, 'grid_after': 2, 'cells': [{'text': 'A'}]}]}
+        self.assertEqual([c['text'] for c in question_draft._source_table_rows(after)[0]['cells']], ['A', '', ''])
+        self.assertEqual(extraction['tables'][0]['rows'][0]['grid_before'], 1)
+
     def test_unproven_table_and_media_report_issues_without_fabrication(self):
         text = "Read.\n[TABLE 1]\n__1__ | [IMG missing.png]\n[/TABLE]"
         self.source(text, [([1], "group", "任务型阅读", 1, 4)])
