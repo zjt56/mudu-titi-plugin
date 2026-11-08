@@ -52,6 +52,7 @@ ROUND_RULES = ("references/filter-framework.json", "references/knowledge-catalog
 
 REVIEW_DIR = "07_review"
 
+
 RESOLVED = {"reviewed", "resolved", "accepted", "fixed", "closed", "approved", "passed", "waived"}
 OPEN = {"open", "pending", "needs_review", "blocked", "proposed", "unchecked", "hold"}
 
@@ -150,6 +151,8 @@ def _evaluate_uncached(batch_dir) -> dict:
     blocking_findings = []
     for name, payload in (("content-review.json", content), ("metadata-review.json", metadata)):
         for finding in _findings(payload):
+            if _is_capability_gap(finding):
+                continue
             if not _is_open(finding):
                 continue
             blocking = finding.get("blocking") is True
@@ -168,11 +171,13 @@ def _evaluate_uncached(batch_dir) -> dict:
         errors.append({"code": "REVIEW_FINDING_OPEN", **finding})
 
     queue_items = _findings(queue) if queue is not None else None
+    open_items = []
     if queue is None:
         errors.append({"code": "MANUAL_QUEUE_MISSING",
                        "message": "缺少 07_review/manual-review-queue.json，无法证明人工审核已完成"})
     else:
-        open_items = [it for it in (queue_items or []) if _is_open(it)]
+        open_items = [it for it in (queue_items or [])
+                      if _is_open(it) and not _is_capability_gap(it)]
         for item in open_items:
             errors.append({
                 "code": "MANUAL_REVIEW_OPEN",
@@ -204,7 +209,7 @@ def _evaluate_uncached(batch_dir) -> dict:
 
     rounds = evaluate_rounds(batch_dir)
     _counts_blocking = len(blocking_findings)
-    _counts_open = len([it for it in (queue_items or []) if _is_open(it)])
+    _counts_open = len(open_items)
     _counts_required = len(required_unchecked)
     # Round findings are materialised into the review files above, so the same
     # issue can appear both as a file finding and as a round error. Count each
@@ -425,18 +430,17 @@ def _file_digest(path):
         return "missing"
 
 
-def _review_rule_revision():
-    """Digest of the review口径 and prompt sources.
+# 审核口径版本：仅当“什么算差异 / 如何比对”的规则真的改变时手工递增。
+# 不要用源码哈希——那样每改一次实现（包括修 bug、改注释）都会把刚跑完的
+# 审核轮次判成过期，队列里的真实差异被整批丢掉。
+REVIEW_RULES_VERSION = "review-rules/v2"
 
-    Rule/prompt changes must invalidate already-recorded rounds; otherwise a fixed
-    checker keeps showing the previous findings from the manual queue.
-    """
+
+def _review_rule_revision():
+    """Stable revision of the review口径 plus the role prompt bytes."""
     here = Path(__file__).resolve()
-    parts = [("rule-code:" + name, _file_digest(here.with_name(name)))
-             for name in ("review.py", "review_rounds.py", "agent_roles.py", "review_consensus.py")]
     role = here.parents[1] / "prompts" / "roles" / "review.md"
-    parts.append(("rule-role:review", _file_digest(role)))
-    return _digest(parts)
+    return _digest([REVIEW_RULES_VERSION, _file_digest(role)])
 
 
 def _plan_input_key(batch, units):
@@ -1054,12 +1058,25 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             ):
                 raise ValueError("Evidence needs a path, locator and quote")
             path = item["path"]
-            if path not in plan["input_hashes"] or path.startswith("rules:"):
+            # 规则/目录文件在计划里以 rules:<path> 绑定；模型引用时常省略前缀，
+            # 按全等匹配会把整轮判成“未绑定证据”，让真实差异进不了待审核。
+            if path in plan["input_hashes"]:
+                key = path
+            elif "rules:" + path in plan["input_hashes"]:
+                key = "rules:" + path
+                item["path"] = key
+            else:
                 raise ValueError("Evidence must cite a bound batch input")
-            text = source_text if path == "01_source/正文.txt" else (batch / path).read_text(encoding="utf-8-sig")
+            if key.startswith("rules:"):
+                root = Path(__file__).resolve().parents[1]
+                text = (root / key[len("rules:"):]).read_text(encoding="utf-8-sig")
+            elif key == "01_source/正文.txt":
+                text = source_text
+            else:
+                text = (batch / key).read_text(encoding="utf-8-sig")
             if not _quote_matches(item["quote"], text):
                 raise ValueError("Evidence quote absent from bound input")
-            if path == "01_source/正文.txt":
+            if key == "01_source/正文.txt":
                 # Bare numbers and punctuation cannot locate a substantive claim.
                 quote = item["quote"].strip()
                 meaningful = bool(re.search(r"[^\W\d_]", quote, re.UNICODE))
@@ -1335,7 +1352,10 @@ def _is_capability_gap(finding) -> bool:
     blob = text + " " + reason
     if not _CAPABILITY_GAP.search(blob):
         return False
-    if _LABEL_CONFLICT.search(text):
+    conflict_text = (text.replace("不矛盾", "")
+                     .replace("无矛盾", "")
+                     .replace("未发现标签冲突", ""))
+    if _LABEL_CONFLICT.search(conflict_text):
         return False
     if source.get("verdict") == "error":
         return False
@@ -1506,6 +1526,11 @@ def evaluate_rounds(batch_dir, payload=None) -> dict:
     # 人工队列（也不会阻断闸门）。真正的差异/错误仍然保留为待审发现。
     # 能力受限（看不到图/听不到音频）不是标签差异：只作提示，不进人工、不阻断。
     informational_findings = [f for f in findings if _is_capability_gap(f)]
+    # A review snapshot can legitimately be older than the current formal batch
+    # after a label correction. Do not project that historical comparison back
+    # into the current manual queue; keep real current-vs-review differences.
+    # 一审/二审与原标签不一致就是差异，必须进待审核；不能因为“审核判断与当前
+    # 正式标签不同”就把它当过期结论丢掉（那正好丢掉了真实分歧）。
     findings = [f for f in findings if not _is_capability_gap(f)]
     # Source attribution is a program conclusion, separate from model verdicts
     # and from manually resolved findings. Keep execution and other targets.

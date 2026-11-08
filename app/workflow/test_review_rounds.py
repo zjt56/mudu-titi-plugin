@@ -126,6 +126,30 @@ class ReviewRoundsTest(unittest.TestCase):
         record['checks'][0]['assessment'].pop('difficulty')
         self.assertEqual(review._round_checks(record, 'labels', self.plan, self.batch), [])
 
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_first_round_label_difference_stays_a_manual_finding(self):
+        """一审与原标签不同=真实差异，必须进待审核，不能当“过期结论”丢掉。"""
+        payload = self.payload()
+        labels = next(r for r in payload['rounds'] if r['round_id'] == 'labels')
+        labels['checks'][0]['assessment']['knowledge'] = [
+            '语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/日常活动']
+        result = review.evaluate_rounds(self.batch, payload)
+        self.assertIn(('group-1-6', 'knowledge'),
+                      [(f.get('unit_id'), f.get('field')) for f in result['findings']])
+        self.assertFalse(result['passed'])
+        self.assertIn('REVIEW_ROUND_FINDING', {e['code'] for e in result['errors']})
+
+    def test_rule_catalog_evidence_without_prefix_counts_as_bound(self):
+        """模型引用 references/*.json 时省略 rules: 前缀，不能因此判整轮失败。"""
+        record = self.payload()['rounds'][0]
+        record['checks'][0]['evidence'] = [
+            {'path': '01_source/正文.txt', 'locator': 'L1', 'quote': 'She reads a book.'},
+            {'path': 'references/knowledge-catalog.json', 'locator': 'points', 'quote': 'points'},
+        ]
+        self.assertEqual(review._round_checks(record, 'labels', self.plan, self.batch), [])
+        self.assertEqual(record['checks'][0]['evidence'][1]['path'],
+                         'rules:references/knowledge-catalog.json')
+
     def test_catalog_filter_retains_metadata_and_unknown_type_falls_back(self):
         from workbench import taxonomy
         catalog = json.loads(taxonomy.KNOWLEDGE_PATH.read_text())

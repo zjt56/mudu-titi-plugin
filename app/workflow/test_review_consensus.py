@@ -11,6 +11,16 @@ from workflow import review, review_rounds
 
 
 class ConsensusTest(unittest.TestCase):
+    def test_image_capability_gap_with_negative_contradiction_is_informational(self):
+        finding = {
+            "round_sources": [{
+                "rationale": "无法确认B图，但答案键B与文字细节不矛盾，未发现标签冲突。",
+                "verdict": "uncertain",
+            }],
+            "reason": "图片内容无法核验",
+        }
+        self.assertTrue(review._is_capability_gap(finding))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

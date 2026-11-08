@@ -14,9 +14,7 @@ ingest 做三件事：
 """
 from __future__ import annotations
 
-import ast
 import json
-import re
 from pathlib import Path
 
 from . import contracts, manifest as mf
@@ -89,42 +87,6 @@ def _current_label_row(batch_dir: Path, unit_id: str) -> dict | None:
             if isinstance(row, dict) and str(row.get("unit_id") or row.get("id") or "") == str(unit_id):
                 return row
     return None
-
-
-def _stale_review_finding(batch_dir: Path, finding: dict) -> bool:
-    """Reject a finding whose review assessment belongs to an older batch state."""
-    sources = finding.get("round_sources")
-    if not isinstance(sources, list) or not sources or not isinstance(sources[0], dict):
-        return False
-    assessment = sources[0].get("assessment")
-    if not isinstance(assessment, dict):
-        assessment = {}
-    row = _current_label_row(batch_dir, str(finding.get("unit_id") or ""))
-    if not isinstance(row, dict):
-        return False
-    assessed_knowledge = assessment.get("knowledge")
-    current_knowledge = row.get("knowledge")
-    if isinstance(assessed_knowledge, list) and isinstance(current_knowledge, list):
-        if set(map(str, assessed_knowledge)) != set(map(str, current_knowledge)):
-            return True
-    assessed_type = assessment.get("type")
-    current_type = row.get("question_type") or row.get("type")
-    if assessed_type and current_type and str(assessed_type) != str(current_type):
-        return True
-    # Older queue records often serialize the comparison as
-    # “原标注=[...]; labels=[...]”. If the current formal row equals the
-    # original side, the remaining difference belongs to an obsolete review
-    # snapshot and must not remain an actionable queue item.
-    reason = str(finding.get("reason") or "")
-    match = re.search(r"原标注=(\[.*?\])；(?:labels|sample)=", reason)
-    if not match:
-        return False
-    try:
-        original = ast.literal_eval(match.group(1))
-    except (SyntaxError, ValueError):
-        return False
-    current = row.get("knowledge")
-    return isinstance(original, list) and isinstance(current, list) and set(map(str, original)) == set(map(str, current))
 
 
 def _stale_missing_label_finding(batch_dir: Path, finding: dict) -> bool:
@@ -224,11 +186,9 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
         return not item.get("decided_by") and status in ("", "open", "needs_review")
 
     stale_missing_labels = [item for item in queue
-                            if _open(item) and (_stale_missing_label_finding(batch_dir, item)
-                                                or _stale_review_finding(batch_dir, item))]
+                            if _open(item) and _stale_missing_label_finding(batch_dir, item)]
     stale_existing = [item for name in existing for item in existing[name]
-                      if _open(item) and (_stale_missing_label_finding(batch_dir, item)
-                                          or _stale_review_finding(batch_dir, item))]
+                      if _open(item) and _stale_missing_label_finding(batch_dir, item)]
     if stale_missing_labels or stale_existing:
         archive_path = review_dir / "retired-round-findings.json"
         archive = _load(archive_path) or {"records": []}
@@ -296,8 +256,7 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
     index = _next_index(records + queue)
 
     findings = [finding for finding in (result.get("findings") or [])
-                if not (_stale_missing_label_finding(batch_dir, finding)
-                        or _stale_review_finding(batch_dir, finding))]
+                if not _stale_missing_label_finding(batch_dir, finding)]
     if "review_rounds" in result:
         rounds = review.evaluate_rounds(batch_dir, result["review_rounds"])
         if rounds["unchecked"]:
@@ -305,8 +264,7 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
         # Persist only supplied real records; never manufacture ok verdicts.
         _write_json(review_dir / review.ROUND_FILE, result["review_rounds"])
         findings.extend(finding for finding in rounds["findings"]
-                        if not (_stale_missing_label_finding(batch_dir, finding)
-                                or _stale_review_finding(batch_dir, finding)))
+                        if not _stale_missing_label_finding(batch_dir, finding))
     summary = result.get("summary") or {}
     blocking_keys = _blocking_keys(summary)
 
