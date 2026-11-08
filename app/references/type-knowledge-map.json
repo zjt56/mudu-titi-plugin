@@ -637,12 +637,6 @@
   "听力关键词语选择": {
    "dims": [
     {
-     "dim": "语音",
-     "branch": "语音",
-     "show": "below-root",
-     "note": "一级标题及子标题"
-    },
-    {
      "dim": "词汇",
      "branch": "词汇",
      "show": "below-root",
