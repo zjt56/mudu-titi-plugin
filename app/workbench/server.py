@@ -678,7 +678,7 @@ def _resolve_structure_issue(folder: Path, finding: dict) -> None:
     save_json(structure_path, structure)
 
 
-def _run_advance_now(name: str, folder: Path) -> dict:
+def _run_advance_now(name: str, folder: Path, *, operations_expectation=None) -> dict:
     """Execute one batch's advance pass synchronously (called only by the serial worker)."""
     from workflow import supervisor as wf_supervisor
     result = {"error": "后台执行器意外退出，等待监督器重试"}
@@ -688,6 +688,15 @@ def _run_advance_now(name: str, folder: Path) -> dict:
         with _lock:
             _advance_state[name] = {"running": False, "external": True, "finished_at": now()}
         return {"started": False, "running": True, "external": True}
+    if operations_expectation is not None:
+        from workflow import operations
+        current = operations._load(folder)
+        if (operations_expectation.get("identity") != operations._identity(folder)
+                or operations_expectation.get("incident_id") != (current.get("incident") or {}).get("incident_id")):
+            claim.__exit__(None, None, None)
+            with _lock:
+                _advance_state[name] = {"running": False, "result": {"error": "stale_operations_identity"}, "finished_at": now()}
+            return {"started": False, "error": "stale_operations_identity"}
     try:
         bridge = auto_flow.load_bridge()
         # The claim already owns auto.advance's per-batch lock. Do not acquire
@@ -697,8 +706,15 @@ def _run_advance_now(name: str, folder: Path) -> dict:
         result = {"error": str(exc)}
     finally:
         try:
-            claim.__exit__(None, None, None)
-            wf_supervisor.record_result(folder, result)
+            try:
+                from workflow import operations
+                try:
+                    operations.observe_execution(folder)
+                except (ValueError, OSError, RuntimeError):
+                    pass  # The durable outbox can reconcile on the next read.
+                wf_supervisor.record_result(folder, result)
+            finally:
+                claim.__exit__(None, None, None)
         finally:
             # A failed ledger write must never leave a dead worker marked
             # running forever. A restart can reconstruct from the manifest.
@@ -720,7 +736,9 @@ def _advance_worker_loop():
             if not _advance_queue:
                 _advance_worker_running = False
                 return
-            name = _advance_queue.pop(0)
+            entry = _advance_queue.pop(0)
+            name = entry["name"] if isinstance(entry, dict) else entry
+            expectation = entry.get("operations_expectation") if isinstance(entry, dict) else None
         try:
             folder = batch_dir(name)
         except (ValueError, OSError):
@@ -731,7 +749,10 @@ def _advance_worker_loop():
         with _lock:
             _advance_state[name] = {"running": True, "started_at": now()}
         try:
-            _run_advance_now(name, folder)
+            if expectation is None:
+                _run_advance_now(name, folder)
+            else:
+                _run_advance_now(name, folder, operations_expectation=expectation)
         except Exception as exc:  # noqa: BLE001 - never kill the worker loop
             with _lock:
                 _advance_state[name] = {"running": False, "result": {"error": str(exc)}, "finished_at": now()}
@@ -746,28 +767,39 @@ def _ensure_advance_worker():
     threading.Thread(target=_advance_worker_loop, daemon=True, name="workbench-advance-worker").start()
 
 
-def _launch_advance(name: str, folder: Path, *, prepare=None, **details) -> dict:
+def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expectation=None, **details) -> dict:
     """Enqueue one batch into the global serial queue (never parallel)."""
     from workflow import supervisor as wf_supervisor
+    if operations_expectation is not None:
+        from workflow import operations
+        if (operations_expectation.get("identity") != operations._identity(folder)
+                or operations_expectation.get("incident_id") != (operations._load(folder).get("incident") or {}).get("incident_id")):
+            return {"started": False, "error": "stale_operations_identity"}
     if (_advance_state.get(name) or {}).get("running"):
         return {"started": False, "running": True}
     with _advance_queue_lock:
-        if name in _advance_queue:
+        if any((entry.get("name") if isinstance(entry, dict) else entry) == name for entry in _advance_queue):
             return {"started": False, "running": True, "queued": True}
-    # 用户点“继续处理”：清掉历史 exhausted 长冷却，从当前阶段立即续跑。
-    try:
-        wf_supervisor.clear_exhausted(folder)
-    except (OSError, ValueError, TypeError):
-        pass
-    try:
+    # Preparation writes must participate in the same lock/lease as execution.
+    with wf_supervisor.advance_claim(folder) as acquired:
+        if not acquired:
+            return {"started": False, "running": True, "external": True}
+        if operations_expectation is not None:
+            from workflow import operations
+            if (operations_expectation.get("identity") != operations._identity(folder)
+                    or operations_expectation.get("incident_id") != (operations._load(folder).get("incident") or {}).get("incident_id")):
+                return {"started": False, "error": "stale_operations_identity"}
+        try:
+            wf_supervisor.clear_exhausted(folder)
+        except (OSError, ValueError, TypeError):
+            pass
         if prepare is not None:
             details.update(prepare())
-    except Exception:
-        raise
     with _lock:
         _advance_state[name] = {"running": False, "queued": True, "queued_at": now(), **details}
     with _advance_queue_lock:
-        _advance_queue.append(name)
+        _advance_queue.append({"name": name, "operations_expectation": operations_expectation}
+                              if operations_expectation is not None else name)
     _ensure_advance_worker()
     return {"started": True, "queued": True, "running": False}
 
@@ -945,6 +977,15 @@ def _archive_preflight(path: Path):
 
 @serialized
 def archive_batch(name: str, confirm_name: str) -> dict:
+    from workflow import supervisor as wf_supervisor
+    folder = batch_dir(name)
+    with wf_supervisor._try_file_lock(wf_supervisor._auto_lock_path(folder)) as acquired:
+        if not acquired or wf_supervisor.execution_busy(folder, include_auto=False):
+            raise ValueError("批次正在运行或执行运维动作，请稍后归档")
+        return _archive_batch_locked(name, confirm_name)
+
+
+def _archive_batch_locked(name: str, confirm_name: str) -> dict:
     """可恢复删除：原子重命名到工作区回收目录，不永久删除任何数据。"""
     if confirm_name != name:
         raise ValueError("确认批次名不匹配，请重新确认目标")
@@ -2182,6 +2223,10 @@ class Handler(BaseHTTPRequestHandler):
             if decoded_path == "/api/audio/status":
                 query = parse_qs(parsed.query)
                 return self.send_json(audio_status((query.get("batch") or [""])[0] or None))
+            if decoded_path == "/api/operations/incidents":
+                from workflow import operations
+                operations.recover_resumes(WORKFLOWS, _launch_advance)
+                return self.send_json(operations.incidents(WORKFLOWS))
             if decoded_path == "/api/batches":
                 return self.send_json({"batches": cached_list_batches()})
             if decoded_path == "/api/taxonomy":
@@ -2198,6 +2243,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"version": taxonomy.knowledge_version(),
                                        "items": taxonomy.knowledge_search(query, limit)})
             parts = decoded_path.strip("/").split("/")
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "operations":
+                from workflow import operations
+                return self.send_json(operations.view(WORKFLOWS, batch_dir(parts[2])))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "media":
                 folder = batch_dir(parts[2])
                 report, manifest, queue = report_for(folder)
@@ -2264,6 +2312,16 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("请求内容必须是对象")
+            if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "operations":
+                from workflow import operations
+                folder = batch_dir(parts[2])
+                if parts[4] == "claim":
+                    return self.send_json(operations.claim(WORKFLOWS, folder, payload))
+                if parts[4] in {"action", "heartbeat", "progress", "release", "cancel"}:
+                    if parts[4] != "action":
+                        payload = {**payload, "action": parts[4]}
+                    return self.send_json(operations.action(WORKFLOWS, folder, payload,
+                        enqueue=lambda expected: _launch_advance(parts[2], folder, operations_expectation=expected)))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "upload":
                 return self.send_json({"ok": True, **start_batch_upload(
                     parts[2], allow_unreviewed=payload.get('allow_unreviewed', False),

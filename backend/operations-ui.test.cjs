@@ -1,0 +1,99 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const client = fs.readFileSync(path.join(__dirname, '../lib/client.js'), 'utf8');
+const start = client.indexOf('    function operationsText(');
+const end = client.indexOf('    function recoveryProgressText(', start);
+function harness(fetch = async () => { throw new Error('unexpected request'); }) {
+  const ctx = vm.createContext({ window: { fetch }, setTimeout, clearTimeout, AbortController });
+  vm.runInContext(client.slice(start, end), ctx);
+  return ctx;
+}
+
+test('all operation states are distinct from workflow quality and model claims', () => {
+  const ctx = harness();
+  for (const [status, label] of Object.entries({ unclaimed: '未接手', queued: '排队', investigating: '调查', repairing: '修复', verifying: '复验', waiting_external: '待外部条件', cancelled: '已取消' })) {
+    assert.equal(ctx.operationsView({ status }).label, label);
+  }
+  assert.equal(ctx.operationsView(null).label, '未接手');
+  assert.equal(ctx.operationsView({ status: 'success', outcome: '已修复' }).label, '状态待确认');
+  for (const verification of [null, 'passed', { passed: 'true' }, { status: 'success' }, { passed: false }]) {
+    assert.equal(ctx.operationsView({ status: 'recovered', verification }).label, '复验待确认');
+  }
+  assert.equal(ctx.operationsView({ status: 'recovered', verification: { passed: true, evidence_id: 'gate-receipt' } }).label, '已恢复');
+  assert.equal(ctx.operationsView({ status: 'repairing', verification: { passed: true } }).label, '修复');
+});
+
+test('backend incident shapes require recorded evidence before resolved means recovered', () => {
+  const ctx = harness();
+  const incident = { incident_id: 'i1', batch_name: 'fixture', session_id: 'sess-1', status: 'resolved',
+    verification: { verified: true, evidence_id: 'receipt-1', snapshot: 'fingerprint', stage: 'validate' },
+    events: [{ timestamp: '2026-11-08T10:00:00Z', action: 'finish', outcome: 'completed', detail: '真实闸门已通过', verification: null }] };
+  assert.equal(ctx.operationsView(incident).label, '已恢复');
+  assert.match(ctx.operationsView(incident).outcome, /真实闸门已通过/);
+  assert.equal(ctx.operationsView({ ...incident, verification: { verified: true } }).label, '复验待确认');
+  assert.equal(ctx.operationsView({ ...incident, verification: { verified: 'true', evidence_id: 'r' } }).label, '复验待确认');
+  assert.equal(ctx.operationsView({ ...incident, status: 'needs_deep_repair' }).label, '需深入修复');
+  assert.equal(ctx.operationsView({ ...incident, status: 'claimed', events: [{ action: 'apply_repair' }] }).label, '修复');
+  assert.equal(ctx.operationsView({ ...incident, status: 'claimed', events: [{ action: 'verify' }] }).label, '复验');
+});
+
+test('unavailable host preserves confirmed enabled state and its readable reason', async () => {
+  const ctx = harness(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ enabled: false, available: false, error: 'Harness不可用' }) }));
+  const result = await ctx.operationsRequest('status');
+  assert.equal(result.enabled, false);
+  assert.equal(result.error, 'Harness不可用');
+});
+
+test('event aliases tolerate missing fields and choose the latest timestamp', () => {
+  const ctx = harness();
+  const result = ctx.operationsView({ session_id: 'sess-1', status: 'investigating', events: [null,
+    { timestamp: '2026-11-08T10:00:00Z', action: 'inspect', outcome: { message: 'missing input' }, verification: { passed: false } },
+    { at: '2026-11-07T10:00:00Z', type: 'older', message: 'old' },
+  ] });
+  assert.equal(result.action, 'inspect');
+  assert.match(result.outcome, /missing input/);
+  assert.match(result.verification, /false/);
+  assert.equal(result.sessionId, 'sess-1');
+  assert.equal(ctx.operationsView({ events: 'unexpected', session_id: {} }).sessionId, '');
+  assert.equal(ctx.operationsView({ events: [{ kind: 'read', result: 'pending', time: 'unparsed' }] }).action, 'read');
+});
+
+test('host reads stay GET and config sends only explicitly requested enabled value', async () => {
+  const calls = [];
+  const ctx = harness(async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ available: true, enabled: false }) };
+  });
+  await ctx.operationsRequest('status');
+  await ctx.operationsRequest('config', { enabled: false });
+  assert.equal(calls[0].url, '/wf-plugin/operations/status');
+  assert.equal(calls[0].options.method, 'GET');
+  assert.equal(calls[0].options.body, undefined);
+  assert.equal(calls[1].url, '/wf-plugin/operations/config');
+  assert.equal(calls[1].options.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[1].options.body), { enabled: false });
+});
+
+test('malformed and failed host responses are readable errors, never success', async () => {
+  for (const response of [
+    { ok: false, status: 503, text: async () => '{"error":"服务离线"}' },
+    { ok: true, status: 200, text: async () => '<html>offline</html>' },
+    { ok: true, status: 200, text: async () => '{"error":"配置不可写"}' },
+  ]) {
+    await assert.rejects(harness(async () => response).operationsRequest('config', { enabled: true }), /服务离线|无法读取|配置不可写/);
+  }
+});
+
+test('panel is isolated beside diagnostics and has no repair or invented session navigation', () => {
+  const panel = client.slice(start, end);
+  assert.match(client, /diagBanner\(selBatch, stage\),\s*h\(OperationsPanel/);
+  assert.match(panel, /jget\('\/batches\/' \+ encodeURIComponent\(batchName\) \+ '\/operations'/);
+  assert.doesNotMatch(panel, /\/repair|jpost\(|window\.open|href:|location\./);
+  assert.match(panel, /enabled: true, available: false, loaded: false/);
+  assert.match(panel, /原有自愈不受影响/);
+  assert.match(panel, /clipboard\.writeText\(view\.sessionId\)/);
+  assert.match(panel, /generation\.current\+\+; controller\.abort\(\); clearTimeout\(timer\)/);
+});

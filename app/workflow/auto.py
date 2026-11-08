@@ -531,6 +531,9 @@ def advance(batch_dir: Path, bridge: dict, stop_at: str | None = None) -> dict:
 
 
 def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -> dict:
+    from . import operations
+    if operations.lease_active(batch_dir):
+        return {"action": "operations_leased", "status": "waiting", "reason": "Harness 运维修复租约生效中"}
     manifest = mf.load(batch_dir)
     cooldown = _read_cooldown(batch_dir)
     recovery_wait = {}

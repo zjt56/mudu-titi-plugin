@@ -206,8 +206,10 @@ def advance_claim(folder):
     on the open file handle. Busy external work is never queued behind a lock.
     """
     folder = Path(folder)
+    from . import operations
     with _try_file_lock(_auto_lock_path(folder)) as acquired:
-        yield bool(acquired and not execution_busy(folder, include_auto=False))
+        yield bool(acquired and not operations.lease_active(folder)
+                   and not execution_busy(folder, include_auto=False))
 
 
 def _regular_file(folder, relative):

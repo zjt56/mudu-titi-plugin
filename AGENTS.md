@@ -49,6 +49,8 @@
 16. **Word 表格空白网格位置不得丢失**：转换表格时必须保留 `grid_before/grid_after` 明确记录的行首/行尾空白列，以空单元格表达，保持非空文字及 `rowspan/colspan` 不变；禁止为凑齐行宽猜改合并跨度。存量表格只在原件摘要匹配、源表唯一绑定、旧投影逐项相等时，通过有备份的事务恢复并复验；无证据的结构错误仍须如实报告。落地：`app/workflow/question_draft.py::_source_table_rows`、`app/workflow/self_heal_actions.py::_prepare_tables`。
 17. **格式诊断必须区分失败与延期检查**：最终上传格式检查优先读取 `07_review/upload-format.json.errors`，显示错误码、题组标识和具体原因；`deferred/warnings` 不得冒充本地阻断。报告缺损时回退日志中的结构化错误，不能从末尾抓一句“必须”当失败原因。知识点目录快照/媒体部署等延期项仍须在真实上传准备时检查，不得为修本地卡点放宽远端校验。落地：`app/workflow/diagnose.py::_format_detail`、`app/workflow/format_gate.py`。
 
+18. **Harness 运维为附加能力**：新增异常接手不得替换原录题、自愈、审核和上传功能；关闭或不可用时原流程继续。运维只在批次身份、尝试和写锁有效时调用受控动作，未知请求先查回执，不盲重发。模型自述、会话空闲或安排重试不能当成恢复，必须以当前产物的真实复验为准。未知代码缺陷保留复现证据，不直接修改运行中的插件，不自动上传发布。落地：`app/workflow/operations.py`、`lib/operations-agent.js`；说明见 `app/docs/harness-operations.md`。
+
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 
 ## 三、变更记录制度（强制）
