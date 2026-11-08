@@ -44,3 +44,31 @@
 ## 回退
 
 还原 `manifest.is_stale` / `handoff` 的输入绑定段 / `record_semantics` 即可。
+
+## 追加（2026-11-08）：过期状态不再阻碍上传
+
+用户要求“过期/内容变化状态不要阻碍批次上传”。据此调整上传前检查
+（`workbench/server.py::_check_upload_preconditions`）：
+
+- 去掉 `is_stale(validate)` 门槛：不再因为 validate 产物内容变化/过期就拒绝上传；
+  只要 `validate` 曾 `completed` 即放行。
+- 保留其它“内容对不对”的硬校验：批次标签校验、试卷结构校验、审核状态确认
+  （有审核差异时仍需用户在界面确认上传，带 attempt_token 通过）。
+- 内容正确性由用户自行把关；本改动不自动上传远端、不改产物。
+
+验证：23 卷（validate=completed 但 is_stale=True）上传前检查不再报“已过期”；
+带确认 token 时通过（仅剩审核差异的正常确认）。
+
+## 追加2（2026-11-08）：未完成审核/审核差异也不阻碍上传
+
+用户再次强调（此前已强调过，本次补记入规则）：**未完成审核也不影响批次上传到题库服务器**。
+据此改 `workbench/server.py::_check_upload_preconditions`：
+
+- 去掉 `elif not summary.get('passed'): raise '该批次尚未完成审核'` 硬拦截；
+  未完成审核/有审核差异时照常允许上传。
+- 仅在“已带确认令牌但审核 revision 变了”时提示重新确认（防误传旧版本），不硬挡。
+- 保留内容硬校验：validate 需曾 completed、批次标签、试卷结构。
+
+已同步写入根 `AGENTS.md` 硬规则 3 与 `CHANGELOG/RULES.md`（2026-11-08 条）。
+验证：23 卷（review_gate=needs_review、审核未 passed）不带 token 上传前检查通过；
+真实 revision+token 也通过。

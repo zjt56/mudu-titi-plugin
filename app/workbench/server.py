@@ -1362,14 +1362,14 @@ def _check_upload_preconditions(folder, unreviewed_revision, attempt_token):
     from workflow.label_audit import inspect_file
     state = manifest.load(folder)
     summary = runner.unreviewed_summary(folder, state)
-    if attempt_token:
-        if not unreviewed_revision or summary.get('revision') != unreviewed_revision:
-            raise ValueError('审核状态已变化，请重新查看并确认上传')
-    elif not summary.get('passed'):
-        raise ValueError('该批次尚未完成审核，请先确认是否上传')
-    stale, reason = manifest.is_stale(folder, state, contracts.STAGE_BY_ID['validate'])
-    if state.get('stages', {}).get('validate', {}).get('status') != manifest.COMPLETED or stale:
-        raise ValueError('批次校验未通过或已过期：' + str(reason or '请重新校验'))
+    # 用户明确要求：未完成审核 / 有审核差异 都不阻碍上传到题库服务器。
+    # 只在“已带确认令牌但审核revision变了”时提示重新确认，不做硬拦截。
+    if attempt_token and (not unreviewed_revision or summary.get('revision') != unreviewed_revision):
+        raise ValueError('审核状态已变化，请重新查看并确认上传')
+    # 用户要求：内容过期/变化（is_stale）不阻碍上传——只要 validate 曾通过（completed）
+    # 即可上传；内容正确性由用户自己把关。标签/结构等“内容对不对”的硬校验仍在下面执行。
+    if state.get('stages', {}).get('validate', {}).get('status') != manifest.COMPLETED:
+        raise ValueError('批次校验未通过：请先完成本地体检（validate）')
     labels = inspect_file(folder / '06_batch' / 'batch_meta.json')
     if not labels.get('passed'):
         raise ValueError('批次标签校验未通过，请先检查标签')
