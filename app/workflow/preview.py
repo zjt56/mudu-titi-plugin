@@ -202,37 +202,74 @@ def slice_range(lines: list[str], numbers) -> list[str]:
         return []
 
     # 从首题向上补回共享材料；明确材料标题/分段导语是本组的起点。
+    # `[TABLE N]…[/TABLE]` 无论前面是 A/B 分段标签还是 `※Notes：1.…2.…` 备注，
+    # 都整块属于本组材料；先找到表格起点，再继续向上找分段标签。
+    # 若首题上方紧邻表格块（表格正文里没有 `（）56.` 形式的题号行），
+    # 先把整块表格纳入，再继续向上找 A/B 分段标签与备注。
     top = start
-    for cursor in range(start - 1, -1, -1):
+    cursor = start - 1
+    pending_table = None
+    while cursor >= 0:
         text = _plain(lines[cursor]).strip()
+        if "[/TABLE]" in text:
+            target = cursor
+            for back in range(cursor, -1, -1):
+                if "[TABLE" in _plain(lines[back]):
+                    target = back
+                    break
+            top = target
+            cursor = target - 1
+            continue
         if SECTION.match(text) or _strong_number(text) is not None or BARE_OPTION.match(text):
             break
-        if _weak_numbers(text) and not set(_weak_numbers(text)).issubset(nums):
-            break
+        # 表格前的备注/说明（如 `※Notes：1.…`）属于本组材料，弱题号不构成其他题。
         top = cursor
         if material_label(text):
             top = material_start(lines, cursor)
             break
         if guide_numbers(text):
             break
+        cursor -= 1
 
     chunk = []
+    in_table = False
     for cursor in range(top, len(lines)):
         line = lines[cursor]
         plain = _plain(line).strip()
-        if cursor > top and (SECTION.match(plain) or (cursor > start and material_label(plain))):
-            break
+        # 表格材料（[TABLE N]…[/TABLE]）内部的行即使像 `A` 这类段落标签，也属于
+        # 本组共享材料，必须原样保留；不能因 material_label 判定把表格截断。
+        if plain.startswith("[TABLE"):
+            in_table = True
+        if not in_table:
+            if cursor > top and (SECTION.match(plain) or (cursor > start and material_label(plain))):
+                break
+            if cursor > start and LEADIN.match(plain) and not guide_numbers(line):
+                break
         found = _strong_number(line)
         if found is not None and found not in nums:
             break
         refs = guide_numbers(line)
         if refs and not set(refs).issubset(nums):
             break
-        if cursor > start and LEADIN.match(plain) and not refs:
-            break
         chunk.append(line)
+        if plain.startswith("[/TABLE]"):
+            in_table = False
+    # 顶部独立的 A/B 分段标签本身不是正文；但表格里的同名行已在 in_table 内保留。
     # 空行不是选项块结束的证据；带括号/画线/粗体的末题和 A.–D. 均完整保留。
-    return [line.rstrip() for line in chunk if line.strip() and not material_label(line)]
+    out = []
+    in_table = False
+    for line in chunk:
+        plain = _plain(line).strip()
+        if plain.startswith("[TABLE"):
+            in_table = True
+        if not line.strip():
+            continue
+        if not in_table and material_label(line):
+            continue
+        out.append(line.rstrip())
+        if plain.startswith("[/TABLE]"):
+            in_table = False
+    return out
 
 
 def source_slice(batch_dir, numbers, lines: list[str] | None = None) -> list[str]:

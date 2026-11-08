@@ -35,6 +35,7 @@
 | 2026-11-08 | [2026-11-08-explanation-binding-fix.md](2026-11-08-explanation-binding-fix.md) | （中间方案，已被 direct-copy 取代）放宽解析严格来源校验的历史留痕 |
 | 2026-11-08 | [2026-11-08-format-hints-not-blocking.md](2026-11-08-format-hints-not-blocking.md) | 格式小问题（下划线/空档/表格写法）只提示不阻断；题号题干对不上等实质错误仍阻断 |
 | 2026-11-08 | [2026-11-08-review-difference-kept.md](2026-11-08-review-difference-kept.md) | 更正：一审/二审与原标签不一致必须待审核；移除把真实差异当“过期结论”的过滤 |
+| 2026-11-08 | [2026-11-08-preview-keeps-group-material.md](2026-11-08-preview-keeps-group-material.md) | 预览切片不再丢题号前的表格/材料（2024 卷首篇阅读只剩选项的根因） |
 | 2026-11-08 | [2026-11-08-explanation-reference-authority.md](2026-11-08-explanation-reference-authority.md) | 解析来源唯一性：PDF/OCR 副本不再与 Word 权威来源竞争；闸门诊断指明具体检查项 |
 | 2026-11-08 | [2026-11-08-normalized-stage-fingerprints.md](2026-11-08-normalized-stage-fingerprints.md) | 阶段复用用规范化输出签名，消除 JSON 序列化噪声导致的重跑；精确绑定与真实内容验收保留 |
 | 2026-11-08 | [2026-11-08-group-material-table-span.md](2026-11-08-group-material-table-span.md) | 修复表格型阅读题组 material 丢失（A8） |

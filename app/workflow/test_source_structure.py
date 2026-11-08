@@ -257,6 +257,24 @@ class SourceBoundaryRegressionTest(unittest.TestCase):
         self.assertEqual(second["source_expected_options"], 0)
         self.assertIn("用英语回答", "\n".join(slice_range(body.splitlines(), [71, 72])))
 
+    def test_reading_table_material_before_first_question_is_not_dropped(self):
+        """首题上方是 [TABLE] 材料（前有 A 标签与 ※Notes 备注）时必须整块保留。"""
+        body = ("Ⅷ.阅读理解(共3小题)\n"
+                "第一节 阅读下列短文，从每小题所给的A、B、C、D四个选项中选出最佳选项。\n"
+                "A\n[TABLE 2]\nWATER SAFETY FOR ALL<br>Join us in July.\nFamily | Water | Safety\n[/TABLE]\n"
+                "※Notes：1.register（登记）　2.contact（联系）\n"
+                "（　）56.When is the Celebration？\nA.On Sunday.\tB.On Monday.\nC.On Wednesday.\tD.On Friday.\n"
+                "（　）57.At what age can a child join？\nA.6.\tB.8.\nC.10.\tD.12.\n"
+                "（　）58.What can we learn？\nA.It keeps open.\tB.It teaches skills.\n"
+                "C.It is free.\tD.It has two programs.\n")
+        chunk = "\n".join(slice_range(body.splitlines(), [56, 57, 58]))
+        self.assertIn("[TABLE 2]", chunk)
+        self.assertIn("WATER SAFETY FOR ALL", chunk)
+        self.assertIn("※Notes", chunk)
+        self.assertIn("56.When is the Celebration", chunk)
+        # 材料在题目之前，顺序不能颠倒。
+        self.assertLess(chunk.index("[TABLE 2]"), chunk.index("56.When is the Celebration"))
+
     def test_final_audit_rejects_lost_table_image_and_word_underline(self):
         body = ("Ⅰ.阅读理解(共1小题)\nA\n[TABLE 1]\nName | Value\nSun | Bright\n[/TABLE]\n"
                 "This <u>marked</u> word matters. [IMG figure.png]\n56. Choose?\nA.One B.Two C.Three D.Four\n")
