@@ -154,14 +154,24 @@ def run_all(skill_root: Path, batch_json: Path, inputs: dict,
             if result["script"] == "scripts/06-upload/check_answers.py":
                 result["input_basis"] = "原答案PDF经正式答案阶段提取的JSON；本项比较装配结果与提取答案，不声称直接解析PDF。"
                 result["answer_artifact"] = effective_inputs["answers"]["path"]
+    # 需要原文的检查（画线/解析/提示标记/正文保真）拿不到 source 时会被跳过；
+    # 跳过不能按“没报错=通过”处理，否则单项体检会静默放行。
+    source_required = [c for c in selected if "source" in c.needs]
+    source_missing = (not inputs.get("source", {}).get("exists")
+                      and bool(source_required))
     blocking_failures = [r for r in results if r["blocking"] and not r["passed"]]
+    if source_missing:
+        blocking_failures.append({"check": "原卷来源缺失（SOURCE_INPUT_MISSING）",
+                                  "blocking": True, "passed": False,
+                                  "output": "需要原文的检查无 source，无法完成逐题核对",
+                                  "note": "直接跑单项体检时也要提供 --source"})
     warnings = [r for r in results if (not r["blocking"] and not r["passed"]) or r.get("warnings")]
     return {
         "passed": not blocking_failures,
         "batch": str(batch_json),
         "checks": results,
         "blocking_failures": [r["check"] for r in blocking_failures],
-        "warnings": [r["check"] for r in warnings],
+        "warnings": [r["check"] for r in warnings] + (["SOURCE_INPUT_MISSING"] if source_missing else []),
         "skipped": skipped,
     }
 
