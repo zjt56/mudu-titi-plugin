@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-08 | [2026-11-08-writing-preview-no-duplicate.md](2026-11-08-writing-preview-no-duplicate.md) | 书面表达预览只补切片之前的导语，修复题干/要求/配图重复，原始与正式数据不变 |
 | 2026-11-08 | [2026-11-08-review-capability-keeps-differences.md](2026-11-08-review-capability-keeps-differences.md) | 修复图片能力提示吞掉程序标签差异；2015 卷第 6–10 题补回待审，整卷队列 14 条逐项一致 |
 | 2026-11-08 | [2026-11-08-blind-review-label-absence.md](2026-11-08-blind-review-label-absence.md) | 修复盲审隐藏标签被误判缺失；无依据结论自动局部补审、2015 卷重建队列并保留真实差异 |
 | 2026-11-08 | [2026-11-08-explanation-binding-fix.md](2026-11-08-explanation-binding-fix.md) | （中间方案，已被 direct-copy 取代）放宽解析严格来源校验的历史留痕 |

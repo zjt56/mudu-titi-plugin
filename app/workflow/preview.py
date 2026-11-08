@@ -347,7 +347,10 @@ def section_leadin(lines: list[str], numbers, first_line: str | None = None) -> 
     if title_idx is None:
         return []
     lead = [lines[title_idx].rstrip()]
-    for i in range(title_idx + 1, len(lines)):
+    # The slice already owns everything from anchor onward. Reading beyond it
+    # copies unnumbered writing prompts, bullet requirements and images into
+    # the lead-in a second time. Keep only source lines strictly before anchor.
+    for i in range(title_idx + 1, anchor):
         line = lines[i]
         text = _plain(line).strip()
         if not text:

@@ -27,6 +27,7 @@
    - 自动结果在闸门报告记录顺延编号的来源与依据，不伪称印刷题号或人工核验。其它结构矛盾和题干不符仍按其自身问题处理，不能借顺延规则放过。
    - 顺延编号不代表核对过页图、版面、题图或听力；独立的 OCR、版面或题干真实性问题不能因此消失。隔离回归为 `python3 -m unittest workflow.test_structure_number_inference workflow.test_structure_gate workflow.test_source_structure workflow.test_structure_closure workflow.test_structure_checks`，不运行真实批次以避免改写其闸门产物。
 8. 切片保留作答说明、表格、图片引用、段落和原文画线；大题标题、整卷说明、重复卷名、答案附录与题目正文分开。
+   - 独立题补大题标题/导语时，`section_leadin` 只能读取题目切片首行锚点之前的源行，不能把无印刷题号作文的题干、圆点要点、图片、注意事项再当导语补一遍。原文内部真实重复内容必须保留，禁止全局文本去重。回归覆盖原文→`source_slice`→`server.detail.source_preview`→`preview_blocks`，并验证原文和正式批次字节不变（`workflow.test_writing_preview`）。
 9. 正式批次的题干/材料/逐题选项必须再次对照确认结构。只修工作台预览不能证明已修复批次数据。
 
 ## 结构疑点与非阻断候选
