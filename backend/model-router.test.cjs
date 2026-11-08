@@ -95,8 +95,11 @@ test('router script has no hardcoded substitute model', () => {
   assert.equal(text.includes('deepseek-v4-pro'), false);
 });
 
-test('plugin agent config requests high part concurrency without API-level throttling', () => {
+test('plugin agent config 按本地资源保守设置并发，不按 API 限流', () => {
   const config = JSON.parse(readFileSync(join(__dirname, 'local-agent.plugin.json'), 'utf8'));
-  assert.equal(config.part_concurrency, 16);
-  assert.equal(config.review_part_parallel, 16);
+  // 每个分片都是独立 dsh 进程；16 路在 16GB 机器上曾把整机压到内存紧张并导致宿主重启，
+  // 因此改为 4。这是本地资源保护，不是按 provider 速率上限做 API 限流。
+  assert.equal(config.part_concurrency, 4);
+  assert.equal(config.review_part_parallel, 4);
+  assert.match(config._concurrency_note || '', /内存/);
 });
