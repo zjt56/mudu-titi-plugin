@@ -55,3 +55,4 @@
 - 落地：`app/workflow/question_draft.py::_bound_source` 增加 group span 整窗分支；`CHANGELOG/2026-11-08-group-material-table-span.md`。
 - 边界：只修 group 材料绑定；不改题目内容/答案/标签；表格材料用 `[TABLE ...]` 原样保留，A8 要求 group 有 material + subquestions。
 | 2026-11-08 | **格式小问题不阻断流程**：用户原话“标点符号呀、下划线呀，这些在流程通过性上都是小问题，只要不是大错误就行”；只有题目/题干/题号对不上才是大问题。据此把下划线/答题线占位、全角空档、`<br>`、首字母间距、表格列数/空档写法等降为 `[W…` 提示，不阻断 validate。 | `app/scripts/_common.py::report`（软提示不阻断）；`scripts/06-upload/check_underline.py`、`check_tables.py`、`check_text.py`、`audit_sentence_blanks.py`；`workflow/checks.py` blocking=False；根 `AGENTS.md` 硬规则 9；`CHANGELOG/2026-11-08-format-hints-not-blocking.md` |
+| 2026-11-08 | **本规则写入程序**：上述“格式小问题不阻断”不是只在文档里说明，而是落在检查器代码——`app/scripts/_common.py::report` 的软提示机制、`check_underline`/`check_tables`/`check_text`/`audit_sentence_blanks` 的 `[W…` 前缀、`workflow/checks.py` 的 `blocking=False`。用户要求：“写到程序的规则里面”。 | 程序落地位置同上；`CHANGELOG/2026-11-08-format-hints-not-blocking.md` |
