@@ -83,3 +83,11 @@ class AtomicManifestTest(unittest.TestCase):
         mf.save(self.batch, {"value": "new"})
         self.assertTrue(self.path.is_symlink())
         self.assertEqual(mf.load(self.batch)["value"], "new")
+
+    def test_sha256_cache_invalidates_when_file_changes(self):
+        path = self.batch / "payload.txt"
+        path.write_text("before", encoding="utf-8")
+        first = mf.sha256_file(path)
+        self.assertEqual(mf.sha256_file(path), first)
+        path.write_text("after", encoding="utf-8")
+        self.assertNotEqual(mf.sha256_file(path), first)

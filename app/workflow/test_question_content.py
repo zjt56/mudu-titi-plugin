@@ -71,6 +71,12 @@ class InlineOptionTest(unittest.TestCase):
 
 
 class OptionBoundaryTest(unittest.TestCase):
+    def test_question_number_can_touch_inline_option_a(self):
+        from workflow.question_content import question_parts
+        part = question_parts(
+            ["39.A.first B.second C.third D.fourth"], 39)
+        self.assertEqual([o["label"] for o in part["options"]], list("ABCD"))
+
     def test_trailing_summary_is_not_absorbed_into_last_option(self):
         from workflow.question_content import question_parts
         unit_stem = ("(　　)55.A.realize\tB.enjoy\t\tC.forget\tD.celebrate\n"

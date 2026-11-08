@@ -34,6 +34,7 @@
 |---|---|---|
 | 2026-11-08 | [2026-11-08-explanation-binding-fix.md](2026-11-08-explanation-binding-fix.md) | （中间方案，已被 direct-copy 取代）放宽解析严格来源校验的历史留痕 |
 | 2026-11-08 | [2026-11-08-normalized-stage-fingerprints.md](2026-11-08-normalized-stage-fingerprints.md) | 阶段复用用规范化输出签名，消除 JSON 序列化噪声导致的重跑；精确绑定与真实内容验收保留 |
+| 2026-11-08 | [2026-11-08-performance-cleanup.md](2026-11-08-performance-cleanup.md) | 低风险哈希提速、行内选项兼容与本地产物忽略 | 
 | 2026-11-08 | [2026-11-08-onboarding-wizard.md](2026-11-08-onboarding-wizard.md) | 新增「初始化引导」页：六项体检 + 听力模型一键安装/更新 |
 | 2026-11-08 | [2026-11-08-listening-no-phonetics.md](2026-11-08-listening-no-phonetics.md) | 听力关键词语选择不再标「语音」知识点（语音是语音题考点） |
 | 2026-11-08 | [2026-11-08-audio-fastpath-and-br-newline.md](2026-11-08-audio-fastpath-and-br-newline.md) | 修复听力切段快路脱敏误判、装配 `<br>` 换行被 B10 拦 |

@@ -243,7 +243,9 @@ def _required_stem(text: str) -> str:
     return "\n".join(lines)
 
 
-INLINE_OPTION = re.compile(r"(?<=\s)([A-H])[.．、]\s*\S")
+# Inline option A may follow whitespace or a question-number separator (e.g. ``39.A.first``).
+# Keep the boundary non-word so ordinary prose such as ``DATA.`` is not mistaken for an option.
+INLINE_OPTION = re.compile(r"(?<!\w)([A-H])[.．、]\s*\S")
 
 
 def option_block_start(lines: list[str]) -> tuple[int, int] | None:

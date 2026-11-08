@@ -19,6 +19,12 @@ __pycache__/
 *.tmp
 node_modules/
 
+# 本地验证、记忆与人工备份，不属于发布代码
+/.mnemon/
+/.verification/
+/app/workflows/
+/app/workflow/batch_fill.py.bak
+
 
 # 随插件分发的运行时二进制（体积大，发布前用 fetch_vendor.py 拉进 vendor，不进 git）
 app/audio/vendor/python/

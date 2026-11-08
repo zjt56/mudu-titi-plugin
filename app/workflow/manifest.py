@@ -23,6 +23,12 @@ MANIFEST_VERSION = "1.0"
 DELIVERY_VERSION = "1.0"
 DELIVERY_FILENAME = "delivery.json"
 
+# Hashes are requested repeatedly while the scheduler inspects dependencies and
+# review evidence. Cache only by filesystem metadata; any size/mtime change
+# automatically forces a fresh digest, so validation semantics stay unchanged.
+_FILE_DIGEST_CACHE = {}
+_FILE_DIGEST_CACHE_LIMIT = 4096
+
 # Inputs consumed directly by a stage but not represented by its immediate
 # dependency's declared outputs. Keeping these bindings here prevents stale
 # review conclusions when source/labels change without a stage rerun.
@@ -74,13 +80,27 @@ def delivery_path(batch_dir: Path) -> Path:
 
 def sha256_file(path) -> str:
     path = Path(path)
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return ""
     if not path.is_file():
         return ""
+    key = (str(path.resolve()), stat_result.st_size, stat_result.st_mtime_ns)
+    cached = _FILE_DIGEST_CACHE.get(key)
+    if cached is not None:
+        return cached
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    # Keep only a bounded process-local cache. Old metadata keys are harmless,
+    # but clearing prevents a long-lived backend from retaining every revision.
+    if len(_FILE_DIGEST_CACHE) >= _FILE_DIGEST_CACHE_LIMIT:
+        _FILE_DIGEST_CACHE.clear()
+    _FILE_DIGEST_CACHE[key] = value
+    return value
 
 
 def load(batch_dir) -> dict:
