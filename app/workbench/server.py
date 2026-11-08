@@ -210,6 +210,7 @@ def source_lines(folder):
 def source_blocks(lines):
     blocks = []
     table = None
+    pending_images = []
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("[TABLE"):
@@ -219,11 +220,22 @@ def source_blocks(lines):
             if table is not None:
                 blocks.append({"type": "table", "rows": table})
                 table = None
+            # 表格单元格内的图片紧跟在表格之后渲染，保持原有阅读顺序。
+            blocks.extend(pending_images)
+            pending_images = []
             continue
         if table is not None:
-            cells = [cell.strip() for cell in line.split("|")]
+            # 表格单元格里也可能嵌图片（如 `[IMG image10.jpeg]<br>Weather`）。
+            # 图片必须先抽成独立图块，否则会被当作单元格文本，正文里就看不到图。
+            cell_images = []
+            for match in re.finditer(r"\[IMG\s+([^\]]+)\]", line):
+                cell_images.append({"type": "image", "name": Path(match.group(1).strip()).name})
+            cells = [cell.strip() for cell in re.sub(r"\[IMG\s+[^\]]+\]", "", line).split("|")]
             if any(cells):
                 table.append(cells)
+            if cell_images:
+                # 表格结束后按原顺序追加图块，保证图片仍在本单元材料内可预览。
+                pending_images.extend(cell_images)
             continue
         cursor = 0
         for match in re.finditer(r"\[IMG\s+([^\]]+)\]", line):
