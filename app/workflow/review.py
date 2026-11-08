@@ -1383,7 +1383,15 @@ def _is_capability_gap(finding) -> bool:
     must not enter manual review or block the gate. A finding that actually names a
     label/answer conflict still counts even if it also mentions an image.
     """
-    source = (finding.get("round_sources") or [{}])[0]
+    sources = finding.get("round_sources") or []
+    # compare() emits structured field/value observations only after proving a
+    # real original/labels/sample difference. Reviewer prose about unseen media
+    # cannot erase that program-derived disagreement, even with verdict="ok".
+    if finding.get("field") in {"type", "subtypes", "knowledge"} and any(
+            isinstance(s, dict) and s.get("field") == finding["field"] and "value" in s
+            for s in sources):
+        return False
+    source = sources[0] if sources else {}
     text = " ".join(str(source.get("rationale") or "").split())
     reason = str(finding.get("reason") or "")
     blob = text + " " + reason

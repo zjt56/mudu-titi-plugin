@@ -145,6 +145,51 @@ class ConsensusTest(unittest.TestCase):
         self.assertFalse(result['passed'])
 
     @patch.object(review, '_verify_round_sources', return_value=None)
+    def test_real_label_differences_survive_media_capability_prose(self, _verify_sources):
+        for rid in review.ROUND_IDS:
+            for field, value in (
+                    ('knowledge', self.knowledge + ['设题角度/阅读/细节理解']),
+                    ('type', '任务型阅读'), ('subtypes', ['选择4题'])):
+                with self.subTest(round=rid, field=field):
+                    payload = self.payload()
+                    check = next(r for r in payload['rounds'] if r['round_id'] == rid)['checks'][0]
+                    check['assessment'][field] = value
+                    if field == 'type':
+                        check['assessment']['subtypes'] = ['阅读问答']
+                    check['rationale'] = '根据原文独立判断标签；图片未实际查看，仅据占位和文本判断。'
+                    result = review.evaluate_rounds(self.batch, payload)
+                    self.assertTrue(result['execution_completed'], result['errors'])
+                    self.assertFalse(result['passed'])
+                    differences = [f for f in result['findings'] if f['field'] == field]
+                    self.assertEqual(len(differences), 1, result)
+                    self.assertFalse(review._is_capability_gap(differences[0]))
+                    self.assertFalse(any(f.get('field') == field for f in result['informational']))
+
+    @patch.object(review, '_verify_round_sources', return_value=None)
+    def test_media_related_difference_is_written_to_manual_queue(self, _verify_sources):
+        from workflow import ingest
+        payload = self.payload()
+        check = payload['rounds'][0]['checks'][0]
+        check['assessment']['knowledge'].append('设题角度/阅读/细节理解')
+        check['rationale'] = '图片未实际查看，仅据文本独立判断知识点。'
+        ingest.build_review_files(self.batch, {'review_rounds': payload}, reconcile_rounds=True)
+        queue = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
+        self.assertEqual([(x['unit_id'], x['field']) for x in queue], [('g', 'knowledge')])
+        self.assertEqual(queue[0]['status'], 'open')
+
+    @patch.object(review, '_verify_round_sources', return_value=None)
+    def test_agreement_with_only_media_uncertainty_stays_informational(self, _verify_sources):
+        payload = self.payload()
+        check = payload['rounds'][0]['checks'][0]
+        check['verdict'] = 'uncertain'
+        check['rationale'] = '无法确认图片与选项的对应关系，未实际查看图片。'
+        result = review.evaluate_rounds(self.batch, payload)
+        self.assertTrue(result['execution_completed'], result['errors'])
+        self.assertTrue(result['passed'], result['errors'])
+        self.assertEqual(result['findings'], [])
+        self.assertEqual(len(result['informational']), 1)
+
+    @patch.object(review, '_verify_round_sources', return_value=None)
     def test_group_disagreement_one_finding_and_knowledge_order_ignored(self, _verify_sources):
         payload = self.payload()
         # 知识点顺序不是判断差异：反转后仍应视为一致。
