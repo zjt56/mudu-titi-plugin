@@ -36,6 +36,7 @@
 | 2026-11-08 | [2026-11-08-review-difference-kept.md](2026-11-08-review-difference-kept.md) | 更正：一审/二审与原标签不一致必须待审核；移除把真实差异当“过期结论”的过滤 |
 | 2026-11-08 | [2026-11-08-explanation-reference-authority.md](2026-11-08-explanation-reference-authority.md) | 解析来源唯一性：PDF/OCR 副本不再与 Word 权威来源竞争；闸门诊断指明具体检查项 |
 | 2026-11-08 | [2026-11-08-normalized-stage-fingerprints.md](2026-11-08-normalized-stage-fingerprints.md) | 阶段复用用规范化输出签名，消除 JSON 序列化噪声导致的重跑；精确绑定与真实内容验收保留 |
+| 2026-11-08 | [2026-11-08-table-image-in-cell.md](2026-11-08-table-image-in-cell.md) | 表格图片与文字放回同一单元格 |
 | 2026-11-08 | [2026-11-08-table-row-images-tiny.md](2026-11-08-table-row-images-tiny.md) | 表格图片按行归位并缩为极小缩略图 |
 | 2026-11-08 | [2026-11-08-preview-table-image-and-size.md](2026-11-08-preview-table-image-and-size.md) | 修复表格内图片预览缺失，并缩小原卷图片显示 |
 | 2026-11-08 | [2026-11-08-review-stale-snapshot-fix.md](2026-11-08-review-stale-snapshot-fix.md) | 修复审核旧快照和盲审脱敏导致的误报待审 |

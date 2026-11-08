@@ -219,21 +219,26 @@ def source_blocks(lines):
             continue
         if stripped.startswith("[/TABLE]"):
             if table is not None:
-                # table_images 与 rows 按行对齐；每行可有 0..N 张图片。
-                blocks.append({"type": "table", "rows": table, "rowImages": table_images})
+                # table_images 与 rows 同形：table_images[行][列] = 该单元格的图片名列表。
+                blocks.append({"type": "table", "rows": table, "cellImages": table_images})
                 table = None
                 table_images = []
             continue
         if table is not None:
             # 表格单元格里也可能嵌图片（如 `[IMG image10.jpeg]<br>Weather`）。
-            # 每一行的图片必须留在该行内渲染（不能移到表格外），否则位置错乱。
-            row_images = [Path(m.group(1).strip()).name
-                          for m in re.finditer(r"\[IMG\s+([^\]]+)\]", line)]
-            cleaned = re.sub(r"\[IMG\s+[^\]]+\]", "", line)
-            cells = [cell.strip() for cell in cleaned.split("|")]
-            if any(cells) or row_images:
+            # 图片必须留在它原本所在的单元格内，与同一单元格的文字一起渲染。
+            # 因此按单元格切分后，逐单元格收集其图片名。
+            cell_images = []
+            cells = []
+            for raw_cell in line.split("|"):
+                names = [Path(m.group(1).strip()).name
+                         for m in re.finditer(r"\[IMG\s+([^\]]+)\]", raw_cell)]
+                cleaned = re.sub(r"\[IMG\s+[^\]]+\]", "", raw_cell).strip()
+                cells.append(cleaned)
+                cell_images.append(names)
+            if any(cells) or any(cell_images):
                 table.append(cells)
-                table_images.append(row_images)
+                table_images.append(cell_images)
             continue
         cursor = 0
         for match in re.finditer(r"\[IMG\s+([^\]]+)\]", line):
@@ -261,10 +266,13 @@ def attach_media(blocks, folder, name):
             block["url"] = media_url(block["name"])
             continue
         if block.get("type") == "table":
-            row_images = block.get("rowImages") or []
-            block["rowImages"] = [
-                [{"name": image_name, "url": media_url(image_name)} for image_name in row]
-                for row in row_images
+            grid = block.get("cellImages") or []
+            block["cellImages"] = [
+                [
+                    [{"name": image_name, "url": media_url(image_name)} for image_name in cell]
+                    for cell in row
+                ]
+                for row in grid
             ]
     return blocks
 
