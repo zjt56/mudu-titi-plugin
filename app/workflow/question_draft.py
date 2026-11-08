@@ -217,6 +217,28 @@ def _bound_source(unit, source, cleaned, fresh):
     text = str(unit.get("stem") or "").strip()
     span = unit.get("source_span") or {}
     lines = cleaned.splitlines()
+    # A grouped unit's material (article/table/rubric) lives between the section
+    # start and its first question number. When the confirmed span is trusted,
+    # bind the WHOLE span window as the source text so the leading material is
+    # not dropped; the group branch in build() then splits it into material +
+    # children. Restrict to groups: a standalone question owns only its own stem.
+    if unit.get("unit_kind") == "group" and span.get("basis") in ("ai_classified", "cleaned_source"):
+        start, end = span.get("start_line"), span.get("end_line")
+        if type(start) is int and type(end) is int and 1 <= start <= end <= len(lines):
+            window = lines[start - 1:end]
+            located = _locate_in_window(text, window, start)
+            if located is not None:
+                first, last, skipped = located
+                # Keep the full confirmed span window (material + questions);
+                # locate only proves the stem is inside it, it must NOT shrink
+                # the leading article/table material away.
+                whole = "\n".join(lines[start - 1:end]).strip()
+                proof = {"basis": "group_span_window",
+                         "line_basis": "denoise.clean_body(01_source/正文.txt)",
+                         "start_line": start, "end_line": end}
+                if skipped:
+                    proof["material_labels_skipped"] = True
+                return whole, proof
     if span.get("basis") == "ai_classified":
         start, end = span.get("start_line"), span.get("end_line")
         if not (type(start) is int and type(end) is int and 1 <= start <= end <= len(lines)):
