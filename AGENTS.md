@@ -42,6 +42,7 @@
 13. **题组材料必须在题号前完整绑定**：group（题组）从原卷绑定来源时，必须使用**完整 confirmed span 窗口（文章/表格/导语 + 题目）**；定位 stem 只能证明其在窗内，绝不得据此从首个题号起截取、把题号前的材料丢掉（否则 group 的 `material` 为空、装配报 A8）。`source_span.basis` 为 `ai_classified` 或 `cleaned_source` 均属可信边界；standalone 仍只绑定自身题干。表格材料用 `[TABLE ...]` 原样保留。落地：`app/workflow/question_draft.py::_bound_source`。
 
 14. **预览不得丢题组材料**：原卷预览按题号切出的片段必须包含题号之前的共享材料（文章、`[TABLE N]` 表格、`※Notes` 备注、分段 A/B 标签）；预览切片不得因“段落标签/弱题号”把表格或正文截掉，也不得把材料排到题目之后。只影响预览与只读核对，不改题目数据。落地：`app/workflow/preview.py::slice_range`。
+    **数据完整 ≠ 展示完整**：修复“内容丢失”类问题必须同时验证①批次数据字段、②每一层消费/展示输出（预览切片、`source_blocks`、payload），只验证一层不算通过；并且必须补一条覆盖该链路的回归测试，避免同类问题再次漏检。
 
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 
