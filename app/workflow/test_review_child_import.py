@@ -26,8 +26,14 @@ class ChildImportTest(unittest.TestCase):
         self.fixture.write('03_types/types.json', {'items': [{'unit_id': 'g', 'type': '单项填空', 'subtypes': ['四个选项']}]})
         self.fixture.write('04_knowledge/knowledge.json', {'items': [{'unit_id': 'g', 'knowledge': self.knowledge['knowledge'], 'subquestions': [{'number': str(n), 'knowledge': []} for n in range(1, 16)]}]})
         self.fixture.write('01_source_ans/answers.json', {'answers': {str(n): 'A' for n in range(1, 16)}, 'difficulty': {str(n): '容易' for n in range(1, 16)}})
+        # Sampling is deliberately independent of source bytes. Vary the
+        # synthetic unit topology, not irrelevant paper text, to include table 1.
         for salt in range(100):
-            self.fixture.write('01_source/正文.txt', f'Paper {salt}\n' + self.stem + '\n')
+            self.uid = f'g-{salt}'
+            self.fixture.write('01_source/structure.confirmed.json', {'units': [{'unit_id': self.uid, 'unit_kind': 'group', 'numbers': list(range(1, 16)), 'stem': self.stem}]})
+            self.fixture.write('03_types/types.json', {'items': [{'unit_id': self.uid, 'type': '单项填空', 'subtypes': ['四个选项']}]})
+            self.fixture.write('04_knowledge/knowledge.json', {'items': [{'unit_id': self.uid, 'knowledge': self.knowledge['knowledge'], 'subquestions': [{'number': str(n), 'knowledge': []} for n in range(1, 16)]}]})
+            self.fixture.write('01_source/正文.txt', 'Paper\n' + self.stem + '\n')
             plan = review.prepare_round_plan(self.batch)
             if any(q['number'] == '1' for q in plan['sample']):
                 self.plan = plan
@@ -48,7 +54,7 @@ class ChildImportTest(unittest.TestCase):
             task = review_rounds.export_task(self.batch)
             self.assertEqual(task.get('round_id'), rid, task)
             checks = []
-            for target in (sample if rid == 'sample' else [{'unit_id': 'g'}]):
+            for target in (sample if rid == 'sample' else [{'unit_id': self.uid}]):
                 numbers = [target['number']] if rid == 'sample' else [str(n) for n in range(1, 16)]
                 assessment = self.assessment(numbers)
                 quote = 'Shared passage.'

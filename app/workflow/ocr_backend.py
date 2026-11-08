@@ -387,6 +387,21 @@ def read_pdf(source: Path, output_dir: Path, config=None) -> dict:
 inspect_pdf = read_pdf
 
 
+def _printable_ratio(text):
+    """Share of letters/digits/CJK among non-space characters.
+
+    A PDF whose fonts lack a usable ToUnicode map yields a "text layer" made of
+    punctuation and stray glyphs. That layer is unreadable evidence, so the page
+    must go to OCR instead of being trusted as source text.
+    """
+    characters = [c for c in text if not c.isspace()]
+    if not characters:
+        return 0.0
+    readable = sum(1 for c in characters if c.isalpha() or c.isdigit()
+                   or "\u4e00" <= c <= "\u9fff")
+    return readable / len(characters)
+
+
 def _quality_reasons(text):
     reasons = []
     if len(text.strip()) < 80:
@@ -396,14 +411,43 @@ def _quality_reasons(text):
     # Latin/alphanumeric runs only: continuous CJK paragraphs are legitimate.
     if re.search(r"[A-Za-z0-9]{40,}", text):
         reasons.append("long_glued_run")
+    if len(text.strip()) >= 80 and _printable_ratio(text) < 0.55:
+        reasons.append("garbled_text_layer")
     return reasons
+
+
+def _bbox_close(first, second, tolerance=1.0):
+    try:
+        return all(abs(float(a) - float(b)) <= tolerance for a, b in zip(first, second))
+    except (TypeError, ValueError):
+        return False
+
+
+def _inline_match(blocks, bbox):
+    """Find the dictionary block for an inline image, tolerating bbox rounding."""
+    if not bbox:
+        return None
+    exact = next((b for b in blocks if tuple(b.get("bbox") or ()) == tuple(bbox)), None)
+    if exact is not None:
+        return exact
+    return next((b for b in blocks if _bbox_close(b.get("bbox") or (), bbox)), None)
+
+
+def _preview(page, output, number, preview_dpi, pymupdf=None):
+    if pymupdf is None:
+        import pymupdf  # local import keeps this module's CLI import light
+    path = output / f"page-{number:04d}-preview.png"
+    scale = min(preview_dpi / 72, 2400 / max(page.rect.width, page.rect.height, 1))
+    page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csRGB,
+                    alpha=False).save(str(path))
+    return str(path)
 
 
 def _pdf_worker(source, output, preview_dpi):
     import pymupdf
 
     output = Path(output)
-    pages = []
+    pages, warnings = [], []
     with pymupdf.open(str(source)) as document:
         if document.needs_pass:
             raise OCRBackendError("PDF is encrypted and requires a password")
@@ -416,22 +460,36 @@ def _pdf_worker(source, output, preview_dpi):
                     blocks.append({"bbox": list(block[:4]), "text": block[4], "type": "text"})
             images = []
             inline_blocks = None
+            unexported = 0
             for index, image in enumerate(page.get_image_info(xrefs=True), 1):
                 xref = image.get("xref", 0)
-                if xref:
-                    extracted = document.extract_image(xref)
-                    if not extracted or not extracted.get("image"):
-                        raise OCRBackendError(f"Cannot export embedded image xref {xref} on page {number}")
-                    image_bytes, extension = extracted["image"], extracted["ext"]
-                else:
-                    if inline_blocks is None:
-                        inline_blocks = [b for b in page.get_text("dict")["blocks"] if b.get("type") == 1]
-                    matching = next((b for b in inline_blocks if tuple(b["bbox"]) == tuple(image["bbox"])), None)
-                    if matching is None:
-                        raise OCRBackendError(f"Cannot export inline image on page {number}")
-                    image_bytes, extension = matching["image"], matching["ext"]
-                if not re.fullmatch(r"[A-Za-z0-9]+", extension):
-                    raise OCRBackendError("Invalid embedded image extension")
+                # An image that cannot be exported is evidence to review, not a
+                # reason to discard the whole page's text layer. Record it and
+                # route the page to OCR/preview review instead.
+                try:
+                    if xref:
+                        extracted = document.extract_image(xref)
+                        if not extracted or not extracted.get("image"):
+                            raise ValueError(f"embedded image xref {xref} has no bytes")
+                        image_bytes, extension = extracted["image"], extracted["ext"]
+                    else:
+                        if inline_blocks is None:
+                            inline_blocks = [b for b in page.get_text("dict")["blocks"]
+                                             if b.get("type") == 1]
+                        matching = _inline_match(inline_blocks, image.get("bbox"))
+                        if matching is None:
+                            raise ValueError("inline image has no matching dictionary block")
+                        image_bytes, extension = matching["image"], matching["ext"]
+                    if not re.fullmatch(r"[A-Za-z0-9]+", str(extension or "")):
+                        raise ValueError("invalid embedded image extension")
+                except Exception as exc:  # noqa: BLE001 - never lose readable text
+                    unexported += 1
+                    warnings.append({"page": number, "image_index": index, "xref": xref,
+                                     "bbox": list(image.get("bbox") or []),
+                                     "code": "IMAGE_EXPORT_FAILED",
+                                     "message": str(exc)[:300],
+                                     "note": "图片未能导出为证据；该页需版面/OCR 复核，文字层仍保留"})
+                    continue
                 path = output / f"page-{number:04d}-image-{index:03d}.{extension}"
                 path.write_bytes(image_bytes)
                 images.append({"path": str(path), "bbox": list(image["bbox"]), "xref": xref,
@@ -444,11 +502,15 @@ def _pdf_worker(source, output, preview_dpi):
                 page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csRGB,
                                 alpha=False).save(str(path))
                 preview = str(path)
+            if unexported:
+                reasons = list(dict.fromkeys([*reasons, "unexported_image"]))
+                preview = preview or _preview(page, output, number, preview_dpi)
             pages.append({"page": number, "text": text, "method": "text", "blocks": blocks,
-                          "images": images, "width": page.rect.width, "height": page.rect.height,
+                          "images": images, "unexported_images": unexported,
+                          "width": page.rect.width, "height": page.rect.height,
                           "needs_ocr": bool(reasons), "quality_reasons": reasons, "preview": preview})
     (output / "result.json").write_text(json.dumps({"source": str(source), "pages": pages,
-                                                   "warnings": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+                                                   "warnings": warnings}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

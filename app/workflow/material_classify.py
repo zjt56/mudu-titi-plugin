@@ -112,6 +112,8 @@ def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=
     batch = Path(batch_dir)
     manifest = mf.load(batch)
     inputs = manifest.get("inputs", {})
+    authority_path = str((inputs.get("source") or {}).get("path") or "")
+    word_authority = Path(authority_path).suffix.lower() == ".docx"
     seen = {}
     docs = []
     # 优先收集显式声明的答案/解析，再是正文，最后是其它文档。
@@ -133,18 +135,28 @@ def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=
             source_path = batch / source_path
         text = (_document_text(batch, str(source_path)) if ocr_report is None else
                 _document_text(batch, str(source_path), ocr_report=ocr_report))
+        # Input authority is independent of the detected text role. Keep answer
+        # text available by input/text_path while PDF wording cannot replace Word.
+        reference = word_authority and source_path.suffix.lower() == ".pdf"
+        authority = ({"content_authority": key == "source", "authority_input": "source"}
+                     if word_authority else {})
         if text is None:
-            results.append({"input": key, "path": path, "role": "other", "source": "unavailable",
+            results.append({"input": key, "path": path,
+                            "role": "structure_reference" if reference else "other",
+                            "source": "unavailable", **authority,
                             "error": "文档文字提取失败，原附件已保留，不能视为已完成解析"})
             continue
         role, source = _classify_one(text, invoke_fn, config)
+        if reference:
+            authority["content_role"] = role
+            role = "structure_reference"
         # Preserve every uploaded document's complete text layer as an independent
         # hand-off. It must not be reduced to the current confirmed question range.
         material_dir = batch / "01_source" / "materials"
         material_dir.mkdir(parents=True, exist_ok=True)
         material_path = material_dir / f"{key}.txt"
         material_path.write_text(text, encoding="utf-8")
-        results.append({"input": key, "path": path, "role": role, "source": source,
+        results.append({"input": key, "path": path, "role": role, "source": source, **authority,
                         "chars": len(text), "source_sha256": mf.sha256_file(source_path),
                         "text_sha256": mf.sha256_file(material_path),
                         "text_path": material_path.relative_to(batch).as_posix()})

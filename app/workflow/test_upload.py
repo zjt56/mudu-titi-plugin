@@ -12,11 +12,10 @@ from workflow.test_upload_payload import batch as payload_fixture, catalog_snaps
 
 
 def valid_batch():
-    # These cases exercise freezing/approval/network boundaries. Keep their
-    # content fixture valid under F7 so a missing explanation does not mask
-    # the behavior each test is intended to verify.
+    # Freeze/approval/network cases use absent optional content; AI-generated
+    # text is forbidden and would hide the boundary each case exercises.
     data = payload_fixture()
-    data['items'][0]['explanation'] = '本题考查名词用法，依据示例句语境选择A项。（AI生成，待校对）'
+    data['items'][0]['explanation'] = '无'
     return data
 
 
@@ -44,6 +43,12 @@ class UploadFlowTest(unittest.TestCase):
         gate = self.state['stages']['upload_gate']
         gate.update(status=mf.APPROVED, approved_batch_sha256=mf.sha256_file(self.source))
         gate.update(upload.approval_binding(self.batch, config=self.settings))
+
+    def test_local_preflight_writes_offline_summary(self):
+        report = upload.local_preflight(self.batch)
+        self.assertIn("passed", report)
+        self.assertIn("network_checked", report)
+        self.assertTrue((self.batch / "07_upload/local-preflight.json").is_file())
 
     def test_frozen_wire_preserves_source_and_submits_exact_approved_bytes(self):
         original = self.source.read_bytes(); self.prepare(); self.approve()
@@ -168,6 +173,31 @@ class UploadFlowTest(unittest.TestCase):
         self.source.write_text(json.dumps(source, ensure_ascii=False))
         report = upload.prepare(self.batch, catalog=self.catalog, config=self.settings)
         self.assertFalse(report['passed'])
+        self.assertFalse((self.batch / '07_upload/plan.json').exists())
+        self.client.return_value.submit.assert_not_called()
+
+    def test_generated_or_unverified_content_never_freezes_or_posts(self):
+        for field in ('explanation', 'articleSummary'):
+            for value in ('自撰内容没有原文来源。', '生成内容（AI生成，待校对）'):
+                with self.subTest(field=field, value=value):
+                    source = valid_batch()
+                    source['items'][0][field] = value
+                    self.source.write_text(json.dumps(source, ensure_ascii=False))
+                    report = upload.prepare(self.batch, catalog=self.catalog, config=self.settings)
+                    self.assertFalse(report['passed'], report)
+                    self.assertFalse(report['content_source']['passed'])
+                    self.assertFalse((self.batch / '07_upload/plan.json').exists())
+                    self.assertFalse(upload.local_preflight(self.batch)['content']['passed'])
+                    self.client.return_value.submit.assert_not_called()
+
+    def test_original_explanation_cannot_be_omitted_before_freezing(self):
+        source_dir = self.batch / '01_source'
+        source_dir.mkdir()
+        (source_dir / '正文.txt').write_text('81. She reads a book.', encoding='utf-8')
+        (source_dir / '附录.txt').write_text('81.A 【解析】来源提供的完整解析。', encoding='utf-8')
+        report = upload.prepare(self.batch, catalog=self.catalog, config=self.settings)
+        self.assertFalse(report['passed'], report)
+        self.assertIn('ORIGINAL_EXPLANATION_OMITTED', {row['code'] for row in report['content_source']['errors']})
         self.assertFalse((self.batch / '07_upload/plan.json').exists())
         self.client.return_value.submit.assert_not_called()
 

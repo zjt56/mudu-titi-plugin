@@ -51,6 +51,12 @@ class StructureHumanClosureTest(unittest.TestCase):
         self.root = Path(self.temp.name); self.batch = self.root / 'paper'
         src = self.batch / '01_source'; src.mkdir(parents=True)
         (src / '正文.txt').write_text('Ⅹ.书面表达(共1小题)\n假定你是李辉。\nYours,\nLi Hui\n', encoding='utf-8')
+        # 结构 AI 是生产主路径；这些用例验证确定性闸门，不能因为本机
+        # 配置了模型路由就发起真实调用（会把测试拖慢并占用执行锁）。
+        import os as _os
+        from unittest.mock import patch as _patch
+        _offline = _patch.dict(_os.environ, {'WF_STRUCTURE_AI': '0'})
+        _offline.start(); self.addCleanup(_offline.stop)
         (src / 'structure.json').write_text(json.dumps({'unresolved': [
             {'code': 'QUESTION_NUMBER_INFERRED', 'line': 1, 'message': '作文无印刷题号'}],
             'sections': [], 'groups': []}, ensure_ascii=False), encoding='utf-8')

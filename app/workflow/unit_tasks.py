@@ -1,7 +1,7 @@
-"""Bound unit partitions for local assemble/review calls.
+"""Bound unit partitions for local labeling, assemble and review calls.
 
-Raw source, rules and ancillary evidence remain intact in every prompt. Only
-well-known unit-indexed upstream artifacts are reduced. All parts are merged
+Labeling may omit other uniquely source-bound units using unit_context; unknown
+evidence stays global. Assemble/review retain raw source. All parts are merged
 and passed through the ordinary whole-batch importer before installation.
 """
 import copy
@@ -40,14 +40,14 @@ def compact_extraction(value):
     return _compact_extraction(value)
 
 
-_SPLIT_STAGES = ("assemble", "review", "explanations", "knowledge")
+_SPLIT_STAGES = ("assemble", "review", "types", "explanations", "knowledge")
 
 
 def build_parts(batch, stage, max_input_chars, max_units=15):
     if isinstance(max_units, bool) or not isinstance(max_units, int) or max_units < 1:
         raise ValueError("max_units must be a positive integer")
     if stage not in _SPLIT_STAGES:
-        raise ValueError("Unit splitting supports assemble, review, explanations and knowledge only")
+        raise ValueError("Unit splitting supports assemble, review, types, explanations and knowledge only")
     base = agent_tasks.build_task(batch, stage, max_input_chars=sys.maxsize)
     if base["preconditions"]:
         return base, []
@@ -64,12 +64,28 @@ def build_parts(batch, stage, max_input_chars, max_units=15):
     ids = [u["unit_id"] for u in units]
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate confirmed unit IDs")
+    from . import unit_context
+    projection = unit_context.prepare(batch, stage, context, base["input_hashes"])
 
     def make(selected):
         chosen = {u["unit_id"] for u in selected}
         numbers = {str(n) for u in selected for n in u["numbers"]}
-        subset = copy.deepcopy(context)
+        if projection is not None:
+            subset = projection.project(selected)
+        elif stage in unit_context.STAGES:
+            subset = unit_context.project_indexed(context, selected)
+        else:
+            subset = copy.deepcopy(context)
         subset["confirmed_units_with_stable_ids"] = selected
+        feedback = subset.get("repair_feedback")
+        if feedback is not None and not feedback["all_units"]:
+            affected = [uid for uid in feedback["unit_ids"] if uid in chosen]
+            if affected:
+                feedback["unit_ids"] = affected
+                feedback["feedback_by_unit"] = {uid: feedback["feedback_by_unit"][uid] for uid in affected}
+            else:
+                # Absence must be exact: an empty key would miss a valid snapshot.
+                subset.pop("repair_feedback")
         paths = [agent_tasks.ARTIFACTS[name] for name in ("types", "explanations", "knowledge", "audio", "assemble")]
         paths.append("06_batch/batch_meta.json")
         for path in paths:
@@ -101,6 +117,14 @@ def build_parts(batch, stage, max_input_chars, max_units=15):
         if "01_source/extraction.json" in subset:
             subset["01_source/extraction.json"] = _compact_extraction(subset["01_source/extraction.json"])
         extra = ""
+        if stage == "explanations":
+            # Matching source explanations needs content rules and selected types,
+            # not the knowledge taxonomy, even with an older task producer.
+            for key in (*_ASSEMBLE_DROP, "skills-reference/type-knowledge-map.md", "textbook_index"):
+                subset.pop(key, None)
+            extra = ("按所选 unit_id、确认题号及 source_bindings 定位正文，答案 evidence 仅为来源定位线索；"
+                     "它们不证明解析或大意归属。原解析/文章大意仍须结合完整来源的章节与材料边界核实，"
+                     "不得仅凭重复的 A/B 篇号匹配。未证明归属的原始来源完整保留，引用其原始行号。\n")
         if stage == "assemble":
             for key in _ASSEMBLE_DROP:
                 subset.pop(key, None)
@@ -128,7 +152,18 @@ def build_parts(batch, stage, max_input_chars, max_units=15):
             raise ValueError("A single unit with complete source and required rules exceeds max_input_chars; no source was truncated")
     if selected:
         parts.append({"unit_ids": [u["unit_id"] for u in selected], "prompt": make(selected)})
+    if projection is not None:
+        for part in parts:
+            part["cache_scope"] = {"version": unit_context.VERSION, "guards": projection.guards}
+            # Exact raw evidence freshness is deliberately outside cache identity.
+            part["freshness_guards"] = projection.freshness_guards
     return base, parts
+
+
+def check_part_inputs(batch, part):
+    """Freshness of conservative evidence, including newly appeared media/files."""
+    from . import unit_context
+    unit_context.check_guards(batch, part)
 
 
 def validate_part(batch, stage, part, response):
@@ -138,6 +173,9 @@ def validate_part(batch, stage, part, response):
     semantic validation remains mandatory on the merged whole-batch candidate.
     """
     merged = merge(stage, [part], [response])
+    if stage == "types" and response["status"] == "completed":
+        selected = [u for u in agent_tasks.confirmed_units(batch) if u["unit_id"] in part["unit_ids"]]
+        agent_tasks._types(merged["artifacts"][agent_tasks.ARTIFACTS[stage]], selected)
     if stage in ("assemble", "explanations", "knowledge") and response["status"] == "completed":
         units = {u["unit_id"]: u for u in agent_tasks.confirmed_units(batch)}
         for row in merged["artifacts"][agent_tasks.ARTIFACTS[stage]]["items"]:
@@ -151,7 +189,7 @@ def merge(stage, parts, responses):
     if stage not in _SPLIT_STAGES or len(parts) != len(responses) or not parts:
         raise ValueError("Invalid unit-part responses")
     path = agent_tasks.ARTIFACTS[stage]
-    item_artifacts = stage in ("assemble", "explanations", "knowledge")
+    item_artifacts = stage in ("assemble", "types", "explanations", "knowledge")
     merged = {"status": "completed", "artifacts": {path: {"items": []}}, "notes": [], "findings": []}
     if not item_artifacts:
         merged["artifacts"][path] = {"findings": [], "checked_units": [], "unchecked": []}

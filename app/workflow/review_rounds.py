@@ -20,8 +20,8 @@ from .local_agent import _agent_lock, _check_input_hashes, invoke, load_config
 
 # Bumped whenever the prompt builder or blind context changes, so stale
 # partition states and bindings are never reused silently.
-CONTEXT_VERSION = "blind-context-v10"
-PROMPT_VERSION = "review-prompt-v8"
+CONTEXT_VERSION = "blind-context-v11"
+PROMPT_VERSION = "review-prompt-v9"
 
 
 ARTIFACT = "review_round"
@@ -53,6 +53,11 @@ def _save(batch, relative, data):
     _atomic(_path(batch, relative), _encoded(data))
 
 
+def _effective_round_plan(batch):
+    """Resume verified unchanged whole-plan evidence without reissuing rounds."""
+    return review.resolve_round_plan(batch)[0]
+
+
 def _existing(batch, plan):
     path = _path(batch, "07_review/" + review.ROUND_FILE)
     if not path.is_file():
@@ -62,7 +67,7 @@ def _existing(batch, plan):
             or not isinstance(payload.get("rounds"), list)):
         # Keep stale evidence in its existing file until the first new real
         # result is imported; exported tasks always start from the current plan.
-        return {"plan": plan, "rounds": []}
+        return review.rebase_rounds(batch, payload, plan)
     # Corrupt/duplicate records are not evidence, but must not prevent fresh
     # independent work. The original file is archived when a new result lands.
     evaluated = review.evaluate_rounds(batch, payload)
@@ -95,6 +100,10 @@ def _next(batch, plan, skip_rounds=()):
         if round_id not in evaluated["checked_rounds"] and round_id not in skip_rounds:
             return round_id, None
     if evaluated['execution_completed']:
+        path = _path(batch, "07_review/" + review.ROUND_FILE)
+        if path.is_file() and _load(path.read_bytes()) != payload:
+            _atomic(_path(batch, "workflow/review-history/" + uuid.uuid4().hex + ".json"), path.read_bytes())
+            _save(batch, "07_review/" + review.ROUND_FILE, payload)
         # Resume reuses real bound records, but refreshes their derived queue even
         # when the current rules yield no findings. Retired comparisons are archived.
         ingest.build_review_files(batch, {'findings': evaluated['findings']}, reconcile_rounds=True)
@@ -105,13 +114,19 @@ def _next(batch, plan, skip_rounds=()):
                   "completed": evaluated["execution_completed"], "quality_passed": evaluated["passed"], "review": evaluated}
 
 
+def _agent_roles():
+    """审核轮次也使用内置审核员角色段落，保持角色提示词单一来源。"""
+    from . import agent_roles
+    return agent_roles
+
+
 def _round_prompt(round_id, targets, context):
     instruction = ("【执行状态与质量分开】全部TARGETS都已逐项检查并给出check后，顶层status=completed，哪怕某条check因图片未见、答案冲突或证据不足而verdict=uncertain/error。这表示本轮执行完毕，不表示质量通过；保留真实疑点，绝不能改成ok来过关。只有尚未执行/未覆盖目标时顶层status=needs_review，并在notes说明未覆盖目标。"
-                   "独立盲判统一标签：依据原卷、材料、选项、答案与解析判断主类、子类、组级知识点及每道目标小题难度；整组题型不判子题知识点（子题 knowledge=[]），独立单题才判自身知识点。"
-                   "assessment={type:string,subtypes:[string],knowledge:[full paths],subquestions:[{number:string,knowledge:[full paths]}],difficulty:[{number:string,value:容易|适中|困难}]}。"
+                   "独立盲判统一标签：依据原卷、材料、选项、答案与解析判断主类、子类、组级知识点；难度、来源、地区、年份及分类元数据不参与审核；整组题型不判子题知识点（子题 knowledge=[]），独立单题才判自身知识点。"
+                   "assessment={type:string,subtypes:[string],knowledge:[full paths],subquestions:[{number:string,knowledge:[full paths]}]}。"
                    "单题 subquestions=[]；整篇题组列出目标子题且其 knowledge=[]。一审覆盖单元全部小题；二审对整组题只做组级核对（整组抽取、不拆小题），对独立单题仅列抽中小题，不宣称同组其他小题已审核。"
                    "knowledge 路径必须逐字取自供给目录（references/knowledge-catalog.json），不得自造更深的子级：目录里 '语用/情景交际' 已是叶子时只能写它，不能写 '语用/情景交际/询问目的'；某维度没有合法叶子就不写该维度。"
-                   "整篇题型（阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话）只判定组级知识点与难度，其子题 knowledge=[]。"
+                   "整篇题型（阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话）只判定组级知识点，其子题 knowledge=[]。"
                    "无法判断标签时使用 verdict=uncertain、assessment=null 并说明具体原因及可核验证据，继续审其他目标；不得猜测。"
                    "【标签分层口径·必须遵守】以组题为准的单元在组级挂体裁/主题/内容标签，subquestions[].knowledge 允许为空数组；"
                    "这是合规设计而非缺陷，严禁因『子题知识点为空/考点未落到小题』生成 error、uncertain 或整改要求。"
@@ -120,7 +135,7 @@ def _round_prompt(round_id, targets, context):
                    "【引证口径】quote 必须是绑定文件的逐字连续片段，不得改写原文的单复数、所有格、拼写或标点，先在给定正文中逐字定位再复制。"
                    + ("二审还须提供 source_comparison:string，说明目标与原文、答案的对照；"
                       "二审目标是整组题（阅读理解/完形填空/任务型阅读/补全对话/听力信息转换/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解等）时，"
-                      "TARGETS 里该目标 number=null，请整组核对、只给组级标签与组级难度（difficulty 覆盖组内全部题号），subquestions 逐小题列出但 knowledge=[]，"
+                      "TARGETS 里该目标 number=null，请整组核对、只给组级标签，subquestions 逐小题列出但 knowledge=[]，"
                       "check 省略 number，不拆成逐小题 check、不做小题二审；目标是独立单题时每条 check 必须带 number 字段，取值与 TARGETS 中该目标的 number 完全一致。"
                       if round_id == 'sample' else ""))
     check_shape = ("{unit_id,number?,verdict:ok|error|uncertain,rationale,evidence:[{path,locator,quote}],assessment}"
@@ -146,12 +161,14 @@ def _round_prompt(round_id, targets, context):
         "For listening, read the COMPLETE relevant dialogue in 02_audio/full-transcript.json, including the response, not just the first question or audio-map preview sentence. A transcript is text evidence, not proof of hearing audio. Never infer a contradiction from a question alone when its response resolves it. "
         "Do not claim images were seen from placeholders or audio heard from a transcript; record specific limitations without inventing mismatches. "
         "status=completed means this round was executed, even if it found errors. Missing review evidence => needs_review; never clear it.\n"
-        + "ROUND: " + round_id + "\n" + instruction + "\nTARGETS: " + json.dumps(targets, ensure_ascii=False)
+        + "ROUND: " + round_id + "\n" + instruction
+        + _agent_roles().section("review", "07_review/agent-review.json", round_id)
+        + "\nTARGETS: " + json.dumps(targets, ensure_ascii=False)
         + "\nBEGIN SUPPLIED CONTENT" + context + "END SUPPLIED CONTENT\nReturn JSON only."
     )
 
 
-def _source_excerpts(source, selected):
+def _source_excerpts(source, selected, force=False, adjacent_units=()):
     """Return exact, located unit spans, or the whole source when proof fails."""
     if not isinstance(source, str) or not selected:
         return source
@@ -196,8 +213,14 @@ def _source_excerpts(source, selected):
             if unit.get('unit_kind') == 'group' and _strong_number(needle[0]) is not None:
                 return source
             following = next((line for line in lines[last + 1:] if line.strip()), None)
+            next_unit = any(other.get('unit_id') != unit.get('unit_id')
+                            and isinstance(other.get('stem'), str) and other['stem'].strip()
+                            and other['stem'] in source and source.count(other['stem']) == 1
+                            and following is not None
+                            and other['stem'].splitlines()[0].strip() == following.strip()
+                            for other in adjacent_units)
             if following is not None and not (_strong_number(following) is not None
-                    or SECTION.match(following) or material_label(following)):
+                    or SECTION.match(following) or material_label(following) or next_unit):
                 return source  # e.g. omitted options, images, tables or continuation
             if first and material_label(lines[first - 1]):
                 first -= 1
@@ -220,7 +243,7 @@ def _source_excerpts(source, selected):
                         for first, last in merged]}
     # Small papers can cost more in span metadata than they save in source text.
     encode = lambda value: json.dumps(value, ensure_ascii=False, separators=(',', ':'))
-    return result if len(encode(result)) < len(encode(source)) else source
+    return result if force or len(encode(result)) < len(encode(source)) else source
 
 
 def _transcript_excerpt(transcript, evidence, chosen):
@@ -371,12 +394,16 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
                 answers.pop('difficultyEvidence', None)
             # Free-form validation diagnostics can contain the original labels.
             subset.pop('07_review/validation-report.json', None)
+            subset.pop('01_source/metadata.json', None)
             # The assembled batch repeats provenance (upload-only) and the
             # explanation text that is already supplied separately; drop those
             # copies from the blind review context to shrink each prompt.
             for key in ('06_batch/batch_meta.json', '06_batch/batch.json'):
                 value = subset.get(key)
                 items = value.get('items') if isinstance(value, dict) else None
+                if isinstance(value, dict):
+                    for key in ('meta', 'metadata', 'source', 'source_type', 'title', 'name', 'categories', 'difficulty'):
+                        value.pop(key, None)
                 if isinstance(items, list):
                     for item in items:
                         if isinstance(item, dict):
@@ -540,7 +567,7 @@ def _check_bound_inputs(batch, task_id, plan=None):
     binding = _load(_path(batch, "workflow/review-bindings/" + task_id + ".json").read_bytes())
     if plan is None:
         try:
-            plan = review.prepare_round_plan(batch)
+            plan = _effective_round_plan(batch)
         except (ValueError, OSError, KeyError, TypeError) as exc:
             raise ReviewInputsChanged('Review inputs are no longer valid: ' + str(exc)) from exc
     if (binding.get('context_version') not in ('blind-context-v8', CONTEXT_VERSION)
@@ -573,7 +600,7 @@ def _repair_round(batch, task_id, config):
         raise ValueError("No repairable partial result")
     if partial.get('task_id') != task_id:
         raise ValueError('Repair task ID differs from its saved partial result')
-    plan = review.prepare_round_plan(batch)
+    plan = _effective_round_plan(batch)
     if plan["input_binding"] != partial.get("input_binding"):
         raise ReviewInputsChanged("Inputs changed; repair is not allowed")
     prompt, targets = _repair_context(batch, partial, plan)
@@ -637,8 +664,6 @@ def _write_part_package(batch, state, state_path, plan, input_hashes, index, fro
         "knowledge": dict(string_list, minItems=1),
         "subquestions": {"type": "array", "items": {"type": "object", "additionalProperties": False,
             "required": ["number", "knowledge"], "properties": {"number": {"type": "string"}, "knowledge": dict(string_list)}}},
-        "difficulty": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": False,
-            "required": ["number", "value"], "properties": {"number": {"type": "string"}, "value": {"enum": ["容易", "适中", "困难"]}}}},
     }
     assessment_schemas = {r: dict(common_assessment) for r in review.ROUND_IDS}
     assessment_schemas['sample']['source_comparison'] = {"type": "string", "minLength": 1}
@@ -673,7 +698,7 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
                  only_round=None):
     batch = Path(batch_dir)
     _recover_installs(batch)
-    plan = review.prepare_round_plan(batch)
+    plan = _effective_round_plan(batch)
     if only_round is not None:
         evaluated = review.evaluate_rounds(batch)
         if only_round in evaluated["checked_rounds"] or only_round in skip_rounds:
@@ -700,7 +725,10 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
             (batch / '01_source/正文.txt').read_text(encoding='utf-8-sig'))['types']
     except (OSError, ValueError):
         section_types = {}
-    state_key = [plan, round_id, input_hashes, CONTEXT_VERSION, PROMPT_VERSION]
+    previous_path = _path(batch, "07_review/" + review.ROUND_FILE)
+    previous = _load(previous_path.read_bytes()) if previous_path.is_file() else None
+    reused_checks, reuse = review.reusable_checks(batch, previous, plan, round_id)
+    state_key = [plan, round_id, input_hashes, CONTEXT_VERSION, PROMPT_VERSION, reuse]
     generation = _review_generation(batch, plan)
     if generation is not None:
         state_key.append(generation['nonce'])
@@ -719,14 +747,17 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
     else:
         budget = max_input_chars
         while True:
-            sample_units = {q['unit_id'] for q in plan['sample']} if round_id == 'sample' else None
+            reused_keys = {review._check_key(ref, round_id) for ref in reuse}
+            pending = ([q for q in plan['sample'] if review._check_key(q, round_id) not in reused_keys]
+                       if round_id == 'sample' else [uid for uid in plan['units'] if (uid, None) not in reused_keys])
+            pending_units = {q['unit_id'] for q in pending} if round_id == 'sample' else set(pending)
             unit_parts = _partition_contexts(base, budget, max_units_per_part, round_id,
-                                             sample_units, section_types)
+                                             pending_units, section_types)
             parts = []
             for part in unit_parts:
                 ids = set(part["unit_ids"])
-                targets = ([q for q in plan["sample"] if q["unit_id"] in ids] if round_id == "sample"
-                           else [uid for uid in plan["units"] if uid in ids])
+                targets = ([q for q in pending if q["unit_id"] in ids] if round_id == "sample"
+                           else [uid for uid in pending if uid in ids])
                 if not targets:
                     continue
                 parts.append({"targets": targets, "prompt": _round_prompt(round_id, targets, part["context"])})
@@ -742,7 +773,8 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
             part["task_id"] = "round-" + uuid.uuid4().hex
         state = {"plan": plan, "round_id": round_id, "prior_rounds": prior_rounds,
                  "input_hashes": input_hashes,
-                 "execution_id": "round-group-" + uuid.uuid4().hex, "parts": parts, "completed": []}
+                 "execution_id": "round-group-" + uuid.uuid4().hex, "parts": parts, "completed": [],
+                 "reuse": reuse, "reused_checks": reused_checks}
         frozen_digest = review.frozen_partition_digest(state)
         for index in range(len(parts)):
             _write_part_package(batch, state, state_path, plan, input_hashes, index, frozen_digest)
@@ -808,7 +840,7 @@ def _clear_pending(batch, task_id):
 def _finish_install(batch, transaction):
     """Replay a validated install intent; all steps are idempotent."""
     task_id = transaction['task_id']
-    plan = review.prepare_round_plan(batch)
+    plan = _effective_round_plan(batch)
     binding = _check_bound_inputs(batch, task_id, plan)
     record = transaction['record']
     findings = review._round_checks(record, record['round_id'], plan, batch, lenient=True)
@@ -848,7 +880,7 @@ def _recover_installs(batch):
     folder = _path(batch, 'workflow/review-transactions/.probe').parent
     if not folder.is_dir():
         return
-    plan = review.prepare_round_plan(batch)
+    plan = _effective_round_plan(batch)
     for path in sorted(folder.glob('round-*.json')):
         transaction = _load(_path(batch, 'workflow/review-transactions/' + path.name).read_bytes())
         task_id = transaction['task_id']
@@ -931,7 +963,7 @@ def _import_result(batch_dir, task_id, result):
     if binding.get('context_version') not in ('blind-context-v8', CONTEXT_VERSION):
         raise ValueError('Review context changed; export a new blind task')
     _check_bound_inputs(batch, task_id)
-    plan = review.prepare_round_plan(batch)
+    plan = _effective_round_plan(batch)
     if plan != binding["plan"]:
         raise ReviewInputsChanged("Round inputs changed; export a new task")
     current = _existing(batch, plan)
@@ -995,7 +1027,9 @@ def _import_result(batch_dir, task_id, result):
     all_parts = state["completed"] + [completed]
     record = {"round_id": round_id, "input_binding": plan["input_binding"],
               "execution_id": state["execution_id"] if len(all_parts) > 1 else task_id,
-              "checks": [check for entry in all_parts for check in entry["checks"]]}
+              "checks": [check for entry in all_parts for check in entry["checks"]] + state.get("reused_checks", [])}
+    if state.get("reuse"):
+        record["reuse"] = state["reuse"]
     if len(all_parts) > 1:
         record["parts"] = [{"execution_id": entry["task_id"], "targets": p["targets"]}
                            for entry, p in zip(all_parts, state["parts"])]
@@ -1301,7 +1335,7 @@ def _run(batch_dir, config=None, portable_max_input_chars=None):
     quota_hit = False
     retries = max(1, min(5, int(config.get("review_max_attempts", 1))))
     with _agent_lock(60):
-        _purge_stale_pending(Path(batch_dir), review.prepare_round_plan(batch_dir))
+        _purge_stale_pending(Path(batch_dir), _effective_round_plan(batch_dir))
     while True:
         configured_parallel = config.get("review_part_parallel",
                                             config.get("part_concurrency", 1))

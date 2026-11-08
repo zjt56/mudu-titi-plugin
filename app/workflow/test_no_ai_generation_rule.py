@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """用户规则（2026-11-05）：试卷没有解析/文章大意时不再使用 AI 生成，
-直接跳过，对应字段一律填「无」；留空、自撰、未标注生成内容仍按旧体检拦停。
+直接跳过，对应字段一律填「无」；留空可归一，自撰或标记生成内容拒绝。
 
 覆盖：提示规则、子智能体1校验、来源体检、上传来源检查、任务示例。
 """
@@ -78,15 +78,76 @@ class NoAiGenerationRuleTest(unittest.TestCase):
         result = checks.run_check(spec, Path(__file__).resolve().parents[1], batch, {})
         self.assertTrue(result['passed'], result)
 
-    def test_check_script_still_rejects_empty_and_unmarked_generated(self):
+    def test_check_script_rejects_generated_content_with_or_without_marker(self):
         spec = next(c for c in checks.CHECKS if 'check_explanations' in c.script)
-        for bad in ('', '自己写的解析没有来源也没有标注。'):
+        for bad in ('自己写的解析没有来源也没有标注。', '本题根据上下文判断。' + tasks.AI_MARK, tasks.AI_MARK):
             with self.subTest(bad=bad):
                 batch = self.batch / ('bad-' + str(abs(hash(bad))) + '.json')
                 batch.write_text(json.dumps({'items': [{'unit_id': 'q-1', 'question_type': '单项填空',
                                                         'answer': 'A', 'explanation': bad}]}, ensure_ascii=False), encoding='utf-8')
                 result = checks.run_check(spec, Path(__file__).resolve().parents[1], batch, {})
                 self.assertFalse(result['passed'])
+
+    def test_upload_strict_check_rejects_unsourced_and_ai_content(self):
+        from workflow.upload_content import inspect_content
+        for value in ('自己写的解析。', '这是生成内容' + tasks.AI_MARK):
+            with self.subTest(value=value):
+                payload = self.explanation(explanation=value)
+                before = json.dumps(payload, ensure_ascii=False)
+                self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
+                self.assertEqual(json.dumps(payload, ensure_ascii=False), before)
+
+    def test_missing_values_are_normalized_but_existing_original_cannot_be_erased(self):
+        for value in ('', None, '   '):
+            payload = self.explanation(explanation=value, articleSummary=value)
+            rows = content_rules.validate(payload, self.units, self.typed, self.batch)
+            self.assertEqual(rows['q-1']['explanation'], ABSENT)
+            self.assertEqual(rows['q-1']['articleSummary'], ABSENT)
+        self.write('01_source/附录.txt', '1.A 【解析】这里是原附录逐字给出的解析。')
+        with self.assertRaisesRegex(ValueError, 'ORIGINAL_EXPLANATION_OMITTED'):
+            content_rules.validate(self.explanation(), self.units, self.typed, self.batch)
+
+    def test_validate_restores_unique_word_fragment_in_original_payload(self):
+        source = 'A项:开始;B项:结束。'
+        self.write('01_source/附录.txt', '1.A 【解析】' + source)
+        self.write('01_source/materials/attachment_001.txt', '1.A 【解析】A项：开始；B项：结束。')
+        payload = self.explanation(explanation='A项：开始；B项：结束。')
+        rows = content_rules.validate(payload, self.units, self.typed, self.batch)
+        self.assertEqual(rows['q-1']['explanation'], source)
+        self.assertEqual(payload['items'][0]['explanation'], source)
+        self.assertTrue(any('原文恢复：01_source/附录.txt:1' in e for e in payload['items'][0]['evidence']))
+
+    def test_validate_restores_group_child_and_summary_from_authority(self):
+        self.write('01_source/正文.txt', '1. First question\n2. Second question\n')
+        self.write('01_source/附录.txt', '【文章大意】主题:旅行。\n1.A 【解析】原因:天气。\n2.B 【解析】时间:今天。\n')
+        self.write('01_source/materials/attachment_001.txt', '【文章大意】主题：旅行。\n1.A 【解析】原因：天气。\n2.B 【解析】时间：今天。\n')
+        units = [{'unit_id': 'group-1-2', 'unit_kind': 'group', 'numbers': [1, 2]}]
+        payload = {'items': [{'unit_id': 'group-1-2', 'explanation': '无', 'articleSummary': '主题：旅行。',
+                             'subquestions': [{'number': 1, 'explanation': '原因：天气。'},
+                                              {'number': 2, 'explanation': '时间：今天。'}], 'evidence': ['附录'] }]}
+        content_rules.validate(payload, units, {'group-1-2': {'type': '阅读理解'}}, self.batch)
+        row = payload['items'][0]
+        self.assertEqual(row['articleSummary'], '主题:旅行。')
+        self.assertEqual([c['explanation'] for c in row['subquestions']], ['原因:天气。', '时间:今天。'])
+        self.assertEqual(sum('原文恢复：' in e for e in row['evidence']), 3)
+
+    def test_explanation_import_installs_restored_source_not_pdf_candidate(self):
+        self.write('01_source/附录.txt', '1.A 【解析】原因:天气;时间:今天。')
+        self.write('01_source/materials/attachment_001.txt', '1.A 【解析】原因：天气；时间：今天。')
+        payload = self.explanation(explanation='原因：天气；时间：今天。')
+        result = tasks.accept_result(self.batch, 'explanations', {
+            'status': 'completed', 'artifacts': {tasks.ARTIFACTS['explanations']: payload},
+            'notes': [], 'findings': []})
+        self.assertTrue(result['completed'], result)
+        installed = json.loads((self.batch / tasks.ARTIFACTS['explanations']).read_text())
+        self.assertEqual(installed['items'][0]['explanation'], '原因:天气;时间:今天。')
+        self.assertTrue(any('原文恢复：' in e for e in installed['items'][0]['evidence']))
+
+    def test_validate_does_not_normalize_substantive_rewrite(self):
+        self.write('01_source/附录.txt', '1.A 【解析】原因:天气。')
+        payload = self.explanation(explanation='原因：时间。')
+        with self.assertRaisesRegex(ValueError, 'EXPLANATION_SOURCE_UNVERIFIED'):
+            content_rules.validate(payload, self.units, self.typed, self.batch)
 
     def test_task_examples_use_wu_not_ai_generation(self):
         # 导出任务会争用运行中的 agent 锁，这里直接核对示例载荷源码。

@@ -207,6 +207,86 @@ class UnitTasksTest(unittest.TestCase):
             _, parts = unit_tasks.build_parts("unused", "review", 1000000)
         self.assertEqual([len(p["unit_ids"]) for p in parts], [15, 15, 2])
 
+    def test_label_fallback_scopes_indexed_rows_but_keeps_all_original_evidence(self):
+        # Missing/raw-unmatched stems force the conservative full-source binding.
+        # Indexed draft rows must still stay local instead of duplicating the paper.
+        self.context.update({
+            "01_source/structure.confirmed.json": {"units": self.units},
+            "01_source/structure.json": {"groups": [
+                {"unit_id": "q-1", "numbers": [1], "stem": "selected structure"},
+                {"unit_id": "q-2", "numbers": [2], "stem": "UNRELATED-STRUCTURE"}]},
+            "06_batch/question-draft.json": {"input_hashes": {"whole": "digest"},
+                "content_sha256": "whole digest", "items": [
+                    {"unit_id": "q-1", "stem": "selected draft"},
+                    {"unit_id": "q-2", "stem": "UNRELATED-DRAFT"}],
+                "source_bindings": {"q-1": {"start_line": 10, "end_line": 14},
+                                    "q-2": {"start_line": 20, "end_line": 30}},
+                "issues": [{"unit_id": "q-2", "reason": "UNRELATED-ISSUE"},
+                           {"reason": "global warning"}]},
+            "incremental_gaps": {"unrelated": "UNRELATED-GAPS"},
+            "01_source/附录.txt": "A篇【文章大意】 original summary\n1.【解析】 original explanation",
+            "01_source/materials/attachment_001.txt": "Ambiguous section 2. original appendix",
+            "01_source/pdf-ocr.json": {"sources": [{"text": "complete layout evidence"}]},
+            agent_tasks.ARTIFACTS["answers"]: {"answers": {"1": "A", "2": "B"},
+                "evidence": {"1": ["附录 L2"], "2": ["UNRELATED-ANSWER-EVIDENCE"]}},
+        })
+        self.base["prompt"] = "header\n" + unit_tasks._BEGIN + json.dumps(self.context) + unit_tasks._END
+        for stage in ("types", "explanations", "knowledge"):
+            with self.subTest(stage=stage), patch.object(agent_tasks, "build_task", return_value=self.base):
+                base, parts = unit_tasks.build_parts("unused", stage, 1000000, max_units=1)
+                prompt = parts[0]["prompt"]
+                value = json.loads(prompt.split(unit_tasks._BEGIN, 1)[1].rsplit(unit_tasks._END, 1)[0])
+                self.assertNotIn("cache_scope", parts[0])
+                self.assertEqual(base["input_hashes"], {"source": "hash"})
+                for marker in ("UNRELATED-STRUCTURE", "UNRELATED-DRAFT", "UNRELATED-ISSUE",
+                               "UNRELATED-GAPS", "UNRELATED-ANSWER-EVIDENCE"):
+                    self.assertNotIn(marker, prompt)
+                for path in ("01_source/正文.txt", "01_source/附录.txt",
+                             "01_source/materials/attachment_001.txt", "01_source/pdf-ocr.json"):
+                    self.assertEqual(value[path], self.context[path])
+                draft = value["06_batch/question-draft.json"]
+                self.assertEqual(draft["source_bindings"], {"q-1": {"start_line": 10, "end_line": 14}})
+                self.assertEqual(draft["issues"], [{"reason": "global warning"}])
+                self.assertNotIn("input_hashes", draft)
+                self.assertNotIn("content_sha256", draft)
+                self.assertEqual(value[agent_tasks.ARTIFACTS["answers"]]["evidence"], {"1": ["附录 L2"]})
+
+    def test_label_fallback_prompt_scales_with_selected_rows(self):
+        def build(count, selected):
+            units = [{"unit_id": "q-%d" % n, "numbers": [n]} for n in range(1, count + 1)]
+            context = {"confirmed_units_with_stable_ids": units,
+                       "01_source/正文.txt": "unknown ownership: keep complete source",
+                       "01_source/structure.confirmed.json": {"units": units},
+                       "06_batch/question-draft.json": {"items": [
+                           {"unit_id": u["unit_id"], "stem": "text-%s-" % u["unit_id"] + "x" * 4000}
+                           for u in units]}}
+            base = dict(self.base, prompt="header\n" + unit_tasks._BEGIN + json.dumps(context) + unit_tasks._END)
+            with patch.object(agent_tasks, "build_task", return_value=base):
+                return unit_tasks.build_parts("unused", "explanations", 1000000, max_units=selected)[1][0]["prompt"]
+        one = build(20, 1)
+        self.assertEqual(one, build(40, 1))
+        self.assertGreater(len(build(20, 2)), len(one) + 4000)
+        self.assertNotIn("text-q-2-", one)
+
+    def test_explanations_drop_only_irrelevant_knowledge_rules(self):
+        self.context.update({"references/knowledge-catalog.json": {"leaf": "ALL-KNOWLEDGE-LEAVES"},
+                             "skills-reference/type-knowledge-map.md": "KNOWLEDGE-MAPPING",
+                             "skills-reference/type-taxonomy.md": "COMPLETE-TAXONOMY",
+                             "docs/content-labeling.md": "SOURCE-OWNERSHIP-RULES",
+                             "references/filter-framework.json": {"all_types": "COMPLETE-FRAMEWORK"}})
+        self.base["prompt"] = "header\n" + unit_tasks._BEGIN + json.dumps(self.context) + unit_tasks._END
+        for stage in ("types", "explanations", "knowledge"):
+            with patch.object(agent_tasks, "build_task", return_value=self.base):
+                _, parts = unit_tasks.build_parts("unused", stage, 1000000, max_units=1)
+            prompt = parts[0]["prompt"]
+            for required in ("COMPLETE-TAXONOMY", "SOURCE-OWNERSHIP-RULES", "COMPLETE-FRAMEWORK"):
+                self.assertIn(required, prompt)
+            for marker in ("ALL-KNOWLEDGE-LEAVES", "KNOWLEDGE-MAPPING"):
+                if stage == "explanations":
+                    self.assertNotIn(marker, prompt)
+                else:
+                    self.assertIn(marker, prompt)
+
     def test_missing_inputs_never_split(self):
         self.base["preconditions"] = ["missing source"]
         with patch.object(agent_tasks, "build_task", return_value=self.base):

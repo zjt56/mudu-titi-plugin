@@ -161,7 +161,7 @@ class ConsensusTest(unittest.TestCase):
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_incomplete_or_old_payload_cannot_pass(self, _verify_sources):
         payload = self.payload()
-        payload['rounds'][0]['checks'][0]['assessment'].pop('difficulty')
+        payload['rounds'][0]['checks'][0]['assessment'].pop('knowledge')
         self.assertFalse(review.evaluate_rounds(self.batch, payload)['execution_completed'])
         payload = self.payload()
         payload['plan']['protocol'] = 'upload-workflow.review-rounds/v1'

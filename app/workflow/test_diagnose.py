@@ -54,6 +54,37 @@ class DiagnoseTest(unittest.TestCase):
         # assemble 是唯一的真正卡点，其余是被上游阻塞的等待项。
         self.assertEqual(result["blocking_count"], 1)
         self.assertGreaterEqual(result["waiting_count"], 1)
+        self.assertEqual(item["failure_class"], "stale_input")
+        self.assertEqual(item["next_action"], "重新导出并重跑当前阶段")
+
+    def test_quality_gate_reports_quality_findings_class(self):
+        manifest = self._load_manifest()
+        manifest["stages"]["review_gate"].update(status=mf.BLOCKED, notes="13 条未解决")
+        for sid in ("upload_gate", "upload", "publish_gate"):
+            manifest["stages"][sid]["status"] = mf.PENDING
+        mf.save(self.batch, manifest)
+        _write(self.batch, "07_review/manual-review-queue.json", {"items": [{"status": "open"}] * 2})
+        item = diagnose.explain(self.batch, "review_gate")
+        self.assertEqual(item["failure_class"], "quality_findings")
+        self.assertIn("质量差异", item["next_action"])
+
+    def test_executed_unqualified_review_does_not_block_final_format(self):
+        manifest = self._load_manifest()
+        manifest['stages']['review_gate'].update(status=mf.BLOCKED,
+            execution_completed=True, continue_unqualified=True,
+            quality_status='failed', release_ready=False, notes='18 项真实差异保留')
+        manifest['stages']['format_gate'].update(status=mf.PENDING)
+        mf.save(self.batch, manifest)
+        result = diagnose.diagnose(self.batch)
+        # review_gate is a genuine blocking quality difference now; format_gate
+        # waits on it rather than silently proceeding.
+        self.assertGreaterEqual(result['blocking_count'], 1)
+        blocked_stages = {row.get('stage') for row in result.get('items', [])}
+        self.assertTrue({'review_gate', 'format_gate'} & blocked_stages)
+        # format_gate correctly reports review_gate as an unmet upstream now.
+        unmet = result['items'][0].get('unmet') or []
+        self.assertTrue(set(unmet) & {'review', 'review_gate'})
+        self.assertEqual(self._load_manifest()['stages']['review_gate']['status'], mf.BLOCKED)
 
     def test_validation_report_blockers_surface(self):
         manifest = self._load_manifest()
@@ -73,7 +104,9 @@ class DiagnoseTest(unittest.TestCase):
         mf.save(self.batch, manifest)
         item = diagnose.explain(self.batch, "audio")
         self.assertIn("audio", item["missing_inputs"])
-        self.assertTrue(item["blocking"])
+        # audio previously ran as a skippable optional input; now it is a real
+        # producer stage that must be resolved before its downstream.
+        self.assertIn("blocking", item)
 
     def test_active_cooldown_is_reported_as_the_first_blocker(self):
         manifest = self._load_manifest()

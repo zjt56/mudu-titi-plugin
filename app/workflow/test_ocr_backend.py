@@ -182,6 +182,13 @@ class OCRBackendTest(unittest.TestCase):
         self.assertIn("short_text", backend._quality_reasons("page 1"))
         self.assertIn("suspicious_characters", backend._quality_reasons("\ufffd" + "word " * 40))
         self.assertIn("long_glued_run", backend._quality_reasons("a" * 90))
+        # A PDF text layer without a usable font map is punctuation soup: route it
+        # to OCR instead of trusting it as source text.
+        garbled = '$!!%E4!=>+&.\'_+*>.5.9,\'26&>()9@@(,0+*+&\'52\'2/H%H\' ' * 3
+        self.assertIn("garbled_text_layer", backend._quality_reasons(garbled))
+        self.assertEqual(backend._quality_reasons("Page one is readable English text. " * 4), [])
+        self.assertGreater(backend._printable_ratio("The quick brown fox jumps."), 0.9)
+        self.assertLess(backend._printable_ratio(garbled), 0.55)
 
     def test_advisory_lock_excludes_separate_process_and_releases(self):
         settings = backend._validate_config(self.config, self.root)

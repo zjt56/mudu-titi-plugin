@@ -99,6 +99,20 @@ class AssembleLocalTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("结构确认已变化", reason)
 
+    def test_structure_bookkeeping_and_source_metadata_do_not_require_model_assembly(self):
+        assemble_local.record_guard(self.batch)
+        structure = json.loads((self.batch / assemble_local.STRUCTURE).read_text(encoding="utf-8"))
+        structure["generated_at"] = "new timestamp"
+        structure["meta"] = {"source": "更新后的原卷名称", "year": "2026"}
+        _write(self.batch, assemble_local.STRUCTURE, structure)
+        ok, reason = assemble_local.guard_status(self.batch)
+        self.assertTrue(ok, reason)
+        rebuilt = assemble_local.build(self.batch)
+        self.assertEqual(rebuilt["items"][0]["filterMetadata"]["source"], "更新后的原卷名称")
+        # The confirmed source may use a string; the upload wire year is int.
+        self.assertEqual(rebuilt["items"][0]["filterMetadata"]["year"], 2026)
+        self.assertIs(type(rebuilt["items"][0]["filterMetadata"]["year"]), int)
+
     def test_batch_tamper_invalidates_baseline(self):
         assemble_local.record_guard(self.batch)
         data = json.loads((self.batch / assemble_local.BATCH).read_text(encoding="utf-8"))
@@ -142,6 +156,39 @@ class AssembleLocalTest(unittest.TestCase):
         with patch("workflow.agent_tasks.accept_result", side_effect=ValueError("选项被改写")):
             self.assertIsNone(assemble_local.try_assemble(self.batch))
         self.assertTrue((self.batch / assemble_local.FALLBACK).is_file())
+
+    def test_first_assembly_merges_complete_source_draft_without_model(self):
+        from workflow import agent_tasks, question_draft
+        initial = Path(self.tmp.name) / "first"
+        text = "1. She ______ a book. A. reads B. read C. reading D. to read"
+        _write(initial, assemble_local.STRUCTURE, {"units": [{"unit_kind": "standalone", "numbers": [1],
+            "type": "单项填空", "stem": text,
+            "source_span": {"basis": "ai_classified", "start_line": 1, "end_line": 1}}]})
+        (initial / "01_source/正文.txt").write_text(text, encoding="utf-8")
+        (initial / "01_source/附录.txt").write_text("答案 1. A", encoding="utf-8")
+        _write(initial, "01_source/structure.json", {"sections": [{"type": "单项填空", "questions": [1]}], "groups": []})
+        _write(initial, assemble_local.TYPES, {"items": [{"unit_id": "q-1", "type": "单项填空",
+            "subtypes": ["四个选项"], "words": 5, "contentComplete": True, "evidence": ["正文 L1"]}]})
+        _write(initial, assemble_local.ANSWERS, {"answers": {"1": "A"}, "evidence": {"1": ["附录 L1"]}})
+        _write(initial, assemble_local.EXPLANATIONS, {"items": [{"unit_id": "q-1", "explanation": "无",
+            "articleSummary": "无", "subquestions": [], "evidence": ["附录仅有答案"]}]})
+        _write(initial, assemble_local.KNOWLEDGE, {"items": [{"unit_id": "q-1", "knowledge": ["词汇/词汇辨析/动词辨析"],
+            "subquestions": [], "evidence": ["正文 L1"]}]})
+        self.assertFalse((initial / assemble_local.BATCH).exists())
+        self.assertTrue(assemble_local.available(initial))
+        draft = question_draft.ensure(initial)
+        candidate = assemble_local.build(initial)
+        self.assertEqual(candidate["items"][0]["stem"], draft["items"][0]["stem"])
+        self.assertEqual(candidate["items"][0]["options"], draft["items"][0]["options"])
+        self.assertEqual(candidate["items"][0]["knowledge"], ["词汇/词汇辨析/动词辨析"])
+        self.assertEqual(candidate["items"][0]["answer"], "A")
+        response = {"status": "completed", "artifacts": {assemble_local.BATCH: candidate}, "notes": [], "findings": []}
+        report = agent_tasks.accept_result(initial, "assemble", response, validate_only=True)
+        self.assertTrue(report["completed"])
+        self.assertFalse((initial / assemble_local.BATCH).exists())
+        self.assertEqual(assemble_local.try_assemble(initial, {"timeout_seconds": 1}), 0)
+        self.assertTrue((initial / assemble_local.BATCH).is_file())
+        self.assertTrue((initial / assemble_local.GUARD).is_file())
 
     def test_seed_rejects_option_not_in_structure(self):
         data = json.loads((self.batch / assemble_local.BATCH).read_text(encoding="utf-8"))

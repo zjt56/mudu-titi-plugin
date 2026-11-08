@@ -22,6 +22,12 @@ class StructureGateTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # 结构 AI 是生产主路径；这些用例验证确定性闸门，不能因为本机
+        # 配置了模型路由就发起真实调用（会把测试拖慢并占用执行锁）。
+        import os as _os
+        from unittest.mock import patch as _patch
+        _offline = _patch.dict(_os.environ, {'WF_STRUCTURE_AI': '0'})
+        _offline.start(); self.addCleanup(_offline.stop)
 
     def test_is_group_type(self):
         self.assertTrue(structure_gate.is_group_type("完形填空"))

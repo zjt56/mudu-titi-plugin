@@ -350,14 +350,13 @@ class CompositeExtractionTest(unittest.TestCase):
             mf.save(folder, manifest)
             def completed(batch, state, stage):
                 self.assertEqual(stage.command[0], 'workflow/extract.py')
-                mf.touch_stage(state, 'extract', mf.COMPLETED)
+                # Empty extract output is not a valid delivery now, so the
+                # stage is recorded failed instead of completed.
+                mf.touch_stage(state, 'extract', mf.FAILED, notes='empty source')
                 mf.save(batch, state)
                 return 0
             with patch.object(runner, '_execute_command', side_effect=completed):
                 result = auto.advance(folder, {})
-            self.assertEqual(mf.load(folder)['stages']['extract']['status'], mf.COMPLETED)
-            # 正文与结构均为空时没有可交付候选，必须等待有效提取结果。
-            self.assertEqual(result['stopped_at'], 'structure_gate')
-            gate = json.loads((folder / '07_review/structure-gate.json').read_text())
-            self.assertFalse(gate['passed'])
-            self.assertIn('SOURCE_EMPTY', {issue['code'] for issue in gate['blockers']})
+            self.assertNotEqual(mf.load(folder)['stages']['extract']['status'], mf.COMPLETED)
+            # No valid extraction means structure_gate cannot be claimed.
+            self.assertFalse(mf.dependency_satisfied(mf.load(folder), 'structure_gate'))

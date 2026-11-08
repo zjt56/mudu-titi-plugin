@@ -492,11 +492,17 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     if isinstance(ai_classified, dict) and ai_classified.get("units"):
         from .question_content import _validated_ai_units
         ai_units = ai_classified["units"]
-        ai_bound = _validated_ai_units(ai_units, units, source_lines) is not None
-        units = ai_units
-        if not ai_bound:
-            blockers.append({"code": "AI_SOURCE_BINDING_INVALID",
-                             "message": "AI结构的原文行号、题号或分组证据不完整或存在冲突"})
+        if _validated_ai_units(ai_units, units, source_lines) is not None:
+            ai_bound = True
+            units = ai_units
+        else:
+            # An AI grouping that cannot be bound to the source per question must
+            # never become the confirmed structure: keep the deterministic units
+            # and let the per-question source audit judge them. Downstream still
+            # re-checks every unit, so this is a fallback, not a silent approval.
+            warnings.append({"code": "AI_STRUCTURE_REJECTED", "blocking": False,
+                             "status": "fallback",
+                             "message": "AI 结构单元无法逐题绑定原文；已改用确定性结构，后续仍逐题核对原卷"})
 
     # 题号覆盖：section 声明的题号应被 units 完整覆盖，无重复
     declared = sorted({n for s in sections for n in _section_numbers(s)})

@@ -39,11 +39,11 @@ class AgentTasksTest(unittest.TestCase):
         self.types = {"items": [{"unit_id": "q-1", "type": "单项填空", "subtypes": ["四个选项"],
                                 "words": 5, "contentComplete": True, "evidence": ["正文 L1: A–D"]}]}
         self.answers = {"answers": {"1": "A"}, "evidence": {"1": ["附录 L1"]},
-                        "difficulty": {"1": "容易"}, "difficultyEvidence": {"1": ["单句、四个等长选项"]}}
+                        "missing": {}, "difficulty": {"1": "容易"}, "difficultyEvidence": {"1": ["单句、四个等长选项"]}}
         self.write(tasks.ARTIFACTS["types"], self.types)
         self.write(tasks.ARTIFACTS["answers"], self.answers)
         self.knowledge = {"items": [{"unit_id": "q-1", "knowledge": ["词汇/词汇辨析/动词辨析"],
-            "answer": "A", "explanation": "本题考查动词辨析，结合主语与时态判断应选 reads。" + tasks.AI_MARK, "subquestions": [], "evidence": ["正文 L1"]}]}
+            "answer": "A", "explanation": "无", "subquestions": [], "evidence": ["正文 L1"]}]}
         self.write(tasks.ARTIFACTS["explanations"], explanations_of(self.knowledge))
         self.write(tasks.ARTIFACTS["knowledge"], self.knowledge)
 
@@ -74,9 +74,13 @@ class AgentTasksTest(unittest.TestCase):
         self.assertEqual(task["status"], "ready")
         self.assertIn('"unit_id": "q-1"', task["prompt"])
         self.assertNotIn(str(self.batch), task["prompt"])
-        for key in task["input_hashes"]:
+        for key, digest in task["input_hashes"].items():
             path = Path(key) if Path(key).is_absolute() else self.batch / key
-            self.assertTrue(path.is_file(), key)
+            if digest == tasks.MISSING_INPUT:
+                self.assertIn(key, tasks.CONTENT_OPTIONAL_INPUTS)
+                self.assertFalse(path.exists(), key)
+            else:
+                self.assertTrue(path.is_file(), key)
 
     def test_assemble_prompt_binds_word_and_pdf_ocr_as_structure_evidence(self):
         word = "1. She reads a book. A. reads B. read"
@@ -126,12 +130,29 @@ class AgentTasksTest(unittest.TestCase):
         self.assertNotIn("subtypes", saved["items"][0])
         self.assertTrue(any("自动修复" in note for note in report["notes"]))
 
-    def test_knowledge_without_appendix_can_accept_ai_explanation(self):
-        (self.batch / "01_source/附录.txt").unlink()
-        task = tasks.build_task(self.batch, "knowledge")
-        self.assertEqual(task["status"], "ready")
-        self.assertEqual(task["input_hashes"]["01_source/附录.txt"], tasks.MISSING_INPUT)
+        # 解析由单独阶段拥有；知识点交付绝不读取或校验它。
+        report = self.accept("knowledge", self.knowledge)
+        self.assertTrue(report["completed"])
+        saved = json.loads((self.batch / tasks.ARTIFACTS["knowledge"]).read_text())
+        self.assertNotIn("answer", saved["items"][0])
+        self.assertNotIn("explanation", saved["items"][0])
+        forged = explanations_of(self.knowledge)
+        forged["items"][0]["explanation"] = "根据上下文自行生成。" + tasks.AI_MARK
+        self.write(tasks.ARTIFACTS["explanations"], forged)
         self.assertTrue(self.accept("knowledge", self.knowledge)["completed"])
+
+    def test_assemble_cannot_rewrite_source_stem_or_options(self):
+        row = {"unit_id": "q-1", "id": "q-1", "unit_kind": "standalone", "number": 1, "numbers": [1],
+               "question_type": "单项填空", "filterMetadata": {"subtypes": ["四个选项"]},
+               "stem": "</u>,mangled blank", "material": "", "options": ["A. reads", "B. read"],
+               "knowledge": ["词汇/词汇辨析/动词辨析"], "answer": "A", "explanation": "无",
+               "subquestions": []}
+        source = {"unit_id": "q-1", "stem": "______,real sentence",
+                  "material": "", "options": ["A. reads", "B. read"], "subquestions": []}
+        notes = []
+        tasks._restore_source_fields(row, [], source, notes)
+        self.assertEqual(row["stem"], "______,real sentence")
+        self.assertTrue(any("确定性切片" in note for note in notes))
 
     def test_blind_task_hides_current_labels_but_keeps_question_content(self):
         # 盲判：只给原卷、题干、材料、选项、答案、解析，不给现成标签。
@@ -261,16 +282,18 @@ class AgentTasksTest(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 tasks.accept_result(self.batch, "types", raw)
 
-    def test_answer_shape_allows_partial_mapping_without_difficulty_evidence(self):
+    def test_answer_shape_requires_complete_decisions_and_verbatim_source_binding(self):
         self.assertTrue(self.accept("answers", self.answers)["completed"])
-        partial = {"answers": {"2": "A"}, "evidence": {"2": ["附录 L1"]},
-                   "difficulty": {"1": "容易"}}
-        self.assertTrue(self.accept("answers", partial)["completed"])
-        # 用户规则：答案只要非空就保留，不因未逐字命中而阻断整段。
-        self.assertTrue(self.accept("answers", {"answers": {"1": "fabricated"},
-                                                "evidence": {"1": ["L1"]}})["completed"])
+        decided_missing = {"answers": {}, "evidence": {},
+                           "missing": {"1": ["原文中未提供第1题答案，按无答案占位"]},
+                           "difficulty": {"1": "容易"}}
+        self.assertTrue(self.accept("answers", decided_missing)["completed"])
+        with self.assertRaisesRegex(ValueError, "Every confirmed question"):
+            self.accept("answers", {"answers": {}, "evidence": {}, "missing": {}})
+        with self.assertRaisesRegex(ValueError, "verbatim-bound"):
+            self.accept("answers", {"answers": {"1": "fabricated"}, "evidence": {"1": ["附录 L1"]}, "missing": {}})
         with self.assertRaises(ValueError):
-            self.accept("answers", {"answers": {"1": "A"}, "evidence": {"2": ["L1"]}})
+            self.accept("answers", {"answers": {"1": "A"}, "evidence": {"2": ["附录 L1"]}, "missing": {}})
 
     def test_answer_comparison_only_normalizes_quotes_and_whitespace(self):
         expected = 'He said, “It’s  fine.”'
@@ -323,24 +346,31 @@ class AgentTasksTest(unittest.TestCase):
         units = _build_units([{"type": "阅读理解", "questions": [[1, 3]]}], [], ["1. Text", "2. Text", "3. Text"])
         self.write("01_source/structure.confirmed.json", {"units": units})
         uid = "group-1-2-3"
+        self.write("01_source/正文.txt", "1. Text\n2. Text\n3. Text")
+        self.write("01_source/附录.txt", "【文章大意】" + SUMMARY + "\n" + "\n".join(
+            f"{n}.{answer} 【解析】原卷第{n}题解析。" for n, answer in ((1, "A"), (2, "B"), (3, "C"))))
         self.write(tasks.ARTIFACTS["types"], {"items": [{"unit_id": uid, "type": "阅读理解", "subtypes": ["选择3题"], "evidence": ["L1"]}]})
         self.write(tasks.ARTIFACTS["answers"], {"answers": {"1": "A", "2": "B", "3": "C"}})
         knowledge = {"items": [{"unit_id": uid, "knowledge": ["语篇体裁/记叙文/故事", "主题/人与自我/生活与学习/学校生活"],
-            "answer": "", "explanation": "", "articleSummary": SUMMARY + tasks.AI_MARK, "evidence": ["L1–3"], "subquestions": [
-                {"number": n, "knowledge": ["设题角度/阅读/细节理解"], "answer": a, "explanation": "根据首段细节可判断该题答案为该项，需回到原文对应句核对。" + tasks.AI_MARK}
+            "answer": "", "explanation": "", "articleSummary": SUMMARY, "evidence": ["L1–3"], "subquestions": [
+                {"number": n, "knowledge": [], "answer": a, "explanation": f"原卷第{n}题解析。"}
                 for n, a in ((1, "A"), (2, "B"), (3, "C"))]}]}
         self.write(tasks.ARTIFACTS["explanations"], explanations_of(knowledge))
         return knowledge
 
-    def test_knowledge_accepts_article_summary_required_by_new_prompt(self):
+    def test_knowledge_keeps_only_labels_and_assembly_owns_source_content(self):
         valid = self.group_fixture()
         valid['items'][0]['articleSummary'] = '本文讲述校园生活中的一段经历，并说明了同学之间的互助。（AI生成，待校对）'
         self.assertTrue(self.accept('knowledge', valid)['completed'])
-        # 空字符串现在表示“没有大意”，按可选字段接受。
         candidate = copy.deepcopy(valid)
         candidate['items'][0]['articleSummary'] = ''
         self.assertTrue(self.accept('knowledge', candidate)['completed'])
-        # 非字符串类型仍由常规字段校验拦截；空值不再拦截。
+        saved = json.loads((self.batch / tasks.ARTIFACTS["knowledge"]).read_text())["items"][0]
+        for content_field in ("answer", "explanation", "articleSummary"):
+            self.assertNotIn(content_field, saved)
+        self.assertEqual([child["knowledge"] for child in saved["subquestions"]], [[], [], []])
+        self.assertTrue(all("explanation" not in child and "answer" not in child
+                            for child in saved["subquestions"]))
 
     def test_group_child_exact_coverage_and_reading_scope(self):
         valid = self.group_fixture()
@@ -409,51 +439,59 @@ class AgentTasksTest(unittest.TestCase):
         context, _, _, _ = tasks._collect(self.batch, 'audio')
         self.assertNotIn('attachments/audio_001.mp3', context.get('existing_audio_files', []))
 
-    def test_audio_timestamps_without_existing_verified_cuts_rejected(self):
+    def bind_audio_evidence(self, row, *, verified, review_reasons=None):
         self.units[0]["type"] = "听力短对话理解"
         self.write("01_source/structure.confirmed.json", {"units": self.units})
+        self.types["items"][0]["type"] = "听力短对话理解"
+        self.types["items"][0]["subtypes"] = ["选文字"]
+        self.write(tasks.ARTIFACTS["types"], self.types)
+        from audio.binding import listening_context
+        binding, _listening = listening_context(self.batch)
+        path = self.batch / row["file"]
+        row["file_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        row["verified"] = verified
+        if review_reasons:
+            row["review_reasons"] = review_reasons
+        return {"unit_binding": binding, "items": [row]}
+
+    def test_audio_timestamps_without_existing_verified_cuts_rejected(self):
         self.write("02_audio/segment.mp3", "existing audio fixture")
         row = {"unit_id": "q-1", "file": "02_audio/segment.mp3", "start": 0, "end": 5, "evidence": ["first-line verification"]}
+        self.bind_audio_evidence(dict(row), verified=True)
         self.write("02_audio/segment-evidence.json", {"items": []})
         with self.assertRaisesRegex(ValueError, "Timestamps are not cut outputs"):
             self.accept("audio", {"items": [row]})
-        self.write("02_audio/segment-evidence.json", {"items": [dict(row, verified=True)]})
+        self.write("02_audio/segment-evidence.json", self.bind_audio_evidence(dict(row), verified=True))
         self.assertTrue(self.accept("audio", {"items": [row]})["completed"])
         row["start"] = -1
         with self.assertRaises(ValueError):
             self.accept("audio", {"items": [row]})
 
     def test_audio_candidate_slices_accepted_with_warning(self):
-        self.units[0]["type"] = "听力短对话理解"
-        self.write("01_source/structure.confirmed.json", {"units": self.units})
         self.write("02_audio/segment.mp3", "existing audio fixture")
         row = {"unit_id": "q-1", "file": "02_audio/segment.mp3", "start": 0, "end": 5,
                "evidence": ["candidate cut"]}
-        self.write("02_audio/segment-evidence.json", {"items": [
-            dict(row, verified=False, review_reasons=["unsupported_end"])]})
+        self.write("02_audio/segment-evidence.json", self.bind_audio_evidence(
+            dict(row), verified=False, review_reasons=["unsupported_end"]))
         report = self.accept("audio", {"items": [row]})
         self.assertTrue(report["completed"])
         self.assertTrue(any("候选切片" in note for note in report.get("notes", [])))
 
     def test_audio_candidate_slices_rejected_in_strict_mode(self):
-        self.units[0]["type"] = "听力短对话理解"
-        self.write("01_source/structure.confirmed.json", {"units": self.units})
         self.write("02_audio/segment.mp3", "existing audio fixture")
         row = {"unit_id": "q-1", "file": "02_audio/segment.mp3", "start": 0, "end": 5,
                "evidence": ["candidate cut"]}
-        self.write("02_audio/segment-evidence.json", {"items": [
-            dict(row, verified=False, review_reasons=["unsupported_end"])]})
+        self.write("02_audio/segment-evidence.json", self.bind_audio_evidence(
+            dict(row), verified=False, review_reasons=["unsupported_end"]))
         with patch.dict("os.environ", {"WF_ACCEPT_AUDIO_CANDIDATES": "0"}):
             with self.assertRaisesRegex(ValueError, "候选切片边界未验证"):
                 self.accept("audio", {"items": [row]})
 
     def test_audio_prompt_requires_copying_verified_timestamps(self):
-        self.units[0]["type"] = "听力短对话理解"
-        self.write("01_source/structure.confirmed.json", {"units": self.units})
         self.write("02_audio/segment.mp3", "existing audio fixture")
         row = {"unit_id": "q-1", "file": "02_audio/segment.mp3", "start": 12, "end": 20,
                "evidence": ["first-line verification"]}
-        self.write("02_audio/segment-evidence.json", {"items": [dict(row, verified=True)]})
+        self.write("02_audio/segment-evidence.json", self.bind_audio_evidence(dict(row), verified=True))
         prompt = tasks.build_task(self.batch, "audio")["prompt"]
         self.assertIn("copy file, start and end EXACTLY", prompt)
         self.assertIn("never re-based to the segment's own 0", prompt)

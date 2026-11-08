@@ -25,9 +25,21 @@ def _batch(root: Path) -> Path:
                    "type": "听力关键词语选择", "stem": "(　　)1.A.page B.paper C.pencil"}]},
         ensure_ascii=False), encoding="utf-8")
     (batch / "02_audio" / "seg-q-1.mp3").write_bytes(b"ID3cut")
+    # A cut is only current when its type/unit binding matches and the file hash
+    # is recorded, exactly as the splitter now produces it.
+    (batch / "03_types").mkdir(parents=True, exist_ok=True)
+    (batch / "03_types" / "types.json").write_text(json.dumps({"items": [{
+        "unit_id": "q-1", "type": "听力关键词语选择", "subtypes": [], "words": 3,
+        "contentComplete": True, "evidence": ["正文 L2"]}]}, ensure_ascii=False), encoding="utf-8")
+    import hashlib
+    from audio.binding import listening_context
+    binding, _ = listening_context(batch)
+    cut_sha = hashlib.sha256((batch / "02_audio" / "seg-q-1.mp3").read_bytes()).hexdigest()
     (batch / "02_audio" / "segment-evidence.json").write_text(json.dumps({
+        "generator": "audio.segment/multi-v1", "unit_binding": binding,
         "items": [{"unit_id": "q-1", "file": "02_audio/seg-q-1.mp3",
                    "start": 0.0, "end": 12.5, "duration": 12.5,
+                   "file_sha256": cut_sha,
                    "confidence": "anchored", "quality": "ok", "verified": True,
                    "evidence": ["ffmpeg -ss 0.0"]}]}, ensure_ascii=False), encoding="utf-8")
     manifest = mf.new_manifest("batch", batch, {}, {})
@@ -98,7 +110,8 @@ class SkippedStageRevivalTest(unittest.TestCase):
             mf.touch_stage(manifest, 'audio', mf.SKIPPED, notes='old skip')
             mf.save(batch, manifest)
             args = SimpleNamespace(stage='audio', until=None, force=False, dry_run=False, config=None)
-            with patch.object(runner, '_execute_command', return_value=0) as execute:
+            with patch.object(mf, 'dependency_satisfied', return_value=True), \
+                 patch.object(runner, '_execute_command', return_value=0) as execute:
                 self.assertEqual(runner._cmd_run_locked(batch, args), 0)
             execute.assert_called_once()
             self.assertEqual(mf.load(batch)['stages']['audio']['status'], mf.PENDING)

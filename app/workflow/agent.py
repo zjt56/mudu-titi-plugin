@@ -399,6 +399,24 @@ def main(argv=None):
     parser.add_argument('--config', type=Path)
     parser.add_argument('--dry-run', action='store_true')
     values = parser.parse_args(args)
+    if values.stage == 'assemble' and not values.dry_run:
+        from . import batch_fill, assemble_local
+        if (values.batch_dir / batch_fill.STATE).is_file():
+            # The early batch already owns its questions. Finalization never
+            # falls back to a model that reconstructs the whole batch.
+            code = assemble_local.try_assemble(values.batch_dir)
+            if code == 0:
+                _mark_stage_completed(values.batch_dir, 'assemble')
+            return code if code is not None else 3
+    if values.stage == 'explanations' and not values.dry_run:
+        # 正文/答案材料已确定时，解析与大意按题号直接取原文，不调用模型。
+        from . import explanations_direct
+        if explanations_direct.install(values.batch_dir) is not None:
+            _mark_stage_completed(values.batch_dir, 'explanations')
+            print(json.dumps({"stage": "explanations", "status": "completed",
+                              "detail": "按题号从已确定正文/答案材料直接取解析，未调用模型"},
+                             ensure_ascii=False))
+            return 0
     if values.stage == 'audio' and not values.dry_run and _audio_evidence_ready(values.batch_dir):
         # 切段器已产出并通过契约校验：不再调用模型，避免慢调用与无谓改写。
         _mark_stage_completed(values.batch_dir, 'audio')

@@ -146,9 +146,11 @@ def _fingerprints(batch, manifest, stage, hashes):
 
 
 def _preconditions(manifest, spec):
-    reasons = [f"Prerequisite {dep} must be completed, approved or skipped"
-               for dep in spec.depends_on
-               if manifest.get("stages", {}).get(dep, {}).get("status") not in mf.TERMINAL_OK]
+    prerequisites = contracts.upstream_of(spec.id)
+    reasons = [f"Prerequisite {dep} must have a current, consumer-validated delivery"
+               for dep in prerequisites
+               if not mf.dependency_satisfied(manifest, dep, allow_unqualified=False)]
+
     if manifest.get("stages", {}).get(spec.id, {}).get("status") in mf.TERMINAL_OK:
         reasons.append(f"Stage {spec.id} is already complete; explicitly invalidate it before exporting again")
     return reasons
@@ -193,8 +195,13 @@ def export_task(batch_dir, stage, output_dir=None, max_input_chars=180000) -> di
         return result
     with _agent_lock(5):
         manifest = mf.load(batch)
+        blockers = _preconditions(manifest, spec)
+        if blockers:
+            return {"action": "blocked", "completed": False, "stage": stage,
+                    "preconditions": blockers}
         built = agent_tasks.build_task(batch, stage, max_input_chars=max_input_chars)
-        missing = list(dict.fromkeys(built["preconditions"] + _preconditions(manifest, spec)))
+        missing = list(dict.fromkeys(built["preconditions"]))
+
         task_id = str(uuid.uuid4())
         canonical = batch / "workflow" / "agent-tasks" / task_id
         _path(batch, f"workflow/agent-tasks/{task_id}/task.json")
@@ -331,23 +338,14 @@ def import_result(batch_dir, task_id, result_path) -> dict:
                 "protocol": PROTOCOL, "task_id": task_id, "result_sha256": result_sha256,
                 "report": report})
         new_outputs = mf.output_hashes(batch, spec)
-        prior_outputs = (manifest["stages"].get(stage) or {}).get("output_hashes") or {}
-        outputs_changed = new_outputs != prior_outputs
         mf.touch_stage(manifest, stage, status, kind=spec.kind,
                        input_hashes=mf.input_hashes(batch, manifest, spec),
                        output_hashes=new_outputs,
                        notes="通用 Agent 任务 " + task_id + ": " + "; ".join(report["notes"]))
-        if report["completed"] and outputs_changed:
-            # 收窄失效范围：只有本阶段产物内容真的变了才作废下游；重复导入相同
-            # 产物（空跑一遍）不再连累已完成的 review 等下游重算。下游不含本阶段
-            # 自身——自身刚被 touch_stage 标记完成。
-            from . import contracts
-            for target in contracts.downstream_of(stage):
-                record = manifest["stages"].get(target)
-                if not record or record.get("status") in (mf.INVALIDATED, mf.PENDING):
-                    continue
-                mf.touch_stage(manifest, target, mf.INVALIDATED,
-                               notes="上游产物变化，下游需重算")
+        if report["completed"]:
+            # Publish a content baseline and recheck actual consumers. A changed
+            # ancestor is not itself evidence that every descendant changed.
+            mf.record_delivery(batch, manifest, spec)
         manifest["status"] = mf.derive_status(manifest)
         receipt = {"protocol": PROTOCOL, "task_id": task_id, "stage": stage,
                    "result_sha256": result_sha256, **report}

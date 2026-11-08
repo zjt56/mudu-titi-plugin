@@ -537,8 +537,12 @@ class _Builder:
             and data.get("unit_kind", "group" if data.get("subquestions") else "standalone") == "group"
             and (data.get("answer") is None
                  or isinstance(data.get("answer"), str) and not data["answer"].strip()))
+        material_group = (not child and data.get('unit_kind') == 'group'
+                          and bool(data.get('subquestions'))
+                          and (_nonempty(data.get('material')) or bool(data.get('materialBlocks'))))
         for key in ("stem", "answer"):
-            if not _nonempty(data.get(key)) and not (key == "answer" and deferred_group_answer):
+            if not _nonempty(data.get(key)) and not (
+                    key == "answer" and deferred_group_answer or key == 'stem' and material_group):
                 self.error("MISSING_" + key.upper(), f"缺少 {key} 正文", uid)
         for key, prefix in (("answer", r"(?:参考答案|答案|answer)"), ("explanation", r"(?:解析|explanation)")):
             text = data.get(key)
@@ -684,8 +688,13 @@ class _Builder:
         if not child:
             output["unit_kind"] = kind
             if kind == "group":
-                if not children or not (_nonempty(data.get("material")) or data.get("materialBlocks")):
-                    self.error("GROUP_INCOMPLETE", "题组必须有共享 material/materialBlocks 和结构化子题", uid)
+                # Listening source papers normally print instructions/questions
+                # while the shared dialogue exists in audio only. Do not invent
+                # a written transcript to satisfy a reading-material rule.
+                listening_group = (isinstance(main_type, str) and main_type.startswith('听力')
+                                   and _nonempty(data.get('stem')))
+                if not children or not (_nonempty(data.get("material")) or data.get("materialBlocks") or listening_group):
+                    self.error("GROUP_INCOMPLETE", "题组必须有结构化子题及共享材料；听力题组可保留原卷听力说明", uid)
                 expected_numbers = raw.get("numbers")
                 child_numbers = [c.get("number") for c in children if isinstance(c, dict)]
                 valid_numbers = (isinstance(expected_numbers, list) and bool(expected_numbers)
@@ -705,14 +714,20 @@ class _Builder:
                         self.error("MISSING_ANSWER", "无法从完整、唯一题号且非空的子题答案构建组级答案", uid)
             elif children:
                 self.error("UNIT_KIND_CONFLICT", "含子题的单元必须声明 group", uid)
+        declared_options = output.get("options", [])
+        if 0 < len(declared_options) < 2:
+            # A single-option choice question is unambiguously broken; the
+            # server would render an unanswerable item.
+            self.error("OPTION_COUNT_TOO_SMALL", "选择题至少需要两个选项", uid)
         subtypes = filters.get("subtypes", [])
+        numerals = {"二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6}
         for subtype in subtypes if isinstance(subtypes, list) else []:
             if not isinstance(subtype, str):
                 continue
-            if data.get("type") == "单项填空" and subtype in ("三个选项", "四个选项"):
-                expected = 3 if subtype == "三个选项" else 4
-                if len(output.get("options", [])) != expected:
-                    self.error("OPTION_COUNT_MISMATCH", f"子类{subtype}需要 {expected} 个完整选项", uid)
+            count = re.fullmatch(r"([二两三四五六])个选项", subtype)
+            expected = numerals[count.group(1)] if count else None
+            if expected is not None and len(declared_options) != expected:
+                self.error("OPTION_COUNT_MISMATCH", f"子类{subtype}需要 {expected} 个完整选项", uid)
             count = re.fullmatch(r"选择(\d+)题|(\d+)空", subtype)
             if not child and kind == "group" and count:
                 expected = int(count.group(1) or count.group(2))

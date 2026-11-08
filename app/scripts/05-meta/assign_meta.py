@@ -134,6 +134,21 @@ def main() -> int:
         diff = judged
         fm["categories"] = _categories(it, rules)
         it["filterMetadata"] = fm
+        # 组内子题各自有难度；顶层与 filterMetadata 别名必须同值，
+        # 否则上传映射会报 ALIAS_CONFLICT。以子题顶层值为准，缺失才继承组级判断。
+        for child in it.get("subquestions") or []:
+            if not isinstance(child, dict):
+                continue
+            cfm = child.get("filterMetadata") or {}
+            top = child.get("difficulty")
+            chosen = top if isinstance(top, str) and top in ("容易", "适中", "困难") else cfm.get("difficulty")
+            if chosen not in ("容易", "适中", "困难"):
+                chosen = judged
+            cfm["difficulty"] = chosen
+            cfm["difficultyValue"] = None
+            child["filterMetadata"] = cfm
+            if "difficulty" in child:
+                child["difficulty"] = chosen
         if diff is None:
             pending.append(it.get("id"))
     args.out.parent.mkdir(parents=True, exist_ok=True)

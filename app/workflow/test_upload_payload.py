@@ -65,6 +65,23 @@ class UploadPayloadTest(unittest.TestCase):
     def codes(self, report):
         return {e["code"] for e in report["errors"]}
 
+    def test_group_material_does_not_require_an_invented_stem(self):
+        item = reading_group()
+        item['stem'] = ''
+        report = self.build(batch(item))
+        self.assertNotIn('MISSING_STEM', self.codes(report))
+        self.assertNotIn('GROUP_INCOMPLETE', self.codes(report))
+        self.assertEqual(report['payload']['items'][0]['stem'], '')
+
+    def test_listening_group_does_not_require_written_transcript(self):
+        item = reading_group()
+        item.update(question_type='听力长对话理解', material='', stem='听下面一段对话,回答第56至58小题。')
+        item['filterMetadata']['subtypes'] = ['选择3题']
+        report = self.build(batch(item))
+        self.assertNotIn('GROUP_INCOMPLETE', self.codes(report))
+        item['stem'] = ''
+        self.assertIn('GROUP_INCOMPLETE', self.codes(self.build(batch(item))))
+
     def test_valid_conversion_is_read_only_and_allowlisted(self):
         data = batch()
         data["items"][0].update(status="reviewed", warnings=["local warning"], knowledgeStatus="已确认", human_confirmed=True)

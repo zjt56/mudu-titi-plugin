@@ -27,6 +27,7 @@ from pathlib import Path
 from contextlib import contextmanager
 
 from . import bootstrap, config as cfgmod
+from .binding import listening_context, assert_current
 
 AUDIO_SUFFIXES = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac")
 EVIDENCE_NAME = "segment-evidence.json"
@@ -163,36 +164,9 @@ def skeleton(silences: list[tuple[float, float]], long_silence: float, duration:
 
 
 def load_listening_units(batch: Path) -> list[dict]:
-    """从 structure.confirmed.json + types.json 取听力单元（unit_id / numbers）。"""
-    structure = batch / "01_source" / "structure.confirmed.json"
-    types_file = batch / "03_types" / "types.json"
-    if not structure.is_file():
-        raise RuntimeError("缺少 01_source/structure.confirmed.json，请先跑结构确认")
-    # 结构确认里的单元可能只有 numbers/unit_kind，没有预先写死的 unit_id；
-    # 统一用 agent_tasks.confirmed_units 派生稳定 ID（q-N / group-N-...），
-    # 与 03_types/types.json 的 unit_id 保持一致。
-    try:
-        from workflow import agent_tasks
-        units = agent_tasks.confirmed_units(Path(batch))
-    except Exception:
-        units = json.loads(structure.read_text(encoding="utf-8")).get("units") or []
-    by_uid = {}
-    if types_file.is_file():
-        for row in (json.loads(types_file.read_text(encoding="utf-8")).get("items") or []):
-            if isinstance(row, dict) and row.get("unit_id"):
-                by_uid[row["unit_id"]] = str(row.get("type") or "")
-    out = []
-    for row in units:
-        if not isinstance(row, dict):
-            continue
-        uid = str(row.get("unit_id") or row.get("id") or "")
-        numbers = [int(n) for n in (row.get("numbers") or []) if str(n).isdigit()]
-        if not uid or not numbers:
-            continue
-        qtype = by_uid.get(uid, str(row.get("type") or ""))
-        if qtype.startswith("听力"):
-            out.append({"unit_id": uid, "numbers": numbers, "type": qtype})
-    return sorted(out, key=lambda u: u["numbers"][0])
+    """Read only the catalog-valid, exactly covered confirmed/type version."""
+    from .binding import listening_context
+    return listening_context(batch)[1]
 
 
 _CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
@@ -739,7 +713,7 @@ def assign_audio_units(units: list[dict], anchors_by_audio: dict[str, dict]) -> 
 def inspect_multiple_audio(batch: Path, inputs: dict, cfg: dict, progress=None) -> dict:
     """Transcribe each recording independently and persist provisional assignment evidence."""
     batch = Path(batch).resolve()
-    units = load_listening_units(batch)
+    unit_binding, units = listening_context(batch)
     sources = [(key, item) for key, item in inputs.items()
                if (key == 'audio' or re.fullmatch(r'audio_\d{3,}', key)) and isinstance(item, dict)]
     sources.sort(key=lambda row: row[0])
@@ -770,7 +744,8 @@ def inspect_multiple_audio(batch: Path, inputs: dict, cfg: dict, progress=None) 
                             'anchors': {str(number): times for number, times in anchors.items()},
                             'coarse_numbers': sorted(coarse), 'silence_skeleton': cuts}
     mapping = assign_audio_units(units, anchors_by_audio)
-    report = {'sources': source_info, 'assignments': {key: [unit['unit_id'] for unit in values]
+    assert_current(batch, unit_binding)
+    report = {'unit_binding': unit_binding, 'sources': source_info, 'assignments': {key: [unit['unit_id'] for unit in values]
                                                        for key, values in mapping['assignments'].items()},
               'unresolved': mapping['unresolved'], 'complete': mapping['complete'],
               'status': 'provisional', 'note': '只记录题号对应证据，尚未生成正式切片映射'}
@@ -789,12 +764,13 @@ def slice_multiple_audio(batch: Path, analysis: dict, progress=None) -> dict:
 
 
 def _slice_multiple_audio_locked(batch: Path, analysis: dict, progress=None) -> dict:
-    units = load_listening_units(batch)
+    unit_binding, units = listening_context(batch)
     sources = analysis.get('sources') if isinstance(analysis, dict) else None
     if (not isinstance(sources, dict) or len(sources) < 2 or
             analysis.get('complete') is not True or analysis.get('unresolved') or
             analysis.get('status') != 'provisional'):
         raise RuntimeError('多音频对应不完整或存在歧义')
+    assert_current(batch, analysis.get('unit_binding'))
     manifest_path = batch / 'workflow' / 'manifest.json'
     if not manifest_path.is_file():
         manifest_path = batch / 'manifest.json'
@@ -869,7 +845,7 @@ def _slice_multiple_audio_locked(batch: Path, analysis: dict, progress=None) -> 
             # cut() names by unit_id; add an independent generation and ordinal
             # so sanitized IDs cannot collide or overwrite a previous candidate.
             cut_id = generation + '-' + str(len(items))
-            cut_row = dict(row, unit_id=cut_id, audio_sha256=source['sha256'])
+            cut_row = dict(row, unit_id=cut_id, audio_sha256=source['sha256'], unit_binding=unit_binding)
             evidence = cut(paths[source_key], out_dir, cut_row)
             file = '02_audio/seg-' + cut_id + '.mp3'
             output = batch / file
@@ -894,12 +870,16 @@ def _slice_multiple_audio_locked(batch: Path, analysis: dict, progress=None) -> 
         if (_file_digest(path) != sources[key]['sha256'] or
                 _file_digest(batch / sources[key]['transcript']) != transcript_digests[key]):
             raise RuntimeError('切片期间音频或转写来源已改变：' + str(key))
+    assert_current(batch, unit_binding)
     order = {unit['unit_id']: index for index, unit in enumerate(units)}
     items.sort(key=lambda item: order[item['unit_id']])
+    for item in items:
+        item['file_sha256'] = _file_digest(batch / item['file'])
     needs_review = [item['unit_id'] for item in items if not item['verified']]
     evidence_doc = {'generator': 'audio.segment/multi-v1', 'generation': generation,
-                    'sources': sources, 'needs_review_units': needs_review, 'items': items}
-    map_doc = {'generation': generation, 'items': [
+                    'unit_binding': unit_binding, 'sources': sources,
+                    'needs_review_units': needs_review, 'items': items}
+    map_doc = {'generation': generation, 'unit_binding': unit_binding, 'items': [
         {key: item[key] for key in ('unit_id', 'file', 'source_audio', 'source_path',
                                      'source_sha256', 'start', 'end')} for item in items]}
     _atomic_json(out_dir / MAP_NAME, map_doc)
@@ -1038,7 +1018,8 @@ def cut(audio: Path, out_dir: Path, item: dict) -> list[str]:
     name = "seg-" + re.sub(r"[^A-Za-z0-9._-]", "-", str(item["unit_id"])) + ".mp3"
     target = out_dir / name
     sidecar = out_dir / (name + ".key.json")
-    key = {"version": 2, "audio": item.get("audio_sha256") or _file_digest(audio),
+    key = {"version": 3, "audio": item.get("audio_sha256") or _file_digest(audio),
+           "unit_binding": item.get("unit_binding"),
            "start": item["start"], "end": item["end"], "codec": "libmp3lame-q4"}
     try:
         cached = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -1124,7 +1105,11 @@ def _run_locked(batch: Path, cfg: dict | None = None, audio: str | None = None,
         if any(re.fullmatch(r'audio_\d{3,}', key) and isinstance(item, dict) and item.get('exists')
                for key, item in inputs.items()):
             raise RuntimeError('多份音频已保存，但尚未完成音频与题组的对应，不能按单音频切段')
+    unit_binding, units = listening_context(batch)
+    if not units:
+        raise RuntimeError("该批次没有听力单元，无需切段")
     src = find_audio(batch, audio)
+    audio_sha256 = _file_digest(src)
     report("probe", 5, "读取音频时长")
     duration = measured("probe", probe_duration, src)
     report("silence", 15, "silencedetect 定骨架")
@@ -1133,9 +1118,7 @@ def _run_locked(batch: Path, cfg: dict | None = None, audio: str | None = None,
     fine_cuts = fine_silence_cuts(silences, float(cfg["cut_silence"]),
                                   float(cfg["skeleton_silence"]), duration)
     report("units", 25, "读取听力单元")
-    units = load_listening_units(batch)
-    if not units:
-        raise RuntimeError("该批次没有听力单元，无需切段")
+    assert_current(batch, unit_binding)
 
     # Split only at measured long-silence midpoints BEFORE ASR, not after
     # drifting alignment has merged separate questions into a 30-second chunk.
@@ -1203,7 +1186,9 @@ def _run_locked(batch: Path, cfg: dict | None = None, audio: str | None = None,
                        f"锚点 {sum(len(v) for v in anchors.values())} 个")
     plan_rows = measured("planning", plan, units, anchors, cuts, duration, fine_cuts, coarse_numbers)
 
-    audio_sha256 = _file_digest(src)
+    if _file_digest(src) != audio_sha256:
+        raise RuntimeError("转写期间音频来源已改变")
+    assert_current(batch, unit_binding)
     items = []
     # 切片是纯 ffmpeg 子进程，互相独立：并行切，墙钟从「段数 × 单段耗时」降到
     # 大致「单段耗时 × 批次数」。失败仍然按单元抛出，不影响其它段的记录。
@@ -1212,7 +1197,7 @@ def _run_locked(batch: Path, cfg: dict | None = None, audio: str | None = None,
     cut_started = time.monotonic()
     cut_results: dict[int, list[str]] = {}
     with _cut_futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(cut, src, out_dir, dict(row, audio_sha256=audio_sha256)): index
+        futures = {pool.submit(cut, src, out_dir, dict(row, audio_sha256=audio_sha256, unit_binding=unit_binding)): index
                    for index, row in enumerate(plan_rows)}
         for future in _cut_futures.as_completed(futures):
             cut_results[futures[future]] = future.result()
@@ -1233,14 +1218,20 @@ def _run_locked(batch: Path, cfg: dict | None = None, audio: str | None = None,
                       "review_reasons": row.get("review_reasons", []), "evidence": evidence})
         report("cut", 75 + int(20 * (i + 1) / len(plan_rows)), row["unit_id"])
 
+    for item in items:
+        item["file_sha256"] = _file_digest(batch / item["file"])
     needs_review = [it["unit_id"] for it in items if not it["verified"]]
+    assert_current(batch, unit_binding)
+    if _file_digest(src) != audio_sha256:
+        raise RuntimeError("切片期间音频来源已改变")
     evidence_doc = {"generator": "audio.segment/v2", "audio": str(src),
+                    "unit_binding": unit_binding, "audio_sha256": audio_sha256,
                     "duration": duration, "config": cfg,
                     "silence_skeleton": cuts, "anchors": {str(k): v for k, v in anchors.items()},
                     "needs_review_units": needs_review, "region_proofs": {str(n): v for n,v in region_proofs.items()},
                     "items": items}
     _atomic_json(out_dir / EVIDENCE_NAME, evidence_doc)
-    _atomic_json(out_dir / MAP_NAME, {"items": [
+    _atomic_json(out_dir / MAP_NAME, {"unit_binding": unit_binding, "items": [
         {"unit_id": it["unit_id"], "file": it["file"], "start": it["start"], "end": it["end"]}
         for it in items]})
     if needs_review:

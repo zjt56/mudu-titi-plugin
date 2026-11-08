@@ -216,12 +216,13 @@ class ArchiveTest(unittest.TestCase):
 
     def test_advance_registration_prevents_archive_until_worker_finishes(self):
         entered, release = threading.Event(), threading.Event()
-        original_advance = server.auto_flow.advance
-        def worker(*args):
+        original_advance = server.auto_flow._advance_locked
+        def worker(*args, **kwargs):
+            self.assertEqual(kwargs.get("stop_at"), "upload_gate")
             entered.set()
             release.wait(5)
             return {"done": True}
-        with patch.object(server.auto_flow, "advance", worker), patch.object(server.auto_flow, "load_bridge", return_value={}):
+        with patch.object(server.auto_flow, "_advance_locked", worker), patch.object(server.auto_flow, "load_bridge", return_value={}):
             server.start_advance(self.name)
             self.assertTrue(entered.wait(2))
             try:
@@ -233,7 +234,7 @@ class ArchiveTest(unittest.TestCase):
                 for thread in threading.enumerate():
                     if thread.name == f"workbench-advance-{self.name}":
                         thread.join(2)
-        self.assertIs(server.auto_flow.advance, original_advance)
+        self.assertIs(server.auto_flow._advance_locked, original_advance)
         self.assertTrue(self.folder.exists())
 
 

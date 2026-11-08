@@ -6,13 +6,13 @@ const path = require('node:path');
 const client = fs.readFileSync(path.resolve(__dirname, '..', 'lib/client.js'), 'utf8');
 const server = fs.readFileSync(path.resolve(__dirname, '..', 'app/workbench/server.py'), 'utf8');
 
-test('后端给出 flow_done（二审结束）唯一口径，供排队区与审核列表共用', () => {
+test('后端阶段卡复用契约顺序与 flow_done 口径，客户端无需维护第二份阶段顺序', () => {
   assert.match(server, /"flow_done":\s*flow_done/);
-  // review 或 review_gate 任一进入完成态即视为结束。
-  assert.match(server, /flow_done = review_status_value in TERMINAL_OK or gate_status_value in TERMINAL_OK/);
+  assert.match(server, /STAGE_ORDER = \[s\.id for s in wf_contracts\.STAGES\]/);
+  assert.match(server, /for sid in \(STAGE_ORDER or list\(stages\)\)/);
 });
 
-test('排队区只列处理中的试卷；二审结束的从队列消失', () => {
+test('排队区只列处理中的试卷；内容审核与上传格式检查结束的从队列消失', () => {
   assert.match(client, /const pendingBatches = batches\.filter\(\(b\) => !b\.flow_done && !b\.uploaded\)/);
   assert.match(client, /const finishedBatches = batches\.filter\(\(b\) => b\.flow_done && !b\.uploaded\)/);
   // 队列行遍历的是 pendingBatches，不是全部 batches。
@@ -29,7 +29,7 @@ test('上传后不再自动跳到审核页，改由醒目入口按需切换', ()
   assert.match(client, /const goReview = \(\) => \{ if \(props\.onGoReview\) props\.onGoReview\(\); \}/);
 });
 
-test('当前试卷二审结束后自动切到下一份未结束的，流程图开始新流程', () => {
+test('当前试卷内容审核与上传格式检查结束后自动切到下一份未结束的，流程图开始新流程', () => {
   assert.match(client, /pending\.some\(\(b\) => b\.name === cur\) \? cur : pending\[0\]\.name/);
   // 流程图只跟踪处理中的试卷。
   assert.match(client, /const selBatch = pendingBatches\.find\(\(b\) => b\.name === sel\) \|\| pendingBatches\[0\]/);
@@ -37,7 +37,7 @@ test('当前试卷二审结束后自动切到下一份未结束的，流程图�
   assert.match(client, /本轮流程已结束/);
   assert.match(client, /上传新试卷会开始一轮新流程/);
   // 排队区常驻显示：即使没有处理中的试卷也保留这块区域和空状态，
-  // 不因队列为空而整块收起；二审结束的试卷仍不占用队列。
+  // 不因队列为空而整块收起；内容审核与上传格式检查结束的试卷仍不占用队列。
   assert.match(client, /排队区常驻显示/);
   assert.match(client, /const queue = h\('div', \{ style: \{ flex: 1, minHeight: 190/);
   assert.match(client, /pendingBatches\.length === 0\s*\n?\s*\? h\(EmptyState/);
@@ -47,7 +47,7 @@ test('当前试卷二审结束后自动切到下一份未结束的，流程图�
 });
 
 test('流程图精修：紧凑两行节点名、方向箭头、已完成段用中性色、阶段进度', () => {
-  assert.match(client, /const DONE = \{ completed: true, approved: true, skipped: true \}/);
+  assert.match(client, /const DONE = \{ completed: true, approved: true, skipped: true, completed_with_findings: true \}/);
   assert.match(client, /doneN \+ ' \/ ' \+ items\.length\)/);
   assert.match(client, /arrows\.map/);   // 方向箭头消除蛇形回绕的阅读歧义
   assert.match(client, /s\.reached \? doneLine : todoLine/); // 已完成段用中性灰
@@ -84,8 +84,8 @@ test('减文案：上传页冗余小字说明与冗长按钮文字已移除', ()
   assert.doesNotMatch(client, /选填 · 留空将自动识别/);
   assert.doesNotMatch(client, /点击选择，或将文件拖放到此处/);
   assert.doesNotMatch(client, /文件名含“答案\/解析”的会自动识别为答案卷/);
-  assert.doesNotMatch(client, /二审结束后自动离开队列/);
-  assert.doesNotMatch(client, /上传试卷后，这里显示从提取到二审结束的流程/);
+  assert.doesNotMatch(client, /内容审核与上传格式检查结束后自动离开队列/);
+  assert.doesNotMatch(client, /上传试卷后，这里显示从提取到内容审核与上传格式检查结束的流程/);
   assert.doesNotMatch(client, /选择一份试卷进入审核；也可重新标签/);
   assert.doesNotMatch(client, /上传并开始处理/);
   assert.doesNotMatch(client, /const legend = /);

@@ -109,7 +109,7 @@ class ReviewRoundsTest(unittest.TestCase):
         schema = json.loads((package / 'response.schema.json').read_text())
         assessment = schema['properties']['artifacts']['properties']['review_round']['properties']['checks']['items']['properties']['assessment']
         assessment = next((branch for branch in assessment.get('oneOf', []) if branch.get('type') == 'object'), assessment)
-        self.assertIn('difficulty', assessment['required'])
+        self.assertNotIn('difficulty', assessment['required'])
         record = self.payload()['rounds'][0]
         self.assertEqual(review._round_checks(record, 'labels', self.plan, self.batch), [])
         payload = self.payload()
@@ -124,8 +124,7 @@ class ReviewRoundsTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 review._round_checks(record, 'labels', self.plan, self.batch)
         record['checks'][0]['assessment'].pop('difficulty')
-        with self.assertRaises(ValueError):
-            review._round_checks(record, 'labels', self.plan, self.batch)
+        self.assertEqual(review._round_checks(record, 'labels', self.plan, self.batch), [])
 
     def test_catalog_filter_retains_metadata_and_unknown_type_falls_back(self):
         from workbench import taxonomy

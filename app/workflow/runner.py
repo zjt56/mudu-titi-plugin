@@ -85,7 +85,33 @@ def _log_path(batch_dir: Path, stage_id: str) -> Path:
     return path
 
 
-def _record_success(batch_dir: Path, manifest: dict, stage: contracts.Stage) -> None:
+def _record_success(batch_dir: Path, manifest: dict, stage: contracts.Stage) -> bool:
+    """Record a real success; a failing ownership hook is a stage failure, not a crash."""
+    from . import batch_fill
+    if (batch_dir / batch_fill.STATE).is_file():
+        if stage.id == "meta":
+            metadata = json.loads((batch_dir / "06_batch/batch_meta.base.json").read_text(encoding="utf-8-sig"))
+            batch_fill.sync(batch_dir, "metadata", metadata)
+            # This controlled metadata enrichment belongs to the same batch.
+            # It changes no accepted question body or semantic labels.
+            assembled = manifest.get("stages", {}).get("assemble", {})
+            if assembled.get("status") in mf.TERMINAL_OK:
+                spec = contracts.STAGE_BY_ID["assemble"]
+                assembled["output_hashes"] = mf.output_hashes(batch_dir, spec)
+                mf.record_semantics(batch_dir, manifest, spec)
+        elif stage.id == "format_gate":
+            try:
+                batch_fill.mark_finalized(batch_dir)
+            except ValueError as exc:
+                # Sealing needs the confirmed structure and the batch objects.
+                # A corrupt structure must surface as a diagnosable blocker so
+                # the structure gate can rerun, never as a crash that hides it.
+                mf.touch_stage(manifest, stage.id, mf.FAILED, exit_code=1,
+                               notes="固化批次失败：" + str(exc)[:300])
+                manifest.setdefault("stages", {}).setdefault("structure_gate", {})[
+                    "rebuild_required"] = True
+                print("  ✗ 固化批次失败：" + str(exc)[:160])
+                return False
     mf.touch_stage(
         manifest, stage.id, mf.COMPLETED,
         input_hashes=mf.input_hashes(batch_dir, manifest, stage),
@@ -97,6 +123,7 @@ def _record_success(batch_dir: Path, manifest: dict, stage: contracts.Stage) -> 
     )
     mf.record_delivery(batch_dir, manifest, stage)
     mf.mark_delivery_consumed(batch_dir, stage.id)
+    return True
 
 
 def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
@@ -127,6 +154,16 @@ def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
     log.write_text(f"$ {' '.join(argv)}\n\n{out}\n\n[stderr]\n{err}", encoding="utf-8")
     for line in (out or "").splitlines()[-5:]:
         print("    " + line.strip()[:120])
+    # Source partitioning is part of extraction ownership; publish its semantic
+    # baseline only after this deterministic and model-assisted stage is final.
+    if code == 0 and stage.id == "extract":
+        try:
+            from . import structure_ai
+            reviewed = structure_ai.auto_review(batch_dir)
+            if reviewed.get("ran") and reviewed.get("skipped"):
+                print(f"  · 结构 AI 复核：已将 {len(reviewed['skipped'])} 行答案/解析移入附录")
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
+            print(f"  · 结构 AI 复核跳过：{str(exc)[:160]}")
     with _agent_lock(timeout):
         current = mf.load(batch_dir)
         # Another actor may have completed this stage while the command ran.
@@ -150,8 +187,22 @@ def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
                 print("  ✗ 缺少阶段产物：" + "、".join(missing))
                 code = 1
             else:
-                _record_success(batch_dir, current, stage)
-                print(f"  ✓ 完成，日志：{log.relative_to(batch_dir)}")
+                try:
+                    accepted = _record_success(batch_dir, current, stage)
+                except (ValueError, OSError, KeyError, TypeError) as exc:
+                    # A process exit of zero is only a candidate delivery. A
+                    # rejected source/body sync must remain a recoverable stage
+                    # failure, not escape and leave the whole driver 'running'.
+                    accepted = False
+                    mf.touch_stage(current, stage.id, mf.FAILED, exit_code=1,
+                                   notes='阶段产物校验/回填失败：' + str(exc)[:500])
+                    with log.open('a', encoding='utf-8') as handle:
+                        handle.write('\n[delivery-rejected]\n' + str(exc) + '\n')
+                if accepted:
+                    print(f"  ✓ 完成，日志：{log.relative_to(batch_dir)}")
+                else:
+                    print(f"  ✗ 产物未通过交付校验，日志：{log.relative_to(batch_dir)}")
+                    code = 1
         mf.save(batch_dir, current)
         if current is not manifest:  # 同一对象时 clear+update 会把自己清空
             manifest.clear()
@@ -185,22 +236,6 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
         mf.save(batch_dir, manifest)
         print(f"  ✗ {report['error']}；报告：{target.relative_to(batch_dir)}")
         return 1
-    # Deterministically restore empty table blocks from confirmed Word slices
-    # before validation; this repairs model formatting loss without weakening audit.
-    try:
-        from .question_content import restore_table_blocks_from_structure
-        batch_data = json.loads(batch_json.read_text(encoding="utf-8-sig"))
-        repaired = restore_table_blocks_from_structure(batch_dir, batch_data)
-        if repaired:
-            batch_json.write_text(json.dumps(batch_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            meta_json = batch_dir / "06_batch" / "batch_meta.json"
-            if meta_json.is_file():
-                meta_data = json.loads(meta_json.read_text(encoding="utf-8-sig"))
-                restore_table_blocks_from_structure(batch_dir, meta_data)
-                meta_json.write_text(json.dumps(meta_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            print(f"  · 自动恢复 {repaired} 个原卷表格块")
-    except (OSError, ValueError, TypeError, KeyError) as exc:
-        print(f"  · 表格自动恢复未执行：{exc}")
     final_batch_hash = mf.sha256_file(batch_json)
     stage = contracts.STAGE_BY_ID["validate"]
     mf.touch_stage(manifest, "validate", mf.RUNNING)
@@ -225,12 +260,23 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
     # 跳过听力的批次只豁免听力单元的题图/选项内容；非听力单元的题干、选项、
     # 题图与共享材料仍逐项对照原卷。
     report["source_audit"] = audit
+    # 图片/音频引用缺失属 AI 能力受限项：只作提示，不阻断本地体检；
+    # 结构、题号、题干、选项、材料归属等文本类问题仍是硬阻断。
+    media_codes = {"SOURCE_IMAGE_MISSING", "OPTION_CONTENT_MISMATCH",
+                   "SOURCE_OPTIONS_INCOMPLETE", "SHARED_OPTIONS_MISMATCH"}
+    text_issues = [issue for issue in audit.get("issues", [])
+                   if issue.get("code") not in media_codes]
+    media_issues = [issue for issue in audit.get("issues", [])
+                    if issue.get("code") in media_codes]
+    if media_issues:
+        report.setdefault("warnings", []).append("SOURCE_MEDIA_UNVERIFIED")
     report.setdefault("checks", []).append({
         "check": "原卷逐题覆盖与材料归属 source_audit", "blocking": True,
-        "passed": audit.get("passed") is True,
-        "output": "；".join(issue.get("message", "") for issue in audit.get("issues", [])[:5]),
+        "passed": not text_issues,
+        "output": "；".join(issue.get("message", "") for issue in (text_issues or media_issues)[:5]),
+        "note": "图片/音频能力受限项只报告，不阻断" if media_issues and not text_issues else "",
     })
-    if audit.get("passed") is not True:
+    if text_issues:
         report.setdefault("blocking_failures", []).append("SOURCE_SLICE_MISMATCH")
         report["passed"] = False
     report["checked_at"] = mf.now_iso()
@@ -486,17 +532,7 @@ def _structure_inputs(batch_dir: Path, manifest: dict) -> tuple:
 
 
 def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
-    """Compute privately, then publish only if the evidence and gate are unchanged."""
-    # 解析版试卷的答案/解析常混在正文里。先用 AI 复核“哪些编号行是答案”，
-    # 校验通过后带 skip_lines 重跑确定性结构化；模型不可用/失败则静默跳过，
-    # 闸门仍按原规则运行，绝不因为 AI 而放行。
-    try:
-        from . import structure_ai
-        reviewed = structure_ai.auto_review(batch_dir)
-        if reviewed.get("ran") and reviewed.get("skipped"):
-            print(f"  · 结构 AI 复核：已将 {len(reviewed['skipped'])} 行答案/解析移入附录")
-    except (OSError, ValueError, RuntimeError, TypeError) as exc:
-        print(f"  · 结构 AI 复核跳过：{str(exc)[:160]}")
+    """Check the immutable extraction delivery and publish only a gate result."""
     from .local_agent import _agent_lock
     with _agent_lock(1500):
         current = mf.load(batch_dir)
@@ -657,10 +693,35 @@ def do_review_gate(batch_dir: Path, manifest: dict, *, lock_held=False) -> int:
                 manifest.update(current)
             print("  ✗ 审核闸门运行期间审核文件或原卷发生变化，请重新审核")
             return 1
+        # 记录当前最终批次摘要，供下游 handoff 判定 review-gate 报告是否仍对应当前批次。
+        try:
+            final_meta = batch_dir / "06_batch" / "batch_meta.json"
+            result["batch_sha256"] = mf.sha256_file(final_meta) if final_meta.is_file() else None
+        except OSError:
+            result["batch_sha256"] = None
         target = review.write_gate(batch_dir, result)
         if result["passed"]:
             _record_success(batch_dir, current, contracts.STAGE_BY_ID["review_gate"])
             current["stages"]["review_gate"]["notes"] = f"报告：{target.relative_to(batch_dir)}"
+        elif result.get("manual_only"):
+            # 用户流程目的：一审/二审找出差异交人工。除「待人工审核的差异」外无
+            # 其它硬错时，视为审核已执行完成、可继续组装待上传批次；但绝不冒充
+            # 质量通过：release_ready=False，quality_status=pending，交付为
+            # delivered_unqualified，上传仍须人工在差异处理后显式确认。
+            n = result["counts"]["open_manual_items"]
+            mf.touch_stage(current, "review_gate", mf.NEEDS_REVIEW,
+                           execution_completed=True,
+                           continue_unqualified=True,
+                           quality_status="pending",
+                           release_ready=False,
+                           notes=f"审核已执行完成，{n} 项差异待人工审核（未放行，未上传）")
+            mf.record_delivery(batch_dir, current, contracts.STAGE_BY_ID["review_gate"])
+            mf.save(batch_dir, current)
+            if current is not manifest:
+                manifest.clear()
+                manifest.update(current)
+            print(f"  · 审核闸门：已执行完成，{n} 项差异待人工审核；继续组装待上传批次（未放行）")
+            return 0
         else:
             mf.touch_stage(current, "review_gate", mf.BLOCKED,
                            notes=f"{len(result['errors'])} 条未解决")
@@ -982,12 +1043,40 @@ def _skip_agent_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
         if not reason:
             return False
         if current["stages"].get(stage.id, {}).get("status") not in mf.TERMINAL_OK:
+            if stage.id == "answers":
+                # An empty-answer decision requires confirmed question coverage.
+                # Without structure, leave this producer waiting for its real prerequisite.
+                if not (batch_dir / "01_source/structure.confirmed.json").is_file():
+                    return False
+                from . import empty_answers
+                try:
+                    empty_answers.write_empty_answers(batch_dir)
+                except (OSError, ValueError, TypeError):
+                    # Structure not usable yet: keep waiting instead of failing.
+                    return False
+                mf.touch_stage(current, stage.id, mf.COMPLETED,
+                               notes="未提供答案来源；为全部确认题号登记无答案决定")
+                mf.save(batch_dir, current)
+                mf.record_delivery(batch_dir, current, stage)
+                mf.save(batch_dir, current)
+                if current is not manifest:
+                    manifest.clear()
+                    manifest.update(current)
+                print(f"  · {stage.id} 已登记确定性无答案决定（{reason}）")
+                return True
             if stage.id == "explanations":
                 # 跳过解析提取时必须留下确定性空产物，装配仍可继续。
                 from .optional_inputs import write_empty_explanations
                 # 结构尚未产出时只记录跳过；正式结构完成后才生成逐题空解析产物。
                 if (batch_dir / "01_source/structure.confirmed.json").is_file():
-                    write_empty_explanations(batch_dir)
+                    try:
+                        write_empty_explanations(batch_dir)
+                    except (OSError, ValueError, TypeError):
+                        # Structure unusable: keep waiting, do not mark skipped.
+                        return False
+                    from . import batch_fill
+                    if (batch_dir / batch_fill.STATE).is_file():
+                        batch_fill.sync(batch_dir, "explanations")
             mf.touch_stage(current, stage.id, mf.SKIPPED, notes=reason)
             mf.save(batch_dir, current)
         if current is not manifest:
@@ -1009,6 +1098,11 @@ def cmd_run(args) -> int:
 
 def _cmd_run_locked(batch_dir: Path, args) -> int:
     manifest = mf.load(batch_dir)
+    if not args.dry_run:
+        invalidated = mf.reconcile_deliveries(batch_dir, manifest)
+        if invalidated:
+            mf.save(batch_dir, manifest)
+            manifest = mf.load(batch_dir)
     order = list(contracts.STAGE_ORDER)
     if args.stage:
         order = [args.stage]
@@ -1043,7 +1137,7 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
             if stage.kind != contracts.HUMAN and (record.get("input_hashes") or record.get("output_hashes")):
                 stale, why = mf.is_stale(batch_dir, manifest, stage)
                 if stale and not args.dry_run:
-                    mf.invalidate_downstream(batch_dir, manifest, stage_id, why)
+                    mf.invalidate_stage(batch_dir, manifest, stage_id, why)
                     mf.save(batch_dir, manifest)
                     status = mf.INVALIDATED
                 elif stale:
@@ -1052,8 +1146,12 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
                     continue
             else:
                 continue
+        # An explicit/structural skip does not require upstream completion and
+        # must be honoured before reporting an upstream wait.
+        if stage.kind == contracts.AGENT and _skip_agent_stage(batch_dir, manifest, stage, dry_run=args.dry_run):
+            continue
         unmet = [d for d in stage.depends_on
-                 if manifest["stages"].get(d, {}).get("status") not in TERMINAL]
+                 if not mf.dependency_satisfied(manifest, d, allow_unqualified=True)]
         if unmet:
             print(f"⏸ {stage_id} 等待上游：{'、'.join(unmet)}")
             return 0 if args.dry_run else 1
@@ -1093,7 +1191,15 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
                 continue
             # 组装是确定性合并：结构不变时直接搬运四路产物，不调用模型。
             if stage.id == "assemble" and not args.dry_run:
-                from workflow import assemble_local, agent_protocol
+                from workflow import assemble_local, agent_protocol, batch_fill
+                if (batch_dir / batch_fill.STATE).is_file():
+                    from workflow import auto as auto_flow
+                    executable = auto_flow._bridge_stage(stage, ["{python}", "-m", "workflow.agent", "run", "--stage", "assemble", "--batch-dir", "{batch_dir}"])
+                    code = _execute_command(batch_dir, manifest, executable)
+                    if code:
+                        return code
+                    manifest = mf.load(batch_dir)
+                    continue
                 if assemble_local.available(batch_dir):
                     try:
                         payload = assemble_local.build(batch_dir)

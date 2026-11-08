@@ -48,6 +48,33 @@ class TaskTemplateCacheTests(unittest.TestCase):
             tasks.build_task(self.batch, "answers", max_input_chars=200000)
             self.assertEqual(build.call_count, 5)
 
+    def test_assembly_rules_do_not_invalidate_answer_task(self):
+        before = tasks.build_task(self.batch, "answers")
+        constraints = tasks.ROOT / "skills-reference/constraints.md"
+        original = constraints.read_text(encoding="utf-8")
+        try:
+            constraints.write_text(original + "\n临时装配版式规则\n", encoding="utf-8")
+            after = tasks.build_task(self.batch, "answers")
+        finally:
+            constraints.write_text(original, encoding="utf-8")
+        self.assertEqual(before["prompt"], after["prompt"])
+
+    def test_assembly_rules_invalidate_assemble_task(self):
+        self.write("01_source/structure.json", json.dumps({"sections": [], "groups": []}))
+        self.write("01_source/metadata.json", "{}")
+        self.write("03_types/types.json", json.dumps({"items": [{"unit_id": "q-1", "type": "语音题", "subtypes": [], "words": 0, "contentComplete": True, "evidence": ["正文 L1"]}]}))
+        self.write("04_knowledge/knowledge.json", json.dumps({"items": [{"unit_id": "q-1", "knowledge": ["语音/基本读音/字母在单词中的基本读音"], "subquestions": [], "evidence": ["正文 L1"]}]}))
+        self.write("04_knowledge/explanations.json", json.dumps({"items": [{"unit_id": "q-1", "explanation": "无", "articleSummary": "无", "subquestions": [], "evidence": ["正文 L1"]}]}))
+        before = tasks.build_task(self.batch, "assemble")
+        constraints = tasks.ROOT / "skills-reference/constraints.md"
+        original = constraints.read_text(encoding="utf-8")
+        try:
+            constraints.write_text(original + "\n临时装配版式规则\n", encoding="utf-8")
+            after = tasks.build_task(self.batch, "assemble")
+        finally:
+            constraints.write_text(original, encoding="utf-8")
+        self.assertNotEqual(before["prompt"], after["prompt"])
+
     def test_cache_hit_does_not_bypass_path_checks(self):
         tasks.build_task(self.batch, "answers")
         path = self.batch / "01_source/正文.txt"

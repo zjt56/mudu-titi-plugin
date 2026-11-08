@@ -17,17 +17,23 @@ from workflow import agent_protocol as protocol, agent_tasks, contracts, manifes
 
 class AgentProtocolTest(unittest.TestCase):
     def setUp(self):
-        # These file-protocol tests never acquire the machine-wide agent lock.
-        lock = patch.object(protocol, "_agent_lock", side_effect=lambda *_: nullcontext())
-        lock.start()
-        self.addCleanup(lock.stop)
+        # These file-protocol tests never acquire the machine-wide agent lock,
+        # including the lock taken inside review_rounds for review export/import.
+        from workflow import local_agent, review_rounds
+        for owner in (protocol, review_rounds):
+            lock = patch.object(owner, "_agent_lock", side_effect=lambda *_a, **_k: nullcontext())
+            lock.start()
+            self.addCleanup(lock.stop)
+        fallback = patch.object(local_agent, "_agent_lock", side_effect=lambda *_a, **_k: nullcontext())
+        fallback.start()
+        self.addCleanup(fallback.stop)
         self.tmp = tempfile.TemporaryDirectory(prefix="agent protocol ")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         self.batch = self.root / "original batch"
         self.batch.mkdir()
-        self.write("01_source/正文.txt", "1. She ___ a book. A. reads B. read C. reading D. to read")
-        self.write("01_source/structure.json", {"sections": [], "groups": []})
+        self.write("01_source/正文.txt", "1. She ______ a book. A. reads B. read C. reading D. to read")
+        self.write("01_source/structure.json", {"sections": [{"type": "单项填空", "questions": [1]}], "groups": []})
         self.write("01_source/extraction.json", {})
         self.write("01_source/metadata.json", {})
         self.write("07_review/extraction-report.json", {})
@@ -37,14 +43,64 @@ class AgentProtocolTest(unittest.TestCase):
         self.write("01_source/附录.txt", "1. A")
         source = self.batch / "original.txt"
         source.write_text("original source", encoding="utf-8")
+        self.write("01_source/metadata.json", {
+            "original_sha256": mf.sha256_file(source),
+            "source_sha256": mf.sha256_file(self.batch / "01_source/正文.txt"),
+        })
+        gate_report = {
+            "passed": True,
+            "input_hashes": {
+                "01_source/正文.txt": mf.sha256_file(self.batch / "01_source/正文.txt"),
+                "01_source/structure.json": mf.sha256_file(self.batch / "01_source/structure.json"),
+                "01_source/structure.confirmed.json": mf.sha256_file(self.batch / "01_source/structure.confirmed.json"),
+            },
+            "original_sha256": mf.sha256_file(source),
+        }
+        self.write("07_review/structure-gate.json", gate_report)
         manifest = mf.new_manifest("test-protocol", self.batch,
                                    mf.register_input(self.batch, "source", source), {"version": "test"})
         mf.touch_stage(manifest, "extract", mf.COMPLETED)
         mf.touch_stage(manifest, "structure_gate", mf.COMPLETED,
                        output_hashes=mf.output_hashes(self.batch, contracts.STAGE_BY_ID["structure_gate"]))
+        self.write("06_batch/batch.base.json", {"items": [{
+            "unit_id": "q-1", "unit_kind": "standalone", "number": 1, "numbers": [1],
+            "stem": "She ______ a book.", "material": "", "options": ["A. reads", "B. read", "C. reading", "D. to read"],
+            "subquestions": []}], "name": "test"})
+        types = {"items": [{"unit_id": "q-1", "type": "单项填空", "subtypes": ["四个选项"],
+                             "words": 5, "contentComplete": True, "evidence": ["正文 L1"]}]}
+        self.write(agent_tasks.ARTIFACTS["types"], types)
+        answers = {"answers": {"1": "A"}, "evidence": {"1": ["附录 L1"]}, "missing": {}}
+        self.write(agent_tasks.ARTIFACTS["answers"], answers)
+        mf.touch_stage(manifest, "preassemble", mf.COMPLETED,
+                       output_hashes=mf.output_hashes(self.batch, contracts.STAGE_BY_ID["preassemble"]))
         mf.save(self.batch, manifest)
         self.payload = {"items": [{"unit_id": "q-1", "type": "单项填空", "subtypes": ["四个选项"],
                                    "words": 5, "contentComplete": True, "evidence": ["正文 L1 A–D"]}]}
+
+    def mark_delivered(self, stage):
+        manifest = mf.load(self.batch)
+        spec = contracts.STAGE_BY_ID[stage]
+        mf.touch_stage(manifest, stage, mf.COMPLETED,
+                       input_hashes=mf.input_hashes(self.batch, manifest, spec),
+                       output_hashes=mf.output_hashes(self.batch, spec))
+        mf.record_delivery(self.batch, manifest, spec)
+        mf.save(self.batch, manifest)
+
+    def mark_chain(self, stages, **overrides):
+        """Mark a chain as really delivered, with recorded input bindings."""
+        for stage_id in stages:
+            spec = contracts.STAGE_BY_ID[stage_id]
+            manifest = mf.load(self.batch)
+            touch = overrides.get(stage_id, {})
+            status = touch.pop('status', mf.COMPLETED) if isinstance(touch, dict) else mf.COMPLETED
+            mf.touch_stage(manifest, stage_id, status,
+                           input_hashes=mf.input_hashes(self.batch, manifest, spec),
+                           output_hashes=mf.output_hashes(self.batch, spec),
+                           **touch)
+            mf.save(self.batch, manifest)
+            if status in mf.TERMINAL_OK:
+                mf.record_delivery(self.batch, manifest, spec)
+                mf.save(self.batch, manifest)
 
     def write(self, relative, value):
         path = self.batch / relative
@@ -120,7 +176,7 @@ else:
 print(json.dumps(result, ensure_ascii=False))
 ''', encoding="utf-8")
         config = local_agent._validate_config({"provider": "command", "command": ["{python}", str(script), str(marker)],
-                                               "timeout_seconds": 10}, self.root)
+                                               "timeout_seconds": 30, "max_input_chars": 200000}, self.root)
         bridge = auto.load_bridge()
         bridge.pop("audio")
         with patch.object(auto, "PARALLEL_AGENTS_ENABLED", True), \
@@ -155,9 +211,10 @@ print(json.dumps(result, ensure_ascii=False))
         value = self.envelope(task_id, "needs_review")
         value["result"]["notes"] = ["Need clearer source"]
         response = self.response(task_id, value)
+        types_before = (self.batch / agent_tasks.ARTIFACTS["types"]).read_bytes()
         report = protocol.import_result(self.batch, task_id, response)
         self.assertFalse(report["completed"])
-        self.assertFalse((self.batch / agent_tasks.ARTIFACTS["types"]).exists())
+        self.assertEqual((self.batch / agent_tasks.ARTIFACTS["types"]).read_bytes(), types_before)
         self.assertEqual(mf.load(self.batch)["stages"]["types"]["status"], mf.NEEDS_REVIEW)
         self.assertEqual(protocol.import_result(self.batch, task_id, response), report)
         with self.assertRaisesRegex(ValueError, "consumed"):
@@ -165,20 +222,34 @@ print(json.dumps(result, ensure_ascii=False))
 
     def prepare_review(self):
         self.write(agent_tasks.ARTIFACTS["types"], self.payload)
-        self.write(agent_tasks.ARTIFACTS["answers"], {"answers": {"1": "A"}, "evidence": {"1": ["附录 L1"]}})
-        explanation = "本题考查动词辨析，结合主语与时态判断应选 reads。" + agent_tasks.AI_MARK
+        self.write(agent_tasks.ARTIFACTS["answers"], {"answers": {"1": "A"}, "evidence": {"1": ["附录 L1"]}, "missing": {}})
+        explanation = "无"
         self.write(agent_tasks.ARTIFACTS["explanations"], {"items": [{
-            "unit_id": "q-1", "explanation": explanation, "articleSummary": "",
-            "subquestions": [], "evidence": ["正文 L1"]}]})
+            "unit_id": "q-1", "explanation": explanation, "articleSummary": "无",
+            "subquestions": [], "evidence": ["未提供原解析"]}]})
+        from workbench import taxonomy
+        knowledge = ["词汇/词汇辨析/动词辨析"]
+        ids = [row["id"] for row in taxonomy.resolve_knowledge(knowledge)["resolved"]]
         self.write(agent_tasks.ARTIFACTS["knowledge"], {"items": [{
-            "unit_id": "q-1", "knowledge": ["词汇/词汇辨析/动词辨析"], "answer": "A",
-            "explanation": explanation, "articleSummary": "", "subquestions": [],
-            "evidence": ["正文 L1"]}]})
-        self.write(agent_tasks.ARTIFACTS["assemble"], {"items": []})
-        manifest = mf.load(self.batch)
+            "unit_id": "q-1", "knowledge": knowledge, "knowledgeIds": ids,
+            "subquestions": [], "evidence": ["正文 L1"]}]})
+        batch = {"name": "test", "items": [{
+            "id": "q-1", "unit_id": "q-1", "unit_kind": "standalone", "number": 1, "numbers": [1],
+            "question_type": "单项填空", "filterMetadata": {"subtypes": ["四个选项"]},
+            "stem": "1. She ______ a book. A. reads B. read C. reading D. to read", "material": "",
+            "options": ["A. reads", "B. read", "C. reading", "D. to read"],
+            "knowledge": knowledge, "knowledgeIds": ids, "knowledge_ids": ids,
+            "answer": "A", "explanation": "无", "articleSummary": "无", "subquestions": []}]}
+        self.write("06_batch/batch.json", batch)
+        self.write("06_batch/batch_meta.base.json", batch)
+        self.write("06_batch/batch_meta.json", batch)
+        self.write("07_review/validation-report.json", {
+            "passed": True, "batch_sha256": mf.sha256_file(self.batch / "06_batch/batch_meta.json")})
         for stage in contracts.upstream_of("review"):
-            mf.touch_stage(manifest, stage, mf.COMPLETED)
-        mf.save(self.batch, manifest)
+            if stage == "audio":
+                self.mark_chain([stage], **{stage: {'status': mf.SKIPPED, 'notes': '未提供音频'}})
+            else:
+                self.mark_delivered(stage)
 
     def review_response(self, task_id, status="completed"):
         return self.response(task_id, {"protocol": protocol.PROTOCOL, "task_id": task_id, "result": {
@@ -270,13 +341,19 @@ print(json.dumps(result, ensure_ascii=False))
         # 组装只搬运四路产物，合法性由导入器程序校验；完整听力转写与切片证据
         # 只在语义审核阶段需要，不再进入组装上下文，也不再让组装任务因它们变化而失效。
         self.write(agent_tasks.ARTIFACTS['types'], self.payload)
-        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}})
-        self.write(agent_tasks.ARTIFACTS['explanations'], {'items': []})
-        self.write(agent_tasks.ARTIFACTS['knowledge'], {'items': []})
-        state = mf.load(self.batch)
-        for stage in ('audio', 'types', 'explanations', 'knowledge'):
-            mf.touch_stage(state, stage, mf.COMPLETED)
-        mf.save(self.batch, state)
+        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}, 'evidence': {'1': ['附录 L1']}, 'missing': {}})
+        self.write(agent_tasks.ARTIFACTS['explanations'], {'items': [{
+            'unit_id': 'q-1', 'explanation': '无', 'articleSummary': '无',
+            'subquestions': [], 'evidence': ['原卷无解析']}]})
+        self.write(agent_tasks.ARTIFACTS['knowledge'], {'items': [{
+            'unit_id': 'q-1', 'knowledge': ['词汇/词汇辨析/动词辨析'],
+            'subquestions': [], 'evidence': ['正文 L1']}]})
+        self.write("02_audio/SKIP_LISTENING", "no original audio")
+        for stage in contracts.STAGE_BY_ID['assemble'].depends_on:
+            if stage == "audio":
+                self.mark_chain([stage], **{stage: {'status': mf.SKIPPED, 'notes': '未提供音频'}})
+            else:
+                self.mark_delivered(stage)
         optional = ('02_audio/full-transcript.json', '02_audio/segment-evidence.json')
         for name in optional:
             self.write(name, {'items': [{'unit_id': 'q-1', 'text': 'Actual AI transcript; pending verification.'}]})
@@ -302,8 +379,9 @@ print(json.dumps(result, ensure_ascii=False))
     def test_review_still_binds_full_transcript_and_segments(self):
         # 一审/二审需要完整听力转写与切片证据做语义核对，仍必须进入审核上下文。
         self.write(agent_tasks.ARTIFACTS['types'], self.payload)
-        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}})
+        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}, 'evidence': {'1': ['附录 L1']}, 'missing': {}})
         self.write(agent_tasks.ARTIFACTS['knowledge'], {'items': []})
+        self.write("02_audio/SKIP_LISTENING", "test isolation")
         optional = ('02_audio/full-transcript.json', '02_audio/segment-evidence.json')
         for name in optional:
             self.write(name, {'items': [{'unit_id': 'q-1', 'text': 'transcript', 'verified': True}]})
@@ -313,52 +391,69 @@ print(json.dumps(result, ensure_ascii=False))
             self.assertIn(name, contexts)
 
     def test_optional_content_inputs_portable_fingerprints_detect_changes(self):
+        """A genuinely optional input appearing/disappearing makes an exported task stale."""
         self.write(agent_tasks.ARTIFACTS['types'], self.payload)
-        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}})
-        self.write(agent_tasks.ARTIFACTS['knowledge'], {'items': []})
-        for stage in ('knowledge', 'assemble'):
-            state = mf.load(self.batch)
-            for upstream in contracts.upstream_of(stage):
-                mf.touch_stage(state, upstream, mf.COMPLETED)
-            mf.save(self.batch, state)
-            for name in agent_tasks.CONTENT_OPTIONAL_INPUTS:
-                path = self.batch / name
-                before = path.read_bytes() if path.is_file() else None
-                for change in ('appear', 'delete'):
-                    with self.subTest(stage=stage, name=name, change=change):
-                        if change == 'appear':
-                            if path.exists():
-                                path.unlink()
-                        else:
-                            path.parent.mkdir(parents=True, exist_ok=True)
-                            path.write_text('{"passed": true}' if name.endswith('.json') else 'evidence')
-                        exported = protocol.export_task(self.batch, stage)
-                        task_id = exported['task_id']
-                        if change == 'appear':
-                            path.parent.mkdir(parents=True, exist_ok=True)
-                            path.write_text('{"passed": true}' if name.endswith('.json') else 'evidence')
-                        else:
-                            path.unlink()
-                        response = self.response(task_id, {'protocol': protocol.PROTOCOL, 'task_id': task_id,
-                            'result': {'status': 'needs_review', 'artifacts': {}, 'notes': ['待核'], 'findings': []}})
-                        with self.assertRaisesRegex(ValueError, 'stale'):
-                            protocol.import_result(self.batch, task_id, response)
-                if before is None:
+        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}, 'evidence': {'1': ['附录 L1']}, 'missing': {}})
+        self.write(agent_tasks.ARTIFACTS['explanations'], {'items': [{
+            'unit_id': 'q-1', 'explanation': '无', 'articleSummary': '无',
+            'subquestions': [], 'evidence': ['未提供原解析']}]})
+        self.write(agent_tasks.ARTIFACTS['knowledge'], {'items': [{
+            'unit_id': 'q-1', 'knowledge': ['词汇/词汇辨析/动词辨析'],
+            'subquestions': [], 'evidence': ['正文 L1']}]})
+        for upstream in contracts.upstream_of('knowledge'):
+            self.mark_delivered(upstream)
+        mf.touch_stage(mf.load(self.batch), 'knowledge', mf.PENDING)
+        state = mf.load(self.batch)
+        mf.touch_stage(state, 'knowledge', mf.PENDING)
+        mf.save(self.batch, state)
+        name = 'workflow/repair-feedback/knowledge.json'
+        path = self.batch / name
+        feedback = json.dumps({'version': 1, 'stage': 'knowledge', 'unit_ids': [],
+                               'feedback_by_unit': {}, 'all_units': True, 'attempt': 1,
+                               'reason': 'AI诊断', 'error': '实际错误摘要'}, ensure_ascii=False)
+        for change in ('appear', 'delete'):
+            with self.subTest(name=name, change=change):
+                reset = mf.load(self.batch)
+                mf.touch_stage(reset, 'knowledge', mf.PENDING)
+                mf.save(self.batch, reset)
+                Path(path.parent).mkdir(parents=True, exist_ok=True)
+                if change == 'appear':
                     if path.exists():
                         path.unlink()
                 else:
-                    path.write_bytes(before)
+                    path.write_text(feedback, encoding='utf-8')
+                task_id = protocol.export_task(self.batch, 'knowledge')['task_id']
+                if change == 'appear':
+                    path.write_text(feedback, encoding='utf-8')
+                else:
+                    path.unlink()
+                response = self.response(task_id, {'protocol': protocol.PROTOCOL, 'task_id': task_id,
+                    'result': {'status': 'needs_review', 'artifacts': {}, 'notes': ['待核'], 'findings': []}})
+                with self.assertRaisesRegex(ValueError, 'stale'):
+                    protocol.import_result(self.batch, task_id, response)
 
     def test_missing_content_fingerprints_and_legacy_bindings(self):
         self.write(agent_tasks.ARTIFACTS['types'], self.payload)
-        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}})
+        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}, 'evidence': {'1': ['附录 L1']}, 'missing': {}})
+        self.write(agent_tasks.ARTIFACTS['explanations'], {"items": [{
+            "unit_id": "q-1", "explanation": "无", "articleSummary": "无",
+            "subquestions": [], "evidence": ["未提供原解析"]}]})
+        self.write(agent_tasks.ARTIFACTS['knowledge'], {"items": [{
+            "unit_id": "q-1", "knowledge": ["词汇/词汇辨析/动词辨析"],
+            "subquestions": [], "evidence": ["正文 L1"]}]})
+        self.mark_delivered('types')
+        self.mark_delivered('answers')
         state = mf.load(self.batch)
-        for upstream in contracts.upstream_of('knowledge'):
-            mf.touch_stage(state, upstream, mf.COMPLETED)
+        mf.touch_stage(state, 'knowledge', mf.PENDING)
         mf.save(self.batch, state)
-        name = '01_source/metadata.json'
+        # repair feedback is a real optional binding; metadata/附录 are both
+        # required extract-or-answer products now and cannot be toggled here.
+        name = 'workflow/repair-feedback/knowledge.json'
         for legacy, appear in ((False, False), (True, False), (True, True)):
             with self.subTest(legacy=legacy, appear=appear):
+                reset = mf.load(self.batch)
+                mf.touch_stage(reset, 'knowledge', mf.PENDING)
+                mf.save(self.batch, reset)
                 path = self.batch / name
                 if path.exists():
                     path.unlink()
@@ -371,7 +466,9 @@ print(json.dumps(result, ensure_ascii=False))
                     binding['fingerprints'] = [r for r in binding['fingerprints'] if r.get('exists') is not False]
                     binding_path.write_text(json.dumps(binding))
                 if appear:
-                    self.write(name, {})
+                    self.write(name, {'version': 1, 'stage': 'knowledge', 'unit_ids': [],
+                                      'feedback_by_unit': {}, 'all_units': True, 'attempt': 1,
+                                      'reason': 'AI诊断', 'error': '实际错误摘要'})
                 response = self.response(task_id, {'protocol': protocol.PROTOCOL, 'task_id': task_id,
                     'result': {'status': 'needs_review', 'artifacts': {}, 'notes': ['待核'], 'findings': []}})
                 if appear:
@@ -382,35 +479,32 @@ print(json.dumps(result, ensure_ascii=False))
 
     def test_content_validation_structure_is_bound_for_knowledge_and_assemble(self):
         self.write(agent_tasks.ARTIFACTS['types'], self.payload)
-        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}})
-        # 子智能体1的解析产物与子智能体2的知识点产物分开登记。
-        self.write(agent_tasks.ARTIFACTS['explanations'], {'items': []})
-        self.write(agent_tasks.ARTIFACTS['knowledge'], {'items': []})
+        self.write(agent_tasks.ARTIFACTS['answers'], {'answers': {'1': 'A'}, 'evidence': {'1': ['附录 L1']}, 'missing': {}})
+        self.write(agent_tasks.ARTIFACTS['explanations'], {'items': [{
+            'unit_id': 'q-1', 'explanation': '无', 'articleSummary': '无',
+            'subquestions': [], 'evidence': ['未提供原解析']}]})
+        self.write(agent_tasks.ARTIFACTS['knowledge'], {'items': [{
+            'unit_id': 'q-1', 'knowledge': ['词汇/词汇辨析/动词辨析'],
+            'subquestions': [], 'evidence': ['正文 L1']}]})
         structure = self.batch / '01_source/structure.json'
         for stage in ('knowledge', 'assemble'):
-            state = mf.load(self.batch)
             for upstream in contracts.upstream_of(stage):
-                mf.touch_stage(state, upstream, mf.COMPLETED)
-            mf.save(self.batch, state)
+                if upstream == "audio":
+                    self.mark_chain([upstream], **{upstream: {'status': mf.SKIPPED, 'notes': '未提供音频'}})
+                else:
+                    self.mark_delivered(upstream)
             for change in ('modify', 'appear'):
                 with self.subTest(stage=stage, change=change):
                     self.write('01_source/structure.json', {'sections': [], 'groups': []})
                     if change == 'appear':
                         structure.unlink()
                     exported = protocol.export_task(self.batch, stage)
-                    task_id = exported['task_id']
-                    if change == 'appear':
-                        self.assertEqual(exported['status'], 'needs_review')
-                        self.assertTrue(any('01_source/structure.json' in p for p in exported['preconditions']))
-                    else:
-                        self.assertEqual(exported['status'], 'ready')
-                        built = agent_tasks.build_task(self.batch, stage)
-                        self.assertEqual(built['input_hashes']['01_source/structure.json'], mf.sha256_file(structure))
-                    self.write('01_source/structure.json', {'sections': [{'type': '书面表达'}], 'groups': []})
-                    response = self.response(task_id, {'protocol': protocol.PROTOCOL, 'task_id': task_id,
-                        'result': {'status': 'needs_review', 'artifacts': {}, 'notes': ['待核'], 'findings': []}})
-                    with self.assertRaisesRegex(ValueError, 'stale'):
-                        protocol.import_result(self.batch, task_id, response)
+                    # A previously completed upstream gate owns this structure
+                    # binding. A changed/missing source structure blocks export;
+                    # it is not sent downstream to fail during import.
+                    self.assertEqual(exported["action"], "blocked")
+                    self.assertIn("structure_gate", " ".join(exported.get("preconditions", [])))
+                    self.write('01_source/structure.json', {'sections': [{'type': '单项填空', 'questions': [1]}], 'groups': []})
 
     def test_rule_change_is_stale(self):
         task_id = self.export()["task_id"]
@@ -485,19 +579,17 @@ print(json.dumps(result, ensure_ascii=False))
         manifest["stages"]["structure_gate"]["status"] = mf.PENDING
         mf.save(self.batch, manifest)
         report = self.export()
-        self.assertEqual(report["status"], "needs_review")
-        with self.assertRaisesRegex(ValueError, "preconditions"):
-            protocol.import_result(self.batch, report["task_id"], self.response(report["task_id"]))
-        self.assertFalse((self.batch / agent_tasks.ARTIFACTS["types"]).exists())
+        self.assertEqual(report["action"], "blocked")
+        self.assertTrue(any("structure_gate" in reason for reason in report["preconditions"]))
+        self.assertTrue((self.batch / agent_tasks.ARTIFACTS["types"]).is_file())
 
     def test_completed_stage_requires_explicit_invalidation(self):
         manifest = mf.load(self.batch)
         mf.touch_stage(manifest, "types", mf.COMPLETED)
         mf.save(self.batch, manifest)
         report = self.export()
-        self.assertEqual(report["status"], "needs_review")
-        with self.assertRaisesRegex(ValueError, "already complete"):
-            protocol.import_result(self.batch, report["task_id"], self.response(report["task_id"]))
+        self.assertEqual(report["action"], "blocked")
+        self.assertTrue(any("already complete" in reason for reason in report["preconditions"]))
 
     def test_import_invalidates_downstream_but_preserves_human_history(self):
         manifest = mf.load(self.batch)
@@ -519,14 +611,11 @@ print(json.dumps(result, ensure_ascii=False))
         manifest["inputs"]["source"] = {"path": str(external), "exists": True, "sha256": mf.sha256_file(external)}
         manifest["inputs"]["relative"] = {"path": "original.txt", "exists": True}
         mf.save(self.batch, manifest)
-        task_id = self.export()["task_id"]
-        binding_path = self.batch / "workflow/agent-bindings" / (task_id + ".json")
-        binding = json.loads(binding_path.read_text())
-        self.assertNotIn(str(self.root), binding_path.read_text())
-        self.assertTrue(any(row["scope"] == "input" and row["path"] == "source" for row in binding["fingerprints"]))
-        external.write_text("changed external source")
-        with self.assertRaisesRegex(ValueError, "stale"):
-            protocol.import_result(self.batch, task_id, self.response(task_id))
+        report = self.export()
+        self.assertEqual(report["action"], "blocked")
+        self.assertTrue(any("extract" in reason.lower() or "source" in reason.lower()
+                            or "original" in reason.lower()
+                            for reason in report["preconditions"]))
 
     def test_output_directory_must_be_empty_and_not_symlink(self):
         occupied = self.root / "occupied"
@@ -576,7 +665,10 @@ print(json.dumps(result, ensure_ascii=False))
                 break
             manifest["stages"][spec.id]["status"] = mf.COMPLETED
         mf.save(self.batch, manifest)
-        self.assertEqual(protocol.next_task(self.batch), {"action": "human", "stage": "upload_gate"})
+        result = protocol.next_task(self.batch)
+        self.assertEqual(result["action"], "blocked")
+        self.assertEqual(result["stage"], "upload_gate")
+        self.assertTrue(any("format_gate" in reason for reason in result["preconditions"]))
 
     @patch.dict(os.environ, {"WF_MODEL_FIRST": "0"})
     def test_cli_errors_return_two_and_review_returns_three(self):

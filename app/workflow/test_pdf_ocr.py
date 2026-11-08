@@ -38,7 +38,8 @@ class PdfOcrTest(unittest.TestCase):
             report = pdf_ocr.run(self.batch, manifest, config)
         self.assertEqual(report["status"], "completed")
         self.assertEqual(len(calls), 2)
-        self.assertTrue(all(call[2] == {"force_ocr": True, "config": config, "mandatory_pdf": True} for call in calls))
+        self.assertEqual(calls[0][2], {"force_ocr": True, "config": config, "mandatory_pdf": True})
+        self.assertEqual(calls[1][2], {"force_ocr": False, "config": config, "mandatory_pdf": False})
         self.assertEqual(report['sources'][0]['pages'][0]['text'], 'OCR text')
         first, second, duplicate = report["sources"]
         self.assertEqual(duplicate["duplicate_of"], "answers")

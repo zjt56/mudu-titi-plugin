@@ -19,7 +19,14 @@ QUESTION_PREFIX = r'^\s*(?:[（(]\s*[）)]\s*)?(\d{1,3})[.．、]'
 QUESTION = re.compile(rf'{QUESTION_PREFIX}.*?{EXPLANATION_LABEL}')
 QUESTION_BOUNDARY = re.compile(QUESTION_PREFIX)
 BODY_QUESTION = QUESTION_BOUNDARY
+# An explanation paragraph printed without its own question number; it binds to
+# the preceding numbered answer line (see the stray-explanation pass below).
+STRAY_EXPLANATION = re.compile(rf'^\s*{EXPLANATION_LABEL}')
 SUMMARY = re.compile(rf'(?:【文章大意】|\[文章大意\]|{IMG}\s*文章大意\s*{IMG})\s*(.*)')
+# 附录在逐题解析后常跟独立附注小标题（如【熟词生义】【点拨】【思路】【拓展】【考点】）
+# 及其说明行；这些不属于解析正文，解析提取必须在此处截断，否则会把附注吞进
+# 解析文本，令模型逐字解析无法与原文解析行全等绑定。
+ANNOTATION = re.compile(r'^\s*(?:\*\*\s*)?【\s*(?:熟词生义|点拨|思路点拨|拓展|引申|考点|词义辨析|语法点|注意|易错点|重难点)\s*】')
 ICON_HEADING = re.compile(rf'^\s*{IMG}[^\n]*?{IMG}')
 SECTION_NUMBER = re.compile(r'^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+|[一二三四五六七八九十]+)[.．、]')
 SECTION_NAME = re.compile(r'^\s*(短对话理解|长对话理解|短文理解|信息转换|单项填空|完形填空|补全对话|阅读理解|任务型阅读|单词拼写|书面表达)(?=\s|$|[（(：:])')
@@ -67,16 +74,60 @@ def _source_line(value):
     return re.sub(r'\*+|<[^>]+>', '', value).strip()
 
 
+def _strip_answer_marker(value):
+    """Drop a leading answer letter / 【解析】 marker from an appendix line."""
+    text = re.sub(r"^\s*(?:[A-H]\s*[.、)）]?\s*)?", "", value or "")
+    text = re.sub(r"^\s*【\s*(?:解析|答案|分析|详解|考点|点拨)\s*】\s*[:：]?\s*", "", text)
+    return text or value
+
+
+_QUOTE_MAP = str.maketrans({"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'",
+                            "\u300c": '"', "\u300d": '"', "\u300e": '"', "\u300f": '"'})
+
+
+def _verbatim(value):
+    """只忽略排版标记、Markdown 星号、空白，以及引号的弯/直弯样式；
+    实词、全半角逗号句号等标点严格保留——标点或措辞差异仍判为不同。"""
+    value = re.sub(r'</?(?:u|b|strong|em|i|sup|sub)(?:\s[^>]*)?>', '', value, flags=re.I)
+    value = re.sub(r'\*{1,3}', '', value)
+    value = value.translate(_QUOTE_MAP)
+    return re.sub(r'\s+', '', value)
+
+
 def _norm(value):
     value = re.sub(r'</?(?:u|b|strong|em|i|sup|sub)(?:\s[^>]*)?>', '', value, flags=re.I)
     value = re.sub(r'\*{1,3}', '', value)
-    return re.sub(r'\s+', '', unicodedata.normalize('NFKC', value))
+    value = unicodedata.normalize('NFKC', value).translate(_QUOTE_MAP)
+    return re.sub(r'\s+', '', value)
 
 
-def inspect_content(batch_dir, payload):
-    """检查已有解释和摘要，不把目录合法或全局文字出现当作归属正确。"""
+def _minor_edit(source, value, limit=2):
+    """source 与 value 归一化后是否只差 ≤limit 处单字符增/删（无替换不同字）。
+
+    用于识破"漏抄/多抄一个实词字"的抄写笔误；语义改写（换词、换句）不满足，
+    仍会判为不一致。基于最长公共子序列长度判定，避免把错字当对。
+    """
+    a, b = _norm(source or ''), _norm(value or '')
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > limit:
+        return False
+    # LCS 长度；a/b 长度接近，O(la*lb) 可接受（单题摘要）。
+    import difflib
+    sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+    matched = sum(block.size for block in sm.get_matching_blocks())
+    edits = (la - matched) + (lb - matched)
+    return edits <= limit
+
+
+def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
+    """共享来源绑定；只有显式 restore 模式允许恢复内存候选，不写文件。"""
     batch = Path(batch_dir).resolve()
     errors, warnings, hashes, summaries, questions, anchors = [], [], {}, [], [], []
+    restorations = []
     body_anchors = []
     source_lines = {}
     material_dir = batch / '01_source/materials'
@@ -110,15 +161,58 @@ def inspect_content(batch_dir, payload):
             match = _question(line)
             if not match:
                 continue
-            parts = [line[match.end():]]
+            head = line[match.end():]
+            # _question already consumes the answer prefix through 【解析】.
+            # The remaining first character may be substantive (e.g. “A项意为”),
+            # and must never be stripped as though it were an answer letter.
+            parts = [head]
             for later in lines[index + 1:]:
                 if (QUESTION_BOUNDARY.match(later) or SUMMARY.search(later)
                         or _section(later) or ICON_HEADING.match(later)
+                        or ANNOTATION.match(later)
                         or PASSAGE_HEADING.match(later)
                         or re.fullmatch(r'\[/?TABLE[^\]]*\]', later)):
                     break
                 parts.append(later)
             questions.append({'number': int(match.group(1)), 'text': _norm(''.join(parts)),
+                              'verbatim': _verbatim(''.join(parts)), 'source_text': '\n'.join(parts).strip(),
+                              'path': relative, 'line': index + 1})
+        # Some answer keys print the answer on its own numbered line and the
+        # 【解析】 in a following paragraph without a number (e.g. "74. It wasn't
+        # easy." then "【解析】根据…"). Bind such a stray explanation to the most
+        # recent numbered answer line that has no explanation yet. This never
+        # crosses a structural boundary or attaches to an already-explained row.
+        for index, line in enumerate(lines):
+            match = STRAY_EXPLANATION.match(line)
+            if not match:
+                continue
+            owner = None
+            for back in range(index - 1, -1, -1):
+                previous = lines[back]
+                if (SUMMARY.search(previous) or _section(previous)
+                        or PASSAGE_HEADING.match(previous) or ICON_HEADING.match(previous)
+                        or ANNOTATION.match(previous) or STRAY_EXPLANATION.match(previous)):
+                    break
+                boundary = QUESTION_BOUNDARY.match(previous)
+                if boundary and _question(previous) is None:
+                    number = int(boundary.group(1))
+                    if not any(row['number'] == number and row['path'] == relative for row in questions):
+                        owner = number
+                    break
+            if owner is None:
+                continue
+            head = line[match.end():]
+            parts = [head]
+            for later in lines[index + 1:]:
+                if (QUESTION_BOUNDARY.match(later) or SUMMARY.search(later)
+                        or _section(later) or ICON_HEADING.match(later)
+                        or ANNOTATION.match(later) or PASSAGE_HEADING.match(later)
+                        or STRAY_EXPLANATION.match(later)
+                        or re.fullmatch(r'\[/?TABLE[^\]]*\]', later)):
+                    break
+                parts.append(later)
+            questions.append({'number': owner, 'text': _norm(''.join(parts)),
+                              'verbatim': _verbatim(''.join(parts)), 'source_text': '\n'.join(parts).strip(),
                               'path': relative, 'line': index + 1})
         for index, line in enumerate(lines):
             match = SUMMARY.search(line)
@@ -132,6 +226,7 @@ def inspect_content(batch_dir, payload):
                     owner = int(question.group(1)); break
                 if (SUMMARY.search(later) or _section(later)
                         or QUESTION_BOUNDARY.match(later) or ICON_HEADING.match(later)
+                        or ANNOTATION.match(later)
                         or PASSAGE_HEADING.match(later) or PART_HEADING.match(later)
                         or PASSAGE_INSTRUCTION.match(later)
                         or re.fullmatch(r'\[/?TABLE[^\]]*\]', later)):
@@ -141,7 +236,9 @@ def inspect_content(batch_dir, payload):
             value = _norm(''.join(parts))
             if value:
                 members = []
-                for later in lines[index + 1:]:
+                _exp = re.compile(r'^\s*【\s*(?:解析|详解|分析)\s*】')
+                for j in range(index + 1, len(lines)):
+                    later = lines[j]
                     if (SUMMARY.search(later) or _section(later) or ICON_HEADING.match(later)
                             or PASSAGE_HEADING.match(later) or PART_HEADING.match(later)
                             or PASSAGE_INSTRUCTION.match(later)
@@ -150,6 +247,12 @@ def inspect_content(batch_dir, payload):
                     question = QUESTION_BOUNDARY.match(later)
                     if question:
                         if not _question(later):
+                            # 纯答案行（无【解析】）：若紧接下一行以【解析】开头，则它仍是
+                            # 该题组的成员，不能在此中断（否则组级【文章大意】只覆盖到前几题）。
+                            follow = lines[j + 1] if j + 1 < len(lines) else ''
+                            if _exp.match(follow):
+                                members.append(int(question.group(1)))
+                                continue
                             break
                         members.append(int(question.group(1)))
                 # 段落末尾的【文章大意】后面通常直接是下一篇材料，前面才是它概括的
@@ -170,8 +273,24 @@ def inspect_content(batch_dir, payload):
                     if prior:
                         members = prior
                         owner = prior[0]
-                summaries.append({'text': value, 'owner': owner, 'members': members,
+                summaries.append({'text': value, 'verbatim': _verbatim(''.join(parts)), 'source_text': '\n'.join(parts).strip(), 'owner': owner, 'members': members,
                                   'path': relative, 'line': index + 1})
+
+    # A PDF supplied alongside Word is layout evidence, not a competing text
+    # authority. Prefer the primary/answer Word excerpts per question or passage;
+    # retain attachment-only content when the primary has no corresponding field.
+    # Repeated anchors within the authoritative file still fail unique_anchor.
+    all_questions = list(questions)
+    all_summaries = list(summaries)
+    attachment_questions = [row for row in questions if row['path'] not in SOURCES]
+    attachment_summaries = [row for row in summaries if row['path'] not in SOURCES]
+    primary_numbers = {row['number'] for row in questions if row['path'] in SOURCES}
+    questions = [row for row in questions
+                 if row['path'] in SOURCES or row['number'] not in primary_numbers]
+    primary_summary_owners = {row['owner'] for row in summaries
+                              if row['path'] in SOURCES and row['owner'] is not None}
+    summaries = [row for row in summaries
+                 if row['path'] in SOURCES or row['owner'] not in primary_summary_owners]
 
     metadata_path = _safe_path(batch, '01_source/metadata.json')
     metadata = {}
@@ -303,7 +422,7 @@ def inspect_content(batch_dir, payload):
             essay_heading = re.compile(rf'^\s*(?:{IMG}\s*参考范文\s*{IMG}|【参考范文】)\s*$')
             if sum(bool(hint.match(line) or hint_inline.match(line))
                    for path, lines in source_lines.items()
-                   if path != '01_source/正文.txt' for line in lines) != 1:
+                   if path in SOURCES and path != '01_source/正文.txt' for line in lines) != 1:
                 return None
             if any(_section(line) and _section(line)[1] == '书面表达'
                    for line in source_lines.get('01_source_ans/正文.txt', [])):
@@ -322,7 +441,7 @@ def inspect_content(batch_dir, payload):
                         or not paragraph or next(_inline_numbers(paragraph), None)
                         or re.search(EXPLANATION_LABEL, paragraph)):
                     return None
-                return number, _norm(paragraph)
+                return number, (_verbatim(paragraph) if strict else _norm(paragraph))
             if len(following) < 6 or not hint.fullmatch(following[0]):
                 return None
             rows = following[1:5]
@@ -334,11 +453,38 @@ def inspect_content(batch_dir, payload):
                     return None
             if not essay_heading.fullmatch(following[5]):
                 return None
-            return number, _norm(''.join(rows))
+            return number, (_verbatim(''.join(rows)) if strict else _norm(''.join(rows)))
         except (OSError, ValueError, TypeError, KeyError, UnicodeError, AttributeError):
             return None
 
-    writing = writing_source()
+    def body_writing_source():
+        # Some Word papers keep the printed hint after the writing task while
+        # the example essay is extracted into the appendix. Bind the exact hint
+        # to the one confirmed writing unit, without requiring both in one file.
+        units = [u for u in confirmed_units.values() if u.get('type') == '书面表达']
+        if len(units) != 1 or len(units[0].get('numbers', [])) != 1:
+            return None
+        body = source_lines.get('01_source/正文.txt', [])
+        headings = [i for i, line in enumerate(body)
+                    if _section(line) and _section(line)[1] == '书面表达']
+        if len(headings) != 1:
+            return None
+        start = headings[0]
+        end = next((i for i in range(start + 1, len(body)) if _section(body[i])), len(body))
+        hints = []
+        for i in range(start + 1, end):
+            match = re.match(r'^【思路点拨】\s*(\S.*)$', body[i])
+            if match:
+                # Multiline hints require separate boundary handling; don't
+                # absorb arbitrary task text after the labelled paragraph.
+                if any(line.strip() for line in body[i + 1:end]):
+                    return None
+                hints.append(match.group(1))
+        if len(hints) == 1:
+            return units[0]['numbers'][0], (_verbatim(hints[0]) if strict else _norm(hints[0]))
+        return None
+
+    writing = writing_source() or body_writing_source()
 
     def has_explanation(item):
         return bool((item.get('explanation') or '').strip()) if isinstance(item.get('explanation'), str) else False
@@ -351,23 +497,113 @@ def inspect_content(batch_dir, payload):
                     return _norm(match.group(1))
         return None
 
+    def restore_field(item, uid, numbers, field):
+        value = item.get(field)
+        if not restore or not isinstance(value, str) or AI_MARK in value:
+            return
+        candidates = []
+        if field == 'explanation':
+            candidates = [row for row in questions if row['path'] in SOURCES
+                          and row['number'] in numbers and _norm(value) == row['text']
+                          and unique_anchor(row['number'], row['path'], row['line'])]
+            attachment_proofs = [row for row in attachment_questions if row['number'] in numbers and row['text'] == _norm(value)
+                                 and row['verbatim'] == _verbatim(value)]
+        elif numbers:
+            candidates = [row for row in summaries if row['path'] in SOURCES
+                          and row['owner'] in numbers and _norm(value) == row['text']
+                          and all(n in row['members'] and unique_anchor(
+                              n, row['path'], row['line'], allow_answer_source=True) for n in numbers)
+                          and sum(other['owner'] == row['owner'] and other['path'] == row['path']
+                                  for other in summaries) == 1]
+            attachment_proofs = [row for row in attachment_summaries
+                                 if row['owner'] in numbers and row['text'] == _norm(value)
+                                 and row['verbatim'] == _verbatim(value)
+                                 and all(n in row['members'] for n in numbers)]
+        else:
+            attachment_proofs = []
+        # A punctuation/width correction is safe only when the candidate is
+        # exactly the companion OCR excerpt and that excerpt uniquely matches
+        # the authoritative fragment. NFKC alone is never sufficient evidence.
+        source = None
+        if len(attachment_proofs) == 1:
+            # Candidate is the companion OCR excerpt verbatim; prefer the
+            # authoritative SOURCES fragment when it exists and differs.
+            if len(candidates) == 1 and candidates[0]['source_text']:
+                source = candidates[0]
+            elif attachment_proofs[0].get('source_text') and value != attachment_proofs[0]['source_text']:
+                source = attachment_proofs[0]
+        elif not candidates:
+            # No authoritative SOURCES row matched, but the cleaned ATTACHMENT
+            # fragment may normalize to exactly one row (punctuation / width
+            # only). Restore that authoritative fragment verbatim.
+            if field == 'explanation':
+                pool = [row for row in attachment_questions
+                        if row['number'] in numbers and row['text'] == _norm(value)]
+            else:
+                pool = [row for row in attachment_summaries
+                        if row['owner'] in numbers and numbers
+                        and all(n in row['members'] for n in numbers)
+                        and row['text'] == _norm(value)]
+            pool = [row for row in pool if row.get('source_text')]
+            if len(pool) == 1:
+                source = pool[0]
+        # 单字漏抄/多抄的近似修复：文章大意的**唯一**权威候选（owner 属于该组、
+        # 覆盖全部题号的 members、且同名 summary 唯一）与模型文本仅相差极少数
+        # 字符（≤2 处增删）时，认定是抄写笔误，用原文 source_text 覆盖；这是"内容
+        # 以原文为准"的确定性修复，绝不放过语义改写（差异大则不匹配，仍报错重跑）。
+        if source is None and field == 'articleSummary' and numbers and isinstance(value, str):
+            uniq = [row for row in summaries if row['path'] in SOURCES and row['owner'] in numbers
+                    and all(n in row['members'] and unique_anchor(
+                        n, row['path'], row['line'], allow_answer_source=True) for n in numbers)
+                    and sum(other['owner'] == row['owner'] and other['path'] == row['path']
+                            for other in summaries) == 1
+                    and row.get('source_text')]
+            if len(uniq) == 1 and _minor_edit(uniq[0]['source_text'], value):
+                source = uniq[0]
+        if source is not None and value != source['source_text']:
+            item[field] = source['source_text']
+            restorations.append({'unit_id': uid, 'field': field,
+                                 'path': source['path'], 'line': source['line'],
+                                 'source_sha256': hashes[source['path']]})
+
     def check(item, uid, numbers, child=False, listening=False, has_any_expl=False, unit_type=''):
         if not isinstance(item, dict):
             return
+        restore_field(item, uid, numbers, 'explanation')
+        restore_field(item, uid, numbers, 'articleSummary')
         summary = item.get('articleSummary', item.get('article_summary', ''))
         explanation = item.get('explanation', '')
         from .content_rules import is_placeholder
         # 明确缺失占位（待补充等）不是可溯源内容，也不是未标注的 AI 生成。
-        if is_placeholder(summary):
+        if summary is None or (isinstance(summary, str) and is_placeholder(summary)):
             summary = ''
-        if is_placeholder(explanation):
+        if explanation is None or (isinstance(explanation, str) and is_placeholder(explanation)):
             explanation = ''
+        if strict:
+            for field, value in (('explanation', explanation), ('articleSummary', summary)):
+                if not isinstance(value, str):
+                    error('CONTENT_TYPE_INVALID', '解析/大意必须是字符串', uid, field)
+                elif AI_MARK in value:
+                    error('AI_CONTENT_FORBIDDEN', '禁止 AI 生成解析或文章大意；不得用标记代替原文', uid, field)
+            if not listening and not explanation and (child or not item.get('subquestions')):
+                originals = [row for row in questions if row['number'] in numbers and row['text'] and not is_placeholder(row['text'])
+                             and unique_anchor(row['number'], row['path'], row['line'])]
+                if originals:
+                    error('ORIGINAL_EXPLANATION_OMITTED', '原题有解析，不能用缺失占位替代', uid, 'explanation',
+                          [f"{row['path']}:{row['line']}" for row in originals])
+            if not child and not summary:
+                originals = [row for row in summaries if row['owner'] in numbers and numbers and not is_placeholder(row['text']) and all(
+                    n in row['members'] and unique_anchor(n, row['path'], row['line'], allow_answer_source=True)
+                    for n in numbers)]
+                if originals:
+                    error('ORIGINAL_SUMMARY_OMITTED', '原材料有文章大意，不能用缺失占位替代', uid, 'articleSummary',
+                          [f"{row['path']}:{row['line']}" for row in originals])
         if isinstance(summary, str) and summary.strip():
             normalized = _norm(summary)
             marked = AI_MARK in summary
             if marked and (not summary.strip().endswith(AI_MARK) or not _norm(summary.strip()[:-len(AI_MARK)])):
-                warning('AI_PROVENANCE_IGNORED', 'AI 生成的大意不再采用，已按空值处理', uid, 'articleSummary')
-            matches = [row for row in summaries if normalized == row['text']]
+                warning('AI_PROVENANCE_IGNORED', '大意的 AI 来源标记无效；严格校验禁止生成内容', uid, 'articleSummary')
+            matches = [row for row in summaries if (_verbatim(summary) == row['verbatim'] if strict else normalized == row['text'])]
             owned = any(row['owner'] in numbers and all(
                             number in row['members'] and unique_anchor(
                                 number, row['path'], row['line'], allow_answer_source=True)
@@ -376,34 +612,34 @@ def inspect_content(batch_dir, payload):
                                 for other in summaries) == 1 for row in matches)
             # 允许两种：可逐字溯源到该题组材料，或明确标注为 AI 生成待校对（F3/F5）。
             if not marked and not owned:
-                warning('SUMMARY_SOURCE_UNVERIFIED', '文章大意未能在原材料中定位；保留原文提取值，不阻断', uid, 'articleSummary',
+                (error if strict else warning)('SUMMARY_SOURCE_UNVERIFIED', '文章大意未能唯一逐字绑定原材料；严格校验拒绝交付', uid, 'articleSummary',
                       [f"{row['path']}:{row['line']} -> 题 {row['owner']}" for row in matches])
         if isinstance(explanation, str) and explanation.strip():
             value = _norm(explanation)
             marked = AI_MARK in explanation
             if marked and (not explanation.strip().endswith(AI_MARK) or not _norm(explanation.strip()[:-len(AI_MARK)])):
-                warning('AI_PROVENANCE_IGNORED', 'AI 生成的解析不再采用，已按空值处理', uid, 'explanation')
-            traceable = bool(value) and any(row['number'] in numbers and value in row['text']
+                warning('AI_PROVENANCE_IGNORED', '解析的 AI 来源标记无效；严格校验禁止生成内容', uid, 'explanation')
+            traceable = bool(value) and any(row['number'] in numbers and (_verbatim(explanation) == row['verbatim'] if strict else value in row['text'])
                             and unique_anchor(row['number'], row['path'], row['line'])
                             for row in questions)
             if writing and not child and not item.get('subquestions'):
-                traceable = traceable or (numbers == [writing[0]] and value == writing[1])
+                traceable = traceable or (numbers == [writing[0]] and (_verbatim(explanation) if strict else value) == writing[1])
             # A group overview may quote an explicitly labelled summary; its
             # ownership is checked above and cross-material quotes are flagged.
             if not child and item.get('subquestions'):
                 traceable = traceable or any(
-                    value == _norm('【文章大意】' + row['text']) and
+                    (_verbatim(explanation) == '【文章大意】' + row['verbatim'] if strict else value == _norm('【文章大意】' + row['text'])) and
                     row['owner'] is not None and
                     (row['owner'] not in numbers or (row['owner'] in numbers and all(
                         number in row['members'] and unique_anchor(number, row['path'], row['line'])
                         for number in numbers)))
                     for row in summaries)
-            if not traceable and unit_type == '书面表达':
+            if not strict and not traceable and unit_type == '书面表达':
                 hint = writing_hint()
                 if hint and value == hint:
                     traceable = True
             if not marked and not traceable:
-                warning('EXPLANATION_SOURCE_UNVERIFIED', '解析未能在原材料中逐字定位；保留提取值，不阻断', uid, 'explanation')
+                (error if strict else warning)('EXPLANATION_SOURCE_UNVERIFIED', '解析未能唯一逐字绑定原题；严格校验拒绝交付', uid, 'explanation')
             for row in summaries:
                 if row['owner'] is not None and row['owner'] not in numbers and row['text'] in value:
                     error('EXPLANATION_CROSSES_MATERIAL', f"解析包含属于题 {row['owner']} 的另一材料大意，需按真实材料边界重新装配", uid, 'explanation',
@@ -431,6 +667,52 @@ def inspect_content(batch_dir, payload):
         # 用户要求：缺解析直接留空跳过，不再要求补写（F7 旧规则已按用户要求取消）。
         unit_type = str((confirmed_units.get(str(uid)) or {}).get('type') or '')
         check(item, uid, numbers, listening=listening, unit_type=unit_type)
-    return {'passed': not errors, 'errors': errors, 'warnings': warnings, 'source_sha256': hashes,
+    return {'passed': not errors, 'errors': errors, 'warnings': warnings,
+            'restorations': restorations, 'source_sha256': hashes,
+            'questions': questions, 'summaries': summaries,
+            'all_questions': all_questions, 'all_summaries': all_summaries,
             'check': 'upload-content-source-v1',
             'scope': '解析/大意来源和明确材料归属；不替代逐题语义、视觉、听力和独立审核'}
+
+
+def collect_source_index(batch_dir):
+    """按题号从已确定正文/答案材料抽取解析与大意索引（只读，不调模型）。
+
+    返回 (questions_by_number, summaries)：
+      questions_by_number: {题号: 权威原文片段(source_text)}
+      summaries: [{owner, members, source_text}]
+    同题号/同组存在多条不同原文时不选中，交由调用方回落模型或标记缺失，
+    绝不凭猜测挑一条。
+    """
+    report = _inspect_content(batch_dir, {'items': []}, strict=False)
+    index = {}
+    conflicted = set()
+    for row in report.get('questions', []):
+        if not row.get('source_text'):
+            continue
+        n = row['number']
+        if n in index and _norm(index[n]) != _norm(row['source_text']):
+            conflicted.add(n)
+        else:
+            index[n] = row['source_text']
+    for n in conflicted:
+        index.pop(n, None)
+    summaries = [{'owner': row.get('owner'), 'members': row.get('members') or [],
+                  'source_text': row['source_text']}
+                 for row in report.get('summaries', []) if row.get('source_text')]
+    return index, summaries
+
+
+def inspect_content(batch_dir, payload, *, strict=False):
+    """只读来源核验；strict 保持原文字符和标点校验，不修改候选。"""
+    return _inspect_content(batch_dir, payload, strict=strict)
+
+
+def restore_source_content(batch_dir, payload):
+    """在内存候选中恢复唯一绑定的权威原片段，再严格核验；不写批次。
+
+    全半角/排版等值仅用于寻找同题原片段，不放宽最终逐字校验。
+    report.restorations 保留每处恢复的文件、行号和来源指纹。
+    无来源、同源重复、跨题或实质改写均不能恢复，也不能通过严格核验。
+    """
+    return _inspect_content(batch_dir, payload, strict=True, restore=True)

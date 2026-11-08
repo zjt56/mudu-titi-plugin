@@ -281,3 +281,42 @@ class SourceCompletionScriptsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MissingAnswerIsNotAnInputErrorTest(unittest.TestCase):
+    """书面表达等原卷无答案时，不能把整卷体检判成 ANSWER_INPUT_ERROR。"""
+
+    def answers_module(self):
+        import importlib.util
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[1] / "scripts/06-upload/check_answers.py"
+        spec = importlib.util.spec_from_file_location("check_answers_missing", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_blank_writing_answer_does_not_raise(self):
+        module = self.answers_module()
+        self.assertIsNone(module.normalize(""))
+        self.assertIsNone(module.normalize(None))
+        self.assertIsNone(module.normalize("   "))
+        self.assertEqual(module.normalize("C"), "C")
+
+    def test_batch_with_blank_writing_answer_passes_and_is_not_input_error(self):
+        module = self.answers_module()
+        batch = {"items": [
+            {"number": 1, "answer": "A"},
+            {"number": 96, "answer": ""},  # 书面表达：原卷无独立答案
+        ]}
+        answers = module.collect_json({"answers": {"1": "A"}})
+        report = module.inspect(batch, answers)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["issues"], [])
+
+    def test_truly_blank_choice_answer_is_still_not_a_crash(self):
+        module = self.answers_module()
+        batch = {"items": [{"number": 2, "answer": ""}]}
+        # 空白答案视为无答案：不需要独立答案覆盖，也不会抛输入错误。
+        report = module.inspect(batch, {})
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["issues"], [])

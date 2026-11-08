@@ -150,6 +150,7 @@ def diagnose(batch_dir) -> dict:
     stages = manifest.get("stages") or {}
     inputs = manifest.get("inputs") or {}
     items = []
+    quality_notes = []
     first_blocked = None
     # 限流/额度冷却时，真正的卡点是“模型暂时不可用”，不是某个下游阶段的旧报错。
     # 把它放在最前面，避免用户看到一堆 failed/needs_review 却一直在重试模型。
@@ -175,17 +176,27 @@ def diagnose(batch_dir) -> dict:
         status = record.get("status") or mf.PENDING
         if status in mf.TERMINAL_OK:
             continue
+        if (status in (mf.BLOCKED, mf.NEEDS_REVIEW) and record.get("execution_completed")
+                and record.get("continue_unqualified")
+                and mf.dependency_satisfied(manifest, stage.id, allow_unqualified=True)):
+            quality_notes.append({"stage": stage.id, "status": status,
+                                  "reason": "已执行，有质量差异（未放行）",
+                                  "notes": str(record.get("notes") or ""), "blocking": False})
+            continue
         # 只把「真正卡住当前推进」的阶段列为卡点：已失败/待复核/阻断，或第一个未完成的。
         note = str(record.get("notes") or "")
         unmet = [d for d in stage.depends_on
-                 if (stages.get(d) or {}).get("status") not in mf.TERMINAL_OK]
+                 if not mf.dependency_satisfied(manifest, d, allow_unqualified=True)]
         missing_inputs = [k for k in stage.requires
                           if not (inputs.get(k) or {}).get("exists")]
 
         reason, detail = "", ""
         if status in (mf.FAILED, mf.NEEDS_REVIEW, mf.BLOCKED, mf.INVALIDATED):
             if status == mf.INVALIDATED:
-                reason = "上游已变化，本阶段产物失效，需重跑"
+                reason = "当前阶段需按内容变化更新"
+                invalidation = record.get("invalidation") or {}
+                if invalidation.get("scope") == "stage":
+                    detail = str(invalidation.get("reason") or note)
             elif status == mf.NEEDS_REVIEW:
                 reason = "代理产出待复核：需要修正后重跑或人工判断"
             elif status == mf.BLOCKED:
@@ -234,31 +245,62 @@ def diagnose(batch_dir) -> dict:
         # 缺必需输入且没有被上游挡住），而不是单纯被上游拖住等着的下游阶段。
         own_problem = (status in (mf.FAILED, mf.NEEDS_REVIEW, mf.BLOCKED, mf.INVALIDATED)
                        or (bool(missing_inputs) and not unmet))
+        failure_class = ""
+        if status == mf.INVALIDATED:
+            failure_class = "stale_input"
+        elif status == mf.FAILED:
+            failure_class = "agent_or_script_failure" if stage.kind in (contracts.AGENT, contracts.COMMAND) else "gate_failure"
+        elif status == mf.NEEDS_REVIEW:
+            failure_class = "agent_output_needs_retry"
+        elif status == mf.BLOCKED:
+            if stage.id == "review_gate":
+                failure_class = "quality_findings"
+            elif stage.kind == contracts.GATE:
+                failure_class = "deterministic_gate_failure"
+            else:
+                failure_class = "blocked_dependency_or_evidence"
+        if missing_inputs:
+            failure_class = "missing_required_input"
+        next_action = (
+            "重新导出并重跑当前阶段" if failure_class == "stale_input" else
+            "修正代理输出后重试" if failure_class == "agent_output_needs_retry" else
+            "处理质量差异或按零人工策略继续" if failure_class == "quality_findings" else
+            "查看阻断码并修复源文件/批次产物" if failure_class in ("deterministic_gate_failure", "gate_failure") else
+            "补齐必需输入" if failure_class == "missing_required_input" else
+            "等待上游阶段完成" if unmet else
+            "重跑当前阶段"
+        )
         entry = {"stage": stage.id, "title": stage.title, "status": status, "kind": stage.kind,
                  "reason": reason or (f"等待执行（{note}）" if note else "等待执行"),
                  "detail": detail, "hint": remedy["hint"], "command": remedy["command"],
                  "depends_on": list(stage.depends_on), "unmet": unmet,
                  "missing_inputs": missing_inputs, "note": note,
+                 "failure_class": failure_class, "next_action": next_action,
                  "blocking": own_problem}
         items.append(entry)
         if first_blocked is None and own_problem:
             first_blocked = stage.id
 
-    # 优先展示自身有问题的卡点；下游等待项按契约顺序排在后面。
+    # Blocking failures first, but ALWAYS in contract stage order, so an
+    # upstream failure (e.g. format_gate) precedes a pure dependent wait
+    # (review_gate) instead of the downstream symptom being diagnosed first.
+    order = {sid: i for i, sid in enumerate(contracts.STAGE_ORDER)}
     ordered = ([it for it in items if it["blocking"]]
                + [it for it in items if not it["blocking"]])
+    ordered.sort(key=lambda it: (0 if it["stage"] in ("model",) else 1,
+                                  order.get(it["stage"], len(order))))
     head = ordered[0] if ordered else None
     if head:
-        summary = f"卡在「{head['title']}」：{head['reason']}"
+        summary = f"{'卡在' if head['blocking'] else '等待'}「{head['title']}」：{head['reason']}"
         if head["detail"]:
             summary += "——" + head["detail"][:120]
     else:
-        summary = "流程已完成"
+        summary = "自动阶段已执行完成；存在质量差异，未宣称放行" if quality_notes else "流程已完成"
     return {"batch": manifest.get("workflow_id") or batch.name,
             "batch_dir": str(batch),
             "status": manifest.get("status") or mf.derive_status(manifest),
             "blocked_at": first_blocked,
-            "items": ordered,
+            "items": ordered, "quality_notes": quality_notes,
             "blocking_count": sum(1 for it in items if it["blocking"]),
             "waiting_count": sum(1 for it in items if not it["blocking"]),
             "summary": summary}

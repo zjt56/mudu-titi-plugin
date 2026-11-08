@@ -42,12 +42,13 @@ ROUND_INPUTS = (
     "02_audio/full-transcript.json", "workflow/media-observations.json",
     "07_review/structure-gate.json", "07_review/validation-report.json",
 )
+# 只绑定审核提示词实际使用的规则；装配版式/上传约束变化不应让审核轮次
+# 无条件过期，除非它们确实改变审核语义。
 ROUND_RULES = ("references/filter-framework.json", "references/knowledge-catalog.json",
                "references/type-knowledge-map.json", "skills-reference/knowledge-matching-rules.md",
-               "skills-reference/README.md", "skills-reference/constraints.md",
-               "skills-reference/lessons-learned.md", "skills-reference/type-taxonomy.md",
+               "skills-reference/README.md", "skills-reference/type-taxonomy.md",
                "skills-reference/knowledge-catalog.md", "skills-reference/type-knowledge-map.md",
-               "docs/knowledge-tagging.md")
+               "docs/knowledge-tagging.md", "docs/content-labeling.md")
 
 REVIEW_DIR = "07_review"
 
@@ -74,13 +75,35 @@ def compact_knowledge_catalog(types, catalog=None):
     return result
 
 
+_LOAD_CACHE = {}
+
+
 def _load(path: Path):
-    if not path.is_file():
-        return None
+    """Parse a JSON artifact once per process per (mtime, size).
+
+    Review evaluation re-reads the same bindings/transactions/partitions dozens of
+    times per request; parsing them each time was the measured hotspot on a
+    48-unit batch (~10s per overview). Reads stay read-only; a changed file is
+    re-parsed because the cache key includes mtime and size.
+    """
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        stat = path.stat()
+    except OSError:
+        return None
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    hit = _LOAD_CACHE.get(key)
+    if hit is not None:
+        return hit[0]
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError:
-        return {"__parse_error__": True}
+        value = {"__parse_error__": True}
+    except OSError:
+        return None
+    if len(_LOAD_CACHE) > 4096:
+        _LOAD_CACHE.clear()
+    _LOAD_CACHE[key] = (value,)
+    return value
 
 
 def _findings(payload) -> list:
@@ -104,7 +127,7 @@ def _is_open(item: dict) -> bool:
     return status == "" or status not in RESOLVED
 
 
-def evaluate(batch_dir) -> dict:
+def _evaluate_uncached(batch_dir) -> dict:
     batch_dir = Path(batch_dir)
     review_dir = batch_dir / REVIEW_DIR
     content = _load(review_dir / "content-review.json")
@@ -213,9 +236,21 @@ def evaluate(batch_dir) -> dict:
                   or (e.get("unit_id"), e.get("field")) not in round_typed]
     errors.extend(rounds["errors"])
     passed = not errors
+    # 区分「真实人工差异」与「结构性硬错」：
+    # 用户流程目的是一审/二审找出差异交给人工，这些差异是本流程的产出，不是
+    # 缺陷。若除「人工待审差异」外没有其它硬错（缺轮次、必检未完成、文件不可
+    # 读、来源不可证、标签审计失败等），则允许继续组装待上传批次，但必须标记
+    # 为「已执行、待人工审核、未放行(release_ready=False)」，绝不算质量通过。
+    MANUAL_CODES = {"REVIEW_ROUND_FINDING", "MANUAL_REVIEW_OPEN", "REVIEW_FINDING_OPEN"}
+    manual_only = (
+        bool(errors)
+        and all(e.get("code") in MANUAL_CODES for e in errors)
+        and rounds.get("execution_completed") is True
+    )
     return {
         "rounds": rounds,
         "passed": passed,
+        "manual_only": manual_only,
         "batch_dir": str(batch_dir),
         "errors": errors,
         "warnings": warnings,
@@ -228,9 +263,24 @@ def evaluate(batch_dir) -> dict:
     }
 
 
+_DIGEST_CACHE = {}
+
+
 def _digest(value) -> str:
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
-                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+    """Hash an immutable dict/list; the same partition is digested many times."""
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                         separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+    hit = _DIGEST_CACHE.get(serialized)
+    if hit is not None:
+        return hit
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    if len(_DIGEST_CACHE) > 2048:
+        _DIGEST_CACHE.clear()
+    _DIGEST_CACHE[serialized] = digest
+    return digest
 
 
 def _quote_matches(quote: str, text: str) -> bool:
@@ -265,15 +315,172 @@ def _zh_reason(text: str) -> str:
     return out.strip()
 
 
+# Fields that do not participate in label/content review. Keep this projection
+# separate from raw task bindings: in-flight imports still require exact bytes.
+_REVIEW_METADATA = frozenset({
+    "difficulty", "difficultyValue", "difficultyEvidence",
+    "source_type", "source_name", "sourceName", "sourceType", "year", "region",
+    "categories", "category", "location", "paper_name", "province", "city",
+    "created_at", "updated_at", "generated_at", "checked_at", "timestamp",
+    "source_span", "source_slice", "evidence", "notes", "status",
+})
+
+
+def semantic_review_value(value):
+    """Project review semantics, excluding provenance/difficulty bookkeeping."""
+    if isinstance(value, dict):
+        result = {}
+        for key, child in value.items():
+            if key in _REVIEW_METADATA or key in {"words", "word_count", "wordCount"} and isinstance(child, (int, float)):
+                continue
+            if key == "filterMetadata" and isinstance(child, dict):
+                child = {label: data for label, data in child.items()
+                         if label in {"subtypes", "knowledge", "knowledgeIds", "knowledge_ids", "type", "question_type"}}
+                if not child:
+                    continue
+            if key in {"materialBlocks", "material_blocks"} and isinstance(child, list):
+                # An empty legacy paragraph placeholder contains no material.
+                # Removing it for wire-schema compatibility is not new content.
+                child = [block for block in child if not (isinstance(block, dict)
+                         and block.get("type") in {"paragraph", "text"}
+                         and set(block) <= {"type", "rows", "text", "content"}
+                         and block.get("rows") in (None, [])
+                         and block.get("text") in (None, "") and block.get("content") in (None, "", []))]
+            result[key] = semantic_review_value(child)
+        if (value.get("question_type", value.get("type")) == "听力关键词语选择"
+                and value.get("unit_kind") == "standalone" and isinstance(value.get("options"), list)
+                and len(value["options"]) >= 3 and isinstance(value.get("stem"), str)
+                and re.fullmatch(r"\s*" + re.escape(str(value.get("number"))) + r"[.．、]\s*", value["stem"])):
+            # The printed number alone is a locator, just as the same row's
+            # explicit number field; source-proven wire normalization adds no question.
+            result["stem"] = ""
+        return result
+    if isinstance(value, list):
+        return [semantic_review_value(v) for v in value]
+    return value
+
+
+def _unit_bindings(batch, units, hashes):
+    """Bind whole review units; unprovable source scopes remain global."""
+    from .review_rounds import _source_excerpts, _transcript_excerpt, CONTEXT_VERSION, PROMPT_VERSION
+    source = (batch / "01_source/正文.txt").read_text(encoding="utf-8-sig")
+    rows = {name: _load(batch / name) for name in (
+        "03_types/types.json", "04_knowledge/knowledge.json", "04_knowledge/explanations.json",
+        "06_batch/batch.json", "06_batch/batch_meta.json", "02_audio/audio_map.json",
+        "02_audio/segment-evidence.json")}
+    answers = _load(batch / "01_source_ans/answers.json")
+    global_hashes = {k: v for k, v in hashes.items() if k.startswith("rules:") or k in (
+        "01_source/附录.txt", "01_source_ans/正文.txt") or k.startswith("01_source/materials/")}
+    # Extraction warnings/media are not reconstructed from the question stem.
+    extraction = _load(batch / "01_source/extraction.json")
+    if isinstance(extraction, dict):
+        from .unit_tasks import compact_extraction
+        extraction = {key: value for key, value in compact_extraction(extraction).items()
+                      if key not in {"source", "source_sha256", "text_sha256", "evidence_dir", "version",
+                                     "structure_status", "characters", "char_count", "ocr_assist_enabled"}}
+    result = {}
+    for unit in units:
+        uid, numbers = unit["unit_id"], {str(n) for n in unit["numbers"]}
+        text = _source_excerpts(source, [unit], force=True, adjacent_units=units)
+        if isinstance(text, dict):
+            text = [span["text"] for span in text["spans"]]
+        payload = {"unit": semantic_review_value(unit), "source": text,
+                   "contract": [CONTEXT_VERSION, PROMPT_VERSION], "global": global_hashes, "extraction": semantic_review_value(extraction)}
+        for name, value in rows.items():
+            if name.startswith("02_audio/"):
+                if unit.get("type") and not str(unit["type"]).startswith("听力"):
+                    continue
+            if isinstance(value, dict) and isinstance(value.get("items"), list):
+                value = [row for row in value["items"] if isinstance(row, dict)
+                         and (row.get("unit_id") or row.get("id")) == uid]
+            payload[name] = semantic_review_value(value)
+        if isinstance(answers, dict):
+            selected = {}
+            for key, value in answers.items():
+                if isinstance(value, dict):
+                    value = {k: v for k, v in value.items() if not str(k).isdigit() or str(k) in numbers}
+                selected[key] = value
+            payload["answers"] = semantic_review_value(selected)
+        payload["observations"] = semantic_review_value(_load(batch / "workflow/media-observations.json"))
+        payload["media"] = {k: v for k, v in hashes.items()
+                            if k not in ROUND_INPUTS and not k.startswith("rules:")
+                            and not k.startswith(("01_source/materials/", "02_audio/"))}
+        if not unit.get("type") or str(unit["type"]).startswith("听力"):
+            for name in hashes:
+                if name.startswith("02_audio/") and name.endswith("full-transcript.json"):
+                    payload[name] = _transcript_excerpt(_load(batch / name),
+                        rows["02_audio/segment-evidence.json"], {uid})
+        result[uid] = _digest(payload)
+    return result
+
+
+_PLAN_CACHE = {}
+
+
+def _file_digest(path):
+    import hashlib
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "missing"
+
+
+def _plan_input_key(batch, units):
+    """Fingerprint every file the plan binds by CONTENT, not mtime.
+
+    mtime is not a safe staleness signal (same-tick writes collide), and the plan
+    digests are the review proof, so a wrong cache hit would hide changed inputs.
+    Files here are small (source/rules/reports), so hashing is affordable.
+    """
+    parts = []
+    for relative in (*ROUND_INPUTS, *ROUND_RULES):
+        for base in (batch, Path(__file__).resolve().parents[1]):
+            path = base / relative
+            if path.is_file():
+                parts.append((str(path), _file_digest(path)))
+                break
+        else:
+            parts.append((relative, "missing"))
+    for relative in ("06_batch/batch.json", "06_batch/batch_meta.json", "workflow/media-observations.json"):
+        parts.append((relative, _file_digest(batch / relative)))
+    materials = batch / "01_source/materials"
+    if materials.is_dir():
+        for path in sorted(materials.glob("attachment_*.txt")):
+            parts.append((str(path), _file_digest(path)))
+    # Observed media bytes are bound by the plan; the key must include them so a
+    # changed image still fails the stale-observation check instead of reusing a
+    # plan computed from the previous bytes.
+    observations = _load(batch / "workflow/media-observations.json") or {}
+    for item in observations.get("observations", []) if isinstance(observations, dict) else []:
+        relative = item.get("path") if isinstance(item, dict) else None
+        if isinstance(relative, str) and relative:
+            parts.append(("media:" + relative, _file_digest(batch / relative)))
+    parts.append(tuple((u["unit_id"], tuple(u["numbers"])) for u in units))
+    return _digest(parts)
+
+
 def prepare_round_plan(batch_dir) -> dict:
     """Bind actual inputs and a reproducible 20% *question* sample; never review.
 
     No identity/signature is needed. Hashes detect stale input, not review quality.
     The caller must run three separate semantic tasks against this same plan.
+
+    A per-unit binding requires semantic projection of the whole unit and its
+    source excerpt, which is the measured cost on big papers. The plan is a pure
+    function of the bound files and confirmed units, so it is memoized by that
+    fingerprint (and would be recomputed for any change) instead of per request.
     """
     from .agent_tasks import confirmed_units
     batch = Path(batch_dir)
     units = confirmed_units(batch)
+    cache_key = (str(batch), _plan_input_key(batch, units))
+    cached = _PLAN_CACHE.get(cache_key)
+    if cached is not None:
+        # Callers (rebase/patch/tests) may mutate the returned plan. A deep copy in
+        # BOTH directions keeps the cache immutable: the stored plan is never
+        # handed out, and a mutated returned plan can never leak back in.
+        import copy
+        return copy.deepcopy(cached[0])
     # 跳过听力的批次：听力单元没有音频/原文可核，语义审核不覆盖它们，
     # 否则一审/二审会因"无法核对听力"永久 uncertain。
     if (batch / "02_audio" / "SKIP_LISTENING").is_file():
@@ -316,27 +523,268 @@ def prepare_round_plan(batch_dir) -> dict:
     # 抽样单位，number=None 表示"抽整组、只做组级核对"，不再逐小题抽查、不做小题二审；
     # 独立单题仍按单题（number=题号）抽样。题型取自 03_types/types.json（结构单元行本身
     # 不带题型）；缺类型时按独立单题处理，保持保守。
-    from workbench import taxonomy
-    types_path = batch / "03_types/types.json"
-    type_rows = {}
-    if types_path.is_file():
-        loaded_types = _load(types_path) or {}
-        type_rows = {x.get("unit_id"): x.get("type")
-                     for x in loaded_types.get("items", []) if isinstance(x, dict)}
-    pool = []
-    for u in units:
-        if (u.get("unit_kind") == "group"
-                and taxonomy.whole_unit_type(type_rows.get(u["unit_id"]))):
-            pool.append({"unit_id": u["unit_id"], "number": None})
-        else:
-            pool.extend({"unit_id": u["unit_id"], "number": str(n)} for n in u["numbers"])
+    pool = round_sample_pool(batch, units)
     count = (len(pool) + 4) // 5
     # Fixed by inputs, not by a model choosing convenient questions. This is not
     # a secret/random sample or the legacy HMAC independent-review mechanism.
-    sample = sorted(pool, key=lambda q: _digest([binding, q]))[:max(1, count)]
-    return {"protocol": ROUND_PROTOCOL, "input_binding": binding, "input_hashes": hashes,
+    sample = sorted(pool, key=lambda q: _digest([ROUND_PROTOCOL, pool, q]))[:max(1, count)]
+    plan = {"protocol": ROUND_PROTOCOL, "input_binding": binding, "input_hashes": hashes,
             "units": [u["unit_id"] for u in units], "questions": questions,
-            "sample": sample, "sample_method": "sha256-input-binding-question-order/v1"}
+            "sample": sample, "sample_method": "sha256-unit-topology-order/v2",
+            "unit_bindings": _unit_bindings(batch, units, hashes)}
+    if len(_PLAN_CACHE) > 64:
+        _PLAN_CACHE.clear()
+    import copy
+    _PLAN_CACHE[cache_key] = (copy.deepcopy(plan), time.time())
+    return plan
+
+
+def round_sample_pool(batch_dir, units=None):
+    """Actual sampling targets, shared by current and retained-plan validation."""
+    from .agent_tasks import confirmed_units
+    from workbench import taxonomy
+    batch = Path(batch_dir)
+    if units is None:
+        units = confirmed_units(batch)
+        if (batch / "02_audio/SKIP_LISTENING").is_file():
+            units = [u for u in units if not str(u.get("type", "")).startswith("听力")]
+    loaded = _load(batch / "03_types/types.json") or {}
+    types = {x.get("unit_id"): x.get("type")
+             for x in loaded.get("items", []) if isinstance(x, dict)}
+    pool = []
+    for unit in units:
+        if unit.get("unit_kind") == "group" and taxonomy.whole_unit_type(types.get(unit["unit_id"])):
+            pool.append({"unit_id": unit["unit_id"], "number": None})
+        else:
+            pool.extend({"unit_id": unit["unit_id"], "number": str(n)} for n in unit["numbers"])
+    return pool
+
+
+def resolve_round_plan(batch_dir, current_plan=None, payload=None):
+    """Select an original whole plan only with complete read-only proof.
+
+    Callers preparing/resuming work must use the effective plan for comparisons.
+    This does not rebind tasks or change their frozen input hashes.
+    """
+    current = prepare_round_plan(batch_dir) if current_plan is None else current_plan
+    if payload is None:
+        payload = _load(Path(batch_dir) / REVIEW_DIR / ROUND_FILE)
+    if not isinstance(payload, dict) or payload.get("plan") == current:
+        return current, None
+    from .review_legacy import compatible_plan
+    compatibility = compatible_plan(batch_dir, current, payload)
+    return (payload["plan"] if compatibility["accepted"] else current), compatibility
+
+
+def stage_semantic_inputs(batch_dir):
+    """Read-only stage fingerprints; never include report timestamps/raw bindings."""
+    plan = prepare_round_plan(batch_dir)
+    return {**{"review-unit:" + uid: digest for uid, digest in plan["unit_bindings"].items()},
+            "review:sample": _digest(plan["sample"])}
+
+
+def _check_key(check, round_id):
+    return (check.get("unit_id"), _sample_number(check) if round_id == "sample" else None)
+
+
+def _completed_part_source(batch, task_id, binding):
+    """Verify a genuinely accepted part before its whole round has completed."""
+    relative = binding.get("state_path", "")
+    if not isinstance(relative, str) or not re.fullmatch(r"workflow/review-partitions/[0-9a-f]{64}\.json", relative):
+        raise ValueError("Invalid completed review part state")
+    state = _load(batch / relative)
+    index, task = binding.get("part_index"), binding.get("task", {})
+    if not isinstance(state, dict) or isinstance(index, bool) or not isinstance(index, int):
+        raise ValueError("Completed review part state missing")
+    parts, completed = state.get("parts", []), state.get("completed", [])
+    if not 0 <= index < len(parts) or not index < len(completed):
+        raise ValueError("Review part was never accepted")
+    entry, part = completed[index], parts[index]
+    expected_digest = (frozen_partition_digest(state) if binding.get("frozen_state")
+                       else _digest(dict(state, completed=completed[:index])))
+    if (entry.get("task_id") != task_id or part.get("task_id") != task_id
+            or binding.get("plan") != state.get("plan")
+            or binding.get("input_hashes") != state.get("input_hashes")
+            or binding.get("prior_rounds") != state.get("prior_rounds")
+            or binding.get("state_digest") != expected_digest
+            or binding.get("context_version") not in ("blind-context-v10", "blind-context-v11")
+            or task.get("protocol") != ROUND_PROTOCOL or task.get("task_id") != task_id
+            or task.get("input_binding") != state["plan"]["input_binding"]
+            or task.get("round_id") != state.get("round_id")
+            or task.get("prompt") != part.get("prompt")
+            or task.get("part_index") != index + 1 or task.get("part_count") != len(parts)):
+        raise ValueError("Completed review part binding mismatch")
+    receipt = _load(batch / "workflow/review-bindings" / (task_id + ".receipt.json"))
+    if not isinstance(receipt, dict) or receipt.get("result_digest") != entry.get("result_digest"):
+        raise ValueError("Completed review part receipt missing or mismatched")
+    candidates = [_load(path) for path in (batch / "workflow/review-results" / task_id).glob("*.json")]
+    candidates = [r for r in candidates if isinstance(r, dict) and _digest(r) == entry.get("result_digest")
+                  and r.get("status") == "completed" and r.get("findings") == []]
+    artifact = candidates[0].get("artifacts") if candidates else None
+    if not isinstance(artifact, dict) or set(artifact) != {"review_round"}:
+        raise ValueError("Completed review part response missing or mismatched")
+    checks = artifact["review_round"].get("checks") if isinstance(artifact["review_round"], dict) else None
+    if state["round_id"] == "sample" and isinstance(checks, list):
+        checks = [dict(c, number=_sample_number(c)) for c in checks]
+    if checks != entry.get("checks"):
+        raise ValueError("Completed review part checks differ from retained response")
+    actual = ([{"unit_id": c.get("unit_id"), "number": _sample_number(c)} for c in checks]
+              if state["round_id"] == "sample" else [c.get("unit_id") for c in checks])
+    if len(actual) != len(part["targets"]) or any(target not in actual for target in part["targets"]):
+        raise ValueError("Completed review part targets mismatch")
+    return {"round_id": state["round_id"], "input_binding": state["plan"]["input_binding"],
+            "execution_id": task_id, "checks": checks}
+
+
+def _reuse_source(batch, ref, round_id, plan):
+    """Resolve one original executed check, without rebinding its task/response."""
+    task_id = ref.get("task_id")
+    if not isinstance(task_id, str) or not re.fullmatch(r"round-[0-9a-f]{32}", task_id):
+        raise ValueError("Invalid review reuse execution")
+    transaction = _load(batch / "workflow/review-transactions" / (task_id + ".json"))
+    binding = _load(batch / "workflow/review-bindings" / (task_id + ".json"))
+    if not isinstance(binding, dict):
+        raise ValueError("Review reuse original execution missing")
+    if ref.get("part") is True:
+        record = _completed_part_source(batch, task_id, binding)
+    else:
+        if not isinstance(transaction, dict) or transaction.get("task_id") != task_id:
+            raise ValueError("Review reuse original transaction missing or mismatched")
+        record = transaction.get("record")
+        if isinstance(record, dict):
+            origin_ids = [part.get("execution_id") for part in record.get("parts", [])] or [record.get("execution_id")]
+            if origin_ids[-1] != task_id:
+                raise ValueError("Review reuse reference is not its original install transaction")
+    old_plan = binding.get("plan")
+    if (not isinstance(old_plan, dict) or not isinstance(record, dict)
+            or record.get("round_id") != round_id
+            or record.get("input_binding") != old_plan.get("input_binding")):
+        raise ValueError("Review reuse original round/input binding mismatch")
+    key = _check_key(ref, round_id)
+    uid = key[0]
+    if (not plan.get("unit_bindings", {}).get(uid)
+            or old_plan.get("unit_bindings", {}).get(uid) != plan["unit_bindings"][uid]):
+        raise ValueError("Review reuse unit content changed")
+    if key in {_check_key(row, round_id) for row in record.get("reuse", [])}:
+        raise ValueError("Reuse must point directly to an original executed target")
+    if ref.get("part") is not True:
+        _verify_round_sources(batch, old_plan, record, verify_reuse=False)
+    matches = [c for c in record["checks"] if _check_key(c, round_id) == key]
+    if len(matches) != 1:
+        raise ValueError("Review reuse original target missing or duplicated")
+    return matches[0], dict(record, input_binding=old_plan["input_binding"])
+
+
+def _payload_reusable_checks(batch_dir, payload, plan, round_id):
+    """Return valid per-unit checks and direct original execution references."""
+    batch = Path(batch_dir)
+    if not isinstance(payload, dict) or not isinstance(payload.get("plan"), dict):
+        return [], []
+    old_plan = payload["plan"]
+    if not isinstance(payload.get("rounds"), list):
+        return [], []
+    records = [r for r in payload["rounds"] if isinstance(r, dict) and r.get("round_id") == round_id]
+    if len(records) != 1:
+        return [], []
+    record = records[0]
+    # Historical context contracts are deliberately not upgraded to v11.
+    expected = ({_check_key(q, round_id) for q in plan["sample"]} if round_id == "sample"
+                else {(uid, None) for uid in plan["units"]})
+    references = {_check_key(r, round_id): r for r in record.get("reuse", [])}
+    ids = [p["execution_id"] for p in record.get("parts", [])] or [record.get("execution_id")]
+    original = ids[-1]
+    checks, refs, seen = [], [], set()
+    for check in record.get("checks", []):
+        key = _check_key(check, round_id)
+        if key not in expected or key in seen:
+            continue
+        seen.add(key)
+        uid, number = key
+        if old_plan.get("unit_bindings", {}).get(uid) != plan.get("unit_bindings", {}).get(uid):
+            continue
+        ref = references.get(key) or {"unit_id": uid, "number": number, "task_id": original}
+        try:
+            saved, _ = _reuse_source(batch, ref, round_id, plan)
+            if saved != check:
+                raise ValueError("Review reuse check differs from original response")
+            single = dict(plan, **{"sample" if round_id == "sample" else "units":
+                [{"unit_id": uid, "number": number}] if round_id == "sample" else [uid]})
+            _round_checks({"round_id": round_id, "input_binding": plan["input_binding"],
+                           "execution_id": original, "checks": [check]}, round_id, single, batch)
+        except (ValueError, OSError, KeyError, TypeError, AttributeError):
+            continue
+        checks.append(check)
+        refs.append(ref)
+    return checks, refs
+
+
+def reusable_checks(batch_dir, payload, plan, round_id):
+    """Recover unaffected targets even after another round replaced the ledger."""
+    batch = Path(batch_dir)
+    checks, refs = _payload_reusable_checks(batch, payload, plan, round_id)
+    from .review_rounds import _review_generation
+    if (_review_generation(batch, plan) is not None
+            or isinstance(payload, dict) and not payload.get("plan", {}).get("unit_bindings")
+            or isinstance(payload, dict) and payload.get("plan") == plan
+            and any(isinstance(r, dict) and r.get("round_id") == round_id for r in payload.get("rounds", []))):
+        return checks, refs
+    expected = len(plan["sample"] if round_id == "sample" else plan["units"])
+    seen = {_check_key(c, round_id) for c in checks}
+    # Installation archives the previous ledger before replacing it. It remains
+    # evidence, not a new execution; every candidate still verifies its original
+    # immutable task, response and transaction before reuse.
+    folder = batch / "workflow/review-history"
+    for path in sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime_ns, reverse=True):
+        if len(checks) == expected:
+            break
+        if path.is_symlink():
+            continue
+        old_checks, old_refs = _payload_reusable_checks(batch, _load(path), plan, round_id)
+        for check, ref in zip(old_checks, old_refs):
+            key = _check_key(check, round_id)
+            if key not in seen:
+                checks.append(check)
+                refs.append(ref)
+                seen.add(key)
+    for path in sorted((batch / "workflow/review-partitions").glob("*.json")):
+        if len(checks) == expected:
+            break
+        if path.is_symlink():
+            continue
+        state = _load(path)
+        if (not isinstance(state, dict) or state.get("round_id") != round_id
+                or state.get("plan") == plan or not isinstance(state.get("plan"), dict)):
+            continue
+        entries = [entry for entry in state.get("completed", []) if isinstance(entry, dict)]
+        saved_checks, saved_refs = [], []
+        for entry in entries:
+            for check in entry.get("checks", []):
+                saved_checks.append(check)
+                uid, number = _check_key(check, round_id)
+                saved_refs.append({"unit_id": uid, "number": number,
+                                   "task_id": entry.get("task_id"), "part": True})
+        synthetic = {"plan": state["plan"], "rounds": [{"round_id": round_id,
+            "execution_id": "accepted-parts", "checks": saved_checks, "reuse": saved_refs}]}
+        old_checks, old_refs = _payload_reusable_checks(batch, synthetic, plan, round_id)
+        for check, ref in zip(old_checks, old_refs):
+            key = _check_key(check, round_id)
+            if key not in seen:
+                checks.append(check)
+                refs.append(ref)
+                seen.add(key)
+    return checks, refs
+
+
+def rebase_rounds(batch_dir, payload, plan):
+    """Read-only reuse: complete rounds only; partial checks are exported later."""
+    rounds = []
+    for round_id in ROUND_IDS:
+        checks, refs = reusable_checks(batch_dir, payload, plan, round_id)
+        count = len(plan["sample"] if round_id == "sample" else plan["units"])
+        if checks and len(checks) == count:
+            rounds.append({"round_id": round_id, "input_binding": plan["input_binding"],
+                           "execution_id": "reused-" + _digest(refs), "checks": checks, "reuse": refs})
+    return {"plan": plan, "rounds": rounds}
 
 
 def _round_issue(round_id, reason):
@@ -535,7 +983,7 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
     格式允许额外字段，但缺失判断、证据或比较结果不能记为已审核。
     """
     required_record = {"round_id", "input_binding", "execution_id", "checks"}
-    if not isinstance(record, dict) or not required_record <= set(record) or set(record) - required_record - {"parts"}:
+    if not isinstance(record, dict) or not required_record <= set(record) or set(record) - required_record - {"parts", "reuse"}:
         raise ValueError("Each round needs round_id/input_binding/execution_id/checks and optional parts")
     if record["round_id"] != round_id or record["input_binding"] != plan["input_binding"]:
         raise ValueError("Round input binding mismatch")
@@ -623,13 +1071,13 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
                     expected_numbers = {str(n) for n in (unit.get("numbers") or [])}
             else:
                 expected_numbers = {str(q["number"]) for q in plan["questions"] if q["unit_id"] == uid}
-            if (not isinstance(difficulty, list) or not expected_numbers
+            if difficulty is not None and (not isinstance(difficulty, list) or not expected_numbers
                     or any(not isinstance(item, dict) or set(item) != {"number", "value"}
                            or not isinstance(item["number"], str)
                            or item["value"] not in ("容易", "适中", "困难") for item in difficulty)):
                 raise ValueError("Label review needs independent difficulty for every question")
-            numbers = [item["number"] for item in difficulty]
-            if len(numbers) != len(set(numbers)) or set(numbers) != expected_numbers:
+            numbers = [item["number"] for item in difficulty] if difficulty is not None else None
+            if numbers is not None and (len(numbers) != len(set(numbers)) or set(numbers) != expected_numbers):
                 raise ValueError("Difficulty assessment must cover each question exactly once")
         if (not valid_strings(assessment.get("knowledge"))
                 or not assessment["knowledge"] or not isinstance(assessment.get("subquestions"), list)):
@@ -687,7 +1135,7 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
                 if key in part_executions:
                     raise ValueError("Overlapping round partitions")
                 part_executions[key] = part["execution_id"]
-        if set(part_executions) != set(expected):
+        if set(part_executions) | {_check_key(r, round_id) for r in record.get("reuse", [])} != set(expected):
             raise ValueError("Round partitions require exact target coverage")
     findings = []
     for check in checks:
@@ -700,8 +1148,12 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             evidence = check.get("evidence") if isinstance(check.get("evidence"), list) else []
             ev_text = [str(i.get("path", "")) + ":" + str(i.get("locator", "")) + ": " + str(i.get("quote", ""))
                        for i in evidence if isinstance(i, dict)]
-            source = {"round_id": round_id, "execution_id": part_executions.get((uid, num), record["execution_id"]),
-                      "input_binding": record["input_binding"], "target_number": num,
+            reused = next((ref for ref in record.get("reuse", []) if _check_key(ref, round_id) == (uid, num)), None)
+            origin = _reuse_source(batch, reused, round_id, plan)[1] if reused else record
+            origin_execution = next((p["execution_id"] for p in origin.get("parts", [])
+                if ({"unit_id": uid, "number": num} if round_id == "sample" else uid) in p["targets"]), origin["execution_id"])
+            source = {"round_id": round_id, "execution_id": origin_execution if reused else part_executions.get((uid, num), record["execution_id"]),
+                      "input_binding": origin["input_binding"], "target_number": num,
                       "verdict": verdict, "rationale": rationale,
                       "evidence": evidence, "assessment": check.get("assessment"),
                       "issue_key": check.get("issue_key"), "resolution_key": check.get("resolution_key")}
@@ -719,15 +1171,68 @@ def frozen_partition_digest(state):
     stripped = dict(state, completed=[],
                     parts=[{k: v for k, v in part.items() if k != "task_id"}
                            for part in state.get("parts", []) if isinstance(part, dict)])
-    return _digest(stripped)
+    return _immutable_digest(stripped)
 
 
-def _verify_round_sources(batch, plan, record):
+_IMMUTABLE_DIGEST_CACHE = {}
+_IMMUTABLE_DIGEST_SEEN = {}
+
+
+def _freeze(value):
+    """Canonical immutable form so equal partition states share one cache entry."""
+    if isinstance(value, dict):
+        return ("o", tuple(sorted((str(k), _freeze(v)) for k, v in value.items())))
+    if isinstance(value, (list, tuple)):
+        return ("a", tuple(_freeze(v) for v in value))
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return ("s", value)
+    return ("r", repr(value))
+
+
+def _immutable_digest(value):
+    """Digest a partition state once; identical states reuse the result.
+
+    Frozen partition states are hashed for every part of every round and the
+    same states recur within one request. Freezing is far cheaper than
+    re-serializing to JSON, and the digest is a pure function of the frozen form.
+    """
+    key = _freeze(value)
+    digest = _IMMUTABLE_DIGEST_CACHE.get(key)
+    if digest is not None:
+        return digest
+    digest = _digest(value)
+    if len(_IMMUTABLE_DIGEST_CACHE) > 8192:
+        _IMMUTABLE_DIGEST_CACHE.clear()
+    _IMMUTABLE_DIGEST_CACHE[key] = digest
+    return digest
+
+
+def _verify_round_sources(batch, plan, record, verify_reuse=True):
     """Verify v2 observations against their bound tasks and retained responses.
 
     The final receipt is written only after evaluation, so the durable install
     transaction is the authority for that part, including during recovery.
     """
+    if (not isinstance(record, dict) or record.get("round_id") not in ROUND_IDS
+            or not isinstance(plan.get("input_binding"), str)
+            or record.get("input_binding") != plan["input_binding"]):
+        raise ValueError("Review original round/input binding mismatch")
+    reuse = record.get("reuse", [])
+    if not isinstance(reuse, list):
+        raise ValueError("Invalid review reuse references")
+    reused_keys = {_check_key(ref, record["round_id"]) for ref in reuse}
+    if len(reused_keys) != len(reuse):
+        raise ValueError("Duplicate review reuse references")
+    if verify_reuse:
+        for ref in reuse:
+            saved, _ = _reuse_source(batch, ref, record["round_id"], plan)
+            if [c for c in record["checks"] if _check_key(c, record["round_id"]) == _check_key(ref, record["round_id"])] != [saved]:
+                raise ValueError("Review reuse check differs from original response")
+    fresh_checks = [c for c in record["checks"] if _check_key(c, record["round_id"]) not in reused_keys]
+    if not fresh_checks:
+        if not reuse or "parts" in record or record["execution_id"] != "reused-" + _digest(reuse):
+            raise ValueError("Review has no original executed checks")
+        return
     parts = record.get("parts")
     ids = [p["execution_id"] for p in parts] if parts else [record["execution_id"]]
     if any(not re.fullmatch(r"round-[0-9a-f]{32}", task_id) for task_id in ids):
@@ -739,7 +1244,8 @@ def _verify_round_sources(batch, plan, record):
     if not isinstance(state_path, str) or not re.fullmatch(r"workflow/review-partitions/[0-9a-f]{64}\.json", state_path):
         raise ValueError("Invalid review partition binding path")
     state = _load(batch / state_path)
-    if not isinstance(state, dict) or state.get("plan") != plan or state.get("round_id") != record["round_id"]:
+    if (not isinstance(state, dict) or state.get("plan") != plan or state.get("round_id") != record["round_id"]
+            or state.get("reuse", []) != record.get("reuse", [])):
         raise ValueError("Review partition state missing or mismatched")
     state_parts, completed = state.get("parts"), state.get("completed")
     if not isinstance(state_parts, list) or not isinstance(completed, list) or len(state_parts) != len(ids) or len(completed) != len(ids) - 1:
@@ -759,7 +1265,7 @@ def _verify_round_sources(batch, plan, record):
                 or binding.get("plan") != plan or binding.get("input_hashes") != state.get("input_hashes")
                 or binding.get("prior_rounds") != state.get("prior_rounds")
                 or binding.get("state_digest") != expected_state_digest
-                or binding.get("context_version") not in ("blind-context-v8", "blind-context-v9", "blind-context-v10")
+                or binding.get("context_version") not in ("blind-context-v8", "blind-context-v9", "blind-context-v10", "blind-context-v11")
                 or task.get("protocol") != ROUND_PROTOCOL or task.get("task_id") != task_id
                 or task.get("round_id") != record["round_id"] or task.get("input_binding") != plan["input_binding"]
                 or task.get("prompt") != state_parts[index].get("prompt")
@@ -782,7 +1288,9 @@ def _verify_round_sources(batch, plan, record):
         if not isinstance(artifact, dict):
             raise ValueError("Review execution response artifact invalid")
         checks = artifact.get("checks")
-        if not isinstance(checks, list) or (index < len(completed) and checks != entry.get("checks")):
+        normalized = ([dict(c, number=_sample_number(c)) for c in checks]
+                      if isinstance(checks, list) and record["round_id"] == "sample" else checks)
+        if not isinstance(checks, list) or (index < len(completed) and normalized != entry.get("checks")):
             raise ValueError("Review execution checks mismatch")
         targets = state_parts[index]["targets"]
         actual = ([{"unit_id": c.get("unit_id"), "number": _sample_number(c)} for c in checks]
@@ -794,7 +1302,7 @@ def _verify_round_sources(batch, plan, record):
             raise ValueError("Review receipt digest mismatch")
         collected.extend([dict(c, number=_sample_number(c))
                           for c in checks] if record["round_id"] == "sample" else checks)
-    if collected != record["checks"]:
+    if collected != fresh_checks:
         raise ValueError("Review checks differ from retained responses")
 
 
@@ -837,7 +1345,7 @@ def write_comparison_snapshot(batch_dir, payload=None) -> dict | None:
     if not isinstance(records, list) or {r.get("round_id") for r in records if isinstance(r, dict)} != set(ROUND_IDS):
         return None
     try:
-        plan = prepare_round_plan(batch)
+        plan, _ = resolve_round_plan(batch, payload=payload)
         evaluated = evaluate_rounds(batch, payload)
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -872,8 +1380,67 @@ def write_comparison_snapshot(batch_dir, payload=None) -> dict | None:
     return snapshot
 
 
+_EVALUATE_CACHE = {}
+
+
+def evaluate(batch_dir) -> dict:
+    """Memoize the review verdict by the review directory fingerprint.
+
+    Callers (overview, upload state, review gate) evaluate the same directory
+    several times per refresh. The result is a pure function of the files read,
+    so an unchanged directory returns the cached verdict; any file edit changes
+    the key and forces a real re-evaluation.
+    """
+    batch = Path(batch_dir)
+    key = (str(batch), _review_dir_key(batch, None))
+    hit = _EVALUATE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    result = _evaluate_uncached(batch)
+    if len(_EVALUATE_CACHE) > 32:
+        _EVALUATE_CACHE.clear()
+    _EVALUATE_CACHE[key] = result
+    return result
+
+
+def _review_dir_key(batch, payload):
+    review_dir = batch / REVIEW_DIR
+    parts = []
+    names = sorted({p.name for p in review_dir.glob("*.json")}) if review_dir.is_dir() else []
+    for name in names:
+        parts.append((name, _file_digest(review_dir / name)))
+    # Everything the verdict depends on must invalidate it: bound artifacts,
+    # review rules, and every task binding/partition/transaction written under
+    # workflow/. Scan those directories so a new or edited artifact is never
+    # masked by a stale cache (tests and live runs both rely on this).
+    for relative in (*ROUND_INPUTS, "01_source/structure.confirmed.json"):
+        parts.append((relative, _file_digest(batch / relative)))
+    root = Path(__file__).resolve().parents[1]
+    for relative in ROUND_RULES:
+        parts.append(("rule:" + relative, _file_digest(root / relative)))
+    for directory in ("workflow/review-bindings", "workflow/review-transactions",
+                      "workflow/review-partitions", "workflow"):
+        target = batch / directory
+        if not target.is_dir():
+            parts.append((directory, "missing"))
+            continue
+        for path in sorted(target.glob("*.json")):
+            parts.append((str(path.relative_to(batch)), _file_digest(path)))
+    if payload is not None:
+        try:
+            parts.append(("payload", _digest(payload)))
+        except (TypeError, ValueError):
+            parts.append(("payload", "unhashable"))
+    return _digest(parts)
+
+
 def evaluate_rounds(batch_dir, payload=None) -> dict:
-    """Fail closed on missing/stale/invalid rounds; emit no invented review data."""
+    """Fail closed on missing/stale/invalid rounds; emit no invented review data.
+
+    No result memoization: any cached verdict risks hiding changed evidence, and
+    this path is not the hot spot for the review page (the plan/digest/load caches
+    below are). Keeping it a pure direct call is safer and still fast enough.
+    """
     batch = Path(batch_dir)
     errors, findings, checked = [], [], []
     try:
@@ -883,6 +1450,9 @@ def evaluate_rounds(batch_dir, payload=None) -> dict:
                 "unchecked": [_round_issue(r, str(exc)) for r in ROUND_IDS], "findings": [], "checked_rounds": []}
     if payload is None:
         payload = _load(batch / REVIEW_DIR / ROUND_FILE)
+    plan, compatibility = resolve_round_plan(batch, plan, payload)
+    if isinstance(payload, dict) and payload.get("plan") != plan:
+        payload = rebase_rounds(batch, payload, plan)
     valid = (isinstance(payload, dict) and set(payload) == {"plan", "rounds"}
              and payload.get("plan") == plan and isinstance(payload.get("rounds"), list))
     records = payload["rounds"] if valid else []
@@ -896,6 +1466,10 @@ def evaluate_rounds(batch_dir, payload=None) -> dict:
             problems = _round_checks(record, round_id, plan, batch, lenient=True)
             _verify_round_sources(batch, plan, record)
             round_executions = {record["execution_id"]} | {p["execution_id"] for p in record.get("parts", [])}
+            for ref in record.get("reuse", []):
+                origin = _reuse_source(batch, ref, round_id, plan)[1]
+                round_executions.add(origin["execution_id"])
+                round_executions.update(p["execution_id"] for p in origin.get("parts", []))
             if executions.intersection(round_executions):
                 raise ValueError("Rounds must come from separate executions")
             executions.update(round_executions)
@@ -961,6 +1535,7 @@ def evaluate_rounds(batch_dir, payload=None) -> dict:
             "unchecked": [e for e in errors if e["code"] in ("REVIEW_ROUND_UNCHECKED", "REVIEW_SAMPLE_SOURCE_UNVERIFIED")],
             "findings": findings, "checked_rounds": checked, "plan": plan,
             "informational": informational_findings,
+            "compatibility": compatibility,
             "sample_source_bindings": sample_source_bindings}
 
 

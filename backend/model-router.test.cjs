@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
@@ -9,12 +9,16 @@ const { spawnSync } = require('node:child_process');
 
 const script = join(__dirname, 'wf-router.sh');
 
-function fixture(t, router) {
+function fixture(t, router, promptText = 'Stage: types\n\nReply with exactly: OK\n') {
   const root = mkdtempSync(join(tmpdir(), 'wf-router-test-'));
   const plugin = join(root, 'plugin');
   mkdirSync(join(plugin, 'backend'), { recursive: true });
   mkdirSync(join(plugin, 'config'), { recursive: true });
   copyFileSync(script, join(plugin, 'backend', 'wf-router.sh'));
+  // 路由脚本依赖同目录的 python 助手（route_pick / provider merge），测试要一起带上。
+  for (const helper of readdirSync(__dirname)) {
+    if (helper.endsWith('.py')) copyFileSync(join(__dirname, helper), join(plugin, 'backend', helper));
+  }
   writeFileSync(join(plugin, 'config', 'model-router.json'),
     typeof router === 'string' ? router : JSON.stringify(router));
   const home = join(root, 'dsh');
@@ -27,7 +31,7 @@ function fixture(t, router) {
   writeFileSync(fake, '#!/bin/sh\ncat >/dev/null\necho OK\n');
   chmodSync(fake, 0o755);
   const prompt = join(root, 'prompt.txt');
-  writeFileSync(prompt, 'Stage: types\n\nReply with exactly: OK\n');
+  writeFileSync(prompt, promptText);
   const response = join(root, 'response.txt');
   const result = spawnSync('sh', [join(plugin, 'backend', 'wf-router.sh'), prompt, response], {
     encoding: 'utf8',
@@ -72,6 +76,18 @@ test('router fails instead of falling back when the config is unreadable', t => 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /cannot read model-router.json/);
   assert.throws(() => readFileSync(response, 'utf8'), { code: 'ENOENT' });
+});
+
+test('Chinese self-heal prompt retains its explicit selected route at a multibyte truncation boundary', t => {
+  const { result, response } = fixture(t, {
+    default: { provider: 'magpie-responses', model: 'default-only', profile: 'fake' },
+    stages: { self_heal: { provider: 'deepseek-official', model: 'deepseek-flash', profile: 'fake' } },
+    review: { rounds: {} },
+  }, 'Stage: self_heal\n' + '根据原文判断自动修复动作。'.repeat(1000));
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /stage=self_heal.*provider=deepseek-official model=deepseek-flash/);
+  assert.doesNotMatch(result.stderr, /illegal byte sequence/);
+  assert.equal(readFileSync(response, 'utf8'), 'OK\n');
 });
 
 test('router script has no hardcoded substitute model', () => {

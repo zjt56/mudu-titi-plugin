@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from . import contracts
+from . import contracts, execution_state
 
 MANIFEST_VERSION = "1.0"
 DELIVERY_VERSION = "1.0"
@@ -41,17 +41,18 @@ EXTRA_STAGE_INPUTS = {
     ),
 }
 
-PENDING = "pending"
-RUNNING = "running"
-COMPLETED = "completed"
-APPROVED = "approved"
-NEEDS_REVIEW = "needs_review"
-BLOCKED = "blocked"
-FAILED = "failed"
-INVALIDATED = "invalidated"
-SKIPPED = "skipped"
+# Public aliases keep every existing importer and on-disk status compatible.
+PENDING = execution_state.PENDING
+RUNNING = execution_state.RUNNING
+COMPLETED = execution_state.COMPLETED
+APPROVED = execution_state.APPROVED
+NEEDS_REVIEW = execution_state.NEEDS_REVIEW
+BLOCKED = execution_state.BLOCKED
+FAILED = execution_state.FAILED
+INVALIDATED = execution_state.INVALIDATED
+SKIPPED = execution_state.SKIPPED
 
-TERMINAL_OK = (COMPLETED, APPROVED, SKIPPED)
+TERMINAL_OK = execution_state.TERMINAL_OK
 DONE_STATES = (COMPLETED, APPROVED, SKIPPED, FAILED, BLOCKED, INVALIDATED)
 
 
@@ -86,7 +87,24 @@ def load(batch_dir) -> dict:
     path = manifest_path(batch_dir)
     if not path.is_file():
         raise FileNotFoundError(f"找不到批次清单：{path}（先运行 init）")
-    return json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(path.read_text(encoding="utf-8"))
+    # New local stages are pending on older manifests; never infer completion
+    # from pre-existing files or erase any historical stage/decision.
+    stages = value.setdefault("stages", {})
+    for stage in contracts.STAGES:
+        historical_upload = (stage.id in ("preassemble", "format_gate")
+                             and stages.get("upload", {}).get("status") == COMPLETED)
+        historical_assembly = (stage.id == "preassemble"
+                               and stages.get("assemble", {}).get("status") == COMPLETED
+                               and stages.get("review", {}).get("status") == COMPLETED
+                               and (Path(batch_dir) / "06_batch/batch.json").is_file()
+                               and not (Path(batch_dir) / "workflow/batch-fill-state.json").is_file())
+        skip = historical_upload or historical_assembly
+        note = ("历史批次已提交远端，不补跑新增本地步骤" if historical_upload else
+                "历史批次已完成组装与审核执行，沿用现有批次，不补跑前置组装" if historical_assembly else "")
+        stages.setdefault(stage.id, {"status": SKIPPED if skip else PENDING,
+                                    "input_hashes": {}, "output_hashes": {}, "notes": note})
+    return value
 
 
 def save(batch_dir, manifest: dict) -> Path:
@@ -165,35 +183,65 @@ def register_input(batch_dir, key: str, path, required: bool = True) -> dict:
 
 def input_hashes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
     """阶段声明依赖的输入哈希：源文件 + 上游产物。"""
+    return _input_fingerprint(batch_dir, manifest, stage, use_mtime=False)
+
+
+def input_mtimes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
+    """与 input_hashes 相同的输入枚举，但取文件修改时间（廉价过期判断用）。"""
+    return _input_fingerprint(batch_dir, manifest, stage, use_mtime=True)
+
+
+def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use_mtime: bool) -> dict:
+    def _fp(path, missing="missing"):
+        if not path or not Path(path).is_file():
+            return missing
+        if use_mtime:
+            try:
+                return Path(path).stat().st_mtime
+            except OSError:
+                return missing
+        return _content_digest(path)
     hashes = {}
     for key in stage.requires:
         item = manifest.get("inputs", {}).get(key)
         if item:
             path = item.get("path")
-            hashes[f"input:{key}"] = (sha256_file(path) if path and Path(path).is_file() else "missing")
+            hashes[f"input:{key}"] = _fp(path)
     extra_inputs = {key: value for key, value in manifest.get('inputs', {}).items()
                     if re.fullmatch(r'attachment_\d{3,}', key)}
     if stage.id == 'audio':
         for key, item in sorted(manifest.get('inputs', {}).items()):
             if re.fullmatch(r'audio_\d{3,}', key) and isinstance(item, dict):
                 path = item.get('path')
-                hashes[f'input:{key}'] = sha256_file(path) if path and Path(path).is_file() else 'missing'
+                hashes[f'input:{key}'] = _fp(path)
+        # 切片证据与切片文件是本阶段自身产出的一部分，内容变了要重切。
+        for rel in ('02_audio/segment-evidence.json',):
+            full = Path(batch_dir) / rel
+            if full.is_file():
+                hashes[f'source:{rel}'] = _fp(full)
+        acoustic = Path(batch_dir) / '02_audio'
+        if acoustic.is_dir():
+            for cut in sorted(acoustic.glob('*.mp3')):
+                hashes[f'source:02_audio/{cut.name}'] = _fp(cut)
     if stage.id == 'extract':
+        answer = manifest.get('inputs', {}).get('answers') or {}
+        path = answer.get('path')
+        hashes['input:answers'] = _fp(path)
         for key, item in sorted(extra_inputs.items()):
             path = item.get('path') if isinstance(item, dict) else None
-            hashes[f'input:{key}'] = sha256_file(path) if path and Path(path).is_file() else 'missing'
+            hashes[f'input:{key}'] = _fp(path)
     if stage.id in ('structure_gate', 'answers', 'types', 'explanations', 'knowledge', 'assemble', 'review', 'review_gate'):
         pdf_ocr = Path(batch_dir) / '01_source/pdf-ocr.json'
-        hashes['direct:01_source/pdf-ocr.json'] = sha256_file(pdf_ocr) if pdf_ocr.is_file() else 'missing'
+        hashes['direct:01_source/pdf-ocr.json'] = _fp(pdf_ocr)
     if stage.id in ('answers', 'types', 'explanations', 'knowledge', 'assemble', 'review', 'review_gate'):
         roles_path = Path(batch_dir) / '01_source/material-roles.json'
-        hashes['material:roles'] = sha256_file(roles_path) if roles_path.is_file() else 'missing'
+        hashes['material:roles'] = _fp(roles_path)
         for key in sorted(extra_inputs):
             path = Path(batch_dir) / '01_source' / 'materials' / (key + '.txt')
-            hashes[f'material:{key}'] = sha256_file(path) if path.is_file() else 'missing'
+            hashes[f'material:{key}'] = _fp(path)
     if stage.id == "underlines":
         docx = manifest.get("inputs", {}).get("docx", {}).get("path")
-        hashes["input:docx"] = sha256_file(docx) if docx and Path(docx).is_file() else "missing"
+        hashes["input:docx"] = _fp(docx)
     for dep in stage.depends_on:
         stage_spec = contracts.STAGE_BY_ID.get(dep)
         if not stage_spec:
@@ -201,24 +249,60 @@ def input_hashes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
         for rel in stage_spec.produces:
             full = Path(batch_dir) / rel
             if full.exists():
-                hashes[f"artifact:{rel}"] = sha256_file(full)
+                hashes[f"artifact:{rel}"] = _fp(full)
     for rel in EXTRA_STAGE_INPUTS.get(stage.id, ()):
         full = Path(batch_dir) / rel
-        hashes[f"direct:{rel}"] = sha256_file(full) if full.is_file() else "missing"
+        hashes[f"direct:{rel}"] = _fp(full)
+    # 填字段阶段直接绑定原始正文与已确认结构：换原卷/改正文/改结构立即让这些
+    # 阶段失效（只对少量文件取指纹，开销可忽略），无需逐单元语义签名。
+    if stage.id in ("answers", "types", "explanations", "knowledge", "audio", "assemble"):
+        for rel in ("01_source/正文.txt", "01_source/structure.confirmed.json"):
+            full = Path(batch_dir) / rel
+            if full.is_file():
+                hashes[f"source:{rel}"] = _fp(full)
+        # 原始上传件（Word/PDF/答案/图片等）也直接绑定：换原卷即全链失效。
+        for key, item in sorted((manifest.get("inputs") or {}).items()):
+            path = item.get("path") if isinstance(item, dict) else None
+            if path and Path(path).is_file():
+                hashes[f"source_input:{key}"] = _fp(path)
+        media_dir = Path(batch_dir) / "01_source/media"
+        if media_dir.is_dir():
+            for media in sorted(media_dir.glob("*")):
+                if media.is_file():
+                    hashes[f"source:01_source/media/{media.name}"] = _fp(media)
+    if stage.id in ("explanations", "assemble"):
+        # 解析/装配需要答案来源；knowledge 只需题型/结构（答案在装配合并）。
+        for rel in ("01_source_ans/正文.txt", "01_source_ans/answers.json"):
+            full = Path(batch_dir) / rel
+            if full.is_file():
+                hashes[f"source:{rel}"] = _fp(full)
+    if stage.id == "assemble":
+        # 装配合并结构元数据、抽取表格等；这些内容变化必须重装。
+        for rel in ("01_source/extraction.json",):
+            full = Path(batch_dir) / rel
+            if full.is_file():
+                hashes[f"source:{rel}"] = _fp(full)
+    if stage.id in ("validate",):
+        # 本地体检必须重核原卷：正文/结构/最终批次任何变化都要重跑 validate。
+        for rel in ("01_source/正文.txt", "01_source/structure.confirmed.json",
+                    "06_batch/batch_meta.json"):
+            full = Path(batch_dir) / rel
+            if full.is_file():
+                hashes[f"source:{rel}"] = _fp(full)
     if stage.id in ("review", "review_gate"):
         from . import review
         root = Path(__file__).resolve().parents[1]
         for rel in review.ROUND_INPUTS:
             path = Path(batch_dir) / rel
-            hashes[f"review:{rel}"] = sha256_file(path) if path.is_file() else "missing"
+            hashes[f"review:{rel}"] = _fp(path)
         for rel in review.ROUND_RULES:
             path = root / rel
-            hashes[f"rule:{rel}"] = sha256_file(path) if path.is_file() else "missing"
+            hashes[f"rule:{rel}"] = _fp(path)
         audio_sources = Path(batch_dir) / '02_audio/sources'
         if audio_sources.is_dir():
             for path in sorted(audio_sources.glob('*/full-transcript.json')):
                 if path.parent.name == 'audio' or re.fullmatch(r'audio_\d{3,}', path.parent.name):
-                    hashes[f'review:{path.relative_to(batch_dir).as_posix()}'] = sha256_file(path)
+                    hashes[f'review:{path.relative_to(batch_dir).as_posix()}'] = _fp(path)
         observations = Path(batch_dir) / 'workflow/media-observations.json'
         if observations.is_file():
             try:
@@ -227,13 +311,45 @@ def input_hashes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
                 for entry in data.get('observations', []):
                     rel = entry['path']
                     path = _safe_path(Path(batch_dir), rel)
-                    hashes[f"media:{rel}"] = sha256_file(path) if path.is_file() else "missing"
+                    hashes[f"media:{rel}"] = _fp(path)
             except (OSError, ValueError, TypeError, KeyError, AttributeError):
                 hashes['media:invalid'] = 'invalid'
     return hashes
 
 
+# 参与内容指纹时忽略的字段：
+#   - 时间戳（每次重写都变，不代表内容变化）；
+#   - 词数 / 难度等“基本标签”（用户规则：难度、词数不参与重算，以首次结果为准）。
+VOLATILE_KEYS = {"generated_at", "created_at", "updated_at", "checked_at", "finished_at", "started_at",
+                 "words", "word_count", "wordCount", "difficulty", "difficultyEvidence"}
+
+
+def _canonical_json(value):
+    """递归去掉易变时间戳字段，产出稳定可比的规范形式（键排序）。"""
+    if isinstance(value, dict):
+        return {k: _canonical_json(v) for k, v in sorted(value.items()) if k not in VOLATILE_KEYS}
+    if isinstance(value, list):
+        return [_canonical_json(v) for v in value]
+    return value
+
+
+def _content_digest(path) -> str:
+    """内容指纹：JSON 文件按规范化结构哈希（忽略 generated_at/键序/空白），其余裸哈希。"""
+    path = Path(path)
+    if not path.is_file():
+        return "missing"
+    try:
+        if path.suffix == ".json":
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            canon = json.dumps(_canonical_json(data), ensure_ascii=False, sort_keys=True)
+            return "json:" + hashlib.sha256(canon.encode("utf-8")).hexdigest()
+    except (OSError, UnicodeError, ValueError):
+        pass
+    return "raw:" + sha256_file(path)
+
+
 def output_hashes(batch_dir, stage: contracts.Stage) -> dict:
+    # 保持裸 SHA256（记录/审计/上传批准对比沿用原有语义）；过期判断已简化为不做内容比对。
     hashes = {}
     for rel in stage.produces:
         full = Path(batch_dir) / rel
@@ -305,12 +421,17 @@ def reconcile_deliveries(batch_dir, manifest: dict) -> list[str]:
         status = record.get("status")
         entry = delivery["stages"].setdefault(stage.id, {})
         if status == SKIPPED:
-            new = {"status": "skipped", "artifacts": [], "consumed_by": [], "updated_at": now_iso()}
+            new = {"status": "skipped", "artifacts": _delivery_artifacts(batch, stage),
+                   "consumed_by": entry.get("consumed_by", []), "updated_at": now_iso()}
         elif status in TERMINAL_OK:
             missing = missing_produces(batch, stage)
             current = output_hashes(batch, stage)
             saved = record.get("output_hashes") or {}
             mismatch = bool(saved) and any(current.get(path) != digest for path, digest in saved.items())
+            if mismatch and record.get("semantic_version"):
+                from . import stage_semantics
+                if record.get("semantic_version") == stage_semantics.VERSION:
+                    mismatch = stage_semantics.output_signatures(batch, stage) != record.get("semantic_outputs")
             if missing or mismatch:
                 reason = ("交付清单发现缺少产物：" + ", ".join(missing)) if missing else "交付清单发现产物指纹变化"
                 if stage.id not in invalidated:
@@ -321,6 +442,10 @@ def reconcile_deliveries(batch_dir, manifest: dict) -> list[str]:
                 # Legacy completed stages with files are accepted and indexed once.
                 if not saved:
                     record["output_hashes"] = current
+                if not record.get("semantic_version"):
+                    stale, _ = is_stale(batch, manifest, stage)
+                    if not stale:
+                        record_semantics(batch, manifest, stage)
                 new = {"status": "delivered", "artifacts": _delivery_artifacts(batch, stage),
                        "consumed_by": entry.get("consumed_by", []), "updated_at": entry.get("updated_at") or now_iso()}
         elif record.get("execution_completed") and record.get("continue_unqualified"):
@@ -336,10 +461,9 @@ def reconcile_deliveries(batch_dir, manifest: dict) -> list[str]:
             changed = True
     for stage_id in invalidated:
         record = manifest["stages"].get(stage_id, {})
-        if record.get("status") in TERMINAL_OK and record.get("status") != SKIPPED:
-            touch_stage(manifest, stage_id, INVALIDATED,
-                        notes="交付清单校验失败，局部重跑：" + delivery["stages"][stage_id].get("reason", "产物过期"))
-            invalidate_downstream(batch, manifest, stage_id, "上游阶段交付失效")
+        if record.get("status") in TERMINAL_OK:
+            invalidate_stage(batch, manifest, stage_id,
+                             "交付清单校验失败，局部重跑：" + delivery["stages"][stage_id].get("reason", "产物过期"))
             changed = True
     if changed:
         _save_delivery(batch, delivery)
@@ -348,6 +472,23 @@ def reconcile_deliveries(batch_dir, manifest: dict) -> list[str]:
 
 def record_delivery(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
     """Write a delivered hand-off after a stage has installed its outputs."""
+    record = manifest.get("stages", {}).get(stage.id, {})
+    if (record.get("status") in TERMINAL_OK or
+            record.get("execution_completed") and record.get("continue_unqualified")):
+        record.pop("rebuild_required", None)
+    # The hard gate is dependency_satisfied/inspect_stage at dispatch time.
+    # Delivery recording must not silently accept an invalid artefact, but it
+    # also must not abort the installer's bookkeeping: record the rejection.
+    from .handoff import inspect_stage
+    checked = inspect_stage(batch_dir, manifest, stage.id)
+    if not checked.get("passed"):
+        record["handoff_errors"] = checked.get("errors", [])[:8]
+    if stage.id in ("answers", "audio", "types", "explanations", "knowledge"):
+        from . import batch_fill
+        if (Path(batch_dir) / batch_fill.STATE).is_file() and (Path(batch_dir) / batch_fill.ARTIFACTS[stage.id]).is_file():
+            batch_fill.sync(batch_dir, stage.id)
+    record_semantics(batch_dir, manifest, stage)
+    invalidate_changed_consumers(batch_dir, manifest, stage.id)
     delivery = _load_delivery(batch_dir)
     delivery["version"] = DELIVERY_VERSION
     delivery["workflow_id"] = manifest.get("workflow_id", Path(batch_dir).name)
@@ -387,6 +528,8 @@ def touch_stage(manifest: dict, stage_id: str, status: str, **fields) -> None:
         record.pop("continue_unqualified", None)
         record.pop("quality_status", None)
         record.pop("release_ready", None)
+    if status in TERMINAL_OK:
+        record.pop("rebuild_required", None)
     if status == RUNNING:
         record["started_at"] = now_iso()
     if status in (COMPLETED, APPROVED, FAILED, BLOCKED, SKIPPED, INVALIDATED):
@@ -409,6 +552,48 @@ def record_decision(manifest: dict, stage_id: str, action: str, actor: str,
     })
 
 
+def record_semantics(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
+    """Record exact audit hashes and normalized output identity for reuse checks.
+
+    Exact hashes remain available for task bindings and audit. Scheduling compares
+    normalized JSON content so serialization-only rewrites do not reopen a stage.
+    """
+    from . import stage_semantics
+    record = manifest["stages"][stage.id]
+    record["semantic_version"] = stage_semantics.VERSION
+    record["semantic_inputs"] = input_hashes(batch_dir, manifest, stage)
+    record["semantic_outputs"] = stage_semantics.output_signatures(batch_dir, stage)
+
+
+def invalidate_stage(batch_dir, manifest: dict, stage_id: str, reason: str) -> list[str]:
+    """Rebuild one stage, retaining descendants until their consumed content changes.
+
+    The marker blocks dependent dispatch during repair even if an intermediate
+    stage still has reusable completed outputs. Explicit deep resets use
+    invalidate_downstream instead.
+    """
+    record = manifest["stages"].get(stage_id)
+    if not record:
+        return []
+    record["rebuild_required"] = True
+    record["invalidation"] = {"scope": "stage", "reason": reason, "at": now_iso()}
+    touch_stage(manifest, stage_id, INVALIDATED, notes=reason)
+    return [stage_id]
+
+
+def invalidate_changed_consumers(batch_dir, manifest: dict, stage_id: str) -> list[str]:
+    """Recheck consumers against actual installed data, never mere ancestry."""
+    changed = []
+    for target in contracts.downstream_of(stage_id):
+        record = manifest["stages"].get(target, {})
+        if record.get("status") not in TERMINAL_OK or record.get("status") == SKIPPED:
+            continue
+        stale, reason = is_stale(batch_dir, manifest, contracts.STAGE_BY_ID[target])
+        if stale:
+            changed.extend(invalidate_stage(batch_dir, manifest, target, reason))
+    return changed
+
+
 def invalidate_downstream(batch_dir, manifest: dict, stage_id: str, reason: str) -> list[str]:
     """让指定阶段及其全部下游失效，返回被失效的阶段。"""
     targets = (stage_id,) + contracts.downstream_of(stage_id)
@@ -425,34 +610,79 @@ def invalidate_downstream(batch_dir, manifest: dict, stage_id: str, reason: str)
 
 
 def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, str]:
-    """已完成阶段是否还能复用。"""
+    """Check reusable stage state without treating serialization as content change.
+
+    New records compare normalized output signatures. Legacy records retain exact
+    hash checks until their next accepted delivery establishes a versioned signature.
+    Consumer validation and final gates remain authoritative for content correctness.
+    """
     record = manifest["stages"].get(stage.id, {})
-    if record.get("status") == SKIPPED:
-        return False, ""
-    if record.get("status") not in TERMINAL_OK and not dependency_satisfied(manifest, stage.id, allow_unqualified=True):
+    if stage.id == "upload_gate" and record.get("status") == APPROVED:
+        approved = record.get("approved_batch_sha256")
+        if not approved or approved != sha256_file(Path(batch_dir) / "06_batch/batch_meta.json"):
+            return True, "上传批准与冻结的最终批次不一致"
+    if record.get("status") not in TERMINAL_OK:
         return True, f"状态为 {record.get('status')}"
     missing = missing_produces(batch_dir, stage)
     if missing:
         return True, f"缺少产物 {', '.join(missing)}"
+    # Exact output hashes remain in the ledger for audit. Reuse compares a
+    # normalized content signature so JSON formatting and clock-only changes
+    # cannot create a scheduling loop; actual payload changes still require a rerun.
     saved_outputs = record.get("output_hashes") or {}
-    for rel, digest in saved_outputs.items():
-        current = sha256_file(Path(batch_dir) / rel)
-        if current != digest:
-            return True, f"产物已变化 {rel}"
-    saved_inputs = record.get("input_hashes") or {}
-    current_inputs = input_hashes(batch_dir, manifest, stage)
-    for key, digest in saved_inputs.items():
-        if current_inputs.get(key) != digest:
-            return True, f"输入已变化 {key}"
+    if saved_outputs:
+        from . import stage_semantics
+        if record.get("semantic_version") == stage_semantics.VERSION:
+            if stage_semantics.output_signatures(batch_dir, stage) != record.get("semantic_outputs"):
+                return True, "阶段产物内容已变化"
+        else:
+            for rel, digest in saved_outputs.items():
+                if sha256_file(Path(batch_dir) / rel) != digest:
+                    return True, f"产物已变化 {rel}"
     return False, ""
 
 
+def _parse_iso(value) -> float | None:
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
 def dependency_satisfied(manifest: dict, stage_id: str, *, allow_unqualified: bool = False) -> bool:
+    """A dependency must be complete, current, and accepted by its next consumer."""
+    if not execution_state.dependency_satisfied(manifest, stage_id, allow_unqualified=allow_unqualified):
+        return False
+    batch_dir = manifest.get("batch_dir")
+    if not batch_dir:
+        return False
+    stage = contracts.STAGE_BY_ID.get(stage_id)
+    if stage is None:
+        return False
     record = manifest.get("stages", {}).get(stage_id, {})
-    if record.get("status") in TERMINAL_OK:
+    if record.get("status") in (COMPLETED, APPROVED):
+        stale, _reason = is_stale(batch_dir, manifest, stage)
+        if stale:
+            return False
+    if (allow_unqualified and stage_id == "review_gate"
+            and record.get("status") == execution_state.NEEDS_REVIEW
+            and record.get("execution_completed") is True
+            and record.get("continue_unqualified") is True
+            and not record.get("release_ready")):
         return True
-    return bool(allow_unqualified and record.get("status") in (BLOCKED, NEEDS_REVIEW)
-                and record.get("execution_completed") and record.get("continue_unqualified"))
+    # 上游都已完成才能消费（未完成/重建中→输入未稳定）。
+    for dep in contracts.upstream_of(stage_id):
+        dep_rec = manifest.get("stages", {}).get(dep, {})
+        if dep_rec.get("status") not in TERMINAL_OK or dep_rec.get("rebuild_required"):
+            return False
+    # 用消费者自己的校验器确认上游交付「题号/内容对应正确、格式合规」才放行下游——
+    # 这是保证“第 1 题答案填到第 1 题、组装格式正确”的正确性关卡，不是可省的哈希校验。
+    # （过期判断已由 is_stale 简化为“完成+产物在”，此处不再重复内容哈希比对。）
+    from .handoff import inspect_stage
+    return inspect_stage(batch_dir, manifest, stage_id).get("passed") is True
 
 
 def ready_stages(batch_dir, manifest: dict, *, allow_unqualified: bool = False) -> list[str]:
@@ -476,6 +706,17 @@ def ready_stages(batch_dir, manifest: dict, *, allow_unqualified: bool = False) 
 
 def skip_reason(manifest: dict, stage: contracts.Stage) -> str:
     """按输入形态判断阶段是否应当跳过（不是失败）。"""
+    if (stage.id in ("preassemble", "format_gate")
+            and manifest.get("stages", {}).get("upload", {}).get("status") == COMPLETED):
+        return "历史批次已提交远端，不补跑新增本地步骤"
+    if stage.id == "preassemble":
+        batch = Path(manifest.get("batch_dir") or ".")
+        stages = manifest.get("stages", {})
+        if (stages.get("assemble", {}).get("status") == COMPLETED
+                and stages.get("review", {}).get("status") == COMPLETED
+                and (batch / "06_batch/batch.json").is_file()
+                and not (batch / "workflow/batch-fill-state.json").is_file()):
+            return "历史批次已完成组装与审核执行，沿用现有批次，不补跑前置组装"
     if stage.id == "answers":
         batch_dir = manifest.get("batch_dir")
         if batch_dir:
@@ -540,36 +781,8 @@ def blocking_stages(manifest: dict) -> list[dict]:
 
 
 def derive_status(manifest: dict) -> str:
-    """把阶段状态收敛为批次总状态。"""
-    statuses = {sid: rec.get("status") for sid, rec in manifest.get("stages", {}).items()}
-    if statuses.get("publish_gate") == APPROVED:
-        return "published"
-    if statuses.get("upload") == COMPLETED:
-        return "staged"
-    if any(s in (FAILED,) for s in statuses.values()):
-        return "failed"
-    blocked_unqualified = [sid for sid, status in statuses.items()
-                           if status in (BLOCKED, NEEDS_REVIEW)
-                           and manifest.get("stages", {}).get(sid, {}).get("continue_unqualified")]
-    if blocked_unqualified and all(dependency_satisfied(manifest, stage.id, allow_unqualified=True)
-                                   for stage in contracts.STAGES if stage.id not in
-                                   ("upload_gate", "upload", "publish_gate")):
-        return "pending_confirmation"
-    if any(s in (BLOCKED,) for s in statuses.values()):
-        return "blocked"
-    if statuses.get("review_gate") in TERMINAL_OK:
-        return "pending_confirmation"
-    if statuses.get("validate") in TERMINAL_OK:
-        return "reviewing"
-    if statuses.get("assemble") in TERMINAL_OK:
-        return "assembling" if statuses.get("meta") not in TERMINAL_OK else "validating"
-    if statuses.get("types") in TERMINAL_OK:
-        return "enriching"
-    if statuses.get("structure_gate") in TERMINAL_OK:
-        return "classifying"
-    if statuses.get("extract") in TERMINAL_OK:
-        return "structure_review"
-    return "created"
+    """Compatibility entrypoint for the shared, read-only batch projection."""
+    return execution_state.derive_status(manifest)
 
 
 def append_log(batch_dir, entry: dict) -> None:

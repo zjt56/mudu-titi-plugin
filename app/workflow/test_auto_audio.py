@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """上传后自动切段：结构闸门通过即调用真实切段器，失败不打断整批推进。"""
 import json
+import hashlib
 import tempfile
 import sys
 import unittest
@@ -16,6 +17,16 @@ def _manifest(batch: Path, *, audio=True):
     if audio:
         manifest["inputs"]["audio"] = {"path": str(batch / "audio.mp3"), "exists": True}
     manifest["stages"]["structure_gate"]["status"] = mf.COMPLETED
+    manifest["stages"]["preassemble"]["status"] = mf.COMPLETED
+    manifest["stages"]["types"]["status"] = mf.COMPLETED
+    structure = batch / "01_source/structure.confirmed.json"
+    structure.parent.mkdir(parents=True, exist_ok=True)
+    structure.write_text(json.dumps({"units": [{"unit_id": "q-1", "unit_kind": "standalone",
+        "numbers": [1], "type": "听力关键词语选择"}]}), encoding="utf-8")
+    types = batch / "03_types/types.json"
+    types.parent.mkdir(parents=True, exist_ok=True)
+    types.write_text(json.dumps({"items": [{"unit_id": "q-1", "type": "听力关键词语选择",
+        "subtypes": [], "words": 1, "contentComplete": True, "evidence": ["正文 L1"]}]}), encoding="utf-8")
     return manifest
 
 
@@ -85,7 +96,15 @@ class AutoAudioPrepareTest(unittest.TestCase):
         self.assertIn('ASR 失败', result['message'])
 
     def test_existing_evidence_is_not_overwritten(self):
-        (self.batch / "02_audio" / "segment-evidence.json").write_text("{}", encoding="utf-8")
+        segment = self.batch / "02_audio/segment.mp3"
+        segment.write_bytes(b"cut audio")
+        from audio.binding import listening_context
+        binding, _listening = listening_context(self.batch)
+        row = {"unit_id": "q-1", "file": "02_audio/segment.mp3", "start": 0.0, "end": 1.0,
+               "evidence": ["cut source"], "verified": True,
+               "file_sha256": hashlib.sha256(segment.read_bytes()).hexdigest()}
+        (self.batch / "02_audio" / "segment-evidence.json").write_text(
+            json.dumps({"generator": "audio.segment/test", "unit_binding": binding, "items": [row]}), encoding="utf-8")
         with patch("audio.segment.run", side_effect=AssertionError("must not rerun")) as run:
             result = auto._auto_prepare_audio(self.batch, self.manifest)
         self.assertEqual(result["status"], "evidence")

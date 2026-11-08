@@ -81,29 +81,44 @@ class ValidationContractsTest(unittest.TestCase):
         argv = checks._argv(check, Path('.'), self.batch, {'source': {'path': str(self.source)}})
         self.assertEqual(argv[-2:], ['--source', str(self.source)])
 
-    def test_group_with_marked_explanations_passes_and_empty_group_also_passes(self):
-        # 用户规则：解析是可选字段，缺失不再拦停；历史 AI 标记也不再校验。
+    def test_group_missing_explanations_pass_but_generated_child_fails(self):
         row = {'id': 'group', 'unit_kind': 'group', 'answer': '', 'explanation': '',
-               'subquestions': [{'number': 1, 'answer': 'A', 'explanation': '本题考查时态（AI生成，待校对）'},
-                                {'number': 2, 'answer': 'B', 'explanation': '本题考查搭配（AI生成，待校对）'}]}
+               'subquestions': [{'number': 1, 'answer': 'A', 'explanation': '无'},
+                                {'number': 2, 'answer': 'B', 'explanation': ''}]}
         code, output = self.run_script(explanations, [row])
         self.assertEqual(code, 0, output)
-        # 组级与全部子题都没有解析 → F7 拦停。
-        empty = {'id': 'group', 'unit_kind': 'group', 'answer': 'A', 'explanation': '',
-                 'subquestions': [{'number': 1, 'answer': 'A', 'explanation': ''}]}
-        code, output = self.run_script(explanations, [empty])
-        self.assertEqual(code, 0, output)
+        for value in ('本题考查时态（AI生成，待校对）', '自己补写的内容。'):
+            row['subquestions'][0]['explanation'] = value
+            code, output = self.run_script(explanations, [row])
+            self.assertEqual(code, 1, output)
+            self.assertIn('子题1', output)
 
-    def test_missing_or_ai_explanations_never_block(self):
-        # 解析可为空；AI 旧标记也不校验、不阻断。
-        for row in ({'id': 'single', 'unit_kind': 'standalone', 'answer': 'A', 'explanation': ''},
-                    {'id': 'group', 'unit_kind': 'group', 'answer': 'A', 'subquestions': []},
-                    {'id': 'single', 'unit_kind': 'standalone', 'answer': 'A',
-                     'explanation': '由AI生成，本题根据上下文判断。'},
-                    {'id': 'single', 'unit_kind': 'standalone', 'answer': 'A',
-                     'explanation': '本题根据上下文判断（AI生成，待校对）'}):
+    def test_missing_content_passes_but_ai_and_unsourced_content_fail(self):
+        for value in ('', None, '无'):
+            row = {'id': 'single', 'unit_kind': 'standalone', 'answer': 'A', 'explanation': value}
             code, output = self.run_script(explanations, [row])
             self.assertEqual(code, 0, output)
+        for value in ('由AI生成，本题根据上下文判断。', '本题根据上下文判断（AI生成，待校对）'):
+            row = {'id': 'single', 'explanation': value}
+            code, output = self.run_script(explanations, [row])
+            self.assertEqual(code, 1, output)
+
+    def test_source_explanation_is_not_rewritten_or_accepted_for_another_question(self):
+        source_dir = self.root / '01_source'
+        source_dir.mkdir()
+        (source_dir / '正文.txt').write_text('1. Question one.\n2. Question two.', encoding='utf-8')
+        original = '原题的完整解析，必须逐字保留。'
+        (source_dir / '附录.txt').write_text(f'1.A 【解析】{original}\n2.B', encoding='utf-8')
+        row = {'id': 'q-1', 'number': 1, 'explanation': original}
+        code, output = self.run_script(explanations, [row])
+        self.assertEqual(code, 0, output)
+        for value in ('无', original[:5], original.replace('完整', '改写')):
+            row['explanation'] = value
+            code, output = self.run_script(explanations, [row])
+            self.assertEqual(code, 1, output)
+        row.update(number=2, explanation=original)
+        code, output = self.run_script(explanations, [row])
+        self.assertEqual(code, 1, output)
 
 
 if __name__ == '__main__':

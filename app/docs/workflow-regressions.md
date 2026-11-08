@@ -101,6 +101,12 @@ OCR 输出只是证据，应保留原件及渲染件摘要、页码、识别文�
 - 分片调用用共享执行锁，导入用独占锁。串并行使用同一分片配置、有效pending可续用、过期pending隔离留证，binding/transaction/raw response不删除。
 - 记录实际调用起止、锁等待、运行时间、输入字节数；导出到回执包含排队/串行导入，不能当单次模型耗时，不能用同时写回证明实际并行。
 
+## 难度别名与离线测试
+
+- 组题子题的 `difficulty` 与 `filterMetadata.difficulty` 必须同值，上传映射会以 `ALIAS_CONFLICT` 阻断；`assign_meta` 按子题顶层值同步嵌套值，缺失才继承组级判断，不另造新难度。
+- 填充阶段产物复用时只允许 `06_batch/` 表现层变化；Word 片段哈希、媒体哈希和全部原始证据必须逐字节一致，并重新通过该阶段校验（`python -m workflow.redeliver --dry-run` 先看是否满足）。
+- 测试不得真实调用模型：结构闸门用例用 `WF_STRUCTURE_AI=0` 或对 `structure_ai.auto_classify` 打桩；本机配置了模型路由时，未打桩的用例会真的发起调用、拖慢并占用执行锁。
+
 ## 回归验证
 
 通用接口必须运行：

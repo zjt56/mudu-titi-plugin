@@ -1,0 +1,553 @@
+"""Source-bound question objects before labeling; never a completed batch.
+
+The items use the assembled/wire field shapes. Answers and labels are deliberately
+empty pending their own stages. Word text is authoritative; PDF OCR is fingerprinted
+as separate layout evidence and never supplies wording. No manifest is read or changed.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import tempfile
+from pathlib import Path
+
+from . import denoise, question_content, wire_format
+
+PATH = "06_batch/question-draft.json"
+VERSION = "upload-workflow.question-draft/v1"
+_INPUTS = ("01_source/正文.txt", "01_source/structure.confirmed.json",
+           "01_source/structure.json", "01_source/extraction.json", "01_source/pdf-ocr.json")
+_MARKUP = re.compile(r"</?(?:u|sup|sub)>|\*\*")
+_TABLE = re.compile(r"\[TABLE(?:\s+(\d+))?\](.*?)\[/TABLE\]", re.S)
+_INSTRUCTION = re.compile(
+    r"^(?:听下面|听一段|听两遍|你将听到|阅读下列|阅读下面|根据对话内容|根据短文内容"
+    r"|补全对话|从方框中选择|用所给词的适当形式|根据汉语意思|将下列句子)"
+    r"|(?:选出最佳选项|将答案填写|答案写在)")
+
+
+def _digest(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _safe(root, relative):
+    path = root / relative
+    if not path.resolve().is_relative_to(root):
+        raise ValueError("Question draft path escapes batch")
+    for item in (path, *path.parents):
+        if item == root:
+            break
+        if item.is_symlink():
+            raise ValueError("Question draft paths cannot contain symlinks")
+    if path.exists() and not path.is_file():
+        raise ValueError("Question draft expects regular files")
+    return path
+
+
+def _hashes(root, media=()):
+    result = {}
+    for relative in (*_INPUTS, *sorted(set(media))):
+        path = _safe(root, relative)
+        result[relative] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
+    # Parser changes also invalidate a persisted draft, without mtime dependence.
+    for name in ("question_draft.py", "question_content.py", "wire_format.py", "denoise.py"):
+        path = Path(__file__).with_name(name)
+        result["parser:" + name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
+
+
+def _json(root, relative, default=None):
+    path = _safe(root, relative)
+    return json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else default
+
+
+def _raw_fragment(raw, needle, after=0):
+    """Recover original Word inline markup around an exact parsed fragment."""
+    plain, offsets, cursor = [], [], 0
+    for match in _MARKUP.finditer(raw):
+        plain.extend(raw[cursor:match.start()])
+        offsets.extend(range(cursor, match.start()))
+        cursor = match.end()
+    plain.extend(raw[cursor:])
+    offsets.extend(range(cursor, len(raw)))
+    plain = "".join(plain)
+    start = plain.find(needle, after)
+    if not needle:
+        boundary = offsets[after] if after < len(offsets) else len(raw)
+        blank = re.search(r"(?:<u>\s*</u>\s*)+$", raw[:boundary])
+        return (blank.group(0).strip() if blank else ""), after
+    if start < 0:
+        return "", after
+    end = start + len(needle)
+    left = offsets[start - 1] + 1 if start else 0
+    right = offsets[end] if end < len(offsets) else len(raw)
+    # The source parser strips leading whitespace, including a Word blank's
+    # contents. Recover its opening tag as well as the otherwise orphaned </u>.
+    prefix = re.search(r"(?:<u>\s*</u>\s*)+$", raw[:offsets[start]])
+    if prefix:
+        left = min(left, prefix.start())
+    return raw[left:right].strip(), end
+
+
+def _parts(lines, number):
+    """Use the existing source parser, retaining Word markup rather than OCR."""
+    parsed = question_content.question_parts(lines, int(number))
+    from .preview import _find
+    start = _find(lines, int(number))
+    # Restrict recovery to this question, not an identical phrase in shared material.
+    raw = "\n".join(lines[start:]) if start is not None else ""
+    stem, cursor = _raw_fragment(raw, parsed["stem"])
+    options = []
+    for option in parsed["options"]:
+        # Include the label while locating the text to disambiguate repeated options.
+        plain = _MARKUP.sub("", raw)
+        label = re.search(r"(?<![A-Za-z0-9&/.\-])" + re.escape(option["label"]) + r"[.．、]\s*", plain[cursor:])
+        offset = cursor + label.end() if label else cursor
+        text, cursor = _raw_fragment(raw, option["text"], offset)
+        options.append({"key": option["label"], "text": text})
+    return {"stem": stem, "options": options, "found": parsed["found"]}
+
+
+def _normalized_span(text, content):
+    """Locate a whitespace-reflowed unit text and return its original line range.
+
+    Confirmed structures from the model reflow source lines (option runs, tabs,
+    full-width blanks) without changing any word. Binding may ignore layout
+    whitespace only: never punctuation, digits, markup or letters.
+    """
+    def normalized(value):
+        chars, index = [], []
+        previous_space = False
+        for position, char in enumerate(value):
+            if char.isspace() or char in "\u3000\xa0":
+                if previous_space:
+                    continue
+                chars.append(" ")
+                previous_space = True
+            else:
+                chars.append(char)
+                previous_space = False
+            index.append(position)
+        return "".join(chars), index
+
+    plain, index = normalized(content)
+    wanted = " ".join(text.split())
+    if not wanted:
+        return None
+    start = plain.find(wanted)
+    if start < 0 or plain.find(wanted, start + 1) >= 0:
+        return None
+    end = start + len(wanted) - 1
+    raw_start, raw_end = index[start], index[end]
+    line_start = content.rfind("\n", 0, raw_start) + 1
+    line_end = content.find("\n", raw_end)
+    if line_end < 0:
+        line_end = len(content)
+    # A source binding covers whole source lines, never just an option prefix
+    # or a sentence fragment that hides the remainder of the same question.
+    if content[line_start:raw_start].strip() or content[raw_end + 1:line_end].strip():
+        return None
+    return (content.count("\n", 0, raw_start) + 1,
+            content.count("\n", 0, raw_end) + 1)
+
+
+def _ordered_within(text, container):
+    """Require complete equality after layout whitespace and material labels.
+
+    Subsequence matching is unsafe: dropping 'not', an option, or a table cell
+    would still match. Only standalone article labels removed by the independent
+    slicer and whitespace may differ; table markup and every content character
+    must remain identical.
+    """
+    from .extract import material_label
+    def compact(value):
+        lines, in_table = [], False
+        for line in value.splitlines():
+            if re.search(r"\[TABLE(?:\s|\])", line):
+                in_table = True
+            if in_table or not material_label(line):
+                lines.append(line)
+            if "[/TABLE]" in line:
+                in_table = False
+        return re.sub(r"\s+", "", "\n".join(lines))
+    wanted, source = compact(text), compact(container)
+    return bool(wanted) and wanted == source
+
+
+def _locate_in_window(text: str, window: list[str], start_line: int):
+    """Locate the unit text inside a declared span and return its exact range.
+
+    The declared span may over-cover (section header, summary, next section) and
+    may keep standalone article labels that the slicer drops. Accept only a
+    unique contiguous match of the complete text after layout whitespace and
+    material labels are ignored; a partial or subsequence match is rejected.
+    """
+    from .extract import material_label
+    wanted = [line for line in text.splitlines() if line.strip()]
+    if not wanted:
+        return None
+    plain = lambda rows: re.sub(r"\s+", "", "".join(rows))
+
+    offsets = [k for k in range(len(window) - len(wanted) + 1)
+               if "\n".join(window[k:k + len(wanted)]).strip() == text]
+    if len(offsets) == 1:
+        k = offsets[0]
+        return start_line + k, start_line + k + len(wanted) - 1, False
+    visible = [(index, line) for index, line in enumerate(window)
+               if not material_label(line) and line.strip()]
+    compact = [line for _, line in visible]
+    found = [k for k in range(len(compact) - len(wanted) + 1)
+             if plain(compact[k:k + len(wanted)]) == plain(wanted)]
+    if len(found) == 1:
+        k = found[0]
+        return start_line + visible[k][0], start_line + visible[k + len(wanted) - 1][0], True
+    # Line reflow is common between Word paragraphs and classified spans.
+    # Compare the complete contiguous content while mapping back to whole
+    # original lines; never accept a subsequence or a partial option prefix.
+    span = _normalized_span(text, "\n".join(line for _, line in visible))
+    if span is not None:
+        first, last = span
+        return start_line + visible[first - 1][0], start_line + visible[last - 1][0], True
+    return None
+
+
+def _bound_source(unit, source, cleaned, fresh):
+    """Require exact source text, and prefer independently rebuilt boundaries."""
+    text = str(unit.get("stem") or "").strip()
+    span = unit.get("source_span") or {}
+    lines = cleaned.splitlines()
+    if span.get("basis") == "ai_classified":
+        start, end = span.get("start_line"), span.get("end_line")
+        if not (type(start) is int and type(end) is int and 1 <= start <= end <= len(lines)):
+            return "", {"reason": "确认结构的行范围与当前Word正文不一致"}
+        located = _locate_in_window(text, lines[start - 1:end], start)
+        if located is None:
+            return "", {"reason": "确认结构的行范围与当前Word正文不一致"}
+        first, last, skipped = located
+        proof = {"basis": "confirmed_source_span",
+                 "line_basis": "denoise.clean_body(01_source/正文.txt)",
+                 "start_line": first, "end_line": last}
+        if skipped:
+            proof["material_labels_skipped"] = True
+        return text, proof
+    matches = [u for u in fresh if u.get("numbers") == unit.get("numbers")
+               and u.get("unit_kind") == unit.get("unit_kind")]
+    if len(matches) == 1 and str(matches[0].get("stem") or "").strip() != text:
+        return "", {"reason": "确认片段与当前原文独立切片不一致，不能沿用旧题干"}
+    for basis, content in (("source_lines", source), ("cleaned_source_lines", cleaned)):
+        rows = content.splitlines()
+        wanted = text.splitlines()
+        positions = [i for i in range(len(rows) - len(wanted) + 1)
+                     if wanted and "\n".join(rows[i:i + len(wanted)]).strip() == text]
+        if len(positions) == 1:
+            start = positions[0]
+            return text, {"basis": basis, "start_line": start + 1, "end_line": start + len(wanted),
+                          "line_basis": ("01_source/正文.txt" if basis == "source_lines"
+                                         else "denoise.clean_body(01_source/正文.txt)"),
+                          "boundary_rebuilt": len(matches) == 1}
+    # Legacy confirmed structures often have no span and reflowed whitespace.
+    # Accept only a unique whitespace-insensitive location in the real text.
+    for basis, content in (("source_lines", source), ("cleaned_source_lines", cleaned)):
+        span = _normalized_span(text, content)
+        if span is not None:
+            return text, {"basis": basis, "start_line": span[0], "end_line": span[1],
+                          "line_basis": ("01_source/正文.txt" if basis == "source_lines"
+                                         else "denoise.clean_body(01_source/正文.txt)"),
+                          "normalized_whitespace": True,
+                          "boundary_rebuilt": len(matches) == 1}
+    # Bind a supplied span only when its complete content matches after layout
+    # whitespace and standalone article labels are removed. Never accept a
+    # character subsequence: that could silently omit substantive source text.
+    confirmed_span = unit.get("source_span") or {}
+    start, end = confirmed_span.get("start_line"), confirmed_span.get("end_line")
+    if type(start) is int and type(end) is int and 1 <= start <= end:
+        for basis, content in (("source_lines", source), ("cleaned_source_lines", cleaned)):
+            rows = content.splitlines()
+            if end > len(rows) or not 1 <= start <= end:
+                continue
+            located = _locate_in_window(text, rows[start - 1:end], start)
+            if located is None:
+                continue
+            first, last, skipped = located
+            proof = {"basis": basis + "_span", "start_line": first, "end_line": last,
+                     "line_basis": ("01_source/正文.txt" if basis == "source_lines"
+                                    else "denoise.clean_body(01_source/正文.txt)"),
+                     "boundary_rebuilt": len(matches) == 1}
+            if skipped:
+                proof["material_labels_skipped"] = True
+            return text, proof
+    return "", {"reason": "确认片段无法唯一回指当前Word正文"}
+
+
+def _skeleton_text(text):
+    """Normalize source layout blanks, retaining underlined nonblank words."""
+    return wire_format.normalize_blank_text(re.sub(r"<br\s*/?>", "\n", text, flags=re.I))
+
+
+INFO_TRANSFER_BLANK = re.compile(r"<u>\s*[\u3000\xa0]*\s*(\d{1,3})\s*[\u3000\xa0]*\s*</u>")
+
+
+def _information_conversion(block_text: str, unit_type: str) -> bool:
+    return "信息转换" in (unit_type or "")
+
+
+def _table_blank_cells(rows, unit_type):
+    """Rewrite source blank markers into the upload table format.
+
+    The final upload contract expresses an information-transfer blank as
+    ``__N__`` inside the table cell and requires the block variant. The source
+    prints ``<u>　26　</u>``; copying that verbatim makes the table check fail, so
+    only for that table type do we convert the marker while keeping cell text.
+    """
+    if not _information_conversion("", unit_type):
+        return rows
+    converted = []
+    for row in rows:
+        cells = []
+        for cell in (row.get("cells") if isinstance(row, dict) else row) or []:
+            if not isinstance(cell, dict):
+                cells.append(cell)
+                continue
+            text = cell.get("text")
+            if isinstance(text, str):
+                cell = dict(cell, text=INFO_TRANSFER_BLANK.sub(lambda m: f"__{m.group(1)}__", text))
+            cells.append(cell)
+        converted.append({"cells": cells})
+    return converted
+
+
+def _table_blocks(text, extraction, issues, uid, unit_type=""):
+    blocks = []
+    for match in _TABLE.finditer(text):
+        tables = extraction.get("tables") or [] if isinstance(extraction, dict) else []
+        exact = [table for table in tables if isinstance(table, dict)
+                 and str(table.get("number")) == match.group(1)
+                 and str(table.get("text") or "").strip() == match.group(0).strip()]
+        rows = []
+        if len(exact) == 1:
+            for row in exact[0].get("rows") or []:
+                cells = []
+                for cell in row.get("cells") or []:
+                    if cell.get("merge_origin") is not None:
+                        continue
+                    value = {k: cell[k] for k in ("text", "rowspan", "colspan", "header") if k in cell}
+                    if isinstance(value.get("text"), str):
+                        value["text"] = _skeleton_text(value["text"])
+                    cells.append(value)
+                rows.append({"cells": cells})
+        else:
+            # Physical newlines inside an underline belong to its cell, not to
+            # a new table row. Keep them through row splitting, then normalize.
+            grid = re.sub(r"<u>.*?</u>", lambda m: m.group(0).replace("\n", "<br>"),
+                          match.group(2), flags=re.S)
+            for line in grid.splitlines():
+                if "|" in line:
+                    rows.append({"cells": [{"text": _skeleton_text(cell.strip()), "items": []}
+                                           for cell in line.split("|")]})
+            issues.append({"unit_id": uid, "code": "TABLE_LAYOUT_UNVERIFIED",
+                           "reason": "保留正文表格网格；没有唯一匹配的Word合并单元格证据"})
+        converted = _table_blank_cells(rows, unit_type)
+        block = {"type": "table", "rows": converted}
+        if _information_conversion(text, unit_type):
+            block["variant"] = "information-conversion"
+        blocks.append(block)
+    return blocks
+
+
+def _rubric_lines(lines, unit_type):
+    """Return the leading verbatim section rubric, if the source states one.
+
+    Only recognized answer instructions qualify; an article's opening sentence
+    must stay in the shared material rather than become a fake stem.
+    """
+    rubric = []
+    from .preview import _strong_number
+    for line in lines:
+        text = line.strip()
+        if not text or _strong_number(line) is not None:
+            break
+        from .extract import material_label
+        if material_label(line):
+            break
+        if question_content._generic_choice_instruction(line, unit_type) or _INSTRUCTION.match(text):
+            rubric.append(line)
+            continue
+        break
+    return rubric
+
+
+def _empty(number):
+    return {"number": int(number), "stem": "", "material": "", "options": [],
+            "knowledge": [], "knowledgeIds": [], "knowledge_ids": [],
+            "answer": "", "explanation": "无", "articleSummary": "无", "subquestions": []}
+
+
+def build(batch_dir, *, units=None):
+    """Build a candidate only. Missing source scopes stay blank with explicit issues.
+
+    The draft is a pure function of the source/confirmed files and the unit list;
+    scheduling and semantic-signature checks rebuild it repeatedly per refresh.
+    Cache by those exact inputs so a real edit still recomputes.
+    """
+    root = Path(batch_dir).resolve()
+    if units is None:
+        from .agent_tasks import confirmed_units
+        units = confirmed_units(root)
+
+    source = _safe(root, "01_source/正文.txt").read_text(encoding="utf-8-sig")
+    confirmed = _json(root, "01_source/structure.confirmed.json", {})
+    structure = _json(root, "01_source/structure.json", {})
+    extraction = _json(root, "01_source/extraction.json", {})
+    cleaned, _, _ = denoise.clean_body(source)
+    from .structure_gate import _build_units
+    from .preview import _find, _strong_number, _weak_numbers
+    fresh = _build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
+    items, bindings, issues, media = [], {}, [], set()
+    inspected_media = {}
+    for unit in units:
+        uid = unit["unit_id"]
+        text, proof = _bound_source(unit, source, cleaned, fresh)
+        row = dict(_empty(unit["numbers"][0]), id=uid, unit_id=uid, unit_kind=unit["unit_kind"],
+                   numbers=[int(n) for n in unit["numbers"]], question_type="",
+                   filterMetadata={"subtypes": []})
+        proof.update(source="01_source/正文.txt", source_text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+        bindings[uid] = proof
+        if not text:
+            issues.append({"unit_id": uid, "code": "SOURCE_SCOPE_UNPROVEN", "reason": proof["reason"]})
+        else:
+            lines = text.splitlines()
+            audit = question_content.audit_source_unit(dict(unit, stem=text))
+            issues.extend(dict(problem, unit_id=uid) for problem in audit["issues"])
+            if unit["unit_kind"] == "standalone":
+                if (unit.get("source_span") or {}).get("number_binding") == "single_writing_section":
+                    row["stem"] = question_content._required_stem(text)
+                else:
+                    part = _parts(lines, unit["numbers"][0])
+                    row.update(stem=part["stem"], options=part["options"])
+                    # Listening word-choice items may print only a number and
+                    # options. Retain that actual source token as the field's
+                    # display text rather than inventing an unheard sentence.
+                    if not part['stem'] and part['options'] and unit.get('type') == '听力关键词语选择':
+                        printed = re.match(r'^\s*(?:[（(]\s*[）)]\s*)?(\d{1,3}[.．、)])', text)
+                        if printed and int(re.match(r'\d+', printed.group(1)).group()) == unit['numbers'][0]:
+                            row['stem'] = printed.group(1)
+                    # Keep unsplit source rather than losing a nonstandard numbered task.
+                    if not part["stem"] and not part["options"]:
+                        row["stem"] = text
+            else:
+                first = min((i for i, line in enumerate(lines) if _strong_number(line) is not None), default=len(lines))
+                option_start = question_content.option_block_start(lines) if audit["shared_options"] else None
+                # The section rubric ("阅读下列短文…" / "听下面一段对话…") is a real
+                # source line and belongs in the group's stem; leaving it empty
+                # makes every grouped question fail the upload stem requirement.
+                rubric = _rubric_lines(lines, unit.get("type") or "")
+                if rubric:
+                    row["stem"] = "\n".join(rubric).strip()
+                body_lines = lines[len(rubric):] if rubric else lines
+                body_first = max(0, first - len(rubric))
+                if option_start is not None:
+                    line, offset = option_start
+                    line -= len(rubric)
+                    row["material"] = "\n".join([*body_lines[:line], body_lines[line][:offset]]).strip()
+                    raw_options = "\n".join([body_lines[line][offset:], *body_lines[line + 1:]])
+                    cursor = 0
+                    plain_options = _MARKUP.sub("", raw_options)
+                    for option in audit["shared_options"]:
+                        label = re.search(r"(?<![A-Za-z0-9&/.\-])" + re.escape(option["label"])
+                                          + r"[.．、]\s*", plain_options[cursor:])
+                        offset = cursor + label.end() if label else cursor
+                        value, cursor = _raw_fragment(raw_options, option["text"], offset)
+                        # 清除 OCR/Markdown 星号与行内空白，保留原文标点字词。
+                        value = re.sub(r"\*{1,3}", "", value).strip()
+                        row["options"].append({"key": option["label"], "text": value})
+                else:
+                    row["material"] = "\n".join(body_lines[:body_first]).strip()
+                for number in unit["numbers"]:
+                    part = _parts(lines, number)
+                    child = _empty(number)
+                    child.update(stem=part["stem"], options=part["options"])
+                    if not child["stem"] and any(int(number) in _weak_numbers(line) for line in lines[:first]):
+                        child["stem"] = "______"  # Explicit blank exists in shared source, not generated prose.
+                    elif not child["stem"] and not child["options"]:
+                        issues.append({"unit_id": uid, "number": number, "code": "CHILD_CONTENT_UNRESOLVED",
+                                       "reason": "保留子题身份；当前原文不能可靠拆出独立题干"})
+                    row["subquestions"].append(child)
+            blocks = _table_blocks(text, extraction, issues, uid, unit.get("type") or "")
+            if blocks:
+                if "信息转换" in str(unit.get("type") or ""):
+                    for block in blocks:
+                        block["variant"] = "information-conversion"
+                row["materialBlocks"] = blocks
+            # Bindings above retain the original Word text; only the generated
+            # skeleton adopts the library's blank and line-break notation.
+            for item in (row, *row["subquestions"]):
+                for key in ("stem", "material"):
+                    item[key] = _skeleton_text(item[key])
+                for option in item["options"]:
+                    option["text"] = _skeleton_text(option["text"])
+            refs = set(question_content._image_names(lines))
+            media_map = {}
+            for name in sorted(refs):
+                if Path(name).name != name or "\\" in name:
+                    issues.append({"unit_id": uid, "code": "MEDIA_PATH_UNSAFE", "reason": "图片引用不是安全文件名"})
+                    continue
+                relative = "01_source/media/" + name
+                path = _safe(root, relative)
+                media.add(relative)
+                digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
+                if relative in inspected_media and inspected_media[relative] != digest:
+                    raise ValueError("Media changed during question draft build")
+                inspected_media[relative] = digest
+                proof.setdefault("media_hashes", {})[relative] = digest
+                if digest != "missing":
+                    media_map[name] = relative  # Local evidence only; never a deployed/verified URL.
+                else:
+                    issues.append({"unit_id": uid, "code": "MEDIA_MISSING", "reason": "原文图片文件缺失：" + name})
+            row = wire_format.normalize_item(row, media_map=media_map, meta=confirmed.get("meta") or {})
+        # Cover every child even when its source scope is unresolved.
+        if unit["unit_kind"] == "group" and not row["subquestions"]:
+            row["subquestions"] = [_empty(n) for n in unit["numbers"]]
+        items.append(row)
+        proof["object_sha256"] = _digest(row)
+    hashes = _hashes(root, media)
+    if any(hashes.get(path) != digest for path, digest in inspected_media.items()):
+        raise ValueError("Media changed during question draft build")
+    result = {"version": VERSION, "status": "candidate", "release_ready": False,
+              "label_status": "not_started", "media_status": "local_evidence_only_unverified",
+              "input_hashes": hashes, "items": items, "source_bindings": bindings,
+              "issues": issues, "notice": "来源绑定只证明机械回指；不代表结构、标签、视觉/听音、装配或审核通过。空答案及无解析/大意是待匹配占位，不证明原卷没有。"}
+    return result
+
+
+def ensure(batch_dir, *, units=None):
+    """Persist deterministically, leaving unchanged drafts untouched and no manifest edits."""
+    root = Path(batch_dir).resolve()
+    target = _safe(root, PATH)
+    before = _hashes(root)
+    result = build(root, units=units)
+    after = _hashes(root)
+    if before != after:
+        raise ValueError("Source changed during question draft build")
+    result["content_sha256"] = _digest(result)
+    content = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    if target.is_file() and target.read_bytes() == content.encode("utf-8"):
+        return result
+    # Inputs, including media, must still match before committing the candidate.
+    media = [key for key in result["input_hashes"] if key.startswith("01_source/media/")]
+    if result["input_hashes"] != _hashes(root, media):
+        raise ValueError("Source or media changed during question draft build")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=".question-draft-", suffix=".tmp",
+                                         dir=target.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+            stream.flush()
+        _safe(root, PATH)
+        temporary.replace(target)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return result

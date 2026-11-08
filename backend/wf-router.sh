@@ -40,72 +40,41 @@ cred_key() {
 
 # 从提示词头部判断 Stage（工作流提示词带 "Stage: <name>"），用于选择基础阶段模型。
 detect_stage() {
-  head -c 4000 "$prompt" | sed -n 's/^Stage:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' | head -1
+  head -c 4000 "$prompt" | LC_ALL=C sed -n 's/^Stage:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' | head -1
+}
+
+# 从提示词头部判断子 Agent 角色（工作流提示词带 "Agent: <role>"）。
+detect_agent() {
+  head -c 4000 "$prompt" | LC_ALL=C sed -n 's/^Agent:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' | head -1
 }
 
 # 从提示词判断审核轮次（review 提示词带 "ROUND: labels|sample"）。
 detect_round() {
-  head -c 20000 "$prompt" | sed -n 's/^ROUND:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' | head -1
+  head -c 20000 "$prompt" | LC_ALL=C sed -n 's/^ROUND:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' | head -1
 }
 
 # 用 python3 解析 model-router.json，输出一行三个字段（用 \t 分隔）：
 #   provider    model_id    基础profile
 # 选择规则：
-#   stage=review 且能识别 round → 用 review.rounds[round]（为空则落回 review.default）
-#   其他（或 review 未配置）     → stages[stage]（为空则 default）
+#   优先级：review 时 rounds[round] → roles[agent] → review.default；其余 roles[agent] → stages[stage] → default
+#   选择逻辑在 backend/route_pick.py，便于单测。
 # 每个条目形如 {"provider":"deepseek-official","model":"deepseek-flash","profile":"wf-deepseek-fast"}
 # 不提供任何“换一个模型”的兜底：配置缺失/损坏/没有默认模型时直接失败，
 # 由用户重新选择模型，绝不静默改用其他模型。
 read_route() {
-  stage="$1"; round="$2"
-  python3 - "$ROUTER" "$stage" "$round" <<'PY'
-import json, sys
-router_path, stage, rnd = sys.argv[1], sys.argv[2], sys.argv[3]
-try:
-    data = json.load(open(router_path, encoding="utf-8"))
-except Exception as exc:
-    sys.stderr.write("wf-router: cannot read model-router.json: %s\n" % exc)
-    sys.exit(1)
-
-def pick(entry, fallback):
-    if isinstance(entry, dict) and entry.get("provider") and entry.get("model"):
-        return entry
-    return fallback
-
-default = data.get("default") or {}
-stages = data.get("stages") or {}
-review = data.get("review") or {}
-
-if not (isinstance(default, dict) and default.get("provider") and default.get("model")):
-    sys.stderr.write("wf-router: model-router.json has no valid default provider/model; "
-                     "select a model again in the plugin settings\n")
-    sys.exit(1)
-
-chosen = None
-if stage == "review":
-    rounds = review.get("rounds") or {}
-    entry = rounds.get(rnd) if rnd else None
-    if not (isinstance(entry, dict) and entry.get("provider") and entry.get("model")):
-        entry = review.get("default")
-    chosen = pick(entry, default)
-else:
-    chosen = pick(stages.get(stage), default)
-
-provider = chosen.get("provider")
-model = chosen.get("model")
-profile = chosen.get("profile") or "wf-deepseek-fast"
-sys.stdout.write("%s\t%s\t%s\n" % (provider, model, profile))
-PY
+  stage="$1"; round="$2"; agent="$3"
+  python3 "$SCRIPT_DIR/route_pick.py" "$ROUTER" "$stage" "$round" "$agent"
 }
 
 STAGE="$(detect_stage || true)"
 ROUND="$(detect_round || true)"
+AGENT="$(detect_agent || true)"
 # 路由失败必须终止本次调用；不能继续用其他模型。
-ROUTE="$(read_route "$STAGE" "$ROUND")" || { log "无法确定模型路由，已停止（不切换到其他模型）"; exit 1; }
+ROUTE="$(read_route "$STAGE" "$ROUND" "$AGENT")" || { log "无法确定模型路由，已停止（不切换到其他模型）"; exit 1; }
 PROVIDER="$(printf '%s' "$ROUTE" | cut -f1)"
 MODEL="$(printf '%s' "$ROUTE" | cut -f2)"
 BASE_PROFILE="$(printf '%s' "$ROUTE" | cut -f3)"
-log "stage=${STAGE:-?} round=${ROUND:-?} -> provider=$PROVIDER model=$MODEL (base=$BASE_PROFILE)"
+log "stage=${STAGE:-?} agent=${AGENT:-?} round=${ROUND:-?} -> provider=$PROVIDER model=$MODEL (base=$BASE_PROFILE)"
 
 BASE_DIR="$DSH_HOME/profiles/$BASE_PROFILE"
 if [ ! -d "$BASE_DIR" ]; then
@@ -118,13 +87,19 @@ fi
 
 # 复用按路由生成的 profile。每个分片仍是独立 dsh 进程，但不再重复复制
 # 整个基础 profile、改写 YAML；路由或基础 patch 变化时通过 key 自动换缓存。
-ROUTE_KEY="$(python3 - "$BASE_DIR" "$PROVIDER" "$MODEL" <<'PY'
+# 用户 desktop profile 里额外配置的 provider（如 opencode-go）也会被合入路由
+# profile，所以缓存键同时包含它的状态，避免新增 provider 后继续复用旧缓存。
+ROUTE_KEY="$(python3 - "$BASE_DIR" "$PROVIDER" "$MODEL" "$DSH_HOME/profiles/desktop/cordis.patch.yml" <<'PY'
 import hashlib, pathlib, sys
-base, provider, model = sys.argv[1:]
+base, provider, model, overlay = sys.argv[1:]
 patch = pathlib.Path(base) / "cordis.patch.yml"
 stat = patch.stat()
-value = "\\0".join((str(patch.resolve()), provider, model, str(stat.st_mtime_ns), str(stat.st_size)))
-print(hashlib.sha256(value.encode()).hexdigest()[:24])
+parts = [str(patch.resolve()), provider, model, str(stat.st_mtime_ns), str(stat.st_size)]
+overlay = pathlib.Path(overlay)
+if overlay.is_file():
+    ostat = overlay.stat()
+    parts += [str(overlay.resolve()), str(ostat.st_mtime_ns), str(ostat.st_size)]
+print(hashlib.sha256("\\0".join(parts).encode()).hexdigest()[:24])
 PY
 )"
 TMP_PROFILE="wf-plugin-route-$ROUTE_KEY"
@@ -148,6 +123,14 @@ if [ ! -f "$READY" ]; then
   fi
 fi
 [ -f "$PATCH" ] || { log "route profile initialization timed out"; exit 1; }
+
+# 合入基础 profile 缺少、但用户 desktop profile 已配置的 provider（如 opencode-go）。
+# 只复制整段 provider 定义，不改动基础 profile 自己的模型配置；脚本幂等。
+if [ "$NEEDS_PATCH" -eq 1 ] && [ -f "$DSH_HOME/profiles/desktop/cordis.patch.yml" ]; then
+  python3 "$SCRIPT_DIR/merge-route-providers.py" "$PATCH" \
+      "$DSH_HOME/profiles/desktop/cordis.patch.yml" \
+    || log "provider merge skipped (route profile keeps base providers)"
+fi
 
 # 用 python 精确替换/追加 agent-default-model 行里的 provider 与 model。
 # 只有初始化 owner 执行一次；后续分片直接复用已经就绪的 profile。
@@ -217,10 +200,60 @@ PY
   rmdir "$INIT_LOCK" 2>/dev/null || true
 fi
 
+# 自愈加固：READY 文件不能证明 agent-default-model 已被正确改写（历史上曾出现
+# 临时 profile 已就绪但 provider/model 仍是 desktop 基线的 magpie/auto/...，
+# 导致部分分片误走 magpie 中转并报 UNKNOWN_MODEL）。使用前强校验实际值，不符
+# 则就地重写为 route_pick 选定的 provider/model，避免坏 profile 被复用。
+if ! python3 - "$PATCH" "$PROVIDER" "$MODEL" <<'PY'
+import sys, re
+path, provider, model = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    lines = open(path, encoding="utf-8").read().splitlines()
+except OSError:
+    sys.exit(1)
+start = next((i for i, ln in enumerate(lines)
+              if re.match(r'^- id:\s*agent-default-model\b', ln)), -1)
+if start == -1:
+    sys.exit(1)
+end = len(lines)
+for j in range(start + 1, len(lines)):
+    if re.match(r'^- ', lines[j]) or (lines[j].strip() and not lines[j].startswith(' ')):
+        end = j; break
+block = lines[start:end]
+def get(k):
+    for b in block:
+        m = re.match(r'^\s*%s:\s*(.*)$' % k, b)
+        if m: return m.group(1).strip()
+    return None
+ok = get('provider') == provider and get('model') == model
+if ok:
+    sys.exit(0)
+# 就地重写 provider/model
+out = []
+for b in block:
+    if re.match(r'^\s*provider:', b):
+        out.append(re.match(r'^\s*', b).group() + "provider: %s" % provider)
+    elif re.match(r'^\s*model:', b):
+        out.append(re.match(r'^\s*', b).group() + "model: %s" % model)
+    else:
+        out.append(b)
+lines[start:end] = out
+open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+print("wf-router: repaired agent-default-model -> %s / %s" % (provider, model), file=sys.stderr)
+sys.exit(0)
+PY
+then
+  log "route profile agent-default-model 仍与目标不符，且无法修复，已停止（不切换其他模型）"
+  exit 1
+fi
+
 # 注入该 provider 对应的凭证环境变量。
 case "$PROVIDER" in
   deepseek-official|deepseek*)
     KEY="$(cred_key DEEPSEEK_API_KEY || true)"
+    ;;
+  opencode-go|opencode*)
+    KEY="$(cred_key OPENCODE_GO_API_KEY || true)"
     ;;
   magpie*|imported*|openai*)
     KEY="$(cred_key MAGPIE_GATEWAY_KEY || true)"
@@ -234,10 +267,12 @@ esac
 # 同时把两个都注入一份（存在的），避免 provider 切换时缺 key。
 DEEPSEEK_API_KEY_V="$(cred_key DEEPSEEK_API_KEY || true)"
 MAGPIE_GATEWAY_KEY_V="$(cred_key MAGPIE_GATEWAY_KEY || true)"
+OPENCODE_GO_API_KEY_V="$(cred_key OPENCODE_GO_API_KEY || true)"
 
 run_once() {
   DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY_V" \
   MAGPIE_GATEWAY_KEY="$MAGPIE_GATEWAY_KEY_V" \
+  OPENCODE_GO_API_KEY="$OPENCODE_GO_API_KEY_V" \
   "$DSH_BIN" --profile "$TMP_PROFILE" - < "$prompt"
 }
 

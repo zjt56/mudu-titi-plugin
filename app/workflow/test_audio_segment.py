@@ -25,9 +25,12 @@ def _batch(root: Path, numbers=(1, 2, 3)) -> Path:
     units = [{"unit_id": f"q-{n}", "unit_kind": "standalone", "numbers": [n]} for n in numbers]
     (batch / "01_source" / "structure.confirmed.json").write_text(
         json.dumps({"units": units}), encoding="utf-8")
+    from workbench.taxonomy import subtypes
     (batch / "03_types" / "types.json").write_text(
-        json.dumps({"items": [{"unit_id": f"q-{n}", "type": "听力短对话理解"} for n in numbers]}),
-        encoding="utf-8")
+        json.dumps({"items": [{"unit_id": f"q-{n}", "type": "听力关键词语选择",
+                               "subtypes": subtypes("听力关键词语选择"), "words": 0,
+                               "contentComplete": True, "evidence": ["题型测试证据"]}
+                              for n in numbers]}), encoding="utf-8")
     audio = root / "full.mp3"
     audio.write_bytes(b"ID3fakeaudio")
     (batch / "workflow" / "manifest.json").write_text(
@@ -105,7 +108,10 @@ class MultiAudioSlicingTest(unittest.TestCase):
                             'silence_skeleton': [0.0, 10.0]}
         (batch / 'workflow/manifest.json').write_text(json.dumps({'inputs': {
             key: {'path': value['path'], 'sha256': value['sha256']} for key, value in sources.items()}}))
-        return {'sources': sources, 'assignments': {'audio': ['q-1'], 'audio_001': ['q-2']},
+        from audio.binding import listening_context
+        unit_binding, _ = listening_context(batch)
+        return {'unit_binding': unit_binding, 'sources': sources,
+                'assignments': {'audio': ['q-1'], 'audio_001': ['q-2']},
                 'unresolved': [], 'complete': True, 'status': 'provisional'}
 
     @staticmethod
@@ -604,6 +610,73 @@ class BootstrapTest(unittest.TestCase):
             cfg = dict(cfgmod.DEFAULTS, data_dir=str(tmp))
             self.assertFalse(bootstrap.ready(cfg))
             self.assertFalse((Path(tmp) / "READY.json").exists())
+
+
+class AudioVersionBindingTest(unittest.TestCase):
+    def test_type_or_confirmed_unit_change_invalidates_cut_evidence(self):
+        from audio.binding import listening_context
+        from audio.consistency import pair_is_consistent
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = _batch(Path(tmp), numbers=(1,))
+            binding, units = listening_context(batch)
+            cut_path = batch / '02_audio/seg-q-1.mp3'
+            cut_path.write_bytes(b'real-cut-placeholder')
+            digest = segment._file_digest(cut_path)
+            row = {'unit_id': 'q-1', 'file': '02_audio/seg-q-1.mp3', 'start': 0.0,
+                   'end': 5.0, 'file_sha256': digest, 'evidence': ['cut source']}
+            evidence = {'generator': 'audio.segment/v2', 'unit_binding': binding, 'items': [row]}
+            mapping = {'unit_binding': binding, 'items': [
+                {key: row[key] for key in ('unit_id', 'file', 'start', 'end')} ]}
+            self.assertTrue(pair_is_consistent(batch, [mapping, evidence]))
+            types_path = batch / '03_types/types.json'
+            types = json.loads(types_path.read_text())
+            types['items'][0]['type'] = '听力短对话理解'
+            types['items'][0]['subtypes'] = ['选图片']
+            types_path.write_text(json.dumps(types), encoding='utf-8')
+            self.assertFalse(pair_is_consistent(batch, [mapping, evidence]))
+
+    def test_confirmed_membership_change_invalidates_binding(self):
+        from audio.binding import listening_context
+        from audio.consistency import pair_is_consistent
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = _batch(Path(tmp), numbers=(1,))
+            binding, _ = listening_context(batch)
+            cut_path = batch / '02_audio/seg-q-1.mp3'
+            cut_path.write_bytes(b'real-cut-placeholder')
+            row = {'unit_id': 'q-1', 'file': '02_audio/seg-q-1.mp3', 'start': 0.0,
+                   'end': 5.0, 'file_sha256': segment._file_digest(cut_path), 'evidence': ['cut source']}
+            evidence = {'generator': 'audio.segment/v2', 'unit_binding': binding, 'items': [row]}
+            mapping = {'unit_binding': binding, 'items': [
+                {key: row[key] for key in ('unit_id', 'file', 'start', 'end')} ]}
+            structure_path = batch / '01_source/structure.confirmed.json'
+            structure = json.loads(structure_path.read_text())
+            structure['units'].append({'unit_id': 'q-2', 'unit_kind': 'standalone', 'numbers': [2]})
+            structure_path.write_text(json.dumps(structure), encoding='utf-8')
+            types_path = batch / '03_types/types.json'
+            types = json.loads(types_path.read_text())
+            types['items'].append(dict(types['items'][0], unit_id='q-2'))
+            types_path.write_text(json.dumps(types), encoding='utf-8')
+            self.assertNotEqual(listening_context(batch)[0], binding)
+            self.assertFalse(pair_is_consistent(batch, [mapping, evidence]))
+
+    def test_cut_cache_rekeys_when_unit_version_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'source.mp3'
+            source.write_bytes(b'audio')
+            out = root / '02_audio'
+            out.mkdir()
+            calls = []
+            def fake_ffmpeg(command, **kwargs):
+                calls.append(command)
+                Path(command[-1]).write_bytes(b'cut' + str(len(calls)).encode())
+                return type('Process', (), {'returncode': 0, 'stderr': ''})()
+            item = {'unit_id': 'q-1', 'start': 0.0, 'end': 4.0,
+                    'audio_sha256': segment._file_digest(source), 'unit_binding': {'sha256': 'one'}}
+            with mock.patch.object(segment.subprocess, 'run', side_effect=fake_ffmpeg):
+                segment.cut(source, out, item)
+                segment.cut(source, out, dict(item, unit_binding={'sha256': 'two'}))
+            self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

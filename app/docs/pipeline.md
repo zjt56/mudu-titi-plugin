@@ -1,8 +1,8 @@
-# 流水线：16 个阶段与自动驱动
+# 流水线：18 个阶段与自动驱动
 
 这篇管"一批卷子从原件到待上传草稿"的推进方式：有哪些阶段、每个阶段产出什么、自动执行器在哪里停下，以及哪些动作永远不允许自动化。
 
-## 16 个阶段
+## 18 个阶段
 
 阶段定义是封闭契约，写在 `workflow/contracts.py` 的 `STAGES` 里，顺序、依赖、产物都不可临时增删。类型只有四种：`agent`（由执行者或代理完成）、`command`（跑脚本）、`gate`（机器闸门，只能由检查结果放行）、`human`（人工确认，只能由人标记）。
 
@@ -10,27 +10,32 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `extract` | 来源、年份、地区、来源类型与原卷复合提取 | `01_source/metadata.json`、正文、结构与提取证据 | command | 原件（必有） | 确定性执行器 |
 | 2 | `structure_gate` | 对照原卷逐题核题号、选项、材料边界和真实对话分组 | `01_source/structure.confirmed.json`、`07_review/structure-gate.json` | gate | `extract` | 证据不足则阻断并准备版面复核 |
-| 3 | `answers` | 子智能体4：对照确认后的题号提取答案、整理答案与解析对应关系并判定难度 | `01_source_ans/answers.json` | agent | `structure_gate` | 无单独答案卷时可用原卷附录；无任何答案证据则待核验 |
-| 4 | `audio` | 按确认后的听力单元切段并核对起止 | `02_audio/audio_map.json` | agent | `structure_gate` | 无音频才跳过 |
-| 5 | `types` | 子智能体3：判题型与子类、统计题目词数、判断内容是否完整 | `03_types/types.json` | agent | `structure_gate` | 等待代理执行 |
-| 6 | `explanations` | 子智能体1：解析/文章大意逐字匹配；缺失填「无」，不生成 | `04_knowledge/explanations.json` | agent | `types` | 答案为可选上下文；归属不确定转待核验 |
-| 7 | `knowledge` | 子智能体2：知识点打标与同步教材课时匹配 | `04_knowledge/knowledge.json` | agent | `types` | 答案及解析为可选上下文；最终组装核对来源 |
-| 8 | `assemble` | 组装批次 | `06_batch/batch.json` | agent | `audio`、`types`、`knowledge`、`explanations` | 等待代理执行 |
-| 9 | `meta` | 难度与分类 | `06_batch/batch_meta.base.json` | command | `assemble` | — |
-| 10 | `underlines` | 从 DOCX 字符格式补画线并生成最终批次 | `06_batch/batch_meta.json` | command | `meta` | 无 DOCX 时保留原有内容 |
-| 11 | `validate` | 本地脚本体检 + 源头逐题对账 | `07_review/validation-report.json` | gate | `underlines` | 失败保留质量阻断 |
-| 12 | `review` | 三类审核与人工队列 | `07_review/manual-review-queue.json` | agent | `validate` | 等待代理执行 |
-| 13 | `review_gate` | 审核放行判断 | `07_review/review-gate.json` | gate | `review` | 失败即阻断 |
-| 14 | `upload_gate` | 上传前人工确认 | 无（写入台账） | human | `review_gate` | 必须人工确认 |
-| 15 | `upload` | 写入上传暂存 | `07_upload/receipt.json` | command | `upload_gate` | 冻结请求、批准绑定、远端目录/媒体和复核通过后，显式 `upload --yes` 提交 |
-| 16 | `publish_gate` | 发布前人工确认 | 无（写入台账） | human | `upload` | 必须人工确认 |
+| 3 | `preassemble` | 前置组装上传字段形状，立即建立同一批次 | `06_batch/batch.base.json`、可逐步填充的 `06_batch/batch.json` | command | `structure_gate` | 未判断标签留空；来源必须可回指 |
+| 4 | `answers` | 逐题填入原答案或带来源证据的「无答案」决定 | `01_source_ans/answers.json` | agent | `preassemble`、结构确认 | 未逐题决定不能交付 |
+| 6 | `audio` | 依据已验证题型切听力并填媒体引用 | `02_audio/audio_map.json` | agent | `structure_gate`、`preassemble`、`types` | 单元/类型绑定过期即拒绝；无音频明确跳过 |
+| 5 | `types` | 填目录题型、子类、词数并确认原文完整性 | `03_types/types.json` | agent | `preassemble`、结构确认 | `contentComplete=false` 不交付 |
+| 7 | `explanations` | 按Word原文逐字匹配解析/大意，确认缺失填占位 | `04_knowledge/explanations.json` | agent | `types`、`answers` | 来源唯一且精确绑定；不生成 |
+| 8 | `knowledge` | 仅填知识点叶子/ID与适用教材映射 | `04_knowledge/knowledge.json` | agent | `types` | 只含标签；不读取答案或解析 |
+| 9 | `assemble` | 确定性合流，按原题身份合入并校验全部上游数据 | `06_batch/batch.json` | agent/command | `answers`、`types`、`audio`（或有效跳过）、`explanations`、`knowledge` | 任一上游未交付/不合规/过期即等待 |
+| 10 | `meta` | 归一难度与分类，并逐字段回填同批次 | `06_batch/batch_meta.base.json` | command | `assemble` | 不改题文与知识标签 |
+| 11 | `underlines` | 补画线并生成最终上传序列化视图 | `06_batch/batch_meta.json` | command | `meta` | 无 DOCX 保留原有内容 |
+| 12 | `validate` | 本地体检与原卷逐题对账 | `07_review/validation-report.json` | gate | `underlines` | 失败保留质量问题 |
+| 13 | `review` | 两轮内容与知识点审核 | 分轮记录与差异队列 | agent | `validate` | 复用未变单元 |
+| 14 | `review_gate` | 内容审核结果归集 | `07_review/review-gate.json` | gate | `review` | 质量结论如实保留 |
+| 15 | `format_gate` | 最终本地上传字段/格式检查 | `07_review/upload-format.json` | command | `review_gate` | 无模型、无网络；错误不伪称通过 |
+| 16 | `upload_gate` | 上传确认 | 台账与冻结绑定 | human | `format_gate` | 专用上传入口 |
+| 17 | `upload` | 写入远端上传暂存 | `07_upload/receipt.json` | command | `upload_gate` | 严格冻结请求与远端验证 |
+| 18 | `publish_gate` | 发布确认 | 台账 | human | `upload` | 发布仍走专用入口 |
 
 要点：
 
-- 第 9 阶段生成基础批次，第 10 阶段独立生成最终批次；体检读取最终批次。
-- 第 10 阶段运行目录/排版/表格等本地脚本，并额外直接执行源头逐题对账。部分脚本为本项目补充实现，不能视为已验证等价于发布侧原脚本；任何缺脚本、源题选项丢失、跨材料或表格/画线缺失都必须如实报告，不能调低检查来换取通过。
-- 第 14 阶段现通过[上传 API 对接](upload-api.md)实现：`prepare-upload` 读取当前目录、校验并冻结 API 请求，人工批准绑定最终文件与目标，再由 `upload --yes` 原样提交到暂存；普通 run/auto 不提交。缺凭据、媒体、来源或复核证据时仍阻断，远端人工确认后才生成草稿。
-- 第 15 阶段永远是最后一步，`publish_gate` 通过也不会让批次变成已发布；发布动作在发布侧执行。
+- `preassemble` 即建立真实批次；后续步骤按字段填充。`meta`/`underlines` 生成同一批题目的归一化上传视图，体检和最终格式检查读取该视图。
+- `validate` 运行目录、排版、表格与源头逐题对账；不能调低原文保真检查换取通过。
+- 审核后新增 `format_gate`，只做本地上传格式检查，不触发模型。上传队列仅在当前最终文件通过该检查后结束；二审完成不再提前移出队列。
+- [上传 API 对接](upload-api.md)仍在真实提交前校验实时远端目录、媒体和冻结请求；本地格式通过不等同远端提交批准或发布。普通 run/auto 不自动提交远端。
+
+
+调度只并发**依赖已经交付且消费者校验通过**的阶段。第一波答案与题型可并行；音频必须等待题型完成，并将题型/结构摘要绑定到切片证据；下一波解析（依赖题型、答案）与知识点（仅依赖题型、只输出标签）可并行。答案、解析与知识标签由 `assemble` 唯一确定性合并，合并成功后才允许 meta 等下游读取。
 
 ## 结构归类与确认（第 2 阶段）
 
@@ -63,6 +68,40 @@
 通过即写 `01_source/structure.confirmed.json` 并进入题型判定；不通过停下等人工或重跑，
 **不会**因题号归属、图片理解的语义歧义被机器静默放行——机器拿不准的会以阻断码暴露出来。
 
+## 卡点分类与前置预检
+
+工作台诊断会为每个自身卡点附带 `failure_class` 与 `next_action`，把“代理输出格式失败、输入过期、确定性闸门失败、审核质量差异、缺必需输入、等待上游”分开显示。下游仅等待上游时不再伪装成新的失败。
+
+`validate` 阶段会额外写入 `07_upload/local-preflight.json`：这是离线本地预检，不访问远端、不冻结文件、不批准上传，但会提前检查最终批次、标签目录、解析来源、媒体引用和 payload 大小。远端目录、媒体可访问性、冻结文件一致性仍只由 `prepare-upload`/`verify` 在上传前复核。
+
+规则文件按阶段分层绑定：解析/知识点/审核只绑定自身语义规则；装配版式或上传约束变化不会让无关阶段的模型任务无条件过期。真正相关的输入、产物和目录变化仍会使阶段失效并要求重跑。
+
+## 前置标准题目对象与局部更新
+
+结构确认后立即执行独立 `preassemble`：从 Word 原文和确认结构生成源对象，再真正写入 `06_batch/batch.json`，不等标签完成。每个独立题/题组使用稳定 `unit_id`，题干、选项、共享材料、表格、子题、媒体按最终字段形状前置组装。`batch.base.json` 是不随标签填充变化的来源基线，`workflow/batch-fill-state.json` 记录各字段填充进度；这些都不冒充审核通过。
+
+答案、题型、知识点、解析/大意、媒体和元信息产物被校验接受后，按唯一题号/单元逐字段回填同一批次。未判断字段保持空；确认原件没有相应内容后仍沿用既有「无」「未提供」等占位规则，有原文则逐字填写，不生成解析或大意。OCR 只作版面辅助，不覆盖 Word 原文。Word 为主卷时，配套 PDF 明确登记为 `structure_reference`，只帮助判断题号、题型和层级；可读页使用原生文字层，不强制整卷重做 OCR。PDF 辅助获取失败只保留诊断，不把已成功的 Word 提取判成失败。同题解析以 Word 正文/附录为准，PDF OCR 的重复内容不制造“来源不唯一”冲突。
+
+执行顺序为：复合提取 → 确认题目结构 → 前置批次组装 → 答案/音频/题型填充 → 解析与知识点填充 → 汇总固化和元信息补全 → 体检与内容审核 → 最终上传格式检查。答案、音频、题型可在前置组装后独立推进。
+
+标签模型默认以一题或一个题组为一片（`label_part_units=1`），与审核分片大小独立。可以唯一回指当前原文且模型身份可观察时，按本片题文、对应标签/答案、规则目录和模型配置复用快照；在途任务仍核对全部原始输入。托管批次后置 `assemble` 仅对同一批对象汇总固化并走原有整批保真校验；发生冲突时保留现有题目对象等待局部修正，不回退模型整批重组。没有托管状态的历史批次保留原有装配路径。来源元数据及报告簿记变化只做确定性字段合并。
+
+自动恢复采用两层指纹：任务导入和上传冻结继续校验原始字节；完成结果复用比较该阶段真正消费的内容。JSON 缩进、键顺序和生成时间不使内容失效。词数、难度变化不重新打知识点；题型/子类、题干、选项或答案真实变化才更新相关工作。原始标签难度保留为首轮结果，不成为审核完成前提。
+
+修复阶段时先只重排当前阶段，保留其它产物；它交付后，再逐个检查消费者是否真的接收了变化。未修好的上游会阻止依赖任务提交，但不会先把整条链的已完成结果作废。审核按独立题/共享材料题组保存语义摘要和真实执行来源：题干、选项、答案、解析、知识点或相关媒体改变时补对应单元；共享材料改变补对应题组；来源、难度、分类和报告时间变化不补审。无法可靠限定范围的附录或媒体变化仍保守扩大范围。
+
+显式 `invalidate` 仍代表要求整链重置；正常恢复不再使用该操作。旧记录只有原始摘要时，先按旧摘要验证；没有可证明的逐题审核来源时不能直接认定旧记录有效。上传批准仍绑定最终文件的精确摘要，内容冻结保护不因缓存复用而放松。
+
+## 持续自动修复与执行验证
+
+真实工作台服务启动时会启动 `workflow.supervisor.WorkflowSupervisor`，默认每 30 秒检查活动批次，服务退出时停止；只导入模块不会启动线程。监督器只扫描活动 `workflows`，不恢复归档，也不调用上传或发布。每批 `workflow/supervisor.json` 保存重试时间和无进展预算，重启后继续；不再依赖短暂的 7 轮巡检或用户反复点继续。执行中的批次/模型/CLI 锁不会被重复接管。
+
+完整路径是：检测失败或无进展 → 当前配置模型根据诊断、错误日志、相关原文与尝试历史选择动作 → 受限本地执行器应用 → 重新校验 → 继续原有流水线。`self_heal` 使用显式 Stage 标记走当前模型路由，不静默换模型。限流冷却在模型诊断前检查；暂时服务失败会退避后再试，同错长期无进展进入长冷却并再次探测，不会无限高频调用或永久丢下任务。
+
+实际动作包含：有原文证明的上传格式修复、源表格恢复、已登记文件状态更新、当前阶段重试，以及携带真实错误反馈的受影响题目重试。真实修复会备份、守卫原始输入、原子安装并读回校验，失败回滚；不编造缺失原文、答案或解析，也不把质量失败改成通过。纯格式等价修复可重用已实际通过的原验证与审核证据，仍独立复检来源和上传形状；内容恢复引入变化则重新执行相应检查。
+
+`workflow/repair-feedback/<stage>.json` 的严格反馈只进入对应阶段和受影响分片。其它题目的精确提示与有效缓存保留；在途任务仍校验全部原始输入。`workflow/self-heal.json` 区分 `retry_scheduled`、`repair_applied`、`retry_verified`、`retry_failed`，排队不冒充修复成功；小型 `self-heal-status.json` 用于界面显示“AI 判断／局部修复／校验／稍后重试”，不新增主流程节点。后台 `/api/health` 返回实际监督线程存活与最近巡检时间。
+
 ## 阶段状态
 
 台账里每个阶段只有九种状态：
@@ -76,7 +115,7 @@
 | `needs_review` | 需要人工再看 |
 | `blocked` | 被阻断，等外部条件 |
 | `failed` | 执行失败 |
-| `invalidated` | 上游变了，必须重跑 |
+| `invalidated` | 当前阶段实际消费内容或交付发生变化，按范围更新 |
 | `skipped` | 按规则跳过（如没有音频） |
 
 只有 `completed`、`approved`、`skipped` 算完成。`failed`、`blocked`、`invalidated` 都必须处理后才能继续。
@@ -154,6 +193,20 @@ workflows/<批次>/
 | 上传阶段 | `上传须人工通过专用命令显式确认` | `human` |
 
 已经在终态的阶段直接跳过；`invalidated` 的阶段会被重新执行。
+
+### 已交付产物的受控复用
+
+阶段产物因为“表现层改写”被标成过期时（例如空档写法、表格 variant、换行归一化改变了 `06_batch/batch.base.json`，而 Word 原文与所有原始证据文件逐字节未变），重新调用模型只会得到同一批标签。`python -m workflow.redeliver --batch-dir <批次> --stage <阶段...>` 提供一条受控的替代路径：
+
+1. 只接受填充阶段（`audio`/`types`/`explanations`/`knowledge`），终态阶段原样返回。
+2. 产物必须与交付时记录的哈希一致；交付后被改动则拒绝。
+3. 记录的全部原始输入必须仍一致，只允许 `06_batch/` 表现层对象变化；任何正文、附录、结构、题型、材料或音频字节变化都会拒绝。
+4. 托管的逐题来源绑定（Word 片段哈希与媒体哈希）必须与当前构建完全相同。
+5. 产物先通过该阶段现有的完整校验，才登记交付。
+
+全部条件都是确定性的、只读的；登记仍走正常的 `record_delivery`，并在 `workflow/redeliver-log.jsonl` 留下证据。它不是审核、质量通过、上传或发布，也不改变原文。--dry-run 只报告能否复用。
+
+不满足任一条件时命令拒绝并给出具体原因，此时必须真正重跑该阶段。
 
 ### 队列文件 `_queue.json`
 
@@ -251,7 +304,7 @@ python -m workflow.doctor
 
 | 文件 | 作用 |
 | --- | --- |
-| `workflow/contracts.py` | 16 个阶段、依赖、产物、失效关系 |
+| `workflow/contracts.py` | 18 个阶段、依赖、产物、失效关系 |
 | `workflow/auto.py` | 扫描 inbox、初始化、推进、写 `_queue.json` |
 | `workflow/runner.py` | 各阶段实际执行、人工标记、闸门判断、上传阻断 |
 | `workflow/manifest.py` | 台账读写、哈希、状态推导、失效传播 |

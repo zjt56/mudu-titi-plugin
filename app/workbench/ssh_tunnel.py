@@ -34,6 +34,27 @@ def _listening(host, port):
         return False
 
 
+def _endpoint_reachable(host, port, timeout=2.0):
+    """端到端可达性：端口 listening 不等于隧道转发正常（僵尸/悬挂 socket 会误判）。
+
+    直接对本地端口发一个极小的 HTTP 请求；只要远端服务返回任意 HTTP 状态即视为可达。
+    连接被拒/超时/无响应 → 隧道失效，需要重建。
+    """
+    import http.client
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        try:
+            conn.request("GET", "/api/health")
+            resp = conn.getresponse()
+            resp.read(64)
+            return True
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - 任何失败都视为不可达
+        return False
+
+
+
 def _stop(process):
     if process.poll() is None:
         process.terminate()
@@ -67,7 +88,13 @@ def ensure_upload_connection(timeout=10):
     bind = "::1" if host == "::1" else "127.0.0.1"
     with _lock:
         if _listening(host, port):
-            return "本机上传服务已就绪"
+            # 端口被占不代表转发可用（可能是上一次 ssh 留下的僵尸 socket/defunct 进程）。
+            # 只有端到端可访问才算就绪；否则清理残留并重建。
+            if _endpoint_reachable(host, port):
+                return "本机上传服务已就绪"
+            stale = _processes.pop((bind, port), None)
+            if stale is not None:
+                _stop(stale)
         previous = _processes.pop((bind, port), None)
         if previous is not None:
             _stop(previous)
@@ -117,7 +144,7 @@ def ensure_upload_connection(timeout=10):
             if process.poll() is not None:
                 _processes.pop((bind, port), None)
                 raise TunnelError("SSH 隧道启动失败，请检查主机、密钥、主机指纹和端口配置")
-            if _listening(host, port) and process.poll() is None:
+            if _listening(host, port) and process.poll() is None and _endpoint_reachable(host, port):
                 return "SSH 隧道已就绪"
             time.sleep(0.1)
         _stop(process)

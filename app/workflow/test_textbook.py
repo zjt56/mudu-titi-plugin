@@ -88,7 +88,7 @@ class KnowledgeTextbookWiringTest(unittest.TestCase):
         self.write(tasks.ARTIFACTS["answers"], {"answers": {"1": "A"}, "evidence": {"1": ["附录 L1"]},
                                                  "difficulty": {"1": "容易"},
                                                  "difficultyEvidence": {"1": ["单句"]}})
-        self.explanation = "根据主语与语境判断应选该项。" + tasks.AI_MARK
+        self.explanation = "无"
         self.write(tasks.ARTIFACTS["explanations"], {"items": [{
             "unit_id": "q-1", "explanation": self.explanation, "articleSummary": "",
             "subquestions": [], "evidence": ["正文 L2"]}]})

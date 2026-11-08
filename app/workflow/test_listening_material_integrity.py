@@ -168,9 +168,13 @@ class ListeningMaterialIntegrityTest(unittest.TestCase):
         broken = copy.deepcopy(batch)
         broken["items"][0]["subquestions"][0]["answer"] = "B"
         self.assertIn("ANSWER_MISMATCH", {i["code"] for i in self.answers.inspect(broken, answers)["issues"]})
+        # 空白答案不再抛输入错误（用户规则：缺答案不作为输入错误阻断）。它应按
+        # "该题无答案"处理——不与独立答案比较，也不会让整卷被判为格式错误。
         broken["items"][0]["subquestions"][0]["answer"] = ""
-        with self.assertRaises(self.answers.AnswerError):
-            self.answers.inspect(broken, answers)
+        report = self.answers.inspect(broken, answers)
+        codes = {i["code"] for i in report["issues"]}
+        self.assertNotIn("ANSWER_MISMATCH", codes)
+        self.assertNotIn("ANSWER_SOURCE_MISSING", codes)
         del answers["20"]
         self.assertIn("ANSWER_SOURCE_MISSING", {i["code"] for i in self.answers.inspect(batch, answers)["issues"]})
 

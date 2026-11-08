@@ -36,7 +36,7 @@ MAX_FINAL_BYTES = 8 * 1024 * 1024
 DEFAULTS = {"provider": "dsh", "timeout_seconds": 900, "max_input_chars": 180000,
             "retries": 2, "retry_feedback_chars": 1600, "unit_split": True,
             # 每片更小，减少单次模型上下文压力；审核片默认可稍大但仍可调。
-            "assemble_part_units": 8, "review_part_units": 15}
+            "assemble_part_units": 8, "review_part_units": 15, "label_part_units": 1}
 
 # Only explicit transport/error fields count; task text can legitimately mention
 # 429, QUOTA or RATE_LIMIT. Never infer a provider failure from those substrings.
@@ -52,7 +52,8 @@ _ERROR_CODES = {
 _HTTP_ERROR = re.compile(
     r"\b(?:HTTP(?:/\d(?:\.\d)?)?\s+(?:status\s*[:=]?\s*)?|"
     r"(?:HTTP|API)\s+(?:error|status)(?:\s+code)?\s*[:=(]?\s*|"
-    r"(?:status_code|statusCode|http_status)\s*[:=]\s*)([45]\d\d)\b", re.I)
+    r"(?:status_code|statusCode|http_status)\s*[:=]\s*|"
+    r"(?:dsh|wf-router):\s*RATE_LIMIT:\s*)([45]\d\d)\b", re.I)
 
 
 def is_review_prompt(prompt: str) -> bool:
@@ -245,7 +246,10 @@ def load_config(path=None) -> dict:
 def _agent_lock(timeout, *, shared=False):
     """Exclusive by default; explicit parallel callers share a POSIX lock.
 
-    Windows retains exclusive locking. Never unlink the lock inode.
+    POSIX callers may pass the yielded handle to their child via pass_fds.
+    Closing our reference (without LOCK_UN) keeps the same open-file-description
+    lock held until the last inheriting process closes it. Windows retains its
+    existing exclusive locking and yields None. Never unlink the lock inode.
     """
     key = hashlib.sha256(str(Path(__file__).resolve().parent).encode()).hexdigest()
     lock_path = Path(tempfile.gettempdir()) / f"mudu-local-agent-{key}.lock"
@@ -272,15 +276,14 @@ def _agent_lock(timeout, *, shared=False):
                     raise AgentError("Timed out waiting for workflow agent lock", "lock_timeout") from exc
                 time.sleep(min(0.1, max(0, deadline - time.monotonic())))
         try:
-            yield
+            yield handle if os.name != "nt" else None
         finally:
             if os.name == "nt":
                 import msvcrt
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            # POSIX: the outer with closes only our reference. Explicit LOCK_UN
+            # would also unlock a still-running child sharing this description.
 
 
 def _command(config, final_path, prompt_path=None, work_dir=None):
@@ -462,7 +465,10 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False) ->
             # orchestrator that bounds concurrency and serializes imports opts in.
             lock = (_agent_lock(settings["timeout_seconds"], shared=True) if permit_parallel
                     else _agent_lock(settings["timeout_seconds"]))
-            with lock:
+            with lock as lock_handle:
+                # None remains valid for Windows and mock/no-op lock contexts.
+                inherited_lock = ({"pass_fds": (lock_handle.fileno(),)}
+                                  if os.name != "nt" and lock_handle is not None else {})
                 call_started = time.monotonic()
                 metadata["wall_start"] = datetime.now(timezone.utc).isoformat()
                 process = None
@@ -473,6 +479,7 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False) ->
                             stdin=subprocess.PIPE if input_mode == "stdin" else subprocess.DEVNULL,
                             stdout=stdout, stderr=stderr, cwd=str(root), shell=False,
                             start_new_session=(os.name != "nt"),
+                            **inherited_lock,
                         )
                     except OSError as exc:
                         raise AgentError("Cannot start agent executable; inspect attempt logs", "spawn") from exc
@@ -574,22 +581,59 @@ def _part_snapshot_dir(batch_dir, stage):
     return Path(batch_dir) / "workflow" / "agent-runs" / (stage + "-parts")
 
 
-def _part_snapshot_key(stage, part, hashes, config):
-    """Fingerprint one partition: its exact prompt, unit set, inputs and model config.
+def _part_model_binding(config):
+    """Observe explicit model identity or the repository's actual router config.
 
-    Binding to the full prompt + input hashes means any change upstream (source,
-    upstream artifacts, rules or model routing) invalidates the stored part, so a
-    reused part is never stale or borrowed from different content.
+    Unknown host-default models cannot safely use cross-batch-change snapshots.
+    Hashes only are retained; no credential/config contents are logged or saved.
     """
-    model_config = {k: v for k, v in config.items() if k not in ("command", "executable")}
+    files = {}
+    for token in config.get("command", []):
+        if not isinstance(token, str) or Path(token).name != "wf-router.sh":
+            continue
+        script = Path(token).expanduser().resolve()
+        plugin = Path(os.environ.get("WF_PLUGIN_DIR") or script.parent.parent).expanduser().resolve()
+        router = plugin / "config" / "model-router.json"
+        try:
+            route = json.loads(router.read_text(encoding="utf-8-sig"))
+            default = route.get("default")
+            if not isinstance(default, dict) or not default.get("provider") or not default.get("model"):
+                return None
+            for path in (script, router):
+                files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, ValueError, AttributeError):
+            return None
+        return {"files": files}
+    if any(isinstance(config.get(k), str) and config[k].strip()
+           for k in ("model", "model_cache_identity")):
+        return {"files": files}
+    return None
+
+
+def _part_snapshot_key(stage, part, hashes, config):
+    """Bind the exact delivered prompt, proved scope and complete model config.
+
+    Only source-proven label parts may replace full-batch hashes with conservative
+    local/global dependency guards. Import and in-flight checks keep ALL hashes.
+    """
+    scope = part.get("cache_scope")
+    local = stage in ("types", "explanations", "knowledge") and isinstance(scope, dict)
+    from workflow import agent_tasks
+    # Repair data already binds the exact selected prompt. Keep whole-file
+    # feedback hashes for freshness, not unrelated partitions' cache identity.
+    inputs = scope if local else {k: v for k, v in hashes.items()
+                                  if k not in agent_tasks.REPAIR_FEEDBACK_INPUTS}
     return hashlib.sha256(json.dumps(
-        {"version": 1, "stage": stage, "unit_ids": part.get("unit_ids", []),
-         "prompt": part["prompt"], "hashes": hashes, "model_config": model_config},
-        ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        {"version": 2, "stage": stage, "unit_ids": part.get("unit_ids", []),
+         "prompt": part["prompt"], "inputs": inputs, "model_config": config},
+        ensure_ascii=False, sort_keys=True, allow_nan=False).encode("utf-8")).hexdigest()
 
 
 def _load_part_snapshot(batch_dir, stage, part, hashes, config):
     """Return a previously validated partition response, or None."""
+    if stage in ("types", "explanations", "knowledge") and (
+            not part.get("cache_scope") or config.get("_part_model_binding") is None):
+        return None  # Unproven evidence/model scope must be recomputed conservatively.
     directory = _part_snapshot_dir(batch_dir, stage)
     key = _part_snapshot_key(stage, part, hashes, config)
     path = directory / (key + ".json")
@@ -610,6 +654,9 @@ def _load_part_snapshot(batch_dir, stage, part, hashes, config):
 
 def _store_part_snapshot(batch_dir, stage, part, hashes, config, candidate):
     """Atomically persist a validated partition response for future reuse."""
+    if stage in ("types", "explanations", "knowledge") and (
+            not part.get("cache_scope") or config.get("_part_model_binding") is None):
+        return
     directory = _part_snapshot_dir(batch_dir, stage)
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -645,8 +692,9 @@ def _part_concurrency(config):
 
 
 def _part_units(config, stage):
-    """每片单元上限：组装默认 8、审核默认 15，均可在 local-agent.json 调整。"""
-    key = "assemble_part_units" if stage == "assemble" else "review_part_units"
+    """标签默认一题/题组一片；组装8、审核15，可分别调整。"""
+    key = ("label_part_units" if stage in ("types", "explanations", "knowledge") else
+           "assemble_part_units" if stage == "assemble" else "review_part_units")
     value = config.get(key, DEFAULTS[key])
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise AgentError(f"{key} must be a positive integer", "config")
@@ -678,6 +726,7 @@ def main(argv=None):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.stage):
             raise AgentError("stage must contain only letters, digits, underscores or hyphens", "input")
         from workflow import agent_tasks
+        config = dict(config, _part_model_binding=_part_model_binding(config))
         batch_dir = args.batch_dir.expanduser().resolve()
         if args.stage == "answers" and not args.dry_run and (batch_dir / "workflow" / "manifest.json").is_file():
             from workflow.agent_prepare import prepare_answers
@@ -689,7 +738,7 @@ def main(argv=None):
             outcome = assemble_local.try_assemble(batch_dir, config)
             if outcome is not None:
                 return outcome
-        split_enabled = config.get("unit_split", True) and args.stage in ("assemble", "review", "explanations", "knowledge")
+        split_enabled = config.get("unit_split", True) and args.stage in ("assemble", "review", "types", "explanations", "knowledge")
         try:
             task = agent_tasks.build_task(batch_dir, args.stage, max_input_chars=config["max_input_chars"])
         except ValueError as exc:
@@ -701,9 +750,9 @@ def main(argv=None):
         if split_enabled and parts is None and not task.get("preconditions"):
             try:
                 _unit_count = len(agent_tasks.confirmed_units(batch_dir))
-            except (OSError, ValueError, KeyError, TypeError):
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 _unit_count = 0
-            if _unit_count > _part_units(config, args.stage):
+            if (args.stage in ("types", "explanations", "knowledge") and _unit_count > 0) or _unit_count > _part_units(config, args.stage):
                 from workflow import unit_tasks
                 task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
                                                      max_units=_part_units(config, args.stage))
@@ -719,7 +768,12 @@ def main(argv=None):
             raise AgentError("candidate_cache must be a boolean", "config")
         # The private cache requires POSIX dir_fd/O_NOFOLLOW; keep Windows on the normal path.
         cache_enabled = cache_enabled and os.name != "nt" and args.stage != "review" and not args.dry_run
+        if parts is not None and args.stage in ("types", "explanations", "knowledge"):
+            cache_enabled = cache_enabled and bool(config.get("_part_model_binding")) and all(
+                part.get("cache_scope") for part in parts)
         hashes = task.get("input_hashes", {})
+        if config.get("_part_model_binding"):
+            hashes.update(config["_part_model_binding"]["files"])
         def cache_validate(candidate):
             _check_input_hashes(batch_dir, hashes)
             checked = agent_tasks.accept_result(batch_dir, args.stage, candidate, validate_only=True)
@@ -764,6 +818,7 @@ def main(argv=None):
                                   if concurrency > 1 and len(parts) > 1 else {})
 
             def run_part(index, part):
+                unit_tasks.check_part_inputs(batch_dir, part)
                 # Resume: a previously validated partition for the same prompt,
                 # unit set, inputs and model config is reused instead of re-run.
                 reused = None
@@ -789,6 +844,10 @@ def main(argv=None):
                               f"（{len(part['unit_ids'])} 单元，{len(part['prompt']) // 1000}K 字符，第 {attempt + 1} 次）", flush=True)
                         result = invoke(delivered, part_dir, config, **invocation_options)
                         _check_input_hashes(batch_dir, hashes)
+                        try:
+                            unit_tasks.check_part_inputs(batch_dir, part)
+                        except ValueError as exc:
+                            raise AgentError(str(exc), "context_changed") from exc
                         candidate = result["response"]
                         unit_tasks.validate_part(batch_dir, args.stage, part, candidate)
                     except (AgentError, ValueError) as exc:
@@ -819,6 +878,8 @@ def main(argv=None):
             _json_write(run_dir / "response.json", response)
             with _agent_lock(config.get("timeout_seconds", 900)):
                 _check_input_hashes(batch_dir, hashes)
+                for part in parts:
+                    unit_tasks.check_part_inputs(batch_dir, part)
                 report = agent_tasks.accept_result(batch_dir, args.stage, response)
             _json_write(run_dir / "import-report.json", report)
             cache_store(response, report)

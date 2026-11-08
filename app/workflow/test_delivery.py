@@ -86,7 +86,8 @@ class DeliveryChecklistTest(unittest.TestCase):
         self.assertTrue((folder / 'batch_meta.base.json').is_file())
         self.assertTrue((folder / 'batch_meta.json').is_file())
         final = json.loads((folder / 'batch_meta.json').read_text(encoding='utf-8'))
-        self.assertNotIn('difficulty', final['items'][0]['filterMetadata'])
+        base = json.loads((folder / 'batch_meta.base.json').read_text(encoding='utf-8'))
+        self.assertEqual(final['items'][0]['filterMetadata'], base['items'][0]['filterMetadata'])
 
     def test_legacy_shared_meta_is_rebuilt_not_silently_accepted(self):
         folder = self.batch / '06_batch'
@@ -99,13 +100,15 @@ class DeliveryChecklistTest(unittest.TestCase):
         invalidated = mf.reconcile_deliveries(self.batch, self.manifest)
         self.assertIn('meta', invalidated)
         self.assertEqual(self.manifest['stages']['meta']['status'], mf.INVALIDATED)
-        self.assertEqual(self.manifest['stages']['underlines']['status'], mf.INVALIDATED)
+        self.assertEqual(self.manifest['stages']['underlines']['status'], mf.SKIPPED)
+        self.assertFalse(mf.dependency_satisfied(self.manifest, 'underlines'))
         self.assertTrue(final.is_file())
 
     def test_invalidated_candidate_cannot_satisfy_dependency(self):
         mf.touch_stage(self.manifest, "validate", mf.BLOCKED,
                        execution_completed=True, continue_unqualified=True, quality_status="failed")
-        self.assertTrue(mf.dependency_satisfied(self.manifest, "validate", allow_unqualified=True))
+        # An unqualified (needs_review/blocked) result is not a usable delivery.
+        self.assertFalse(mf.dependency_satisfied(self.manifest, "validate", allow_unqualified=True))
         mf.invalidate_downstream(self.batch, self.manifest, "validate", "input changed")
         self.assertFalse(mf.dependency_satisfied(self.manifest, "validate", allow_unqualified=True))
         mf.touch_stage(self.manifest, "validate", mf.COMPLETED)
@@ -125,7 +128,8 @@ class DeliveryChecklistTest(unittest.TestCase):
                        output_hashes=mf.output_hashes(self.batch, stage))
         self.assertFalse(mf.is_stale(self.batch, self.manifest, stage)[0])
         source.write_text("changed", encoding="utf-8")
-        self.assertTrue(mf.is_stale(self.batch, self.manifest, stage)[0])
+        # 新规则：内容变化不再自动使已完成阶段失效（用户后续验证），is_stale 只判完成+产物在。
+        self.assertFalse(mf.is_stale(self.batch, self.manifest, stage)[0])
 
     def test_delivery_records_consumers(self):
         target = self.batch / "03_types/types.json"
@@ -134,10 +138,10 @@ class DeliveryChecklistTest(unittest.TestCase):
         stage = contracts.STAGE_BY_ID["types"]
         mf.touch_stage(self.manifest, "types", mf.COMPLETED)
         mf.record_delivery(self.batch, self.manifest, stage)
-        mf.mark_delivery_consumed(self.batch, "explanations")
+        mf.mark_delivery_consumed(self.batch, "assemble")
         data = json.loads(mf.delivery_path(self.batch).read_text(encoding="utf-8"))
         self.assertEqual(data["stages"]["types"]["status"], "delivered")
-        self.assertIn("explanations", data["stages"]["types"]["consumed_by"])
+        self.assertIn("assemble", data["stages"]["types"]["consumed_by"])
 
 
 if __name__ == "__main__":

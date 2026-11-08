@@ -892,16 +892,18 @@ def run(batch_dir: Path) -> dict:
         roles = material_classify.classify_documents(batch_dir, invoke_fn=invoke, config=cfg,
                                                      ocr_report=ocr_report)
         result["material_roles"] = roles
-        failures = [row.get('input', 'unknown') for row in roles.get('documents', [])
-                    if isinstance(row, dict) and row.get('error')]
+        failed_rows = [row for row in roles.get('documents', [])
+                       if isinstance(row, dict) and row.get('error')]
+        auxiliary_failures = [row for row in failed_rows
+                              if source_path.suffix.lower() == '.docx'
+                              and Path(str(row.get('path') or '')).suffix.lower() == '.pdf']
+        if auxiliary_failures:
+            names = '、'.join(row.get('input', 'unknown') for row in auxiliary_failures)
+            result.setdefault('warnings', []).append('PDF 材料提取失败：' + names + '；继续使用 Word 原文处理')
+        failures = [row.get('input', 'unknown') for row in failed_rows if row not in auxiliary_failures]
         if failures:
-            failed_rows = [row for row in roles.get('documents', []) if row.get('error')]
-            if (source_path.suffix.lower() == '.docx' and ocr_report.get('status') == 'failed'
-                    and all(Path(str(row.get('path') or '')).suffix.lower() == '.pdf' for row in failed_rows)):
-                result.setdefault('warnings', []).append('PDF 材料提取失败：' + '、'.join(failures) + '；继续使用 Word 原文处理')
-            else:
-                result['passed'] = False
-                result['error'] = '附件解析失败，请重试：' + '、'.join(failures)
+            result['passed'] = False
+            result['error'] = '附件解析失败，请重试：' + '、'.join(failures)
         # 明确上传了答案/解析卷、而正文附录为空时，把答案卷文字补到 01_source_ans，
         # 供 answers 阶段使用（不依赖模型，直接取该文件文字层）。
         ans_item = (manifest.get("inputs", {}).get("answers") or {})

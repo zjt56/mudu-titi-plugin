@@ -19,6 +19,61 @@ class UploadContentTest(unittest.TestCase):
             ''.join(f'{n}.题目\n' for n in range(31, 51)) + 'Ⅷ.阅读理解\n' +
             ''.join(f'{n}.题目\n' for n in range(51, 101)))
 
+    def test_primary_text_wins_over_duplicate_pdf_ocr_explanations(self):
+        materials = self.batch / '01_source/materials'
+        materials.mkdir()
+        (materials / 'attachment_001.txt').write_text(
+            self.text.replace('游泳原因。', 'OCR 改写的游泳原因。'))
+        payload = {'items': [{'number': 31, 'explanation': '游泳原因。', 'articleSummary': '游泳文章。'}]}
+        result = inspect_content(self.batch, payload, strict=True)
+        self.assertTrue(result['passed'], result)
+        payload['items'][0]['explanation'] = 'OCR 改写的游泳原因。'
+        self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
+
+    def test_stray_explanation_binds_to_preceding_numbered_answer(self):
+        # Answer on its own line, explanation in the next paragraph without a number.
+        self.path.write_text('Ⅷ.阅读理解\n74. It wasn\u2019t easy.\n\n'
+                             '【解析】根据第三段可知,作者感觉不容易。\n')
+        payload = {'items': [{'number': 74, 'explanation': '根据第三段可知,作者感觉不容易。'}]}
+        self.assertTrue(inspect_content(self.batch, payload, strict=True)['passed'])
+        # A rewritten explanation must still be rejected.
+        payload['items'][0]['explanation'] = '根据第三段可知,作者感觉很困难。'
+        self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
+
+    def test_quote_style_difference_restores_authoritative_text(self):
+        materials = self.batch / '01_source/materials'; materials.mkdir()
+        (materials / 'attachment_001.txt').write_text(
+            'Ⅷ.阅读理解\n62. D 【解析】根据最后一段中的 "farm." 可知,Gill 写书的灵感来自农场。\n')
+        payload = {'items': [{'number': 62,
+            'explanation': '根据最后一段中的\u201cfarm.\u201d可知,Gill写书的灵感来自农场。'}]}
+        result = inspect_content(self.batch, payload, strict=True)
+        self.assertTrue(result['passed'], result)
+
+    def test_attachment_only_explanation_remains_available(self):
+        materials = self.batch / '01_source/materials'
+        materials.mkdir()
+        (materials / 'attachment_001.txt').write_text('Ⅷ.阅读理解\n60.A 【解析】仅附件提供的解析。\n')
+        payload = {'items': [{'number': 60, 'explanation': '仅附件提供的解析。'}]}
+        self.assertTrue(inspect_content(self.batch, payload, strict=True)['passed'])
+
+    def test_explanation_starting_with_option_letter_keeps_first_character(self):
+        self.path.write_text('Ⅵ.完形填空\n31.B 【解析】A项意为“观看”;B项意为“开始”。\n')
+        result = inspect_content(self.batch, {'items': [{'number': 31,
+            'explanation': 'A项意为“观看”;B项意为“开始”。'}]}, strict=True)
+        self.assertTrue(result['passed'], result)
+
+    def test_writing_hint_at_end_of_primary_word_body(self):
+        body = 'Ⅹ.书面表达（共1小题）\n请写一封信。\n【思路点拨】先总写，再提出建议。\n'
+        (self.batch / '01_source/正文.txt').write_text(body)
+        self.path.write_text('【参考范文】\nDear Jack,\n范文。\n')
+        confirmed = {'units': [{'unit_id': 'q-96', 'type': '书面表达',
+                               'unit_kind': 'standalone', 'numbers': [96]}]}
+        (self.batch / '01_source/structure.confirmed.json').write_text(json.dumps(confirmed))
+        payload = {'items': [{'unit_id': 'q-96', 'number': 96, 'explanation': '先总写，再提出建议。'}]}
+        self.assertTrue(inspect_content(self.batch, payload, strict=True)['passed'])
+        payload['items'][0]['explanation'] = '先总写，再生成建议。'
+        self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
+
     def writing_fixture(self):
         body = ('Ⅸ.单词拼写\n80.题目\nⅩ.书面表达（共1小题；满分20分）\n'
                 '请写一篇英语短文。\n要点：\n1.活动目的；\n2.使用方法。\n')
@@ -139,6 +194,60 @@ class UploadContentTest(unittest.TestCase):
         self.bind_writing_gate()
         report = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': paragraph}]})
         self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report['warnings']})
+
+    def test_writing_primary_hint_ignores_companion_attachment_duplicate(self):
+        explanation = self.writing_fixture()
+        materials = self.batch / '01_source/materials'
+        materials.mkdir()
+        (materials / 'attachment_001.txt').write_text(self.path.read_text())
+        report = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': explanation}]}, strict=True)
+        self.assertTrue(report['passed'], report)
+        # Repetition in the authority itself remains ambiguous, even with a PDF.
+        self.path.write_text(self.path.read_text() + '【思路点拨】另一段。\n')
+        report = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': explanation}]}, strict=True)
+        self.assertFalse(report['passed'])
+
+    def test_writing_two_primary_sources_remain_ambiguous(self):
+        explanation = self.writing_fixture()
+        answer = self.batch / '01_source_ans/正文.txt'
+        answer.parent.mkdir()
+        answer.write_text('【思路点拨】另一个权威来源。\n')
+        report = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': explanation}]}, strict=True)
+        self.assertFalse(report['passed'])
+
+    def test_source_restoration_copies_word_characters_and_keeps_inspection_read_only(self):
+        from workflow.upload_content import restore_source_content
+        self.path.write_text('Ⅵ.完形填空\n31.B 【解析】A项:开始;B项:结束。\n')
+        materials = self.batch / '01_source/materials'
+        materials.mkdir()
+        (materials / 'attachment_001.txt').write_text('Ⅵ.完形填空\n31.B 【解析】A项：开始；B项：结束。\n')
+        payload = {'items': [{'number': 31, 'explanation': 'A项：开始；B项：结束。'}]}
+        original = self.path.read_bytes()
+        strict = inspect_content(self.batch, payload, strict=True)
+        self.assertFalse(strict['passed'])
+        self.assertEqual(payload['items'][0]['explanation'], 'A项：开始；B项：结束。')
+        self.assertFalse(strict['warnings'])
+        self.assertNotIn('不阻断', strict['errors'][0]['message'])
+        report = restore_source_content(self.batch, payload)
+        self.assertTrue(report['passed'], report)
+        self.assertEqual(payload['items'][0]['explanation'], 'A项:开始;B项:结束。')
+        self.assertEqual(report['restorations'][0]['path'], '01_source/附录.txt')
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_source_restoration_refuses_substantive_edits_and_repeated_authority(self):
+        from workflow.upload_content import restore_source_content
+        for appendix, candidate in [
+            ('Ⅵ.完形填空\n31.B 【解析】A项:开始。\n', 'A项：结束。'),
+            ('Ⅵ.完形填空\n31.B 【解析】A项:开始。\n31.B 【解析】A项:开始。\n', 'A项：开始。'),
+            ('Ⅵ.完形填空\n32.B 【解析】A项:开始。\n', 'A项：开始。'),
+        ]:
+            with self.subTest(appendix=appendix):
+                self.path.write_text(appendix)
+                payload = {'items': [{'number': 31, 'explanation': candidate}]}
+                report = restore_source_content(self.batch, payload)
+                self.assertFalse(report['passed'], report)
+                self.assertEqual(report['restorations'], [])
+                self.assertEqual(payload['items'][0]['explanation'], candidate)
 
     def group(self, **changes):
         item = {'unit_id': 'group-56', 'numbers': [56], 'articleSummary': '南极文章。',

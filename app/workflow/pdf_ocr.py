@@ -77,7 +77,14 @@ def run(batch, manifest, config=None):
             snapshot.write_bytes(data)
             item["snapshot"] = snapshot.relative_to(batch).as_posix()
             item["result_dir"] = source_dir.relative_to(batch).as_posix()
-            result = ocr_backend.recognize(snapshot, source_dir, force_ocr=True, config=config, mandatory_pdf=True)
+            primary = manifest['inputs'].get('source') or {}
+            structural_reference = (Path(str(primary.get('path') or '')).suffix.lower() == '.docx'
+                                    and key not in ('source', 'answers'))
+            # A companion PDF supplies hierarchy/layout. Read usable native
+            # pages directly; OCR only unreliable pages instead of forcing a
+            # full second transcription of the Word content.
+            result = ocr_backend.recognize(snapshot, source_dir, force_ocr=not structural_reference,
+                                           config=config, mandatory_pdf=not structural_reference)
             if not isinstance(result, dict) or not isinstance(result.get("pages"), list) or not result["pages"]:
                 raise ValueError("OCR returned no pages")
             if any(not isinstance(page, dict) or not isinstance(page.get("text"), str)

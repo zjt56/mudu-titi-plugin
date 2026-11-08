@@ -7,6 +7,10 @@ from pathlib import Path
 
 from . import agent_tasks
 
+ANSWER_ROW = re.compile(r"^\s*\d{1,3}\s*[.．、:：)]\s*(?:[A-Ha-h](?:\s*[-/、,，]\s*[A-Ha-h])*|[A-Za-z][A-Za-z'’/ -]{0,80})\s*$")
+ANSWER_SEQUENCE = re.compile(r"^\s*\d{1,3}\s*[.．、:：)]\s*[A-Ha-h](?:\s*\d{1,3}\s*[.．、:：)]\s*[A-Ha-h])\s*$")
+ANSWER_RANGE = re.compile(r"^\s*\d{1,3}\s*[~～—-]\s*\d{1,3}\s+[A-Ha-h]+\s*$")
+ANSWER_HEADER = re.compile(r"(?:参考答案|答案与解析|答案|Answer\s*Key)", re.I)
 EXPLANATION_MARK = re.compile(r"(?:【解析】|\[解析\]|【文章大意】|文章大意|解析\s*[:：])")
 ANSWER_FILES = ("01_source_ans/正文.txt", "01_source/附录.txt")
 SOURCE_DIRS = ("01_source_ans", "01_source")
@@ -33,13 +37,33 @@ def _nonempty(path: Path) -> str:
         return ""
 
 
+def _answer_text_files(batch_dir: Path):
+    root = Path(batch_dir)
+    for relative in ANSWER_FILES:
+        path = root / relative
+        if path.is_file():
+            yield path
+    materials = root / "01_source/materials"
+    if materials.is_dir():
+        yield from sorted(materials.glob("attachment_*.txt"))
+
+
+def _has_explicit_answers(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if any(ANSWER_HEADER.search(line) for line in lines):
+        return True
+    return any(ANSWER_ROW.fullmatch(line) or ANSWER_RANGE.fullmatch(line)
+               or ANSWER_SEQUENCE.fullmatch(line) for line in lines)
+
+
 def has_answer_source(batch_dir) -> bool:
-    return any(_nonempty(path) for path in _text_files(Path(batch_dir)))
+    return any(_has_explicit_answers(_nonempty(path)) for path in _answer_text_files(Path(batch_dir)))
 
 
 def has_explanation_source(batch_dir) -> bool:
-    """True when any supplied text actually contains 解析/文章大意 markers."""
-    return any(EXPLANATION_MARK.search(_nonempty(path)) for path in _text_files(Path(batch_dir)))
+    """True when a supplied answer source actually contains explanation markers."""
+    return any(EXPLANATION_MARK.search(_nonempty(path)) for path in _answer_text_files(Path(batch_dir)))
+
 
 
 def write_empty_explanations(batch_dir) -> Path:

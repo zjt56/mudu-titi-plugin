@@ -56,7 +56,7 @@ class AgentEntryTests(unittest.TestCase):
     def test_review_run_ignores_legacy_state_and_never_invokes_precheck(self):
         batch = self._review_batch()
         old_state = batch / 'workflow/review-ai-state.json'
-        old_state.parent.mkdir(parents=True)
+        old_state.parent.mkdir(parents=True, exist_ok=True)
         old_state.write_text('{"report":{"completed":true}}', encoding='utf-8')
         output = io.StringIO()
         with patch.object(agent, 'configured', return_value=True), \
@@ -91,10 +91,25 @@ class AgentEntryTests(unittest.TestCase):
                 "articleSummary": "", "evidence": ["正文第1题"], "subquestions": []}]},
             "06_batch/batch.json": {"items": []},
         }
+        # The large-review case pins only the review round-export plumbing; give
+        # every review prerequisite a valid, current delivery so export starts.
+        _batch_json = {"name": "fixture", "items": []}
         for rel, value in files.items():
             path = batch / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        manifest = mf.load(batch) if mf.manifest_path(batch).is_file() else mf.new_manifest("large-review", batch, {}, {})
+        for dep in contracts.upstream_of("review"):
+            spec = contracts.STAGE_BY_ID[dep]
+            for rel in spec.produces:
+                if not (batch / rel).is_file():
+                    (batch / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (batch / rel).write_text('{"items": []}', encoding="utf-8")
+            mf.touch_stage(manifest, dep, mf.COMPLETED,
+                           input_hashes=mf.input_hashes(batch, manifest, spec),
+                           output_hashes=mf.output_hashes(batch, spec))
+            mf.record_delivery(batch, manifest, spec)
+        mf.save(batch, manifest)
         return batch
 
     def _partial_ai(self, batch):
@@ -211,7 +226,7 @@ class AgentEntryTests(unittest.TestCase):
         local = self._partial_ai(batch)
         candidate = json.loads((Path(local["attempt_dir"]) / "response.json").read_text())
         response = batch / "workflow/agent-bindings/review-fixture.response.json"
-        response.parent.mkdir(parents=True)
+        response.parent.mkdir(parents=True, exist_ok=True)
         response.write_text(json.dumps({"result": candidate}), encoding="utf-8")
         first = {"task_id": "review-fixture", "stage": "review", **local["report"]}
         def partial():
@@ -330,7 +345,10 @@ class AgentEntryTests(unittest.TestCase):
             mf.touch_stage(manifest, dep, mf.COMPLETED)
         mf.save(batch, manifest)
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        # This case only pins large-context round export; artefact validity of
+        # the review prerequisites is covered by the handoff suite.
+        with patch.object(mf, "dependency_satisfied", return_value=True), \
+             contextlib.redirect_stdout(output):
             self.assertEqual(agent.main(["export", "--batch-dir", str(batch), "--stage", "review", "--max-input-chars", "1000000"]), 0)
         exported = json.loads(output.getvalue())
         self.assertEqual(exported["round_id"], "labels")
@@ -357,7 +375,7 @@ class AgentEntryTests(unittest.TestCase):
     def test_resume_legacy_state_without_binding_uses_default_budget(self):
         batch = self._review_batch()
         state = batch / "workflow/review-ai-state.json"
-        state.parent.mkdir(parents=True)
+        state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text(json.dumps({"completed": True, "task_id": "c374a490-7fb5-4ea1-a2fb-555555555555", "result_sha256": "old"}))
         with contextlib.redirect_stdout(io.StringIO()), patch.object(review_rounds, "run", return_value={"action": "exported", "completed": False}) as rounds:
             self.assertEqual(agent._resume_review(batch), 3)

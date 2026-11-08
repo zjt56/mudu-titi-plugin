@@ -37,6 +37,10 @@ def normalize(value):
             raise AnswerError("答案数组不能为空")
         parts = [normalize(v) for v in value]
         return parts[0] if len(parts) == 1 else tuple(parts)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        # 书面表达等题型原卷无“答案”字段（缺省/None/空串）。这不是格式错误，
+        # 而是"该题没有可核对的独立答案"，按无答案处理，避免整卷体检判成输入错误。
+        return None
     if not isinstance(value, (str, int, float)) or isinstance(value, bool):
         raise AnswerError("答案必须是非空文字或非空答案数组")
     text = html.unescape(re.sub(r"<[^>]*>|\*\*", "", str(value)))
@@ -139,8 +143,12 @@ def inspect(batch, answers):
     issues = []
     placeholders = {"无答案", "无解析"}
     for n in sorted(actual, key=int):
-        if str(actual[n]["value"]).strip() in placeholders:
+        entry = actual[n]
+        # 以规范化结果判定"有没有答案"：None/空白/「无答案」都代表该题没有可
+        # 核对的答案，不能要求独立答案覆盖，否则书面表达这类题会让整卷失败。
+        if entry.get("normalized") is None or str(entry.get("value") or "").strip() in placeholders:
             # 用户规则：缺答案填「无答案」，保留待补，不作为答案冲突阻断。
+            # 书面表达等原卷无独立答案时此字段为 None，同理不阻断。
             continue
         if n not in answers:
             issues.append({"code": "ANSWER_SOURCE_MISSING", "number": int(n), "message": "独立答案未覆盖此题号"})

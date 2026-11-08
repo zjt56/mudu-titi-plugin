@@ -17,16 +17,22 @@ class AudioSkipTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        # Recovery has its own suite; skip tests must never invoke a real model.
+        recovery = patch('workflow.self_heal.recover', return_value={})
+        recovery.start()
+        self.addCleanup(recovery.stop)
         self.batch = Path(self.temp.name) / "batch"
         self.manifest = mf.new_manifest("batch", self.batch, {
             "audio": {"exists": True, "path": "unused-test-recording.mp3"}}, {})
+        # Audio dispatch is tested after all current source prerequisites.
         for rel in (*contracts.STAGE_BY_ID['extract'].produces,
-                    *contracts.STAGE_BY_ID['structure_gate'].produces):
+                    *contracts.STAGE_BY_ID['structure_gate'].produces,
+                    *contracts.STAGE_BY_ID['preassemble'].produces):
             path = self.batch / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('{}', encoding='utf-8')
         (self.batch / "01_source/附录.txt").write_text("1.A", encoding="utf-8")
-        for stage in ("extract", "structure_gate"):
+        for stage in ("extract", "structure_gate", "preassemble"):
             mf.touch_stage(self.manifest, stage, mf.COMPLETED)
         mf.save(self.batch, self.manifest)
 
@@ -136,6 +142,7 @@ class AudioSkipTest(unittest.TestCase):
                     return {stage.id: 0 for stage in stages}
 
                 with patch.object(auto, "PARALLEL_AGENTS_ENABLED", True), \
+                     patch.object(mf, "dependency_satisfied", return_value=True), \
                      patch.object(agent, "configured", return_value=True), \
                      patch.object(local_agent, "load_config", return_value={}), \
                      patch.object(auto, "_parallel_ready_agents", side_effect=offline), \
@@ -147,7 +154,8 @@ class AudioSkipTest(unittest.TestCase):
 
     def test_listening_without_explicit_skip_still_dispatches_audio(self):
         self._structure(["听力短对话"])
-        with patch.object(auto, "load_bridge", return_value={"audio": ["offline"]}), \
+        with patch.object(mf, "dependency_satisfied", return_value=True), \
+             patch.object(auto, "load_bridge", return_value={"audio": ["offline"]}), \
              patch.object(runner, "_execute_command", return_value=3) as execute:
             self.assertEqual(runner.cmd_run(self._runner_args()), 3)
         self.assertEqual(execute.call_args.args[2].id, "audio")
@@ -160,7 +168,7 @@ class AudioSkipTest(unittest.TestCase):
         self._structure(["听力短对话", "书面表达"])
         self._skip_marker()
         target = self.batch / "06_batch/batch_meta.json"
-        target.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text('{}', encoding="utf-8")
         issues = [{"unit_id": "q-1", "code": code, "message": code} for code in (
             "SOURCE_IMAGE_MISSING", "OPTION_CONTENT_MISMATCH",

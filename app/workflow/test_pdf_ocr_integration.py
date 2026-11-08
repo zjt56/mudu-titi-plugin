@@ -68,6 +68,70 @@ class PdfOcrIntegrationTest(unittest.TestCase):
         self.assertEqual(result['pdf_ocr']['sources'][0]['status'], 'failed')
         self.assertIn('Word question', (self.batch / '01_source/原始正文.txt').read_text())
 
+    def test_word_pdf_role_failure_is_nonblocking_for_any_ocr_status(self):
+        manifest = {'inputs': {'source': self.entry(self.word),
+                               'attachment_001': self.entry(self.pdf)}}
+        word = {'text': '一、单项选择\n1. Word question?', 'media': [], 'warnings': []}
+        for status in ('completed', 'failed', 'no_pdfs'):
+            with self.subTest(status=status), \
+                 patch.object(extract.mf, 'load', return_value=manifest), \
+                 patch('workflow.agent.configured', return_value=False), \
+                 patch('workflow.docx_extract.extract_docx', return_value=word), \
+                 patch.object(pdf_ocr, 'run', return_value={'status': status, 'sources': []}), \
+                 patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=RuntimeError('native unavailable')):
+                result = extract.run(self.batch)
+            self.assertTrue(result['passed'])
+            self.assertTrue(any('PDF 材料提取失败' in warning for warning in result['warnings']))
+            rows = {row['input']: row for row in result['material_roles']['documents']}
+            self.assertEqual(rows['attachment_001']['role'], 'structure_reference')
+            self.assertFalse(rows['attachment_001']['content_authority'])
+            self.assertIn('error', rows['attachment_001'])
+            self.assertTrue(rows['source']['content_authority'])
+            self.assertEqual(rows['source']['authority_input'], 'source')
+            self.assertIn('Word question', (self.batch / '01_source/原始正文.txt').read_text())
+            saved = json.loads((self.batch / '01_source/material-roles.json').read_text())
+            self.assertEqual(saved, result['material_roles'])
+
+    def test_word_pdf_reference_preserves_explicit_answer_text_fallback(self):
+        manifest = {'inputs': {'source': self.entry(self.word), 'answers': self.entry(self.answer)}}
+        word = {'text': '一、单项选择\n1. Word question?', 'media': [], 'warnings': []}
+        with patch.object(extract.mf, 'load', return_value=manifest), \
+             patch('workflow.agent.configured', return_value=False), \
+             patch('workflow.docx_extract.extract_docx', return_value=word), \
+             patch.object(pdf_ocr.ocr_backend, 'recognize', side_effect=self.recognize), \
+             patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=self.native):
+            result = extract.run(self.batch)
+        self.assertTrue(result['passed'])
+        answer = next(row for row in result['material_roles']['documents'] if row['input'] == 'answers')
+        self.assertEqual(answer['role'], 'structure_reference')
+        self.assertFalse(answer['content_authority'])
+        self.assertIn(answer['content_role'], material_classify.ROLES)
+        text = (self.batch / answer['text_path']).read_text()
+        self.assertIn('参考答案', text)
+        self.assertEqual((self.batch / '01_source_ans/正文.txt').read_text(), text)
+        self.assertTrue((self.batch / '01_source_ans/preparation.json').is_file())
+        self.assertNotIn('参考答案', (self.batch / '01_source/原始正文.txt').read_text())
+
+    def test_auxiliary_pdf_failure_does_not_hide_required_word_failure(self):
+        supporting = self.batch / 'supporting.docx'
+        supporting.write_bytes(b'broken word')
+        manifest = {'inputs': {'source': self.entry(self.word), 'attachment_001': self.entry(self.pdf),
+                               'attachment_002': self.entry(supporting)}}
+        def word(source, evidence):
+            if source.name == supporting.name:
+                raise ValueError('unreadable supporting Word')
+            return {'text': '一、单项选择\n1. Word question?', 'media': [], 'warnings': []}
+        with patch.object(extract.mf, 'load', return_value=manifest), \
+             patch('workflow.agent.configured', return_value=False), \
+             patch('workflow.docx_extract.extract_docx', side_effect=word), \
+             patch.object(pdf_ocr, 'run', return_value={'status': 'completed', 'sources': []}), \
+             patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=RuntimeError('native unavailable')):
+            result = extract.run(self.batch)
+        self.assertFalse(result['passed'])
+        self.assertIn('attachment_002', result['error'])
+        self.assertNotIn('attachment_001', result['error'])
+        self.assertTrue(any('attachment_001' in warning for warning in result['warnings']))
+
     def test_native_and_pdf_ocr_overlap_before_outputs_are_written(self):
         manifest = {'inputs': {'source': self.entry(self.pdf)}}
         native_started = threading.Event()

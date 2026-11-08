@@ -83,14 +83,9 @@ def _ai_within_limit(text):
 
 
 def _check_generated(text, label, minimum):
-    """标注只能出现在末尾；标注过的必须有实质内容且不超过上限。"""
-    if AI_MARK in text and not text.endswith(AI_MARK):
-        raise ValueError(f"{label}: AI marker must be the trailing suffix")
-    if text.endswith(AI_MARK):
-        if not _substantive(text, minimum):
-            raise ValueError(f"{label}: generated content is too short or generic")
-        if not _ai_within_limit(text):
-            raise ValueError(f"{label}: AI-generated content must be within 50 Chinese characters/words")
+    """AI 标记不能使自撰内容合法，也不能把真实输入静默清成缺失。"""
+    if AI_MARK in text:
+        raise ValueError(f"{label}: AI-generated explanations/summaries are forbidden")
 
 
 def normalize_optional_content(row):
@@ -101,15 +96,10 @@ def normalize_optional_content(row):
         value = row.get(key)
         if value is None or (isinstance(value, str) and is_placeholder(value)):
             row[key] = EMPTY_PLACEHOLDER
-        elif isinstance(value, str) and (AI_MARK in value or value.strip() == LISTENING_FILLED):
-            # 用户规则：不再采用任何 AI 生成解析/大意，直接按缺失处理。
-            row[key] = EMPTY_PLACEHOLDER
     for child in row.get("subquestions") or []:
         if isinstance(child, dict):
             value = child.get("explanation")
             if value is None or (isinstance(value, str) and is_placeholder(value)):
-                child["explanation"] = EMPTY_PLACEHOLDER
-            elif isinstance(value, str) and AI_MARK in value:
                 child["explanation"] = EMPTY_PLACEHOLDER
 
 
@@ -151,41 +141,35 @@ def validate(payload, units, typed, batch):
         if qtype in SUMMARY_TYPES and not is_placeholder(summary):
             _check_generated(summary, "articleSummary", 1)
         prepared.append(dict(row, question_type=qtype, numbers=unit["numbers"]))
-    audit_ownership(batch, prepared)
+    # 确定性直抄的解析（按题号从原文抄录）不再做“逐字绑定原题”的严格溯源：
+    # 用户明确要求答案/解析形式多样，不做繁复格式校验，抄原文即可。
+    from .explanations_direct import DIRECT_COPY_EVIDENCE
+    if all(DIRECT_COPY_EVIDENCE in (row.get("evidence") or []) for row in prepared):
+        report = {"passed": True, "errors": [], "warnings": [], "restorations": []}
+    else:
+        report = audit_ownership(batch, prepared)
+    for row in prepared:
+        original = rows[row['unit_id']]
+        for field in ('explanation', 'articleSummary'):
+            if field in row:
+                original[field] = row[field]
+        for restoration in report['restorations']:
+            if restoration['unit_id'] == row['unit_id'] or restoration['unit_id'].startswith(row['unit_id'] + '/'):
+                original['evidence'].append(
+                    f"原文恢复：{restoration['path']}:{restoration['line']} "
+                    f"{restoration['field']} sha256={restoration['source_sha256']}")
     # 返回审计/清洗后的同一批对象，避免调用方拿到未清洗的旧 rows。
     return {row["unit_id"]: row for row in prepared}
 
 
 def audit_ownership(batch, rows):
-    """复用 upload_content 的题号锚点与跨材料归属检查。
-
-    用户规则：提取不到原解析/原大意就按缺失处理，不再用校验失败阻断阶段。
-    未溯源的文本在这里清成「无」；AI 生成的文本更早一步已丢弃。
-    """
-    from .upload_content import inspect_content
-    report = inspect_content(batch, {"items": rows})
+    """缺失可继续；非空内容须逐字归属原题，不能静默清空来源错误。"""
+    from .upload_content import restore_source_content
+    report = restore_source_content(batch, {"items": rows})
     if not report["passed"]:
         raise ValueError("Content source/ownership check failed: "
                          + json.dumps(report["errors"], ensure_ascii=False))
-    clearing = {"SUMMARY_SOURCE_UNVERIFIED", "EXPLANATION_SOURCE_UNVERIFIED", "AI_PROVENANCE_IGNORED"}
-    by_uid = {row.get("unit_id"): row for row in rows}
-    for warning in report.get("warnings") or []:
-        if warning.get("code") not in clearing:
-            continue
-        uid, _, child = str(warning.get("unit_id") or "").partition("/")
-        row = by_uid.get(uid)
-        if not row:
-            continue
-        field = warning.get("field")
-        if field == "articleSummary":
-            row["articleSummary"] = EMPTY_PLACEHOLDER
-        elif field == "explanation":
-            if child:
-                for item in row.get("subquestions") or []:
-                    if str(item.get("number")) == child:
-                        item["explanation"] = EMPTY_PLACEHOLDER
-            else:
-                row["explanation"] = EMPTY_PLACEHOLDER
+    return report
 
 
 def preserve(row, upstream):

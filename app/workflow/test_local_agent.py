@@ -276,6 +276,12 @@ class LocalAgentTest(unittest.TestCase):
         self.assertEqual(metadata["exit_code"], 7)
         self.assertEqual(Path(evidence["stderr"]).read_text(), "helpful error")
 
+    def test_router_prefill_capacity_429_is_transient_rate_limit(self):
+        stderr = ('dsh: RATE_LIMIT: 429: {"type":"server_error",'
+                  '"message":"Upstream request failed: [prefill_cap_refused] the cell is at capacity"}\n'
+                  'wf-router: RATE_LIMIT: throttled')
+        self.assertEqual(agent.failure_details(stderr), ('rate_limit', 429))
+
     def test_quota_failure_is_classified(self):
         stderr = 'dsh: QUOTA: magpie-responses API error (429): DAILY_LIMIT_EXCEEDED'
         with patch.object(agent.subprocess, "Popen", side_effect=self.process(stdout="", stderr=stderr, returncode=1)):

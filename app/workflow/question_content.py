@@ -255,9 +255,15 @@ def option_block_start(lines: list[str]) -> tuple[int, int] | None:
     """
     from .preview import BARE_OPTION
     for index, line in enumerate(lines):
-        if BARE_OPTION.match(line.strip()):
-            return index, len(line) - len(line.lstrip())
-        match = INLINE_OPTION.search(line)
+        stripped = line.strip()
+        # OCR/Markdown 会把选项写成 "**A. Let's...**"；识别前先去掉星号，
+        # 但返回的 offset 仍指向原始行，供后续按原文切片。
+        probe = re.sub(r"\*{1,3}", "", stripped)
+        if BARE_OPTION.match(probe):
+            m = re.search(r"[A-H]\s*[.．、]", probe)
+            offset = stripped.find(m.group()) if m else 0
+            return index, len(line) - len(line.lstrip()) + max(offset, 0)
+        match = INLINE_OPTION.search(re.sub(r"\*{1,3}", "", line))
         if match and match.group(1) == "A":
             return index, match.start()
     return None
@@ -294,6 +300,10 @@ def audit_source_unit(unit: dict) -> dict:
         if located is not None:
             first, offset = located
             shared_options = question_parts(["0." + "\n".join([lines[first][offset:]] + lines[first + 1:])], 0)["options"]
+            # 选项文本清除 OCR/Markdown 星号与首尾空白，避免污染正式批次与上传格式。
+            for opt in shared_options:
+                if isinstance(opt, dict) and isinstance(opt.get("text"), str):
+                    opt["text"] = re.sub(r"\*{1,3}", "", opt["text"]).strip()
     return {"passed": not issues, "issues": issues, "questions": parts, "shared_options": shared_options}
 
 
@@ -462,6 +472,22 @@ def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
         if not unit:
             continue
         parsed = audit_source_unit(unit).get("questions") or {}
+        # The audit parser strips presentation marks; using its stem as the
+        # restored payload can erase a leading whitespace underline. Recover
+        # Word markup with the same parser used by preassembly, then serialize
+        # actual blanks without changing underlined words.
+        from .question_draft import _parts
+        from .wire_format import normalize_blank_text
+        for number in unit.get('numbers') or []:
+            original = _parts(str(unit.get('stem') or '').splitlines(), number)
+            entry = lookup(parsed, number)
+            if isinstance(entry, dict) and original.get('found'):
+                if original.get('stem'):
+                    entry['stem'] = normalize_blank_text(original['stem'])
+                if original.get('options'):
+                    entry['options'] = [{'label': opt['key'],
+                                         'text': normalize_blank_text(opt['text'])}
+                                        for opt in original['options']]
         if unit.get("unit_kind") == "standalone":
             fill(row, lookup(parsed, unit["numbers"][0]))
         else:

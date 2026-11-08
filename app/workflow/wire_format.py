@@ -193,7 +193,14 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None):
                 text = text[len(stem):].strip()
             data["material"] = text or source.strip()
 
-    attachments = list(data.get("attachments") or [])
+    # attachments 去重：每次 normalize 都从现有附件起步并 append IMG/音频映射，
+    # 重复调用会把同样的 image/audio 反复追加（q-6 修复前一次囤到 13 条）。
+    # 保留原有附件（不预清空）——preassemble 已把 [IMG] 转成 attachments、文本里
+    # 不再有 [IMG] 标记，若在此清空 image/audio 再"从文本重建"会把它们整批丢掉
+    # （导致上传报 SOURCE_IMAGE_MISSING）。改为：保留原附件 + 从文本/音频追加，最后
+    # 统一按身份去重，既幂等去重又不会误删已挂好的图片。
+    existing = [a for a in (data.get("attachments") or []) if isinstance(a, dict)]
+    attachments = list(existing)
     for key, placement in (("stem", "question"), ("material", "material")):
         if isinstance(data.get(key), str):
             data[key] = replace_images(data[key], placement, None, media_map, attachments)
@@ -229,6 +236,21 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None):
             if url and not any(a.get("kind") == "audio" for a in attachments):
                 attachments.append({"kind": "audio", "url": url, "name": filename.split("/")[-1]})
 
+    # 按身份去重，保持首次出现顺序，幂等。同一张图片/同一音频文件（kind+name 相同）
+    # 无论出现在哪个字段或 placement，都只是同一媒体的一份引用，只保留首次出现的那条
+    # （通常是 preassemble 已挂好的权威附件）；避免既有附件与文本 [IMG] 各存一份导致重复。
+    deduped = []
+    seen_att = set()
+    for a in attachments:
+        name = a.get("name") or str(a.get("url", "")).rsplit("/", 1)[-1]
+        kind = a.get("kind")
+        key = (kind, name) if kind in ("image", "audio") else (
+            kind, name, a.get("placement"), a.get("optionKey"))
+        if key in seen_att:
+            continue
+        seen_att.add(key)
+        deduped.append(a)
+    attachments = deduped
     if attachments:
         data["attachments"] = attachments
     elif "attachments" in data:

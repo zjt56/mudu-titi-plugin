@@ -27,6 +27,14 @@ class ProvisionalTest(unittest.TestCase):
                        'input_hashes': {p: mf.sha256_file(self.batch / p) for p in
                            ('01_source/正文.txt', '01_source/structure.json', '01_source/structure.confirmed.json')}}
         self.put('07_review/structure-gate.json', self.report)
+        self.manifest_before = (self.batch / 'workflow/manifest.json').read_bytes()
+
+    def assert_formal_stages_untouched(self):
+        # load() migrates absent stages in memory; provisional work must neither
+        # persist that migration nor mark any formal stage as executed.
+        self.assertEqual((self.batch / 'workflow/manifest.json').read_bytes(), self.manifest_before)
+        self.assertTrue(all(row['status'] == mf.PENDING
+                            for row in mf.load(self.batch)['stages'].values()))
 
     def put(self, name, value):
         path = self.batch / name
@@ -43,7 +51,7 @@ class ProvisionalTest(unittest.TestCase):
         self.assertEqual(invoke.call_count, 1)
         self.assertIn('Second question.', invoke.call_args.args[0])
         self.assertFalse((self.batch / '03_types/types.json').exists())
-        self.assertEqual(mf.load(self.batch)['stages'], {})
+        self.assert_formal_stages_untouched()
         summary = json.loads((self.batch / outcome['summary']).read_text())
         self.assertFalse(summary['authoritative'])
         self.assertEqual(summary['units'][0]['unit_id'], 'q-2')
@@ -211,14 +219,15 @@ class ProvisionalTest(unittest.TestCase):
         typed = {'status': 'completed', 'findings': [], 'notes': [], 'artifacts': {
             '03_types/types.json': {'items': [{'unit_id': 'q-2', 'type': '单项填空', 'subtypes': ['四个选项'],
                                                'words': 5, 'contentComplete': True, 'evidence': ['正文第2题']}]}}}
-        body = '第2题答案为B，对应选项two，结合题干判断其用法。'
+        # A proven answer-only appendix permits placeholders, not invented explanations.
+        body = '无'
         explanation = {'status': 'completed', 'findings': [], 'notes': [], 'artifacts': {
-            '04_knowledge/explanations.json': {'items': [{'unit_id': 'q-2', 'explanation': body + provisional.agent_tasks.AI_MARK,
+            '04_knowledge/explanations.json': {'items': [{'unit_id': 'q-2', 'explanation': body,
                 'articleSummary': '', 'subquestions': [], 'evidence': ['正文第2题与附录第2行']}]}}}
         knowledge = {'status': 'completed', 'findings': [], 'notes': [], 'artifacts': {
             '04_knowledge/knowledge.json': {'items': [{'unit_id': 'q-2',
                 'knowledge': ['词汇/词汇辨析/动词辨析'], 'answer': 'B',
-                'explanation': body + provisional.agent_tasks.AI_MARK,
+                'explanation': body,
                 'articleSummary': '', 'subquestions': [], 'evidence': ['正文第2题']}]}}}
         with patch('workflow.provisional.local_agent.invoke',
                    side_effect=[{'response': typed}, {'response': explanation}, {'response': knowledge}]) as invoke:
@@ -230,7 +239,8 @@ class ProvisionalTest(unittest.TestCase):
         self.assertEqual(row['explanations']['status'], 'candidate')
         self.assertEqual(row['knowledge']['status'], 'candidate')
         self.assertTrue(provisional.validate_saved_summary(self.batch, outcome['summary'])['source_fresh'])
-        for altered in ('one', provisional.agent_tasks.AI_MARK):
+        for altered in ('one', provisional.agent_tasks.AI_MARK,
+                        '第2题答案为B，对应选项two，结合题干判断其用法。' + provisional.agent_tasks.AI_MARK):
             candidate = json.loads(json.dumps(explanation, ensure_ascii=False))
             candidate['artifacts']['04_knowledge/explanations.json']['items'][0]['explanation'] = altered
             with patch('workflow.provisional.local_agent.invoke', side_effect=[{'response': typed}, {'response': candidate}]):
@@ -248,7 +258,15 @@ class ProvisionalTest(unittest.TestCase):
                    side_effect=[{'response': typed}, {'response': explanation}, {'response': forged}]) as invoke:
             rejected = provisional.run(self.batch)
         self.assertEqual(invoke.call_count, 3)
-        self.assertEqual(json.loads((self.batch / rejected['summary']).read_text())['units'][0]['knowledge']['status'], 'needs_review')
+        corrected_row = json.loads((self.batch / rejected['summary']).read_text())['units'][0]
+        self.assertEqual(corrected_row['knowledge']['status'], 'candidate')
+        # Knowledge workers own labels only; content merges at assembly, so the
+        # knowledge candidate must contain no answer/explanation echo at all.
+        corrected = corrected_row['knowledge']['artifact']['items'][0]
+        self.assertNotIn('answer', corrected)
+        self.assertNotIn('explanation', corrected)
+        self.assertNotIn('one', json.dumps(corrected_row, ensure_ascii=False))
+        self.assertFalse((self.batch / '04_knowledge/knowledge.json').exists())
         self.put('01_source_ans/正文.txt', '2. B 【解析】存在未验证来源的解析')
         with patch('workflow.provisional.local_agent.invoke', return_value={'response': typed}) as invoke:
             blocked = provisional.run(self.batch)
@@ -302,15 +320,15 @@ class ProvisionalTest(unittest.TestCase):
             return {'response': {'status': 'completed', 'findings': [], 'notes': [], 'artifacts': {
                 '03_types/types.json': {'items': [{'unit_id': f'q-{n}', 'type': '单项填空',
                     'subtypes': ['四个选项'], 'words': 6, 'contentComplete': True, 'evidence': ['正文']}]}}}}
-        text = '题干中给出的选项与答案对应，需结合句子具体语义核对。'
+        text = '无'
         def explanation(n):
             return {'response': {'status': 'completed', 'findings': [], 'notes': [], 'artifacts': {
-                '04_knowledge/explanations.json': {'items': [{'unit_id': f'q-{n}', 'explanation': text + provisional.agent_tasks.AI_MARK,
+                '04_knowledge/explanations.json': {'items': [{'unit_id': f'q-{n}', 'explanation': text,
                     'articleSummary': '', 'subquestions': [], 'evidence': ['正文与附录']}]}}}}
         def knowledge(n, tags, answer):
             return {'response': {'status': 'completed', 'findings': [], 'notes': [], 'artifacts': {
                 '04_knowledge/knowledge.json': {'items': [{'unit_id': f'q-{n}', 'knowledge': tags, 'answer': answer,
-                    'explanation': text + provisional.agent_tasks.AI_MARK, 'articleSummary': '',
+                    'explanation': text, 'articleSummary': '',
                     'subquestions': [], 'evidence': ['正文']}]}}}}
         invalid = knowledge(2, ['虚构/知识'], 'A')
         valid = knowledge(3, ['词汇/词汇辨析/动词辨析'], 'B')
@@ -429,11 +447,11 @@ class ProvisionalTest(unittest.TestCase):
                 'subtypes': ['四个选项'], 'evidence': ['正文']}]}}}
         knowledge = {'status': 'completed', 'findings': [], 'notes': [], 'artifacts': {
             '04_knowledge/knowledge.json': {'items': [{'unit_id': 'q-2', 'knowledge': ['词汇/词汇辨析/动词辨析'],
-                'answer': 'B', 'explanation': '第2题答案为B，对应选项two，结合题干判断其用法。' + provisional.agent_tasks.AI_MARK,
+                'answer': 'B', 'explanation': '无',
                 'subquestions': [], 'evidence': ['正文']}]}}}
         explanation = {'status': 'completed', 'findings': [], 'notes': [], 'artifacts': {
             '04_knowledge/explanations.json': {'items': [{'unit_id': 'q-2',
-                'explanation': '第2题答案为B，对应选项two，结合题干判断其用法。' + provisional.agent_tasks.AI_MARK,
+                'explanation': '无',
                 'articleSummary': '', 'subquestions': [], 'evidence': ['正文']}]}}}
         with patch('workflow.provisional.local_agent.invoke',
                    side_effect=[{'response': typed}, {'response': explanation}, {'response': knowledge}]):
@@ -567,7 +585,7 @@ class ProvisionalTest(unittest.TestCase):
         self.assertEqual(result['status'], 'needs_review')
         self.assertFalse((self.batch / '03_types/types.json').exists())
         self.assertFalse((self.batch / '04_knowledge/knowledge.json').exists())
-        self.assertEqual(mf.load(self.batch)['stages'], {})
+        self.assert_formal_stages_untouched()
 
     def test_spelling_requires_strict_structure_and_original(self):
         for second, heading in [

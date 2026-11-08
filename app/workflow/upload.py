@@ -129,6 +129,46 @@ def _media(payload):
     return urls
 
 
+def local_preflight(batch_dir) -> dict:
+    """离线生成上传前摘要，不访问远端、不冻结、不改变阶段状态。
+
+    目的是把最终批次的本地硬错误提前暴露在 validate 之后，而不是等用户点击上传。
+    远端目录、媒体 HEAD 和冻结一致性仍由 prepare/verify 负责。
+    """
+    batch = Path(batch_dir).resolve()
+    report = {"passed": True, "network_checked": False, "errors": [], "warnings": []}
+    final = batch / "06_batch" / "batch_meta.json"
+    if not final.is_file() or final.is_symlink():
+        report["passed"] = False
+        report["errors"].append({"code": "FINAL_BATCH_MISSING", "message": "缺少正式批次 batch_meta.json"})
+    else:
+        try:
+            from .label_audit import inspect_file
+            labels = inspect_file(final)
+            report["label_audit"] = labels
+            if not labels.get("passed"):
+                report["passed"] = False
+                report["errors"].extend(labels.get("errors", []))
+            from .upload_content import inspect_content
+            content = inspect_content(batch, json.loads(final.read_text(encoding="utf-8-sig")), strict=True)
+            report["content"] = content
+            if not content.get("passed"):
+                report["passed"] = False
+                report["errors"].extend(content.get("errors", []))
+            raw = final.read_bytes()
+            report["payload_bytes_before_mapping"] = len(raw)
+            if len(raw) > MAX_BYTES:
+                report["passed"] = False
+                report["errors"].append({"code": "PAYLOAD_TOO_LARGE", "message": "正式批次超过 2 MB，上传前需拆分"})
+            report["unresolved_media"] = bool(report.get("content", {}).get("errors"))
+        except (OSError, ValueError, TypeError) as exc:
+            report["passed"] = False
+            report["errors"].append({"code": "LOCAL_PREFLIGHT_ERROR", "message": str(exc)})
+    target = batch / FOLDER / "local-preflight.json"
+    _write(target, _bytes(report))
+    return report
+
+
 def prepare(batch_dir, *, catalog=None, config=None, check_media=True, **options):
     """读取实时目录后冻结确定性映射。离线目录预检不等同已验证远端媒体。"""
     batch = Path(batch_dir).resolve()
@@ -161,7 +201,7 @@ def prepare(batch_dir, *, catalog=None, config=None, check_media=True, **options
                 options['name'] = title
         report = _mapping(source, snapshot, options)
         from .upload_content import inspect_content
-        content = inspect_content(batch, source)
+        content = inspect_content(batch, source, strict=True)
         report['content_source'] = content
         report['errors'].extend(content['errors'])
         report['passed'] = report['passed'] and content['passed']
@@ -248,7 +288,7 @@ def verify(batch_dir, *, config=None):
     if not mapped['passed'] or _bytes(mapped['payload']) != raw:
         raise ValueError('冻结件不再满足当前映射校验，必须重新准备、审核和批准')
     from .upload_content import inspect_content
-    content = inspect_content(batch, source)
+    content = inspect_content(batch, source, strict=True)
     if not content['passed'] or content['source_sha256'] != plan.get('content_source_sha256', {}):
         raise ValueError('解析或文章大意的来源不符、串材料或来源文件已变化，须重新准备和复核')
     return {'plan': plan, 'plan_sha256': _sha(plan_raw), 'payload': raw}

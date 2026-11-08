@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -98,6 +99,31 @@ class MetadataPlaceholderTests(unittest.TestCase):
         self.assertEqual(module._categories({}, {'categories': {}}), ['未提供'])
         self.assertEqual(module._categories({'question_type': '单项填空'}, {'categories': {
             '必考题': {'when_types': ['单项填空']}}}), ['必考题'])
+
+    def test_group_child_difficulty_aliases_stay_equal(self):
+        spec = importlib.util.spec_from_file_location('metadata_alias_test', ROOT / 'scripts/05-meta/assign_meta.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as temp:
+            source, out = Path(temp) / 'batch.json', Path(temp) / 'meta.json'
+            source.write_text(json.dumps({'items': [{
+                'unit_id': 'g', 'unit_kind': 'group', 'difficulty': '适中',
+                'filterMetadata': {'subtypes': []},
+                'subquestions': [
+                    {'number': 1, 'difficulty': '适中', 'filterMetadata': {'difficulty': '容易'}},
+                    {'number': 2, 'filterMetadata': {'difficulty': '容易'}},
+                    {'number': 3, 'filterMetadata': {}}]}]}, ensure_ascii=False), encoding='utf-8')
+            argv = sys.argv
+            sys.argv = ['assign_meta', '--batch', str(source), '--out', str(out)]
+            try:
+                self.assertEqual(module.main(), 0)
+            finally:
+                sys.argv = argv
+            data = json.loads(out.read_text(encoding='utf-8'))
+        children = data['items'][0]['subquestions']
+        self.assertEqual((children[0]['difficulty'], children[0]['filterMetadata']['difficulty']), ('适中', '适中'))
+        self.assertEqual(children[1]['filterMetadata']['difficulty'], '容易')
+        self.assertEqual(children[2]['filterMetadata']['difficulty'], '适中')
 
     def test_review_prompt_does_not_request_manual_confirmation_for_missing_metadata(self):
         from workflow import review_rounds

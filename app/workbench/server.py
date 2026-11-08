@@ -38,8 +38,9 @@ try:
     from workflow import auto as auto_flow
     from workflow import contracts as wf_contracts
     from workflow import manifest as wf_manifest
+    from workflow import execution_state as wf_execution_state
 except ImportError:  # 看台可以脱离流水线单独跑
-    auto_flow = wf_contracts = wf_manifest = None
+    auto_flow = wf_contracts = wf_manifest = wf_execution_state = None
 
 ROOT = Path(__file__).resolve().parents[1]
 # 插件版：宿主编译生效配置后，让本进程拉起的 runner/auto 子进程也走插件模型路由。
@@ -76,6 +77,8 @@ FORMAT_FIELDS = {"stem", "options", "option", "answer", "material", "materialblo
 SIDE_EFFECTS = ("upload", "publish", "delete")
 _lock = threading.RLock()
 _batches_snapshot = None
+_batches_epoch = 0
+_batches_read_lock = threading.Lock()
 # 听力切段后台任务（安装 / 切段共用一把闸，避免并发下载与切片）。
 _audio_job = {"running": False, "kind": "", "batch": "", "lock": threading.Lock()}
 
@@ -84,12 +87,13 @@ def serialized(function):
     """同服务的建批次、推进注册、删除与写入共享临界区。"""
     @wraps(function)
     def wrapped(*args, **kwargs):
-        global _batches_snapshot
+        global _batches_snapshot, _batches_epoch
         with _lock:
             try:
                 return function(*args, **kwargs)
             finally:
-                # Writes must invalidate the short-lived HTTP list snapshot.
+                # In-flight reads cannot republish a snapshot from before a write.
+                _batches_epoch += 1
                 _batches_snapshot = None
     return wrapped
 
@@ -440,7 +444,16 @@ def stage_cards(manifest, has_output: bool = False, advance_running: bool = Fals
         card = {"id": sid, "title": STAGE_TITLES.get(sid, sid),
                 "kind": STAGE_KINDS.get(sid) or record.get("kind") or "",
                 "status": record.get("status") or "pending",
+                "execution_completed": bool(record.get("execution_completed")),
+                "continue_unqualified": bool(record.get("continue_unqualified")),
+                "quality_status": record.get("quality_status") or "",
+                "release_ready": bool(record.get("release_ready")),
+                "description": (wf_contracts.STAGE_BY_ID[sid].description if wf_contracts and sid in wf_contracts.STAGE_BY_ID else ""),
+                "depends_on": list(wf_contracts.STAGE_BY_ID[sid].depends_on) if wf_contracts and sid in wf_contracts.STAGE_BY_ID else [],
                 "notes": record.get("notes") or ""}
+        if record.get("rebuild_required") and card["status"] in TERMINAL_OK:
+            # A retained old result is not the result of the requested rebuild.
+            card["status"] = "invalidated"
         diag = diag_by_stage.get(sid)
         if diag:
             card["reason"] = diag.get("reason") or ""
@@ -449,9 +462,14 @@ def stage_cards(manifest, has_output: bool = False, advance_running: bool = Fals
             card["command"] = diag.get("command") or ""
             card["blocking"] = bool(diag.get("blocking"))
         cards.append(card)
-    done = sum(1 for card in cards if card["status"] in TERMINAL_OK)
-    current = next((card for card in cards if card["status"] not in TERMINAL_OK), None)
-    early = ("extract", "answers", "audio", "structure_gate")
+    if wf_execution_state is not None:
+        progress = wf_execution_state.projection(manifest or {}, stage_ids=[card["id"] for card in cards])
+        done = progress["done"]
+        current = next((card for card in cards if card["id"] == progress["current"]), None)
+    else:
+        done = sum(1 for card in cards if card["status"] in TERMINAL_OK)
+        current = next((card for card in cards if card["status"] not in TERMINAL_OK), None)
+    early = ("extract", "structure_gate", "preassemble")
     stale = bool(has_output and current and (done == 0 or current["id"] in early))
     if advance_running:
         hint = "工作台正在处理"
@@ -624,31 +642,81 @@ def _resolve_structure_issue(folder: Path, finding: dict) -> None:
     save_json(structure_path, structure)
 
 
-@serialized
-def start_advance(name: str) -> dict:
-    """后台推进流水线：代理阶段会停住等桥，人工阶段停住等人。"""
-    if auto_flow is None:
-        raise ValueError("流水线模块不可用")
-    folder = batch_dir(name)
-    state = _advance_state.get(name) or {}
-    if state.get("running"):
+def _launch_advance(name: str, folder: Path, *, prepare=None, **details) -> dict:
+    """Register one local worker while holding auto's existing OS execution lock."""
+    from workflow import supervisor as wf_supervisor
+    if (_advance_state.get(name) or {}).get("running"):
         return {"started": False, "running": True}
-    _advance_state[name] = {"running": True, "started_at": now()}
+    # 用户点“继续处理”：清掉历史 exhausted 长冷却，从当前阶段立即续跑。
+    try:
+        wf_supervisor.clear_exhausted(folder)
+    except (OSError, ValueError, TypeError):
+        pass
+    claim = wf_supervisor.advance_claim(folder)
+    if not claim.__enter__():
+        claim.__exit__(None, None, None)
+        return {"started": False, "running": True, "external": True}
+    try:
+        if prepare is not None:
+            details.update(prepare())
+    except Exception:
+        claim.__exit__(None, None, None)
+        raise
+    _advance_state[name] = {"running": True, "started_at": now(), **details}
 
     def work():
+        result = {"error": "后台执行器意外退出，等待监督器重试"}
         try:
-            result = auto_flow.advance(folder, auto_flow.load_bridge())
+            bridge = auto_flow.load_bridge()
+            # The claim already owns auto.advance's per-batch lock. Do not
+            # acquire it again. Remote upload/publish is never a watchdog task.
+            result = auto_flow._advance_locked(folder, bridge, stop_at="upload_gate")
         except Exception as exc:  # noqa: BLE001 - 后台线程，结果回显给前端
             result = {"error": str(exc)}
-        with _lock:
-            _advance_state[name] = {"running": False, "result": result, "finished_at": now()}
+        finally:
+            try:
+                claim.__exit__(None, None, None)
+                wf_supervisor.record_result(folder, result)
+            finally:
+                # A failed ledger write must never leave a dead worker marked
+                # running forever. A restart can reconstruct from the manifest.
+                with _lock:
+                    _advance_state[name] = {"running": False, "result": result, "finished_at": now()}
 
-    threading.Thread(target=work, daemon=True, name=f"workbench-advance-{name}").start()
+    try:
+        threading.Thread(target=work, daemon=True, name=f"workbench-advance-{name}").start()
+    except Exception:
+        claim.__exit__(None, None, None)
+        _advance_state[name] = {"running": False}
+        raise
     return {"started": True, "running": True}
 
 
+@serialized
+def start_advance(name: str) -> dict:
+    """Run one local pass; the durable supervisor schedules subsequent recovery."""
+    if auto_flow is None:
+        raise ValueError("流水线模块不可用")
+    return _launch_advance(name, batch_dir(name))
+
+
 def advance_state(name: str) -> dict:
-    return _advance_state.get(name) or {"running": False}
+    state = dict(_advance_state.get(name) or {"running": False})
+    try:
+        folder = batch_dir(name)
+        path = folder / "workflow/supervisor.json"
+        ledger = load(path, {}) if not path.is_symlink() and not path.parent.is_symlink() else {}
+        if isinstance(ledger, dict) and ledger:
+            state["supervisor"] = {key: ledger[key] for key in
+                ("status", "next_retry_at", "no_progress_attempts", "escalation", "last_result") if key in ledger}
+        path = folder / "workflow/self-heal-status.json"
+        healing = load(path, {}) if not path.is_symlink() and not path.parent.is_symlink() else {}
+        if isinstance(healing, dict) and healing:
+            state["self_heal"] = {key: healing[key] for key in
+                ("status", "stage", "next_retry_at", "attempt", "verified", "action", "reason", "error_code", "has_feedback") if key in healing}
+    except ValueError:
+        pass
+    return state
 
 
 # 重新标签 / 重新审核：从指定阶段起让其后全部失效，再后台推进到停住。
@@ -658,31 +726,28 @@ RERUN_START = {"tag": "types", "review": "review"}
 RERUN_LABEL = {"tag": "重新标签", "review": "重新审核"}
 
 
+@serialized
 def start_rerun(name: str, mode: str) -> dict:
-    """让 RERUN_START[mode] 及其下游失效，然后后台推进到停住。"""
+    """An explicit user rerun invalidates only after owning the execution lock."""
     if auto_flow is None or wf_manifest is None:
         raise ValueError("流水线模块不可用")
     if mode not in RERUN_START:
         raise ValueError("不支持的重新执行类型")
     folder = batch_dir(name)
-    if (_advance_state.get(name) or {}).get("running"):
-        return {"started": False, "running": True}
-    manifest = wf_manifest.load(folder)
     start_stage = RERUN_START[mode]
-    changed = wf_manifest.invalidate_downstream(folder, manifest, start_stage, RERUN_LABEL[mode])
-    wf_manifest.save(folder, manifest)
-    _advance_state[name] = {"running": True, "started_at": now(), "mode": mode, "invalidated": changed}
+    prepared = {}
 
-    def work():
-        try:
-            result = auto_flow.advance(folder, auto_flow.load_bridge())
-        except Exception as exc:  # noqa: BLE001 - 后台线程，结果回显给前端
-            result = {"error": str(exc)}
-        with _lock:
-            _advance_state[name] = {"running": False, "result": result, "finished_at": now()}
+    def prepare():
+        manifest = wf_manifest.load(folder)
+        changed = wf_manifest.invalidate_downstream(folder, manifest, start_stage, RERUN_LABEL[mode])
+        wf_manifest.save(folder, manifest)
+        prepared.update(mode=mode, invalidated=changed)
+        return prepared
 
-    threading.Thread(target=work, daemon=True, name=f"workbench-rerun-{name}").start()
-    return {"started": True, "running": True, "mode": mode, "from": start_stage, "invalidated": changed}
+    result = _launch_advance(name, folder, prepare=prepare)
+    if result.get("started"):
+        result.update(prepared, **{"from": start_stage})
+    return result
 
 
 def _slug(text, fallback: str = "新试卷") -> str:
@@ -934,8 +999,52 @@ def decorate_review_rows(folder, rows):
     return review_status
 
 
+def final_format_complete(folder, manifest):
+    """Use the same real-format completion rule as background supervision."""
+    if wf_execution_state is None:
+        return False
+    return wf_execution_state.local_complete(Path(folder), manifest)
+
+
+_OVERVIEW_CACHE = {}
+
+
+def _overview_key(folder):
+    """Fingerprint the files overview reads so a cached projection is never stale."""
+    import hashlib
+    parts = []
+    for relative in ("workflow/manifest.json", "07_review/report.json",
+                     "07_review/manual-review-queue.json", "07_review/review-rounds.json",
+                     "07_review/content-review.json", "07_review/metadata-review.json",
+                     "07_review/unchecked.json", "06_batch/batch_meta.json", "06_batch/batch.json",
+                     "01_source/structure.confirmed.json", "workflow/self-heal-status.json",
+                     "workflow/supervisor.json"):
+        path = folder / relative
+        try:
+            stat = path.stat()
+            parts.append((relative, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            parts.append((relative, "missing"))
+    audio = folder / "02_audio" / "SKIP_LISTENING"
+    parts.append(("skip_listening", audio.is_file()))
+    raw = repr(parts).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def overview(name):
     folder = batch_dir(name)
+    key = (str(folder), _overview_key(folder))
+    hit = _OVERVIEW_CACHE.get(key)
+    if hit is not None:
+        return hit
+    value = _overview_uncached(name, folder)
+    if len(_OVERVIEW_CACHE) > 64:
+        _OVERVIEW_CACHE.clear()
+    _OVERVIEW_CACHE[key] = value
+    return value
+
+
+def _overview_uncached(name, folder):
     report, manifest, queue = report_for(folder)
     base = question_rows(folder, report)
     number_map = number_of_unit(base)
@@ -973,14 +1082,11 @@ def overview(name):
         diagnostics = _diagnose.diagnose(folder)
     except (OSError, ValueError, KeyError, ImportError):
         diagnostics = None
-    # 「二审结束」唯一口径：review（两轮审核：一审全量 + 二审抽 20%）阶段进入完成态。
-    # 上传页排队区据此移除已结束的试卷，并流转到试卷审核界面做人工确认；
-    # 仍在处理 / 卡住的试卷保留在排队区并显示卡点诊断。
-    review_status_value = str(((manifest.get("stages") or {}).get("review") or {}).get("status") or "")
-    gate_status_value = str(((manifest.get("stages") or {}).get("review_gate") or {}).get("status") or "")
-    flow_done = review_status_value in TERMINAL_OK or gate_status_value in TERMINAL_OK
+    # 内容审核之后仍须完成最终格式检查。不能在二审结束时提前移出上传队列。
+    flow_done = final_format_complete(folder, manifest)
     upload = upload_state(name)
     upload_stage_done = str(((manifest.get("stages") or {}).get("upload") or {}).get("status") or "") == "completed"
+    flow_done = flow_done or upload_stage_done  # 已提交远端的历史批次不因新增本地步骤重新排队。
     receipt = upload.get("receipt") or load(folder / "receipt.json", {})
     upload_pending = bool(isinstance(receipt, dict) and (receipt.get("remote_confirmation_required")
                           or receipt.get("stage") == "pending_confirmation"))
@@ -1006,7 +1112,7 @@ def overview(name):
             "extraction": load(folder / "07_review" / "extraction-report.json", {}),
             "structure_gate": load(folder / "07_review" / "structure-gate.json", {}),
             "stages": stages, "rows": rows, "has_audio": has_audio,
-            # 自动流程是否结束（二审完成）；上传页排队区按此移除，并提示人工确认。
+            # 自动流程是否结束（审核后最终格式检查通过）；上传页排队区按此移除。
             "flow_done": flow_done,
             # 已写入云端上传暂存的批次视为完成，试卷审核列表不再展示。
             "uploaded": uploaded, "upload_pending_confirmation": upload_pending,
@@ -1033,13 +1139,19 @@ def cached_list_batches():
     The uncached list_batches remains available to internal workflow callers.
     """
     global _batches_snapshot
-    with _lock:
-        key = (str(WORKFLOWS), str(INBOX))
-        if (_batches_snapshot is not None and _batches_snapshot[0] == key
-                and monotonic() < _batches_snapshot[1]):
-            return _batches_snapshot[2]
+    # Coalesce list readers without holding the scheduler/mutation lock during
+    # full question/media projection. HTTP polling must not starve dispatch.
+    with _batches_read_lock:
+        with _lock:
+            key = (str(WORKFLOWS), str(INBOX))
+            if (_batches_snapshot is not None and _batches_snapshot[0] == key
+                    and monotonic() < _batches_snapshot[1]):
+                return _batches_snapshot[2]
+            epoch = _batches_epoch
         result = list_batches()
-        _batches_snapshot = (key, monotonic() + 2.0, result)
+        with _lock:
+            if epoch == _batches_epoch and key == (str(WORKFLOWS), str(INBOX)):
+                _batches_snapshot = (key, monotonic() + 2.0, result)
         return result
 
 
@@ -1286,6 +1398,34 @@ def _stage_upload_media(folder):
             os.close(root_fd)
         from workflow.agent_protocol import _load
         metadata = _load(raw)
+        # 若媒体已按内容寻址部署（07_upload/media-map.json 存在且覆盖批次全部附件
+        # 文件名），直接复用该映射，避免重复 SSH 部署；也避免 referenced_media 对
+        # 已部署 flat-hash 附件（/source-media/<sha>-…，非批次目录名前缀）误报
+        # “Attachment URL is not owned by this batch”。仅当映射完整覆盖时复用。
+        existing_map = folder / '07_upload' / 'media-map.json'
+        if existing_map.is_file():
+            try:
+                deployed = json.loads(existing_map.read_text(encoding='utf-8-sig'))
+            except (OSError, ValueError):
+                deployed = None
+            if isinstance(deployed, dict):
+                needed = set()
+                def _collect(node):
+                    if isinstance(node, dict):
+                        for a in (node.get('attachments') or []):
+                            if isinstance(a, dict) and a.get('name'):
+                                needed.add(a['name'])
+                        for c in (node.get('subquestions') or []):
+                            _collect(c)
+                for item in (metadata.get('items') or []):
+                    _collect(item)
+                if needed and all(
+                        isinstance(deployed.get(n), str)
+                        and deployed[n].startswith('/source-media/')
+                        for n in needed):
+                    # 与正常路径保持同构：(mapping, source_hash)。缺少元组会导致
+                    # 调用方 `mapping, source_hash = staged` 解包失败。
+                    return {n: deployed[n] for n in needed}, hashlib.sha256(raw).hexdigest()
         refs = media_inventory.referenced_media(folder, metadata)
         if not refs:
             return None
@@ -1954,7 +2094,9 @@ class Handler(BaseHTTPRequestHandler):
         decoded_path = unquote(parsed.path)
         try:
             if decoded_path == "/api/health":
-                return self.send_json({"ok": True, "instance_id": os.environ.get("WF_BACKEND_INSTANCE_ID", "")})
+                return self.send_json({"ok": True, "instance_id": os.environ.get("WF_BACKEND_INSTANCE_ID", ""),
+                                       "workflow_runtime_version": wf_execution_state.RUNTIME_VERSION if wf_execution_state else None,
+                                       "self_heal_supervisor": _workflow_supervisor.health() if _workflow_supervisor else {"running": False}})
             if decoded_path == "/api/audio/config":
                 return self.send_json(audio_overview())
             if decoded_path == "/api/audio/status":
@@ -2223,6 +2365,37 @@ class Handler(BaseHTTPRequestHandler):
         return {"saved": saved, "warnings": warnings}
 
 
+_workflow_supervisor = None
+
+
+def _dispatch_supervised(name):
+    # HTTP overview reads may hold this lock while inspecting many media files.
+    # The watchdog must remain bounded and never queue behind such a request.
+    if not _lock.acquire(blocking=False):
+        return {"started": False, "running": False, "busy": True}
+    try:
+        return start_advance(name)
+    finally:
+        _lock.release()
+
+
+def serve(http_server):
+    """Start background recovery only with an actual server lifecycle."""
+    global _workflow_supervisor
+    from workflow.supervisor import WorkflowSupervisor
+    supervisor = WorkflowSupervisor(WORKFLOWS, _dispatch_supervised,
+        is_active=lambda name: bool((_advance_state.get(name) or {}).get("running")
+                                   or (_upload_jobs.get(name) or {}).get("running")))
+    _workflow_supervisor = supervisor
+    try:
+        supervisor.start()
+        http_server.serve_forever()
+    finally:
+        supervisor.stop()
+        _workflow_supervisor = None
+        http_server.server_close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="木牍录题 REST API 后端（无页面）")
     parser.add_argument("--host", default="127.0.0.1")
@@ -2238,7 +2411,7 @@ def main():
         except Exception:  # noqa: BLE001 - 启动预热失败不影响本地工作台
             pass
     threading.Thread(target=_warm_tunnel, daemon=True).start()
-    ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
+    serve(ThreadingHTTPServer((args.host, args.port), Handler))
 
 
 if __name__ == "__main__":

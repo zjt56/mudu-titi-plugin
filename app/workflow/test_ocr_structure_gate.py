@@ -54,7 +54,11 @@ class OCRStructureGateTest(unittest.TestCase):
     def test_legacy_candidate_still_checks_original_boundaries(self):
         self.assertIn('GROUP_BOUNDARY_MISMATCH', self.codes(self.run_case([])))
 
-    def test_unbound_or_hallucinated_units_do_not_override_boundaries(self):
+    def test_unbound_or_hallucinated_units_never_become_the_confirmed_structure(self):
+        # Rejecting an unbound AI grouping is a fallback to the deterministic
+        # units, not an approval: the AI units must never be written, and the
+        # fallback still has to survive the per-question source audits (covered by
+        # the blocking tests below when the source itself is inconsistent).
         for change in ('span', 'omission', 'hallucination', 'duplicate'):
             with self.subTest(change=change):
                 units = [dict(unit, source_span=dict(unit['source_span'])) for unit in self.units]
@@ -66,9 +70,17 @@ class OCRStructureGateTest(unittest.TestCase):
                     units[1]['numbers'] = [8, 10]
                 else:
                     units[1]['numbers'] = [7, 8, 9]
-                codes = self.codes(self.run_case(units))
-                self.assertIn('AI_SOURCE_BINDING_INVALID', codes)
-                self.assertIn('GROUP_BOUNDARY_MISMATCH', codes)
+                report = self.run_case(units)
+                warnings = {item['code'] for item in report['warnings']}
+                self.assertIn('AI_STRUCTURE_REJECTED', warnings)
+                self.assertNotIn('AI_SOURCE_BINDING_INVALID', self.codes(report))
+                from workflow import denoise
+                confirmed = json.loads((self.batch / '01_source/structure.confirmed.json').read_text())
+                cleaned = denoise.clean_body('\n'.join(self.lines))[0]
+                expected = structure_gate._build_units(
+                    self.structure['sections'], self.structure['groups'], cleaned.splitlines())
+                self.assertEqual([(u['numbers'], u['stem']) for u in confirmed['units']],
+                                 [(u['numbers'], u['stem']) for u in expected])
 
     def test_actual_source_omission_and_duplicate_remain_blocking(self):
         self.lines.append('10. Unreported question?')

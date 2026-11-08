@@ -1,4 +1,4 @@
-"""组装阶段的确定性重组装（仅“结构未变”的重跑场景）。
+"""组装阶段的确定性合并（首次来源完整草稿，或结构未变的重跑）。
 
 上次组装被接受时会登记结构指纹与批次指纹（`06_batch/assemble-guard.json`）。
 只要结构确认文件或批次产物在那之后发生过变化，就判定不可用并交回模型组装，
@@ -72,7 +72,9 @@ def record_guard(batch_dir) -> None:
         items = payload.get("items") or []
     except (OSError, ValueError):
         return
+    from . import stage_semantics
     guard = {"structure_sha256": _sha(structure), "batch_sha256": _sha(assembled),
+             "confirmed_content_digest": stage_semantics.digest(stage_semantics._projection("knowledge", STRUCTURE, _load(structure))),
              "unit_ids": sorted(_unit_id(i) for i in items),
              "structure_digest": _structure_digest(payload)}
     target = batch / GUARD
@@ -81,9 +83,50 @@ def record_guard(batch_dir) -> None:
     temporary.replace(target)
 
 
-def guard_status(batch_dir):
-    """返回 (是否可确定性重组装, 原因)。任何不确定都交回模型。"""
+def _initial_payload(batch_dir):
+    """Promote only a complete source-bound draft into an assembly candidate.
+
+    This is not installation or approval: the normal importer still validates
+    all labels, source fidelity, children, media and format before writing batch.
+    """
+    from . import question_draft
     batch = Path(batch_dir)
+    for rel in (STRUCTURE, KNOWLEDGE, EXPLANATIONS, TYPES, ANSWERS):
+        if not (batch / rel).is_file():
+            raise ValueError("首次确定性组装缺少 " + rel)
+    draft = question_draft.ensure(batch)
+    if not draft.get("items") or draft.get("issues"):
+        raise ValueError("前置题目对象仍有来源或结构疑点，不能确定性组装")
+    rows = copy.deepcopy(draft["items"])
+    bindings = draft.get("source_bindings") or {}
+    if any(not bindings.get(_unit_id(row), {}).get("start_line") for row in rows):
+        raise ValueError("前置题目对象缺少逐单元来源绑定")
+    meta = _load(batch / STRUCTURE).get("meta") or {}
+    from .wire_format import _year
+    for row in rows:
+        filters = row.setdefault("filterMetadata", {})
+        for key in ("source", "source_type", "year", "region"):
+            if meta.get(key) not in (None, "", []):
+                filters[key] = _year(meta[key]) if key == "year" else meta[key]
+    return {"items": rows}
+
+
+def guard_status(batch_dir):
+    """返回 (是否可确定性组装, 原因)。任何不确定都交回模型。"""
+    batch = Path(batch_dir)
+    from . import batch_fill
+    if (batch / batch_fill.STATE).is_file():
+        try:
+            batch_fill.initialize(batch)
+            return True, "前置批次已建立，仅核对并固化同一批次的填充结果"
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return False, "前置批次存在冲突：" + str(exc)
+    if not (batch / BATCH).exists():
+        try:
+            _initial_payload(batch)
+            return True, "前置标准题目对象已完整绑定原文，可直接合并标签"
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return False, str(exc)
     for rel in (BATCH, STRUCTURE, KNOWLEDGE, EXPLANATIONS, TYPES, ANSWERS):
         if not (batch / rel).is_file():
             return False, f"缺少 {rel}"
@@ -105,7 +148,10 @@ def guard_status(batch_dir):
     except (OSError, ValueError):
         return False, "组装基线不可读"
     if guard.get("structure_sha256") != _sha(batch / STRUCTURE):
-        return False, "结构确认已变化：不能沿用旧题干/选项/材料"
+        from . import stage_semantics
+        current_structure = stage_semantics.digest(stage_semantics._projection("knowledge", STRUCTURE, _load(batch / STRUCTURE)))
+        if not guard.get("confirmed_content_digest") or guard["confirmed_content_digest"] != current_structure:
+            return False, "结构确认已变化：不能沿用旧题干/选项/材料"
     # 标签产物（types/answers/explanations/knowledge）更新后批次指纹必然变化，
     # 这正是确定性重组装要覆盖的场景；只有"结构字段"被改动才交回模型。
     assembled = _load(batch / BATCH)
@@ -145,6 +191,11 @@ def _overlay_labels(target: dict, source: dict) -> None:
         return
     target["knowledge"] = list(source.get("knowledge") or [])
     ids = list(source.get("knowledgeIds") or [])
+    if not ids and target["knowledge"]:
+        from workbench import taxonomy
+        resolved = taxonomy.resolve_knowledge(target["knowledge"])
+        if not resolved["unknown"] and not resolved["non_leaf"]:
+            ids = [point["id"] for point in resolved["resolved"]]
     target["knowledgeIds"] = ids
     target["knowledge_ids"] = list(ids)
 
@@ -158,17 +209,35 @@ def _overlay_text(target: dict, primary: dict, secondary: dict, key: str) -> Non
 
 
 def build(batch_dir) -> dict:
-    """用已审核批次的结构，叠加最新四路产物；不新增、不删改任何结构字段。"""
+    """用已接受结构或首次来源绑定草稿，确定性叠加上游标签。"""
     batch = Path(batch_dir)
-    data = _load(batch / BATCH)
+    from . import batch_fill
+    if (batch / batch_fill.STATE).is_file():
+        # Validate ownership/source freshness before touching the existing objects.
+        data = copy.deepcopy(batch_fill.initialize(batch)["payload"])
+    else:
+        data = _load(batch / BATCH) if (batch / BATCH).exists() else _initial_payload(batch)
     types = {r["unit_id"]: r for r in _load(batch / TYPES).get("items", [])}
     know = {r["unit_id"]: r for r in _load(batch / KNOWLEDGE).get("items", [])}
     expl = {r["unit_id"]: r for r in _load(batch / EXPLANATIONS).get("items", [])}
-    answer_data = _load(batch / ANSWERS)
+    answer_data = _load(batch / ANSWERS) if (batch / ANSWERS).is_file() else {"answers": {}, "difficulty": {}}
     answers = answer_data.get("answers") or {}
     difficulty = answer_data.get("difficulty") or {}
+    meta = _load(batch / STRUCTURE).get("meta") or {}
+    from .wire_format import _year
+
+    def _meta_value(key, value):
+        # Confirmed paper metadata is often a digit string; the wire shape needs
+        # an integer year, and overwriting the normalized value would make the
+        # final upload check reject an otherwise valid batch.
+        return _year(value) if key == "year" else value
 
     for item in data.get("items", []):
+        for key in ("source", "source_type", "year", "region"):
+            if meta.get(key) not in (None, "", []):
+                item.setdefault("filterMetadata", {})[key] = _meta_value(key, meta[key])
+                if key in item:
+                    item[key] = _meta_value(key, meta[key])
         uid = _unit_id(item)
         row_type = types.get(uid) or {}
         if row_type.get("type"):
@@ -349,19 +418,24 @@ def verify_against_structure(batch_dir):
 
 def try_assemble(batch_dir, config=None):
     """可确定性重组装时完成导入并返回退出码；否则返回 None 交回模型路径。"""
+    from . import batch_fill
+    managed = (Path(batch_dir) / batch_fill.STATE).is_file()
     ok, reason = guard_status(batch_dir)
     if not ok:
-        print(f"  确定性重组装不可用：{reason}", flush=True)
-        return None
+        print(f"  确定性填充汇总不可用：{reason}", flush=True)
+        return 3 if managed else None
     from . import agent_tasks
-    candidate = {"status": "completed",
-                 "artifacts": {agent_tasks.ARTIFACTS["assemble"]: build(batch_dir)},
-                 "notes": ["确定性重组装：结构未变，沿用已审核题干/选项/材料，仅覆盖四路产物字段，未调用模型"],
-                 "findings": []}
     try:
+        candidate = {"status": "completed",
+                     "artifacts": {agent_tasks.ARTIFACTS["assemble"]: build(batch_dir)},
+                     "notes": ["确定性组装：沿用来源绑定的前置题目对象或既有结构，合并上游标签，正常执行整批保真校验，未调用模型"],
+                     "findings": []}
         agent_tasks.accept_result(batch_dir, "assemble", candidate, validate_only=True)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         _record_fallback(batch_dir, str(exc))
+        if managed:
+            print(f"  前置批次填充结果未通过整批校验，保留同批次等待修正：{exc}", flush=True)
+            return 3
         print(f"  确定性产物未通过整批校验，交回模型组装：{exc}", flush=True)
         return None
     from .local_agent import _agent_lock
@@ -397,7 +471,7 @@ def main(argv=None) -> int:
     ok, reason = guard_status(batch)
     print(json.dumps({"reusable": ok, "reason": reason}, ensure_ascii=False))
     if ok and args.check:
-        before = _load(batch / BATCH)
+        before = _load(batch / BATCH) if (batch / BATCH).is_file() else {"items": []}
         after = build(batch)
         diffs = []
         for old, new in zip(before.get("items", []), after.get("items", [])):
