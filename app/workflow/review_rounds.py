@@ -160,6 +160,9 @@ def _round_prompt(round_id, targets, context):
         "An issue in one target must not stop reviewing the remaining targets. Knowledge review focuses on label semantics; distinguish a proposed label change from missing image/audio evidence and from answer/content defects. "
         "For listening, read the COMPLETE relevant dialogue in 02_audio/full-transcript.json, including the response, not just the first question or audio-map preview sentence. A transcript is text evidence, not proof of hearing audio. Never infer a contradiction from a question alone when its response resolves it. "
         "Do not claim images were seen from placeholders or audio heard from a transcript; record specific limitations without inventing mismatches. "
+        "审核对象是最终批次 06_batch/batch_meta.json 的字段；字段为空才可报告缺失，"
+        "不得因预组装草稿、占位值或模板文本为空而提出差异或 uncertain。"
+        "提出题型/知识点差异前，必须先引用最终批次中的当前值作为对照。 "
         "status=completed means this round was executed, even if it found errors. Missing review evidence => needs_review; never clear it.\n"
         + "ROUND: " + round_id + "\n" + instruction
         + _agent_roles().section("review", "07_review/agent-review.json", round_id)

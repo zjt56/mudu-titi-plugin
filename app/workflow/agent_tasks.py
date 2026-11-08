@@ -391,7 +391,9 @@ def _collect(batch, stage, speculative=False):
                 for unit in units])
         else:
             contexts["confirmed_units_with_stable_ids"] = _sanitized(units)
-        if stage in ("answers", "types", "explanations", "knowledge", "assemble", "review"):
+        # review 不读预组装草稿：草稿的题型/知识点按设计为空，曾让审核模型
+        # 把“草稿未打标”当成题目差异，整卷误报人工项。审核对象是最终批次字段。
+        if stage in ("answers", "types", "explanations", "knowledge", "assemble"):
             from . import question_draft
             try:
                 question_draft.ensure(batch, units=units)

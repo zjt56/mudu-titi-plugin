@@ -425,6 +425,20 @@ def _file_digest(path):
         return "missing"
 
 
+def _review_rule_revision():
+    """Digest of the review口径 and prompt sources.
+
+    Rule/prompt changes must invalidate already-recorded rounds; otherwise a fixed
+    checker keeps showing the previous findings from the manual queue.
+    """
+    here = Path(__file__).resolve()
+    parts = [("rule-code:" + name, _file_digest(here.with_name(name)))
+             for name in ("review.py", "review_rounds.py", "agent_roles.py", "review_consensus.py")]
+    role = here.parents[1] / "prompts" / "roles" / "review.md"
+    parts.append(("rule-role:review", _file_digest(role)))
+    return _digest(parts)
+
+
 def _plan_input_key(batch, units):
     """Fingerprint every file the plan binds by CONTENT, not mtime.
 
@@ -456,6 +470,7 @@ def _plan_input_key(batch, units):
         if isinstance(relative, str) and relative:
             parts.append(("media:" + relative, _file_digest(batch / relative)))
     parts.append(tuple((u["unit_id"], tuple(u["numbers"])) for u in units))
+    parts.append(("rule-revision", _review_rule_revision()))
     return _digest(parts)
 
 
@@ -518,7 +533,8 @@ def prepare_round_plan(batch_dir) -> dict:
             raise ValueError("Media observation is stale: " + relative)
         hashes[relative] = digest
     questions = [{"unit_id": u["unit_id"], "number": str(n)} for u in units for n in u["numbers"]]
-    binding = _digest({"input_hashes": hashes, "questions": questions})
+    binding = _digest({"input_hashes": hashes, "questions": questions,
+                       "rule_revision": _review_rule_revision()})
     # 二审抽样口径：以组题为单位的题型（阅读/完形/补全对话/信息转换等）整组作为一个
     # 抽样单位，number=None 表示"抽整组、只做组级核对"，不再逐小题抽查、不做小题二审；
     # 独立单题仍按单题（number=题号）抽样。题型取自 03_types/types.json（结构单元行本身

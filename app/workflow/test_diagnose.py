@@ -45,6 +45,8 @@ class DiagnoseTest(unittest.TestCase):
             '{"error": "Assemble must preserve validated knowledge artifact field explanation", "code": "integration"}\n',
             encoding="utf-8")
         result = diagnose.diagnose(self.batch)
+        self.assertEqual(result["batch_name"], self.batch.name)
+        self.assertIn(self.batch.name, result["summary"])
         self.assertEqual(result["blocked_at"], "assemble")
         item = diagnose.explain(self.batch, "assemble")
         # 真实错误从日志里被挖出来了，而不是那句笼统的 notes。

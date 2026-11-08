@@ -112,13 +112,39 @@ def _open_manual_items(batch: Path) -> int:
                if isinstance(x, dict) and str(x.get("status") or "").lower() not in closed)
 
 
+# 常见阻断检查的“为什么+怎么修”。说明必须能指向具体判定口径，避免只给
+# 一句“按阻断项修复”让用户反复试错。
+CHECK_HINTS = {
+    "解析 check_explanations": "解析/大意必须能在原卷（Word 正文或附录）逐字找到；"
+        "PDF/OCR 副本 wording 不同不算冲突，但权威原文里同一题出现两份不同解析仍算冲突。"
+        "查看 07_review/validation-report.json 中该检查的 output 定位题目。",
+    "答案 check_answers": "答案值必须与答案来源一致，缺答案留空或「无」，不能改写。",
+    "结构 check_structure": "题号/选项/材料边界与原卷不一致；对照原卷修正结构后重跑。",
+    "标签 check_tags": "知识点必须是目录叶子且名称与 ID 对应；不要自由造词。",
+    "题型标签 audit_type_tags": "题型/子类必须是目录值，且与原题一致。",
+    "原卷逐题覆盖与材料归属 source_audit": "逐题回指原卷失败：题干/选项/材料必须来自对应切片。",
+    "正文保真 check_fidelity": "图片型材料天然可能对不上，属能力受限提示；文本差异才需修。",
+}
+
+
+def _check_hint(detail: str) -> str:
+    for name, hint in CHECK_HINTS.items():
+        if name in (detail or ""):
+            return hint
+    return ""
+
+
 # 每个阶段「怎么修」的通用指引：优先给出可粘贴命令，再给一句人话。
-def _remedy(stage: contracts.Stage, batch_dir: str) -> dict:
+def _remedy(stage: contracts.Stage, batch_dir: str, detail: str = "") -> dict:
     base = f"python -m workflow.runner"
     if stage.kind == contracts.HUMAN:
         return {"hint": "这是人工闸门，需你本人确认（不代签）：核对批次/来源/目标/查重后标记批准。",
                 "command": f"{base} mark --batch-dir {batch_dir} --stage {stage.id} --status approved"}
     if stage.kind == contracts.GATE:
+        specific = _check_hint(detail)
+        if specific:
+            return {"hint": "确定性检查未过。" + specific,
+                    "command": f"{base} run --batch-dir {batch_dir} --stage {stage.id} --force"}
         return {"hint": "确定性检查未过：按上面列出的阻断项修复对应问题后重跑该阶段。",
                 "command": f"{base} run --batch-dir {batch_dir} --stage {stage.id}"}
     if stage.kind == contracts.COMMAND:
@@ -240,7 +266,7 @@ def diagnose(batch_dir) -> dict:
             reason = reason or "缺少必需输入"
             detail = (detail + "；" if detail else "") + "缺少输入：" + "、".join(missing_inputs)
 
-        remedy = _remedy(stage, str(batch))
+        remedy = _remedy(stage, str(batch), detail)
         # 真正的「卡点」是本阶段自身有问题（失败/待复核/阻断/失效，或它自己
         # 缺必需输入且没有被上游挡住），而不是单纯被上游拖住等着的下游阶段。
         own_problem = (status in (mf.FAILED, mf.NEEDS_REVIEW, mf.BLOCKED, mf.INVALIDATED)
@@ -291,12 +317,13 @@ def diagnose(batch_dir) -> dict:
                                   order.get(it["stage"], len(order))))
     head = ordered[0] if ordered else None
     if head:
-        summary = f"{'卡在' if head['blocking'] else '等待'}「{head['title']}」：{head['reason']}"
+        summary = f"批次「{batch.name}」：{'卡在' if head['blocking'] else '等待'}「{head['title']}」：{head['reason']}"
         if head["detail"]:
             summary += "——" + head["detail"][:120]
     else:
         summary = "自动阶段已执行完成；存在质量差异，未宣称放行" if quality_notes else "流程已完成"
     return {"batch": manifest.get("workflow_id") or batch.name,
+            "batch_name": batch.name,
             "batch_dir": str(batch),
             "status": manifest.get("status") or mf.derive_status(manifest),
             "blocked_at": first_blocked,

@@ -26,7 +26,7 @@ SUMMARY = re.compile(rf'(?:【文章大意】|\[文章大意\]|{IMG}\s*文章大
 # 附录在逐题解析后常跟独立附注小标题（如【熟词生义】【点拨】【思路】【拓展】【考点】）
 # 及其说明行；这些不属于解析正文，解析提取必须在此处截断，否则会把附注吞进
 # 解析文本，令模型逐字解析无法与原文解析行全等绑定。
-ANNOTATION = re.compile(r'^\s*(?:\*\*\s*)?【\s*(?:熟词生义|点拨|思路点拨|拓展|引申|考点|词义辨析|语法点|注意|易错点|重难点)\s*】')
+ANNOTATION = re.compile(r'^\s*(?:\*\*\s*)?#*\s*【\s*(?:熟词生义|点拨|思路点拨|拓展|引申|考点|词义辨析|语法点|注意|易错点|重难点|词汇积累|难句分析)\s*】')
 ICON_HEADING = re.compile(rf'^\s*{IMG}[^\n]*?{IMG}')
 SECTION_NUMBER = re.compile(r'^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+|[一二三四五六七八九十]+)[.．、]')
 SECTION_NAME = re.compile(r'^\s*(短对话理解|长对话理解|短文理解|信息转换|单项填空|完形填空|补全对话|阅读理解|任务型阅读|单词拼写|书面表达)(?=\s|$|[（(：:])')
@@ -67,6 +67,29 @@ def _same_section(left, right):
         return left is right
     comparable = [(a, b) for a, b in zip(left, right) if a is not None and b is not None]
     return bool(comparable) and all(a == b for a, b in comparable)
+
+
+def reference_only_sources(batch_dir):
+    """Sources that are evidence copies, not content authority.
+
+    material-roles.json marks the uploaded PDF/OCR copy as content_authority=false
+    when a Word original is authoritative. Such a copy must never compete with the
+    authoritative text for "unique binding"; it may only corroborate.
+    """
+    path = Path(batch_dir) / '01_source' / 'material-roles.json'
+    if not path.is_file():
+        return frozenset()
+    try:
+        data = json.loads(path.read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError, UnicodeError):
+        return frozenset()
+    result = set()
+    for doc in (data.get('documents') or []) if isinstance(data, dict) else []:
+        if isinstance(doc, dict) and doc.get('content_authority') is False:
+            text_path = doc.get('text_path')
+            if isinstance(text_path, str) and text_path:
+                result.add(text_path)
+    return frozenset(result)
 
 
 def _source_line(value):
@@ -131,6 +154,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
     body_anchors = []
     source_lines = {}
     material_dir = batch / '01_source/materials'
+    reference_only = reference_only_sources(batch)
     extra_sources = [p.relative_to(batch).as_posix() for p in sorted(material_dir.glob('attachment_*.txt'))
                      if re.fullmatch(r'attachment_\d{3,}\.txt', p.name)] if material_dir.is_dir() else []
     for relative in (*SOURCES, *extra_sources):
@@ -340,7 +364,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
         declared = unit.get('numbers') or []
         return [int(n) for n in declared if str(n).isdigit()] or numbers
 
-    def unique_anchor(number, path, line, *, allow_answer_source=False):
+    def unique_anchor(number, path, line, *, allow_answer_source=False, expected=None):
         if not isinstance(number, int):
             return False
         candidates = body_anchors if path == '01_source/正文.txt' else anchors
@@ -349,10 +373,20 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             return False
         # A separate answer-only file may repeat a number without supplying a
         # competing explanation. A second labelled explanation is ambiguous.
-        if not allow_answer_source and any(
-                row['number'] == number and row['path'] != path
-                and row['path'] != '01_source/正文.txt' for row in questions):
-            return False
+        if not allow_answer_source:
+            competing = [row for row in questions
+                         if row['number'] == number and row['path'] != path
+                         and row['path'] != '01_source/正文.txt'
+                         and row['path'] not in reference_only]
+            if expected is not None:
+                # 同一份卷被重复提取（PDF 附件 / OCR 副本 / materials/*.txt）时，
+                # 同文解析的副本不是竞争者；只有措辞不同的解析才算冲突。
+                # 副本间常有全/半角标点差异，这里按规范化文本比较（_norm 做 NFKC），
+                # 不放松对“措辞被改写”的判定（那仍会因 text 不同而冲突）。
+                wanted = _norm(expected)
+                competing = [row for row in competing if row['text'] != wanted]
+            if competing:
+                return False
         # When a separate body is available, the same number must also have a
         # unique body anchor. Repeated numbers need human section verification.
         if path != '01_source/正文.txt':
@@ -587,13 +621,13 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     error('AI_CONTENT_FORBIDDEN', '禁止 AI 生成解析或文章大意；不得用标记代替原文', uid, field)
             if not listening and not explanation and (child or not item.get('subquestions')):
                 originals = [row for row in questions if row['number'] in numbers and row['text'] and not is_placeholder(row['text'])
-                             and unique_anchor(row['number'], row['path'], row['line'])]
+                             and unique_anchor(row['number'], row['path'], row['line'], expected=row['verbatim'])]
                 if originals:
                     error('ORIGINAL_EXPLANATION_OMITTED', '原题有解析，不能用缺失占位替代', uid, 'explanation',
                           [f"{row['path']}:{row['line']}" for row in originals])
             if not child and not summary:
                 originals = [row for row in summaries if row['owner'] in numbers and numbers and not is_placeholder(row['text']) and all(
-                    n in row['members'] and unique_anchor(n, row['path'], row['line'], allow_answer_source=True)
+                    n in row['members'] and unique_anchor(n, row['path'], row['line'], allow_answer_source=True, expected=row['verbatim'])
                     for n in numbers)]
                 if originals:
                     error('ORIGINAL_SUMMARY_OMITTED', '原材料有文章大意，不能用缺失占位替代', uid, 'articleSummary',
@@ -606,7 +640,8 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             matches = [row for row in summaries if (_verbatim(summary) == row['verbatim'] if strict else normalized == row['text'])]
             owned = any(row['owner'] in numbers and all(
                             number in row['members'] and unique_anchor(
-                                number, row['path'], row['line'], allow_answer_source=True)
+                                number, row['path'], row['line'], allow_answer_source=True,
+                                expected=row['verbatim'])
                             for number in numbers)
                         and sum(other['owner'] == row['owner'] and other['path'] == row['path']
                                 for other in summaries) == 1 for row in matches)
@@ -620,7 +655,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             if marked and (not explanation.strip().endswith(AI_MARK) or not _norm(explanation.strip()[:-len(AI_MARK)])):
                 warning('AI_PROVENANCE_IGNORED', '解析的 AI 来源标记无效；严格校验禁止生成内容', uid, 'explanation')
             traceable = bool(value) and any(row['number'] in numbers and (_verbatim(explanation) == row['verbatim'] if strict else value in row['text'])
-                            and unique_anchor(row['number'], row['path'], row['line'])
+                            and unique_anchor(row['number'], row['path'], row['line'], expected=explanation)
                             for row in questions)
             if writing and not child and not item.get('subquestions'):
                 traceable = traceable or (numbers == [writing[0]] and (_verbatim(explanation) if strict else value) == writing[1])
@@ -631,7 +666,8 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     (_verbatim(explanation) == '【文章大意】' + row['verbatim'] if strict else value == _norm('【文章大意】' + row['text'])) and
                     row['owner'] is not None and
                     (row['owner'] not in numbers or (row['owner'] in numbers and all(
-                        number in row['members'] and unique_anchor(number, row['path'], row['line'])
+                        number in row['members'] and unique_anchor(number, row['path'], row['line'],
+                            expected=row['verbatim'])
                         for number in numbers)))
                     for row in summaries)
             if not strict and not traceable and unit_type == '书面表达':

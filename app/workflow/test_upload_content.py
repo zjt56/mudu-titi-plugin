@@ -30,6 +30,29 @@ class UploadContentTest(unittest.TestCase):
         payload['items'][0]['explanation'] = 'OCR 改写的游泳原因。'
         self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
 
+    def test_reference_copy_role_excludes_it_from_ambiguity(self):
+        materials = self.batch / '01_source/materials'; materials.mkdir()
+        (materials / 'attachment_001.txt').write_text(
+            'Ⅵ.完形填空\n31.A 【解析】OCR 改写的游泳原因。\n')
+        (self.batch / '01_source/material-roles.json').write_text(json.dumps({
+            'documents': [
+                {'input': 'source', 'role': 'paper', 'content_authority': True,
+                 'text_path': '01_source/正文.txt'},
+                {'input': 'attachment_001', 'role': 'structure_reference',
+                 'content_authority': False,
+                 'text_path': '01_source/materials/attachment_001.txt'}]}, ensure_ascii=False))
+        payload = {'items': [{'number': 31, 'explanation': '游泳原因。', 'articleSummary': '游泳文章。'}]}
+        result = inspect_content(self.batch, payload, strict=True)
+        self.assertTrue(result['passed'], result)
+        # 权威来源内部再出现同题另一份解析，仍然算冲突，不能借参考件规则放行。
+        self.path.write_text(self.text + '31.B 【解析】另一种说法。\n')
+        self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
+
+    def test_markdown_prefixed_annotation_heading_ends_explanation(self):
+        self.path.write_text('Ⅵ.完形填空\n31.A 【解析】游泳原因。\n##【词汇积累】swim v.游泳\n')
+        payload = {'items': [{'number': 31, 'explanation': '游泳原因。'}]}
+        self.assertTrue(inspect_content(self.batch, payload, strict=True)['passed'])
+
     def test_stray_explanation_binds_to_preceding_numbered_answer(self):
         # Answer on its own line, explanation in the next paragraph without a number.
         self.path.write_text('Ⅷ.阅读理解\n74. It wasn\u2019t easy.\n\n'

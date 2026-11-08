@@ -22,6 +22,12 @@
 | 2026-11-08 | **过期/未完成审核不阻碍上传**：批次产物“过期/内容变化”与“未完成审核/有审核差异”都不阻碍上传到题库服务器；只要本地体检（validate）曾通过即可上传，内容正确性由用户自己把关（标签/结构等硬校验仍保留）。“这个过期状态不阻碍批次上传”“未完成审核也不影响批次上传到题库服务器”。 | `workbench/server.py::_check_upload_preconditions`；根 `AGENTS.md` 硬规则 3 |
 | 2026-11-08 | **哈希不得成为序列化噪声卡点**：工作流不得因 JSON 空白、键顺序或时间戳差异反复失效/重跑；模型限流不得冻结不依赖模型的本地阶段或独立分支。精确哈希保留给在途任务输入绑定、原件/媒体证明、音频一致性及上传冻结，不得用放宽安全边界制造假完成。 | `workflow/manifest.py` 规范化阶段产物签名；`workflow/stage_semantics.py`；`workflow/auto.py` 冷却隔离；根 `AGENTS.md` 硬规则 2；`CHANGELOG/2026-11-08-normalized-stage-fingerprints.md` |
 
+## 2026-11-08 卡点反馈必须标明具体批次（用户强调）
+
+- 原话要点：2014 年试卷本来已经跑完，但错误报告没有精准指到具体试卷，反馈后又把 2014 批次拉出来重跑；后续卡点必须指出具体批次。
+- 落地：`app/workflow/diagnose.py` 增加 `batch_name`，诊断摘要带批次名；`lib/client.js` 卡点条显示批次名，继续处理失败提示带批次名；根 `AGENTS.md` 硬规则 11。
+- 边界：只改善错误定位和反馈，不改变自动推进、重试、自愈或阶段规则；泛化反馈不得猜测目标批次。
+
 ## 2026-11-08 听力题不标语音知识点（用户强调）
 
 - 原话要点：听力关键词语选择题每道都冒出「单字母在单词中的语音变形」，
@@ -29,3 +35,4 @@
 - 落地：`app/references/type-knowledge-map.json` 的「听力关键词语选择」去掉 `语音` 维度，
   只留 `词汇 + 答案考点`；`app/skills-reference/type-knowledge-map.md` 同步。
 - 边界：`语音题` 仍标语音；其它题型未动。
+| 2026-11-08 | **重复来源不参与唯一性竞争**：同一份卷被重复提取的 PDF/OCR 附件副本（`material-roles.json` 中 `content_authority=false`）只作佐证，不得让逐字解析被判“来源不唯一”；权威原文内部同题两份不同解析仍算冲突。**卡点说明必须给出具体检查项与判定口径**，不能只写“按阻断项修复”。 | `workflow/upload_content.py` `reference_only_sources`；`workflow/diagnose.py` `CHECK_HINTS`；根 `AGENTS.md` 硬规则 2/4；`CHANGELOG/2026-11-08-explanation-reference-authority.md` |

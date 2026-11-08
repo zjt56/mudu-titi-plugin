@@ -33,7 +33,9 @@
 | 日期 | 记录 | 摘要 |
 |---|---|---|
 | 2026-11-08 | [2026-11-08-explanation-binding-fix.md](2026-11-08-explanation-binding-fix.md) | （中间方案，已被 direct-copy 取代）放宽解析严格来源校验的历史留痕 |
+| 2026-11-08 | [2026-11-08-explanation-reference-authority.md](2026-11-08-explanation-reference-authority.md) | 解析来源唯一性：PDF/OCR 副本不再与 Word 权威来源竞争；闸门诊断指明具体检查项 |
 | 2026-11-08 | [2026-11-08-normalized-stage-fingerprints.md](2026-11-08-normalized-stage-fingerprints.md) | 阶段复用用规范化输出签名，消除 JSON 序列化噪声导致的重跑；精确绑定与真实内容验收保留 |
+| 2026-11-08 | [2026-11-08-batch-specific-blocker-report.md](2026-11-08-batch-specific-blocker-report.md) | 卡点诊断和继续处理错误必须明确显示具体批次 |
 | 2026-11-08 | [2026-11-08-source-boundary-fix.md](2026-11-08-source-boundary-fix.md) | 来源结构按 source_span 审计选项，修复 18 项结构边界回归 |
 | 2026-11-08 | [2026-11-08-performance-cleanup.md](2026-11-08-performance-cleanup.md) | 低风险哈希提速、行内选项兼容与本地产物忽略 | 
 | 2026-11-08 | [2026-11-08-onboarding-wizard.md](2026-11-08-onboarding-wizard.md) | 新增「初始化引导」页：六项体检 + 听力模型一键安装/更新 |

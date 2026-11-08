@@ -75,6 +75,42 @@ def _key(record: dict) -> tuple:
             str(record.get("reason") or ""))
 
 
+def _current_label_row(batch_dir: Path, unit_id: str) -> dict | None:
+    """Read the current formal row used by the review UI, if available."""
+    for relative in ("06_batch/batch_meta.json", "06_batch/batch.json"):
+        path = Path(batch_dir) / relative
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError, UnicodeError):
+            continue
+        for row in payload.get("items", []) if isinstance(payload, dict) else []:
+            if isinstance(row, dict) and str(row.get("unit_id") or row.get("id") or "") == str(unit_id):
+                return row
+    return None
+
+
+def _stale_missing_label_finding(batch_dir: Path, finding: dict) -> bool:
+    """Reject an old blind-review false positive after labels were filled.
+
+    Blind review intentionally removes labels from its prompt. Older review
+    executions sometimes reported that redaction as a real missing-label issue.
+    Retire only that exact failure mode, and only when the current formal row
+    now has both a type and a non-empty knowledge label.
+    """
+    field = _norm_field(finding.get("field"))
+    reason = str(finding.get("reason") or "")
+    if field not in {"labels", "label", "knowledge"}:
+        return False
+    if "草稿" not in reason or ("为空" not in reason and "未完成标注" not in reason):
+        return False
+    row = _current_label_row(batch_dir, str(finding.get("unit_id") or ""))
+    if not isinstance(row, dict):
+        return False
+    has_type = bool(str(row.get("question_type") or row.get("type") or "").strip())
+    knowledge = row.get("knowledge")
+    return has_type and isinstance(knowledge, list) and bool(knowledge)
+
+
 def _round_identity(record: dict):
     """Only exact, bound observations establish cross-round identity."""
     sources = record.get("round_sources")
@@ -149,6 +185,19 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
         status = str(item.get("status", "")).strip().lower()
         return not item.get("decided_by") and status in ("", "open", "needs_review")
 
+    stale_missing_labels = [item for item in queue
+                            if _open(item) and _stale_missing_label_finding(batch_dir, item)]
+    if stale_missing_labels:
+        archive_path = review_dir / "retired-round-findings.json"
+        archive = _load(archive_path) or {"records": []}
+        records = archive.setdefault("records", [])
+        for item in stale_missing_labels:
+            retired = dict(item, retired_reason="旧盲审把脱敏后的空标签误报为缺失；当前正式批次标签已完整")
+            if retired not in records:
+                records.append(retired)
+        _write_json(archive_path, archive)
+        queue = [item for item in queue if item not in stale_missing_labels]
+
     if current_binding:
         for name in existing:
             existing[name] = [r for r in existing[name] if not _superseded(r)]
@@ -202,7 +251,8 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
     queue_by_id = {item.get("finding_id"): item for item in queue}
     index = _next_index(records + queue)
 
-    findings = list(result.get("findings") or [])
+    findings = [finding for finding in (result.get("findings") or [])
+                if not _stale_missing_label_finding(batch_dir, finding)]
     if "review_rounds" in result:
         rounds = review.evaluate_rounds(batch_dir, result["review_rounds"])
         if rounds["unchecked"]:
