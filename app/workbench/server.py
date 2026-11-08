@@ -210,32 +210,30 @@ def source_lines(folder):
 def source_blocks(lines):
     blocks = []
     table = None
-    pending_images = []
+    table_images = []
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("[TABLE"):
             table = []
+            table_images = []
             continue
         if stripped.startswith("[/TABLE]"):
             if table is not None:
-                blocks.append({"type": "table", "rows": table})
+                # table_images 与 rows 按行对齐；每行可有 0..N 张图片。
+                blocks.append({"type": "table", "rows": table, "rowImages": table_images})
                 table = None
-            # 表格单元格内的图片紧跟在表格之后渲染，保持原有阅读顺序。
-            blocks.extend(pending_images)
-            pending_images = []
+                table_images = []
             continue
         if table is not None:
             # 表格单元格里也可能嵌图片（如 `[IMG image10.jpeg]<br>Weather`）。
-            # 图片必须先抽成独立图块，否则会被当作单元格文本，正文里就看不到图。
-            cell_images = []
-            for match in re.finditer(r"\[IMG\s+([^\]]+)\]", line):
-                cell_images.append({"type": "image", "name": Path(match.group(1).strip()).name})
-            cells = [cell.strip() for cell in re.sub(r"\[IMG\s+[^\]]+\]", "", line).split("|")]
-            if any(cells):
+            # 每一行的图片必须留在该行内渲染（不能移到表格外），否则位置错乱。
+            row_images = [Path(m.group(1).strip()).name
+                          for m in re.finditer(r"\[IMG\s+([^\]]+)\]", line)]
+            cleaned = re.sub(r"\[IMG\s+[^\]]+\]", "", line)
+            cells = [cell.strip() for cell in cleaned.split("|")]
+            if any(cells) or row_images:
                 table.append(cells)
-            if cell_images:
-                # 表格结束后按原顺序追加图块，保证图片仍在本单元材料内可预览。
-                pending_images.extend(cell_images)
+                table_images.append(row_images)
             continue
         cursor = 0
         for match in re.finditer(r"\[IMG\s+([^\]]+)\]", line):
@@ -252,11 +250,22 @@ def source_blocks(lines):
 
 def attach_media(blocks, folder, name):
     media_root = (folder / "01_source" / "media").resolve()
+
+    def media_url(image_name):
+        target = (media_root / image_name).resolve()
+        ok = target.parent == media_root and target.is_file()
+        return f"/api/batches/{name}/media/{image_name}" if ok else None
+
     for block in blocks:
-        if block.get("type") != "image":
+        if block.get("type") == "image":
+            block["url"] = media_url(block["name"])
             continue
-        target = (media_root / block["name"]).resolve()
-        block["url"] = f"/api/batches/{name}/media/{block['name']}" if target.parent == media_root and target.is_file() else None
+        if block.get("type") == "table":
+            row_images = block.get("rowImages") or []
+            block["rowImages"] = [
+                [{"name": image_name, "url": media_url(image_name)} for image_name in row]
+                for row in row_images
+            ]
     return blocks
 
 
