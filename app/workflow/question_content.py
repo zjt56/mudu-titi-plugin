@@ -271,9 +271,20 @@ def option_block_start(lines: list[str]) -> tuple[int, int] | None:
     return None
 
 
-def audit_source_unit(unit: dict) -> dict:
-    """Check every source child and option block, rather than trusting counts alone."""
+def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict:
+    """Check every source child and option block, rather than trusting counts alone.
+
+    Confirmed structure keeps options in ``source_parts`` instead of copying them
+    into the formal ``stem``. When the original cleaned lines are available, use
+    the unit's proven source span for auditing only; the stored structure shape
+    remains unchanged.
+    """
     lines = str(unit.get("stem") or "").splitlines()
+    span = unit.get("source_span") or {}
+    start, end = span.get("start_line"), span.get("end_line")
+    if (isinstance(source_lines, list) and type(start) is int and type(end) is int
+            and 1 <= start <= end <= len(source_lines)):
+        lines = source_lines[start - 1:end]
     numbers = unit.get("numbers") or []
     parts = {n: question_parts(lines, n) for n in numbers}
     issues = []
@@ -636,7 +647,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     """
     from . import denoise, structure_gate
     from .extract import _plain, material_label
-    from .preview import _strong_number, BARE_OPTION
+    from .preview import _strong_number, BARE_OPTION, SECTION
     root = Path(batch_dir)
     source = (root / "01_source/正文.txt").read_text(encoding="utf-8-sig")
     structure = json.loads((root / "01_source/structure.json").read_text(encoding="utf-8-sig"))
@@ -676,6 +687,8 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
         material = []
         located = option_block_start(unit["stem"].splitlines())
         for index, line in enumerate(unit["stem"].splitlines()):
+            if SECTION.match(_plain(line)):
+                continue
             if _strong_number(line) is not None:
                 break
             if located is not None and index == located[0]:
@@ -710,6 +723,8 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                 preserved = [_canonical(x) for x in re.findall(r"<u>(.*?)</u>", candidate_body, flags=re.S)]
                 if _canonical(marked) not in preserved:
                     issue("SOURCE_UNDERLINE_MISSING", "原卷实词下划线未保留：" + marked[:80], uid)
+        # Keep final batch material semantics based on the confirmed unit stem;
+        # structure-gate performs the separate raw-span option audit.
         source_audit = audit_source_unit(unit)
 
         def check_images(required, present, number=None, label=""):

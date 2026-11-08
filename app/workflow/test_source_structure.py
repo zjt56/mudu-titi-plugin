@@ -50,8 +50,13 @@ class SourceBoundaryRegressionTest(unittest.TestCase):
 
     def candidate(self, units):
         items = []
+        source_lines = (self.root / "01_source/正文.txt").read_text(encoding="utf-8").splitlines()
         for index, unit in enumerate(units):
-            lines = unit["stem"].splitlines()
+            span = unit.get("source_span") or {}
+            if type(span.get("start_line")) is int and type(span.get("end_line")) is int:
+                lines = source_lines[span["start_line"] - 1:span["end_line"]]
+            else:
+                lines = unit["stem"].splitlines()
             material = []
             from workflow.preview import _strong_number
             for line in lines:
@@ -77,8 +82,10 @@ class SourceBoundaryRegressionTest(unittest.TestCase):
         self.assertTrue(report["passed"], report["blockers"])
         self.assertEqual([u["numbers"] for u in confirmed["units"]], [list(range(31, 41)), list(range(41, 51))])
         for unit, last in zip(confirmed["units"], [40, 50]):
-            self.assertIn(f"D.fourth{last}", unit["stem"])
-            self.assertEqual(len(audit_source_unit(unit)["questions"][last]["options"]), 4)
+            span = unit["source_span"]
+            source_lines = body.splitlines()[span["start_line"] - 1:span["end_line"]]
+            self.assertTrue(any(f"D.fourth{last}" in line for line in source_lines))
+            self.assertEqual(len(question_parts(source_lines, last)["options"]), 4)
         self.assertNotIn("Passage B", confirmed["units"][0]["stem"])
         candidate = self.candidate(confirmed["units"])
         self.assertTrue(audit_batch_source(root, candidate)["passed"])
@@ -297,8 +304,13 @@ class SourceBoundaryRegressionTest(unittest.TestCase):
         text = extract_docx(source, self.root / "native")["text"]
         _, report, confirmed = self.make_batch(text)
         self.assertTrue(report["passed"], report["blockers"])
-        self.assertIn("D.fourth", confirmed["units"][0]["stem"])
-        self.assertEqual(len(question_parts(confirmed["units"][0]["stem"].splitlines(), 40)["options"]), 4)
+        unit = confirmed["units"][0]
+        # 选项属于 source_parts 的独立证据，不应强行拼进正式 stem；
+        # 审计会按 source_span 读取原文，正式批次再写入 options。
+        span = unit["source_span"]
+        source_lines = text.splitlines()[span["start_line"] - 1:span["end_line"]]
+        self.assertTrue(any("D.fourth" in line for line in source_lines))
+        self.assertEqual(len(question_parts(source_lines, 40)["options"]), 4)
 
 
     def test_ampersand_inside_option_text_is_not_a_new_option_label(self):

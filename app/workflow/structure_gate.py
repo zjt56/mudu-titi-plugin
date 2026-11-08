@@ -573,7 +573,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     for unit in units:
         if not unit["stem"].strip():
             content_problems.append({"code": "SOURCE_UNIT_EMPTY", "message": f"源头单元 {unit['numbers']} 内容为空"})
-        content_problems.extend(audit_source_unit(unit)["issues"])
+        content_problems.extend(audit_source_unit(unit, source_lines)["issues"])
     # 听力稿可能只有材料；题干/选项由模型从其他材料合并。
     if model_structure_only:
         for problem in content_problems:
