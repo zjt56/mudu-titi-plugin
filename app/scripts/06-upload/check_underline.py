@@ -8,7 +8,8 @@
 E16：语音辨音选项 / 音标词表 / 划线提问短语，原文该画线的词必须写成 <u>…</u>。
      依据原文明确 <u> 标记或问句明确提到 underlined word/phrase；普通引号不代表画线。
      信息转换/完形空位应为 <u>　N　</u> 或 __N__。
-E19：书面表达题干不得含下划线占位 <u>　　</u> 或连续 ______（答题线由前端画）。
+E19：书面表达题干不宜含下划线占位 <u>　　</u> 或连续 ______（答题线由前端画）。
+     这属于格式小问题：以 [W19] 输出为提示，不阻断流程（题目/题干/题号对不上才是实质错误）。
 """
 from __future__ import annotations
 
@@ -67,21 +68,22 @@ def _check_unit(u):
             around = material[max(0, m.start() - 6): m.end() + 6]
             if "<u>" in around and "</u>" in around:
                 continue
-            problems.append(f"[E16] 空位未画线: {uid}（材料「{m.group(0)!r}」应为 <u>　N　</u> 或 __N__）")
+            problems.append(f"[W16] 空位未画线（提示，不阻断）: {uid}"
+                            f"（材料「{m.group(0)!r}」建议 <u>　N　</u> 或 __N__）")
 
     # E19：书面表达题干不得含下划线占位 / 连续下划线
     if qt == "书面表达":
         if E19_U_PLACEHOLDER.search(stem):
-            problems.append(f"[E19] 书面表达题干含下划线占位: {uid}（<u>　　</u> 应删除，答题线由前端画）")
+            problems.append(f"[W19] 书面表达题干含下划线占位（不阻断）: {uid}（<u>　　</u> 建议删除，答题线由前端画）")
         if E19_LONG_UNDERLINE.search(stem):
-            problems.append(f"[E19] 书面表达题干含连续下划线: {uid}（_____ 应删除，答题线由前端画）")
+            problems.append(f"[W19] 书面表达题干含连续下划线（不阻断）: {uid}（_____ 建议删除，答题线由前端画）")
 
         # 子题也检查（若有）
         for c in (u.get("subquestions") or []):
             cstem = str(c.get("stem") or "")
             cn = c.get("number")
             if E19_U_PLACEHOLDER.search(cstem) or E19_LONG_UNDERLINE.search(cstem):
-                problems.append(f"[E19] 书面表达子题 {cn} 题干含答题下划线: {uid}（应删除）")
+                problems.append(f"[W19] 书面表达子题 {cn} 题干含答题下划线（不阻断）: {uid}（建议删除）")
 
     return problems
 

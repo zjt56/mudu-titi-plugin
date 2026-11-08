@@ -41,13 +41,35 @@ def arg_parser(desc):
     return ap
 
 
-def report(problems, ok_msg="通过"):
+# 小问题标记：以 [W 开头的行只是可修可不修的格式/标点/画线类提示，
+# “题目、题干、题号对不上”这类实质错误才用 [E 开头并阻断。
+SOFT_MARKERS = ("[W", "[INFO]", "[提示]", "[PREF]")
+
+
+def _is_soft(line):
+    text = str(line).strip()
+    return text.startswith(SOFT_MARKERS)
+
+
+def report(problems, ok_msg="通过", *, soft_default=False):
+    """打印检查结果并按退出码表示是否阻断。
+
+    soft_default=True：本检查只报告格式类问题，任何 findings 都只提示、不阻断。
+    否则以 [W 开头的软提示不阻断，其余（[E / [B / [格式] / [ERROR）仍阻断。
+    """
     for p in problems:
         print(p)
-    if problems:
-        print(f"[FAIL] {len(problems)} 条问题", file=sys.stderr)
+    if soft_default:
+        soft, blocking = list(problems), []
+    else:
+        soft = [p for p in problems if _is_soft(p)]
+        blocking = [p for p in problems if not _is_soft(p)]
+    if soft:
+        print(f"[WARN] {len(soft)} 条格式提示（不阻断流程）", file=sys.stderr)
+    if blocking:
+        print(f"[FAIL] {len(blocking)} 条问题", file=sys.stderr)
         return 1
-    print(f"[OK] {ok_msg}")
+    print(f"[OK] {ok_msg}" + (f"（{len(soft)} 条格式提示不阻断）" if soft else ""))
     return 0
 
 

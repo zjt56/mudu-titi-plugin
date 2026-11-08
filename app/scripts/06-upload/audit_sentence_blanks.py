@@ -62,7 +62,7 @@ def main(argv=None):
                 f"{label}: 完成句子空档数 {blanks} ≠ 答案词数 {words}"
                 f"（answer={answer!r}，C14 一词一空）")
 
-    return report(problems, ok_msg="完成句子空档检查通过（无完成句子题或均匹配）")
+    return report(problems, ok_msg="完成句子空档检查通过（无完成句子题或均匹配）", soft_default=True)
 
 
 if __name__ == "__main__":

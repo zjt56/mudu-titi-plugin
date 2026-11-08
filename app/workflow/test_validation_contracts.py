@@ -69,11 +69,14 @@ class ValidationContractsTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('UNDERLINE_MAPPING_MISSING', output)
 
-    def test_writing_placeholders_and_unmarked_blanks_still_fail(self):
+    def test_writing_placeholders_and_unmarked_blanks_are_soft_hints(self):
+        # 用户规则（2026-11-08）：下划线/空档写法属格式小问题，只提示不阻断；
+        # 只有题目/题干/题号对不上这类实质错误才阻断。
         for row in ({'id': 'essay', 'question_type': '书面表达', 'stem': 'Write here ______'},
                     {'id': 'cloze', 'question_type': '完形填空', 'material': 'Fill　31　here.'}):
             code, output = self.run_script(underline, [row])
-            self.assertEqual(code, 1, output)
+            self.assertEqual(code, 0, output)
+            self.assertIn('[W', output)
 
     def test_underline_check_receives_source_without_becoming_skippable(self):
         check = next(c for c in checks.CHECKS if c.script.endswith('/check_underline.py'))

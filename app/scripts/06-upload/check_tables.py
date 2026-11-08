@@ -93,9 +93,9 @@ def _check_rectangular(unit, block, idx, problems):
                 cursor += 1
             columns = set(range(cursor, cursor + colspan))
             if columns.intersection(occupied):
-                problems.append(f"{unit.get('unit_id')}: 第{idx + 1}张表 第{r + 1}行合并单元格重叠")
+                problems.append(f"[W] {unit.get('unit_id')}: 第{idx + 1}张表 第{r + 1}行合并单元格重叠（提示，不阻断）")
             if r + rowspan > len(rows):
-                problems.append(f"{unit.get('unit_id')}: 第{idx + 1}张表 第{r + 1}行 rowspan 超出实际表格")
+                problems.append(f"[W] {unit.get('unit_id')}: 第{idx + 1}张表 第{r + 1}行 rowspan 超出实际表格（提示，不阻断）")
             occupied.update(columns)
             for column in columns:
                 active_until[column] = r + rowspan
@@ -108,7 +108,7 @@ def _check_rectangular(unit, block, idx, problems):
     body = widths[1:] if len(widths) > 1 else widths
     if len(set(body)) > 1:
         problems.append(
-            f"{unit.get('unit_id')}: 第{idx + 1}张表不是矩形，各行逻辑列数不一致 {widths}")
+            f"[W] {unit.get('unit_id')}: 第{idx + 1}张表各行列数不一致 {widths}（提示，不阻断）")
 
 
 def _check_cell_blanks(unit, block, idx, problems):
@@ -125,12 +125,12 @@ def _check_cell_blanks(unit, block, idx, problems):
                 continue
             if _FULLWIDTH_BLANK.search(text):
                 problems.append(
-                    f"{unit.get('unit_id')}: 第{idx + 1}张表 第{r + 1}行第{c + 1}列 "
-                    f"使用全角空档（E10），应写成 __N__：{text!r}")
+                    f"[W10] {unit.get('unit_id')}: 第{idx + 1}张表 第{r + 1}行第{c + 1}列 "
+                    f"使用全角空档，建议写成 __N__（提示，不阻断）：{text!r}")
             if _SPACED_UNDERSCORE.search(text):
                 problems.append(
-                    f"{unit.get('unit_id')}: 第{idx + 1}张表 第{r + 1}行第{c + 1}列 "
-                    f"空档含空格（E10），应写成 __N__：{text!r}")
+                    f"[W10] {unit.get('unit_id')}: 第{idx + 1}张表 第{r + 1}行第{c + 1}列 "
+                    f"空档含空格，建议写成 __N__（提示，不阻断）：{text!r}")
 
 
 def _collect_blank_numbers(block):
@@ -161,8 +161,8 @@ def _check_information_conversion(unit, block, idx, problems):
     variant = _block_variant(block, unit)
     if variant != "information-conversion":
         problems.append(
-            f"{uid}: 信息转换(听力信息转换)表格 variant 应为 information-conversion，"
-            f"实为 {variant!r}（E9）")
+            f"[W9] {uid}: 信息转换表格 variant 建议为 information-conversion，"
+            f"实为 {variant!r}（提示，不阻断）")
 
     sub_numbers = []
     for sub in unit.get("subquestions") or []:
@@ -176,9 +176,9 @@ def _check_information_conversion(unit, block, idx, problems):
     for n in sub_numbers:
         cnt = seen.get(n, 0)
         if cnt == 0:
-            problems.append(f"{uid}: 子题号 __{n}__ 未在信息转换表格中出现（E9）")
+            problems.append(f"[W9] {uid}: 子题号 __{n}__ 未在信息转换表格中出现（提示，不阻断）")
         elif cnt > 1:
-            problems.append(f"{uid}: 子题号 __{n}__ 在表格中出现 {cnt} 次（应仅一次，E9）")
+            problems.append(f"[W9] {uid}: 子题号 __{n}__ 在表格中出现 {cnt} 次，建议仅一次（提示，不阻断）")
 
 
 def main(argv=None):

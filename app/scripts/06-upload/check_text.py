@@ -54,18 +54,19 @@ def _check_unit(unit, child):
 
         # B1/B2：U+3000 连续空档
         for _m in U3000_RUN.finditer(text):
-            problems.append(f"U+3000空档: {uid}（{loc} {field}）")
+            problems.append(f"[W] U+3000空档（提示，不阻断）: {uid}（{loc} {field}）")
             break  # 同一字段只报一次，避免刷屏
 
         # B10：<br>
         if BR.search(text):
-            problems.append(f"[B10] <br>换行: {loc}（{field} 应使用真实换行 \\n）")
+            problems.append(f"[W] <br>换行（提示，不阻断）: {loc}（{field} 建议使用真实换行）")
 
         # B4/B9：首字母与空档被空格隔开，且后面有中文提示括号
         m = LOOSE_INITIAL.search(text)
         if m:
             problems.append(
-                f"[B4] 首字母提示未紧贴空档: {loc}（{field}「{m.group(1)} {m.group(2)}」应为「{m.group(1)}{m.group(2)}」）"
+                f"[W] 首字母提示未紧贴空档: {loc}（提示，不阻断）"
+                f"（{field}「{m.group(1)} {m.group(2)}」建议「{m.group(1)}{m.group(2)}」）"
             )
 
     return problems

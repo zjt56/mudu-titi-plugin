@@ -27,12 +27,19 @@ CHECKS: tuple[Check, ...] = (
     Check("目录与匹配规则 label_audit", "workflow/label_audit.py"),
     Check("排版 check_text", "scripts/06-upload/check_text.py", blocking=False,
           note="只报告，不阻断"),
-    Check("空档 audit_underlines", "scripts/06-upload/audit_underlines.py"),
-    Check("画线 check_underline", "scripts/06-upload/check_underline.py"),
-    Check("表格 check_tables", "scripts/06-upload/check_tables.py"),
+    # 画线/空档/表格属格式表达问题（下划线、全角空档、表格列数），脚本内以
+    # [W… 提示输出；这里再兜底为不阻断，避免格式小问题卡住整卷流程。
+    # 题目/题干/题号对不上等实质错误仍由结构、答案、来源审计等阻断项拦截。
+    Check("空档 audit_underlines", "scripts/06-upload/audit_underlines.py", blocking=False,
+          note="格式类提示，不阻断"),
+    Check("画线 check_underline", "scripts/06-upload/check_underline.py", blocking=False,
+          note="画线/下划线属格式提示，不阻断"),
+    Check("表格 check_tables", "scripts/06-upload/check_tables.py", blocking=False,
+          note="表格列数/空档写法属格式提示，不阻断"),
     Check("题型版面 audit_type_layout", "scripts/06-upload/audit_type_layout.py"),
     Check("批次完整性 audit_batch_integrity", "scripts/06-upload/audit_batch_integrity.py"),
-    Check("完成句子 audit_sentence_blanks", "scripts/06-upload/audit_sentence_blanks.py"),
+    Check("完成句子 audit_sentence_blanks", "scripts/06-upload/audit_sentence_blanks.py",
+          blocking=False, note="空档写法属格式提示，不阻断"),
     Check("结构 check_structure", "scripts/06-upload/check_structure.py"),
     Check("标签 check_tags", "scripts/04-knowledge/check_tags.py"),
     Check("题型标签 audit_type_tags", "scripts/06-upload/audit_type_tags.py"),
