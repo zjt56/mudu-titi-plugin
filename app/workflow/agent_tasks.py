@@ -865,6 +865,9 @@ def _normalize_blank_text(text):
     带题号的空档（如 <u>　26　</u> 或 　26　）→ __26__；纯空档 → ______。"""
     if not isinstance(text, str):
         return text
+    # 原卷 docx 提取用 <br> 表示表格单元格内换行；入库文本必须用真实换行（约束 B10），
+    # 装配回填题干/材料时统一转换，避免把 HTML 标记带进题库。
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
     # 带题号的空档（表格/信息转换）：<u>　26　</u>、<u> 26 </u>、　26　 → __26__
     text = re.sub(r"<u>\s*[\u3000\s]*(\d{1,3})[\u3000\s]*\s*</u>", r"__\1__", text)
     text = re.sub(r"\u3000\s*(\d{1,3})\s*\u3000", r"__\1__", text)

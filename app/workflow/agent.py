@@ -334,7 +334,10 @@ def _audio_evidence_ready(batch_dir) -> bool:
         if len(payload["items"]) != len(items):
             return False
         context, _, missing, units = agent_tasks._collect(batch, "audio")
-        if missing or context.get('02_audio/segment-evidence.json') != document:
+        # 上下文里的 evidence 已做过脱敏（绝对路径→[host-path-redacted]），
+        # 直接和磁盘原文件比较会永远不相等，导致切段快路永远被判“证据不足”。
+        # 比较前对原文件做同样脱敏，确保比较的是同一口径。
+        if missing or context.get('02_audio/segment-evidence.json') != agent_tasks._sanitized(document):
             return False
         agent_tasks._validate(batch, "audio", payload, context, units)
     except (OSError, ValueError, KeyError, TypeError):

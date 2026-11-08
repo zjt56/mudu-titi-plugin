@@ -34,6 +34,7 @@
 |---|---|---|
 | 2026-11-08 | [2026-11-08-explanation-binding-fix.md](2026-11-08-explanation-binding-fix.md) | （中间方案，已被 direct-copy 取代）放宽解析严格来源校验的历史留痕 |
 | 2026-11-08 | [2026-11-08-normalized-stage-fingerprints.md](2026-11-08-normalized-stage-fingerprints.md) | 阶段复用用规范化输出签名，消除 JSON 序列化噪声导致的重跑；精确绑定与真实内容验收保留 |
+| 2026-11-08 | [2026-11-08-audio-fastpath-and-br-newline.md](2026-11-08-audio-fastpath-and-br-newline.md) | 修复听力切段快路脱敏误判、装配 `<br>` 换行被 B10 拦 |
 | 2026-11-08 | [2026-11-08-whole-paper-single-pass.md](2026-11-08-whole-paper-single-pass.md) | 标注阶段改为整卷一次分析（不再一题一片），提示词瘦身，knowledge 209→69s、explanations 296→80s |
 | 2026-11-08 | [2026-11-08-simplify-hash-checks.md](2026-11-08-simplify-hash-checks.md) | 简化哈希/过期校验让流程逐步填充、不再反复卡；题号/答案/格式正确性关卡保留 |
 | 2026-11-08 | [2026-11-08-relax-strict-handoff.md](2026-11-08-relax-strict-handoff.md) | 移除逐交接点严格校验与语义指纹，改为轻量哈希+末次整体验收，解决反复卡顿 |
