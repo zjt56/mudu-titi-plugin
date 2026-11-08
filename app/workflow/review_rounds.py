@@ -21,7 +21,7 @@ from .local_agent import _agent_lock, _check_input_hashes, invoke, load_config
 # Bumped whenever the prompt builder or blind context changes, so stale
 # partition states and bindings are never reused silently.
 CONTEXT_VERSION = "blind-context-v11"
-PROMPT_VERSION = "review-prompt-v9"
+PROMPT_VERSION = "review-prompt-v10"
 
 
 ARTIFACT = "review_round"
@@ -160,9 +160,13 @@ def _round_prompt(round_id, targets, context):
         "An issue in one target must not stop reviewing the remaining targets. Knowledge review focuses on label semantics; distinguish a proposed label change from missing image/audio evidence and from answer/content defects. "
         "For listening, read the COMPLETE relevant dialogue in 02_audio/full-transcript.json, including the response, not just the first question or audio-map preview sentence. A transcript is text evidence, not proof of hearing audio. Never infer a contradiction from a question alone when its response resolves it. "
         "Do not claim images were seen from placeholders or audio heard from a transcript; record specific limitations without inventing mismatches. "
-        "审核对象是最终批次 06_batch/batch_meta.json 的字段；字段为空才可报告缺失，"
-        "不得因预组装草稿、占位值或模板文本为空而提出差异或 uncertain。"
-        "提出题型/知识点差异前，必须先引用最终批次中的当前值作为对照。 "
+        "【盲审字段隐藏契约】提供的最终批次和结构是去标签的只读视图："
+        "type/question_type、subtypes、knowledge 及其 ID、filterMetadata 已被程序刻意隐藏。"
+        "未提供这些字段不代表正式批次标签缺失或为空，严禁因此报告 error/uncertain 或补齐标签要求。"
+        "只需依据可见题文、答案、解析独立填写 assessment；程序负责与原标签比较，"
+        "不得引用、猜测或要求查看已隐藏的当前标签值。"
+        "verdict 只描述可见题面、答案、解析的实质问题或无法独立判断的具体原因；"
+        "能独立判定且未发现实质问题时填 ok，即使 assessment 最终与原标签不同，程序仍会保留该真实差异。 "
         "status=completed means this round was executed, even if it found errors. Missing review evidence => needs_review; never clear it.\n"
         + "ROUND: " + round_id + "\n" + instruction
         + _agent_roles().section("review", "07_review/agent-review.json", round_id)

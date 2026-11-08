@@ -85,6 +85,54 @@ class ConsensusTest(unittest.TestCase):
         self.assertTrue(result['passed'], result['errors'])
         self.assertEqual(result['findings'], [])
 
+    def test_hidden_label_absence_requires_targeted_repair_not_fake_agreement(self):
+        for rid in review.ROUND_IDS:
+            payload = self.payload()
+            record = next(r for r in payload['rounds'] if r['round_id'] == rid)
+            check = record['checks'][0]
+            check['verdict'] = 'error'
+            check['rationale'] = '最终批次组级条目未见 type、subtypes、knowledge 字段，组级标签缺失。'
+            if rid == 'sample':
+                check['number'] = None
+            original = copy.deepcopy(check)
+            valid, failed = review_rounds._partition_check_issues(
+                review, self.plan, rid, [check], self.batch)
+            self.assertEqual(valid, [])
+            self.assertEqual(failed[0]['unit_id'], 'g')
+            self.assertIn('BLIND_LABEL_ABSENCE', failed[0]['reason'])
+            self.assertEqual(check, original)  # no fabricated ok / changed evidence
+
+    def test_absence_in_issue_or_sample_comparison_also_requires_repair(self):
+        for field in ('issue_key', 'resolution_key', 'source_comparison'):
+            check = self.payload()['rounds'][1]['checks'][0]
+            check['verdict'] = 'uncertain'
+            if field == 'source_comparison':
+                check['assessment'][field] = '最终 knowledge 字段缺失'
+            else:
+                check[field] = '最终知识点标签缺失，请补齐。'
+            with self.assertRaisesRegex(review.RoundCheckError, 'BLIND_LABEL_ABSENCE'):
+                review._reject_blind_label_absence(check)
+
+    def test_real_missing_content_and_negated_label_absence_are_not_repair_errors(self):
+        for text in ('知识点一致，但答案缺失。', '原文缺失，无法判断知识点。',
+                     '知识点并非缺失，但答案错误。', '知识点未缺失，答案与原文不符。',
+                     '未发现标签缺失，答案与原文冲突。',
+                     '子题 knowledge 为空符合协议，但答案错误。'):
+            check = {'verdict': 'error', 'rationale': text}
+            review._reject_blind_label_absence(check)
+
+    @patch.object(review, '_verify_round_sources', return_value=None)
+    def test_matching_labels_do_not_hide_real_answer_or_source_errors(self, _verify_sources):
+        for rid in review.ROUND_IDS:
+            payload = self.payload()
+            check = next(r for r in payload['rounds'] if r['round_id'] == rid)['checks'][0]
+            check['verdict'] = 'error'
+            check['rationale'] = '原文明确写读书，但正式答案为 B，答案与原文不一致。'
+            result = review.evaluate_rounds(self.batch, payload)
+            self.assertTrue(result['execution_completed'], result['errors'])
+            self.assertFalse(result['passed'])
+            self.assertTrue(any(f['field'] == rid for f in result['findings']))
+
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_extra_knowledge_dimension_is_a_difference(self, _verify_sources):
         # 只要知识点集合与原标签不完全相同（含多打/少打一个维度），就是差异，必须进人工。

@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-08 | [2026-11-08-blind-review-label-absence.md](2026-11-08-blind-review-label-absence.md) | 修复盲审隐藏标签被误判缺失；无依据结论自动局部补审、2015 卷重建队列并保留真实差异 |
 | 2026-11-08 | [2026-11-08-explanation-binding-fix.md](2026-11-08-explanation-binding-fix.md) | （中间方案，已被 direct-copy 取代）放宽解析严格来源校验的历史留痕 |
 | 2026-11-08 | [2026-11-08-format-hints-not-blocking.md](2026-11-08-format-hints-not-blocking.md) | 格式小问题（下划线/空档/表格写法）只提示不阻断；题号题干对不上等实质错误仍阻断 |
 | 2026-11-08 | [2026-11-08-review-difference-kept.md](2026-11-08-review-difference-kept.md) | 更正：一审/二审与原标签不一致必须待审核；移除把真实差异当“过期结论”的过滤 |

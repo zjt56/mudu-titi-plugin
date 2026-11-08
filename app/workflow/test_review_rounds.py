@@ -98,6 +98,11 @@ class ReviewRoundsTest(unittest.TestCase):
             for evidence in ('She reads a book.', 'answer-evidence', 'shared-evidence',
                              'assembled-evidence', 'complete-dialogue-evidence'):
                 self.assertIn(evidence, text)
+            prompt = review_rounds._round_prompt(rid, [], text)
+            self.assertIn('被程序刻意隐藏', prompt)
+            self.assertIn('程序负责与原标签比较', prompt)
+            self.assertNotIn('必须先引用最终批次中的当前值', prompt)
+            self.assertNotIn('字段为空才可报告缺失', prompt)
             data = json.loads(text.split('\n', 1)[1])
             self.assertEqual(data['references/knowledge-catalog.json'],
                              json.loads((Path(review.__file__).resolve().parents[1] / 'references/knowledge-catalog.json').read_text()))
@@ -416,6 +421,30 @@ class ReviewRoundsTest(unittest.TestCase):
             report = review_rounds._repair_round(self.batch, first['task_id'], {'provider': 'fixture'})
         self.assertEqual(report.get('part_completed'), 1)
         self.assertEqual(report.get('action'), 'continue')
+
+    def test_hidden_labels_trigger_real_local_repair_and_keep_other_checks(self):
+        self._parallel_batch()
+        first = review_rounds.export_task(self.batch, max_units_per_part=2)
+        task = json.loads((Path(first['package_dir']) / 'task.json').read_text())
+        response = self._part_response(task['prompt'], 'labels')
+        checks = response['artifacts']['review_round']['checks']
+        checks[0].update(verdict='error', rationale='最终条目未见 type、subtypes、knowledge 字段。')
+        failed_uid = checks[0]['unit_id']
+        unaffected = copy.deepcopy(checks[1:])
+        with self.assertRaisesRegex(review.RoundCheckError, 'BLIND_LABEL_ABSENCE'):
+            review_rounds.import_result(self.batch, first['task_id'], response)
+        partial = json.loads((self.batch / 'workflow/review-partial' / (first['task_id'] + '.json')).read_text())
+        self.assertEqual(partial['valid_checks'], unaffected)
+        invoked = []
+        def repair(prompt, run_dir, config, permit_parallel=False):
+            fixed = self._part_response(prompt, 'labels')
+            invoked.extend(c['unit_id'] for c in fixed['artifacts']['review_round']['checks'])
+            self.assertIn('BLIND_LABEL_ABSENCE', prompt)
+            return {'response': fixed}
+        with patch.object(review_rounds, 'invoke', side_effect=repair):
+            report = review_rounds._repair_round(self.batch, first['task_id'], {'provider': 'fixture'})
+        self.assertEqual(invoked, [failed_uid])
+        self.assertEqual(report.get('part_completed'), 1)
 
     def test_parallel_parts_overlap_and_complete_in_order(self):
         self._parallel_batch()

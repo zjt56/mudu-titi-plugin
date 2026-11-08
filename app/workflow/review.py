@@ -996,6 +996,42 @@ def _normalize_result_quotes(batch, result):
     return out
 
 
+def _reject_blind_label_absence(check):
+    """A redacted label is not evidence of missing data: request a fresh judgment.
+
+    Do not turn a non-ok verdict into ok or discard a semantic finding. Invalid
+    claims go through the existing per-target repair path; the original response
+    remains evidence and unaffected targets can still be reused.
+    """
+    if check.get("verdict") == "ok":
+        return
+    label = r"(?:\b(?:type|question_type|subtypes|knowledge|filterMetadata)\b|标签|题型|知识点|子类)"
+    absent = r"(?:未见|缺失|缺少|未提供|未填写|未完成标注|为空|不存在|未包含)"
+    # Match a label field/list directly, not arbitrary nearby prose such as
+    # “知识点一致，但答案缺失” or “原文缺失，无法判断知识点”. Negated
+    # absence claims (知识点并非缺失) must not trigger repair either.
+    separator = r"(?:[\s、,，/与和及`'\"：:（）()\[\]]|字段|标注|组级|的|ID)"
+    fields = rf"{label}(?:{separator}|{label})*"
+    pattern = rf"(?:{fields}{absent}|{absent}(?:{separator})*{label})"
+    assessment = check.get("assessment")
+    claims = [check.get("rationale"), check.get("issue_key"), check.get("resolution_key")]
+    if isinstance(assessment, dict):
+        claims.append(assessment.get("source_comparison"))
+    for text in claims:
+        text = str(text or "")
+        for match in re.finditer(pattern, text, flags=re.I):
+            if re.search(r"(?:未发现|没有|并无|并非|不是|不代表|不意味着)(?:任何)?\s*$",
+                         text[:match.start()]):
+                continue
+            if re.match(r"(?:符合(?:协议|规则)|是合规|合规|是允许)", text[match.end():]):
+                continue
+            raise RoundCheckError(
+                "BLIND_LABEL_ABSENCE: 盲审中的 type/question_type、subtypes、knowledge、"
+                "filterMetadata 被刻意隐藏，不能据此断言正式标签缺失。请重新独立判断 assessment；"
+                "仅报告可见题文/答案/解析的实质问题，标签差异由程序比较。",
+                [{"unit_id": check.get("unit_id"), "number": check.get("number")}])
+
+
 def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage=False):
     """收集每轮逐题判断，把与原标注的差异/问题转成人工 finding。
 
@@ -1043,6 +1079,7 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             raise ValueError("Every target needs a valid verdict")
         if not isinstance(check.get("rationale"), str) or not check["rationale"].strip():
             raise ValueError("Every target needs a review rationale")
+        _reject_blind_label_absence(check)
         evidence = check.get("evidence")
         if not isinstance(evidence, list) or not evidence:
             raise ValueError("Every target needs verifiable source evidence")

@@ -9,7 +9,13 @@ from workflow import test_review_local_reuse as fixtures
 
 
 class ReviewLegacyTest(unittest.TestCase):
-    setUp = fixtures.ReviewLocalReuseTest.setUp
+    def setUp(self):
+        # These fixtures exercise the explicit v9 migration, not the live prompt.
+        # New semantic contracts must keep failing closed (see v10 test below).
+        contract = patch.object(review_rounds, 'PROMPT_VERSION', 'review-prompt-v9')
+        contract.start()
+        self.addCleanup(contract.stop)
+        fixtures.ReviewLocalReuseTest.setUp(self)
     write = fixtures.ReviewLocalReuseTest.write
     write_source = fixtures.ReviewLocalReuseTest.write_source
     load = fixtures.ReviewLocalReuseTest.load

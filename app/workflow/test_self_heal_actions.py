@@ -431,6 +431,7 @@ class SelfHealActionsTest(unittest.TestCase):
         self.assertEqual(result['status'], 'rolled_back', result)
         self.assertEqual(self.raw_files(), original)
 
+    @patch('workflow.review_rounds.PROMPT_VERSION', 'review-prompt-v9')
     def test_original_plan_sample_and_execution_restored_sources_remain_compatible(self):
         from workflow import review
         from workflow import test_review_legacy as reviewfixture

@@ -1,5 +1,12 @@
 # RULES — 规则与强调台账
 
+## 2026-11-08 盲审隐藏标签不得误报缺失（2015 卷）
+
+- 用户反馈：“一审和原标签都是一致的，但还是被打上待审核标签”，要求找出原因并根除。
+- 盲审不公开原标签，模型只独立填 assessment，差异比较由程序负责；隐藏字段缺失不能成为人工发现。此类无依据结论由程序拒收并自动补审，原始响应保留，不改写成 ok。
+- 标签一致但有真实答案/解析/原文问题仍须送审；真实知识点/题型/子类差异始终保留。修复后须重建已有派生队列，避免仅改提示而界面仍读旧误报。
+- 落地：根 AGENTS.md 硬规则 6；app/workflow/review_rounds.py::_round_prompt（review-prompt-v10）；app/workflow/review.py::_reject_blind_label_absence；app/docs/review.md；CHANGELOG/2026-11-08-blind-review-label-absence.md。
+
 > 用户强调过、反复强调过、以及新定的硬规则，全部记录在此。新增/修订规则时追加一行，并同步 `AGENTS.md` 第二节。
 > 「原话要点」尽量保留用户当时的表达，避免转述失真。
 
