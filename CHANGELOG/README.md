@@ -39,6 +39,7 @@
 | 2026-11-08 | [2026-11-08-preview-keeps-group-material.md](2026-11-08-preview-keeps-group-material.md) | 预览切片不再丢题号前的表格/材料（2024 卷首篇阅读只剩选项的根因） |
 | 2026-11-08 | [2026-11-08-explanation-reference-authority.md](2026-11-08-explanation-reference-authority.md) | 解析来源唯一性：PDF/OCR 副本不再与 Word 权威来源竞争；闸门诊断指明具体检查项 |
 | 2026-11-08 | [2026-11-08-normalized-stage-fingerprints.md](2026-11-08-normalized-stage-fingerprints.md) | 阶段复用用规范化输出签名，消除 JSON 序列化噪声导致的重跑；精确绑定与真实内容验收保留 |
+| 2026-11-08 | [2026-11-08-serial-batch-queue.md](2026-11-08-serial-batch-queue.md) | 多份试卷上传改为全局串行排队（不并行） |
 | 2026-11-08 | [2026-11-08-group-material-table-span.md](2026-11-08-group-material-table-span.md) | 修复表格型阅读题组 material 丢失（A8） |
 | 2026-11-08 | [2026-11-08-table-responsive-wrap.md](2026-11-08-table-responsive-wrap.md) | 表格自适应宽度并自动断行，取消横向滚动 |
 | 2026-11-08 | [2026-11-08-table-image-in-cell.md](2026-11-08-table-image-in-cell.md) | 表格图片与文字放回同一单元格 |

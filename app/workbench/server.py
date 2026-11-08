@@ -518,6 +518,13 @@ def stage_cards(manifest, has_output: bool = False, advance_running: bool = Fals
 
 _advance_state: dict[str, dict] = {}
 
+# 用户要求：多份试卷上传后必须“依次排队”跑，同一时刻只允许一个批次在推进，
+# 第一份跑完才轮到第二份，绝不并行。这里用一个进程级 FIFO 队列 + 单一调度线程
+# 实现全局串行；_advance_state[name] 记录 running/queued 状态供前端展示。
+_advance_queue: list[str] = []
+_advance_queue_lock = threading.Lock()
+_advance_worker_running = False
+
 
 def finding_current(finding: dict, labels: dict, subs: list[dict], numbers: list) -> str:
     """把这条意见指向的字段当前值捞出来，让人不用翻页也知道在说什么。"""
@@ -671,54 +678,98 @@ def _resolve_structure_issue(folder: Path, finding: dict) -> None:
     save_json(structure_path, structure)
 
 
+def _run_advance_now(name: str, folder: Path) -> dict:
+    """Execute one batch's advance pass synchronously (called only by the serial worker)."""
+    from workflow import supervisor as wf_supervisor
+    result = {"error": "后台执行器意外退出，等待监督器重试"}
+    claim = wf_supervisor.advance_claim(folder)
+    if not claim.__enter__():
+        claim.__exit__(None, None, None)
+        with _lock:
+            _advance_state[name] = {"running": False, "external": True, "finished_at": now()}
+        return {"started": False, "running": True, "external": True}
+    try:
+        bridge = auto_flow.load_bridge()
+        # The claim already owns auto.advance's per-batch lock. Do not acquire
+        # it again. Remote upload/publish is never a watchdog task.
+        result = auto_flow._advance_locked(folder, bridge, stop_at="upload_gate")
+    except Exception as exc:  # noqa: BLE001 - background worker; surfaced to UI
+        result = {"error": str(exc)}
+    finally:
+        try:
+            claim.__exit__(None, None, None)
+            wf_supervisor.record_result(folder, result)
+        finally:
+            # A failed ledger write must never leave a dead worker marked
+            # running forever. A restart can reconstruct from the manifest.
+            with _lock:
+                _advance_state[name] = {"running": False, "result": result, "finished_at": now()}
+    return {"started": True, "running": True}
+
+
+def _advance_worker_loop():
+    """Single global worker: run queued batches strictly one at a time (FIFO).
+
+    One batch must finish before the next starts; never run two batches in
+    parallel. When the queue empties the worker exits; the next enqueue restarts
+    it. The queue itself survives between passes.
+    """
+    global _advance_worker_running
+    while True:
+        with _advance_queue_lock:
+            if not _advance_queue:
+                _advance_worker_running = False
+                return
+            name = _advance_queue.pop(0)
+        try:
+            folder = batch_dir(name)
+        except (ValueError, OSError):
+            with _lock:
+                _advance_state[name] = {"running": False}
+            continue
+        # Mark as the single active batch; later queued items stay "queued".
+        with _lock:
+            _advance_state[name] = {"running": True, "started_at": now()}
+        try:
+            _run_advance_now(name, folder)
+        except Exception as exc:  # noqa: BLE001 - never kill the worker loop
+            with _lock:
+                _advance_state[name] = {"running": False, "result": {"error": str(exc)}, "finished_at": now()}
+
+
+def _ensure_advance_worker():
+    global _advance_worker_running
+    with _advance_queue_lock:
+        if _advance_worker_running:
+            return
+        _advance_worker_running = True
+    threading.Thread(target=_advance_worker_loop, daemon=True, name="workbench-advance-worker").start()
+
+
 def _launch_advance(name: str, folder: Path, *, prepare=None, **details) -> dict:
-    """Register one local worker while holding auto's existing OS execution lock."""
+    """Enqueue one batch into the global serial queue (never parallel)."""
     from workflow import supervisor as wf_supervisor
     if (_advance_state.get(name) or {}).get("running"):
         return {"started": False, "running": True}
+    with _advance_queue_lock:
+        if name in _advance_queue:
+            return {"started": False, "running": True, "queued": True}
     # 用户点“继续处理”：清掉历史 exhausted 长冷却，从当前阶段立即续跑。
     try:
         wf_supervisor.clear_exhausted(folder)
     except (OSError, ValueError, TypeError):
         pass
-    claim = wf_supervisor.advance_claim(folder)
-    if not claim.__enter__():
-        claim.__exit__(None, None, None)
-        return {"started": False, "running": True, "external": True}
     try:
         if prepare is not None:
             details.update(prepare())
     except Exception:
-        claim.__exit__(None, None, None)
         raise
-    _advance_state[name] = {"running": True, "started_at": now(), **details}
-
-    def work():
-        result = {"error": "后台执行器意外退出，等待监督器重试"}
-        try:
-            bridge = auto_flow.load_bridge()
-            # The claim already owns auto.advance's per-batch lock. Do not
-            # acquire it again. Remote upload/publish is never a watchdog task.
-            result = auto_flow._advance_locked(folder, bridge, stop_at="upload_gate")
-        except Exception as exc:  # noqa: BLE001 - 后台线程，结果回显给前端
-            result = {"error": str(exc)}
-        finally:
-            try:
-                claim.__exit__(None, None, None)
-                wf_supervisor.record_result(folder, result)
-            finally:
-                # A failed ledger write must never leave a dead worker marked
-                # running forever. A restart can reconstruct from the manifest.
-                with _lock:
-                    _advance_state[name] = {"running": False, "result": result, "finished_at": now()}
-
-    try:
-        threading.Thread(target=work, daemon=True, name=f"workbench-advance-{name}").start()
-    except Exception:
-        claim.__exit__(None, None, None)
-        _advance_state[name] = {"running": False}
-        raise
-    return {"started": True, "running": True}
+    with _lock:
+        _advance_state[name] = {"running": False, "queued": True, "queued_at": now(), **details}
+    with _advance_queue_lock:
+        _advance_queue.append(name)
+    _ensure_advance_worker()
+    return {"started": True, "queued": True, "running": False}
 
 
 @serialized
