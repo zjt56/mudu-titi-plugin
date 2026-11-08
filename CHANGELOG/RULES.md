@@ -37,3 +37,12 @@
 - 边界：`语音题` 仍标语音；其它题型未动。
 | 2026-11-08 | **重复来源不参与唯一性竞争**：同一份卷被重复提取的 PDF/OCR 附件副本（`material-roles.json` 中 `content_authority=false`）只作佐证，不得让逐字解析被判“来源不唯一”；权威原文内部同题两份不同解析仍算冲突。**卡点说明必须给出具体检查项与判定口径**，不能只写“按阻断项修复”。 | `workflow/upload_content.py` `reference_only_sources`；`workflow/diagnose.py` `CHECK_HINTS`；根 `AGENTS.md` 硬规则 2/4；`CHANGELOG/2026-11-08-explanation-reference-authority.md` |
 | 2026-11-08 | **有差异就必须待审核**：一审/二审与原标签的知识点/题型不一致即真实差异，必须进人工队列；不得用“审核判断≠当前正式标签”判过期而静默丢弃（用户原话：有差异就待审核，没差异默认正常）。图片/音频能力受限仍只作 informational。 | `workflow/review.py` 移除 `_obsolete_label_finding`；`workflow/ingest.py` 只保留“标签已补齐”清理；根 `AGENTS.md` 硬规则 6；`CHANGELOG/2026-11-08-review-difference-kept.md` |
+
+## 2026-11-08 原卷预览图片显示规则（用户强调）
+
+- 原话要点：表格里图片要和那段文字在同一个单元格里，不要分开；表格要自适应宽度、自动断行，不要左右滑动；原图（尤其表格内图）要缩得非常小。
+- 落地：
+  - `app/workbench/server.py::source_blocks` 按单元格切分，`cellImages[行][列]=[图片名]`，图片留在原地；`attach_media` 为 `cellImages` 补 URL。
+  - `lib/client.js` 表格 `width:100%; table-layout:fixed`，单元格 `overflow-wrap:anywhere; word-break:break-word; white-space:normal`；`.wf-table-imgcell` 不再 `nowrap`；表格外容器去掉 `overflow-x:auto`；正文图 `width:100%; max-width:200px`；表格内缩略图极小（约 36×28）。
+  - 图片能力受限仍只作 informational，不进人工、不阻断。
+- 关联记录：`CHANGELOG/2026-11-08-table-image-in-cell.md`、`2026-11-08-table-responsive-wrap.md`、`2026-11-08-preview-table-image-and-size.md`。
