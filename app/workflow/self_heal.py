@@ -30,6 +30,11 @@ SOURCE_FILES = ("01_source/正文.txt", "01_source/structure.json", "01_source/s
                 "04_knowledge/knowledge.json", "03_types/types.json", "workflow/repair-feedback/knowledge.json")
 REPORTS = ("07_review/upload-format.json", "07_review/validation-report.json",
            "07_review/structure-gate.json", "07_review/review-gate.json")
+# Machine-generated ownership evidence. Free-form model prose must never select a
+# producer stage: it may mention unrelated stages by name.
+PREREQUISITE_UNMET = re.compile(r"Prerequisite\s+([a-z_]+)\s+must have a current")
+BATCH_FILL_CONFLICT = re.compile(r"Batch fill[^\n]*conflict", re.IGNORECASE)
+SOURCE_BINDING_DEFECT = re.compile(r"(?:proven\s+source\s+binding|source\s+binding)", re.IGNORECASE)
 
 
 def _path(batch: Path) -> Path:
@@ -473,26 +478,36 @@ def _producer_issues(batch, stage_id, producer_stage):
 
 
 def _error_producer(batch, stage_id, detail):
-    """Select producer only from report issues/check identity, never a fixed stage guess."""
+    """Select producer only from structured evidence, never from prose tokens.
+
+    Free-form model reasoning routinely names other stages ("...并不是题文、答案等
+    本地数据错误"). Scanning that prose for the word 答案 used to reset a completed
+    answers stage even though the failing stage never depended on its content.
+    """
+    text = str(detail)
+    match = PREREQUISITE_UNMET.search(text)
+    if match and match.group(1) in contracts.STAGE_BY_ID:
+        return match.group(1)
+    if BATCH_FILL_CONFLICT.search(text):
+        # The managed batch object is created and refreshed by preassemble.
+        return "preassemble"
+    if SOURCE_BINDING_DEFECT.search(text):
+        return "structure_gate"
     try:
-        parsed = json.loads(detail)
+        parsed = json.loads(text)
     except (TypeError, ValueError):
         parsed = None
     candidates = []
     if isinstance(parsed, dict):
         candidates.extend(parsed.get(key) for key in ("code", "field", "producer_stage", "stage", "check"))
-    candidates.append(detail)
     issues = _issues(batch)
     report_paths = {"validate": {"07_review/validation-report.json"},
                     "format_gate": {"07_review/upload-format.json"},
                     "review_gate": {"07_review/review-gate.json"}}
     issues = [row for row in issues if row.get("report") in report_paths.get(stage_id, set())]
     candidates.extend(issues)
-    owners = []
-    for candidate in candidates:
-        owner = _producer_for_issue(candidate) if isinstance(candidate, dict) else _producer_for_issue({"message": str(candidate)})
-        if owner:
-            owners.append(owner)
+    owners = [owner for owner in (_producer_for_issue(candidate) for candidate in candidates
+                                  if isinstance(candidate, dict)) if owner]
     unique = list(dict.fromkeys(owners))
     return unique[0] if len(unique) == 1 else None
 
@@ -509,13 +524,16 @@ UPSTREAM = {
 
 
 def _escalate_upstream(batch, manifest, stage_id, attempt, reason, *, force=False,
-                       producer_stage=None):
+                       producer_stage=None, evidence=None):
     """带具体错误回上游产出者重新推导，而不是让流程停住。
 
     force=True 时用于模型明确选择 upstream_rederive 的场合（每次新错误都允许）；
     否则只在下游确定性阶段重复失败时自动触发一次。
+    evidence 是机器判定的原始错误；reason 可包含模型的自由文本解释，绝不能拿来
+    决定责任阶段。
     """
-    target = producer_stage or _error_producer(batch, stage_id, reason)
+    target = producer_stage or _error_producer(
+        batch, stage_id, evidence if evidence is not None else reason)
     if target is None or target == stage_id or target in BOUNDARIES:
         return None
     issues = _producer_issues(batch, stage_id, target)
@@ -652,7 +670,8 @@ def _apply(batch, manifest, stage_id, detail, plan, attempt, snapshot):
             + str(detail)[:500] + "；判断：" + str(plan.get("reason", ""))[:200])
     if action == "upstream_rederive":
         escalate = _escalate_upstream(batch, manifest, stage_id, attempt,
-                                      str(detail) + "\n" + str(plan.get("reason", "")), force=True)
+                                      str(detail) + "\n" + str(plan.get("reason", "")),
+                                      force=True, evidence=str(detail))
         if escalate is not None:
             return escalate
         return _defer_and_continue(batch, manifest, stage_id,

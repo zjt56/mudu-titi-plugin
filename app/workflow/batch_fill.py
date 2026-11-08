@@ -130,6 +130,42 @@ def _body(row):
     return result
 
 
+def _canonical_body(row):
+    """Body identity for the fill guard.
+
+    An attachment's URL is a transport location, not its identity: rewriting
+    ``01_source/media/x.png`` to ``/source-media/<batch>/x.png`` (or the
+    content-addressed deploy form) selects the same declared file. Which file is
+    attached stays protected through ``name``/``kind``/placement and the bound
+    media hashes; ownership and existence are still enforced at upload time.
+    """
+    result = _body(row)
+
+    def clean(node):
+        if not isinstance(node, dict):
+            return node
+        attachments = node.get("attachments")
+        if isinstance(attachments, list):
+            rows = []
+            for item in attachments:
+                if isinstance(item, dict):
+                    item = dict(item)
+                    name = item.get("name")
+                    url = item.get("url")
+                    if not name and isinstance(url, str):
+                        name = url.rsplit("/", 1)[-1]
+                    if name:
+                        item["name"] = name
+                    item.pop("url", None)
+                rows.append(item)
+            node["attachments"] = rows
+        for child in node.get("subquestions") or []:
+            clean(child)
+        return node
+
+    return clean(result)
+
+
 def _base(row, meta=None):
     row = copy.deepcopy(row)
     meta = meta or {}
@@ -244,7 +280,7 @@ def _managed(root, *, check_body=True):
             raise ValueError("Batch fill source base integrity conflict")
         expected_body = (state.get("finalized_bodies", {}).get(uid) if state["mode"] == "finalized"
                          else state.get("managed_bodies", {}).get(uid, _body(base)))
-        if check_body and _body(row) != expected_body:
+        if check_body and _canonical_body(row) != _canonical_body(expected_body):
             raise ValueError("Batch fill正文 conflict for " + uid + "; existing content preserved")
     return state, payload
 
@@ -420,7 +456,13 @@ def initialize(batch_dir) -> dict:
         old = state["units"].get(uid)
         if old is not None and old["source_sha256"] == token:
             kept = copy.deepcopy(previous[uid])
+            before = _body(kept)
             _sync_media_attachments(kept, fresh, root.name)
+            installed = _body(kept)
+            if installed != before:
+                # 附件补齐/URL 规范化改写了本对象正文，必须同步托管正文，
+                # 否则下一次 _managed 会把自己刚写入的部署路径误判成人工篡改。
+                state.setdefault("managed_bodies", {})[uid] = copy.deepcopy(installed)
             output.append(kept)
             # Line shifts or parser diagnostics do not invalidate labels.
             units[uid] = dict(old, binding=binding)

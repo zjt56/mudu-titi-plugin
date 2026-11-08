@@ -110,7 +110,7 @@ class UnitTasksTest(unittest.TestCase):
         limit = len(self.prompt) - 500
         calls = []
 
-        def build(batch, stage, max_input_chars):
+        def build(batch, stage, max_input_chars, **kwargs):
             if max_input_chars == limit:
                 raise ValueError("review exceeding max_input_chars")
             return self.base
@@ -140,7 +140,7 @@ class UnitTasksTest(unittest.TestCase):
         self.base.update(stage="review", status="ready")
         limit = len(self.prompt) - 500
 
-        def build(batch, stage, max_input_chars):
+        def build(batch, stage, max_input_chars, **kwargs):
             if max_input_chars == limit:
                 raise ValueError("review exceeding max_input_chars")
             return self.base
@@ -172,7 +172,7 @@ class UnitTasksTest(unittest.TestCase):
         limit = len(self.prompt) - 500
         calls = []
 
-        def build(batch, stage, max_input_chars):
+        def build(batch, stage, max_input_chars, **kwargs):
             if max_input_chars == limit:
                 raise ValueError("review exceeding max_input_chars")
             return self.base

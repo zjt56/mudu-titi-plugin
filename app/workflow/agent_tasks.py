@@ -354,8 +354,15 @@ def _collect(batch, stage, speculative=False):
                     else:
                         missing.append('附件提取失败，需重试：' + ', '.join(sorted(str(x) for x in failed_materials)))
     if materials_dir.is_dir():
+        # Word 原文（source.txt）已存在时，PDF 提取文本对标注类阶段是重复内容：
+        # 整卷一次分析要控制提示词体积，只在装配/审核（需要版面证据）或没有 Word 时带上。
+        _word_source = (materials_dir / 'source.txt').is_file()
+        _label_stage = stage in ('types', 'answers', 'explanations', 'knowledge')
         for path in sorted(materials_dir.glob('attachment_*.txt')):
             if re.fullmatch(r'attachment_\d{3,}\.txt', path.name) and path.stem not in failed_materials:
+                if _word_source and _label_stage:
+                    hashes[path.relative_to(batch).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    continue
                 add(path.relative_to(batch).as_posix(), False)
     # Content validation also consults the unconfirmed structure for unnumbered
     # compositions.  Bind its exact bytes, including when it is not prompt data.
@@ -374,7 +381,16 @@ def _collect(batch, stage, speculative=False):
     if feedback is not None:
         contexts["repair_feedback"] = feedback
     if units:
-        contexts["confirmed_units_with_stable_ids"] = _sanitized(units)
+        # 分片/裁剪机制（unit_tasks.build_parts、unit_context.prepare）依赖
+        # confirmed_units 的 unit_id/numbers/stem，必须保留；这里只去掉标注阶段
+        # 用不到的冗余字段，减小整卷分析的提示词体积。
+        if stage in ("types", "explanations", "knowledge"):
+            contexts["confirmed_units_with_stable_ids"] = _sanitized([
+                {k: v for k, v in unit.items()
+                 if k in ("unit_id", "numbers", "unit_kind", "type", "stem", "label")}
+                for unit in units])
+        else:
+            contexts["confirmed_units_with_stable_ids"] = _sanitized(units)
         if stage in ("answers", "types", "explanations", "knowledge", "assemble", "review"):
             from . import question_draft
             try:
@@ -390,6 +406,8 @@ def _collect(batch, stage, speculative=False):
                     "OCR只辅助层级与版面，不替换Word文字。该候选不能完成assemble或审核。")
             except (OSError, ValueError, TypeError, KeyError) as exc:
                 contexts["question_draft_warning"] = "预组装候选不可用，按原始证据继续：" + str(exc)[:200]
+                if stage in ("types", "explanations", "knowledge"):
+                    contexts["confirmed_units_with_stable_ids"] = _sanitized(units)
     manifest_path = _safe_path(batch, "workflow/manifest.json")
     # Older batches may keep their manifest at the batch root.
     if not manifest_path.is_file():
@@ -397,13 +415,19 @@ def _collect(batch, stage, speculative=False):
     manifest = _json(manifest_path) if manifest_path.is_file() else {}
     if not isinstance(manifest, dict) or not isinstance(manifest.get("inputs", {}), dict):
         raise ValueError("Manifest/inputs must be objects")
-    if manifest_path.is_file():
-        hashes[manifest_path.relative_to(batch).as_posix()] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    # workflow/manifest.json is the progress ledger: the live supervisor rewrites
+    # status/updated_at as other stages advance. Binding its bytes made every task
+    # longer than one scheduling tick fail "input changed" at import and silently
+    # drop a completed answer/knowledge result. All real content inputs above are
+    # still bound by hash, which is what a changed source must invalidate.
     inputs = manifest.get("inputs", {})
     if any(not isinstance(value, dict) for value in inputs.values()):
         raise ValueError("Manifest input entries must be objects")
     contexts["batch_metadata"] = _sanitized(manifest.get("meta", {}))
-    if stage in ('types', 'answers', 'explanations', 'knowledge', 'assemble', 'review'):
+    # PDF OCR 只辅助版面/表格层级，Word 原文才是权威。标注类阶段
+    # （题型/答案/解析/知识点）用不到逐页 OCR，带上会让每片提示词膨胀数十 KB、
+    # 拖慢模型；只有装配/审核需要版面证据。
+    if stage in ('assemble', 'review'):
         add('01_source/pdf-ocr.json', False)
         if '01_source/pdf-ocr.json' in contexts:
             contexts['pdf_ocr_usage'] = ('这些是同一批次逐份 PDF 的 OCR 及版面辅助证据；'
@@ -507,7 +531,7 @@ def _collect(batch, stage, speculative=False):
     return contexts, hashes, missing, units
 
 
-def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _speculative=False):
+def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _speculative=False, slim=False):
     """Return a self-contained task and trusted input hashes, without writes.
 
     Missing readable inputs return completed=False/status=needs_review and a
@@ -520,9 +544,8 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
         raise ValueError("Unsupported speculative stage")
     context, hashes, missing, units = _collect(batch_dir, stage, speculative=_speculative)
     if _speculative:
-        # Bookkeeping changes as formal stages complete; candidate identity is
-        # instead bound to the prompt's metadata and source bytes. Formal tasks
-        # retain their unchanged manifest binding.
+        # Candidate identity is bound to the prompt's metadata and source bytes;
+        # the progress ledger is never part of it.
         hashes.pop("workflow/manifest.json", None)
         hashes.pop("manifest.json", None)
     if blind:
@@ -536,7 +559,7 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
     if stage in ("explanations", "knowledge", "assemble", "review"):
         docs += ["docs/content-labeling.md"]
     if stage in ("knowledge", "assemble", "review"):
-        docs += ["skills-reference/knowledge-catalog.md", "skills-reference/knowledge-matching-rules.md",
+        docs += ["skills-reference/knowledge-matching-rules.md",
                  "skills-reference/type-knowledge-map.md", "docs/knowledge-tagging.md"]
         refs += ["references/knowledge-catalog.json", "references/type-knowledge-map.json"]
     if stage in ("types", "assemble"):
@@ -545,10 +568,34 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
         path = ROOT / relative
         raw = path.read_bytes()
         hashes[str(path.resolve())] = hashlib.sha256(raw).hexdigest()
-        context[relative] = _sanitized(json.loads(raw.decode("utf-8-sig")) if relative.endswith(".json") else raw.decode("utf-8-sig"))
+        if relative.endswith(".json"):
+            value = json.loads(raw.decode("utf-8-sig"))
+            # 知识点标注只需要“可选路径清单”；id 由导入器按路径自动反查回填
+            # （见 _project_knowledge_ids）。完整目录 73KB 全量下发会让每片提示词
+            # 膨胀、拖慢模型，这里只给路径。
+            if relative == "references/knowledge-catalog.json" and stage == "knowledge":
+                points = value.get("points") if isinstance(value, dict) else None
+                if isinstance(points, list):
+                    value = {"paths": [p.get("path") for p in points
+                                       if isinstance(p, dict) and p.get("path")]}
+            context[relative] = _sanitized(value)
+        else:
+            context[relative] = _sanitized(raw.decode("utf-8-sig"))
     # Discovery and safe-path checks always run before lookup. Bind the entire
     # generated context as well as its input hashes, including absent inputs,
     # dynamic media listings, current rules, examples and the budget.
+    if slim and stage in ("types", "explanations", "knowledge"):
+        # 单次整卷分析（不分片）：题目数据已由 question-draft 提供，
+        # 结构文件与单元题干是重复内容；这里只保留最小的单元索引
+        # （unit_id/numbers/kind/type）供模型对齐，去掉整份结构与题干副本。
+        context = {k: v for k, v in context.items()
+                   if k != "01_source/structure.confirmed.json"}
+        units_ctx = context.get("confirmed_units_with_stable_ids")
+        if isinstance(units_ctx, list):
+            context["confirmed_units_with_stable_ids"] = [
+                {k: v for k, v in u.items()
+                 if k in ("unit_id", "numbers", "unit_kind", "type", "label")}
+                for u in units_ctx if isinstance(u, dict)]
     snapshot = {"stage": stage, "budget": max_input_chars, "context": context,
                 "hashes": hashes, "missing": missing, "units": units,
                 "rules": RULES, "artifacts": ARTIFACTS, "ai_mark": AI_MARK}

@@ -403,7 +403,9 @@ class KnowledgeRejudgmentTest(unittest.TestCase):
             row = next(row for row in self.knowledge['items'] if row['unit_id'] == uid)
             return {'response': self.response('knowledge', [row])}
         errors = io.StringIO()
-        with patch.object(local_agent, 'load_config', return_value=self.config), \
+        # 标注阶段默认整卷一次分析；这里显式开启分片，验证“只重跑坏单元”的分片能力仍在。
+        cfg = dict(self.config, label_split=True)
+        with patch.object(local_agent, 'load_config', return_value=cfg), \
              patch.object(local_agent, 'invoke', side_effect=invoke), \
              patch.object(local_agent, '_agent_lock', side_effect=lambda *_: contextlib.nullcontext()), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
@@ -642,6 +644,17 @@ class NeverParkTest(unittest.TestCase):
         self.assertEqual(reloaded["stages"]["preassemble"]["status"], _mf.PENDING)
         self.assertIn("延后", reloaded["stages"]["preassemble"].get("notes", ""))
         self.assertEqual(reloaded["stages"]["assemble"]["status"], _mf.PENDING)
+
+    def test_model_prose_never_selects_the_producer_stage(self):
+        from workflow import self_heal as _heal
+        batch, _ = self.make("prose")
+        detail = ("Stage preconditions unmet: Prerequisite preassemble must have a current, "
+                  "consumer-validated delivery\ntypes 与题文、答案等本地数据无关")
+        # 自由文本里出现「答案」不能把已完成的 answers 拉回重跑；只认机器证据。
+        self.assertEqual(_heal._error_producer(batch, "types", detail), "preassemble")
+        self.assertEqual(
+            _heal._error_producer(batch, "answers", "Batch fill正文 conflict for q-6; existing content preserved"),
+            "preassemble")
 
     def test_same_error_never_bounces_upstream_twice(self):
         from workflow import self_heal as _heal, manifest as _mf

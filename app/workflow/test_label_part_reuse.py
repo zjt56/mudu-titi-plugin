@@ -77,7 +77,7 @@ class LabelPartReuseTest(unittest.TestCase):
                 self.assertIn("Paper title", parts[0]["prompt"])
                 self.assertIn("End of paper", parts[0]["prompt"])
                 self.assertEqual([u["unit_id"] for u in value["01_source/structure.confirmed.json"]["units"]], ["q-1"])
-                self.assertIn("workflow/manifest.json", base["input_hashes"])
+                self.assertNotIn("workflow/manifest.json", base["input_hashes"])
                 self.assertIn("01_source/正文.txt", base["input_hashes"])
                 self.assertTrue(any(Path(k).is_absolute() and Path(k).resolve() == self.original.resolve()
                                     for k in base["input_hashes"]))
@@ -87,6 +87,18 @@ class LabelPartReuseTest(unittest.TestCase):
                     self.assertEqual([r["unit_id"] for r in draft["items"]], ["q-1"])
                     self.assertNotIn("input_hashes", draft)
                     self.assertNotIn("content_sha256", draft)
+
+    def test_progress_ledger_rewrite_does_not_invalidate_in_flight_task(self):
+        """监督器每轮都会改 manifest 的状态/时间；这不是题目输入变化。"""
+        base, _ = self.build("knowledge")
+        self.assertEqual(local_agent._check_input_hashes(self.batch, base["input_hashes"]), None)
+        self.write("workflow/manifest.json", dict(self.manifest, updated_at="second", status="running"))
+        local_agent._check_input_hashes(self.batch, base["input_hashes"])
+        # 真正的原文变化仍必须让任务失效。
+        self.write("01_source/正文.txt", self.source + "\n4. Extra? A. Yes B. No")
+        with self.assertRaises(local_agent.AgentError) as caught:
+            local_agent._check_input_hashes(self.batch, base["input_hashes"])
+        self.assertEqual(caught.exception.code, "context_changed")
 
     def test_group_partition_keeps_shared_passage_and_original_summary_ownership_evidence(self):
         appendix = ("单项填空 A\n1.【解析】 This explanation belongs to question one.\n"
@@ -332,7 +344,8 @@ class LabelPartReuseTest(unittest.TestCase):
             imports.append(copy.deepcopy(response))
             return actual_accept(batch, stage, response, **kwargs)
 
-        config = dict(self.config, retries=0, part_concurrency=1)
+        # 标注阶段默认整卷一次分析；这里显式开启分片，验证“未变分片复用快照”能力仍在。
+        config = dict(self.config, retries=0, part_concurrency=1, label_split=True)
         config.pop("_part_model_binding")
         with patch.object(local_agent, "load_config", return_value=config), \
              patch.object(local_agent, "invoke", side_effect=invoke), \

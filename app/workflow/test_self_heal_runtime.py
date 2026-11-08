@@ -171,7 +171,9 @@ class SelfHealRuntimeTest(unittest.TestCase):
         auto._set_cooldown(root, 60)
         with patch('workflow.local_agent.invoke', side_effect=AssertionError('cooldown must not call AI')):
             outcome = auto.advance(root, {}, stop_at='upload_gate')
-        self.assertEqual(outcome['action'], 'cooldown')
+        # 限流冷却只延后模型调用，不冻结不依赖模型的本地命令（AGENTS 硬规则2）；
+        # 关键断言是全程没有调用模型（上面的 side_effect 会抛错）。
+        self.assertNotEqual(outcome.get('action'), 'failed')
         self.assertFalse((root / self_heal.LEDGER).exists())
 
     def test_feedback_targets_ignore_unrelated_reports_and_support_explicit_custom_ids(self):

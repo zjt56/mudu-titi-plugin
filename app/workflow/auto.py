@@ -406,6 +406,28 @@ def _batch_auto_lock(batch_dir: Path):
 AUDIO_HEARTBEAT_TIMEOUT_SECONDS = 15 * 60
 
 
+def _segment_lock_held(batch_dir: Path) -> bool:
+    """Whether a live segmenter process still owns this batch's audio lock.
+
+    The job status file survives a backend restart, so a dead worker otherwise
+    blocks the batch for the whole heartbeat timeout. Probing the flock is exact.
+    """
+    path = Path(batch_dir) / "02_audio" / ".segment.lock"
+    if not path.is_file():
+        return False
+    try:
+        import fcntl
+    except ImportError:  # Windows: fall back to the heartbeat timeout.
+        return True
+    try:
+        with path.open("a+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return False
+    except OSError:
+        return True
+
+
 def _auto_prepare_audio(batch_dir: Path, manifest: dict) -> dict:
     """Run the real audio splitter once when a batch is advanced.
 
@@ -458,7 +480,9 @@ def _auto_prepare_audio(batch_dir: Path, manifest: dict) -> dict:
             heartbeat_age = time.time() - float(current.get("updated") or 0)
         except (TypeError, ValueError):
             heartbeat_age = float("inf")
-        if heartbeat_age < AUDIO_HEARTBEAT_TIMEOUT_SECONDS:
+        # A job status file can outlive its worker (backend/app restart). The
+        # flock is authoritative: held means really running; free means stale.
+        if heartbeat_age < AUDIO_HEARTBEAT_TIMEOUT_SECONDS and _segment_lock_held(batch_dir):
             return {"status": "running", "message": "该批次已有切段任务在运行，请等它结束"}
         # A dead worker must not hold the batch forever. The next call below
         # starts a fresh run and the splitter keeps any atomic prior outputs.
@@ -559,18 +583,25 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
     for stage in contracts.STAGES:
         # 结构闸门一确认就先切听力：赶在并行代理批把 audio 当成“缺证据”之前，
         # 让上传后的流程真正自动完成切段，而不是等用户点按钮。
-        if audio_allowed and audio_prep.get("status") == "waiting" and "audio" not in recovery_wait:
+        if audio_allowed and audio_prep.get("status") == "waiting":
             deps = contracts.STAGE_BY_ID["audio"].depends_on
             if all(dep_ready(d) for d in deps):
                 audio_prep = _auto_prepare_audio(batch_dir, manifest)
         if stop_at and stage.id == stop_at:
             break
         if stage.id in recovery_wait:
-            wait = recovery_wait[stage.id]
-            reason = (wait.get("event") or {}).get("error") or (wait.get("event") or {}).get("reason") or "AI修复已记录，等待自动重试窗口"
-            blocked(stage.id, str(reason)[:300], "cooldown", next_retry_at=wait.get("next_retry_at"),
-                    retry_after=wait.get("retry_after"), self_heal_status=wait.get("status"))
-            continue
+            # 听力切段能力缺失（未安装/未启用）属于能力受限，不是内容错误：
+            # 不能被自愈冷却长期挂住，按既有规则跳过并继续，其它阶段照常推进。
+            capability_limited_audio = (
+                stage.id == "audio" and ZERO_TOUCH
+                and audio_prep.get("status") in {"disabled", "not_ready", "unavailable", "error",
+                                                 "no_audio", "running"})
+            if not capability_limited_audio:
+                wait = recovery_wait[stage.id]
+                reason = (wait.get("event") or {}).get("error") or (wait.get("event") or {}).get("reason") or "AI修复已记录，等待自动重试窗口"
+                blocked(stage.id, str(reason)[:300], "cooldown", next_retry_at=wait.get("next_retry_at"),
+                        retry_after=wait.get("retry_after"), self_heal_status=wait.get("status"))
+                continue
         if stage.id in parallel_done:
             code = parallel_done[stage.id]
             if code == 4:
@@ -675,7 +706,11 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                     mf.save(batch_dir, manifest)
                     print("  · audio 跳过（未提供音频，继续）")
                     continue
-                if prep_status in {"disabled", "not_ready", "error", "unavailable", "needs_review", "running", "multiple_audio"}:
+                if prep_status == "running":
+                    # 正在切段是正常等待，不能写成 needs_review 让自愈反复重排。
+                    blocked("audio", str(audio_prep.get("message") or "听力切段运行中"), "waiting")
+                    continue
+                if prep_status in {"disabled", "not_ready", "error", "unavailable", "needs_review", "multiple_audio"}:
                     if ZERO_TOUCH and prep_status == "needs_review":
                         # 候选切片已经写出，只是边界证据不足。零人工模式下直接采用候选，
                         # 不再停在“待回听”，把未验证边界记录在阶段备注里。

@@ -36,7 +36,10 @@ MAX_FINAL_BYTES = 8 * 1024 * 1024
 DEFAULTS = {"provider": "dsh", "timeout_seconds": 900, "max_input_chars": 180000,
             "retries": 2, "retry_feedback_chars": 1600, "unit_split": True,
             # 每片更小，减少单次模型上下文压力；审核片默认可稍大但仍可调。
-            "assemble_part_units": 8, "review_part_units": 15, "label_part_units": 1}
+            "assemble_part_units": 8, "review_part_units": 15, "label_part_units": 1,
+            # 标注阶段（题型/解析/知识点）默认整卷一次分析，不再一题一片：
+            # 用户明确要求“整张试卷拿去分析”，分片会让每次调用都重复带上整卷上下文。
+            "label_split": False}
 
 # Only explicit transport/error fields count; task text can legitimately mention
 # 429, QUOTA or RATE_LIMIT. Never infer a provider failure from those substrings.
@@ -738,9 +741,14 @@ def main(argv=None):
             outcome = assemble_local.try_assemble(batch_dir, config)
             if outcome is not None:
                 return outcome
-        split_enabled = config.get("unit_split", True) and args.stage in ("assemble", "review", "types", "explanations", "knowledge")
+        _label_stage = args.stage in ("types", "explanations", "knowledge")
+        # 标注阶段默认整卷一次分析（label_split=False）；装配/审核仍按 unit_split 分片。
+        split_enabled = ((bool(config.get("label_split", False)) if _label_stage
+                          else bool(config.get("unit_split", True)))
+                         and args.stage in ("assemble", "review", "types", "explanations", "knowledge"))
         try:
-            task = agent_tasks.build_task(batch_dir, args.stage, max_input_chars=config["max_input_chars"])
+            task = agent_tasks.build_task(batch_dir, args.stage, max_input_chars=config["max_input_chars"],
+                                          slim=not split_enabled)
         except ValueError as exc:
             if not split_enabled or "exceeding max_input_chars" not in str(exc):
                 raise

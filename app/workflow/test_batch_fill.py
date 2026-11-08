@@ -357,6 +357,33 @@ class BatchFillTest(unittest.TestCase):
         self.assertEqual(result["changed_units"], ["q-1"])
         self.assertEqual([r["answer"] for r in self.load()["items"]], ["", "B"])
 
+    def test_media_url_normalization_does_not_poison_fill_guard(self):
+        # initialize 会把附件 URL 规范成部署形式；这一步不能把刚写入的正文判成
+        # 人工篡改，否则答案/题型一启动就失败、监督器无限重试同一冲突。
+        self.source("One? [IMG first.png]")
+        self.put("01_source/media/first.png", "original image")
+        batch_fill.initialize(self.root)
+        self.assertEqual(batch_fill.initialize(self.root)["status"], "refreshed")
+        self.assertEqual(batch_fill.initialize(self.root)["status"], "unchanged")
+        self.assertEqual(batch_fill.sync(self.root, "answers", {"answers": {"1": "A"}})["status"], "filled")
+        row = self.load()["items"][0]
+        self.assertEqual(row["answer"], "A")
+        self.assertEqual(row["attachments"][0]["url"],
+                         "/source-media/" + self.root.name + "/first.png")
+
+    def test_deployed_attachment_url_is_equivalent_but_real_body_edit_still_conflicts(self):
+        self.source("One? [IMG first.png]")
+        self.put("01_source/media/first.png", "original image")
+        batch_fill.initialize(self.root)
+        data = self.load()
+        data["items"][0]["attachments"][0]["url"] = "/source-media/batch/first.png"
+        self.put(batch_fill.BATCH, data)
+        self.assertTrue(batch_fill.is_filling(self.root))
+        data["items"][0]["stem"] = "human authored words"
+        self.put(batch_fill.BATCH, data)
+        with self.assertRaisesRegex(ValueError, "conflict"):
+            batch_fill.initialize(self.root)
+
     def test_concurrent_body_edit_during_draft_build_is_not_overwritten(self):
         batch_fill.initialize(self.root)
         ensure = question_draft.ensure
