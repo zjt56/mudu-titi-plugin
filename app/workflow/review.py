@@ -60,7 +60,12 @@ OPEN = {"open", "pending", "needs_review", "blocked", "proposed", "unchecked", "
 
 
 def compact_knowledge_catalog(types, catalog=None):
-    """Filter only when every type has a usable mapping; otherwise keep everything."""
+    """Filter only when every type has a usable mapping; otherwise keep everything.
+
+    Every returned point carries an explicit ``leaf``/``leafTerminal`` marker so
+    the blind review model can see where the catalog stops and does not invent
+    deeper paths (e.g. 应用文/新媒体语篇/电子邮件 are sibling leaves).
+    """
     from workbench import taxonomy
     if catalog is None:
         catalog = _load(taxonomy.KNOWLEDGE_PATH)
@@ -68,14 +73,28 @@ def compact_knowledge_catalog(types, catalog=None):
         return catalog
     result = dict(catalog)
     rules = taxonomy.type_knowledge_rules()
+    points = catalog["points"]
     if not types or any(not isinstance(ty, str) or ty not in rules
                         or not taxonomy._allowed_prefixes(ty) for ty in types):
-        return result
-    prefixes = [p for ty in types for p in taxonomy._allowed_prefixes(ty)]
-    result["points"] = [point for point in catalog["points"]
-                        if not isinstance(point, dict) or not isinstance(point.get("path"), str)
-                        or any(taxonomy._under(point["path"], pre) for pre in prefixes)]
+        kept = points
+    else:
+        prefixes = [p for ty in types for p in taxonomy._allowed_prefixes(ty)]
+        kept = [point for point in points
+                if not isinstance(point, dict) or not isinstance(point.get("path"), str)
+                or any(taxonomy._under(point["path"], pre) for pre in prefixes)]
+    result["points"] = [_mark_leaf(point, points) for point in kept]
     return result
+
+
+def _mark_leaf(point, all_points):
+    """Add leaf/leafTerminal to one catalog point without changing its content."""
+    if not isinstance(point, dict) or not isinstance(point.get("path"), str):
+        return point
+    path = point["path"]
+    is_leaf = not any(isinstance(other, dict) and isinstance(other.get("path"), str)
+                      and other["path"].startswith(path + "/") for other in all_points)
+    return {**point, "leaf": is_leaf,
+            "leafTerminal": "叶子：到此为止，不得再拼接子级" if is_leaf else "非叶子：需继续选到叶子"}
 
 
 _LOAD_CACHE = {}

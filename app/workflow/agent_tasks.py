@@ -702,6 +702,25 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
                 if isinstance(points, list):
                     value = {"paths": [p.get("path") for p in points
                                        if isinstance(p, dict) and p.get("path")]}
+            elif relative == "references/knowledge-catalog.json" and isinstance(value, dict) \
+                    and isinstance(value.get("points"), list):
+                # Blind review/label prompts must see where each path is a leaf so
+                # the model stops at real leaves (应用文/新媒体语篇/电子邮件 are
+                # sibling leaves) instead of inventing deeper levels.
+                points = value["points"]
+                marked = []
+                for point in points:
+                    if isinstance(point, dict) and isinstance(point.get("path"), str):
+                        path = point["path"]
+                        is_leaf = not any(
+                            isinstance(o, dict) and isinstance(o.get("path"), str)
+                            and o["path"].startswith(path + "/") for o in points)
+                        marked.append({**point, "leaf": is_leaf,
+                                       "leafTerminal": "叶子：到此为止，不得再拼接子级"
+                                                       if is_leaf else "非叶子：需继续选到叶子"})
+                    else:
+                        marked.append(point)
+                value = {**value, "points": marked}
             context[relative] = _sanitized(value)
         else:
             context[relative] = _sanitized(raw.decode("utf-8-sig"))

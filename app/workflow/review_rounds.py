@@ -127,6 +127,7 @@ def _round_prompt(round_id, targets, context):
                    "assessment={type:string,subtypes:[string],knowledge:[full paths],subquestions:[{number:string,knowledge:[full paths]}]}。"
                    "单题 subquestions=[]；整篇题组列出目标子题且其 knowledge=[]。一审覆盖单元全部小题；二审对整组题只做组级核对（整组抽取、不拆小题），对独立单题仅列抽中小题，不宣称同组其他小题已审核。"
                    "knowledge 路径必须逐字取自供给目录（references/knowledge-catalog.json），不得自造更深的子级：目录里 '语用/情景交际' 已是叶子时只能写它，不能写 '语用/情景交际/询问目的'；某维度没有合法叶子就不写该维度。"
+                   "【叶子即终点·必须遵守】供给目录每个节点都带 leaf 与 leafTerminal：leaf=true（『叶子：到此为止』）表示该路径就是可选的最终知识点，必须原样照抄、绝不能再往后拼接任何子级；leaf=false（非叶子）必须继续往下选到某个 leaf=true 的叶子。注意同名为不同层级的情况：例如『电子邮件』是『语篇体裁/新媒体语篇/电子邮件』这一片的叶子，不是『语篇体裁/应用文/电子邮件』——照抄目录中真实存在的完整路径，不得把不同分支的词拼在一起。"
                    "assessment.knowledge 还必须遵守 references/type-knowledge-map.json 的题型维度：例如听力长对话理解只允许主题、设题角度/听力，不得写语篇体裁；路径不在目录或超出允许维度会让整轮校验失败。"
                    "【子类必填·必须遵守】只要主类在目录里有子类（如『书面表达』有 列中文要点/列英文要点/思维导图/图片/图文结合/表格/图表/论坛帖文/其他，『单项填空』有 四个选项 等），assessment.subtypes 必须给出至少一个取自目录的合法子类，不得留空数组；留空会被判为标签缺项并作为差异送人工核对。只有目录里确实无子类的主类才可写 subtypes:[]，不得自造目录外子类。"
                    "整篇题型（阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话）只判定组级知识点，其子题 knowledge=[]。"
@@ -1389,6 +1390,47 @@ def restart_rounds(batch_dir):
                 'generation': nonce, 'retired_partitions': len(retired)}
 
 
+_STALL_PATH = "workflow/review-stall.json"
+
+
+def _stall_key(round_id, error):
+    """Stable identity for one deterministic failure across re-exported tasks.
+
+    Task ids/attempt dirs change on every export, so they cannot bound a loop.
+    round + normalized error detail is the real "same problem" identity.
+    """
+    detail = " ".join(str(error or "").split())[:300]
+    return round_id + "\n" + detail
+
+
+def _load_stall(batch):
+    data = review._load(_path(batch, _STALL_PATH))
+    return data if isinstance(data, dict) and isinstance(data.get("counts"), dict) else {"counts": {}}
+
+
+def _record_stall(batch, round_id, error, *, max_strikes):
+    """Increment the cross-run counter for this exact failure; return count."""
+    ledger = _load_stall(batch)
+    key = _stall_key(round_id, error)
+    entry = ledger["counts"].get(key) or {"count": 0}
+    entry["count"] = int(entry.get("count", 0)) + 1
+    entry["round_id"] = round_id
+    entry["error"] = " ".join(str(error or "").split())[:400]
+    ledger["counts"][key] = entry
+    _save(batch, _STALL_PATH, ledger)
+    return entry["count"]
+
+
+def _clear_stall(batch, round_id):
+    ledger = _load_stall(batch)
+    changed = False
+    for key in [k for k, v in ledger["counts"].items() if v.get("round_id") == round_id]:
+        ledger["counts"].pop(key, None)
+        changed = True
+    if changed:
+        _save(batch, _STALL_PATH, ledger)
+
+
 def run(batch_dir, config=None, portable_max_input_chars=None, *, fresh=False):
     """Resume by default; fresh=True requires an explicit human restart request."""
     if not isinstance(fresh, bool):
@@ -1398,8 +1440,66 @@ def run(batch_dir, config=None, portable_max_input_chars=None, *, fresh=False):
         report = _run(batch_dir, config, portable_max_input_chars)
     except ReviewInputsChanged as exc:
         report = _inputs_changed_report(exc)
+    report = _apply_stall_budget(batch_dir, config, report)
     if restarted is not None:
         report = dict(report, restart=restarted)
+    return report
+
+
+def _stall_limit(config):
+    """Per-failure strike limit; defaults to at least the single-run retry budget.
+
+    A deterministic per-target failure (same round + error text) must stop after a
+    small number of attempts across re-exported tasks instead of looping forever.
+    """
+    retries = max(1, min(5, int((config or {}).get("review_max_attempts", 1))))
+    return max(int((config or {}).get("review_stall_strikes", 0) or 0), retries * 2, 3)
+
+
+def _apply_stall_budget(batch_dir, config, report):
+    """Turn an endlessly repeated identical round failure into a bounded stop.
+
+    Called once per `run`. A round that completed clears its strikes; a round
+    that failed on the same (round + error text) accrues strikes across runs. On
+    reaching the limit, stop re-exporting and return a clear blocked reason with
+    the concrete offending error instead of spinning.
+    """
+    if not isinstance(report, dict):
+        return report
+    batch = Path(batch_dir)
+    checked = set()
+    try:
+        checked = set(review.evaluate_rounds(batch)["checked_rounds"])
+    except (ValueError, OSError, KeyError, TypeError):
+        pass
+    failures = report.get("failures")
+    if not isinstance(failures, dict):
+        # Single-round/parallel failure summaries land in report["summary"]
+        # (execution_failures) or nested review summary; gather what we can.
+        summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        failures = summary.get("execution_failures") if isinstance(summary.get("execution_failures"), dict) else {}
+    limit = _stall_limit(config)
+    for round_id in review.ROUND_IDS:
+        if round_id in checked:
+            _clear_stall(batch, round_id)
+            continue
+        entry = failures.get(round_id) if isinstance(failures, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        error = entry.get("reason") or entry.get("error")
+        if not error:
+            continue
+        if entry.get("error_code") in ("rate_limit", "quota"):
+            continue
+        count = _record_stall(batch, round_id, error, max_strikes=limit)
+        if count >= limit:
+            detail = " ".join(str(error).split())[:400]
+            return {"action": "blocked", "completed": False, "quality_passed": False,
+                    "stall": {"round_id": round_id, "strikes": count, "limit": limit,
+                              "error": detail},
+                    "reason": (f"{round_id} 轮同一校验错误已连续 {count} 次（上限 {limit}），"
+                               f"停止原样重试，需按具体错误修复：" + detail),
+                    "summary": report.get("summary", report)}
     return report
 
 

@@ -143,6 +143,27 @@ def knowledge_tree():
             "leaf_total": len(leaves), "items": roots}
 
 
+def knowledge_catalog_for_prompt():
+    """Flat catalog for blind prompts: each node states whether it is a leaf.
+
+    Models otherwise keep drilling past a real leaf (e.g. 应用文/新媒体语篇/
+    电子邮件 are three sibling leaves) and invent deeper paths. An explicit
+    ``leaf``/``leafTerminal`` marker tells the model "stop here" up front.
+    Only presentation changes; the catalog content and paths are unchanged.
+    """
+    by_path, leaves = knowledge_index()
+    points = []
+    for path, point in by_path.items():
+        is_leaf = path in leaves
+        node = {"id": point["id"], "name": point["name"], "path": path,
+                "leaf": is_leaf,
+                "leafTerminal": "此路径是叶子，到此为止，不得再拼接子级" if is_leaf
+                                else "非叶子，需继续选到叶子"}
+        points.append(node)
+    return {"version": knowledge_version(), "complete": True,
+            "leaf_total": len(leaves), "points": points}
+
+
 def require_knowledge(paths):
     """工作台写入只接受目录中的完整叶子路径，不接受自由值或容器强制转换。"""
     if not isinstance(paths, list) or any(not isinstance(p, str) or not p.strip() for p in paths):

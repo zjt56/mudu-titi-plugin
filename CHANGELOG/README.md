@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-review-leaf-markers-and-stall-budget.md](2026-11-09-review-leaf-markers-and-stall-budget.md) | 审核目录标注叶子边界、同错重试预算止住空转；保留按题局部补审 |
 | 2026-11-09 | [2026-11-09-operations-never-triggered.md](2026-11-09-operations-never-triggered.md) | 修复 AI 运维从不触发：self_heal 签名含重试证据，operations 旧公式永远匹配不上 |
 | 2026-11-09 | [2026-11-09-review-json-error-feedback.md](2026-11-09-review-json-error-feedback.md) | 审核 JSON 结构错误重试给出括号/根键修复指引；保持严格解析、不自动改判 |
 | 2026-11-09 | [2026-11-09-review-subtype-gap-recoverable.md](2026-11-09-review-subtype-gap-recoverable.md) | 审核书面表达等漏填目录子类改为可恢复差异，不再阻塞整轮；提示词强化子类必填 |

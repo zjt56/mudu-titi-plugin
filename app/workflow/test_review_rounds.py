@@ -105,8 +105,15 @@ class ReviewRoundsTest(unittest.TestCase):
             self.assertNotIn('必须先引用最终批次中的当前值', prompt)
             self.assertNotIn('字段为空才可报告缺失', prompt)
             data = json.loads(text.split('\n', 1)[1])
-            self.assertEqual(data['references/knowledge-catalog.json'],
-                             json.loads((Path(review.__file__).resolve().parents[1] / 'references/knowledge-catalog.json').read_text()))
+            supplied_catalog = data['references/knowledge-catalog.json']
+            original_catalog = json.loads((Path(review.__file__).resolve().parents[1]
+                                           / 'references/knowledge-catalog.json').read_text())
+            # Supplied points carry leaf/leafTerminal markers; compare content only.
+            def strip(cat):
+                return [{k: v for k, v in p.items() if k not in ('leaf', 'leafTerminal')}
+                        for p in cat['points']]
+            self.assertEqual(strip(supplied_catalog), strip(original_catalog))
+            self.assertTrue(all('leafTerminal' in p for p in supplied_catalog['points']))
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_difficulty_blind_assessment_and_comparison(self):
@@ -188,8 +195,21 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(scoped['version'], catalog['version'])
         self.assertEqual(scoped['versionId'], catalog['versionId'])
         self.assertLess(len(scoped['points']), len(catalog['points']))
+        # Every supplied point gains a leaf/leafTerminal marker; content unchanged.
+        for point in scoped['points']:
+            self.assertIn('leaf', point)
+            self.assertIn('leafTerminal', point)
+        base = {p['path']: {k: v for k, v in p.items() if k not in ('leaf', 'leafTerminal')}
+                for p in catalog['points']}
+
+        def strip(cat):
+            return {p['path']: {k: v for k, v in p.items() if k not in ('leaf', 'leafTerminal')}
+                    for p in cat['points']}
         for types in ([], ['未知题型'], ['阅读理解', '未知题型'], ['阅读理解', None]):
-            self.assertEqual(review.compact_knowledge_catalog(types, catalog), catalog)
+            scoped_fallback = review.compact_knowledge_catalog(types, catalog)
+            self.assertEqual(strip(scoped_fallback), base)
+            for point in scoped_fallback['points']:
+                self.assertIn('leafTerminal', point)
 
     def test_knowledge_schema_allows_empty_whole_group_child_labels(self):
         exported = review_rounds.export_task(self.batch, skip_rounds=('labels',))
@@ -1305,6 +1325,44 @@ class ReviewRoundsTest(unittest.TestCase):
         findings = review_consensus.compare(self.batch, self.plan, [record])
         subtype_diffs = [f for f in findings if f.get("field") == "subtypes"]
         self.assertTrue(subtype_diffs, findings)
+
+    def test_identical_round_failure_stops_after_strike_budget(self):
+        # A deterministic per-round failure that repeats across re-exported tasks
+        # must stop after a small strike budget instead of spinning forever.
+        def fake_run(batch_dir, config=None, portable_max_input_chars=None):
+            return {"action": "blocked", "completed": False,
+                    "summary": {"execution_failures": {"labels": {
+                        "attempts": 2,
+                        "reason": "1 target(s) need repair: Invalid review labels: 题目：知识点路径不在目录里：['语篇体裁/应用文/电子邮件']"}}}}
+        config = {"provider": "fixture", "review_max_attempts": 2}
+        results = []
+        with patch.object(review_rounds, "_run", side_effect=fake_run):
+            for _ in range(5):
+                results.append(review_rounds.run(self.batch, config=config))
+        # It must eventually turn into a bounded stop with the concrete error.
+        stalls = [r for r in results if r.get("stall")]
+        self.assertTrue(stalls, [r.get("reason") for r in results])
+        stall = stalls[0]
+        self.assertIn("应用文/电子邮件", stall["reason"])
+        self.assertFalse(stall["completed"])
+        # Once stalled, subsequent runs keep being blocked (do not spin again).
+        self.assertTrue(all(r.get("stall") for r in results[-2:]))
+
+    def test_leaf_markers_present_in_review_catalog(self):
+        # The blind review catalog must label every node as a leaf (terminal) or
+        # not, so the model stops at real leaves instead of drilling deeper.
+        from workflow import agent_tasks
+        self._parallel_batch()
+        base = agent_tasks.build_task(self.batch, "review", max_input_chars=1000000)
+        part = review_rounds._partition_contexts(base, 1000000, round_id="labels")[0]
+        context = part["context"]
+        self.assertIn("leafTerminal", context)
+        data = json.loads(context.split("\n", 1)[1])
+        points = data["references/knowledge-catalog.json"]["points"]
+        self.assertTrue(points)
+        for point in points:
+            self.assertIn("leaf", point)
+            self.assertIn("leafTerminal", point)
 
 
 if __name__ == "__main__":
