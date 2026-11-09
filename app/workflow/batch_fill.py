@@ -733,7 +733,18 @@ def mark_finalized(batch_dir) -> dict:
     for uid, row in rows.items():
         token = _source_token(_base(row), draft.get("source_bindings", {}).get(uid, {}))
         if token != state["units"][uid]["source_sha256"]:
-            raise ValueError("Source changed before finalization")
+            saved = state["units"][uid]
+            before, after = _body(saved["base"]), _body(_base(row))
+            changed = sorted(key for key in set(before) | set(after)
+                             if before.get(key) != after.get(key))
+            binding = draft.get("source_bindings", {}).get(uid, {})
+            old_binding = saved.get("binding", {})
+            if old_binding.get("source_text_sha256") != binding.get("source_text_sha256"):
+                changed.append("source_text_sha256")
+            if old_binding.get("media_hashes", {}) != binding.get("media_hashes", {}):
+                changed.append("media_hashes")
+            raise ValueError("Source changed before finalization: " + uid
+                             + "; changed fields: " + ", ".join(changed or ["source binding"]))
     state["mode"] = "finalized"
     state["finalized_bodies"] = {uid: _body(row) for uid, row in _rows(payload).items()}
     state["payload_sha256"] = question_draft._digest(payload)

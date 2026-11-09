@@ -118,10 +118,16 @@ def _format_errors(report) -> list[str] | None:
     return out
 
 
-def _format_detail(batch: Path) -> str:
-    errors = _format_errors(_read(batch / "07_review" / "upload-format.json"))
+def _format_detail(batch: Path, note: str = "") -> str:
+    report = _read(batch / "07_review" / "upload-format.json")
+    errors = _format_errors(report)
     if errors is not None:
-        return "；".join(errors) if errors else "格式报告 errors 为空；阶段失败原因未记录，需重新检查格式阶段日志。"
+        if errors:
+            return "；".join(errors)
+        # 脚本报告只覆盖格式检查；后续固化钩子仍可能失败，台账记录才是本次阶段结论。
+        if note:
+            return note + "；现有格式报告 errors 为空，不证明本次阶段已完成。"
+        return "格式报告 errors 为空；阶段失败原因未记录，需重新检查格式阶段日志。"
     text = _tail_file(batch / "workflow" / "logs" / "format_gate.log", limit=None)
     # CLI 输出的是带缩进的 JSON，日志尾部常为 deferred；即使外框截断也优先取 errors 数组。
     decoder = json.JSONDecoder()
@@ -187,6 +193,9 @@ def _remedy(stage: contracts.Stage, batch_dir: str, detail: str = "") -> dict:
     if stage.kind == contracts.HUMAN:
         return {"hint": "这是人工闸门，需你本人确认（不代签）：核对批次/来源/目标/查重后标记批准。",
                 "command": f"{base} mark --batch-dir {batch_dir} --stage {stage.id} --status approved"}
+    if stage.id == "review_gate":
+        return {"hint": "按具体审核质量差异自动修正并复验；审核执行完成或队列为空均不能单独证明放行。",
+                "command": ""}
     if stage.kind == contracts.GATE:
         specific = _check_hint(detail)
         if specific:
@@ -195,6 +204,10 @@ def _remedy(stage: contracts.Stage, batch_dir: str, detail: str = "") -> dict:
         return {"hint": "确定性检查未过：按上面列出的阻断项修复对应问题后重跑该阶段。",
                 "command": f"{base} run --batch-dir {batch_dir} --stage {stage.id}"}
     if stage.id == "format_gate":
+        if detail.startswith("固化批次失败："):
+            return {"hint": "格式检查与来源固化是不同检查；先按具体异常恢复来源绑定及前置批次对象，"
+                            "复验受影响内容和审核后再运行最终格式阶段。现有空 errors 不代表固化成功。",
+                    "command": ""}
         hint = "查看 07_review/upload-format.json 的 errors，按 code、unit_id、message 定位本地格式错误后重跑。"
         if "MATERIAL_TABLE_" in detail:
             hint += ("定位 06_batch/batch_meta.json 中该 unit_id 的 materialBlocks[].rows[].cells，"
@@ -290,7 +303,7 @@ def diagnose(batch_dir) -> dict:
                 if bl:
                     detail = "；".join(bl)
             if stage.id == "format_gate":
-                detail = _format_detail(batch)
+                detail = _format_detail(batch, note if note != "最终格式检查未通过" else "")
             if stage.id in ("validate",):
                 bl = _validation_blockers(batch)
                 if bl:
@@ -298,7 +311,11 @@ def diagnose(batch_dir) -> dict:
             if stage.id == "review_gate":
                 open_items = _open_manual_items(batch)
                 if open_items:
-                    detail = f"人工队列仍有 {open_items} 项未处理"
+                    reason = "审核存在未解决的质量差异，尚未放行"
+                    detail = f"审核差异队列仍有 {open_items} 项未解决"
+                elif record.get("execution_completed"):
+                    reason = "审核放行条件未满足"
+                    detail = note or "审核已执行；当前质量或交付证据尚未满足放行条件"
             if not detail:
                 err = _agent_error(batch, stage.id)
                 if err:
@@ -317,8 +334,19 @@ def diagnose(batch_dir) -> dict:
                 elif not (batch / "02_audio" / "segment-evidence.json").is_file():
                     detail = "缺少 02_audio/segment-evidence.json：听力切段尚未运行或未启用（可选能力）"
         if unmet:
-            reason = reason or "等待上游阶段完成"
-            detail = (detail + "；" if detail else "") + "上游未完成：" + "、".join(unmet)
+            reason = reason or "等待上游交付满足条件"
+            dependency_details = []
+            for dep in unmet:
+                dep_record = stages.get(dep) or {}
+                dep_status = dep_record.get("status") or mf.PENDING
+                if dep_status in mf.TERMINAL_OK:
+                    state_detail = "已执行，当前产物或消费者校验未满足"
+                elif dep_record.get("execution_completed"):
+                    state_detail = "已执行，质量或交付条件未满足"
+                else:
+                    state_detail = "尚未完成执行"
+                dependency_details.append(f"{dep}（{state_detail}；status={dep_status}）")
+            detail = (detail + "；" if detail else "") + "上游交付未满足：" + "、".join(dependency_details)
         if missing_inputs:
             reason = reason or "缺少必需输入"
             detail = (detail + "；" if detail else "") + "缺少输入：" + "、".join(missing_inputs)
@@ -347,7 +375,7 @@ def diagnose(batch_dir) -> dict:
         next_action = (
             "重新导出并重跑当前阶段" if failure_class == "stale_input" else
             "修正代理输出后重试" if failure_class == "agent_output_needs_retry" else
-            "处理质量差异或按零人工策略继续" if failure_class == "quality_findings" else
+            "按具体质量差异自动修正并复验审核放行条件" if failure_class == "quality_findings" else
             "查看阻断码并修复源文件/批次产物" if failure_class in ("deterministic_gate_failure", "gate_failure") else
             "补齐必需输入" if failure_class == "missing_required_input" else
             "等待上游阶段完成" if unmet else

@@ -70,6 +70,21 @@ class DiagnoseTest(unittest.TestCase):
         self.assertEqual(item["failure_class"], "quality_findings")
         self.assertIn("质量差异", item["next_action"])
 
+    def test_executed_review_quality_failure_is_not_called_unexecuted(self):
+        manifest = self._load_manifest()
+        manifest["stages"]["review_gate"].update(
+            status=mf.BLOCKED, execution_completed=True, notes="12 项真实差异保留")
+        manifest["stages"]["format_gate"].update(status=mf.PENDING)
+        mf.save(self.batch, manifest)
+        _write(self.batch, "07_review/manual-review-queue.json", {"items": [{"status": "open"}] * 12})
+        gate = diagnose.explain(self.batch, "review_gate")
+        self.assertIn("质量差异", gate["reason"])
+        self.assertIn("12 项未解决", gate["detail"])
+        self.assertNotIn("代理产出", gate["reason"])
+        downstream = diagnose.explain(self.batch, "format_gate")
+        self.assertIn("review_gate（已执行，质量或交付条件未满足", downstream["detail"])
+        self.assertFalse(downstream["blocking"])
+
     def test_executed_unqualified_review_does_not_block_final_format(self):
         manifest = self._load_manifest()
         manifest['stages']['review_gate'].update(status=mf.BLOCKED,
@@ -185,6 +200,35 @@ class DiagnoseTest(unittest.TestCase):
         # 报告与失败台账矛盾时，只解释证据不足，不擅自改为成功。
         self.assertEqual(item["status"], mf.FAILED)
         self.assertTrue(item["blocking"])
+
+    def test_format_passed_report_keeps_actual_finalization_failure_and_upstream(self):
+        manifest = self._load_manifest()
+        manifest["stages"]["format_gate"].update(
+            status=mf.FAILED, notes="固化批次失败：Source changed before finalization: group-59-60-61-62; changed fields: stem")
+        manifest["stages"]["review_gate"].update(status=mf.PENDING)
+        mf.save(self.batch, manifest)
+        report = self._format_report()
+        report.update(passed=True, status="passed", errors=[])
+        _write(self.batch, "07_review/upload-format.json", report)
+        self._format_log(json.dumps(report, ensure_ascii=False, indent=2))
+        before = (self.batch / "workflow/manifest.json").read_bytes()
+        item = diagnose.explain(self.batch, "format_gate")
+        self.assertIn("固化批次失败：Source changed", item["detail"])
+        self.assertIn("group-59-60-61-62", item["detail"])
+        self.assertIn("上游交付未满足：review_gate（尚未完成执行", item["detail"])
+        self.assertNotIn("阶段失败原因未记录", item["detail"])
+        self.assertNotIn("CATALOG_REQUIRED", item["detail"])
+        self.assertEqual(item["status"], mf.FAILED)
+        self.assertTrue(item["blocking"])
+        self.assertEqual(before, (self.batch / "workflow/manifest.json").read_bytes())
+
+    def test_format_real_errors_still_take_priority_over_stage_note(self):
+        self._fail_format()
+        _write(self.batch, "07_review/upload-format.json", self._format_report())
+        manifest = self._load_manifest()
+        manifest["stages"]["format_gate"]["notes"] = "固化批次失败：older hook error"
+        mf.save(self.batch, manifest)
+        self._assert_table_failure(diagnose.explain(self.batch, "format_gate"))
 
     def test_format_deferred_only_log_does_not_become_blocker_detail(self):
         self._fail_format()

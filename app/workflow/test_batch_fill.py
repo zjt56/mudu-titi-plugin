@@ -374,6 +374,30 @@ class BatchFillTest(unittest.TestCase):
         self.assertEqual(self.load(batch_fill.STATE)["mode"], "filling")
         self.assertFalse((self.root / "workflow/manifest.json").exists())
 
+    def test_finalize_reports_changed_unit_and_body_field_without_writing_state(self):
+        batch_fill.initialize(self.root)
+        draft = question_draft.ensure(self.root)
+        draft["items"][0]["stem"] = "New proven shared section rubric"
+        saved = self.snapshot()
+        with patch.object(question_draft, "ensure", return_value=draft):
+            with self.assertRaisesRegex(ValueError, "q-1; changed fields: stem"):
+                batch_fill.mark_finalized(self.root)
+        self.assertEqual(self.snapshot(), saved)
+        self.assertEqual(self.load(batch_fill.STATE)["mode"], "filling")
+
+    def test_finalize_reports_media_and_source_binding_changes(self):
+        batch_fill.initialize(self.root)
+        for field, value in (("source_text_sha256", "a" * 64),
+                             ("media_hashes", {"01_source/media/new.png": "b" * 64})):
+            with self.subTest(field=field):
+                draft = question_draft.ensure(self.root)
+                draft["source_bindings"]["q-1"][field] = value
+                saved = self.snapshot()
+                with patch.object(question_draft, "ensure", return_value=draft):
+                    with self.assertRaisesRegex(ValueError, "q-1; changed fields: " + field):
+                        batch_fill.mark_finalized(self.root)
+                self.assertEqual(self.snapshot(), saved)
+
     def test_source_media_change_only_resets_its_owner(self):
         self.source("One? [IMG first.png]")
         self.put("01_source/media/first.png", "original image")

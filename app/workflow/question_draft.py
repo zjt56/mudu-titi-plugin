@@ -616,7 +616,7 @@ def ensure(batch_dir, *, units=None):
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=".question-draft-", suffix=".tmp",
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", prefix=".question-draft-", suffix=".tmp",
                                          dir=target.parent, delete=False) as stream:
             temporary = Path(stream.name)
             stream.write(content)
