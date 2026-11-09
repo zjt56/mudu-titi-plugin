@@ -239,8 +239,13 @@ def input_signatures(batch, manifest, stage, raw_hashes):
             result["rule:" + rel] = digest(file_value(root / rel))
     if stage.id == "preassemble":
         root = Path(__file__).resolve().parent
-        for name in ("batch_fill.py", "question_draft.py", "question_content.py", "wire_format.py"):
+        for name in ("batch_fill.py", "question_draft.py", "question_content.py", "wire_format.py", "preassembly.py"):
             result["preassemble-rule:" + name] = digest(file_value(root / name))
+        from . import agent_tasks
+        result["rule:task"] = digest(agent_tasks.RULES["types"])
+        for rel in ("references/filter-framework.json", "references/type-subtypes.md",
+                    "skills-reference/type-taxonomy.md", "prompts/roles/types.md"):
+            result["rule:" + rel] = digest(file_value(root.parent / rel))
     if stage.id == "format_gate":
         from . import format_gate
         for path in format_gate.RULE_FILES:

@@ -10,17 +10,17 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `extract` | 来源、年份、地区、来源类型与原卷复合提取 | `01_source/metadata.json`、正文、结构与提取证据 | command | 原件（必有） | 确定性执行器 |
 | 2 | `structure_gate` | 对照原卷逐题核题号、选项、材料边界和真实对话分组 | `01_source/structure.confirmed.json`、`07_review/structure-gate.json` | gate | `extract` | 证据不足则阻断并准备版面复核 |
-| 3 | `preassemble` | 前置组装上传字段形状，立即建立同一批次 | `06_batch/batch.base.json`、可逐步填充的 `06_batch/batch.json` | command | `structure_gate` | 未判断标签留空；来源必须可回指 |
+| 3 | `preassemble` | 切题后建立来源对象，并在同一阶段判题型、子类、词数与完整性 | `06_batch/batch.base.json`、`03_types/types.json`、逐步填充的 `06_batch/batch.json` | agent（内含确定性组装） | `structure_gate` | 来源对象与题型均验收才交付；不重新编写原题 |
 | 4 | `answers` | 逐题填入原答案或带来源证据的「无答案」决定 | `01_source_ans/answers.json` | agent | `preassemble`、结构确认 | 未逐题决定不能交付 |
 | 6 | `audio` | 依据已验证题型切听力并填媒体引用 | `02_audio/audio_map.json` | agent | `structure_gate`、`preassemble`、`types` | 单元/类型绑定过期即拒绝；无音频明确跳过 |
-| 5 | `types` | 填目录题型、子类、词数并确认原文完整性 | `03_types/types.json` | agent | `preassemble`、结构确认 | `contentComplete=false` 不交付 |
+| 5 | `types` | 兼容题型交接校验，只读检查前置组装的结果 | `03_types/types.json`（复用组装产物） | command | `preassemble`、结构确认 | 不调用模型、不重复判型；不完整不能交付 |
 | 7 | `explanations` | 按Word原文逐字匹配解析/大意，确认缺失填占位 | `04_knowledge/explanations.json` | agent | `types`、`answers` | 来源唯一且精确绑定；不生成 |
 | 8 | `knowledge` | 仅填知识点叶子/ID与适用教材映射 | `04_knowledge/knowledge.json` | agent | `types` | 只含标签；不读取答案或解析 |
 | 9 | `assemble` | 确定性合流，按原题身份合入并校验全部上游数据 | `06_batch/batch.json` | agent/command | `preassemble`、`answers`、`types`、`explanations`、`knowledge` | 前置对象冲突或标签未交付即等待；不等待听力 |
 | 10 | `meta` | 归一难度与分类，并逐字段回填同批次 | `06_batch/batch_meta.base.json` | command | `assemble` | 不改题文与知识标签 |
 | 11 | `underlines` | 补画线并生成最终上传序列化视图 | `06_batch/batch_meta.json` | command | `meta` | 无 DOCX 保留原有内容 |
 | 12 | `validate` | 本地体检与原卷逐题对账 | `07_review/validation-report.json` | gate | `underlines` | 失败保留质量问题 |
-| 13 | `review` | 两轮内容与知识点审核 | 分轮记录与差异队列 | agent | `validate` | 复用未变单元 |
+| 13 | `review` | 两轮内容与知识点审核 | 分轮记录与差异队列 | agent | `validate`、`audio` | 复用未变单元 |
 | 14 | `review_gate` | 内容审核结果归集 | `07_review/review-gate.json` | gate | `review` | 质量结论如实保留 |
 | 15 | `format_gate` | 最终本地上传字段/格式检查 | `07_review/upload-format.json` | command | `review_gate` | 无模型、无网络；错误不伪称通过 |
 | 16 | `upload_gate` | 上传确认 | 台账与冻结绑定 | human | `format_gate` | 专用上传入口 |
@@ -35,7 +35,7 @@
 - [上传 API 对接](upload-api.md)仍在真实提交前校验实时远端目录、媒体和冻结请求；本地格式通过不等同远端提交批准或发布。普通 run/auto 不自动提交远端。
 
 
-调度只并发**依赖已经交付且消费者校验通过**的阶段。第一波答案与题型可并行；音频必须等待题型完成，并将题型/结构摘要绑定到切片证据；下一波解析（依赖题型、答案）与知识点（仅依赖题型、只输出标签）可并行。答案、解析与知识标签由 `assemble` 唯一确定性合并，合并成功后才允许 meta 等下游读取。
+调度只并发**依赖已经交付且消费者校验通过**的阶段。前置组装在同一阶段完成来源对象与题型判断；题型不完整时整个前置组装不能交付。随后答案、音频、知识点可并行；音频消费已经验收的题型并将题型/结构摘要绑定到切片证据；解析等待答案与题型。`types` 只保留无模型的兼容检查点，显式旧任务交回与受影响题型局部修正仍使用其原身份。答案、解析与知识标签由 `assemble` 唯一确定性合并，合并成功后才允许 meta 等下游读取。
 
 ## 结构归类与确认（第 2 阶段）
 
@@ -80,11 +80,11 @@
 
 ## 前置标准题目对象与局部更新
 
-结构确认后立即执行独立 `preassemble`：从 Word 原文和确认结构生成源对象，再真正写入 `06_batch/batch.json`，不等标签完成。每个独立题/题组使用稳定 `unit_id`，题干、选项、共享材料、表格、子题、媒体按最终字段形状前置组装。`batch.base.json` 是不随标签填充变化的来源基线，`workflow/batch-fill-state.json` 记录各字段填充进度；这些都不冒充审核通过。
+结构确认后立即执行 `preassemble`：从 Word 原文和切题边界生成源对象，真正写入 `06_batch/batch.json`，并在同一阶段结合题干、选项、大题标题和共享材料判断题型、子类、词数与内容完整性。确定性代码建立正文与来源绑定，模型只填写题型标签，不能重新抄写或改动题目。题型结果通过目录、覆盖与完整性检查并回填同一批对象后，前置组装才完成。每个独立题/题组使用稳定 `unit_id`，题干、选项、共享材料、表格、子题、媒体按最终字段形状前置组装。`batch.base.json` 是不随标签填充变化的来源基线，`workflow/batch-fill-state.json` 记录各字段填充进度；这些都不冒充审核通过。
 
 答案、题型、知识点、解析/大意、媒体和元信息产物被校验接受后，按唯一题号/单元逐字段回填同一批次。未判断字段保持空；确认原件没有相应内容后仍沿用既有「无」「未提供」等占位规则，有原文则逐字填写，不生成解析或大意。OCR 只作版面辅助，不覆盖 Word 原文。Word 为主卷时，配套 PDF 明确登记为 `structure_reference`，只帮助判断题号、题型和层级；可读页使用原生文字层，不强制整卷重做 OCR。PDF 辅助获取失败只保留诊断，不把已成功的 Word 提取判成失败。同题解析以 Word 正文/附录为准，PDF OCR 的重复内容不制造“来源不唯一”冲突。
 
-执行顺序为：复合提取 → 确认题目结构 → 前置批次组装 → 答案/音频/题型填充 → 解析与知识点填充 → 汇总固化和元信息补全 → 体检与内容审核 → 最终上传格式检查。答案、音频、题型可在前置组装后独立推进。
+执行顺序为：复合提取 → 确认切题结构 → 前置批次组装（含题型判断）→ 答案/音频/知识点并行 → 解析与合流固化 → 元信息、画线及体检 → 内容审核 → 最终上传格式检查。解析依赖答案；听力不阻塞组装固化和体检，内容审核必须等听力完成。
 
 标签模型默认以一题或一个题组为一片（`label_part_units=1`），与审核分片大小独立。可以唯一回指当前原文且模型身份可观察时，按本片题文、对应标签/答案、规则目录和模型配置复用快照；在途任务仍核对全部原始输入。托管批次后置 `assemble` 仅对同一批对象汇总固化并走原有整批保真校验；发生冲突时保留现有题目对象等待局部修正，不回退模型整批重组。没有托管状态的历史批次保留原有装配路径。来源元数据及报告簿记变化只做确定性字段合并。
 

@@ -32,7 +32,7 @@ class AudioSkipTest(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('{}', encoding='utf-8')
         (self.batch / "01_source/附录.txt").write_text("1.A", encoding="utf-8")
-        for stage in ("extract", "structure_gate", "preassemble"):
+        for stage in ("extract", "structure_gate", "preassemble", "types"):
             mf.touch_stage(self.manifest, stage, mf.COMPLETED)
         mf.save(self.batch, self.manifest)
 
@@ -129,7 +129,9 @@ class AudioSkipTest(unittest.TestCase):
                 self._structure(["听力短对话"] if marker else ["单项填空"])
                 if marker:
                     self._skip_marker()
-                mf.touch_stage(self.manifest, "audio", mf.PENDING)
+                for stage in ("answers", "audio", "knowledge"):
+                    mf.touch_stage(self.manifest, stage, mf.PENDING)
+                mf.touch_stage(self.manifest, "explanations", mf.COMPLETED)
                 mf.save(self.batch, self.manifest)
                 dispatched = []
 
@@ -142,13 +144,16 @@ class AudioSkipTest(unittest.TestCase):
                     return {stage.id: 0 for stage in stages}
 
                 with patch.object(auto, "PARALLEL_AGENTS_ENABLED", True), \
-                     patch.object(mf, "dependency_satisfied", return_value=True), \
+                     patch.object(mf, "dependency_satisfied", side_effect=lambda state, dep, **kw:
+                                  state["stages"][dep]["status"] in mf.TERMINAL_OK), \
                      patch.object(agent, "configured", return_value=True), \
                      patch.object(local_agent, "load_config", return_value={}), \
                      patch.object(auto, "_parallel_ready_agents", side_effect=offline), \
                      patch.object(runner, "_execute_command") as execute:
-                    auto.advance(self.batch, auto.load_bridge(), stop_at="explanations")
-                self.assertEqual(dispatched, ["answers", "types"])
+                    auto.advance(self.batch, auto.load_bridge(), stop_at="assemble")
+                self.assertEqual(dispatched, ["answers", "knowledge"])
+                self.assertNotIn("audio", dispatched)
+                self.assertEqual(mf.load(self.batch)["stages"]["assemble"]["status"], mf.PENDING)
                 execute.assert_not_called()
                 self.assertEqual(mf.load(self.batch)["stages"]["audio"]["status"], mf.SKIPPED)
 

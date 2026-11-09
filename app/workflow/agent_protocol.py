@@ -74,8 +74,13 @@ def _atomic(path, raw):
 
 def _spec(stage):
     spec = contracts.STAGE_BY_ID.get(stage)
-    if not spec or spec.kind != contracts.AGENT or stage not in agent_tasks.ARTIFACTS:
+    if not spec or (spec.kind != contracts.AGENT and stage != "types") or stage not in agent_tasks.ARTIFACTS:
         raise ValueError(f"Unsupported agent stage: {stage!r}")
+    if stage == "types":
+        # Explicit old-task import/export and scoped repairs retain their agent
+        # identity. The normal scheduler uses the read-only COMMAND checkpoint.
+        from dataclasses import replace
+        return replace(spec, kind=contracts.AGENT, command=())
     return spec
 
 
@@ -147,9 +152,26 @@ def _fingerprints(batch, manifest, stage, hashes):
 
 def _preconditions(manifest, spec):
     prerequisites = contracts.upstream_of(spec.id)
+    def ready(dep):
+        if mf.dependency_satisfied(manifest, dep, allow_unqualified=False):
+            return True
+        # Old portable types tasks consumed a source-only preassembly. Preserve
+        # that exact legacy path; fresh preassemble delivery still requires labels.
+        record = manifest.get("stages", {}).get(dep, {})
+        if (spec.id == "types" and dep == "preassemble"
+                and record.get("status") in (mf.COMPLETED, mf.APPROVED)
+                and not record.get("rebuild_required")
+                and "03_types/types.json" not in (record.get("output_hashes") or {})):
+            from .handoff import inspect_stage
+            from dataclasses import replace
+            legacy = replace(contracts.STAGE_BY_ID[dep], produces=("06_batch/batch.base.json",))
+            if mf.is_stale(manifest["batch_dir"], manifest, legacy)[0]:
+                return False
+            return inspect_stage(manifest["batch_dir"], manifest, dep,
+                                 legacy_source_only=True).get("passed") is True
+        return False
     reasons = [f"Prerequisite {dep} must have a current, consumer-validated delivery"
-               for dep in prerequisites
-               if not mf.dependency_satisfied(manifest, dep, allow_unqualified=False)]
+               for dep in prerequisites if not ready(dep)]
 
     if manifest.get("stages", {}).get(spec.id, {}).get("status") in mf.TERMINAL_OK:
         reasons.append(f"Stage {spec.id} is already complete; explicitly invalidate it before exporting again")
@@ -199,6 +221,9 @@ def export_task(batch_dir, stage, output_dir=None, max_input_chars=180000) -> di
         if blockers:
             return {"action": "blocked", "completed": False, "stage": stage,
                     "preconditions": blockers}
+        if stage == "preassemble":
+            from . import preassembly
+            preassembly.prepare(batch)
         built = agent_tasks.build_task(batch, stage, max_input_chars=max_input_chars)
         missing = list(dict.fromkeys(built["preconditions"]))
 

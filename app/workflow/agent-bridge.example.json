@@ -1,4 +1,14 @@
 {
+  "preassemble": [
+    "{python}",
+    "-m",
+    "workflow.agent",
+    "run",
+    "--stage",
+    "preassemble",
+    "--batch-dir",
+    "{batch_dir}"
+  ],
   "answers": [
     "{python}",
     "-m",

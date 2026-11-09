@@ -3,7 +3,7 @@ stage: types
 artifact: 03_types/types.json
 
 ## 职责
-为每个已确认单元判定主题型、子类、英文词数与内容完整性。
+在前置批次组装过程中，为刚按原文切分并绑定来源的每个单元判定主题型、子类、英文词数与内容完整性。结合大题标题、题干、选项和共享材料判断，不能只看孤立题干猜题型。新批次在本阶段交付前完成判定；`types` 任务身份保留供旧任务交回和局部修正使用。
 
 ## 权限边界
 - 只写 `types.json` 的 `items`（`unit_id/type/subtypes/words/contentComplete/evidence`）。

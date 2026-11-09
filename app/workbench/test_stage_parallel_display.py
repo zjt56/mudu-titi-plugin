@@ -25,8 +25,8 @@ class StageParallelDisplayTest(unittest.TestCase):
         info = server.stage_cards(manifest, has_output=True, advance_running=True)
         return {card["id"] for card in info["items"] if card.get("active")}, info
 
-    def test_parallel_agents_report_every_ready_stage_as_active(self):
-        # types/answers 已完成，explanations 与 knowledge 同时满足依赖 → 两个都“处理中”。
+    def test_parallel_agents_report_every_running_stage_as_active(self):
+        # explanations 与 knowledge 均已实际启动，必须同时显示“处理中”。
         manifest = _manifest({"types": "completed", "answers": "completed",
                                "explanations": "running", "knowledge": "running"})
         active, info = self._active(manifest)
@@ -63,12 +63,39 @@ class StageParallelDisplayTest(unittest.TestCase):
         self.assertNotIn("audio", active)
         self.assertNotIn("types", active)
 
-    def test_unstarted_batch_shows_only_open_stages_after_ready_deps(self):
-        # 刚上传的批次：extract 未开始，其余未开始阶段依赖未满足 → 只有 extract 活动。
-        manifest = _manifest({}, unknown=tuple(server.STAGE_ORDER))
-        manifest["stages"] = {sid: {"status": "pending"} for sid in server.STAGE_ORDER}
+    def test_unstarted_batch_has_no_active_stage(self):
+        for manifest in ({"stages": {}}, _manifest({sid: "pending" for sid in server.STAGE_ORDER})):
+            with self.subTest(manifest=manifest):
+                active, info = self._active(manifest)
+                self.assertEqual(active, set())
+                self.assertEqual(info["current"]["id"], "extract")
+                self.assertEqual(info["current"]["status"], "pending")
+
+    def test_ready_pending_stages_stay_idle_even_while_batch_advances(self):
+        manifest = _manifest({"answers": "pending", "audio": "pending",
+                              "knowledge": "pending", "explanations": "pending"})
+        for advancing in (False, True):
+            with self.subTest(advancing=advancing):
+                info = server.stage_cards(manifest, advance_running=advancing)
+                self.assertFalse(any(card["active"] for card in info["items"]))
+                self.assertEqual(server.active_stage_ids(manifest), set())
+
+    def test_only_dispatched_parallel_worker_is_active(self):
+        manifest = _manifest({"answers": "running", "audio": "pending",
+                              "knowledge": "pending", "explanations": "pending"})
         active, _ = self._active(manifest)
-        self.assertEqual(active, {"extract"})
+        self.assertEqual(active, {"answers"})
+        self.assertEqual(server.active_stage_ids(manifest), {"answers"})
+
+    def test_unqualified_types_does_not_satisfy_running_consumers(self):
+        manifest = _manifest({"types": "needs_review", "audio": "running",
+                              "knowledge": "running", "explanations": "running"},
+                             types={"execution_completed": True,
+                                    "continue_unqualified": True,
+                                    "release_ready": False})
+        active, _ = self._active(manifest)
+        self.assertFalse(server.manifest_dependency_satisfied(manifest, "types"))
+        self.assertEqual(active, set())
 
     def test_unqualified_review_gate_counts_as_met_dependency(self):
         # review_gate「已执行、差异待人工」应解锁 format_gate 等下游，而不是卡住显示。

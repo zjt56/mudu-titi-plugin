@@ -24,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = {
     "answers": "01_source_ans/answers.json",
     "audio": "02_audio/audio_map.json",
-    "types": "03_types/types.json",
+    "types": "03_types/types.json",  # historical task / local repair identity
+    "preassemble": "03_types/types.json",  # source skeleton is built by code, never by the model
     "explanations": "04_knowledge/explanations.json",
     "knowledge": "04_knowledge/knowledge.json",
     "assemble": "06_batch/batch.json",
@@ -36,6 +37,7 @@ ARTIFACTS = {
 EXAMPLE_REQUIRED = {
     "answers": ("answers", "evidence", "missing"),
     "types": ("items",),
+    "preassemble": ("items",),
     "explanations": ("items",),
     "knowledge": ("items",),
     "audio": ("items",),
@@ -47,7 +49,7 @@ AI_MARK = "（AI生成，待校对）"
 RULES = {
     "answers": "You are labeling subagent 4 (answers, explanation alignment, difficulty). Artifact: {answers:{question_number:string}, evidence:{question_number:[nonempty location strings]}, difficulty:{question_number:容易|适中|困难}}. Extract every answer and explanation mapping actually present in all supplied answer materials, including question numbers outside the current tentative structure. Never discard questions merely because the source paper currently contains only another section. Never solve or guess; preserve original wording. Difficulty is optional: when the actual stem/options are supplied, make a concise subjective judgment; otherwise leave it empty. Do not write difficulty evidence. Every confirmed question must have either an original answer or an explicit missing entry: missing:{question_number:[nonempty source-location strings confirming no independent answer]}. Never leave a confirmed question undecided. A reference essay is source content: preserve it when it is the supplied model answer; do not invent one. Missing must be disjoint from answers. Conflicts, undecided numbers and invalid values are unfinished work, not completed delivery.",
     "audio": "Artifact: {items:[{unit_id,file,start,end,evidence:[location strings]}]}. Cover exactly the listening units. file is an existing batch-relative already-cut media segment, never the original full recording. For every listening unit copy file, start and end EXACTLY from a 02_audio/segment-evidence.json item; prefer rows whose verified is true. start/end are offsets on the whole-paper recording, never re-based to the segment's own 0. Do not guess, round or adjust them. If a unit has only an unverified candidate row (verified false) whose segment file exists, still copy its file/start/end exactly and include the review_reasons in evidence; never invent, round or adjust times. Only return needs_review when no evidence row exists at all.",
-    "types": "You are labeling subagent 3 (type, word count, content completeness). Artifact: {items:[{unit_id,type,subtypes:[string],words:integer,contentComplete:boolean,evidence:[location strings]}]}. Exactly one row per confirmed unit. Use only catalog main types and their exact subtypes. All applicable subtypes are required; only 单词拼写 permits multiple subtypes. words is the English word count of the unit's own stem/material/options (digits and Chinese not counted); contentComplete is false when the question is truncated, missing options, or its stem does not match the passage. Never rename IDs or change unit boundaries.",
+    "types": "You classify type, word count and content completeness INSIDE the preassembly stage. Use the just-split source-bound questions, section instructions, options and shared material together; do not guess from an isolated stem. The legacy types identity is also used for scoped repairs. Artifact: {items:[{unit_id,type,subtypes:[string],words:integer,contentComplete:boolean,evidence:[location strings]}]}. Exactly one row per confirmed unit. Use only catalog main types and their exact subtypes. All applicable subtypes are required; only 单词拼写 permits multiple subtypes. words is the English word count of the unit's own stem/material/options (digits and Chinese not counted); contentComplete is false when the question is truncated, missing options, or its stem does not match the passage. Never rename IDs or change unit boundaries.",
     "knowledge": "You are labeling subagent 2 (knowledge points; textbook matching only for lesson-synced sources). Artifact: {items:[{unit_id,knowledge:[full catalog leaf paths],knowledgeIds:[matching catalog IDs],textbook:{version,book,unit,section,evidence},subquestions:[{number,knowledge:[full leaf paths],knowledgeIds:[]}],evidence:[nonempty location strings]}]}. Output tags ONLY. The importer validates and installs this label artifact; it does not read answers or explanations. Those are merged deterministically with your labels only after all producer artifacts independently pass their own contracts. Assign knowledge tags only. knowledgeIds is optional but must match paths. Use the matching types.json row as type/subtype context. Groups cover each confirmed child number exactly once; standalone subquestions is []. Whole-unit types (阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话) take ONLY group-level tags (genre/theme/content): their subquestions must carry knowledge=[] and are never tagged per child. Per-question types (听力短对话理解, 听力关键词语选择, 单项填空, 单词拼写, 完成句子, 翻译, 情景运用, 语音题 etc.) tag every child separately. textbook placement is ONLY for lesson-synced sources (同步练习/单元测验) whose own title or section header names the textbook unit: use exact strings from the supplied textbook_index and cite paper evidence; otherwise omit. Every knowledge path MUST be copied verbatim from the supplied catalog (references/knowledge-catalog.json); never append an invented child below an existing leaf (e.g. '语用/情景交际' is already a leaf — writing '语用/情景交际/询问目的' is invalid), and never invent names or IDs. When no valid leaf exists for a dimension, omit that dimension. Evidence must be nonempty and refer to supplied text.",
     "explanations": content_rules.RULES,
     "assemble": "Artifact: {items:[{unit_id,id,unit_kind,number,numbers,question_type,filterMetadata:{subtypes:[]},stem,material,options:[],knowledge:[],knowledgeIds:[],knowledge_ids:[],answer,explanation,subquestions:[]}]}. For cloze groups, if the shared Word material already contains numbered blanks (the normal case), each child stem MUST be the nonempty placeholder '______' and MUST NOT repeat the material number; only preserve 'N.' or 'N. ______' when the supplied original layout puts that number with the options and does not already show it in shared material. id equals unit_id. Copy confirmed numbers and kind. Standalone number is its one question number; group number is its first question number, children each have number. Use strict catalog labels, full leaf paths and matching IDs at each layer. Cover all units and group child numbers exactly. Merge validated upstream artifacts without guessing answers. Copy identified original-paper metadata into EACH item's filterMetadata: filterMetadata.source = meta.source, filterMetadata.source_type = meta.source_type, filterMetadata.year = meta.year and filterMetadata.region = meta.region, as EXACT strings (for example 安徽省, never 安徽); do not abbreviate, translate or place them only at top level. location is the within-source question/page/section locator, not the province. Copy version and authorization only from explicit supplied evidence; never default or guess them. Include explicit batch name/upload_mode/upload_target when supplied. Optional 01_source/metadata.json supplies extraction evidence. Never let manifest filenames or current year override identified paper metadata. Missing paper_title/source/source_type uses the literal placeholder 未提供; this is allowed and must not block completion or create a routine human-confirmation finding. Never guess a year or region to fill missing metadata. Preserve original source words, options, markings, paragraphs, tables, images and underlines; supplied text alone cannot verify unseen images/formatting, record those uncertainties. When Word source text is supplied, copy its wording, spelling, punctuation and options exactly; use PDF OCR only as a guide to hierarchy and layout, never to replace, correct or rewrite Word text. Match OCR evidence to the same paper and page; record unresolved structural conflicts or missing evidence. Do not claim upload, publication, approval, independent review or final workflow status. Copy the validated explanation/articleSummary from the upstream knowledge artifact exactly; do not generate or rewrite content in assembly. Scope appendix lookups by section AND passage or question number; repeated A/B labels across cloze and reading are not unique IDs. Stop each explanation at its own real section/material boundary. Copy all table rowspan/colspan from source evidence. Include audio/image attachments only after a real deployment mapping is supplied, with placement/optionKey where required; never invent URLs. Media deployment is a separate controlled human step, so when no mapping is supplied, omit attachments and record the pending media deployment in notes instead of failing the whole artifact for that alone. structure.confirmed.json image_questions is only an extraction hint and must not be treated as the attachment binding. No invented media or URLs. MATERIAL BOUNDARY: each group's material MUST contain ONLY that group's own passage/材料 from the source, copied verbatim. Do NOT copy an adjacent group's passage text into this group, and do NOT put a section-wide generic rubric (e.g. 阅读下列短文，从每小题所给的A、B、C、D四个选项中选出最佳选项) into a group's material unless that exact line is this group's own lead-in attached to this passage. For listening groups the material may be empty (its content is audio). TABLE: when the source unit contains a table (信息转换/信息匹配/海报广告表 etc.), materialBlocks MUST include a type=table block preserving the real row/column grid with rowspan/colspan; do not flatten a table into prose. Keep stem as the question/作答指令 only; put the shared passage in material, never inside stem.",
@@ -169,6 +171,7 @@ def _number(value):
 
 def stage_gaps(batch_dir, stage):
     """Return only missing unit/field work for incremental stage retries."""
+    stage = "types" if stage == "preassemble" else stage
     batch = Path(batch_dir)
     try:
         units = confirmed_units(batch)
@@ -315,6 +318,7 @@ def _repair_feedback(batch, stage, units, hashes):
 
 
 def _collect(batch, stage, speculative=False):
+    stage = "types" if stage == "preassemble" else stage
     batch = Path(batch).resolve()
     contexts, hashes, missing = {}, {}, []
     if stage in ('audio', 'assemble', 'review'):
@@ -394,6 +398,13 @@ def _collect(batch, stage, speculative=False):
     structure = add("01_source/structure.confirmed.json", stage != "answers")
     units = confirmed_units(batch) if structure else []
     feedback = _repair_feedback(batch, stage, units, hashes)
+    if stage == "types":
+        # Both public assembly tasks and legacy type repairs use this model
+        # implementation. Bind both inputs, including absence, so new feedback
+        # invalidates an in-flight task; explicit type repair takes precedence.
+        assembly_feedback = _repair_feedback(batch, "preassemble", units, hashes)
+        if feedback is None:
+            feedback = assembly_feedback
     if feedback is not None:
         contexts["repair_feedback"] = feedback
     if units:
@@ -611,12 +622,34 @@ def compact_label_context(context):
     return context
 
 
+def _preassembly_prompt(prompt):
+    from . import agent_roles
+    return (prompt.replace("Stage: types\n", "Stage: preassemble\n", 1)
+            .replace("Agent: types\n", "Agent: preassemble\n", 1)
+            .replace(agent_roles.section("types", ARTIFACTS["types"]),
+                     agent_roles.section("preassemble", ARTIFACTS["preassemble"]), 1))
+
+
 def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _speculative=False, slim=False):
     """Return a self-contained task and trusted input hashes, without writes.
 
     Missing readable inputs return completed=False/status=needs_review and a
     preconditions list. Oversized context raises, without silently truncating.
     """
+    if stage == "preassemble":
+        task = build_task(batch_dir, "types", max_input_chars, blind,
+                          _speculative=_speculative, slim=slim)
+        task = dict(task, stage=stage, input_hashes=dict(task["input_hashes"]))
+        base = _safe_path(batch_dir, "06_batch/batch.base.json")
+        if not base.is_file():
+            raise ValueError("前置组装必须先建立来源对象：06_batch/batch.base.json")
+        task["input_hashes"]["06_batch/batch.base.json"] = hashlib.sha256(base.read_bytes()).hexdigest()
+        task["prompt"] = _preassembly_prompt(task["prompt"])
+        role = ROOT / "prompts/roles/preassemble.md"
+        task["input_hashes"][str(role.resolve())] = hashlib.sha256(role.read_bytes()).hexdigest()
+        if len(task["prompt"]) > max_input_chars:
+            raise ValueError("preassemble prompt exceeding max_input_chars after adding assembly constraints")
+        return task
     _stage(stage)
     if isinstance(max_input_chars, bool) or not isinstance(max_input_chars, int) or max_input_chars <= 0:
         raise ValueError("max_input_chars must be a positive integer")
@@ -735,6 +768,12 @@ def _blind_context(context):
 
 
 def _build_task_template(stage, max_input_chars, context, hashes, missing, units, review_round=None):
+    if stage == "preassemble":
+        task = _build_task_template("types", max_input_chars, context, hashes, missing, units, review_round)
+        prompt = _preassembly_prompt(task["prompt"])
+        if len(prompt) > max_input_chars:
+            raise ValueError("preassemble prompt exceeding max_input_chars after adding assembly constraints")
+        return dict(task, stage=stage, prompt=prompt)
     header = (
         "You are a local JSON-only educational content worker. Read ONLY the supplied content. "
         "NO tools, filesystem access, network, uploads, shell commands, or manifest writes. "
@@ -1040,6 +1079,7 @@ def _normalize_knowledge_payload(payload, notes=None):
 
 
 def _validate(batch, stage, payload, context, units, *, strict_preserve=True, notes=None):
+    stage = "types" if stage == "preassemble" else stage
     if stage == "knowledge":
         _normalize_knowledge_payload(payload, notes)
     if stage in ("knowledge", "assemble"):
@@ -1544,6 +1584,20 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
     Raises ValueError on malformed/unsafe output. A needs_review result imports
     nothing, and is returned to the caller to retain alongside its raw response.
     """
+    if stage == "preassemble":
+        # Source objects stay deterministic; the model can only return labels.
+        from . import batch_fill, preassembly
+        preassembly.require_current_source(batch_dir)
+        if not _safe_path(batch_dir, "06_batch/batch.base.json").is_file():
+            raise ValueError("前置组装缺少来源对象：06_batch/batch.base.json")
+        if (Path(batch_dir) / batch_fill.STATE).is_file():
+            batch_fill._managed(Path(batch_dir))
+        from .handoff import inspect_stage
+        checked = inspect_stage(batch_dir, {}, "preassemble", legacy_source_only=True)
+        if not checked.get("passed"):
+            raise ValueError("前置组装来源对象未通过验收：" + "; ".join(
+                row["message"] for row in checked.get("errors") or []))
+        stage = "types"
     _stage(stage)
     if isinstance(response, str):
         def unique(pairs):

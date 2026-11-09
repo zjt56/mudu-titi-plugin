@@ -76,7 +76,7 @@ def _batch(root, stage, payload):
                     raise ValueError(f"{unit['unit_id']}: downstream {key} must be a string")
 
 
-def inspect_stage(batch_dir, manifest, stage_id):
+def inspect_stage(batch_dir, manifest, stage_id, *, legacy_source_only=False):
     """Inspect installed output only; never repair, install, mark or invoke a model."""
     from . import contracts, manifest as mf
     root = Path(batch_dir)
@@ -92,6 +92,8 @@ def inspect_stage(batch_dir, manifest, stage_id):
                     raise ValueError('Audio skip is no longer justified')
                 return {'passed': True, 'errors': []}
         for relative in spec.produces:
+            if legacy_source_only and stage_id == 'preassemble' and relative == '03_types/types.json':
+                continue
             from .agent_tasks import _safe_path
             if not _safe_path(root, relative).is_file():
                 raise ValueError('Missing required delivery: ' + relative)
@@ -136,7 +138,8 @@ def inspect_stage(batch_dir, manifest, stage_id):
             from audio.consistency import pair_is_consistent, read_pair
             if not pair_is_consistent(root, read_pair(root)):
                 raise ValueError('音频切片映射与证据不一致或已过期，需重新切段')
-        elif stage_id in ('answers', 'types', 'explanations', 'knowledge'):
+        elif stage_id in ('preassemble', 'answers', 'types', 'explanations', 'knowledge') and not (
+                stage_id == 'preassemble' and legacy_source_only):
             from . import agent_tasks
             context = _context(root)
             payload = copy.deepcopy(context[agent_tasks.ARTIFACTS[stage_id]])

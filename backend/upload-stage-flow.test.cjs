@@ -70,7 +70,7 @@ test('main flow stays under ten nodes while retaining every actual substage', ()
 
 test('preassembly completion remains independent from fill summary and final format check', () => {
   const items = stages();
-  items.find((item) => item.id === 'preassemble').status = 'completed';
+  for (const id of ['preassemble', 'types']) items.find((item) => item.id === id).status = 'completed';
   items.find((item) => item.id === 'answers').status = 'running';
   items.find((item) => item.id === 'audio').status = 'running';
   const { tree } = renderFlow(items, items.find((item) => item.id === 'answers'));
@@ -119,8 +119,10 @@ test('workflow explains shared batch, parallel fill, placeholder preservation an
   assert.match(content, /查看分项处理与状态/);
   assert.match(content, /06_batch\/batch\.json/);
   assert.match(content, /后续只填充同一个批次/);
-  assert.match(content, /答案、音频、题型并行/);
-  assert.match(content, /题型完成后，解析与文章大意、知识点并行/);
+  assert.match(content, /前置批次组装同时完成题型与子类判定/);
+  assert.match(content, /完成后，答案、音频、知识点并行/);
+  assert.match(content, /解析与文章大意等待答案完成后填充/);
+  assert.doesNotMatch(content, /答案、音频、题型并行|题型完成后，解析与文章大意、知识点并行/);
   assert.match(content, /确认缺失时沿用「无解析 \/ 未填写 \/ 未提供」/);
   assert.match(content, /不重新组题/);
   assert.match(content, /通过即打包成可上传批次并进入人工审核区/);
@@ -135,9 +137,58 @@ test('grouped status never completes while a real child is pending or failed', (
     ['completed', 'needs_review', 'needs_review'], ['completed', 'skipped', 'completed'],
     ['skipped', 'skipped', 'skipped'],
   ]) {
-    const grouped = context.compactFlowStages([{ id: 'types', status: first }, { id: 'knowledge', status: second }]);
+    const grouped = context.compactFlowStages([{ id: 'preassemble', status: first }, { id: 'types', status: second }]);
     assert.equal(grouped.length, 1);
     assert.equal(grouped[0].status, expected);
+  }
+});
+
+test('preassembly and type checkpoint share completion without waiting for parallel fill', () => {
+  const items = stages();
+  const preassemble = items.find((item) => item.id === 'preassemble');
+  const types = items.find((item) => item.id === 'types');
+  Object.assign(preassemble, { kind: 'agent', status: 'completed' });
+  Object.assign(types, { kind: 'gate', status: 'pending' });
+  for (const id of ['answers', 'audio', 'knowledge']) items.find((item) => item.id === id).status = 'running';
+  const { context } = renderFlow(items);
+  const group = () => context.compactFlowStages(items).find((item) => item.id === 'preassemble');
+  assert.deepEqual(Array.from(group().stage_ids), ['preassemble', 'types']);
+  assert.equal(group().status, 'pending');
+  assert.equal(context.compactProgress({ items }).done, 0);
+
+  for (const status of ['completed', 'skipped']) {
+    types.status = status;
+    const { tree } = renderFlow(items, items.find((item) => item.id === 'answers'));
+    const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'preassemble')[0];
+    assert.equal(group().status, 'completed');
+    assert.equal(context.compactProgress({ items }).done, 1);
+    assert.match(text(node), /批次组装与题型 · 已完成/);
+    assert.ok(node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
+    for (const id of ['answers', 'audio', 'knowledge']) {
+      assert.equal(context.compactFlowStages(items).find((item) => item.id === id).status, 'running');
+    }
+  }
+});
+
+test('either preassembly or type checkpoint failure keeps the merged node incomplete', () => {
+  for (const failedId of ['preassemble', 'types']) {
+    const items = stages();
+    for (const id of ['preassemble', 'types', 'answers', 'audio', 'knowledge']) {
+      items.find((item) => item.id === id).status = 'completed';
+    }
+    const failed = items.find((item) => item.id === failedId);
+    Object.assign(failed, { status: 'failed', notes: failedId + ' 产物校验失败' });
+    const { tree, context } = renderFlow(items, failed);
+    const grouped = context.compactFlowStages(items).find((item) => item.id === 'preassemble');
+    const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'preassemble')[0];
+    assert.equal(grouped.status, 'failed');
+    assert.equal(grouped.done, 1);
+    assert.equal(grouped.total, 2);
+    assert.equal(context.compactProgress({ items }).done, 2); // Only audio and knowledge are complete.
+    assert.equal(node.props['data-stage-ids'], 'preassemble types');
+    assert.match(text(node), /批次组装与题型 · 失败/);
+    assert.ok(text(node).includes(failed.notes));
+    assert.ok(!node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
   }
 });
 

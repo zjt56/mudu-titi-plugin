@@ -7,14 +7,14 @@ from unittest.mock import patch
 from workflow import contracts, manifest as mf
 
 
-def _dep_until_types_fixed(test):
+def _dep_until_preassembly_fixed(test):
     def dependency(manifest, stage_id, **kwargs):
-        rec = manifest.get("stages", {}).get("types", {})
-        types_blocked = rec.get("rebuild_required") or rec.get("status") not in ("completed", "approved", "skipped")
-        if stage_id == "types":
-            return not types_blocked
+        rec = manifest.get("stages", {}).get("preassemble", {})
+        preassembly_blocked = rec.get("rebuild_required") or rec.get("status") not in ("completed", "approved", "skipped")
+        if stage_id == "preassemble":
+            return not preassembly_blocked
         # A failed current-stage repair blocks every downstream that consumes it.
-        if types_blocked and stage_id in ("review", "validate", "assemble"):
+        if preassembly_blocked and stage_id in ("types", "review", "validate", "assemble"):
             return False
         return True
     return dependency
@@ -323,8 +323,10 @@ class ContentReuseTest(unittest.TestCase):
         def execute(batch, manifest, stage):
             calls.append(stage.id)
             return 1  # Repair failed: dependent review must wait, never use old output.
-        with patch("workflow.agent_tasks.stage_gaps", side_effect=lambda batch, sid: {"units": ["q-1"]} if sid == "types" else {}), \
-                patch.object(mf, "dependency_satisfied", side_effect=_dep_until_types_fixed(self)), \
+        # Type-label gaps belong to the preassembly model stage; the legacy
+        # types COMMAND only checks its delivery and never repairs model output.
+        with patch("workflow.agent_tasks.stage_gaps", side_effect=lambda batch, sid: {"units": ["q-1"]} if sid == "preassemble" else {}), \
+                patch.object(mf, "dependency_satisfied", side_effect=_dep_until_preassembly_fixed(self)), \
                 patch("workflow.self_heal.recover", return_value={"changed": False}), \
                 patch.object(auto, "_auto_prepare_audio", return_value={"status": "ready"}), \
                 patch.object(auto, "PARALLEL_AGENTS_ENABLED", False), \
@@ -332,9 +334,10 @@ class ContentReuseTest(unittest.TestCase):
                 patch.object(auto.rn, "_execute_command", side_effect=execute), \
                 patch.object(auto, "_result", return_value={"status": "test"}):
             auto._advance_locked(self.batch, {sid: ["offline"] for sid in contracts.STAGE_ORDER}, stop_at="review_gate")
-        self.assertEqual(calls, ["types"])
+        self.assertEqual(calls, ["preassemble"])
         state = mf.load(self.batch)
-        self.assertTrue(state["stages"]["types"]["rebuild_required"])
+        self.assertTrue(state["stages"]["preassemble"]["rebuild_required"])
+        self.assertEqual(state["stages"]["review"]["status"], mf.PENDING)
         self.assertFalse(mf.dependency_satisfied(state, "validate", allow_unqualified=True))
 
     def test_review_reuses_after_report_timestamp_only_change(self):

@@ -45,7 +45,7 @@
     **数据完整 ≠ 展示完整**：修复“内容丢失”类问题必须同时验证①批次数据字段、②每一层消费/展示输出（预览切片、`source_blocks`、payload），只验证一层不算通过；并且必须补一条覆盖该链路的回归测试，避免同类问题再次漏检。
     **共用大题题干不得只挂在第一组**：完形 A/B、阅读各篇共用同一大题的作答导语；后一组来源窗口只含自己的文章时，必须依据已验证来源坐标补回同节标题之后、首篇材料之前的完整公共导语；含限定题号的组内导语不得传播，本组专属导语优先。生成、原文审计和预览使用同一归属规则，保留 `A`/`B` 分段标签与材料原文，禁止留空或编造；`第一节`/`第二节` 分段前缀只用于识别匹配。落地：`app/workflow/question_draft.py::_section_rubric`、`question_content.py::SECTION_LEAD`。
 
-15. **听力并行、只有内容审核等听力**：听力（audio）切段/转写耗时最长，不得阻塞答案、题型、解析、知识点、组装（assemble）及后续 meta/underlines/validate。`assemble.depends_on` **不含 audio**；只有内容审核（`review`）显式依赖 audio（审核要读 `02_audio/full-transcript.json` 核对听力语义）。即：答案→题型→解析/知识点→组装可先跑完，听力可与之并行；到内容审核必须等听力完成。落地：`app/workflow/contracts.py`（assemble / review 的 `depends_on`）。
+15. **听力并行、只有内容审核等听力**：听力（audio）切段/转写耗时最长，不得阻塞答案、题型、解析、知识点、组装（assemble）及后续 meta/underlines/validate。`assemble.depends_on` **不含 audio**；只有内容审核（`review`）显式依赖 audio（审核要读 `02_audio/full-transcript.json` 核对听力语义）。即：前置组装（含题型）完成后，答案、听力与知识点可并行；解析等待答案，随后汇总组装及体检可先跑完；到内容审核必须等听力完成。落地：`app/workflow/contracts.py`（assemble / review 的 `depends_on`）。
 
 16. **Word 表格空白网格位置不得丢失**：转换表格时必须保留 `grid_before/grid_after` 明确记录的行首/行尾空白列，以空单元格表达，保持非空文字及 `rowspan/colspan` 不变；禁止为凑齐行宽猜改合并跨度。存量表格只在原件摘要匹配、源表唯一绑定、旧投影逐项相等时，通过有备份的事务恢复并复验；无证据的结构错误仍须如实报告。落地：`app/workflow/question_draft.py::_source_table_rows`、`app/workflow/self_heal_actions.py::_prepare_tables`。
 17. **格式诊断必须区分失败与延期检查**：最终上传格式检查优先读取 `07_review/upload-format.json.errors`，显示错误码、题组标识和具体原因；`deferred/warnings` 不得冒充本地阻断。报告缺损时回退日志中的结构化错误，不能从末尾抓一句“必须”当失败原因。知识点目录快照/媒体部署等延期项仍须在真实上传准备时检查，不得为修本地卡点放宽远端校验。落地：`app/workflow/diagnose.py::_format_detail`、`app/workflow/format_gate.py`。
@@ -53,6 +53,8 @@
 18. **Harness 运维为附加能力**：新增异常接手不得替换原录题、自愈、审核和上传功能；关闭或不可用时原流程继续。运维只在批次身份、尝试和写锁有效时调用受控动作，未知请求先查回执，不盲重发。模型自述、会话空闲或安排重试不能当成恢复，必须以当前产物的真实复验为准。未知代码缺陷保留复现证据，不直接修改运行中的插件，不自动上传发布。**同一修复/续跑策略在相同输入与代码上重复失败必须拒绝原样重试并升级为隔离代码修复；代码修复只能在临时工作区进行，安装须显式确认且宿主设置 `MD_OPERATIONS_INSTALL=1`，安装后仍须重启、重新认领并用原失败检查复验。内容阶段出错只按受影响题目局部重生成（限答案/解析/题型/知识点/听力），未定位到题号就拒绝，不得整卷重跑或借机改动上传边界。** 落地：`app/workflow/operations.py`、`app/workflow/operations_development.py`、`lib/operations-agent.js`；说明见 `app/docs/harness-operations.md`。
 
 19. **提示词示例即契约（示例与校验器同源）**：任务提示词里的示例 JSON 必须包含校验器要求的全部必填键；必填键/键集一旦变更（如 `answers` 的 `missing`），必须在同一次改动内同步示例、规则正文与回归测试，禁止示例比校验器旧。构建任务时由 `EXAMPLE_REQUIRED` 自检示例缺键并直接报错（不烧模型调用）；校验报错必须点名缺/多的键与不匹配的题号，让下一次重试能一次改对。**确定性失败不得用重试消化**：某阶段首轮就确定性失败的产物（示例缺字段、键集不符、覆盖不全）必须修提示词或契约，不得靠 `retries` 循环空转；同一阶段连续多轮同一报错即视为确定性卡点，按第 2 条升级为实际修复。落地：`app/workflow/agent_tasks.py::EXAMPLE_REQUIRED`、`_build_task_template`、`_fields`、`_numbers_preview`；回归 `app/workflow/test_agent_tasks.py::test_every_stage_example_satisfies_its_declared_contract`、`::test_answers_task_example_carries_every_required_field`。
+
+20. **题型判断在前置组装内完成**：切题后结合题干、选项、大题标题和共享材料，在 `preassemble` 同一阶段产出并验收目录题型、子类、词数与完整性；不能仅合并流程图名称。来源对象和题型都合格才交付下游，随后答案、听力和知识点可并行。`types` 标识只保留无模型的兼容交接校验及显式旧任务/局部修正入口，新批次不得再独立调用一轮题型模型。局部题型修正须同步其共享交付摘要，避免让前置组装永久过期。
 
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 

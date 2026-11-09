@@ -245,7 +245,15 @@ def load_bridge(path: Path | None = None) -> dict:
         data = json.loads(target.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError:
         return {}
-    return {k: v for k, v in data.items() if isinstance(v, list) and v}
+    bridge = {k: v for k, v in data.items() if isinstance(v, list) and v}
+    legacy_types = ["{python}", "-m", "workflow.agent", "run", "--stage", "types",
+                    "--batch-dir", "{batch_dir}"]
+    if "preassemble" not in bridge and bridge.get("types") == legacy_types:
+        # Migrate the previously shipped bridge without changing any configured
+        # model or custom command. Explicit new assembly overrides always win.
+        bridge["preassemble"] = ["{python}", "-m", "workflow.agent", "run", "--stage", "preassemble",
+                                  "--batch-dir", "{batch_dir}"]
+    return bridge
 
 
 def _bridge_stage(stage: contracts.Stage, command: list) -> contracts.Stage:
@@ -304,6 +312,12 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
 
     def invoke(item):
         stage_id, (_, task, run_dir) = item
+        # Persist actual worker activity so the UI need not pretend every ready
+        # stage is already running (idle/queued/cooldown must remain distinct).
+        with agent_protocol._agent_lock(5):
+            current = mf.load(batch_dir)
+            mf.touch_stage(current, stage_id, mf.RUNNING, notes="")
+            mf.save(batch_dir, current)
         invoke_config = dict(config)
         if stage_id in {"explanations", "knowledge"}:
             invoke_config["max_input_chars"] = max(int(invoke_config.get("max_input_chars", 180000)), 600000)

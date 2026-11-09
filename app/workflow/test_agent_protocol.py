@@ -67,8 +67,10 @@ class AgentProtocolTest(unittest.TestCase):
             "stem": "She ______ a book.", "material": "", "options": ["A. reads", "B. read", "C. reading", "D. to read"],
             "subquestions": []}], "name": "test"})
         types = {"items": [{"unit_id": "q-1", "type": "单项填空", "subtypes": ["四个选项"],
-                             "words": 5, "contentComplete": True, "evidence": ["正文 L1"]}]}
-        self.write(agent_tasks.ARTIFACTS["types"], types)
+                             "words": 5, "contentComplete": True, "evidence": ["正文 L1 A–D"]}]}
+        # Match accepted preassembly serialization so a legacy no-op import
+        # does not change this upstream producer's exact output binding.
+        self.write(agent_tasks.ARTIFACTS["types"], json.dumps(types, ensure_ascii=False, indent=2) + "\n")
         answers = {"answers": {"1": "A"}, "evidence": {"1": ["附录 L1"]}, "missing": {}}
         self.write(agent_tasks.ARTIFACTS["answers"], answers)
         mf.touch_stage(manifest, "preassemble", mf.COMPLETED,
@@ -150,18 +152,38 @@ class AgentProtocolTest(unittest.TestCase):
         manifest = mf.load(self.batch)
         self.assertEqual(manifest["stages"]["types"]["status"], mf.COMPLETED)
         self.assertEqual(manifest["stages"]["types"]["kind"], contracts.AGENT)
+        self.assertEqual(contracts.STAGE_BY_ID["types"].kind, contracts.COMMAND)
+        self.assertEqual(protocol._spec("types").kind, contracts.AGENT)
+        self.assertEqual(protocol._spec("types").command, ())
         self.assertEqual(json.loads((self.batch / agent_tasks.ARTIFACTS["types"]).read_text()), self.payload)
         self.assertEqual(manifest["stages"]["upload_gate"]["status"], mf.PENDING)
+
+    def test_preassembly_delivers_types_and_compatibility_check_is_read_only(self):
+        from workflow import preassembly
+        preassemble = contracts.STAGE_BY_ID["preassemble"]
+        checkpoint = contracts.STAGE_BY_ID["types"]
+        self.assertEqual(preassemble.kind, contracts.AGENT)
+        self.assertEqual(preassemble.produces, ("06_batch/batch.base.json", "03_types/types.json"))
+        self.assertEqual(checkpoint.kind, contracts.COMMAND)
+        self.assertEqual(checkpoint.command, (
+            "{python}", "-m", "workflow.preassembly", "check", "--batch-dir", "{batch_dir}"))
+        before = {path.relative_to(self.batch): path.read_bytes()
+                  for path in self.batch.rglob("*") if path.is_file()}
+        self.assertTrue(preassembly.check(self.batch)["passed"])
+        after = {path.relative_to(self.batch): path.read_bytes()
+                 for path in self.batch.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
 
     @unittest.skipIf(os.name == "nt", "Windows agent lock remains exclusive")
     def test_auto_parallel_calls_use_real_processes_and_portable_import(self):
         from workflow import auto, agent, local_agent, agent_prepare
+        self.mark_delivered("types")
         marker = self.root / "markers"
         marker.mkdir()
         script = self.root / "agent.py"
         script.write_text('''import json, pathlib, sys, time
 prompt = sys.stdin.read()
-stage = "answers" if "Stage: answers" in prompt else "types"
+stage = "answers" if "Stage: answers" in prompt else "knowledge"
 root = pathlib.Path(sys.argv[1])
 (root / stage).write_text("started")
 deadline = time.monotonic() + 5
@@ -172,7 +194,7 @@ if len(list(root.iterdir())) < 2:
 if stage == "answers":
     result = {"status": "needs_review", "artifacts": {}, "notes": ["need evidence"], "findings": []}
 else:
-    result = {"status": "completed", "artifacts": {"03_types/types.json": {"items": [{"unit_id": "q-1", "type": "单项填空", "subtypes": ["四个选项"], "words": 5, "contentComplete": True, "evidence": ["正文 L1 A–D"]}]}}, "notes": [], "findings": []}
+    result = {"status": "completed", "artifacts": {"04_knowledge/knowledge.json": {"items": [{"unit_id": "q-1", "knowledge": ["词汇/词汇辨析/动词辨析"], "subquestions": [], "evidence": ["正文 L1"]}]}}, "notes": [], "findings": []}
 print(json.dumps(result, ensure_ascii=False))
 ''', encoding="utf-8")
         config = local_agent._validate_config({"provider": "command", "command": ["{python}", str(script), str(marker)],
@@ -183,12 +205,14 @@ print(json.dumps(result, ensure_ascii=False))
              patch.object(agent, "configured", return_value=True), \
              patch.object(local_agent, "load_config", return_value=config), \
              patch.object(agent_prepare, "prepare_answers"):
-            outcome = auto.advance(self.batch, bridge, stop_at="explanations")
-        self.assertEqual({p.name for p in marker.iterdir()}, {"answers", "types"})
+            outcome = auto.advance(self.batch, bridge, stop_at="assemble")
+        self.assertEqual({p.name for p in marker.iterdir()}, {"answers", "knowledge"})
         saved = mf.load(self.batch)
         self.assertEqual(saved["stages"]["answers"]["status"], mf.NEEDS_REVIEW)
         self.assertEqual(saved["stages"]["types"]["status"], mf.COMPLETED)
-        self.assertEqual(json.loads((self.batch / agent_tasks.ARTIFACTS["types"]).read_text()), self.payload)
+        self.assertEqual(saved["stages"]["knowledge"]["status"], mf.COMPLETED)
+        knowledge = json.loads((self.batch / agent_tasks.ARTIFACTS["knowledge"]).read_text())
+        self.assertEqual(knowledge["items"][0]["knowledge"], ["词汇/词汇辨析/动词辨析"])
         self.assertEqual(outcome["failed_stages"], [])
 
     def test_exact_replay_is_idempotent_but_altered_result_rejected(self):
@@ -441,7 +465,10 @@ print(json.dumps(result, ensure_ascii=False))
         self.write(agent_tasks.ARTIFACTS['knowledge'], {"items": [{
             "unit_id": "q-1", "knowledge": ["词汇/词汇辨析/动词辨析"],
             "subquestions": [], "evidence": ["正文 L1"]}]})
-        self.mark_delivered('types')
+        # Labels were rewritten above; bind the post-preassembly delivery before
+        # exporting knowledge rather than leaving stale source-only hashes.
+        for upstream in contracts.upstream_of('knowledge'):
+            self.mark_delivered(upstream)
         self.mark_delivered('answers')
         state = mf.load(self.batch)
         mf.touch_stage(state, 'knowledge', mf.PENDING)
@@ -659,7 +686,7 @@ print(json.dumps(result, ensure_ascii=False))
                 break
             manifest["stages"][spec.id]["status"] = mf.COMPLETED
         mf.save(self.batch, manifest)
-        self.assertEqual(protocol.next_task(self.batch)["action"], "exported")
+        self.assertEqual(protocol.next_task(self.batch), {"action": "run_workflow", "stage": "types"})
         for spec in contracts.STAGES:
             if spec.id == "upload_gate":
                 break

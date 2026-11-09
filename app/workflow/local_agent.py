@@ -737,6 +737,18 @@ def main(argv=None):
         from workflow import agent_tasks
         config = dict(config, _part_model_binding=_part_model_binding(config))
         batch_dir = args.batch_dir.expanduser().resolve()
+        assembling = args.stage == "preassemble"
+        accept_stage = args.stage
+        if assembling:
+            # Reuse the existing type model/partition/repair implementation inside
+            # preassembly. The outer agent/runner records preassemble, not types.
+            from . import preassembly
+            with _agent_lock(config.get("timeout_seconds", 900)):
+                if args.dry_run:
+                    preassembly.require_current_source(batch_dir)
+                else:
+                    preassembly.prepare(batch_dir)
+            args.stage = "types"
         if args.stage == "answers" and not args.dry_run and (batch_dir / "workflow" / "manifest.json").is_file():
             from workflow.agent_prepare import prepare_answers
             prepare_answers(batch_dir)
@@ -756,7 +768,7 @@ def main(argv=None):
             with _agent_lock(config.get("timeout_seconds", 900)):
                 _check_input_hashes(batch_dir, result["input_hashes"])
                 label_execution.check_inputs(batch_dir, args.stage, result["collected_hashes"])
-                report = agent_tasks.accept_result(batch_dir, args.stage, result["response"])
+                report = agent_tasks.accept_result(batch_dir, accept_stage, result["response"])
             _json_write(run_dir / "import-report.json", report)
             print(json.dumps({"attempt_dir": str(run_dir), "report": report}, ensure_ascii=False))
             return 0 if report.get("completed") else 3
@@ -783,9 +795,16 @@ def main(argv=None):
                 from workflow import unit_tasks
                 task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
                                                      max_units=_part_units(config, args.stage))
+        if assembling:
+            base = agent_tasks._safe_path(batch_dir, "06_batch/batch.base.json")
+            if base.is_file():
+                task.setdefault("input_hashes", {})["06_batch/batch.base.json"] = hashlib.sha256(base.read_bytes()).hexdigest()
+            elif not args.dry_run:
+                raise AgentError("前置组装缺少来源对象", "integration")
+            task["input_hashes"].update(preassembly.original_input_hashes(batch_dir))
         attempts = batch_dir / "workflow" / "agent-runs"
         attempts.mkdir(parents=True, exist_ok=True)
-        run_dir = Path(tempfile.mkdtemp(prefix=args.stage + "-", dir=attempts))
+        run_dir = Path(tempfile.mkdtemp(prefix=("preassemble" if assembling else args.stage) + "-", dir=attempts))
         if task.get("status") == "needs_review":
             _json_write(run_dir / "task-report.json", task)
             print(json.dumps({"attempt_dir": str(run_dir), "status": "needs_review", "report": task}, ensure_ascii=False))
@@ -803,7 +822,7 @@ def main(argv=None):
             hashes.update(config["_part_model_binding"]["files"])
         def cache_validate(candidate):
             _check_input_hashes(batch_dir, hashes)
-            checked = agent_tasks.accept_result(batch_dir, args.stage, candidate, validate_only=True)
+            checked = agent_tasks.accept_result(batch_dir, accept_stage, candidate, validate_only=True)
             if not checked.get("completed"):
                 raise ValueError("Cached candidate is not complete")
         cache_args = dict(stage=args.stage, fingerprints=hashes, prompt=task["prompt"],
@@ -817,7 +836,7 @@ def main(argv=None):
             if cached is not None:
                 with _agent_lock(config.get("timeout_seconds", 900)):
                     _check_input_hashes(batch_dir, hashes)
-                    report = agent_tasks.accept_result(batch_dir, args.stage, cached)
+                    report = agent_tasks.accept_result(batch_dir, accept_stage, cached)
                 _json_write(run_dir / "import-report.json", report)
                 print(json.dumps({"attempt_dir": str(run_dir), "status": cached["status"],
                                   "cache_hit": True, "report": report}, ensure_ascii=False))
@@ -907,7 +926,7 @@ def main(argv=None):
                 _check_input_hashes(batch_dir, hashes)
                 for part in parts:
                     unit_tasks.check_part_inputs(batch_dir, part)
-                report = agent_tasks.accept_result(batch_dir, args.stage, response)
+                report = agent_tasks.accept_result(batch_dir, accept_stage, response)
             _json_write(run_dir / "import-report.json", report)
             cache_store(response, report)
             _record_assemble_guard(batch_dir, args.stage, report)
@@ -952,7 +971,7 @@ def main(argv=None):
             try:
                 with _agent_lock(config.get("timeout_seconds", 900)):
                     _check_input_hashes(batch_dir, hashes)
-                    report = agent_tasks.accept_result(batch_dir, args.stage, response)
+                    report = agent_tasks.accept_result(batch_dir, accept_stage, response)
             except AgentError as exc:
                 exc.artifacts = result.get("artifacts", {})
                 _json_write(run_dir / "import-report.json", {"completed": False, "error_code": exc.code, "error": str(exc)})

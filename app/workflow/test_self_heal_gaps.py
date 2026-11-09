@@ -563,15 +563,19 @@ class UpstreamEscalationTest(unittest.TestCase):
         args = ("preassemble", "Cannot fill batch without proven source binding",
                 {"action": "record_only", "reason": "没有已验证修复"}, 2, {"files": {}})
         self.assertTrue(_heal._apply(batch, state, *args)["changed"])
-        # Same stage + same error + same evidence must never bounce upstream twice;
-        # the second attempt is deferred (the rest of the flow keeps going), not a
-        # fresh upstream re-derivation and not a permanent park.
+        # Same stage + same error + same evidence must never bounce upstream twice.
+        # Preassembly is now a model stage, so after the bounded source retry it
+        # can retry its own type work with concrete feedback.
         again = _heal._apply(batch, _mf.load(batch), "preassemble",
                              "Cannot fill batch without proven source binding",
                              {"action": "record_only", "reason": "没有已验证修复"}, 2, {"files": {}})
         self.assertTrue(again["changed"])
-        self.assertEqual(again["status"], "deferred")
-        self.assertEqual(again["outcome"], "deferred_and_continuing")
+        self.assertEqual(again["status"], "requeued")
+        self.assertEqual(again["outcome"], "content_retry_with_feedback")
+        self.assertEqual(again["target_stage"], "preassemble")
+        self.assertFalse(again["verified"])
+        self.assertTrue((batch / again["feedback_path"]).is_file())
+        self.assertEqual(_mf.load(batch)["stages"]["structure_gate"]["status"], _mf.PENDING)
 
     def test_first_attempt_still_escalates_instead_of_parking(self):
         import tempfile
@@ -587,8 +591,14 @@ class UpstreamEscalationTest(unittest.TestCase):
         result = _heal._apply(batch, state, "preassemble", "err",
                               {"action": "record_only", "reason": "r"}, 1, {"files": {}})
         self.assertTrue(result["changed"])
-        # Unknown free-text errors defer rather than guess an upstream stage.
-        self.assertIn(result["outcome"], ("upstream_escalated", "deferred_and_continuing"))
+        # Unknown free-text errors stay with the preassembly model stage;
+        # they do not guess a different producer or claim a verified repair.
+        self.assertEqual(result["status"], "requeued")
+        self.assertEqual(result["outcome"], "content_retry_with_feedback")
+        self.assertEqual(result["target_stage"], "preassemble")
+        self.assertFalse(result["verified"])
+        self.assertTrue((batch / result["feedback_path"]).is_file())
+        self.assertEqual(_mf.load(batch)["stages"]["preassemble"]["status"], _mf.PENDING)
 
 
 class NeverParkTest(unittest.TestCase):

@@ -27,6 +27,9 @@ class RepairFeedbackTest(unittest.TestCase):
         self.write("01_source/正文.txt", self.source)
         self.write("01_source/structure.confirmed.json", {"units": self.units})
         self.write("01_source/structure.json", {"sections": [{"type": "单项填空", "questions": [1, 2]}], "groups": []})
+        # Preassembly tasks consume the source objects prepared before their
+        # internal type task; this suite checks bindings, not source construction.
+        self.write("06_batch/batch.base.json", {"items": copy.deepcopy(self.units)})
         original = self.write("original.txt", self.source)
         self.manifest = {"inputs": {"source": {"path": str(original)}}, "meta": {"source_type": "中考真题"}}
         self.write("workflow/manifest.json", self.manifest)

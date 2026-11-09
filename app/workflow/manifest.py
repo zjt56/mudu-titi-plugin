@@ -503,6 +503,26 @@ def record_delivery(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
     checked = inspect_stage(batch_dir, manifest, stage.id)
     if not checked.get("passed"):
         record["handoff_errors"] = checked.get("errors", [])[:8]
+    if stage.id == "types" and checked.get("passed"):
+        # A controlled type-only repair also updates preassembly's shared output.
+        # Preserve its source delivery/status; otherwise a valid repair would make
+        # preassemble stale forever because both contracts own the same types.json.
+        assembled = manifest.get("stages", {}).get("preassemble", {})
+        if (assembled.get("status") in (COMPLETED, APPROVED)
+                and not assembled.get("rebuild_required")
+                and inspect_stage(batch_dir, manifest, "preassemble").get("passed")):
+            base_spec = contracts.STAGE_BY_ID["preassemble"]
+            base_name = "06_batch/batch.base.json"
+            saved_base = (assembled.get("semantic_outputs") or {}).get(base_name)
+            if saved_base:
+                from . import stage_semantics
+                source_current = stage_semantics.output_signatures(batch_dir, base_spec)[base_name] == saved_base
+            else:
+                source_current = ((assembled.get("output_hashes") or {}).get(base_name)
+                                  == sha256_file(Path(batch_dir) / base_name))
+            if source_current:
+                assembled["output_hashes"] = output_hashes(batch_dir, base_spec)
+                record_semantics(batch_dir, manifest, base_spec)
     if stage.id in ("answers", "audio", "types", "explanations", "knowledge"):
         from . import batch_fill
         if (Path(batch_dir) / batch_fill.STATE).is_file() and (Path(batch_dir) / batch_fill.ARTIFACTS[stage.id]).is_file():
@@ -653,7 +673,15 @@ def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, s
     if saved_outputs:
         from . import stage_semantics
         if record.get("semantic_version") == stage_semantics.VERSION:
-            if stage_semantics.output_signatures(batch_dir, stage) != record.get("semantic_outputs"):
+            current_outputs = stage_semantics.output_signatures(batch_dir, stage)
+            saved_semantics = record.get("semantic_outputs")
+            if (stage.id == "preassemble" and isinstance(saved_semantics, dict)
+                    and "03_types/types.json" not in saved_semantics):
+                # Legacy preassembly recorded only its source skeleton. Presence
+                # and consumer validation still check the newly required labels.
+                current_outputs = {key: value for key, value in current_outputs.items()
+                                   if key in saved_semantics}
+            if current_outputs != saved_semantics:
                 return True, "阶段产物内容已变化"
         else:
             for rel, digest in saved_outputs.items():

@@ -403,6 +403,10 @@ def _feedback(batch, stage_id, reason, detail, attempt, unit_ids=None):
         detail += "\n" + (log.read_text(encoding="utf-8", errors="replace")[-5000:] if log.is_file() else "")
     except OSError:
         pass
+    # Preassembly's model work reuses the types task/repair contract. Send its
+    # validation feedback to that implementation instead of an unread new file.
+    if stage_id == "preassemble":
+        stage_id = "types"
     scoped = unit_ids is not None
     if not scoped:
         unit_ids, _ = _affected_units(batch, detail, stage_id)
@@ -586,6 +590,15 @@ def _defer_and_continue(batch, manifest, stage_id, reason):
 
 def _apply(batch, manifest, stage_id, detail, plan, attempt, snapshot):
     action = plan["action"]
+    if stage_id == "types" and action in (
+            "retry_stage", "retry_stage_with_fresh_context", "refresh_inputs", "record_only", "upstream_rederive"):
+        # types is now a read-only checkpoint. Rechecking cannot generate missing
+        # or rejected labels; return the defect to its actual assembly producer.
+        feedback = _feedback(batch, "types", plan["reason"], detail, attempt)
+        _requeue(batch, manifest, "preassemble", "题型交接校验失败，返回前置组装修正：" + str(detail)[:250])
+        return {"changed": True, "status": "requeued", "verified": False,
+                "outcome": "content_retry_with_feedback", "target_stage": "preassemble",
+                "feedback_path": feedback, "effective_action": "preassembly_type_repair"}
     from . import self_heal_actions
     expected = {name: digest for name, digest in snapshot["files"].items() if not name.startswith("input:")}
     for name, digest in snapshot["files"].items():

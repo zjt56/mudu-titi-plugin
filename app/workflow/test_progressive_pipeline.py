@@ -53,7 +53,12 @@ class ProgressivePipelineTest(unittest.TestCase):
             return agent_protocol.import_result(self.root, task["task_id"], response)
 
     def prepare(self):
-        self.assertEqual(runner._execute_command(self.root, self.state, contracts.STAGE_BY_ID["preassemble"]), 0)
+        result = self.accept("preassemble", {"items": [{
+            "unit_id": "q-1", "type": "单项填空", "subtypes": ["四个选项"],
+            "words": 5, "contentComplete": True, "evidence": ["正文 L1"]}]})
+        self.assertTrue(result["completed"], result)
+        self.assertEqual(mf.load(self.root)["stages"]["preassemble"]["status"], mf.COMPLETED)
+        self.assertTrue((self.root / "03_types/types.json").is_file())
         self.assertTrue((self.root / batch_fill.BATCH).is_file())
         self.assertTrue((self.root / batch_fill.BATCH_BASE).is_file())
         self.assertEqual(mf.load(self.root)["stages"]["assemble"]["status"], mf.PENDING)
@@ -62,7 +67,11 @@ class ProgressivePipelineTest(unittest.TestCase):
     def fill(self):
         initial = self.prepare()
         base_bytes = (self.root / batch_fill.BATCH_BASE).read_bytes()
-        self.accept("types", {"items": [{"unit_id": "q-1", "type": "单项填空", "subtypes": ["四个选项"], "words": 5, "contentComplete": True, "evidence": ["正文 L1"]}]})
+        types_path = self.root / "03_types/types.json"
+        types_bytes = types_path.read_bytes()
+        self.assertEqual(runner._execute_command(
+            self.root, mf.load(self.root), contracts.STAGE_BY_ID["types"]), 0)
+        self.assertEqual(types_path.read_bytes(), types_bytes)
         typed = self.load()["items"][0]
         self.assertEqual(typed["question_type"], "单项填空")
         self.assertEqual(typed["knowledge"], [])

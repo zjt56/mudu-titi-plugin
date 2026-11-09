@@ -147,7 +147,7 @@ def derive_status(manifest):
         return "reviewing"
     if statuses.get("assemble") in TERMINAL_OK:
         return "assembling" if statuses.get("meta") not in TERMINAL_OK else "validating"
-    if statuses.get("types") in TERMINAL_OK:
+    if statuses.get("preassemble") in TERMINAL_OK or statuses.get("types") in TERMINAL_OK:
         return "enriching"
     if statuses.get("structure_gate") in TERMINAL_OK:
         return "classifying"

@@ -81,10 +81,17 @@ class RunnerAutoTest(unittest.TestCase):
         # Keep optional agents eligible: scheduling, not absent-input skipping,
         # is the subject of these tests.
         (source / '附录.txt').write_text('参考答案\n1. A\n【解析】原卷已有解析。', encoding='utf-8')
-        # Scheduling tests start after source-only preassembly; that new
-        # dependency is exercised separately by test_progressive_pipeline.
+        # Scheduling tests start after preassembly has delivered source objects
+        # and labels; artifact validation is isolated from scheduler behavior.
         for stage_id in ("extract", "structure_gate", "preassemble"):
             mf.touch_stage(self.manifest, stage_id, mf.COMPLETED)
+        mf.save(self.batch, self.manifest)
+
+    def _ready_parallel_labels(self):
+        self._ready_after_structure()
+        # Preassembly already classified types; this deterministic checkpoint
+        # must finish before audio/knowledge can be real model peers of answers.
+        mf.touch_stage(self.manifest, "types", mf.COMPLETED)
         mf.save(self.batch, self.manifest)
 
     def _execute_offline(self, outcomes, calls):
@@ -98,7 +105,7 @@ class RunnerAutoTest(unittest.TestCase):
 
     def test_parallel_wave_overlaps_calls_and_imports_ready_workers(self):
         from workflow import agent, agent_protocol, agent_tasks, local_agent, agent_prepare
-        self._ready_after_structure()
+        self._ready_parallel_labels()
         barrier = threading.Barrier(2, timeout=5)
         completed = set()
         imports = []
@@ -117,7 +124,7 @@ class RunnerAutoTest(unittest.TestCase):
             return {"status": "ready", "prompt": stage}
 
         def invoke(prompt, run_dir, config, permit_parallel=False, coordinated_imports=False):
-            if permit_parallel and prompt in {"answers", "types"}:
+            if permit_parallel and prompt in {"answers", "audio"}:
                 barrier.wait()
                 with lock:
                     completed.add(prompt)
@@ -131,7 +138,7 @@ class RunnerAutoTest(unittest.TestCase):
 
         def validate(batch, stage, response, validate_only=False):
             validation.append(stage)
-            if stage == "types" and validation.count(stage) == 1:
+            if stage == "audio" and validation.count(stage) == 1:
                 raise ValueError("test validation failure")
 
         def execute(batch, manifest, stage):
@@ -140,7 +147,6 @@ class RunnerAutoTest(unittest.TestCase):
             return 0
 
         def import_result(batch, task_id, path):
-            expected = {"answers", "types", "audio"} if task_id == "audio" else {"answers", "types"}
             self.assertIn(task_id, completed)
             imports.append(task_id)
             current = mf.load(batch)
@@ -160,9 +166,10 @@ class RunnerAutoTest(unittest.TestCase):
              patch("workflow.label_execution.run", side_effect=lambda b, s, c, r, **kw: invoke(s, r, c, permit_parallel=True)), \
              patch.object(agent_protocol, "import_result", side_effect=import_result):
             outcome = auto.advance(self.batch, default, stop_at="explanations")
-        # Audio now depends on types, so it runs in the following wave rather
-        # than overlapping unvalidated types; both still finish before assemble.
-        self.assertCountEqual(imports, ["answers", "types"])
+        # Both peers are ready after the read-only types checkpoint.
+        self.assertCountEqual(imports, ["answers", "audio"])
+        self.assertEqual(completed, {"answers", "audio"})
+        self.assertEqual(mf.load(self.batch)["stages"]["explanations"]["status"], mf.PENDING)
         self.assertEqual(len(retries), 1)
         self.assertIn("test validation failure", retries[0])
         self.assertEqual(outcome["failed_stages"], [])
@@ -171,14 +178,8 @@ class RunnerAutoTest(unittest.TestCase):
 
     def test_parallel_wave_starts_only_dependency_ready_first_wave_workers(self):
         from workflow import agent_protocol, agent_tasks, local_agent
-        self._isolate_scheduler()
-        _ready_after_structure_offline = None
-        source = self.batch / '01_source'
-        source.mkdir(parents=True, exist_ok=True)
-        for stage_id in ("extract", "structure_gate", "preassemble"):
-            mf.touch_stage(self.manifest, stage_id, mf.COMPLETED)
-        mf.save(self.batch, self.manifest)
-        stages = [contracts.STAGE_BY_ID[stage] for stage in ("answers", "types")]
+        self._ready_parallel_labels()
+        stages = [contracts.STAGE_BY_ID[stage] for stage in ("answers", "knowledge", "explanations")]
         barrier = threading.Barrier(2, timeout=5)
         entered = set()
         lock = threading.Lock()
@@ -201,7 +202,6 @@ class RunnerAutoTest(unittest.TestCase):
             return {"completed": True}
 
         with patch("workflow.agent_prepare.prepare_answers"), \
-             patch.object(mf, "dependency_satisfied", return_value=True), \
              patch.object(agent_protocol, "export_task", side_effect=export), \
              patch.object(agent_tasks, "build_task", side_effect=lambda batch, stage, **kw: {"status": "ready", "prompt": stage}), \
              patch.object(agent_tasks, "accept_result"), \
@@ -209,11 +209,14 @@ class RunnerAutoTest(unittest.TestCase):
              patch("workflow.label_execution.run", side_effect=lambda b, s, c, r, **kw: invoke(s, r, c, permit_parallel=True)), \
              patch.object(agent_protocol, "import_result", side_effect=import_result):
             outcomes = auto._parallel_ready_agents(self.batch, stages, {"max_input_chars": 10000, "retries": 0})
-        self.assertEqual(outcomes, {stage.id: 0 for stage in stages})
+        self.assertEqual(outcomes, {"answers": 0, "knowledge": 0})
+        self.assertEqual(entered, {"answers", "knowledge"})
+        self.assertEqual(mf.load(self.batch)["stages"]["explanations"]["status"], mf.PENDING)
 
     def test_ready_stage_is_imported_before_slow_peer_finishes(self):
         from workflow import agent_protocol, agent_tasks, local_agent
-        stages = [contracts.STAGE_BY_ID[s] for s in ('answers', 'types')]
+        self._ready_parallel_labels()
+        stages = [contracts.STAGE_BY_ID[s] for s in ('answers', 'knowledge')]
         imported = threading.Event()
         def export(batch, stage, **kw):
             package = self.batch / 'early-packages' / stage
@@ -228,7 +231,6 @@ class RunnerAutoTest(unittest.TestCase):
                 imported.set()
             return {'completed': True}
         with patch('workflow.agent_prepare.prepare_answers'), \
-             patch.object(mf, 'dependency_satisfied', return_value=True), \
              patch.object(agent_protocol, 'export_task', side_effect=export), \
              patch.object(agent_tasks, 'build_task', side_effect=lambda b, s, **kw: {'status': 'ready', 'prompt': s}), \
              patch.object(agent_tasks, 'accept_result'), \
@@ -236,7 +238,7 @@ class RunnerAutoTest(unittest.TestCase):
              patch.object(local_agent, 'invoke', side_effect=slow), \
              patch.object(agent_protocol, 'import_result', side_effect=install):
             self.assertEqual(auto._parallel_ready_agents(self.batch, stages, {'max_input_chars': 10000, 'retries': 0}),
-                             {'answers': 0, 'types': 0})
+                             {'answers': 0, 'knowledge': 0})
 
     def test_rate_limit_wrapper_code_is_authoritative(self):
         self.assertTrue(auto._is_rate_limited(
@@ -247,7 +249,8 @@ class RunnerAutoTest(unittest.TestCase):
 
     def test_parallel_rate_limit_becomes_cooldown_not_failed(self):
         from workflow import agent_protocol, agent_tasks, local_agent
-        stages = [contracts.STAGE_BY_ID[stage] for stage in ("answers", "types")]
+        self._ready_parallel_labels()
+        stages = [contracts.STAGE_BY_ID[stage] for stage in ("answers", "knowledge")]
 
         def export(batch, stage, **kwargs):
             package = self.batch / "packages" / stage
@@ -261,7 +264,6 @@ class RunnerAutoTest(unittest.TestCase):
                 'wf-agent-result: {"error_code": "rate_limit", "http_status": 429}')
 
         with patch("workflow.agent_prepare.prepare_answers"), \
-             patch.object(mf, "dependency_satisfied", return_value=True), \
              patch.object(agent_protocol, "export_task", side_effect=export), \
              patch.object(agent_tasks, "build_task", side_effect=lambda batch, stage, **kw: {"status": "ready", "prompt": stage}), \
              patch.object(agent_tasks, "accept_result"), \
@@ -337,7 +339,7 @@ class RunnerAutoTest(unittest.TestCase):
         """A separate process marking another stage must not deadlock or lose updates."""
         import multiprocessing as mp
         from workflow import agent, agent_protocol, agent_tasks, local_agent, agent_prepare
-        self._ready_after_structure()
+        self._ready_parallel_labels()
         default = auto.load_bridge()
         marker = threading.Event()
 
@@ -401,7 +403,7 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertFalse(proc.is_alive())
         manifest = mf.load(self.batch)
         self.assertEqual(manifest["stages"]["meta"]["status"], mf.COMPLETED)
-        for stage in ("answers", "types"):
+        for stage in ("answers", "audio"):
             self.assertEqual(manifest["stages"][stage]["status"], mf.COMPLETED)
 
     def test_answers_failure_continues_audio_types_but_waits_for_real_downstream(self):
@@ -889,8 +891,10 @@ class RunnerAutoTest(unittest.TestCase):
 
     def test_parallel_first_candidate_retains_needs_review_and_continues(self):
         from workflow import agent, local_agent
-        self._ready_after_structure()
+        self._ready_parallel_labels()
+        dispatched = []
         def dispatch(batch, stages, config):
+            dispatched.extend(stage.id for stage in stages)
             state = mf.load(batch)
             for stage in stages:
                 if stage.id == 'answers':
@@ -908,6 +912,8 @@ class RunnerAutoTest(unittest.TestCase):
              patch.object(local_agent, 'load_config', return_value={}), \
              patch.object(auto, '_parallel_ready_agents', side_effect=dispatch):
             auto.advance(self.batch, auto.load_bridge(), stop_at='explanations')
+        self.assertCountEqual(dispatched, ['answers', 'audio'])
+        self.assertEqual(mf.load(self.batch)['stages']['audio']['status'], mf.COMPLETED)
         record = mf.load(self.batch)['stages']['answers']
         self.assertEqual(record['status'], mf.NEEDS_REVIEW)
         self.assertFalse(record.get('continue_unqualified'))

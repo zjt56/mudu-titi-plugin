@@ -5,8 +5,9 @@ const path = require('node:path');
 
 const root = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
-const STAGES = ['answers', 'audio', 'types', 'explanations', 'knowledge', 'assemble', 'review'];
+const STAGES = ['preassemble', 'answers', 'audio', 'types', 'explanations', 'knowledge', 'assemble', 'review'];
 const ARTIFACTS = {
+  preassemble: '03_types/types.json',
   answers: '01_source_ans/answers.json',
   audio: '02_audio/audio_map.json',
   types: '03_types/types.json',
