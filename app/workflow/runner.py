@@ -49,6 +49,52 @@ SKILL_ROOT = Path(__file__).resolve().parent.parent
 TERMINAL = mf.TERMINAL_OK
 
 
+# ---------------------------------------------------------------- 控制台编码
+#
+# Windows 上 Python 的标准输出默认是 cp936(GBK) 管道。只要输出里有一个 GBK
+# 编不出的字符（U+FFFD、emoji、部分符号），print 就抛 UnicodeEncodeError。
+# 阶段命令明明已经成功落盘，父进程却在回显日志那一行崩掉，阶段就永远停在
+# running，监督器还会每 30 秒把整卷（含 OCR）重跑一遍。这里做两件事：
+#   1) 本进程 stdio 改成 errors="replace"：任何字符都不会再让流水线崩溃；
+#   2) 阶段子进程强制 UTF-8 输出：父进程按 UTF-8 解码，日志不再是乱码。
+
+def _harden_stdio() -> None:
+    """Make our own stdout/stderr unable to raise on unencodable characters."""
+    import sys as _sys
+    for stream in (_sys.stdout, _sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+def _stage_env() -> dict:
+    """Environment for stage subprocesses: stdout/stderr in UTF-8.
+
+    Without this the child writes GBK bytes into the pipe while this process
+    decodes UTF-8, so every Chinese line becomes U+FFFD (and then cannot be
+    printed back to a GBK console at all).
+    """
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def _echo(text: str) -> None:
+    """Echo one line; a console that cannot encode it must never abort a stage."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", "replace").decode("ascii"))
+    except ValueError:
+        pass
+
+
+_harden_stdio()
+
+
 # ---------------------------------------------------------------- 小工具
 
 def _skill_version() -> str:
@@ -126,8 +172,51 @@ def _record_success(batch_dir: Path, manifest: dict, stage: contracts.Stage) -> 
     return True
 
 
+def _mark_crashed(batch_dir: Path, manifest: dict, stage: contracts.Stage,
+                  exc: BaseException) -> None:
+    """Un-wedge a stage left in `running` because the executor itself blew up.
+
+    Only `running` is touched: a stage that already reached a terminal state
+    must keep its verdict, and a stage that never started must stay pending.
+    """
+    from .local_agent import _agent_lock
+    try:
+        with _agent_lock(30):
+            current = mf.load(batch_dir)
+            status = current.get("stages", {}).get(stage.id, {}).get("status")
+            if status != mf.RUNNING:
+                return
+            mf.touch_stage(current, stage.id, mf.FAILED, exit_code=1,
+                           notes="执行器异常：" + str(exc)[:300])
+            mf.save(batch_dir, current)
+            if current is not manifest:
+                manifest.clear()
+                manifest.update(current)
+    except Exception:  # noqa: BLE001 - the original exception is what matters
+        pass
+
+
 def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
                      timeout: int = 1800) -> int:
+    """Run one stage command without ever leaving the stage wedged in `running`.
+
+    The costly failure this guards: `touch_stage(RUNNING)` is already saved when
+    the executor crashes, so the stage looks live forever, the supervisor keeps
+    re-dispatching it, and every attempt redoes the whole extraction (and its
+    PDF OCR). The crash must become a diagnosable `failed` instead.
+    """
+    try:
+        # Streams may have been replaced since import (worker threads, harnesses
+        # that capture stdout); re-assert the non-throwing policy before any echo.
+        _harden_stdio()
+        return _execute_command_stage(batch_dir, manifest, stage, timeout)
+    except Exception as exc:  # noqa: BLE001 - re-raised after making it visible
+        _mark_crashed(batch_dir, manifest, stage, exc)
+        raise
+
+
+def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
+                           timeout: int = 1800) -> int:
     rendered = _render(stage.command, batch_dir)
     # 契约里的命令首项是仓库内脚本路径，需要补解释器；
     # 代理桥等外部命令自带解释器，不能重复加 python。
@@ -145,7 +234,7 @@ def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
     try:
         proc = subprocess.run(argv, cwd=str(SKILL_ROOT), capture_output=True,
                               text=True, encoding="utf-8", errors="replace",
-                              timeout=timeout)
+                              timeout=timeout, env=_stage_env())
         code, out, err = proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired:
         code, out, err = 124, "", f"超时 {timeout}s"
@@ -153,7 +242,7 @@ def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
         code, out, err = 127, "", f"无法启动命令：{exc}"
     log.write_text(f"$ {' '.join(argv)}\n\n{out}\n\n[stderr]\n{err}", encoding="utf-8")
     for line in (out or "").splitlines()[-5:]:
-        print("    " + line.strip()[:120])
+        _echo("    " + line.strip()[:120])
     # Source partitioning is part of extraction ownership; publish its semantic
     # baseline only after this deterministic and model-assisted stage is final.
     if code == 0 and stage.id == "extract":
