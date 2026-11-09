@@ -1,4 +1,4 @@
-﻿# 2026-11-09 修复多卷上传的题目 ID 冲突（question_id_exists）
+# 2026-11-09 修复多卷上传的题目 ID 冲突（question_id_exists）
 
 ## 背景 / 触发
 

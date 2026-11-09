@@ -1,4 +1,4 @@
-﻿# 2026-11-09 审核绑定补齐已提供的 PDF OCR 辅助证据
+# 2026-11-09 审核绑定补齐已提供的 PDF OCR 辅助证据
 
 ## 背景
 目标批次【木牍教育】20年安徽中考英语的两轮审核反复报 `Evidence must cite a bound batch input`。冻结提示词明确提供 `01_source/pdf-ocr.json`，任务级 input_hashes 也绑定其摘要，但嵌套审核 plan.input_hashes 没有该文件。模型引用真实且当前的 OCR 段落，因此被两个不一致的输入清单拒绝。

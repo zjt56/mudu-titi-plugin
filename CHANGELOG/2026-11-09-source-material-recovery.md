@@ -1,4 +1,4 @@
-﻿# Windows transactional repair file mode fallback
+# Windows transactional repair file mode fallback
 
 ## 背景（Background）
 

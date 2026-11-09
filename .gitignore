@@ -1,4 +1,4 @@
-﻿# 生成物（运行时由宿主插件写出，不随仓库迁移）
+# 生成物（运行时由宿主插件写出，不随仓库迁移）
 backend/.local-agent.effective.json
 backend/.local-agent.effective.json.tmp-*
 
