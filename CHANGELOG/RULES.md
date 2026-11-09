@@ -1,5 +1,13 @@
 # RULES — 规则与强调台账
 
+## 2026-11-09 AI 运维必须能真正接手（用户质疑“从来没有工作过”）
+
+- 触发：用户反馈 AI 运维从未工作。核查：服务 `available=true, enabled=true`，但 `incidentCount=0`，所有批次 `operations.json` 的 `incident=null`。
+- 根因：`9387566` 把 self_heal 签名改为含“重试证据”（输入/原卷/代码指纹），`operations._discover` 仍用旧公式 `sha256(stage+detail)` 重算，二者永远不相等，任何真实 `repair_failed` 都不会被识别。
+- 规则：运维事件身份必须以 self_heal 实际记录的事件 signature 为准，不得在其它模块自行重算另一套签名；新增/修改签名公式时必须同步所有消费方并补跨模块回归。
+- 运维仍只升级“已真实失败过自愈”的当前卡点；`review_gate` 差异、限流/额度、正常运行不得当成故障。
+- 落地：`app/workflow/operations.py::_discover`；回归 `workflow.test_operations::test_discovery_accepts_self_heal_evidence_signature`；记录 `CHANGELOG/2026-11-09-operations-never-triggered.md`。
+
 ## 2026-11-09 答案不因无害小符号卡住（用户明确）
 
 - 原话要点：“对答案的要求不要这么苛刻……即使他加了两个这种小符号，他也不影响答案的正确性……下游的这种校验不要这么严”。

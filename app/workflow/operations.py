@@ -327,6 +327,10 @@ def _reconcile_stage_refusal(state):
 
 def _discover(folder):
     state = _load(folder) or {"identity": _identity(folder), "incident": None, "receipts": [], "failures": {}}
+    state.setdefault("identity", _identity(folder))
+    state.setdefault("incident", None)
+    state.setdefault("receipts", [])
+    state.setdefault("failures", {})
     _reconcile_stage_refusal(state)
     incident = state.get("incident")
     if incident:
@@ -360,16 +364,25 @@ def _discover(folder):
         return state
     if stage == "review" and record.get("status") in {mf.NEEDS_REVIEW, mf.COMPLETED, mf.APPROVED}:
         return state
-    signature = hashlib.sha256((stage + "\n" + detail).encode()).hexdigest()[:16]
-    # Count actual failed repair events, independently of resettable watchdog budgets.
+    # Match real failed-repair events by stage + exact current detail. Do NOT
+    # recompute a hash: self_heal's signature includes retry evidence (input/code
+    # hashes), so a locally derived stage+detail hash can never equal it. Use the
+    # failed event's own signature as the incident identity instead.
+    failed = []
     for event in self_heal._load(folder).get("events", []):
-        if (event.get("stage") != stage or event.get("signature") != signature
+        if (event.get("stage") != stage or event.get("detail") != detail
                 or event.get("outcome") not in {"repair_failed", "retry_failed"}
-                or event.get("error_code") in {"rate_limited", "rate_limit", "model_cooldown"}):
+                or event.get("error_code") in {"rate_limited", "rate_limit", "model_cooldown"}
+                or not str(event.get("signature") or "")):
             continue
+        failed.append(event)
+    for event in failed:
         key = _hash({k: event.get(k) for k in ("at", "stage", "signature", "attempt")})
-        state["failures"][key] = {"stage": stage, "signature": signature}
-    count = sum(x == {"stage": stage, "signature": signature} for x in state["failures"].values())
+        state["failures"][key] = {"stage": stage, "signature": event["signature"],
+                                  "detail": detail}
+    count = sum(1 for x in state["failures"].values()
+                if x.get("stage") == stage and x.get("detail") == detail)
+    signature = failed[-1]["signature"] if failed else ""
     if count and not (incident and incident.get("signature") == signature):
         state["incident"] = {"incident_id": uuid.uuid4().hex, "batch_name": folder.name,
             "batch_dir": str(folder), "status": "queued", "eligible": True, "stage": stage,

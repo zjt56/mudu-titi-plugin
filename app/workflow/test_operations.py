@@ -20,9 +20,11 @@ class OperationsTests(unittest.TestCase):
         (self.folder / "workflow").mkdir(parents=True)
         self.manifest = {"batch_dir": str(self.folder), "stages": {"validate": {"status": "failed"}}, "inputs": {}}
         self.put("workflow/manifest.json", self.manifest)
-        self.signature = __import__('hashlib').sha256(b"validate\nbroken").hexdigest()[:16]
+        # self_heal signs with retry evidence (inputs/code hashes), so the exact
+        # value is opaque here — operations must use the event's own signature.
+        self.signature = __import__('hashlib').sha256(b"validate\nbroken\n{\"inputs\":{}}").hexdigest()[:16]
         self.put("workflow/self-heal.json", {"events": [{"at": "2026-01-01", "stage": "validate",
-            "signature": self.signature, "outcome": "repair_failed", "attempt": 1}]})
+            "detail": "broken", "signature": self.signature, "outcome": "repair_failed", "attempt": 1}]})
         self.candidate = patch.object(op.self_heal, "_candidate", return_value=("validate", "broken")).start()
         self.snapshot = patch.object(op, "_snapshot", return_value="snapshot1").start()
         self.busy = patch.object(supervisor, "execution_busy", return_value=False).start()
@@ -119,13 +121,24 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(incident["session_id"], claimed["session_id"])
         self.assertNotIn("session_recovery", incident)
 
+    def test_discovery_accepts_self_heal_evidence_signature(self):
+        # Regression: self_heal's signature = sha256(stage+detail+evidence).
+        # Operations previously recomputed sha256(stage+detail) and could never
+        # match, so AI operations never saw any real failed repair.
+        real = __import__('hashlib').sha256(b"validate\nbroken\n{\"inputs\":{\"a\":\"b\"}}").hexdigest()[:16]
+        self.put("workflow/self-heal.json", {"events": [{"at": "2026-01-02", "stage": "validate",
+            "detail": "broken", "signature": real, "outcome": "repair_failed", "attempt": 2}]})
+        found = op.incidents(self.root)["incidents"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["signature"], real)
+
     def test_discovery_requires_actual_failed_heal(self):
         self.put("workflow/self-heal.json", {"events": []})
         self.assertEqual(op.incidents(self.root), {"incidents": []})
 
     def test_rate_limit_does_not_escalate(self):
-        self.put("workflow/self-heal.json", {"events": [{"stage": "validate", "signature": self.signature,
-                 "outcome": "repair_failed", "error_code": "rate_limited"}]})
+        self.put("workflow/self-heal.json", {"events": [{"stage": "validate", "detail": "broken",
+                 "signature": self.signature, "outcome": "repair_failed", "error_code": "rate_limited"}]})
         self.assertEqual(op.incidents(self.root), {"incidents": []})
 
     def test_normal_running_and_review_do_not_escalate(self):
@@ -322,8 +335,8 @@ class OperationsTests(unittest.TestCase):
 
     def test_failed_review_execution_eligible_but_quality_difference_not(self):
         self.candidate.return_value = ("review", "broken")
-        signature = __import__('hashlib').sha256(b"review\nbroken").hexdigest()[:16]
-        self.put("workflow/self-heal.json", {"events": [{"at": "now", "stage": "review", "signature": signature, "outcome": "repair_failed"}]})
+        signature = __import__('hashlib').sha256(b"review\nbroken\n{}").hexdigest()[:16]
+        self.put("workflow/self-heal.json", {"events": [{"at": "now", "stage": "review", "detail": "broken", "signature": signature, "outcome": "repair_failed"}]})
         self.manifest["stages"]["review"] = {"status": "needs_review", "execution_completed": True}
         self.put("workflow/manifest.json", self.manifest)
         self.assertEqual(op.incidents(self.root)["incidents"], [])
@@ -585,9 +598,9 @@ class FastRepairOperationsTests(unittest.TestCase):
         (self.folder / "workflow").mkdir(parents=True)
         self.put("workflow/manifest.json", {"batch_dir": str(self.folder),
                                             "stages": {"validate": {"status": "failed"}}, "inputs": {}})
-        signature = __import__("hashlib").sha256(b"validate\nbroken").hexdigest()[:16]
+        signature = __import__("hashlib").sha256(b"validate\nbroken\n{\"inputs\":{}}").hexdigest()[:16]
         self.put("workflow/self-heal.json", {"events": [{"at": "2026-01-01", "stage": "validate",
-            "signature": signature, "outcome": "repair_failed", "attempt": 1}]})
+            "detail": "broken", "signature": signature, "outcome": "repair_failed", "attempt": 1}]})
         patch.object(op.self_heal, "_candidate", return_value=("validate", "broken")).start()
         patch.object(op, "_snapshot", return_value="snapshot1").start()
         patch.object(supervisor, "execution_busy", return_value=False).start()
