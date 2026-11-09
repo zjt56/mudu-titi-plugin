@@ -817,15 +817,21 @@ def main(argv=None):
         if parts is not None and args.stage in ("answers", "types", "explanations", "knowledge"):
             cache_enabled = cache_enabled and bool(config.get("_part_model_binding")) and all(
                 part.get("cache_scope") for part in parts)
-        hashes = task.get("input_hashes", {})
-        if config.get("_part_model_binding"):
-            hashes.update(config["_part_model_binding"]["files"])
+        # Batch content stays strictly bound for the whole model call. The model
+        # identity files (wf-router.mjs / model-router.json) belong to the cache
+        # key only: the plugin updating its own source mid-run is not a change to
+        # this batch and must never fail the stage as if content were altered.
+        strict_hashes = dict(task.get("input_hashes", {}))
+        binding_files = (config.get("_part_model_binding") or {}).get("files") or {}
+        # Cache identity still covers the model router; only the in-flight content
+        # check uses strict batch hashes.
+        cache_hashes = {**strict_hashes, **binding_files}
         def cache_validate(candidate):
-            _check_input_hashes(batch_dir, hashes)
+            _check_input_hashes(batch_dir, strict_hashes)
             checked = agent_tasks.accept_result(batch_dir, accept_stage, candidate, validate_only=True)
             if not checked.get("completed"):
                 raise ValueError("Cached candidate is not complete")
-        cache_args = dict(stage=args.stage, fingerprints=hashes, prompt=task["prompt"],
+        cache_args = dict(stage=args.stage, fingerprints=cache_hashes, prompt=task["prompt"],
                           model_config=config, validate=cache_validate)
         if cache_enabled:
             from workflow import candidate_cache
@@ -835,7 +841,7 @@ def main(argv=None):
                 cached = None
             if cached is not None:
                 with _agent_lock(config.get("timeout_seconds", 900)):
-                    _check_input_hashes(batch_dir, hashes)
+                    _check_input_hashes(batch_dir, strict_hashes)
                     report = agent_tasks.accept_result(batch_dir, accept_stage, cached)
                 _json_write(run_dir / "import-report.json", report)
                 print(json.dumps({"attempt_dir": str(run_dir), "status": cached["status"],
@@ -848,9 +854,8 @@ def main(argv=None):
                 except (OSError, ValueError):
                     pass  # Cache failure must never undo a validated import.
         if parts is not None:
-            hashes = task.get("input_hashes", {})
-            _json_write(run_dir / "input-hashes.json", hashes)
-            _check_input_hashes(batch_dir, hashes)
+            _json_write(run_dir / "input-hashes.json", strict_hashes)
+            _check_input_hashes(batch_dir, strict_hashes)
             if args.dry_run:
                 for index, part in enumerate(parts):
                     (run_dir / ("part-%04d.txt" % (index + 1))).write_text(part["prompt"], encoding="utf-8")
@@ -869,7 +874,7 @@ def main(argv=None):
                 # unit set, inputs and model config is reused instead of re-run.
                 reused = None
                 try:
-                    reused = _load_part_snapshot(batch_dir, args.stage, part, hashes, config)
+                    reused = _load_part_snapshot(batch_dir, args.stage, part, cache_hashes, config)
                     if reused is not None:
                         unit_tasks.validate_part(batch_dir, args.stage, part, reused)
                 except (ValueError, OSError):
@@ -884,12 +889,12 @@ def main(argv=None):
                     if feedback and room < 80:
                         raise AgentError("Partition leaves no room for validation feedback; increase max_input_chars", "input_limit")
                     delivered = part["prompt"] + feedback[:room]
-                    _check_input_hashes(batch_dir, hashes)
+                    _check_input_hashes(batch_dir, strict_hashes)
                     try:
                         print(f"  分片 {index + 1}/{len(parts)}：调用模型"
                               f"（{len(part['unit_ids'])} 单元，{len(part['prompt']) // 1000}K 字符，第 {attempt + 1} 次）", flush=True)
                         result = invoke(delivered, part_dir, config, **invocation_options)
-                        _check_input_hashes(batch_dir, hashes)
+                        _check_input_hashes(batch_dir, strict_hashes)
                         try:
                             unit_tasks.check_part_inputs(batch_dir, part)
                         except ValueError as exc:
@@ -905,7 +910,7 @@ def main(argv=None):
                         continue
                     # Persist only after local validation passes so a retry never
                     # reuses an unchecked partition.
-                    _store_part_snapshot(batch_dir, args.stage, part, hashes, config, candidate)
+                    _store_part_snapshot(batch_dir, args.stage, part, cache_hashes, config, candidate)
                     print(f"  分片 {index + 1}/{len(parts)}：已校验并落盘快照", flush=True)
                     return index, candidate, False
                 raise AgentError("Partition attempts exhausted without a response", "integration")
@@ -923,7 +928,7 @@ def main(argv=None):
             response = unit_tasks.merge(args.stage, parts, responses)
             _json_write(run_dir / "response.json", response)
             with _agent_lock(config.get("timeout_seconds", 900)):
-                _check_input_hashes(batch_dir, hashes)
+                _check_input_hashes(batch_dir, strict_hashes)
                 for part in parts:
                     unit_tasks.check_part_inputs(batch_dir, part)
                 report = agent_tasks.accept_result(batch_dir, accept_stage, response)

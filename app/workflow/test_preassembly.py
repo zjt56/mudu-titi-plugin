@@ -125,6 +125,28 @@ class PreassemblyTest(unittest.TestCase):
         self.assertTrue(mf.dependency_satisfied(mf.load(self.root), "preassemble"))
         self.assertEqual(contracts.STAGE_BY_ID["types"].kind, contracts.COMMAND)
 
+    def test_plugin_router_update_during_model_call_does_not_fail_stage(self):
+        plugin = self.root / "plugin"
+        (plugin / "backend").mkdir(parents=True)
+        (plugin / "config").mkdir(parents=True)
+        router = plugin / "backend/wf-router.mjs"
+        router.write_text("// router v1\n", encoding="utf-8")
+        (plugin / "config/model-router.json").write_text(json.dumps(
+            {"default": {"provider": "official", "model": "flash"}}), encoding="utf-8")
+        config = {"max_input_chars": 180000, "timeout_seconds": 30, "retries": 0,
+                  "label_split": False, "unit_split": False, "candidate_cache": False,
+                  "command": ["node", str(router), "{prompt_file}", "{response_file}"]}
+        def update_plugin(*args, **kwargs):
+            # The plugin updating its own source is not a change to this batch.
+            router.write_text("// router v2 with an updated default\n", encoding="utf-8")
+            return {"response": self.response}
+        with patch.object(local_agent, "load_config", return_value=config), \
+             patch.object(local_agent, "invoke", side_effect=update_plugin), \
+             redirect_stdout(io.StringIO()):
+            code = agent.main(["run", "--stage", "preassemble", "--batch-dir", str(self.root), "--config", "unused.json"])
+        self.assertEqual(code, 0)
+        self.assertTrue(mf.dependency_satisfied(mf.load(self.root), "preassemble"))
+
     def test_local_original_changed_during_model_call_rejects_install(self):
         config = {"max_input_chars": 180000, "timeout_seconds": 30, "retries": 0,
                   "label_split": False, "unit_split": False}

@@ -79,9 +79,11 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
     task, singles = unit_tasks.build_parts(batch, stage, prompt_budget, max_units=1)
     if task.get("preconditions") or not singles:
         raise ValueError("Label stage inputs are not ready")
-    hashes = dict(task["input_hashes"])
-    if config.get("_part_model_binding"):
-        hashes.update(config["_part_model_binding"]["files"])
+    # Strict batch content for every in-flight check; model-identity files only
+    # join the snapshot key so a plugin self-update never invalidates a batch.
+    strict_hashes = dict(task["input_hashes"])
+    binding_files = (config.get("_part_model_binding") or {}).get("files") or {}
+    hashes = {**strict_hashes, **binding_files}
     context, current_hashes, missing, units = agent_tasks._collect(batch, stage)
     if missing or any(current_hashes.get(k) != v for k, v in task["input_hashes"].items() if k in current_hashes):
         raise ValueError("Label stage context changed during preparation")
@@ -103,7 +105,7 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
         if uid in accepted:
             continue
         unit_tasks.check_part_inputs(batch, part)
-        local_agent._check_input_hashes(batch, hashes)
+        local_agent._check_input_hashes(batch, strict_hashes)
         saved = local_agent._load_part_snapshot(batch, stage, part, hashes, config)
         if saved is not None:
             try:
@@ -125,7 +127,7 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
                                          max_units=8 if attempt == 0 else 1, selected_ids=pending)
         def call(index_part):
             index, part = index_part
-            local_agent._check_input_hashes(batch, hashes)
+            local_agent._check_input_hashes(batch, strict_hashes)
             unit_tasks.check_part_inputs(batch, part)
             feedback = ""
             if attempt:
@@ -141,7 +143,7 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
                 if exc.code not in ("response", "integration"):
                     raise  # Timeouts/rate limits are not content repair attempts.
                 return part, None, str(exc)
-            local_agent._check_input_hashes(batch, hashes)
+            local_agent._check_input_hashes(batch, strict_hashes)
             unit_tasks.check_part_inputs(batch, part)
             return part, response, None
         fatal = None
@@ -187,14 +189,14 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
             raise fatal
     pending = set(singleton) - set(accepted)
     if pending:
-        local_agent._check_input_hashes(batch, hashes)
+        local_agent._check_input_hashes(batch, strict_hashes)
         unresolved = {"status": "needs_review", "artifacts": {}, "findings": [],
                       "notes": ["Label repair exhausted for units: " + json.dumps(
                           {uid: errors.get(uid) for uid in sorted(pending)}, ensure_ascii=False)]}
         local_agent._json_write(run_dir / "response.json", unresolved)
-        return {"response": unresolved, "input_hashes": hashes, "collected_hashes": current_hashes,
+        return {"response": unresolved, "input_hashes": strict_hashes, "collected_hashes": current_hashes,
                 "artifacts": {"response": str(run_dir / "response.json")}}
-    local_agent._check_input_hashes(batch, hashes)
+    local_agent._check_input_hashes(batch, strict_hashes)
     check_inputs(batch, stage, current_hashes)
     for part in singles:
         unit_tasks.check_part_inputs(batch, part)
@@ -203,5 +205,5 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
     complete = scoped_regeneration.merge(batch, stage, merged['artifacts'][path], context, units)
     agent_tasks._validate(batch, stage, complete, context, units)
     local_agent._json_write(run_dir / "response.json", merged)
-    return {"response": merged, "input_hashes": hashes, "collected_hashes": current_hashes,
+    return {"response": merged, "input_hashes": strict_hashes, "collected_hashes": current_hashes,
             "artifacts": {"response": str(run_dir / "response.json")}}
