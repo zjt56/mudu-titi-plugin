@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-parallel-stage-display.md](2026-11-09-parallel-stage-display.md) | 流程进度显示：并行阶段同时显示处理中，完成态不再被压回（只改显示） |
 | 2026-11-09 | [2026-11-09-upstream-review.md](2026-11-09-upstream-review.md) | 拉取2f51429并评估工作流与运维变更；发现反馈契约、局部重生成、发布标记及回滚事务等高优先级问题 |
 | 2026-11-09 | [2026-11-09-answers-example-missing-field.md](2026-11-09-answers-example-missing-field.md) | 答案阶段提示词示例补回必填 `missing`，并在报错里点名缺失键/题号；修复2017卷在该阶段无限重试，47+63项测试通过 |
 | 2026-11-09 | [2026-11-09-model-list-host-providers.md](2026-11-09-model-list-host-providers.md) | 设置页模型下拉补上宿主实际可用的 provider 与账号目录模型，不再只正则解析两个补丁块 |

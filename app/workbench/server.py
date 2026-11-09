@@ -456,6 +456,49 @@ def paper_info(folder: Path, report, manifest) -> dict:
             "subject": batch.get("subject") or meta.get("subject") or "english"}
 
 
+def active_stage_ids(manifest, cards=None):
+    """Stages that may legitimately run at the same time (display only).
+
+    A stage is "active" when it is not finished and every declared dependency is
+    already satisfied. This lets the parallel contract (types/answers/audio, then
+    explanations/knowledge) show several stages as in-progress at once instead of
+    a single moving cursor. It never changes dispatch or ledger state.
+    """
+    if wf_contracts is None or wf_manifest is None:
+        return set()
+    cards = cards if cards is not None else [{"id": sid} for sid in STAGE_ORDER]
+    active = set()
+    for card in cards:
+        sid = card.get("id")
+        if card.get("status") in TERMINAL_OK or card.get("status") == "skipped":
+            continue
+        spec = wf_contracts.STAGE_BY_ID.get(sid)
+        if spec is None:
+            continue
+        if all(manifest_dependency_satisfied(manifest, dep) for dep in spec.depends_on):
+            active.add(sid)
+    return active
+
+
+def manifest_dependency_satisfied(manifest, dep_id):
+    """Execution-level readiness of one dependency, without consumer audit.
+
+    Display only: a dependency counts as met once it is executed (or explicitly
+    skipped) and not marked for rebuild. Dispatch still uses the strict
+    ``manifest.dependency_satisfied`` including ``inspect_stage``.
+    """
+    record = ((manifest or {}).get("stages") or {}).get(dep_id) or {}
+    if record.get("rebuild_required"):
+        return False
+    if record.get("status") in TERMINAL_OK:
+        return True
+    if (record.get("status") == "needs_review" and record.get("execution_completed") is True
+            and record.get("continue_unqualified") is True
+            and not record.get("release_ready")):
+        return True
+    return False
+
+
 def stage_cards(manifest, has_output: bool = False, advance_running: bool = False, diagnostics=None) -> dict:
     stages = (manifest or {}).get("stages") or {}
     recorded_running = (manifest or {}).get("status") == "running" or any(
@@ -498,6 +541,12 @@ def stage_cards(manifest, has_output: bool = False, advance_running: bool = Fals
     else:
         done = sum(1 for card in cards if card["status"] in TERMINAL_OK)
         current = next((card for card in cards if card["status"] not in TERMINAL_OK), None)
+    # 并行显示（只读投影）：契约允许同时推进的多个阶段（如 types/answers/audio 一批、
+    # explanations/knowledge 一批）必须同时显示“处理中”，而不是轮流抢同一个 current。
+    # 这里只标出“依赖已满足、尚未完成”的阶段集合，不改任何执行或台账语义。
+    active_ids = active_stage_ids(manifest, cards)
+    for card in cards:
+        card["active"] = card["id"] in active_ids
     early = ("extract", "structure_gate", "preassemble")
     stale = bool(has_output and current and (done == 0 or current["id"] in early))
     if advance_running:
