@@ -53,6 +53,33 @@ def _overlay_providers(path):
     return ids
 
 
+def _first_model(path):
+    """First declared servable model in a profile patch (bootstrap fallback)."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    block, provider = "", ""
+    for line in lines:
+        found = re.match(r"^-\s*id:\s*['\"]?([A-Za-z0-9_-]+)", line)
+        if found:
+            block, provider = found.group(1), ""
+            continue
+        if block == "llm-pi-ai":
+            found = re.match(r"^ {6}([A-Za-z0-9._-]+):\s*$", line)
+            if found:
+                provider = found.group(1)
+                continue
+            found = re.match(r"^ {10}-\s*id:\s*(.+?)\s*$", line)
+            if found and provider:
+                return {"provider": provider, "model": found.group(1).strip().strip('"\'')}
+        elif block in ("llm-deepseek", "llm-deepseek-account"):
+            found = re.match(r"^ {6}-\s*id:\s*(.+?)\s*$", line)
+            if found:
+                return {"provider": "deepseek-official", "model": found.group(1).strip().strip('"\'')}
+    return None
+
+
 def harness_default():
     """The model currently chosen in this device's Harness profile.
 
@@ -73,6 +100,13 @@ def harness_default():
         if found["provider"] not in _overlay_providers(patch):
             continue
         return dict(found, profile=name)
+    # 没有显式 Harness 默认模型时，用 profile 里第一个可服务模型兜底。
+    for name in names:
+        patch = home / "profiles" / name / "cordis.patch.yml"
+        if patch.is_file():
+            first = _first_model(patch)
+            if first:
+                return dict(first, profile=name)
     return None
 try:
     data = json.load(open(router_path, encoding="utf-8"))

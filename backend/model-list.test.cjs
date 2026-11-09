@@ -54,3 +54,11 @@ test('parsing a profile exposes every llm-pi-ai provider', () => {
   assert.ok(providers.has('opencode-go'), [...providers].join(','));
   assert.ok(models.some((m) => m.provider === 'opencode-go' && m.model === 'deepseek-v4.1-flash'));
 });
+
+test('harness default resolves to a servable model without entering any API key', () => {
+  const found = plugin.harnessDefaultModel();
+  assert.ok(found && found.provider && found.model, 'expected a Harness default model');
+  const declared = plugin.parseProfileModels(found.profile || 'desktop');
+  assert.ok(declared.some((m) => m.provider === found.provider && m.model === found.model),
+    `${found.provider}/${found.model} must be declared by its profile`);
+});

@@ -103,9 +103,9 @@ class RoutePickTest(unittest.TestCase):
                 encoding="utf-8")
             result = self.pick({"default": {}, "roles": {}}, stage="types", agent="types",
                                env={"DSH_HOME": home, "DSH_PROFILE": ""})
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("no valid default", result.stderr)
-        self.assertEqual(result.stdout.strip(), "")
+        # 不可服务的 magpie 被跳过，回退到同一 profile 里第一个可服务模型。
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().split("\t")[:2], ["opencode-go", "deepseek-v4.1-flash"])
 
     def test_corrupt_explicit_default_never_falls_back_to_harness(self):
         # 显式配置存在但不完整是错误，不能悄悄改用 Harness 模型。

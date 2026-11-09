@@ -38,6 +38,25 @@ function defaultModelBlock(file) {
   return provider && model ? { provider, model } : null;
 }
 /** The model this device currently has selected in its Harness profile. */
+/** First declared servable model in a profile patch (bootstrap fallback). */
+function firstModel(file) {
+  if (!existsSync(file)) return null;
+  let block = ''; let provider = '';
+  for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const id = line.match(/^-\s*id:\s*['"]?([A-Za-z0-9_-]+)/);
+    if (id) { block = id[1]; provider = ''; continue; }
+    if (block === 'llm-pi-ai') {
+      const p = line.match(/^ {6}([A-Za-z0-9._-]+):\s*$/);
+      if (p) { provider = p[1]; continue; }
+      const m = line.match(/^ {10}-\s*id:\s*(.+?)\s*$/);
+      if (m && provider) return { provider, model: m[1].trim().replace(/^['"]|['"]$/g, '') };
+    } else if (block === 'llm-deepseek' || block === 'llm-deepseek-account') {
+      const m = line.match(/^ {6}-\s*id:\s*(.+?)\s*$/);
+      if (m) return { provider: 'deepseek-official', model: m[1].trim().replace(/^['"]|['"]$/g, '') };
+    }
+  }
+  return null;
+}
 function harnessDefault() {
   const names = [process.env.DSH_PROFILE, 'desktop', 'wf-deepseek-fast', 'wf-deepseek'].filter(Boolean);
   for (const name of names) {
@@ -49,6 +68,12 @@ function harnessDefault() {
     const declared = overlayProviders(readFileSync(file, 'utf8'));
     if (!declared.size || !declared.has(found.provider)) continue;
     return { ...found, profile: name };
+  }
+  // No explicit agent-default-model: fall back to the first servable model of the
+  // Harness profile so a fresh device works without entering any API key.
+  for (const name of names) {
+    const first = firstModel(join(dshHome, 'profiles', name, 'cordis.patch.yml'));
+    if (first) return { ...first, profile: name };
   }
   return null;
 }

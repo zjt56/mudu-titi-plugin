@@ -48,3 +48,15 @@
 同时把 `backend/wf-router-native.test.cjs` 的假 `dsh` 改成平台原生（Windows `.cmd` / POSIX 可执行脚本），使 provider guard 的两条用例在 macOS 本地也能真实执行：9 项中 7 通过、2 项需真实 DSH 而跳过，0 失败。新增/调整用例覆盖：设置默认为空时跟随本机可服务的 Harness 模型、不可服务 provider 被跳过、显式损坏配置不回落。
 
 验证：后端全量 207 项（203 通过 / 2 跳过 / 2 项既有图片 CSS 断言失败）；工作流全量 1869 项（1849 通过 / 17 跳过 / 3 项既有失败）。
+
+## 设置页提示修正（2026-11-09 18:32）
+
+用户指出初始化引导里的「大模型」项显示“未配置默认模型。填 API Key 并选模型后即可运行全流程”是错的：**插件不需要填写模型 API Key**，凭据由 Harness 提供，默认应直接路由到 Harness 当前模型。
+
+- `lib/client.js::OnboardingSection`：模型项改为“跟随 Harness 当前模型：<provider/model>（无需填写 API Key，凭据由 Harness 提供）”；确实没有任何可服务模型时才提示去「模型与设置」选择本机 Harness 已配置的模型，不再提“填 API Key”。
+- 模型设置页说明同步改为“默认跟随本机 Harness 当前模型，无需填写 API Key”。
+- `lib/index.js::harnessDefaultModel` 增加最后兜底：没有显式 `agent-default-model` 时，取本机 Harness profile 里第一个可服务模型（优先 `desktop`，其次 `wf-deepseek`），保证新设备无需任何手工填写即可跑通。
+- `backend/route_pick.py` / `backend/wf-router.mjs` 同步该兜底；不可服务的 provider 仍被跳过。
+- `backend/model-list.test.cjs` 新增“无需 API Key 即可解析出可服务 Harness 默认模型”用例。
+
+验证：`node --test backend/model-list.test.cjs` 6/6；路由相关 35 项 33 通过 2 跳过 0 失败。
