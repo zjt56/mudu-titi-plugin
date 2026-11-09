@@ -32,3 +32,19 @@
 ## 回退
 
 恢复 `config/model-router.json` 的显式 `default`，并回退 `route_pick.py` / `wf-router.mjs` 的 Harness 回退段与相关测试即可；插件设置页的显式模型选择不受影响。
+
+## 与另一台设备 provider guard 修复的互相印证（2026-11-09 18:20）
+
+另一台设备的实际 stderr 揭示根因：`dsh: NO_ADAPTER: no adapter registered for provider "magpie"`。`f9bfb49` 已加两道防线：
+
+1. `lib/index.js::servableHostModels`：设置页只列路由 profile 能服务的宿主模型，不再出现 WorkBuddy 的 magpie；
+2. `backend/wf-router.mjs::overlayProviders`：调用 dsh 前校验 provider 是否在生成的路由 profile 中，不在则带可用列表报错。
+
+本地复核发现需要补的一环：**“跟随 Harness 默认模型”也可能指向不可服务的 provider**（本机 `desktop/agent-default-model` 就是 magpie）。若不处理，空 `default` 仍会自动选中 magpie 并触发 NO_ADAPTER。已统一加上可服务性过滤：
+
+- `lib/index.js::harnessDefaultModel`：候选 profile 的 `agent-default-model` 只有在其自身 `llm-pi-ai`/`llm-deepseek` 声明了该 provider 时才采用；
+- `backend/route_pick.py::harness_default`、`backend/wf-router.mjs::harnessDefault`、`app/workflow/local_agent.py::_harness_default_route`：同一规则，跳过不可服务的 provider，继续下一个候选 profile；全部不可用时明确报错让用户在设置里选可调用模型，绝不静默换模型。
+
+同时把 `backend/wf-router-native.test.cjs` 的假 `dsh` 改成平台原生（Windows `.cmd` / POSIX 可执行脚本），使 provider guard 的两条用例在 macOS 本地也能真实执行：9 项中 7 通过、2 项需真实 DSH 而跳过，0 失败。新增/调整用例覆盖：设置默认为空时跟随本机可服务的 Harness 模型、不可服务 provider 被跳过、显式损坏配置不回落。
+
+验证：后端全量 207 项（203 通过 / 2 跳过 / 2 项既有图片 CSS 断言失败）；工作流全量 1869 项（1849 通过 / 17 跳过 / 3 项既有失败）。

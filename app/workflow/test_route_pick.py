@@ -68,12 +68,44 @@ class RoutePickTest(unittest.TestCase):
             desktop = Path(home) / "profiles" / "desktop"
             desktop.mkdir(parents=True)
             (desktop / "cordis.patch.yml").write_text(
-                '- id: agent-default-model # device menu\n  config:\n    provider: magpie\n    model: auto/deepseek-v4.1-flash\n',
+                '- id: llm-pi-ai\n'
+                '  config:\n'
+                '    providers:\n'
+                '      opencode-go:\n'
+                '        models:\n'
+                '          - id: deepseek-v4.1-flash\n'
+                '- id: agent-default-model # device menu\n'
+                '  config:\n'
+                '    provider: opencode-go\n'
+                '    model: deepseek-v4.1-flash\n',
                 encoding="utf-8")
             result = self.pick({"default": {}, "roles": {}}, stage="types", agent="types",
                                env={"DSH_HOME": home, "DSH_PROFILE": ""})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip().split("\t")[:2], ["magpie", "auto/deepseek-v4.1-flash"])
+        self.assertEqual(result.stdout.strip().split("\t")[:2], ["opencode-go", "deepseek-v4.1-flash"])
+
+    def test_harness_default_provider_not_servable_is_skipped(self):
+        # WorkBuddy 的 magpie 只存在于 Harness 菜单、不在路由 overlay：不能选它。
+        with tempfile.TemporaryDirectory() as home:
+            desktop = Path(home) / "profiles" / "desktop"
+            desktop.mkdir(parents=True)
+            (desktop / "cordis.patch.yml").write_text(
+                '- id: llm-pi-ai\n'
+                '  config:\n'
+                '    providers:\n'
+                '      opencode-go:\n'
+                '        models:\n'
+                '          - id: deepseek-v4.1-flash\n'
+                '- id: agent-default-model\n'
+                '  config:\n'
+                '    provider: magpie\n'
+                '    model: auto/deepseek-v4.1-flash\n',
+                encoding="utf-8")
+            result = self.pick({"default": {}, "roles": {}}, stage="types", agent="types",
+                               env={"DSH_HOME": home, "DSH_PROFILE": ""})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no valid default", result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
 
     def test_corrupt_explicit_default_never_falls_back_to_harness(self):
         # 显式配置存在但不完整是错误，不能悄悄改用 Harness 模型。

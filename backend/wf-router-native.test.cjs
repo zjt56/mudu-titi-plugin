@@ -22,8 +22,11 @@ function fixture(t, promptText = 'Stage: answers\nAgent: answer\n') {
     '- id: agent-default-model\n  config:\n    provider: old\n    model: old\n    reasoningEffort: medium\n');
   fs.mkdirSync(path.join(home, 'profiles', 'headless'), { recursive: true });
   fs.writeFileSync(path.join(home, 'profiles', 'headless', 'cordis.patch.yml'), '[]\n');
-  const dsh = path.join(dir, 'fake-dsh.cmd');
-  fs.writeFileSync(dsh, '@echo off\r\necho OK\r\n');
+  // Use a platform-native fake entry so the routing logic is testable everywhere.
+  const isWin = process.platform === 'win32';
+  const dsh = path.join(dir, isWin ? 'fake-dsh.cmd' : 'fake-dsh');
+  if (isWin) fs.writeFileSync(dsh, '@echo off\r\necho OK\r\n');
+  else { fs.writeFileSync(dsh, '#!/bin/sh\ncat >/dev/null\necho OK\n'); fs.chmodSync(dsh, 0o755); }
   const prompt = path.join(dir, 'prompt.txt');
   const response = path.join(dir, 'response.txt');
   fs.writeFileSync(prompt, promptText, 'utf8');
@@ -37,7 +40,7 @@ test('native router runs a Windows cmd dsh entry and writes the response file', 
     encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readFileSync(f.response, 'utf8'), 'OK\r\n');
+  assert.equal(fs.readFileSync(f.response, 'utf8').replace(/\r\n/g, '\n'), 'OK\n');
   const routeProfile = fs.readdirSync(path.join(f.home, 'profiles')).find(name => name.startsWith('wf-plugin-route-'));
   assert.ok(routeProfile);
   const patch = fs.readFileSync(path.join(f.home, 'profiles', routeProfile, 'cordis.patch.yml'), 'utf8');
@@ -62,7 +65,7 @@ test('native router quotes a Harness path containing spaces', t => {
     },
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readFileSync(f.response, 'utf8'), 'OK\r\n');
+  assert.equal(fs.readFileSync(f.response, 'utf8').replace(/\r\n/g, '\n'), 'OK\n');
 });
 
 test('headless overlay preserves custom provider config and excludes desktop startup', t => {
@@ -172,7 +175,7 @@ test('native router accepts a provider declared by the route profile', t => {
     encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readFileSync(f.response, 'utf8'), 'OK\r\n');
+  assert.equal(fs.readFileSync(f.response, 'utf8').replace(/\r\n/g, '\n'), 'OK\n');
 });
 
 test('plugin config uses node native router and does not require /bin/sh', () => {
@@ -187,15 +190,16 @@ test('native router follows the device Harness model when no plugin default is p
   }));
   fs.mkdirSync(path.join(f.home, 'profiles', 'desktop'), { recursive: true });
   fs.writeFileSync(path.join(f.home, 'profiles', 'desktop', 'cordis.patch.yml'),
-    '- id: agent-default-model # device menu\n  config:\n    provider: magpie\n    model: auto/deepseek-v4.1-flash\n');
+    '- id: llm-pi-ai\n  config:\n    providers:\n      opencode-go:\n        models:\n          - id: deepseek-v4.1-flash\n'
+    + '- id: agent-default-model # device menu\n  config:\n    provider: opencode-go\n    model: deepseek-v4.1-flash\n');
   const result = spawnSync(process.execPath, [router, f.prompt, f.response], {
     encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
   });
   // The fake dsh entry cannot execute on this host; the routing decision and the
   // generated overlay are what this test proves.
-  assert.match(result.stderr, /provider=magpie model=auto\/deepseek-v4\.1-flash/);
+  assert.match(result.stderr, /provider=opencode-go model=deepseek-v4\.1-flash/);
   const routeProfile = fs.readdirSync(path.join(f.home, 'profiles')).find(name => name.startsWith('wf-plugin-route-'));
   const patch = fs.readFileSync(path.join(f.home, 'profiles', routeProfile, 'cordis.patch.yml'), 'utf8');
-  assert.match(patch, /provider: "magpie"/);
-  assert.match(patch, /model: "auto\/deepseek-v4\.1-flash"/);
+  assert.match(patch, /provider: "opencode-go"/);
+  assert.match(patch, /model: "deepseek-v4.1-flash"/);
 });

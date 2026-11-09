@@ -23,7 +23,8 @@ function fixture(t, router, promptText = 'Stage: types\n\nReply with exactly: OK
     typeof router === 'string' ? router : JSON.stringify(router));
   const home = join(root, 'dsh');
   mkdirSync(join(home, 'profiles', 'fake'), { recursive: true });
-  const fakePatch = '- id: agent-default-model\n  config:\n    provider: magpie-responses\n    model: "imported/gpt-5.6-sol"\n';
+  const fakePatch = '- id: llm-pi-ai\n  config:\n    providers:\n      magpie-responses:\n        models:\n          - id: "imported/gpt-5.6-sol"\n'
+    + '- id: agent-default-model\n  config:\n    provider: magpie-responses\n    model: "imported/gpt-5.6-sol"\n';
   writeFileSync(join(home, 'profiles', 'fake', 'cordis.patch.yml'), fakePatch);
   // 每台设备自己的 Harness 默认模型（仓库不固定模型时跟随它）。
   mkdirSync(join(home, 'profiles', 'desktop'), { recursive: true });

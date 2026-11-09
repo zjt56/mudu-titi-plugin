@@ -14,7 +14,8 @@
 - 路由在 `default` 为空时读取本机 `profiles/<profile>/cordis.patch.yml` 的 `agent-default-model`（顺序：`DSH_PROFILE` → `desktop` → `wf-deepseek-fast` → `wf-deepseek`），跟随该设备 Harness 菜单当前模型。
 - 插件设置里显式指定的 `default` / `stages` / `roles` 仍然严格优先；显式配置存在但不完整或损坏时必须报错，不得静默换成其他模型。
 - 缓存与分片快照的模型身份也绑定该 profile 文件，换模型后不会复用旧结果。
-- 落地：`backend/route_pick.py`、`backend/wf-router.mjs`、`lib/index.js`、`lib/client.js`、`app/workflow/local_agent.py::_part_model_binding`；根规则8。
+- 跟随 Harness 默认模型时也必须做“可服务性”过滤：provider 必须在该 profile 的 `llm-pi-ai`/`llm-deepseek` 声明中，否则跳过（WorkBuddy 的 magpie 在 headless 里 NO_ADAPTER）。全部不可用时明确要求用户选模型，不静默换模型。
+- 落地：`backend/route_pick.py`、`backend/wf-router.mjs`、`lib/index.js::servableHostModels/harnessDefaultModel`、`lib/client.js`、`app/workflow/local_agent.py::_part_model_binding`；根规则8。
 
 ## 2026-11-09 题型判断真正纳入前置组装（用户明确）
 

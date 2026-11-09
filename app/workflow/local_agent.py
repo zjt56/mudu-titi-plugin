@@ -620,8 +620,32 @@ def _default_model_block(path):
     return {"provider": provider, "model": model} if provider and model else None
 
 
+def _overlay_providers(path):
+    """Providers the headless route profile can serve for this patch."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    ids, block = set(), ""
+    for line in lines:
+        found = re.match(r"^-\s*id:\s*['\"]?([A-Za-z0-9_-]+)", line)
+        if found:
+            block = found.group(1)
+            continue
+        if block in ("llm-deepseek", "llm-deepseek-account"):
+            ids.add("deepseek-official")
+        found = re.match(r"^ {6}([A-Za-z0-9._-]+):\s*$", line) if block == "llm-pi-ai" else None
+        if found:
+            ids.add(found.group(1))
+    return ids
+
+
 def _harness_default_route():
-    """The model this device selected in its Harness model menu (repo never pins one)."""
+    """The model this device selected in its Harness model menu (repo never pins one).
+
+    A host-only provider (WorkBuddy magpie etc.) is not copied into the headless
+    route profile and would fail with NO_ADAPTER, so it is skipped here.
+    """
     home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh"))
     names = [os.environ.get("DSH_PROFILE"), "desktop", "wf-deepseek-fast", "wf-deepseek"]
     for name in names:
@@ -629,8 +653,9 @@ def _harness_default_route():
             continue
         path = home / "profiles" / name / "cordis.patch.yml"
         found = _default_model_block(path)
-        if found:
-            return dict(found, profile=name), path
+        if not found or found["provider"] not in _overlay_providers(path):
+            continue
+        return dict(found, profile=name), path
     return None, None
 
 

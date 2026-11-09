@@ -33,6 +33,26 @@ def _default_model_block(path):
     return {"provider": provider, "model": model} if provider and model else None
 
 
+def _overlay_providers(path):
+    """Providers the generated route profile can serve (llm-pi-ai / llm-deepseek)."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    ids, block = set(), ""
+    for line in lines:
+        found = re.match(r"^-\s*id:\s*['\"]?([A-Za-z0-9_-]+)", line)
+        if found:
+            block = found.group(1)
+            continue
+        if block in ("llm-deepseek", "llm-deepseek-account"):
+            ids.add("deepseek-official")
+        found = re.match(r"^ {6}([A-Za-z0-9._-]+):\s*$", line) if block == "llm-pi-ai" else None
+        if found:
+            ids.add(found.group(1))
+    return ids
+
+
 def harness_default():
     """The model currently chosen in this device's Harness profile.
 
@@ -45,9 +65,14 @@ def harness_default():
         names.append(os.environ["DSH_PROFILE"])
     names += ["desktop", "wf-deepseek-fast", "wf-deepseek"]
     for name in names:
-        found = _default_model_block(home / "profiles" / name / "cordis.patch.yml")
-        if found:
-            return dict(found, profile=name)
+        patch = home / "profiles" / name / "cordis.patch.yml"
+        found = _default_model_block(patch)
+        if not found:
+            continue
+        # 只接受该 profile 自己声明、会被路由 overlay 复制的 provider。
+        if found["provider"] not in _overlay_providers(patch):
+            continue
+        return dict(found, profile=name)
     return None
 try:
     data = json.load(open(router_path, encoding="utf-8"))

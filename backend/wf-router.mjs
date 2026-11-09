@@ -41,8 +41,14 @@ function defaultModelBlock(file) {
 function harnessDefault() {
   const names = [process.env.DSH_PROFILE, 'desktop', 'wf-deepseek-fast', 'wf-deepseek'].filter(Boolean);
   for (const name of names) {
-    const found = defaultModelBlock(join(dshHome, 'profiles', name, 'cordis.patch.yml'));
-    if (found) return { ...found, profile: name };
+    const file = join(dshHome, 'profiles', name, 'cordis.patch.yml');
+    const found = defaultModelBlock(file);
+    if (!found) continue;
+    // Only providers declared in this profile survive the headless overlay.
+    // Host-only relays (WorkBuddy magpie etc.) would fail with NO_ADAPTER.
+    const declared = overlayProviders(readFileSync(file, 'utf8'));
+    if (!declared.size || !declared.has(found.provider)) continue;
+    return { ...found, profile: name };
   }
   return null;
 }
