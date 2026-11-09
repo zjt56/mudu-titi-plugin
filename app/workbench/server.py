@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -114,9 +115,13 @@ def save_json(path: Path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def batch_dir(name):
+def _validate_batch_name(name):
     if not isinstance(name, str) or not name or Path(name).name != name or name in (".", "..") or any(c in name for c in ("\\", "/", "\x00")):
         raise ValueError("非法批次名")
+
+
+def batch_dir(name):
+    _validate_batch_name(name)
     if WORKFLOWS.is_symlink() or (WORKFLOWS / name).is_symlink():
         raise ValueError("批次目录不能是软链接")
     target = (WORKFLOWS / name).resolve()
@@ -782,21 +787,21 @@ def _advance_worker_loop():
     """
     global _advance_worker_running
     while True:
-        with _advance_queue_lock:
-            if not _advance_queue:
-                _advance_worker_running = False
-                return
-            entry = _advance_queue.pop(0)
-            name = entry["name"] if isinstance(entry, dict) else entry
-            expectation = entry.get("operations_expectation") if isinstance(entry, dict) else None
-        try:
-            folder = batch_dir(name)
-        except (ValueError, OSError):
-            with _lock:
-                _advance_state[name] = {"running": False}
-            continue
-        # Mark as the single active batch; later queued items stay "queued".
+        # Dequeue, validate and mark running under the mutation lock so purge
+        # cannot delete a popped entry before the worker registers ownership.
         with _lock:
+            with _advance_queue_lock:
+                if not _advance_queue:
+                    _advance_worker_running = False
+                    return
+                entry = _advance_queue.pop(0)
+                name = entry["name"] if isinstance(entry, dict) else entry
+                expectation = entry.get("operations_expectation") if isinstance(entry, dict) else None
+            try:
+                folder = batch_dir(name)
+            except (ValueError, OSError):
+                _advance_state.pop(name, None)
+                continue
             _advance_state[name] = {"running": True, "started_at": now()}
         try:
             if expectation is None:
@@ -924,6 +929,85 @@ def _unique_batch_name(base: str) -> str:
     return name
 
 
+def _upload_part_sha(part):
+    return hashlib.sha256(part.get("data") or b"").hexdigest() if isinstance(part, dict) else ""
+
+
+def _existing_upload_batch(source, answer, audio, extra_docs, extra_audio):
+    """Find an existing batch with the exact same uploaded content.
+
+    A repeated upload must not create ``-2``/``-3`` copies of the same paper;
+    that multiplies model runs and review queues. Only an exact content match
+    (all meaningful source/answer/audio/extra inputs) reuses an existing batch.
+    Different source or attachments still create a new batch.
+    """
+    if wf_manifest is None or WORKFLOWS.is_symlink() or not WORKFLOWS.is_dir():
+        return None
+    def signature(part):
+        return (_upload_part_sha(part), Path(part["filename"]).suffix.lower()) if part else None
+
+    expected = {
+        "source": signature(source),
+        "answers": signature(answer),
+        "audio": signature(audio),
+        "attachment": sorted(signature(item) for item in (extra_docs or [])),
+        "audio_extra": sorted(signature(item) for item in (extra_audio or [])),
+    }
+    for folder in sorted(WORKFLOWS.iterdir()):
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        folder = folder.resolve()
+        manifest_path = folder / "workflow" / "manifest.json"
+        if manifest_path.parent.is_symlink() or manifest_path.is_symlink():
+            continue
+        state = load(manifest_path, {})
+        inputs = state.get("inputs") if isinstance(state, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        source_record = inputs.get("source")
+        if not isinstance(source_record, dict) or source_record.get("sha256") != expected["source"][0]:
+            continue
+
+        def current_signature(record):
+            if record is None:
+                return None
+            if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+                raise ValueError("Invalid upload input")
+            path = Path(record["path"])
+            if not path.is_absolute():
+                path = folder / path
+            relative = path.relative_to(folder)
+            current = folder
+            for part in relative.parts:
+                current = current / part
+                if part == ".." or current.is_symlink():
+                    raise ValueError("Unsafe upload input")
+            if not path.is_file():
+                raise ValueError("Missing upload input")
+            # Check the bytes now, not a potentially stale manifest/cache digest.
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != record.get("sha256"):
+                raise ValueError("Changed upload input")
+            return digest.hexdigest(), path.suffix.lower()
+
+        try:
+            actual = {key: current_signature(inputs.get(key)) for key in ("source", "answers", "audio")}
+            actual["attachment"] = sorted(current_signature(item) for key, item in inputs.items()
+                if re.fullmatch(r"attachment_\d{3,}", str(key)))
+            actual["audio_extra"] = sorted(current_signature(item) for key, item in inputs.items()
+                if re.fullmatch(r"audio_\d{3,}", str(key)))
+            if actual == expected:
+                # Ensure the reused response can load the ledger as well.
+                wf_manifest.load(folder)
+                return folder
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return None
+
+
 def _save_part(folder: Path, part: dict, stem: str) -> Path:
     path = folder / f"{stem}{Path(part['filename']).suffix.lower()}"
     path.write_bytes(part["data"])
@@ -967,6 +1051,16 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
         raise ValueError("题源分类不在系统目录中")
     if grade and grade not in ("七年级", "八年级", "九年级"):
         raise ValueError("年级只能选择七年级、八年级或九年级")
+    # 同内容重复上传直接复用已有批次，避免生成 -2/-3 副本并重复跑模型。
+    existing = _existing_upload_batch(
+        source, answer, audio,
+        [f for f in docs if f is not source and f is not answer],
+        extra_audio)
+    if existing is not None:
+        state = wf_manifest.load(existing) if wf_manifest else {}
+        return {"name": existing.name, "duplicate": True, "reused": True,
+                "inbox": "", "paper": paper_info(existing, {}, state),
+                "stage": stage_cards(state), "files": []}
     # 未填写标题时保留用户上传文件的识别线索，不再一律变成「新试卷」。
     # 此名称仅用于展示/定位，正式来源仍由原卷卷头识别，不覆盖原文证据。
     name = _unique_batch_name(_slug(title or Path(source["filename"]).stem or f"{region}{year}"))
@@ -1086,6 +1180,182 @@ def _archive_batch_locked(name: str, confirm_name: str) -> dict:
     _advance_state.pop(name, None)
     return {"ok": True, "name": name, "archive": str(archive.relative_to(root)),
             "recoverable": True}
+
+
+_RECYCLE_DIRS = (".workbench-trash", ".trash", "archives", "archive")
+
+
+def _purge_archive_targets(root: Path, name: str) -> list[Path]:
+    """Recognize receipt archives and legacy named/nested workflows/inbox copies.
+
+    Never use a substring match: deleting paper must preserve paper-2. A receipt
+    for another batch bounds that container, even if it contains a matching name.
+    """
+    targets = []
+
+    def visit(directory):
+        for entry in sorted(directory.iterdir()):
+            if entry.is_symlink():
+                if entry.name == name:
+                    raise ValueError("归档目录不能是软链接")
+                continue
+            if not entry.is_dir():
+                continue
+            receipt_path = entry / "receipt.json"
+            if receipt_path.is_symlink():
+                raise ValueError("归档回执不能是软链接")
+            receipt = load(receipt_path, {})
+            identity = receipt.get("batch") if isinstance(receipt, dict) else None
+            if identity:
+                if identity == name:
+                    targets.append(entry)
+                continue
+            # workflows/inbox directly under a recycle root are aggregate
+            # layout containers, even when a batch happens to have that name.
+            aggregate = entry.name in ("workflows", "inbox") and directory.name in _RECYCLE_DIRS
+            if entry.name == name and not aggregate:
+                targets.append(entry)
+                continue
+            # A legacy archive may keep a batch under a timestamp or workflow ID.
+            manifest_path = entry / "workflow" / "manifest.json"
+            if not manifest_path.parent.is_symlink() and not manifest_path.is_symlink():
+                state = load(manifest_path, {})
+                if isinstance(state, dict) and state.get("workflow_id") == name:
+                    targets.append(entry)
+                    continue
+                if manifest_path.is_file():
+                    continue  # Do not descend into another batch's own artifacts.
+            visit(entry)
+
+    for base in (root, WORKFLOWS, INBOX):
+        for directory in _RECYCLE_DIRS:
+            trash = base / directory
+            if trash.is_symlink():
+                raise ValueError("回收目录不能是软链接")
+            if trash.is_dir():
+                visit(trash)
+    return targets
+
+
+def _purge_audio_targets(name):
+    """Return only this batch's status files, never shared audio/model caches."""
+    from audio import config as cfgmod, bootstrap as boot
+    data_dir = Path(cfgmod.data_dir(cfgmod.load()))
+    batch_status = boot.status_path(data_dir, name)
+    paths = [batch_status, batch_status.with_suffix(".tmp")]
+    global_status = boot.status_path(data_dir)
+    global_paths = [global_status, global_status.with_suffix(".tmp")]
+    # Reject symlinked status paths before reading their identity.
+    for path in paths + global_paths:
+        if any(parent.is_symlink() for parent in (path, *path.parents)):
+            raise ValueError("听力状态路径不能是软链接")
+    for path in global_paths:
+        state = load(path, {})
+        if isinstance(state, dict) and state.get("batch") == name:
+            paths.append(path)
+    for path in paths:
+        state = load(path, {})
+        if isinstance(state, dict) and state.get("running"):
+            raise ValueError("批次听力任务正在运行，请等待结束后再删除")
+    return [path for path in paths if path.is_file()]
+
+
+def _clear_purged_batch_state(name):
+    _advance_state.pop(name, None)
+    _upload_jobs.pop(name, None)
+    with _audio_job["lock"]:
+        if _audio_job.get("batch") == name:
+            audio_lock = _audio_job["lock"]
+            _audio_job.clear()
+            _audio_job.update(running=False, kind="", batch="", lock=audio_lock)
+    with _advance_queue_lock:
+        _advance_queue[:] = [entry for entry in _advance_queue
+                            if (entry.get("name") if isinstance(entry, dict) else entry) != name]
+    # These small caches include question content, not just derived counters.
+    # Clear opaque hash-keyed caches too, since they cannot be filtered by path.
+    _OVERVIEW_CACHE.clear()
+    for module_name, attributes in {
+        "workflow.manifest": ("_FILE_DIGEST_CACHE",),
+        "workflow.review": ("_LOAD_CACHE", "_DIGEST_CACHE", "_PLAN_CACHE",
+                            "_IMMUTABLE_DIGEST_CACHE", "_EVALUATE_CACHE"),
+        "workflow.agent_tasks": ("_TASK_TEMPLATE_CACHE",),
+    }.items():
+        module = sys.modules.get(module_name)
+        if module is not None:
+            for attribute in attributes:
+                cache = getattr(module, attribute, None)
+                if cache is not None:
+                    cache.clear()
+
+
+@serialized
+def purge_batch(name: str, confirm_name: str) -> dict:
+    """Permanently delete one batch and every local trace of it.
+
+    Unlike ``archive_batch`` this is not recoverable: it removes the live
+    workflows/inbox directories plus any recycle archives for the same batch,
+    then clears in-memory scheduling state. The caller must explicitly confirm
+    the exact batch name.
+    """
+    if confirm_name != name:
+        raise ValueError("确认批次名不匹配，请重新确认目标")
+    _validate_batch_name(name)
+    if WORKFLOWS.is_symlink():
+        raise ValueError("批次根目录不能是软链接")
+    folder = WORKFLOWS.resolve() / name
+    if folder.exists() or folder.is_symlink():
+        _archive_preflight(folder)
+    root = WORKFLOWS.resolve().parent
+    if INBOX.is_symlink() or INBOX.resolve().parent != root or INBOX.resolve() == WORKFLOWS.resolve():
+        raise ValueError("收件箱根目录越出工作区")
+    if name in _RECYCLE_DIRS:
+        raise ValueError("拒绝删除共享回收目录")
+    from workflow import supervisor as wf_supervisor
+    with wf_supervisor.advance_claim(folder) as acquired:
+        if not acquired:
+            raise ValueError("批次正在运行或执行运维动作，请稍后删除")
+        if ((_advance_state.get(name) or {}).get("running")
+                or (_upload_jobs.get(name) or {}).get("running")
+                or (_audio_job.get("running") and _audio_job.get("batch") == name)):
+            raise ValueError("批次正在运行，请等待任务结束后再删除")
+        targets = [path for path in (folder, INBOX / name) if path.exists() or path.is_symlink()]
+        targets.extend(_purge_archive_targets(root, name))
+        if not targets:
+            raise ValueError("批次不存在")
+        for target in targets:
+            resolved = target.resolve()
+            if resolved == root or root not in resolved.parents:
+                raise ValueError("拒绝删除工作区之外的路径")
+            _archive_preflight(target)
+            manifest = load(target / "workflow" / "manifest.json", {}) or {}
+            stages = manifest.get("stages") if isinstance(manifest, dict) else None
+            stages = stages if isinstance(stages, dict) else {}
+            if isinstance(manifest, dict) and (manifest.get("status") == "running" or any(
+                    isinstance(stage, dict) and stage.get("status") == "running"
+                    for stage in stages.values())):
+                raise ValueError("批次正在运行，请等待任务结束后再删除")
+        audio_targets = _purge_audio_targets(name)
+        # Preflight every target before the first irreversible removal.
+        removed = []
+        unique = set(targets)
+        for target in sorted(unique, key=lambda path: len(path.parts)):
+            if any(parent in unique for parent in target.parents):
+                continue
+            shutil.rmtree(target)
+            removed.append(str(target.relative_to(root)))
+        for path in audio_targets:
+            path.unlink()
+        _clear_purged_batch_state(name)
+        # Empty recycle shells are not batch data; prune only the known roots.
+        for base in (root, WORKFLOWS, INBOX):
+            for directory in _RECYCLE_DIRS:
+                trash = base / directory
+                try:
+                    if trash.is_dir() and not trash.is_symlink() and not any(trash.iterdir()):
+                        trash.rmdir()
+                except OSError:
+                    pass
+        return {"ok": True, "name": name, "purged": True, "removed": removed}
 
 
 def parse_multipart(handler) -> tuple[dict, list[dict]]:
@@ -1417,6 +1687,7 @@ def _audio_reap_stale(kind: str, batch, data_dir: Path, boot) -> None:
                       detail="", error="切段任务异常中断（进程已退出、心跳超时），已自动重置，可重跑")
 
 
+@serialized
 def start_audio_job(kind: str, options: dict) -> dict:
     cfgmod, boot, segment_mod = _audio_modules()
     cfg = cfgmod.load()
@@ -1696,6 +1967,7 @@ def _run_batch_upload(name, actor, unreviewed_revision='', attempt_token=''):
         job["finished_at"] = time()
 
 
+@serialized
 def start_batch_upload(name, actor="本机操作员", *, allow_unreviewed=False, unreviewed_revision=''):
     folder = batch_dir(name)  # 批次不存在直接抛错
     if type(allow_unreviewed) is not bool:
@@ -2400,6 +2672,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, **start_rerun(parts[2], str(payload.get("mode") or ""))})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "archive":
                 return self.send_json(archive_batch(parts[2], payload.get("confirm_name")))
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "purge":
+                return self.send_json(purge_batch(parts[2], payload.get("confirm_name")))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "decisions":
                 folder = batch_dir(parts[2])
                 return self.send_json({"ok": True, "item": apply_decision(folder, payload.get("item", {}), payload.get("actor"))})

@@ -37,7 +37,7 @@ test('选项配图使用固定 A-D 网格位置和统一尺寸容器', () => {
   assert.match(client, /\.wf-opt-row\{display:grid;grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
   assert.match(client, /gridColumn: String\(\(optionIndex % 4\) \+ 1\)/);
   assert.match(client, /\.wf-opt-row\{[^}]*max-width:504px/);
-  assert.match(client, /\.wf-opt-frame\{[^}]*height:90px/);
+  assert.match(client, /\.wf-opt-frame\{[^}]*height:72px/);
   const optionLabel = new Function('return (' + client.match(/function optionLabel\(text\) \{[\s\S]*?\n      \}/)[0] + ')')();
   assert.equal(optionLabel('**A****.****'), 'A.');
   assert.equal(optionLabel('****\t****B****.****'), 'B.');
@@ -47,7 +47,7 @@ test('选项配图使用固定 A-D 网格位置和统一尺寸容器', () => {
 });
 
 test('题干图片居中并限制在响应式矩形内', () => {
-  assert.match(client, /\.wf-body-image-frame\{[^}]*width:min\(100%,560px\);aspect-ratio:4\/3;margin:12px auto/);
+  assert.match(client, /\.wf-body-image-frame\{[^}]*width:100%;max-width:200px;aspect-ratio:4\/3;margin:8px auto/);
   assert.match(client, /\.wf-body-image-frame \.wf-img\{[^}]*object-fit:contain/);
   assert.match(client, /className: 'wf-body-image-frame'/);
 });

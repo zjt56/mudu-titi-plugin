@@ -77,6 +77,57 @@ class SelfHealTest(unittest.TestCase):
         self.assertEqual(result["outcome"], "stale_running")
         self.assertEqual(mf.load(self.batch)["stages"]["extract"]["status"], mf.PENDING)
 
+    def test_record_only_budget_preserves_failure_and_rechecks_for_actual_repairs(self):
+        manifest = mf.load(self.batch)
+        mf.touch_stage(manifest, "review", mf.FAILED, notes="specific failed check")
+        mf.save(self.batch, manifest)
+        clock = [1000.0]
+        plans = [{"action": "record_only", "reason": "explanation %d" % n}
+                 for n in range(5)] + [{"action": "retry_stage_with_fresh_context", "reason": "new strategy"}]
+        with patch.object(self_heal, "_candidate", return_value=("review", "specific failed check")), \
+             patch.object(self_heal, "_retry_evidence", return_value={"inputs": "same", "code": "same"}), \
+             patch.object(self_heal, "_plan", side_effect=plans) as plan, \
+             patch.object(self_heal.time, "time", side_effect=lambda: clock[0]):
+            for n in range(6):
+                clock[0] += 10000
+                before = mf.load(self.batch)["stages"]["review"]
+                result = self_heal.recover(self.batch)
+                if n < 2 or n == 5:
+                    self.assertTrue(result["changed"], result)
+                    # Simulate the normal executor reproducing the same failure.
+                    state = mf.load(self.batch)
+                    mf.touch_stage(state, "review", mf.FAILED, notes="specific failed check")
+                    mf.save(self.batch, state)
+                else:
+                    self.assertFalse(result["changed"], result)
+                    self.assertEqual(result["status"], "retry_budget_exhausted")
+                    self.assertEqual(result["event"]["escalation"], "code_repair")
+                    self.assertGreater(result["next_retry_at"], clock[0])
+                    self.assertLessEqual(result["retry_after"], 3600)
+                    self.assertEqual(mf.load(self.batch)["stages"]["review"], before)
+                    # An immediate supervisor tick cannot call the model or rerun.
+                    self.assertEqual(self_heal.recover(self.batch)["status"], "cooldown")
+            self.assertEqual(plan.call_count, 6)
+        ledger = self_heal._load(self.batch)
+        self.assertEqual(list(ledger["attempts"].values()), [6])
+
+    def test_changed_input_or_code_opens_new_budget_during_cooldown(self):
+        original = self.batch / "source.txt"
+        original.write_text("first source", encoding="utf-8")
+        manifest = mf.load(self.batch)
+        manifest["inputs"] = mf.register_input(self.batch, "source", original)
+        mf.save(self.batch, manifest)
+        with patch.object(self_heal, "_candidate", return_value=("extract", "same failure")), \
+             patch("workflow.operations._code_fingerprint", side_effect=["v1", "v1", "v2"]), \
+             patch.object(self_heal, "_plan", return_value={"action": "record_only", "reason": "no safe edit"}):
+            results = [self_heal.recover(self.batch)]
+            original.write_text("changed source", encoding="utf-8")
+            results.append(self_heal.recover(self.batch))
+            results.append(self_heal.recover(self.batch))
+        self.assertEqual(len({result["signature"] for result in results}), 3)
+        self.assertEqual([result["event"]["attempt"] for result in results], [1, 1, 1])
+        self.assertTrue(all(result["status"] != "cooldown" for result in results))
+
     def test_human_gate_is_not_sent_to_model(self):
         manifest = mf.load(self.batch)
         for stage in contracts.STAGES:

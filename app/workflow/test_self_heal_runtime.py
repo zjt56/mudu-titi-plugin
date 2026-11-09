@@ -154,13 +154,14 @@ class SelfHealRuntimeTest(unittest.TestCase):
         inputs = mf.input_hashes(root, state, contracts.STAGE_BY_ID['extract'])
         self_heal._save(root, {'last_inputs': {'extract': inputs}, 'events': []})
         from contextlib import nullcontext
-        with patch.object(self_heal, 'recover', return_value={
-                'changed': False, 'stage': 'extract', 'status': 'cooldown'}), \
-                patch('workflow.agent_protocol._agent_lock', side_effect=lambda *a, **k: nullcontext()), \
-                patch.object(auto.rn, '_execute_command') as execute:
-            result = auto.advance(root, {}, stop_at='structure_gate')
-        execute.assert_not_called()
-        self.assertEqual(result['action'], 'cooldown')
+        for status in ('cooldown', 'retry_budget_exhausted'):
+            with self.subTest(status=status), patch.object(self_heal, 'recover', return_value={
+                    'changed': False, 'stage': 'extract', 'status': status}), \
+                    patch('workflow.agent_protocol._agent_lock', side_effect=lambda *a, **k: nullcontext()), \
+                    patch.object(auto.rn, '_execute_command') as execute:
+                result = auto.advance(root, {}, stop_at='structure_gate')
+            execute.assert_not_called()
+            self.assertEqual(result['action'], 'cooldown')
 
     def test_provider_cooldown_does_not_invoke_repair_model(self):
         root = self.root / 'cooldown'

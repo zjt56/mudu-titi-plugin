@@ -76,14 +76,42 @@ class ContentFragmentsTest(unittest.TestCase):
     def test_invalid_ranges_are_rejected_without_partial_expansion(self):
         for changes in ({'start_line': 0}, {'end_line': 99}, {'start_line': 3, 'end_line': 2},
                         {'start_line': True}, {'end_line': 2.0}, {'start_line': '2'},
-                        {'start_column': -1}, {'end_column': 100}, {'start_column': False},
-                        {'start_column': 12, 'end_column': 9}, {'end_column': 6}):
+                        {'start_column': -1}, {'end_column': -1}, {'start_column': False},
+                        {'start_column': 12, 'end_column': 9}, {'end_column': 6},
+                        {'start_column': 999}):
             with self.subTest(changes=changes):
                 payload = self.payload(summary=self.ref(1, **changes))
                 before = copy.deepcopy(payload)
                 with self.assertRaises(ValueError):
                     self.check(payload)
                 self.assertEqual(payload, before)
+
+    def test_display_width_column_overrun_is_clamped_for_explanation_labels(self):
+        self.source.write_text('31.C　【解析】考查交际用语。\n', encoding='utf-8')
+        ref = {'path': '01_source/附录.txt',
+               'sha256': hashlib.sha256(self.source.read_bytes()).hexdigest(),
+               'start_line': 1, 'end_line': 1, 'start_column': 5, 'end_column': 999}
+        rows = [{'explanation': {'source_ref': ref}, 'evidence': ['附录']}]
+        self.assertTrue(expand_references(rows, self.batch))
+        self.assertEqual(rows[0]['explanation'], '考查交际用语。')
+
+    def test_answer_prefix_and_explanation_label_are_stripped_without_columns(self):
+        self.source.write_text('31.C　【解析】考查交际用语。\n', encoding='utf-8')
+        ref = {'path': '01_source/附录.txt',
+               'sha256': hashlib.sha256(self.source.read_bytes()).hexdigest(),
+               'start_line': 1, 'end_line': 1}
+        rows = [{'explanation': {'source_ref': ref}, 'evidence': ['附录']}]
+        self.assertTrue(expand_references(rows, self.batch))
+        self.assertEqual(rows[0]['explanation'], '考查交际用语。')
+
+    def test_numbered_explanation_body_is_not_mistaken_for_answer_prefix(self):
+        for text in ('3.14 is the value.', '1. Choose the correct form.', '1.A reason for this choice.'):
+            with self.subTest(text=text):
+                self.source.write_text(text + '\n', encoding='utf-8')
+                ref = self.ref(1, start_column=0)
+                rows = [{'explanation': ref, 'evidence': ['附录']}]
+                expand_references(rows, self.batch)
+                self.assertEqual(rows[0]['explanation'], text)
 
     def test_reference_shape_is_strict(self):
         refs = [{'source_ref': {}}, {'source_ref': []}, {'text': '第一题解析。'},

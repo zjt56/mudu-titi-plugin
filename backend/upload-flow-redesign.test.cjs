@@ -101,7 +101,7 @@ test('收次要按钮：审核卡片把重新标签/重新审核/删除批次收
   // 三个动作仍在菜单里可点，且卡片外层只直接渲染「进入审核」一个按钮。
   assert.match(client, /\['重新标签', \(\) => doRerun\(b\.name, 'tag'\), false\]/);
   assert.match(client, /\['重新审核', \(\) => doRerun\(b\.name, 'review'\), false\]/);
-  assert.match(client, /\['删除批次', \(\) => doArchive\(b\.name\), true\]/);
+  assert.match(client, /\['彻底删除', \(\) => doArchive\(b\.name\), true\]/);
   // 点遮罩收起菜单、不触发进入审核。
   assert.match(client, /position: 'fixed', inset: 0, zIndex: 40/);
   // 卡片上不再平铺三个次要按钮（不再有独立的「重新标签」按钮节点）。

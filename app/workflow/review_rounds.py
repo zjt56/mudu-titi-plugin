@@ -21,7 +21,7 @@ from .local_agent import _agent_lock, _check_input_hashes, invoke, load_config
 # Bumped whenever the prompt builder or blind context changes, so stale
 # partition states and bindings are never reused silently.
 CONTEXT_VERSION = "blind-context-v11"
-PROMPT_VERSION = "review-prompt-v10"
+PROMPT_VERSION = "review-prompt-v11"
 
 
 ARTIFACT = "review_round"
@@ -126,6 +126,7 @@ def _round_prompt(round_id, targets, context):
                    "assessment={type:string,subtypes:[string],knowledge:[full paths],subquestions:[{number:string,knowledge:[full paths]}]}。"
                    "单题 subquestions=[]；整篇题组列出目标子题且其 knowledge=[]。一审覆盖单元全部小题；二审对整组题只做组级核对（整组抽取、不拆小题），对独立单题仅列抽中小题，不宣称同组其他小题已审核。"
                    "knowledge 路径必须逐字取自供给目录（references/knowledge-catalog.json），不得自造更深的子级：目录里 '语用/情景交际' 已是叶子时只能写它，不能写 '语用/情景交际/询问目的'；某维度没有合法叶子就不写该维度。"
+                   "assessment.knowledge 还必须遵守 references/type-knowledge-map.json 的题型维度：例如听力长对话理解只允许主题、设题角度/听力，不得写语篇体裁；路径不在目录或超出允许维度会让整轮校验失败。"
                    "整篇题型（阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话）只判定组级知识点，其子题 knowledge=[]。"
                    "无法判断标签时使用 verdict=uncertain、assessment=null 并说明具体原因及可核验证据，继续审其他目标；不得猜测。"
                    "【标签分层口径·必须遵守】以组题为准的单元在组级挂体裁/主题/内容标签，subquestions[].knowledge 允许为空数组；"
@@ -138,7 +139,7 @@ def _round_prompt(round_id, targets, context):
                       "TARGETS 里该目标 number=null，请整组核对、只给组级标签，subquestions 逐小题列出但 knowledge=[]，"
                       "check 省略 number，不拆成逐小题 check、不做小题二审；目标是独立单题时每条 check 必须带 number 字段，取值与 TARGETS 中该目标的 number 完全一致。"
                       if round_id == 'sample' else ""))
-    check_shape = ("{unit_id,number?,verdict:ok|error|uncertain,rationale,evidence:[{path,locator,quote}],assessment}"
+    check_shape = ("{unit_id,number?,verdict:ok|error|uncertain,rationale,evidence:[{path,locator,quote}],assessment:{type:string,subtypes:[string],knowledge:[string],subquestions:[{number:string,knowledge:[string]}],source_comparison:string}}"
                    if round_id == 'sample' else
                    "{unit_id,verdict:ok|error|uncertain,rationale,evidence:[{path,locator,quote}],assessment}")
     return (
@@ -148,7 +149,8 @@ def _round_prompt(round_id, targets, context):
         "Return JSON with exactly status (completed|needs_review), artifacts, notes:[], findings:[]. "
         "artifacts must contain only review_round:{checks:[...]}; findings must be []. "
         "checks exactly cover targets once, each " + check_shape + ". "
-        "Quote actual bound source text, with at least one 01_source/正文.txt reference per check. "
+        + ("二审的 assessment 必须包含 source_comparison:string，说明目标与原文、答案的对照。 " if round_id == 'sample' else "")
+        + "Quote actual bound source text, with at least one 01_source/正文.txt reference per check. "
         "Each quote MUST be one single contiguous substring copied verbatim from the bound file (one line or consecutive lines as they appear); never concatenate separate paragraphs, never join a lead-in with a later paragraph using an ellipsis or invented separators. Keep quotes short and exact. "
         "Give actual question-specific semantic rationale. Structural/nonempty/catalog checks alone cannot justify ok. "
         "Write every rationale and assessment explanation in SIMPLIFIED CHINESE (简体中文), concise and readable; do not use English template prefixes like 'What the question tests' or 'Answer-to-point relation'. " 

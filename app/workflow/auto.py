@@ -606,7 +606,7 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
         if healed.get("changed"):
             manifest = mf.load(batch_dir)
             print(f"  · {healed.get('stage')} AI自愈已执行动作：{healed.get('status', 'requeued')}，继续校验")
-        elif healed.get("stage") and healed.get("status") in {"cooldown", "busy", "waiting_external", "failed", "recorded"}:
+        elif healed.get("stage") and healed.get("status") in {"cooldown", "busy", "waiting_external", "failed", "recorded", "retry_budget_exhausted"}:
             # A wait recorded against older inputs must not outrank a real upstream
             # repair: if the failed stage is now stale, schedule it again instead
             # of stopping this round and showing a cooldown to the user.

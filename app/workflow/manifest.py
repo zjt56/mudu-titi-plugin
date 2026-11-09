@@ -763,9 +763,21 @@ def dependency_satisfied(manifest: dict, stage_id: str, *, allow_unqualified: bo
             and not record.get("release_ready")):
         return True
     # 上游都已完成才能消费（未完成/重建中→输入未稳定）。
-    for dep in contracts.upstream_of(stage_id):
+    # Only the executed review gate may retain quality differences while local
+    # format work continues. Content producers must still deliver qualified work.
+    def _upstream_ok(dep):
         dep_rec = manifest.get("stages", {}).get(dep, {})
-        if dep_rec.get("status") not in TERMINAL_OK or dep_rec.get("rebuild_required"):
+        if dep_rec.get("rebuild_required"):
+            return False
+        if dep_rec.get("status") in TERMINAL_OK:
+            return True
+        return bool(allow_unqualified and dep == "review_gate"
+                    and dep_rec.get("status") == execution_state.NEEDS_REVIEW
+                    and dep_rec.get("execution_completed") is True
+                    and dep_rec.get("continue_unqualified") is True
+                    and not dep_rec.get("release_ready"))
+    for dep in contracts.upstream_of(stage_id):
+        if not _upstream_ok(dep):
             return False
     # 用消费者自己的校验器确认上游交付「题号/内容对应正确、格式合规」才放行下游——
     # 这是保证“第 1 题答案填到第 1 题、组装格式正确”的正确性关卡，不是可省的哈希校验。

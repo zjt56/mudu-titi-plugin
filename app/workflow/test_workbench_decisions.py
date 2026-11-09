@@ -114,7 +114,10 @@ class UploadTest(unittest.TestCase):
     def _docx(self, name: str) -> dict:
         path = self.root / name
         with zipfile.ZipFile(path, "w") as zf:
-            zf.writestr("word/document.xml", "<w:document/>")
+            # Include the filename in the payload so different fixture docs are
+            # not mistaken for the same source by upload deduplication.
+            zf.writestr("word/document.xml",
+                        f"<w:document><w:body><w:p><w:r><w:t>{name}</w:t></w:r></w:p></w:body></w:document>")
         return {"field": "files", "filename": name, "data": path.read_bytes()}
 
     def test_upload_creates_batch_and_starts_flow(self):
@@ -131,6 +134,68 @@ class UploadTest(unittest.TestCase):
         # 试卷名不填时用地区+年份兜底，重名自动加后缀
         again = server.handle_upload({"title": "2026年安徽省中考英语"}, [self._docx("A.docx")])
         self.assertNotEqual(again["name"], result["name"])
+
+    def test_identical_upload_reuses_existing_batch_instead_of_creating_copy(self):
+        document = self._docx("same-paper.docx")
+        first = server.handle_upload({"title": "2016年安徽省中考英语"}, [document])
+        second = server.handle_upload({"title": "2016年安徽省中考英语"}, [document])
+        self.assertEqual(second["name"], first["name"])
+        self.assertTrue(second.get("duplicate"))
+        self.assertTrue(second.get("reused"))
+        self.assertEqual(self.started, [first["name"]])
+        self.assertEqual(len(list(server.WORKFLOWS.iterdir())), 1)
+
+    def test_dedupe_requires_present_unchanged_local_inputs(self):
+        document = self._docx("same-paper.docx")
+        first = server.handle_upload({}, [document])
+        source = server.WORKFLOWS / first["name"] / "attachments/source.docx"
+        source.write_bytes(b"changed since original upload")
+        second = server.handle_upload({}, [document])
+        self.assertNotEqual(first["name"], second["name"])
+        (server.WORKFLOWS / second["name"] / "attachments/source.docx").unlink()
+        third = server.handle_upload({}, [document])
+        self.assertNotIn(third["name"], (first["name"], second["name"]))
+        self.assertEqual(len(self.started), 3)
+
+    def test_dedupe_skips_malformed_and_symlinked_ledgers_and_inputs(self):
+        document = self._docx("same-paper.docx")
+        for index, state in enumerate(([], {"inputs": []}, {"inputs": {"source": "bad"}},
+                                      {"inputs": {"source": {"sha256": server._upload_part_sha(document)}}})):
+            server.save_json(server.WORKFLOWS / ("broken-" + str(index)) / "workflow/manifest.json", state)
+        first = server.handle_upload({}, [document])
+        batch = server.WORKFLOWS / first["name"]
+        local = batch / "attachments/source.docx"
+        outside = self.root / "external.docx"
+        outside.write_bytes(document["data"])
+        local.unlink()
+        local.symlink_to(outside)
+        second = server.handle_upload({}, [document])
+        self.assertNotEqual(first["name"], second["name"])
+        self.assertEqual(outside.read_bytes(), document["data"])
+        other = server.WORKFLOWS / second["name"]
+        workflow = other / "workflow"
+        workflow.rename(other / "saved-workflow")
+        workflow.symlink_to(other / "saved-workflow", target_is_directory=True)
+        third = server.handle_upload({}, [document])
+        self.assertNotIn(third["name"], (first["name"], second["name"]))
+
+    def test_dedupe_compares_all_attachments_and_audio_multiplicity(self):
+        source = self._docx("paper.docx")
+        answer = self._docx("answer.docx")
+        pdf = {"filename": "support.pdf", "data": b"%PDF companion"}
+        audio = {"filename": "first.mp3", "data": b"audio one"}
+        extra = {"filename": "second.wav", "data": b"audio two"}
+        parts = [source, answer, pdf, audio, extra]
+        first = server.handle_upload({}, parts)
+        repeated = server.handle_upload({}, parts)
+        self.assertEqual(first["name"], repeated["name"])
+        for changed in (parts[:-1], parts + [dict(extra)],
+                        [source, answer, dict(pdf, data=b"different"), audio, extra],
+                        [source, dict(answer, data=b"different"), pdf, audio, extra]):
+            with self.subTest(parts=changed):
+                result = server.handle_upload({}, changed)
+                self.assertNotEqual(first["name"], result["name"])
+        self.assertEqual(len(self.started), 5)
 
     def test_upload_keeps_paper_data_and_metadata_isolated_per_batch(self):
         first = server.handle_upload(

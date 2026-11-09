@@ -59,6 +59,19 @@ class DiagnoseTest(unittest.TestCase):
         self.assertEqual(item["failure_class"], "stale_input")
         self.assertEqual(item["next_action"], "重新导出并重跑当前阶段")
 
+    def test_review_failure_detail_is_read_from_structured_failures(self):
+        manifest = self._load_manifest()
+        manifest["stages"]["review"].update(status=mf.NEEDS_REVIEW, notes="")
+        mf.save(self.batch, manifest)
+        _write(self.batch, "workflow/review-failures/round-1.json", {
+            "round_id": "labels", "error": "Evidence quote absent from bound input"})
+        log = self.batch / "workflow/logs/review.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("$ review\n[stderr]\n", encoding="utf-8")
+        item = diagnose.explain(self.batch, "review")
+        self.assertIn("Evidence quote absent from bound input", item["detail"])
+        self.assertNotEqual(item["detail"], "[stderr]")
+
     def test_quality_gate_reports_quality_findings_class(self):
         manifest = self._load_manifest()
         manifest["stages"]["review_gate"].update(status=mf.BLOCKED, notes="13 条未解决")

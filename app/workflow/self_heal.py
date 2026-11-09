@@ -294,7 +294,7 @@ def _context(batch: Path, stage_id: str, detail: str) -> str:
         "diagnosis": item, "detail": detail, "log_tail": tail, "issues": _issues(batch),
         "affected_unit_ids": targets, "source_excerpts": excerpts,
         "input_inventory": inventory,
-        "recent_attempts": [{key: event.get(key) for key in ("stage", "plan", "effective_action", "target_stage", "outcome", "error", "verified")}
+        "recent_attempts": [{key: event.get(key) for key in ("stage", "plan", "effective_action", "target_stage", "outcome", "error", "verified", "escalation")}
                             for event in ledger.get("events", [])[-4:]],
         "allowed_actions": sorted(ACTIONS), "verified_repair_options": repair_options,
         "action_meanings": {
@@ -552,7 +552,7 @@ def _escalate_upstream(batch, manifest, stage_id, attempt, reason, *, force=Fals
     confirmed = batch / "01_source/structure.confirmed.json"
     # 用"这一阶段 + 这条具体错误 + 结构证据"作为循环判据：同样的错误已经回退过
     # 一次就绝不再回退，避免上游/下游来回踢皮球；换了证据或换了错误即可再次回退。
-    signature = stage_id + "|" + hashlib.sha256(str(reason).encode("utf-8")).hexdigest()[:16] \
+    signature = stage_id + "|" + hashlib.sha256(str(evidence if evidence is not None else reason).encode("utf-8")).hexdigest()[:16] \
         + "|" + (mf.sha256_file(confirmed) if confirmed.is_file() else "missing")
     if escalated.get(stage_id) == signature:
         return None
@@ -590,6 +590,15 @@ def _defer_and_continue(batch, manifest, stage_id, reason):
 
 def _apply(batch, manifest, stage_id, detail, plan, attempt, snapshot):
     action = plan["action"]
+    if action == "record_only" and attempt >= MAX_ATTEMPTS_PER_STAGE:
+        # Refuse the exhausted strategy without overwriting the original failure
+        # (and hence changing its diagnostic signature). recover schedules a
+        # bounded cooldown and a fresh diagnosis; a real repair can still run.
+        return {"changed": False, "status": "retry_budget_exhausted", "verified": False,
+                "outcome": "retry_budget_exhausted", "target_stage": stage_id,
+                "escalation": "code_repair",
+                "reason": ("同一输入与代码下记录后重跑已达上限；保留原失败检查，"
+                           "冷却后自动重新诊断并选择实际修复或隔离代码修复：" + str(detail))[:1200]}
     if stage_id == "types" and action in (
             "retry_stage", "retry_stage_with_fresh_context", "refresh_inputs", "record_only", "upstream_rederive"):
         # types is now a read-only checkpoint. Rechecking cannot generate missing
@@ -668,7 +677,7 @@ def _apply(batch, manifest, stage_id, detail, plan, attempt, snapshot):
         # missing input) do we defer and let the rest advance.
         escalate = _escalate_upstream(batch, manifest, stage_id, attempt,
                                       str(detail) + "\n" + str(plan.get("reason", "")),
-                                      force=True)
+                                      force=True, evidence=str(detail))
         if escalate is not None:
             return escalate
         from .agent_tasks import ARTIFACTS
@@ -760,6 +769,18 @@ def _delay(attempt, *, external=False):
     return min(3600.0, (60.0 if external else 15.0) * (2 ** min(window, 8)))
 
 
+def _retry_evidence(batch, manifest, stage_id):
+    """Stable retry scope: actual inputs/code, never feedback or stage clocks."""
+    from . import operations
+    return {"inputs": mf.input_hashes(batch, manifest, contracts.STAGE_BY_ID[stage_id]),
+            "originals": {key: mf.sha256_file(entry["path"]) or "missing"
+                          for key, entry in manifest.get("inputs", {}).items()
+                          if isinstance(entry, dict) and entry.get("path")},
+            "code": operations._code_fingerprint(),
+            "control": {name: mf.sha256_file(Path(__file__).with_name(name))
+                        for name in ("self_heal.py", "auto.py", "manifest.py")}}
+
+
 def recover(batch_dir, *, config: dict | None = None) -> dict:
     """Detect -> model judgment -> checked local action; actual retry runs later."""
     batch = Path(batch_dir).resolve()
@@ -787,7 +808,10 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
                 "outcome": "stale_running", "target_stage": stage_id, "verified": False,
                 "reason": "运行记录无活跃执行者，已重排该阶段"}
     ledger, now = _load(batch), time.time()
-    signature = hashlib.sha256((stage_id + "\n" + detail).encode("utf-8")).hexdigest()[:16]
+    # New evidence/code opens a fresh strategy budget and bypasses old cooldowns.
+    # A requeue's timestamps and model explanation cannot reset this identity.
+    evidence = json.dumps(_retry_evidence(batch, manifest, stage_id), sort_keys=True)
+    signature = hashlib.sha256((stage_id + "\n" + detail + "\n" + evidence).encode("utf-8")).hexdigest()[:16]
     attempt_key = stage_id + ":" + signature
     if ledger.get("active_signature") != attempt_key:
         ledger["active_signature"], ledger["next_retry_at"] = attempt_key, 0
@@ -884,7 +908,7 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
     # delay before the next judgment; changed inputs/errors open a new window.
     if not changed and (count + 1) % MAX_ATTEMPTS_PER_STAGE == 0:
         ledger["next_retry_at"] = max(ledger["next_retry_at"], time.time() + 120 * (2 ** min(count // MAX_ATTEMPTS_PER_STAGE, 5)))
-        event["escalation"] = "同错快重试窗口结束，冷却后重新诊断并换策略"
+        event.setdefault("escalation", "同错快重试窗口结束，冷却后重新诊断并换策略")
     event["finished_at"] = mf.now_iso()
     ledger["last_status"] = outcome["status"]
     ledger["last_stage"] = stage_id

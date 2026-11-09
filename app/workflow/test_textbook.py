@@ -136,10 +136,13 @@ class KnowledgeTextbookWiringTest(unittest.TestCase):
         self.assertIn('配套解析：第1题专属材料', task['prompt'])
         self.assertIn('01_source/materials/attachment_001.txt', task['input_hashes'])
 
-    def test_types_task_receives_batch_pdf_ocr_evidence(self):
+    def test_pdf_layout_evidence_is_bound_only_for_layout_consumers(self):
         self.write('01_source/pdf-ocr.json', {'sources': [{'input': 'attachment_001',
                    'pages': [{'page': 1, 'text': 'PDF 题组版面证据'}]}]})
         task = tasks.build_task(self.batch, 'types')
+        self.assertNotIn('PDF 题组版面证据', task['prompt'])
+        self.assertNotIn('01_source/pdf-ocr.json', task['input_hashes'])
+        task = tasks.build_task(self.batch, 'assemble')
         self.assertIn('PDF 题组版面证据', task['prompt'])
         self.assertIn('01_source/pdf-ocr.json', task['input_hashes'])
 

@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-2016-blocker-root-fixes.md](2026-11-09-2016-blocker-root-fixes.md) | 修复 2016 卷 explanations/review 反复卡点：证据路径重映射、source_ref 容错、sample 提示词、自愈重试预算、依赖放行、重复上传去重与彻底删除批次 |
 | 2026-11-09 | [2026-11-09-windows-shared-lock-and-review-freshness.md](2026-11-09-windows-shared-lock-and-review-freshness.md) | Windows 审核分片真正共享锁并行、审核并发 5 路；审核模型 stages.review/roles.review 生效；已完成审核在绑定输入变化时立即失效 |
 | 2026-11-09 | [2026-11-09-router-provider-guard.md](2026-11-09-router-provider-guard.md) | 模型列表只列路由 profile 可服务的 provider；wf-router 调用前校验 provider，避免 NO_ADAPTER 被当成阶段失败 |
 | 2026-11-09 | [2026-11-09-device-harness-model.md](2026-11-09-device-harness-model.md) | 仓库不再固定模型：default 为空时各设备跟随自己 Harness 的 agent-default-model |

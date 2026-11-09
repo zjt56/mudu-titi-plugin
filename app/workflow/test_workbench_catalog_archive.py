@@ -86,7 +86,12 @@ class ArchiveTest(unittest.TestCase):
         self.patches = [patch.object(server, "ROOT", self.root),
                         patch.object(server, "WORKFLOWS", self.root / "workflows"),
                         patch.object(server, "INBOX", self.root / "inbox"),
-                        patch.object(server, "_advance_state", {})]
+                        patch.object(server, "_advance_state", {}),
+                        patch.object(server, "_advance_queue", []),
+                        patch.object(server, "_upload_jobs", {}),
+                        patch.object(server, "_OVERVIEW_CACHE", {}),
+                        patch("audio.config.data_dir", return_value=self.root / "audio"),
+                        patch("workflow.supervisor.tempfile.gettempdir", return_value=str(self.root))]
         for p in self.patches:
             p.start()
         server.WORKFLOWS.mkdir()
@@ -120,6 +125,184 @@ class ArchiveTest(unittest.TestCase):
         self.assertTrue((server.WORKFLOWS / self.name / "attachments/source.pdf").exists())
         self.assertTrue((server.WORKFLOWS / self.name / "workflow" / "manifest.json").exists())
         self.assertTrue((archive / "inbox" / "source.docx").exists())
+
+    def test_purge_removes_live_and_recycle_traces_permanently(self):
+        archived = server.archive_batch(self.name, self.name)
+        archive_dir = self.root / archived["archive"]
+        # Recreate a live batch with the same identity, as a re-upload would.
+        self.folder.mkdir()
+        (self.folder / "workflow").mkdir()
+        server.save_json(self.folder / "workflow" / "manifest.json", {"status": "pending", "stages": {}})
+        (self.folder / "payload.txt").write_text("live data", encoding="utf-8")
+        self.inbox.mkdir()
+        (self.inbox / "source.docx").write_bytes(b"original source")
+        result = invoke("POST", "/api/batches/" + quote(self.name) + "/purge", {"confirm_name": self.name})
+        self.assertTrue(result["purged"])
+        self.assertFalse(self.folder.exists())
+        self.assertFalse(self.inbox.exists())
+        self.assertFalse(archive_dir.exists())
+        self.assertFalse((self.root / ".workbench-trash").exists())
+        self.assertEqual(server.list_batches(), [])
+
+    def test_purge_clears_queued_jobs_upload_results_and_content_caches(self):
+        from workflow import review, agent_tasks
+        server._advance_state[self.name] = {"queued": True}
+        server._advance_queue[:] = [self.name, "keep", {"name": self.name, "operations_expectation": {}}, {"name": "keep-2"}]
+        server._upload_jobs[self.name] = {"running": False, "output": "private result"}
+        server._upload_jobs["keep"] = {"running": False}
+        server._OVERVIEW_CACHE[(str(self.folder), "fingerprint")] = {"rows": ["private"]}
+        caches = [(server.wf_manifest, "_FILE_DIGEST_CACHE"), (review, "_LOAD_CACHE"),
+                  (review, "_DIGEST_CACHE"), (review, "_PLAN_CACHE"),
+                  (review, "_IMMUTABLE_DIGEST_CACHE"), (review, "_EVALUATE_CACHE")]
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            values = [stack.enter_context(patch.object(module, attr, {"opaque": "private"}))
+                      for module, attr in caches]
+            clear = stack.enter_context(patch.object(agent_tasks._TASK_TEMPLATE_CACHE, "clear"))
+            audio_lock = server._audio_job["lock"]
+            stack.enter_context(patch.dict(server._audio_job,
+                {"running": False, "batch": self.name, "result": "private result", "error": "private error"}))
+            server.purge_batch(self.name, self.name)
+            self.assertEqual(server._audio_job, {"running": False, "kind": "", "batch": "", "lock": audio_lock})
+            self.assertTrue(all(not cache for cache in values))
+            clear.assert_called_once()
+        self.assertEqual(server._advance_queue, ["keep", {"name": "keep-2"}])
+        self.assertNotIn(self.name, server._advance_state)
+        self.assertNotIn(self.name, server._upload_jobs)
+        self.assertIn("keep", server._upload_jobs)
+        self.assertEqual(server._OVERVIEW_CACHE, {})
+        self.assertIsNone(server._batches_snapshot)
+
+    def test_purge_supports_archive_only_and_legacy_nested_layouts(self):
+        archived = server.archive_batch(self.name, self.name)
+        targets = [self.root / archived["archive"]]
+        for base, directory, layout in ((self.root, "archives", self.name),
+                                       (server.WORKFLOWS, ".trash", "snapshot/workflows/" + self.name),
+                                       (server.INBOX, "archive", "snapshot/inbox/" + self.name)):
+            target = base / directory / layout
+            target.mkdir(parents=True)
+            (target / "data.txt").write_text("private")
+            targets.append(target)
+        keep = self.root / "archives" / (self.name + "-2")
+        keep.mkdir()
+        (keep / "keep.txt").write_text("keep")
+        result = server.purge_batch(self.name, self.name)
+        self.assertTrue(result["purged"])
+        self.assertTrue(all(not target.exists() for target in targets))
+        self.assertEqual((keep / "keep.txt").read_text(), "keep")
+
+    def test_purge_does_not_mistake_archive_layout_container_for_batch(self):
+        for container in ("workflows", "inbox"):
+            with self.subTest(container=container):
+                name = container
+                own = server.WORKFLOWS / name
+                own.mkdir()
+                nested = self.root / "archives" / container / name
+                nested.mkdir(parents=True)
+                other = nested.parent / "other-batch"
+                other.mkdir()
+                (other / "keep.txt").write_text("keep")
+                server.purge_batch(name, name)
+                self.assertFalse(own.exists())
+                self.assertFalse(nested.exists())
+                self.assertEqual((other / "keep.txt").read_text(), "keep")
+
+    def test_purge_stopped_audio_status_and_global_mirror_only_for_this_batch(self):
+        from audio import bootstrap
+        audio_root = self.root / "audio"
+        own = bootstrap.status_path(audio_root, self.name)
+        other = bootstrap.status_path(audio_root, "other")
+        global_status = bootstrap.status_path(audio_root)
+        for path, name in ((own, self.name), (own.with_suffix(".tmp"), self.name),
+                           (other, "other"), (global_status, self.name),
+                           (global_status.with_suffix(".tmp"), "other")):
+            server.save_json(path, {"batch": name, "running": False})
+        server.purge_batch(self.name, self.name)
+        self.assertFalse(own.exists())
+        self.assertFalse(own.with_suffix(".tmp").exists())
+        self.assertFalse(global_status.exists())
+        self.assertTrue(other.is_file())
+        self.assertTrue(global_status.with_suffix(".tmp").is_file())
+
+    def test_purge_rejects_active_or_symlinked_audio_status_before_deleting_batch(self):
+        from audio import bootstrap
+        own = bootstrap.status_path(self.root / "audio", self.name)
+        server.save_json(own, {"batch": self.name, "running": True})
+        with self.assertRaisesRegex(ValueError, "听力任务正在运行"):
+            server.purge_batch(self.name, self.name)
+        own.unlink()
+        outside = self.root / "outside.json"
+        server.save_json(outside, {"batch": self.name, "running": False})
+        own.symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "软链接"):
+            server.purge_batch(self.name, self.name)
+        self.assertTrue(self.folder.exists())
+        self.assertTrue(outside.exists())
+
+    def test_purge_does_not_delete_live_data_for_active_jobs_or_external_locks(self):
+        from workflow import supervisor
+        for registry in (server._advance_state, server._upload_jobs):
+            with self.subTest(registry=registry):
+                registry[self.name] = {"running": True}
+                with self.assertRaisesRegex(ValueError, "正在运行"):
+                    server.purge_batch(self.name, self.name)
+                registry.clear()
+        with patch.dict(server._audio_job, {"running": True, "batch": self.name}):
+            with self.assertRaisesRegex(ValueError, "正在运行"):
+                server.purge_batch(self.name, self.name)
+        with supervisor._try_file_lock(supervisor._auto_lock_path(self.folder)) as acquired:
+            self.assertTrue(acquired)
+            with self.assertRaisesRegex(ValueError, "正在运行"):
+                server.purge_batch(self.name, self.name)
+        with patch("workflow.operations.lease_active", return_value=True):
+            with self.assertRaisesRegex(ValueError, "运维"):
+                server.purge_batch(self.name, self.name)
+        with supervisor._try_file_lock(self.folder / "workflow/.run.lock") as acquired:
+            self.assertTrue(acquired)
+            with self.assertRaisesRegex(ValueError, "正在运行"):
+                server.purge_batch(self.name, self.name)
+        self.assertTrue(self.folder.is_dir())
+        self.assertTrue(self.inbox.is_dir())
+
+    def test_purge_preflights_all_archives_before_removing_live_data(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        marker = outside / "keep.txt"
+        marker.write_text("keep")
+        archive = self.root / "archives" / self.name
+        archive.mkdir(parents=True)
+        (archive / "nested").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "软链接"):
+            server.purge_batch(self.name, self.name)
+        self.assertTrue(self.folder.is_dir())
+        self.assertTrue(self.inbox.is_dir())
+        self.assertEqual(marker.read_text(), "keep")
+
+    def test_purge_rejects_symlink_recycle_root_and_named_archive(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        for link in (self.root / "archives", self.root / ".trash" / self.name):
+            link.parent.mkdir(exist_ok=True)
+            link.symlink_to(outside, target_is_directory=True)
+            try:
+                with self.assertRaisesRegex(ValueError, "软链接"):
+                    server.purge_batch(self.name, self.name)
+                self.assertTrue(self.folder.exists())
+            finally:
+                link.unlink()
+
+    def test_purge_accepts_stopped_batch_with_malformed_stage_ledger(self):
+        server.save_json(self.folder / "workflow/manifest.json", {"status": "pending", "stages": ["invalid"]})
+        self.assertTrue(server.purge_batch(self.name, self.name)["purged"])
+        self.assertFalse(self.folder.exists())
+        self.assertFalse(self.inbox.exists())
+
+    def test_purge_requires_exact_confirmation_and_safe_identity(self):
+        for name, confirmation in ((self.name, "wrong"), ("../escape", "../escape"),
+                                   ("..", ".."), (".trash", ".trash")):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                server.purge_batch(name, confirmation)
+        self.assertTrue(self.folder.exists())
 
     def test_invalid_knowledge_api_rejects_and_does_not_write(self):
         with self.assertRaisesRegex(ValueError, "目录叶子"):
@@ -232,7 +415,7 @@ class ArchiveTest(unittest.TestCase):
                 release.set()
                 # Wait deterministically for the worker's registry update before fixture cleanup.
                 for thread in threading.enumerate():
-                    if thread.name == f"workbench-advance-{self.name}":
+                    if thread.name in (f"workbench-advance-{self.name}", "workbench-advance-worker"):
                         thread.join(2)
         self.assertIs(server.auto_flow._advance_locked, original_advance)
         self.assertTrue(self.folder.exists())
@@ -254,7 +437,8 @@ class ArchivePluginLayoutTest(unittest.TestCase):
         self.patches = [patch.object(server, "ROOT", self.code_root),
                         patch.object(server, "WORKFLOWS", self.data_root / "workflows"),
                         patch.object(server, "INBOX", self.data_root / "inbox"),
-                        patch.object(server, "_advance_state", {})]
+                        patch.object(server, "_advance_state", {}),
+                        patch("workflow.supervisor.tempfile.gettempdir", return_value=str(self.data_root))]
         for p in self.patches:
             p.start()
         server.WORKFLOWS.mkdir()

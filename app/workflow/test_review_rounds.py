@@ -155,6 +155,31 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(record['checks'][0]['evidence'][1]['path'],
                          'rules:references/knowledge-catalog.json')
 
+    def test_extra_evidence_with_wrong_path_is_remapped_to_bound_source(self):
+        self.write('01_source/附录.txt', '1~5 CACBA\n')
+        self.plan = review.prepare_round_plan(self.batch)
+        record = {'round_id': 'labels', 'input_binding': self.plan['input_binding'],
+                  'execution_id': 'fixture-separate-labels', 'checks': self.checks('labels')}
+        check = record['checks'][0]
+        check['evidence'].append({'path': '01_source/正文.txt', 'locator': '附录答案',
+                                  'quote': '1~5 CACBA'})
+        self.assertEqual(review._round_checks(record, 'labels', self.plan, self.batch), [])
+        self.assertEqual(check['evidence'][-1]['path'], '01_source/附录.txt')
+
+    def test_sample_check_without_source_comparison_is_rejected(self):
+        record = {'round_id': 'sample', 'input_binding': self.plan['input_binding'],
+                  'execution_id': 'fixture-separate-sample', 'checks': self.checks('sample')}
+        for check in record['checks']:
+            if isinstance(check.get('assessment'), dict):
+                check['assessment'].pop('source_comparison', None)
+        with self.assertRaisesRegex(ValueError, 'source comparison'):
+            review._round_checks(record, 'sample', self.plan, self.batch)
+
+    def test_sample_prompt_declares_source_comparison(self):
+        prompt = review_rounds._round_prompt('sample', [], '{}')
+        self.assertIn('source_comparison:string', prompt)
+        self.assertIn('二审的 assessment 必须包含', prompt)
+
     def test_catalog_filter_retains_metadata_and_unknown_type_falls_back(self):
         from workbench import taxonomy
         catalog = json.loads(taxonomy.KNOWLEDGE_PATH.read_text())

@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from workflow import contracts, manifest as mf
 
@@ -130,6 +131,43 @@ class DeliveryChecklistTest(unittest.TestCase):
         source.write_text("changed", encoding="utf-8")
         # 新规则：内容变化不再自动使已完成阶段失效（用户后续验证），is_stale 只判完成+产物在。
         self.assertFalse(mf.is_stale(self.batch, self.manifest, stage)[0])
+
+    def test_unqualified_review_gate_allows_downstream_when_requested(self):
+        for dep in contracts.upstream_of("format_gate"):
+            if dep != "review_gate":
+                mf.touch_stage(self.manifest, dep, mf.COMPLETED)
+        report = self.batch / "07_review/upload-format.json"
+        report.parent.mkdir(parents=True)
+        report.write_text('{"passed": true}', encoding="utf-8")
+        mf.touch_stage(self.manifest, "format_gate", mf.COMPLETED,
+                       output_hashes=mf.output_hashes(self.batch, contracts.STAGE_BY_ID["format_gate"]))
+        mf.touch_stage(self.manifest, "review_gate", mf.NEEDS_REVIEW,
+                       execution_completed=True, continue_unqualified=True,
+                       quality_status="pending", release_ready=False)
+        with patch("workflow.handoff.inspect_stage", return_value={"passed": True}):
+            self.assertFalse(mf.dependency_satisfied(self.manifest, "format_gate"))
+            self.assertTrue(mf.dependency_satisfied(self.manifest, "format_gate", allow_unqualified=True))
+
+    def test_unqualified_content_ancestor_never_satisfies_format_delivery(self):
+        for dep in contracts.upstream_of("format_gate"):
+            mf.touch_stage(self.manifest, dep, mf.COMPLETED)
+        report = self.batch / "07_review/upload-format.json"
+        report.parent.mkdir(parents=True)
+        report.write_text('{"passed": true}', encoding="utf-8")
+        mf.touch_stage(self.manifest, "format_gate", mf.COMPLETED,
+                       output_hashes=mf.output_hashes(self.batch, contracts.STAGE_BY_ID["format_gate"]))
+        with patch("workflow.handoff.inspect_stage", return_value={"passed": True}) as inspect:
+            for dep in contracts.upstream_of("format_gate"):
+                if dep == "review_gate":
+                    continue
+                with self.subTest(ancestor=dep):
+                    mf.touch_stage(self.manifest, dep, mf.NEEDS_REVIEW,
+                                   execution_completed=True, continue_unqualified=True,
+                                   release_ready=False)
+                    self.assertFalse(mf.dependency_satisfied(
+                        self.manifest, "format_gate", allow_unqualified=True))
+                    mf.touch_stage(self.manifest, dep, mf.COMPLETED)
+            inspect.assert_not_called()
 
     def test_delivery_records_consumers(self):
         target = self.batch / "03_types/types.json"

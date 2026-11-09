@@ -1,5 +1,12 @@
 # RULES — 规则与强调台账
 
+## 2026-11-09 删除批次必须彻底删除（用户明确）
+
+- 原话要点：如果删除该批次的事件后，要彻底的删除，不要在本地留有类似的痕迹。
+- 规则：用户明确删除某批次时，必须删除 `workflows/<批次>`、`inbox/<批次>`、同批次 `.workbench-trash`/`.trash`/`archives` 归档和内存调度状态；不得用“可恢复归档”冒充删除，不得保留回执、日志、缓存副本。
+- 边界：只由用户显式删除触发；自动流程仍不得自行删除用户试卷；普通 `archive` API 的可恢复行为保留给旧接口，但工作台“删除批次”按钮改走 `purge`。
+- 落地：`app/workbench/server.py::purge_batch`、`lib/client.js`；根 `AGENTS.md` 硬规则21。
+
 ## 2026-11-09 模型列表/路由只能出现真正可调用的 provider（NO_ADAPTER 卡点修复）
 
 - 触发：批次【木牍教育】18年安徽中考英语 前置组装失败，stderr 实为 `dsh: NO_ADAPTER: no adapter registered for provider "magpie"`，界面却显示「Agent subprocess failed…重跑一次通常即过」。

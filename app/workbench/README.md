@@ -27,6 +27,7 @@ python3.12 -m workbench.server --host 127.0.0.1 --port 8791
 | POST | `/api/batches/{batch}/advance` | 触发流程推进 |
 | POST | `/api/batches/{batch}/decisions` | 人工裁决一条意见（`{item:{finding_id,status,note}}`） |
 | POST | `/api/batches/{batch}/archive` | 归档批次（`{confirm_name}`，可恢复） |
+| POST | `/api/batches/{batch}/purge` | **彻底删除批次**（`{confirm_name}`，永久删除批次目录、收件箱副本与同批次回收归档，无法恢复） |
 | GET | `/api/batches/{batch}/media` | 图片体检结果 |
 | POST | `/api/batches/{batch}/media/exclusions` | 标记非题目图 |
 | GET | `/api/batches/{batch}/media/{file}` / `audio/{file}` | 二进制媒体（支持 `?format=data-url`） |
@@ -53,5 +54,5 @@ python3.12 -m workbench.server --host 127.0.0.1 --port 8791
 ## 写入边界
 
 - 只写批次目录内的 `candidates/`、`07_review/`、`workflow/` 与最外层 `inbox/`；覆盖前留 `.bak`。
-- 不向远端上传或发布；本地批次仅在明确确认后移到工作区回收目录，永久删除没有接口。
-- 归档用可重入锁，推进任务注册后至后台完成前拒绝归档；外部独立进程不共享此锁。
+- 不向远端上传或发布；工作台删除须确认完整批次名，调用 `purge` 永久清除批次、收件副本、同批次归档和本地缓存/调度记录。旧 `archive` 接口仍只作可恢复归档。
+- 删除与归档均受写锁保护；推进、上传或运维任务仍运行时拒绝删除，避免后台写入重新创建已删批次。

@@ -12,6 +12,10 @@ import re
 FORMAT = 'source-fragment/v1'
 _REQUIRED = frozenset(('path', 'sha256', 'start_line', 'end_line'))
 _OPTIONAL = frozenset(('start_column', 'end_column'))
+_EXPL_LABEL = re.compile(r'^\s*【\s*(?:解析|答案|分析|详解)\s*】\s*[:：]?\s*')
+_SUMMARY_LABEL = re.compile(r'^\s*【\s*文章大意\s*】\s*[:：]?\s*')
+_ANSWER_PREFIX = re.compile(
+    r'^\s*\d{1,3}\s*[.．、]\s*[A-H]?\s*(?=【\s*(?:解析|分析|详解)\s*】)')
 
 
 def _allowed_path(relative):
@@ -76,7 +80,7 @@ def expand_references(rows, batch):
     rows = list(rows)
     cache, replacements = {}, []
 
-    def resolve(value):
+    def resolve(value, field):
         if set(value) != {'source_ref'} or not isinstance(value['source_ref'], dict):
             raise ValueError('Content reference must be an object containing only source_ref')
         ref = value['source_ref']
@@ -100,15 +104,32 @@ def expand_references(rows, batch):
         first = lines[start - 1].rstrip('\r\n')
         last = lines[end - 1].rstrip('\r\n')
         left, right = ref.get('start_column', 0), ref.get('end_column', len(last))
-        if (type(left) is not int or type(right) is not int
-                or not 0 <= left <= len(first) or not 0 <= right <= len(last)
-                or (start == end and left > right)):
+        if type(left) is not int or type(right) is not int or left < 0 or left > len(first) or right < 0:
+            raise ValueError('Source fragment column range is out of bounds')
+        # Models frequently report display-column widths (CJK glyphs as two
+        # columns) or an inclusive end. A right edge beyond the physical line
+        # can only mean "through the end of this line"; clamping preserves the
+        # exact source text and avoids discarding otherwise valid references.
+        if right > len(last):
+            right = len(last)
+        if start == end and left > right:
             raise ValueError('Source fragment column range is out of bounds')
         if start == end:
             text = first[left:right]
         else:
             # Preserve internal CRLF/LF line endings and all source whitespace.
             text = lines[start - 1][left:] + ''.join(lines[start:end - 1]) + last[:right]
+        # Source refs often start at the field label (【解析】/【答案】) or
+        # include 【文章大意】. The field contract stores only the body text;
+        # strip a leading label deterministically rather than failing the
+        # entire round on a fixed, non-semantic prefix.
+        if field == 'explanation':
+            # A missing start_column may include the printed answer number/letter
+            # prefix; it is structural, not part of the explanation body.
+            text = _ANSWER_PREFIX.sub('', text, count=1)
+            text = _EXPL_LABEL.sub('', text, count=1)
+        elif field == 'articleSummary':
+            text = _SUMMARY_LABEL.sub('', text, count=1)
         if not text.strip():
             raise ValueError('Source fragment must not be empty')
         evidence = (f"source_ref {relative}:{start}:{left}-{end}:{right} "
@@ -120,7 +141,7 @@ def expand_references(rows, batch):
             return
         for field in fields:
             if isinstance(obj.get(field), dict):
-                text, evidence = resolve(obj[field])
+                text, evidence = resolve(obj[field], field)
                 replacements.append((obj, field, text, evidence, row))
 
     for row in rows:

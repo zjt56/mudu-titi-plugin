@@ -302,6 +302,20 @@ def _quote_matches(quote: str, text: str) -> bool:
     return bool(q) and q in norm(text)
 
 
+def _bound_source_texts(batch, plan):
+    """Read every bound review input once; evidence paths are often mislabeled."""
+    root = Path(__file__).resolve().parents[1]
+    texts = {}
+    for key in (plan.get("input_hashes") or {}):
+        path = (root / key[len("rules:"):]) if key.startswith("rules:") else (Path(batch) / key)
+        try:
+            if path.is_file():
+                texts[key] = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+    return texts
+
+
 _EN_PREFIX_ZH = (
     ("What the question tests:", "本题考点："),
     ("Answer-to-point relation:", "答案与考点关系："),
@@ -1056,8 +1070,7 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
     if not expected or len(expected_set) != len(expected):
         raise ValueError("Review plan must have distinct nonempty targets")
     covered = set()
-    source_path = batch / "01_source/正文.txt"
-    source_text = source_path.read_text(encoding="utf-8-sig")
+    bound_texts = _bound_source_texts(batch, plan)
     from .agent_tasks import confirmed_units
     units = {u["unit_id"]: u for u in confirmed_units(batch)}
     for check in checks:
@@ -1091,34 +1104,38 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             raise ValueError("Target has no confirmed source text; review remains unchecked")
         has_source = False
         for item in evidence:
+            # A real appendix/transcript quote may name the wrong bound input.
+            # Repair that attribution only when another bound input proves it;
+            # malformed, unbound or fabricated evidence still needs local repair.
             if not isinstance(item, dict) or any(
                 not isinstance(item.get(k), str) or not item[k].strip()
                 for k in ("path", "locator", "quote")
             ):
                 raise ValueError("Evidence needs a path, locator and quote")
+            quote = item["quote"]
             path = item["path"]
-            # 规则/目录文件在计划里以 rules:<path> 绑定；模型引用时常省略前缀，
-            # 按全等匹配会把整轮判成“未绑定证据”，让真实差异进不了待审核。
             if path in plan["input_hashes"]:
                 key = path
             elif "rules:" + path in plan["input_hashes"]:
                 key = "rules:" + path
-                item["path"] = key
             else:
                 raise ValueError("Evidence must cite a bound batch input")
-            if key.startswith("rules:"):
-                root = Path(__file__).resolve().parents[1]
-                text = (root / key[len("rules:"):]).read_text(encoding="utf-8-sig")
-            elif key == "01_source/正文.txt":
-                text = source_text
+            matched = None
+            if key is not None and _quote_matches(quote, bound_texts.get(key, "")):
+                matched = key
             else:
-                text = (batch / key).read_text(encoding="utf-8-sig")
-            if not _quote_matches(item["quote"], text):
+                # The quote may be real but attributed to the wrong bound file.
+                # Search every bound source; only an exact/normalized quote hits.
+                for candidate, text in bound_texts.items():
+                    if _quote_matches(quote, text):
+                        matched = candidate
+                        break
+            if matched is None:
                 raise ValueError("Evidence quote absent from bound input")
-            if key == "01_source/正文.txt":
+            item["path"] = matched
+            if matched == "01_source/正文.txt":
                 # Bare numbers and punctuation cannot locate a substantive claim.
-                quote = item["quote"].strip()
-                meaningful = bool(re.search(r"[^\W\d_]", quote, re.UNICODE))
+                meaningful = bool(re.search(r"[^\W\d_]", quote.strip(), re.UNICODE))
                 has_source |= meaningful and _quote_matches(quote, unit_text)
         if not has_source:
             raise ValueError("Every target needs verifiable source evidence")

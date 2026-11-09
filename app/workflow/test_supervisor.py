@@ -378,10 +378,16 @@ class ServerSupervisorTest(SupervisorFixture):
     def test_result_write_failure_never_leaves_dead_worker_running(self):
         folder = self.make_batch()
         reported = threading.Event()
+        original_run = server._run_advance_now
+        def run(*args, **kwargs):
+            try:
+                return original_run(*args, **kwargs)
+            finally:
+                reported.set()
         with patch.object(auto, "load_bridge", return_value={}), \
              patch.object(auto, "_advance_locked", return_value={"status": "blocked"}), \
              patch.object(supervisor, "record_result", side_effect=OSError("disk unavailable")), \
-             patch.object(threading, "excepthook", side_effect=lambda args: reported.set()):
+             patch.object(server, "_run_advance_now", side_effect=run):
             self.assertTrue(server.start_advance("active")["started"])
             self.assertTrue(reported.wait(2))
         self.assertFalse(server.advance_state("active")["running"])

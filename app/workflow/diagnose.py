@@ -42,9 +42,8 @@ def _last_error_line(text: str) -> str:
     """从日志里挑最后一条真正的错误行（跳过 '调用模型/已校验' 等进度行）。"""
     noise = ("调用模型", "已校验并落盘", "复用已校验快照", "执行：", "$ ", "[stderr]")
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-    for line in reversed(lines):
-        if any(marker in line for marker in noise):
-            continue
+    clean = [line for line in lines if not any(marker in line for marker in noise)]
+    for line in reversed(clean):
         if line.startswith("{") and '"error"' in line:
             try:
                 obj = json.loads(line)
@@ -55,7 +54,23 @@ def _last_error_line(text: str) -> str:
         if ("错误" in line or "必须" in line or "要求" in line or "不一致" in line
                 or "Error" in line or "failed" in line.lower() or "Traceback" in line):
             return line
-    return lines[-1] if lines else ""
+    return clean[-1] if clean else ""
+
+
+def _review_failure_detail(batch: Path) -> str:
+    """Recent structured review-part failure; the stage log only has [stderr]."""
+    folder = batch / "workflow" / "review-failures"
+    if not folder.is_dir():
+        return ""
+    files = sorted((p for p in folder.glob("*.json") if p.is_file()),
+                   key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    for path in files[:4]:
+        report = _read(path)
+        if isinstance(report, dict):
+            error = report.get("error") or report.get("reason")
+            if error:
+                return str(error)[:1200]
+    return ""
 
 
 def _agent_error(batch: Path, stage_id: str) -> str:
@@ -320,6 +335,8 @@ def diagnose(batch_dir) -> dict:
                 err = _agent_error(batch, stage.id)
                 if err:
                     detail = err
+            if not detail and stage.id == "review":
+                detail = _review_failure_detail(batch)
             if not detail:
                 log_err = _last_error_line(_tail_file(batch / "workflow" / "logs" / f"{stage.id}.log"))
                 if log_err:

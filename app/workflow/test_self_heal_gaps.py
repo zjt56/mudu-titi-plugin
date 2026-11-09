@@ -116,6 +116,12 @@ class SourceOptionRepairTest(unittest.TestCase):
                     if _strong_number(line) is not None:
                         break
                     prefix.append(line)
+                from workflow.shared_rubric import section_rubric
+                shared = section_rubric(cleaned.splitlines(),
+                                        unit.get('source_span', {}).get('start_line', 1), unit['type'])
+                for line in reversed(shared):
+                    if line not in prefix:
+                        prefix.insert(0, line)
                 row.update(stem='\n'.join(prefix), options=[], subquestions=children)
             items.append(row)
         complete = {'batch_id': 'mixed', 'name': 'isolated mixed paper', 'items': items}
@@ -624,6 +630,25 @@ class NeverParkTest(unittest.TestCase):
                       "validate", "review", "review_gate", "format_gate"):
             self.assertIn(stage, _heal.UPSTREAM, stage)
             self.assertNotIn(_heal.UPSTREAM[stage], _heal.BOUNDARIES, stage)
+
+    def test_record_only_stops_same_signature_after_retry_budget(self):
+        from workflow import self_heal as _heal, manifest as _mf
+        batch, state = self.make("record-budget")
+        for stage in ("review", "types", "preassemble"):
+            with self.subTest(stage=stage), patch.object(_heal, "_escalate_upstream") as escalate:
+                result = _heal._apply(batch, state, stage,
+                                      "Cannot fill batch without proven source binding",
+                                      {"action": "record_only", "reason": "证据不足，无法安全修复"},
+                                      _heal.MAX_ATTEMPTS_PER_STAGE, {"files": {}})
+                self.assertFalse(result["changed"])
+                self.assertEqual(result["status"], "retry_budget_exhausted")
+                self.assertEqual(result["outcome"], "retry_budget_exhausted")
+                self.assertEqual(result["escalation"], "code_repair")
+                # Preserve the original failure and its signature. Re-diagnosis
+                # remains scheduled; exhaustion cannot manufacture a human wait.
+                self.assertEqual(_mf.load(batch)["stages"][stage], state["stages"][stage])
+                self.assertNotIn("待人工", result["reason"])
+                escalate.assert_not_called()
 
     def test_record_only_on_any_agent_stage_never_returns_waiting_external(self):
         from workflow import self_heal as _heal
