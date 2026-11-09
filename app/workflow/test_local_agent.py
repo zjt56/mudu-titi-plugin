@@ -292,6 +292,10 @@ class LocalAgentTest(unittest.TestCase):
         self.assertEqual(metadata["error_code"], "exit")
         self.assertEqual(metadata["exit_code"], 7)
         self.assertEqual(Path(evidence["stderr"]).read_text(), "helpful error")
+        # The operator-facing message must carry the real cause, not just
+        # "inspect stderr.log", while keeping rate-limit classification intact.
+        self.assertIn("(exit 7, exit)", str(caught.exception))
+        self.assertIn("helpful error", str(caught.exception))
 
     def test_router_prefill_capacity_429_is_transient_rate_limit(self):
         stderr = ('dsh: RATE_LIMIT: 429: {"type":"server_error",'

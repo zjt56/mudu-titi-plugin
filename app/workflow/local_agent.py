@@ -515,8 +515,15 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False, co
                         detail = ""
                     code, http_status = failure_details(detail)
                     metadata["http_status"] = http_status
+                    # Keep the machine-readable "(exit N, code)" prefix intact for
+                    # rate-limit classification, then expose a bounded, redacted
+                    # stderr tail so the operator sees the actual cause instead of
+                    # a bare "inspect stderr.log".
+                    from workflow import agent_tasks
+                    tail = agent_tasks._sanitized(detail.strip())[-400:]
+                    suffix = ("：" + tail) if tail else ""
                     raise AgentError(
-                        f"Agent subprocess failed (exit {process.returncode}, {code}); inspect stderr.log", code)
+                        f"Agent subprocess failed (exit {process.returncode}, {code}){suffix}；完整日志见 stderr.log", code)
         final_path = paths["stdout"] if response_mode == "stdout" else paths["final"]
         if response_mode == "stdout":
             artifacts.pop("final")

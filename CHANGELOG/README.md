@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-agent-failure-visibility-and-default-model.md](2026-11-09-agent-failure-visibility-and-default-model.md) | 代理失败附带脱敏stderr尾部；默认模型恢复 deepseek-official/deepseek-flash |
 | 2026-11-09 | [2026-11-09-plugin-selfupdate-not-batch-change.md](2026-11-09-plugin-selfupdate-not-batch-change.md) | 插件自更新（wf-router.mjs）不再被误判为批次输入变化；模型指纹只用于缓存键 |
 | 2026-11-09 | [2026-11-09-preassembly-types.md](2026-11-09-preassembly-types.md) | 题型真正并入前置组装交付；历史题型检查点无模型，局部修正共享签名与真实运行进度同步 |
 | 2026-11-09 | [2026-11-09-model-default-follow.md](2026-11-09-model-default-follow.md) | 修改全局默认模型时，仍跟随默认的子 Agent 与审核轮次一起切换；显式指定的保持不变 |
