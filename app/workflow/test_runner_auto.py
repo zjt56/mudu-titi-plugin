@@ -398,6 +398,20 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(outcome["action"], "review")
         self.assertFalse((self.batch / "06_batch/batch.json").exists())
 
+    def test_failed_preassemble_blocks_assembly_with_completed_labels(self):
+        self._ready_after_structure()
+        for stage_id in ("answers", "types", "knowledge", "explanations"):
+            mf.touch_stage(self.manifest, stage_id, mf.COMPLETED)
+        mf.touch_stage(self.manifest, "preassemble", mf.FAILED,
+                       notes="Batch fill正文 conflict for group-6-7; existing content preserved")
+        mf.save(self.batch, self.manifest)
+        self.assertIn("preassemble", contracts.STAGE_BY_ID["assemble"].depends_on)
+        args = argparse.Namespace(stage="assemble", until=None, force=False, dry_run=False)
+        with patch.object(runner, "_execute_command") as execute:
+            self.assertNotEqual(runner._cmd_run_locked(self.batch, args), 0)
+        execute.assert_not_called()
+        self.assertEqual(mf.load(self.batch)["stages"]["assemble"]["status"], mf.PENDING)
+
     def test_audio_needs_review_does_not_block_assemble_but_blocks_review(self):
         """听力待复核不阻断解析/知识点/组装；只有内容审核(review)必须等听力完成。"""
         self._isolate_scheduler()

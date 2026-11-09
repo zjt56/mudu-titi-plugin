@@ -1,4 +1,4 @@
-# 2026-11-09 URL 原文保真与图片段落标记体检修复
+﻿# 2026-11-09 URL 原文保真与图片段落标记体检修复
 
 ## 背景与证据
 
@@ -8,7 +8,7 @@
 - `app/workflow/agent_tasks.py::_sanitized` 中 Windows 盘符表达式 `[A-Za-z]:[\\/]` 匹配了 `https://` 内的 `s:/`，将原文网址改成 `http[host-path-redacted]`。
 - 第 58 题权威解析已完整保留于 `01_source/附录.txt:64` 和 `04_knowledge/explanations.json`，但三份既有批次投影仍保留被脱敏的网址，严格来源检查正确拒绝该投影。
 
-## 改动
+## 改了什么
 
 - `app/workflow/agent_tasks.py`：为路径表达式增加前缀边界，网址与网址内 `/home/`、`/Users/` 等正常路径保持原文；独立 Windows/POSIX 主机路径及凭证继续脱敏。保留同文件已有并行修复。
 - `app/scripts/06-upload/audit_batch_integrity.py`：仅将带 `kind=image, placement=question` 附件且文本恰为单个大写字母的段落标记排除于相邻文章重复比较。不修改材料或附件。

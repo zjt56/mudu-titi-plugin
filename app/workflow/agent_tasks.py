@@ -30,6 +30,18 @@ ARTIFACTS = {
     "assemble": "06_batch/batch.json",
     "review": "07_review/agent-review.json",
 }
+# 提示词示例就是模型照抄的契约：示例漏掉校验器必填键时，每一轮都会被拒，
+# 重试用尽后阶段回到 pending 再次从同一份坏示例开始（2026-11-09 answers 卡点）。
+# 新增/收紧必填键时必须同时改 EXAMPLE_REQUIRED 与 example_payloads，构建任务时自检。
+EXAMPLE_REQUIRED = {
+    "answers": ("answers", "evidence", "missing"),
+    "types": ("items",),
+    "explanations": ("items",),
+    "knowledge": ("items",),
+    "audio": ("items",),
+    "assemble": ("items",),
+    "review": ("findings", "checked_units", "unchecked"),
+}
 REVIEW_FILES = ("content-review.json", "metadata-review.json", "manual-review-queue.json")
 AI_MARK = "（AI生成，待校对）"
 RULES = {
@@ -667,7 +679,7 @@ def _build_task_template(stage, max_input_chars, context, hashes, missing, units
     number = str(units[0]["numbers"][0]) if units else "1"
     uid = units[0]["unit_id"] if units else "q-1"
     example_payloads = {
-        "answers": {"answers": {number: "A"}, "evidence": {number: ["附录 L1"]}, "difficulty": {number: "容易"}},
+        "answers": {"answers": {number: "A"}, "evidence": {number: ["附录 L1"]}, "missing": {}, "difficulty": {number: "容易"}},
         "types": {"items": [{"unit_id": uid, "type": "单项填空", "subtypes": ["四个选项"], "words": 5, "contentComplete": True, "evidence": ["正文 L1"]}]},
         "explanations": {"items": [{"unit_id": uid, "explanation": "无", "articleSummary": "无", "subquestions": [], "evidence": ["正文 L1；附录 L1 仅给答案，无原解析/原大意"]}]},
         "knowledge": {"items": [{"unit_id": uid, "knowledge": ["词汇/词汇辨析/动词辨析"], "answer": "A", "explanation": "无", "articleSummary": "无", "subquestions": [], "evidence": ["正文 L1；解析与大意取自 explanations 产物"]}]},
@@ -676,6 +688,12 @@ def _build_task_template(stage, max_input_chars, context, hashes, missing, units
         "review": {"findings": [], "checked_units": [u["unit_id"] for u in units], "unchecked": []},
     }
     example = {"status": "completed", "artifacts": {ARTIFACTS[stage]: example_payloads[stage]}, "notes": [], "findings": []}
+    absent = [key for key in EXAMPLE_REQUIRED.get(stage, ()) if key not in example_payloads[stage]]
+    if absent:
+        raise ValueError(
+            f"{stage} prompt example is missing required keys {absent}; "
+            "models copy the example verbatim, so it must track the validator contract"
+        )
     from . import agent_roles
     prompt = (header + f"Stage: {stage}\n" + agent_roles.header(stage)
               + f"Whitelisted artifact: {ARTIFACTS[stage]}\n" + RULES[stage]
@@ -700,9 +718,20 @@ def _strings(value, name, nonempty=False):
     return value
 
 
+def _numbers_preview(values, limit=8):
+    """题号清单只回显有限几个：既让模型知道差在哪，又不把整卷题号塞进重试反馈。"""
+    ordered = sorted(values, key=lambda x: (len(str(x)), str(x)))
+    shown = ", ".join(str(x) for x in ordered[:limit])
+    if len(ordered) > limit:
+        shown += f" 等{len(ordered)}个"
+    return shown or "无"
+
+
 def _fields(obj, allowed, required=()):
     if not isinstance(obj, dict) or set(obj) - set(allowed) or set(required) - set(obj):
-        raise ValueError(f"Invalid fields; allowed={sorted(allowed)}, required={sorted(required)}")
+        known = set(obj) if isinstance(obj, dict) else set()
+        raise ValueError(f"Invalid fields; allowed={sorted(allowed)}, required={sorted(required)}; "
+                         f"absent={sorted(set(required) - known)}, unexpected={sorted(known - set(allowed))}")
 
 
 def _backfill_knowledge_ids(labeled):
@@ -953,12 +982,18 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
         if not isinstance(answers, dict) or not isinstance(evidence, dict) or not isinstance(missing, dict):
             raise ValueError("answers, evidence and missing must be mappings")
         if set(answers) != set(evidence) or set(answers).intersection(missing):
-            raise ValueError("Answer/evidence keys must match and be disjoint from missing keys")
+            raise ValueError("Answer/evidence keys must match and be disjoint from missing keys; "
+                             f"answers_without_evidence={_numbers_preview(set(answers) - set(evidence))}, "
+                             f"evidence_without_answer={_numbers_preview(set(evidence) - set(answers))}, "
+                             f"in_both_answers_and_missing={_numbers_preview(set(answers).intersection(missing))}")
         expected_numbers = {_number(n) for n in numbers}
         if any(_number(n) != n for n in (*answers.keys(), *missing.keys())):
             raise ValueError("Answer and missing keys must use normalized positive question numbers")
         if set(answers).union(missing) != expected_numbers:
-            raise ValueError("Every confirmed question needs an answer or an evidence-backed missing decision")
+            covered = set(answers).union(missing)
+            raise ValueError("Every confirmed question needs an answer or an evidence-backed missing decision; "
+                             f"uncovered={_numbers_preview(expected_numbers - covered)}, "
+                             f"not_in_batch={_numbers_preview(covered - expected_numbers)}")
         if any(not isinstance(value, str) or not value.strip() for value in answers.values()):
             raise ValueError("Answers must be nonempty original text; use missing with evidence when absent")
         for number, locations in missing.items():
@@ -1128,6 +1163,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             raise ValueError("Upstream answer values must be nonempty strings")
         source_text = "\n".join(v for v in context.values() if isinstance(v, str))
         source_draft = None
+        source_bindings = {}
         for unit in units:
             row = rows[unit["unit_id"]]
             children = _children(row, unit)
@@ -1164,7 +1200,9 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 _inject_assemble_content(row, children, knowledge_row, notes)
                 if source_draft is None:
                     from . import question_draft
-                    source_draft = {r["unit_id"]: r for r in question_draft.ensure(batch).get("items", [])}
+                    draft = question_draft.ensure(batch)
+                    source_draft = {r["unit_id"]: r for r in draft.get("items", [])}
+                    source_bindings = draft.get("source_bindings", {})
                 _restore_source_fields(row, children, source_draft.get(unit["unit_id"]), notes)
                 if row.get("id", row["unit_id"]) != row["unit_id"] or row.get("unit_kind") != unit["unit_kind"]:
                     raise ValueError("Assembled ID and unit_kind must preserve confirmed structure")
@@ -1293,15 +1331,18 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             if not isinstance(meta, dict):
                 meta = {}
             materials = {}
-            for unit in confirmed.get("units", []) if isinstance(confirmed, dict) else []:
-                if isinstance(unit, dict) and isinstance(unit.get("stem"), str):
-                    materials[unit.get("unit_id")] = unit["stem"]
-                    numbers = unit.get("numbers")
-                    if isinstance(numbers, list):
-                        try:
-                            materials[tuple(int(n) for n in numbers)] = unit["stem"]
-                        except (TypeError, ValueError):
-                            pass
+            for unit in units:
+                source = (source_draft or {}).get(unit["unit_id"], {})
+                binding = source_bindings.get(unit["unit_id"], {})
+                # The confirmed stem contains the whole group, including children.
+                # A bound draft separates actual shared material; its empty string
+                # is authoritative too (normal for printed listening questions).
+                # Unbound legacy drafts cannot prove absence, so keep their fallback.
+                material = (source["material"] if binding.get("basis") and isinstance(source.get("material"), str)
+                            else unit.get("stem"))
+                if isinstance(material, str):
+                    materials[unit["unit_id"]] = material
+                    materials[tuple(int(n) for n in unit["numbers"])] = material
             audio = {}
             audio_path = Path(batch) / "02_audio" / "audio_map.json"
             if audio_path.is_file():

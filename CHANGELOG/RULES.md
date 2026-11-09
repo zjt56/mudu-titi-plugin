@@ -1,5 +1,16 @@
 # RULES — 规则与强调台账
 
+## 2026-11-09 快速纠错：同证据不得原样重试，代码缺陷走隔离修复（用户授权「可以」）
+
+- 用户原话要点：要实现快速纠正卡点；授权按建议补齐故障证据包、重复失败升级、局部重生成、隔离代码修复/测试/受控更新/续跑。
+- 卡点处理必须指出具体失败检查（报告、错误码、检查名、题号），不能只写"校验不通过"；`diagnose` 返回自包含证据包。
+- 同一修复/续跑策略在**相同输入、证据与插件代码**上重复失败时，后端必须拒绝原样重试并升级为代码修复；输入或代码真实变化后才允许再试。限流、网络、超时等瞬时错误不在此列。
+- 未知程序缺陷不得靠反复重试冒充修复：只能在隔离工作区复现、修复、跑测试、生成安装计划，再由受控宿主确认安装并单次重启；安装成功不等于故障恢复，必须重启后重新认领并用原失败检查与消费者链复验。
+- 局部重生成只缩小重跑范围：仅内容阶段（答案/解析/题型/知识点/听力），只带本批次确认题号；未指定题号时只用证据中真实出现的单元，定位不到就拒绝，不得整卷重跑；上传/发布边界与确定性阶段永不适用。
+- 隔离工作区不是操作系统沙箱；生产安装必须显式确认且宿主设置 `MD_OPERATIONS_INSTALL=1`，默认不可用。`lib/*.js`、配置、数据结构只产出补丁，不得宣称自动生效。
+- 不自动上传、不发布、不改归档批次；真实卷只在明确授权下执行。
+- 落地：`app/workflow/operations.py`、`app/workflow/operations_development.py`、`lib/operations-agent.js`、`app/docs/harness-operations.md`；测试 `workflow.test_operations`、`workflow.test_operations_development`、`backend/operations-agent.test.cjs`。
+
 ## 2026-11-09 共享导语归属修正（审核后修复）
 
 - 原文坐标必须以已验证绑定的 line_basis 为准，不混用原始/去噪行号。
@@ -105,3 +116,4 @@
 | 2026-11-09 | **版本控制只在 master 一条线**：用户明确“不要加分支，直接在 master 上提交后续”。不新开 `develop`/`feature`/`hotfix` 分支，后续改动直接提交到 `master` 并推 `origin`；动手前先 `git fetch` 确认远端未领先，禁止 `push --force`。 | 本地与远端分支均只有 `master`（`git branch -a`）；根 `AGENTS.md` 五、协作提示末条；`CHANGELOG/2026-11-09-console-encoding-stage-wedge.md` 后续提交即按此执行 |
 | 2026-11-09 | **附件 placement 只能是题库四值**：用户反馈题库「上传暂存 → 逐题确认」只报 `invalid_request`，根因是材料图片附件带 `placement=material`；题库只接受 `question/option/answer/explanation`，确认阶段整批 `400 invalid_attachment`。规则：生成线上载荷时 `material`/`stem` 必须归一为 `question`；任何新位置先确认远端确实渲染，不能把本地/装配内部位置直接上线。 | `app/workflow/wire_format.py`、`app/workflow/upload_payload.py`；回归 `workflow.test_upload_payload`、`workflow.test_wire_format`；`app/docs/upload-api.md`；`CHANGELOG/2026-11-09-upload-attachment-placement.md` |
 | 2026-11-09 | **题目 ID 全局唯一、跨卷必须加前缀**：用户反馈 2014 卷确认后再确认 2015 卷报 `question_id_exists`。根因是本地 `q-N`/`group-N` 只在单卷内唯一，题库题目 ID 是全局主键；云端拒绝重复是正确行为。规则：上传冻结时对本地形态 ID 自动加 `<年份>-<批次哈希10位>-` 前缀，显式 ID 保持原样；同批次重传相同前缀属有意防重，替换旧卷先删旧草稿或另建批次。 | `app/workflow/upload.py::_auto_id_prefix`、`app/workflow/upload_payload.py::build_payload(id_prefix=...)`；回归 `workflow.test_upload`、`workflow.test_upload_payload`；`app/docs/upload-api.md`；`CHANGELOG/2026-11-09-question-id-paper-prefix.md` |
+| 2026-11-09 | **提示词示例即契约（示例与校验器同源）**：用户要求“修复也是bug并写入代码规则”。根因是 `answers` 的示例漏了后来才设为必填的 `missing`，模型每轮照抄示例 → 首轮校验必失败 → 补字段的重试又出现 `evidence` 多一个题号 → 两次重试用尽回到 pending，再从同一份坏示例重来，阶段无限空转。规则：示例必须含校验器全部必填键，必填键变更须在同一次改动内同步示例/规则/回归；构建任务时 `EXAMPLE_REQUIRED` 自检缺键直接报错；校验报错要点名缺/多的键与不匹配题号；确定性失败不得靠重试消化，同一阶段连续多轮同一报错即按硬规则 2 升级修复。 | `app/workflow/agent_tasks.py::EXAMPLE_REQUIRED`、`_build_task_template`、`_fields`、`_numbers_preview`；回归 `app/workflow/test_agent_tasks.py::test_every_stage_example_satisfies_its_declared_contract`、`::test_answers_task_example_carries_every_required_field`；根 `AGENTS.md` 硬规则 19；`CHANGELOG/2026-11-09-answers-example-missing-field.md` |

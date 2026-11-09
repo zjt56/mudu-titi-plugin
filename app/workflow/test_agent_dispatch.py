@@ -1,5 +1,6 @@
 """本地 Agent 代理桥调度回归。"""
 import argparse
+from contextlib import nullcontext
 import json
 import subprocess
 import sys
@@ -16,6 +17,11 @@ class AgentDispatchTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         recovery = patch('workflow.self_heal.recover', return_value={})
         recovery.start(); self.addCleanup(recovery.stop)
+        # Fixture dispatch never runs a real agent. Avoid waiting behind a live
+        # workflow's repository-wide lock, including the protocol's import alias.
+        for target in ('workflow.local_agent._agent_lock', 'workflow.agent_protocol._agent_lock'):
+            lock = patch(target, side_effect=lambda *args, **kwargs: nullcontext())
+            lock.start(); self.addCleanup(lock.stop)
         self.folder = Path(self.temp.name)
         self.state = mf.new_manifest('fixture', self.folder, {}, {})
         # Dispatch starts after source-only preassembly, not at its boundary.

@@ -180,6 +180,19 @@ class LocalAgentTest(unittest.TestCase):
             with self.subTest(modes=modes), self.assertRaises(agent.AgentError):
                 agent._validate_config({"provider": "command", "command": ["{python}"], **modes}, self.root)
 
+    def test_plugin_router_uses_node_without_posix_shell(self):
+        config_path = Path(__file__).resolve().parents[2] / "backend" / "local-agent.plugin.json"
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        router_path = config_path.parent / "wf-router.mjs"
+        self.assertEqual(data["command"], ["node", "__PLUGIN_BACKEND__/wf-router.mjs", "{prompt_file}", "{response_file}"])
+        self.assertNotIn("/bin/sh", data["command"])
+        self.assertEqual(data["input_mode"], "none")
+        self.assertEqual(data["response_mode"], "file")
+        configured = agent._validate_config({**data, "command": ["node", str(router_path), "{prompt_file}", "{response_file}"]}, self.root)
+        binding = agent._part_model_binding(configured)
+        self.assertEqual(set(binding["files"]), {str(router_path.resolve()), str((config_path.parent.parent / "config" / "model-router.json").resolve())})
+        self.assertTrue(all(len(digest) == 64 for digest in binding["files"].values()))
+
     def test_command_relative_executable_path_lookup_and_check(self):
         executable = self.root / "my agent"
         executable.write_text("placeholder", encoding="utf-8")

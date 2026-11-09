@@ -25,7 +25,7 @@ folder = root / "paper"
 (folder / "workflow").mkdir(parents=True)
 (folder / "01_source").mkdir()
 (folder / "07_review").mkdir()
-(folder / "01_source/正文.txt").write_text("1. This is the original paper. 原文证据。\n", encoding="utf-8")
+(folder / "01_source/正文.txt").write_bytes("1. This is the original paper. 原文证据。\n".encode("utf-8"))
 manifest = mf.new_manifest("operations-http-fixture", folder, {}, {})
 manifest["stages"]["format_gate"]["status"] = "failed"
 mf.save(folder, manifest)

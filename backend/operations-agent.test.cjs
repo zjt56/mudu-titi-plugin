@@ -26,6 +26,10 @@ async function fixture(options = {}) {
       model: { select: route => { agent.route = route; } },
       inbox: options.pending ? { nextTurn: ['saved'], nextStep: [] } : { nextTurn: [], nextStep: [] },
       followup: message => {
+        // The real loop persists this value unchanged; restore rejects anonymous
+        // messages before setup, so fixtures must enforce the durable contract.
+        assert.equal(message.role, 'user');
+        assert.match(message.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
         agent.messages.push(message);
         work = Promise.resolve().then(async () => {
           try { await options.program?.(record); }
@@ -85,12 +89,60 @@ async function fixture(options = {}) {
   return { manager, calls, agents, events, state, run, ownerEffects, OPERATIONS_TOOL_NAMES };
 }
 
+test('only proven pre-setup malformed history requests receipt-fenced session recovery', async () => {
+  const sessionId = 'operations-damaged';
+  const message = `stored session "${sessionId}" failed validation: Error: session event at seq 10 lacks an identified message`;
+  for (const scenario of ['proven', 'ordinary', 'unknown', 'already_recovered']) {
+    const proven = scenario !== 'ordinary';
+    const error = Object.assign(new Error(message, { cause: new Error('session event at seq 10 lacks an identified message') }), {
+      name: proven ? 'SessionPersistenceCorruptionError' : 'Error',
+    });
+    const f = await fixture({ rows: [incident({ session_id: sessionId,
+      ...(scenario === 'already_recovered' ? { session_recovery: { session_id: 'older' } } : {}) })],
+      persistence: { stat: async () => ({}) },
+      backend: async (path, init, state) => {
+        if (scenario === 'unknown' && init.method === 'GET' && !state.receipts.some(row => row.request_id === 'unsettled')) {
+          state.receipts.push({ request_id: 'unsettled', status: 'unknown' });
+        }
+      }, createHook: async () => { throw error; } });
+    await f.run();
+    assert.equal(f.agents.length, 0);
+    const release = f.calls.find(call => call.body?.action === 'release');
+    assert.deepEqual(release?.body.input.session_corruption, scenario === 'proven' ? {
+      session_id: sessionId, reason: 'missing_user_message_identity',
+    } : undefined);
+    assert.ok(!f.events.some(event => event.state === 'resolved'));
+    await f.manager.stop();
+  }
+});
+
+test('retired historical identity creates one fresh session on the original explicit route', async () => {
+  let statCalls = 0;
+  const f = await fixture({ rows: [incident({ session_id: null, queue_generation: 15,
+    session_recovery: { session_id: 'operations-retired', reason: 'missing_user_message_identity' } })],
+    persistence: { stat: async () => { statCalls++; throw new Error('retired session must not be queried'); } },
+    managerOptions: { makeSessionId: () => 'operations-fresh' },
+    program: async a => { await a.call('diagnose'); },
+  });
+  await f.run();
+  await f.manager.tick(); await f.manager.drain();
+  assert.equal(statCalls, 0);
+  assert.equal(f.agents.length, 1);
+  assert.equal(f.agents[0].mode, 'create');
+  assert.equal(f.agents[0].init.sessionId, 'operations-fresh');
+  assert.deepEqual(f.agents[0].agent.route, { provider: 'chosen-provider', model: 'chosen/model' });
+  assert.equal(f.agents[0].agent.messages.length, 1);
+  assert.ok(f.calls.some(call => call.body?.action === 'diagnose'));
+  assert.ok(!f.events.some(event => event.state === 'resolved'));
+  await f.manager.dispose();
+});
+
 test('creates exactly one eligible incident with scoped tools and backend verified success', async () => {
   const f = await fixture({ program: async a => {
     assert.deepEqual(a.restrictions, [{ allow: [] }]);
     assert.equal(a.guards[0]({ name: 'bash' }), 'Only incident-scoped operations tools are allowed');
     assert.equal(a.guards[0]({ name: 'operations_verify' }), undefined);
-    assert.equal(a.tools.size, 8);
+    assert.equal(a.tools.size, 12);
     await a.call('diagnose'); await a.call('preview_repair', { strategy: 'known' });
     await a.call('apply_repair', { preview_id: 'preview-1' });
     await a.call('verify');
@@ -148,6 +200,16 @@ test('finish requires verification; applying repair invalidates older verificati
   } });
   await f.run();
   assert.ok(f.events.some(e => e.state === 'needs_deep_repair'));
+  assert.equal(f.calls.filter(x => x.body?.action === 'finish').length, 1);
+  await f.manager.dispose();
+});
+
+test('finish can hand a budget-exhausted incident to a person', async () => {
+  const f = await fixture({ program: async a => {
+    await a.call('finish', { outcome: 'needs_human', summary: '24 attempts exhausted; needs a decision' });
+  } });
+  await f.run();
+  assert.ok(f.events.some(e => e.state === 'needs_human'));
   assert.equal(f.calls.filter(x => x.body?.action === 'finish').length, 1);
   await f.manager.dispose();
 });
@@ -232,6 +294,84 @@ test('model failures and session disconnection are separately reported', async (
   assert.ok(!model.events.some(e => e.state === 'backend_disconnected')); await model.manager.dispose();
   const disconnected = await fixture({ program: async a => { a.emit('agent/disposed', { agent: a.agent }); } }); await disconnected.run();
   assert.ok(disconnected.events.some(e => e.state === 'session_disconnected')); await disconnected.manager.dispose();
+});
+
+test('transport cause survives poorer turn summary and all progress diagnostics redact secrets', async () => {
+  const cause = Object.assign(new Error('connect failed https://user:url-password@example.test/v1?api_key=query-secret&token=query-token Authorization: Bearer bearer-secret api_key=key-secret token=token-secret password="password secret"'), {
+    code: 'ECONNRESET', payload: 'payload-secret', headers: { authorization: 'header-secret' },
+  });
+  cause.stack = 'stack-secret';
+  const failure = Object.assign(new Error('fetch failed', { cause }), { name: 'TransportError', code: 'TRANSPORT' });
+  const f = await fixture({ program: async a => {
+    a.emit('agent/error', { agent: a.agent, error: failure });
+    a.emit('session/event', {}, { type: 'turn/end', data: { reason: {
+      kind: 'error', error: { message: 'fetch failed api_key=summary-secret', code: 'TRANSPORT', stack: 'summary-stack-secret', payload: 'summary-payload-secret' },
+    } } });
+  } });
+  await f.run();
+  const final = f.calls.find(x => x.body?.action === 'progress' && x.body.input.state === 'model_failed').body.input;
+  assert.match(final.error, /TransportError/);
+  assert.match(final.error, /TRANSPORT/);
+  assert.match(final.error, /cause: connect failed/);
+  assert.match(final.error, /ECONNRESET/);
+  assert.equal(final.error, f.events.find(e => e.state === 'model_failed').error);
+  assert.equal(typeof final.reason.error.message, 'string');
+  const published = JSON.stringify({ events: f.events, inputs: f.calls.map(x => x.body?.input) });
+  for (const secret of ['url-password', 'query-secret', 'query-token', 'bearer-secret', 'key-secret', 'token-secret', 'password secret', 'payload-secret', 'header-secret', 'stack-secret', 'summary-secret', 'summary-stack-secret', 'summary-payload-secret']) {
+    assert.ok(!published.includes(secret), `leaked ${secret}`);
+  }
+  assert.ok(!f.events.some(e => e.state === 'resolved'));
+  assert.equal(f.calls.find(x => x.body?.action === 'release').body.input.outcome, 'incomplete');
+  await f.manager.dispose();
+});
+
+test('serialized turn error alone retains sanitized code and nested cause without implying success', async () => {
+  const f = await fixture({ program: async a => {
+    a.emit('session/event', {}, { type: 'turn/end', data: { reason: { kind: 'error', error: {
+      message: 'transport unavailable', code: 'TRANSPORT', cause: { name: 'SocketError', code: 'ETIMEDOUT', message: 'Basic basic-secret client_secret=client-secret sk-private-key' },
+    } } } });
+  } });
+  await f.run();
+  const diagnostic = f.events.find(e => e.state === 'model_failed').error;
+  assert.match(diagnostic, /TRANSPORT/); assert.match(diagnostic, /SocketError/); assert.match(diagnostic, /ETIMEDOUT/);
+  assert.doesNotMatch(JSON.stringify(f.events), /basic-secret|client-secret|sk-private-key/);
+  assert.ok(!f.events.some(e => e.state === 'resolved'));
+  await f.manager.dispose();
+});
+
+test('error diagnostics bound huge and cyclic causes and omit stacks and arbitrary objects', async () => {
+  const cause = { message: 'socket closed', code: 'ECONNRESET' };
+  cause.cause = cause;
+  const failure = { name: 'TransportError', code: 'TRANSPORT', message: 'x'.repeat(100000), cause, stack: 'stack-secret', payload: { message: 'payload-secret' } };
+  const f = await fixture({ program: async () => { throw failure; } });
+  await f.run();
+  const diagnostic = f.events.find(e => e.state === 'model_failed').error;
+  assert.ok(diagnostic.length <= 1500); assert.match(diagnostic, /ECONNRESET/); assert.match(diagnostic, /circular cause/);
+  assert.doesNotMatch(diagnostic, /stack-secret|payload-secret/);
+  await f.manager.dispose();
+  const unknown = await fixture({ program: async () => { throw { payload: 'private', toString() { throw new Error('must not stringify'); } }; } });
+  await unknown.run();
+  assert.equal(unknown.events.find(e => e.state === 'model_failed').error, 'Unknown error');
+  await unknown.manager.dispose();
+});
+
+test('quoted credentials cut off by the input bound are fully redacted', async () => {
+  const f = await fixture({ program: async () => { throw new Error(`transport failed password="${'quoted-secret '.repeat(1000)}"`); } });
+  await f.run();
+  const diagnostic = f.events.find(e => e.state === 'model_failed').error;
+  assert.match(diagnostic, /password=\[redacted\]/); assert.doesNotMatch(diagnostic, /quoted-secret/);
+  await f.manager.dispose();
+});
+
+test('diagnostics cap cause depth and tolerate inaccessible error properties', async () => {
+  let failure = { message: 'beyond-depth-secret' };
+  for (let i = 0; i < 5; i++) failure = { message: `level ${i}`, cause: failure };
+  Object.defineProperty(failure, 'code', { get() { throw new Error('getter-secret'); } });
+  const f = await fixture({ program: async () => { throw failure; } });
+  await f.run();
+  const diagnostic = f.events.find(e => e.state === 'model_failed').error;
+  assert.match(diagnostic, /cause limit/); assert.doesNotMatch(diagnostic, /beyond-depth-secret|getter-secret/);
+  await f.manager.dispose();
 });
 
 test('lease renewal failure cancels and blocks mutations', async () => {
@@ -343,4 +483,40 @@ test('temporary list failure is retried on later tick without disabling manager'
   const f = await fixture({ backend: path => { if (path === '/api/operations/incidents' && offline) throw new Error('404 backend starting'); } });
   await f.run(); assert.equal(f.agents.length, 0); offline = false;
   await f.manager.tick(); await f.manager.drain(); assert.equal(f.agents.length, 1); await f.manager.dispose();
+});
+
+test('scoped regeneration and code repair stay incident-scoped and forward exact input', async () => {
+  const f = await fixture({ program: async a => {
+    await a.call('regenerate_units', { target_stage: 'answers', unit_ids: ['u1'], reason: '答案与原文不符' });
+    await a.call('request_code_repair', { summary: '表格行空白列解析崩溃' });
+    await a.call('code_repair', { operation: 'read', path: 'app/workflow/checks.py' });
+  } });
+  await f.run();
+  for (const name of ['operations_regenerate_units', 'operations_request_code_repair', 'operations_code_repair', 'operations_install_code_repair']) {
+    assert.equal(f.agents[0].guards[0]({ name }), undefined, name);
+  }
+  assert.deepEqual(f.calls.find(x => x.body?.action === 'regenerate_units').body.input,
+    { target_stage: 'answers', unit_ids: ['u1'], reason: '答案与原文不符' });
+  assert.deepEqual(f.calls.find(x => x.body?.action === 'code_repair').body.input,
+    { operation: 'read', path: 'app/workflow/checks.py' });
+  assert.equal(f.calls.filter(x => x.body?.action === 'install_code_repair').length, 0);
+  await f.manager.dispose();
+});
+
+test('install awaits host restart and cannot be reported as a fix in the same attempt', async () => {
+  const f = await fixture({ backend: (_path, init) => init.body?.action === 'install_code_repair'
+      ? { status: 'installed_pending_restart', restart_required: true } : undefined,
+    program: async a => {
+      await a.call('verify');
+      const installed = await a.call('install_code_repair', { confirm: true });
+      assert.equal(installed.restart_required, true);
+      await assert.rejects(a.call('verify'), { code: 'FINISHED' });
+      await assert.rejects(a.call('finish', { outcome: 'resolved', summary: 'installed' }), { code: 'FINISHED' });
+    } });
+  await f.run();
+  assert.ok(f.events.some(e => e.state === 'awaiting_restart'));
+  assert.ok(!f.events.some(e => e.state === 'resolved'));
+  const released = f.calls.find(x => x.body?.action === 'release');
+  assert.match(released.body.input.reason, /host restart/);
+  await f.manager.dispose();
 });

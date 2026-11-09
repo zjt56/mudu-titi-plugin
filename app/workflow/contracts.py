@@ -120,7 +120,8 @@ STAGES: tuple[Stage, ...] = (
         # 音频内容（音频只由 audio 阶段写入 attachments，缺映射时按“待部署媒体”记录）。
         # 因此听力与解析/知识点/组装可以并行推进；只有内容审核（review）必须等听力
         # 完成，见 review 阶段对 audio 的显式依赖。
-        depends_on=("answers", "types", "knowledge", "explanations"),
+        # 前置对象可能在标签完成后被重新校验并判冲突，不能只依赖标签的旧完成态。
+        depends_on=("preassemble", "answers", "types", "knowledge", "explanations"),
         produces=("06_batch/batch.json",),
         docs=("references/stages/06-upload.md",),
         description="固化前置批次已填字段并执行原有保真与格式校验；沿用既有题目身份、题干、选项和分组，不重新组题。旧批次仍支持原有确定性合并路径。通关才登记正式填充完成。不等待听力，听力完成后由审核阶段另行消费。",

@@ -41,6 +41,8 @@ ROUND_INPUTS = (
     "01_source/extraction.json", "01_source/structure.json", "01_source/metadata.json", "02_audio/audio_map.json", "02_audio/segment-evidence.json",
     "02_audio/full-transcript.json", "workflow/media-observations.json",
     "07_review/structure-gate.json", "07_review/validation-report.json",
+    # Supplied as auxiliary context by agent_tasks; citations need the same binding.
+    "01_source/pdf-ocr.json", "01_source/material-roles.json",
 )
 # 只绑定审核提示词实际使用的规则；装配版式/上传约束变化不应让审核轮次
 # 无条件过期，除非它们确实改变审核语义。

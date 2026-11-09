@@ -1,4 +1,4 @@
-# 生成物（运行时由宿主插件写出，不随仓库迁移）
+﻿# 生成物（运行时由宿主插件写出，不随仓库迁移）
 backend/.local-agent.effective.json
 backend/.local-agent.effective.json.tmp-*
 
@@ -20,6 +20,8 @@ __pycache__/
 node_modules/
 
 # 本地验证、记忆与人工备份，不属于发布代码
+/backend/diagnostics/
+/backend-regression-review-status*.log
 /.mnemon/
 /.verification/
 /app/workflows/

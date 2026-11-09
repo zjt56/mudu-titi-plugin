@@ -55,7 +55,7 @@ def _atomic_raw(root, relative, raw):
     fd, name = tempfile.mkstemp(prefix=".format-repair-", dir=target.parent)
     try:
         with os.fdopen(fd, "wb") as stream:
-            os.fchmod(stream.fileno(), mode)
+            os.chmod(name, mode) if not hasattr(os, "fchmod") else os.fchmod(stream.fileno(), mode)
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())

@@ -394,7 +394,7 @@ def _plan(batch: Path, stage_id: str, detail: str, config: dict | None = None) -
     return {"action": action, "stage": stage_id, "reason": reason[:500]}
 
 
-def _feedback(batch, stage_id, reason, detail, attempt):
+def _feedback(batch, stage_id, reason, detail, attempt, unit_ids=None):
     from .agent_tasks import ARTIFACTS, _safe_path
     if stage_id not in ARTIFACTS:
         return None
@@ -403,7 +403,9 @@ def _feedback(batch, stage_id, reason, detail, attempt):
         detail += "\n" + (log.read_text(encoding="utf-8", errors="replace")[-5000:] if log.is_file() else "")
     except OSError:
         pass
-    unit_ids, _ = _affected_units(batch, detail, stage_id)
+    scoped = unit_ids is not None
+    if not scoped:
+        unit_ids, _ = _affected_units(batch, detail, stage_id)
     if stage_id == "review":
         # Independent blind review must never receive the original tag values
         # through an error message from the adjudicator.
@@ -412,7 +414,7 @@ def _feedback(batch, stage_id, reason, detail, attempt):
     error = detail.strip()[:6000] or "阶段校验失败，按当前原文与目录重新核对"
     value = {"version": 1, "stage": stage_id, "reason": reason, "error": error,
              "unit_ids": unit_ids, "feedback_by_unit": {uid: {"reason": reason, "error": error} for uid in unit_ids},
-             "all_units": not bool(unit_ids), "attempt": attempt}
+             "all_units": not bool(unit_ids), "scoped_units": scoped, "attempt": attempt}
     from .agent_protocol import _atomic, _encoded
     relative = "workflow/repair-feedback/" + stage_id + ".json"
     _atomic(_safe_path(batch, relative), _encoded(value))

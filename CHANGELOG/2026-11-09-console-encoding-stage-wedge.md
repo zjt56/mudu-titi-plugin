@@ -34,18 +34,20 @@ Windows 上 Python 的 stdout 走 cp936(GBK) 管道。`extract` 明明已经把�
   - `test_real_child_output_lands_in_log_without_replacement`：真子进程 `print` 的中文原样进日志、日志内 U+FFFD 计数为 0（这是端到端补证，不是打桩）；
   - `test_executor_crash_leaves_failed_not_running`：执行器崩溃后阶段为 `failed` 而非 `running`。
 - 回归对照：`workflow.test_runner_auto` 等 10 个受影响模块（163 用例）在「改动前基线（同树副本 + 中和 `_stage_env`/`_echo`）」与本改动后失败集合**完全相同**（2 failures / 19 errors，均为本机 cp936 locale 下 `read_text()`/`write_text()` 未指定编码的既有问题），即本次改动未引入新失败；本改动后新增的 7 个用例全绿。
+- Windows router 修复验证：`node --test backend/wf-router-native.test.cjs` → **2/2 通过**；`PYTHONUTF8=1 python -m unittest workflow.test_local_agent -v` → **34 项中 30 通过、1 既有缓存测试失败、3 跳过**（POSIX 专属）；新增路由用例单独 **1/1 通过**。`node --check lib/index.js` 与 `node --check lib/client.js` 均通过。完整 `node --test backend/*.test.cjs` → **151 项中 134 通过、17 失败**，失败集中于现有测试在 Windows 下依赖 `sh`/`python3`、POSIX 信号和不匹配当前客户端内容的样式断言；native router 两项通过。不得把配置接线视为 agent 阶段或批次完成证明。
 - 实批验证：`【木牍教育】20年安徽中考英语`↔`C:\Users\Administrator\.dsh\wf-plugin-data\workflows\【木牍教育】20年安徽中考英语` 在改动生效后从 `extract` 一路推进到 `preassemble`（`extract` 09:45:56→09:46:00 exit 0、`structure_gate` 09:46:01 exit 0、`preassemble` 09:46:01→09:46:02 exit 0），不再卡在首阶段、也不再每 30 秒重跑整卷 OCR。
-- 顺带暴露的下一个卡点（**不是本次改动引入、也未被本次改动掩盖**）：该批次推进到 `answers`（agent 阶段）时报 `Agent executable not found or not executable: /bin/sh`（`workflow/supervisor-result.json`）。原因是 `backend/local-agent.plugin.json` 把 `command[0]` 写死成 `/bin/sh`，而本机 PATH 上没有 `sh`（只有 Git Bash 的 `sh.exe` 与 harness 自带 `resources/runtime/cli/bin/dsh.cmd`，二者都未接线），`local_agent._validate_config` 因此直接判配置错误。这是 Windows 端的 agent 桥接线问题，需单独处理（见下节）。
+- 随后修复 Windows agent 桥接：`backend/local-agent.plugin.json` 改用已有的 Node 原生 `backend/wf-router.mjs`，不再要求 `/bin/sh`；该 router 会经 `cmd.exe` 调用 `dsh.cmd`。`app/workflow/local_agent.py::_part_model_binding` 同时识别 `.mjs` router，使答案分片缓存指纹包含 router 和路由配置内容。现有 `backend/wf-router-native.test.cjs` 验证 Windows 命令入口；此前批次 supervisor 产物中的 `/bin/sh` 错误是旧配置下的记录，未改写批次 manifest，也未伪造完成状态。
 
 ## 回退方式
 
 单次改动集中在 `runner.py` 与 `lib/index.js` 两处，`git revert` 对应提交即可；回退后将恢复「GBK 回显即崩、阶段停在 running」的旧行为，不建议。
 
-## 未决点（需另开一项处理，不在本次范围）
+## Windows agent 路由修复
 
-Windows 上 agent 阶段（answers/types/explanations/knowledge/assemble/review）全部依赖 `backend/wf-router.sh`，而配置把 `command[0]` 写死为 `/bin/sh`、脚本内部默认用 PATH 上的 `dsh`。本机两者都不成立：
+Windows 上原配置把 `command[0]` 写死为 `/bin/sh`，且 POSIX router 默认寻找 PATH 上的 `dsh`，导致 agent 阶段在配置校验时无法启动。本次将插件配置接到已经维护并测试的 Node 原生 `backend/wf-router.mjs`：它读取 `model-router.json` 选择模型/角色路由，创建隔离 profile，并在 Windows 上通过 `cmd.exe` 调用 Harness `dsh.cmd`。不新增重复的 Python router，也不改个人 `app/workflow/local-agent.json`。
 
-- PATH 无 `sh`（`Get-Command sh` 为空）；Git Bash 的 `C:\Program Files\Git\usr\bin\sh.exe` 存在但未接线。
-- PATH 无 `dsh`；harness 自带 `resources/runtime/cli/bin/dsh.cmd`（`.cmd` 需经 `cmd.exe` 才能从 POSIX shell 调用，MSYS bash 不能直接 exec）。
-
-要让批次在这台 Windows 机器上继续，需要把路由适配器做成 Windows 原生入口（Node 或 Python 版 router，直接以 `dsh.cmd`/`node dsh.js` 调用），而不是让 Python 工作流去 `exec /bin/sh`。这次只修了编码导致的「卡在 running」，没有改 agent 桥的这一层接线；在接线完成前，批次会停在 `answers`，错误即上文 `/bin/sh`。
+- `app/workflow/local_agent.py::_part_model_binding` 将 router 脚本及 `config/model-router.json` 的哈希纳入分片缓存绑定，支持 `.sh` 和 `.mjs`。
+- `backend/wf-router-native.test.cjs` 覆盖真实 `.cmd` 入口行为及插件配置；`app/workflow/test_local_agent.py` 覆盖命令配置不依赖 POSIX shell。
+- 不改批次数据、manifest、审核结果或上传状态；旧 supervisor 错误只作历史记录。配置可启动不代表 agent 阶段完成，仍以工作流导入校验为准。
+- 测试结果：native router **2/2 通过**；新增 Python 路由配置/缓存绑定测试 **1/1 通过**。完整套件在当前 Windows 环境的已知不兼容项见上方验证记录。
+- 回退：将 `backend/local-agent.plugin.json` 的 command 恢复到先前 POSIX 配置，并恢复 `_part_model_binding` 仅识别 `.sh`；Windows agent 会重新受 `/bin/sh` 阻断。

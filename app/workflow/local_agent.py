@@ -592,7 +592,7 @@ def _part_model_binding(config):
     """
     files = {}
     for token in config.get("command", []):
-        if not isinstance(token, str) or Path(token).name != "wf-router.sh":
+        if not isinstance(token, str) or Path(token).name not in ("wf-router.sh", "wf-router.mjs"):
             continue
         script = Path(token).expanduser().resolve()
         plugin = Path(os.environ.get("WF_PLUGIN_DIR") or script.parent.parent).expanduser().resolve()

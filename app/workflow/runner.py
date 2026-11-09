@@ -995,33 +995,19 @@ def _single_run_lock(batch_dir: Path, timeout: float = 2.0):
     makes a second invocation fail fast instead of wasting model calls and
     corrupting the batch.
     """
-    import errno
     import time
+    from . import supervisor
     lock_path = batch_dir / "workflow" / ".run.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+b")
-    try:
-        if not handle.seek(0, os.SEEK_END):
-            handle.write(b"0")
-            handle.flush()
-        deadline = time.monotonic() + timeout
-        import fcntl
-        while True:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError as exc:
-                if exc.errno not in (errno.EACCES, errno.EAGAIN):
-                    raise
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("该批次已有运行中的流水线（runner run），请等待其结束") from exc
-                time.sleep(0.1)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()
+    deadline = time.monotonic() + timeout
+    while True:
+        with supervisor._try_file_lock(lock_path) as acquired:
+            if acquired:
+                yield
+                return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("该批次已有运行中的流水线（runner run），请等待其结束")
+        time.sleep(0.1)
 
 
 def cmd_mark(args) -> int:

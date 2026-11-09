@@ -1,4 +1,4 @@
-# 2026-11-09 修复多卷上传的题目 ID 冲突（question_id_exists）
+﻿# 2026-11-09 修复多卷上传的题目 ID 冲突（question_id_exists）
 
 ## 背景 / 触发
 
@@ -72,6 +72,7 @@ accepted attempt 移到各卷 `07_upload/backups/stale-receipt-<时间戳>/`（�
 - 上传相关套件（payload/wire/upload/upload_client/upload_content/delivery）
   → **184 tests OK**。
 - 生产 `/api/health` 正常；暂存行已更新，备份文件存在。
+- 结论：上述用例全部通过（99 项与 184 项两轮均无失败）。
 
 ## 回退
 

@@ -1,12 +1,14 @@
 """Operations tests use disposable workflows only; no models or remote requests."""
 import concurrent.futures
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from workflow import operations as op, supervisor, auto
+from workflow import operations_development as dev
 
 
 class OperationsTests(unittest.TestCase):
@@ -38,6 +40,84 @@ class OperationsTests(unittest.TestCase):
     def request(self, claim, name, data=None, request="req", **kwargs):
         return op.action(self.root, self.folder, {k: claim[k] for k in ("incident_id", "session_id", "attempt_id")} |
                          {"request_id": request, "action": name, "input": data or {}}, **kwargs)
+
+    def test_host_failure_diagnostics_persist_in_receipt_and_event(self):
+        claimed = self.claim()
+        result = self.request(claimed, "progress", {
+            "state": "session_failed", "error": "resume failed; code=MISSING_SESSION",
+            "reason": {"error": {"message": "token=private-value"}, "payload": "DO_NOT_STORE"},
+            "headers": {"authorization": "DO_NOT_STORE"}, "stack": "DO_NOT_STORE",
+        })
+        detail = result["evidence"]["detail"]
+        self.assertIn("code=MISSING_SESSION", detail)
+        self.assertIn("[REDACTED]", detail)
+        self.assertNotIn("private-value", detail)
+        self.assertNotIn("DO_NOT_STORE", detail)
+        state = op._load(self.folder)
+        self.assertEqual(state["incident"]["events"][-1]["detail"], detail)
+        released = self.request(claimed, "release", {"reason": "attempt incomplete"}, request="release")
+        self.assertEqual(released["evidence"]["detail"], "attempt incomplete")
+        self.assertEqual(op._load(self.folder)["incident"]["status"], "queued")
+
+    def test_session_identity_recovery_preserves_audit_cooldown_and_fences_attempt(self):
+        claimed = self.claim()
+        recovery = {"session_id": claimed["session_id"], "reason": "missing_user_message_identity"}
+        now = op.time.time()
+        with patch.object(op.time, "time", return_value=now):
+            released = self.request(claimed, "release", {"session_corruption": recovery})
+        self.assertEqual(released["status"], "completed")
+        incident = op._load(self.folder)["incident"]
+        self.assertIsNone(incident["session_id"])
+        self.assertEqual(incident["session_recovery"], recovery | {"at": now})
+        self.assertEqual(incident["not_before"], now + 60)
+        self.assertEqual(incident["queue_generation"], claimed["queue_generation"] + 1)
+        self.assertIsNone(incident["attempt_id"])
+        with self.assertRaisesRegex(ValueError, "stale_lease"):
+            self.request(claimed, "progress", request="old-progress")
+        state = op._load(self.folder)
+        state["incident"]["not_before"] = 0
+        op._save(self.folder, state)
+        next_claim = op.claim(self.root, self.folder, {"incident_id": claimed["incident_id"], "session_id": "replacement"})
+        self.assertNotEqual(next_claim["attempt_id"], claimed["attempt_id"])
+        self.assertEqual(next_claim["session_id"], "replacement")
+        with self.assertRaisesRegex(ValueError, "stale_lease"):
+            self.request(claimed, "release", request="old-release")
+        with self.assertRaisesRegex(ValueError, "session_recovery_already_used"):
+            self.request(next_claim, "release", {"session_corruption": {
+                "session_id": "replacement", "reason": "missing_user_message_identity"}}, request="second-recovery")
+
+    def test_session_identity_recovery_refuses_any_unknown_receipt(self):
+        claimed = self.claim()
+        state = op._load(self.folder)
+        state["receipts"].append({"request_id": "unrelated-old", "status": "unknown", "fingerprint": "old"})
+        op._save(self.folder, state)
+        with self.assertRaisesRegex(ValueError, "unknown_receipt_quarantine"):
+            self.request(claimed, "release", {"session_corruption": {
+                "session_id": claimed["session_id"], "reason": "missing_user_message_identity"}})
+        incident = op._load(self.folder)["incident"]
+        self.assertEqual(incident["session_id"], claimed["session_id"])
+        self.assertEqual(incident["status"], "claimed")
+        self.assertNotIn("session_recovery", incident)
+
+    def test_session_identity_recovery_refuses_mismatched_or_invalid_report(self):
+        claimed = self.claim()
+        with self.assertRaisesRegex(ValueError, "session_corruption_identity_mismatch"):
+            self.request(claimed, "release", {"session_corruption": {
+                "session_id": "other", "reason": "missing_user_message_identity"}})
+        for report in (None, {}, {"session_id": "session", "reason": "transport"}):
+            with self.assertRaisesRegex(ValueError, "invalid_session_corruption"):
+                self.request(claimed, "release", {"session_corruption": report})
+        with self.assertRaisesRegex(ValueError, "invalid_session_corruption"):
+            self.request(claimed, "progress", {"session_corruption": {
+                "session_id": "session", "reason": "missing_user_message_identity"}})
+        self.assertEqual(op._load(self.folder)["incident"]["status"], "claimed")
+
+    def test_ordinary_release_never_retires_session_identity(self):
+        claimed = self.claim()
+        self.assertEqual(self.request(claimed, "release")["status"], "completed")
+        incident = op._load(self.folder)["incident"]
+        self.assertEqual(incident["session_id"], claimed["session_id"])
+        self.assertNotIn("session_recovery", incident)
 
     def test_discovery_requires_actual_failed_heal(self):
         self.put("workflow/self-heal.json", {"events": []})
@@ -117,6 +197,71 @@ class OperationsTests(unittest.TestCase):
             result = self.request(claim, "preview_repair", {"repair": "repair_source_tables"}, request="preview")
             self.assertFalse(result["evidence"]["passed"])
 
+    def test_escalation_reconciles_only_with_current_stage_verification(self):
+        self.claim()
+        original = op._load(self.folder)
+        original["incident"].update(status="needs_deep_repair", verification={"verified": True},
+                                    findings=[{"summary": "retain historical finding"}])
+        for passed in (False, True):
+            op._save(self.folder, json.loads(json.dumps(original)))
+            with patch.object(op, "_verify", return_value={"verified": passed, "stage": "validate"}):
+                result = op._discover(self.folder)
+            self.assertEqual(result["incident"]["status"], "resolved" if passed else "needs_deep_repair")
+            self.assertEqual(result["incident"]["findings"], original["incident"]["findings"])
+            if passed:
+                self.assertEqual(result["incident"]["prior_disposition"], "needs_deep_repair")
+
+    def test_legacy_answers_prewrite_refusal_reconciles_without_replay(self):
+        claim = self.claim()
+        state = op._load(self.folder)
+        state["incident"]["stage"] = "answers"
+        state["receipts"] = [{"request_id": "legacy", "fingerprint": "bound-original",
+            "status": "unknown", "evidence": {
+                "error": "Knowledge rejudgment is not applicable to this stage"}}]
+        original = json.loads(json.dumps(state))
+        with patch.object(op.self_heal, "_apply") as apply:
+            op._reconcile_stage_refusal(state)
+            apply.assert_not_called()
+        receipt = state["receipts"][0]
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual(receipt["evidence"], original["receipts"][0]["evidence"])
+        self.assertEqual(receipt["fingerprint"], "bound-original")
+        self.assertFalse(receipt["reconciliation"]["replayed"])
+        state["incident"]["status"] = "queued"
+        generation = state["incident"]["queue_generation"]
+        op._reconcile_stage_refusal(state)
+        self.assertEqual(state["incident"]["queue_generation"], generation + 1)
+        self.assertEqual(receipt["reconciliation"]["queue_generation"], generation + 1)
+        count = len(state["incident"]["events"])
+        op._reconcile_stage_refusal(state)
+        self.assertEqual(len(state["incident"]["events"]), count)
+        for change in ("other_stage", "outbox", "other_error"):
+            refused = json.loads(json.dumps(original))
+            if change == "other_stage":
+                refused["incident"]["stage"] = "validate"
+            elif change == "outbox":
+                refused["resume_outbox"] = {"request_id": "legacy"}
+            else:
+                refused["receipts"][0]["evidence"]["error"] = "interrupted after write"
+            op._reconcile_stage_refusal(refused)
+            self.assertEqual(refused["receipts"][0]["status"], "unknown")
+
+    def test_inapplicable_knowledge_resume_fails_before_mutation(self):
+        claim = self.claim()
+        state = op._load(self.folder)
+        state["incident"]["stage"] = "answers"
+        op._save(self.folder, state)
+        with patch.object(op.self_heal, "_apply") as apply, \
+             patch.object(op.self_heal, "_snapshot", return_value={"files": {}}):
+            result = self.request(claim, "resume", {
+                "strategy": "rejudge_knowledge", "reason": "test stage mismatch"},
+                enqueue=lambda **kwargs: None)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("not applicable", result["evidence"]["error"])
+        apply.assert_not_called()
+        self.assertEqual(self.request(claim, "diagnose", request="after")["status"], "completed")
+        self.assertNotIn("resume_outbox", op._load(self.folder))
+
     def test_partial_mutation_exception_stays_unknown(self):
         claim = self.claim()
         with patch("workflow.self_heal_actions._prepare_tables", return_value={"passed": True}), \
@@ -186,6 +331,15 @@ class OperationsTests(unittest.TestCase):
         self.put("workflow/manifest.json", self.manifest)
         self.assertEqual(len(op.incidents(self.root)["incidents"]), 1)
 
+    def test_view_returns_persisted_snapshot_when_batch_runner_holds_lock(self):
+        incident = op.incidents(self.root)["incidents"][0]
+        with supervisor._try_file_lock(supervisor._auto_lock_path(self.folder)) as acquired:
+            self.assertTrue(acquired)
+            view = op.view(self.root, self.folder)
+        self.assertEqual(view["incident"]["incident_id"], incident["incident_id"])
+        self.assertEqual(view["incident"]["status"], "queued")
+        self.assertEqual(view["receipts"], [])
+
     def test_http_contract_roundtrip_without_models(self):
         from http.server import ThreadingHTTPServer
         from workbench import server
@@ -220,7 +374,7 @@ class OperationsTests(unittest.TestCase):
         claim = self.claim()
         key = hashlib.sha256(str(Path(local_agent.__file__).resolve().parent).encode()).hexdigest()
         path = Path(tempfile.gettempdir()) / ('mudu-local-agent-' + key + '.lock')
-        code = 'import fcntl,sys; f=open(sys.argv[1],"a+b"); fcntl.flock(f,fcntl.LOCK_EX); print("ready",flush=True); sys.stdin.read()'
+        code = 'from pathlib import Path; import sys; from workflow.supervisor import _try_file_lock\nwith _try_file_lock(Path(sys.argv[1])) as acquired:\n assert acquired\n print("ready",flush=True)\n sys.stdin.read()'
         process = subprocess.Popen([sys.executable, '-c', code, str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(process.stdout.readline().strip(), 'ready')
@@ -235,7 +389,7 @@ class OperationsTests(unittest.TestCase):
     def test_cross_process_runner_lock_blocks_claim(self):
         import subprocess, sys
         incident = op.incidents(self.root)["incidents"][0]
-        code = 'import fcntl,sys; f=open(sys.argv[1],"a+b"); fcntl.flock(f,fcntl.LOCK_EX); print("ready",flush=True); sys.stdin.read()'
+        code = 'from pathlib import Path; import sys; from workflow.supervisor import _try_file_lock\nwith _try_file_lock(Path(sys.argv[1])) as acquired:\n assert acquired\n print("ready",flush=True)\n sys.stdin.read()'
         process = subprocess.Popen([sys.executable, "-c", code, str(self.folder / "workflow/.run.lock")],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
@@ -359,6 +513,20 @@ class OperationsTests(unittest.TestCase):
         self.assertTrue(all(set(("timestamp", "action", "outcome", "detail", "verification")) <= e.keys() for e in incident["events"]))
 
 
+    def test_finish_can_hand_incident_to_a_person(self):
+        claim = self.claim()
+        receipt = self.request(claim, "finish", {"outcome": "needs_human", "summary": "预算用尽，需人工决定"}, request="human")
+        self.assertEqual(receipt["status"], "completed", receipt)
+        incident = op.view(self.root, self.folder)["incident"]
+        self.assertEqual(incident["status"], "needs_human")
+        self.assertEqual(incident["escalation"]["kind"], "human")
+        self.assertFalse(incident["eligible"])
+        self.assertEqual(incident["attempt_id"], None)
+        # A human hand-off cannot be reported as a successful repair.
+        self.assertEqual(receipt["evidence"]["outcome"], "needs_human")
+        self.assertFalse(receipt["evidence"]["verified"])
+
+
 class RealOperationsRepairTests(unittest.TestCase):
     def test_real_source_transaction_and_consumer_verification(self):
         # Reuse a source-bound legacy table fixture without mocking repair,
@@ -400,6 +568,240 @@ class RealOperationsRepairTests(unittest.TestCase):
         self.assertTrue(verified["evidence"]["verified"], verified)
         finished = action("finish", {"outcome": "resolved", "summary": "source-proven transaction and consumer recheck"})
         self.assertTrue(finished["evidence"]["verified"], finished)
+
+
+class FastRepairOperationsTests(unittest.TestCase):
+    """Failure packets, repeat escalation and isolated code repair.
+
+    Every test uses a disposable batch copy; the real plugin checkout is never
+    patched because ``_source_root`` points at a fake repository.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "workflows"
+        self.folder = self.root / "paper"
+        (self.folder / "workflow").mkdir(parents=True)
+        self.put("workflow/manifest.json", {"batch_dir": str(self.folder),
+                                            "stages": {"validate": {"status": "failed"}}, "inputs": {}})
+        signature = __import__("hashlib").sha256(b"validate\nbroken").hexdigest()[:16]
+        self.put("workflow/self-heal.json", {"events": [{"at": "2026-01-01", "stage": "validate",
+            "signature": signature, "outcome": "repair_failed", "attempt": 1}]})
+        patch.object(op.self_heal, "_candidate", return_value=("validate", "broken")).start()
+        patch.object(op, "_snapshot", return_value="snapshot1").start()
+        patch.object(supervisor, "execution_busy", return_value=False).start()
+        self.addCleanup(patch.stopall)
+        self.source = Path(self.tmp.name) / "source"
+        workflow = self.source / "app" / "workflow"
+        workflow.mkdir(parents=True)
+        (workflow / "__init__.py").write_text("", encoding="utf-8")
+        (workflow / "fixture_mod.py").write_text("def answer():\n    return 1\n", encoding="utf-8")
+        (workflow / "test_fixture.py").write_text(
+            "import unittest\nfrom workflow import fixture_mod\n\n"
+            "class Fixture(unittest.TestCase):\n"
+            "    def test_answer(self):\n"
+            "        self.assertEqual(fixture_mod.answer(), 1)\n", encoding="utf-8")
+        (workflow / "operations.py").write_text("# control plane\n", encoding="utf-8")
+        (self.source / "workflows" / "user").mkdir(parents=True)
+        (self.source / "workflows" / "user" / "private.json").write_text("{}", encoding="utf-8")
+        self.devdir = Path(self.tmp.name) / "dev"
+        patch.object(op, "_source_root", return_value=self.source).start()
+        patch.object(op, "_code_root", return_value=self.devdir).start()
+
+    def put(self, relative, value):
+        path = self.folder / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def claim(self):
+        incident = op.incidents(self.root)["incidents"][0]
+        return op.claim(self.root, self.folder, {"incident_id": incident["incident_id"], "session_id": "session"})
+
+    def request(self, claim, name, data=None, request="req", **kwargs):
+        return op.action(self.root, self.folder, {k: claim[k] for k in ("incident_id", "session_id", "attempt_id")} |
+                         {"request_id": request, "action": name, "input": data or {}}, **kwargs)
+
+    def test_diagnose_returns_self_contained_failure_packet(self):
+        claim = self.claim()
+        packet = self.request(claim, "diagnose")["evidence"]["packet"]
+        self.assertEqual(packet["batch_name"], "paper")
+        self.assertEqual(packet["stage"], "validate")
+        self.assertEqual(packet["batch_dir"], str(self.folder))
+        for key in ("failed_checks", "affected_unit_ids", "inputs", "input_files", "produced_files",
+                    "completed_independent_stages", "blocked_downstream_stages", "attempts",
+                    "code_fingerprint", "repairs", "resume_strategies"):
+            self.assertIn(key, packet)
+        self.assertEqual(packet["blocked_downstream_stages"], sorted(op._downstream("validate")))
+        self.assertNotIn("validate", packet["completed_independent_stages"])
+        self.assertNotIn("validate", packet["blocked_downstream_stages"])
+
+    def test_repeated_repair_on_identical_evidence_escalates_to_code_repair(self):
+        claim = self.claim()
+        with patch("workflow.self_heal_actions._prepare_tables", return_value={"passed": True, "changes": ["t"]}), \
+             patch("workflow.self_heal_actions.apply_source_table_repair", return_value={"installed": True}) as repair, \
+             patch.object(op.self_heal, "_snapshot", return_value={"files": {}}):
+            self.request(claim, "preview_repair", {"repair": "repair_source_tables"}, request="p1")
+            first = self.request(claim, "apply_repair", {"repair": "repair_source_tables"}, request="a1")
+            self.assertEqual(first["status"], "completed", first)
+            self.request(claim, "preview_repair", {"repair": "repair_source_tables"}, request="p2")
+            second = self.request(claim, "apply_repair", {"repair": "repair_source_tables"}, request="a2")
+        self.assertEqual(repair.call_count, 1)
+        self.assertEqual(second["status"], "failed", second)
+        self.assertIn("repeat_without_new_evidence", second["evidence"]["error"])
+        incident = op._load(self.folder)["incident"]
+        self.assertEqual(incident["escalation"]["kind"], "code_repair")
+        self.assertEqual(incident["escalation"]["attempts"], 1)
+        self.assertEqual([row["outcome"] for row in incident["attempts"]], ["applied"])
+
+    def test_resume_strategy_repeat_requires_changed_code_or_evidence(self):
+        claim = self.claim()
+        def enqueue(expected):
+            return {"queued": True}
+        with patch("workflow.self_heal._apply", return_value={"passed": True}) as apply:
+            first = self.request(claim, "resume", {"strategy": "retry_stage_with_fresh_context", "reason": "重新执行"},
+                                 request="r1", enqueue=enqueue)
+            self.assertEqual(first["status"], "completed", first)
+            state = op._load(self.folder)
+            state["incident"].update(status="queued", not_before=0)
+            op._save(self.folder, state)
+            claim = self.claim()
+            second = self.request(claim, "resume", {"strategy": "retry_stage_with_fresh_context", "reason": "再试一次"},
+                                  request="r2", enqueue=enqueue)
+            self.assertEqual(second["status"], "failed", second)
+            self.assertIn("repeat_without_new_evidence", second["evidence"]["error"])
+            self.assertEqual(apply.call_count, 1)
+            with patch.object(op, "_code_fingerprint", return_value="changed-code"):
+                third = self.request(claim, "resume", {"strategy": "retry_stage_with_fresh_context", "reason": "代码已修复"},
+                                     request="r3", enqueue=enqueue)
+        self.assertEqual(third["status"], "completed", third)
+        self.assertEqual(apply.call_count, 2)
+
+    def test_code_repair_lifecycle_is_isolated_and_install_is_gated(self):
+        claim = self.claim()
+        started = self.request(claim, "request_code_repair", {"summary": "fixture defect"}, request="start")
+        self.assertEqual(started["status"], "completed", started)
+        evidence = started["evidence"]
+        self.assertTrue(Path(evidence["workspace"]).is_dir())
+        self.assertIn("app/workflow/operations.py", evidence["locked"])
+        self.assertFalse((Path(evidence["workspace"]) / "workflows").exists())
+        with self.assertRaisesRegex(ValueError, "source_not_allowlisted"):
+            op._code_repair(self.folder, {"incident_id": claim["incident_id"], "stage": "validate"},
+                            {"operation": "read", "path": "app/workflow/operations.py"})
+        written = self.request(claim, "code_repair", {
+            "operation": "write", "path": "app/workflow/test_new.py",
+            "content": "import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n"}, request="write")
+        self.assertEqual(written["status"], "completed", written)
+        tested = self.request(claim, "code_repair", {"operation": "test",
+            "tests": ["workflow.test_fixture", "workflow.test_new"]}, request="test")
+        self.assertTrue(tested["evidence"]["passed"], tested)
+        prepared = self.request(claim, "code_repair", {"operation": "prepare"}, request="prepare")
+        self.assertEqual(prepared["status"], "completed", prepared)
+        self.assertEqual([change["path"] for change in prepared["evidence"]["changes"]],
+                         ["app/workflow/test_new.py"])
+        refused = self.request(claim, "install_code_repair", {"confirm": True}, request="install-off")
+        self.assertEqual(refused["status"], "failed", refused)
+        self.assertIn("install_disabled", refused["evidence"]["error"])
+        self.assertFalse((self.source / "app/workflow/test_new.py").exists())
+        with patch.dict(os.environ, {"MD_OPERATIONS_INSTALL": "1"}):
+            installed = self.request(claim, "install_code_repair", {"confirm": True}, request="install-on")
+        self.assertEqual(installed["status"], "completed", installed)
+        self.assertTrue(installed["evidence"]["restart_required"])
+        self.assertTrue((self.source / "app/workflow/test_new.py").is_file())
+        self.assertEqual(op._code_record(self.folder)["status"], "installed_pending_restart")
+        self.assertEqual(op._load(self.folder)["incident"]["code_repair"]["status"], "installed_pending_restart")
+        release = json.loads((self.source / dev.RELEASE_MARKER).read_text(encoding="utf-8"))
+        self.assertEqual(release["state"], "installed")
+        self.assertEqual(release["files"], ["app/workflow/test_new.py"])
+        self.assertTrue(release["plan_id"])
+
+    def test_code_repair_refuses_install_without_confirmation(self):
+        claim = self.claim()
+        self.request(claim, "request_code_repair", {}, request="start")
+        with patch.dict(os.environ, {"MD_OPERATIONS_INSTALL": "1"}):
+            refused = self.request(claim, "install_code_repair", {}, request="install")
+        self.assertEqual(refused["status"], "failed", refused)
+        self.assertIn("install_confirmation_required", refused["evidence"]["error"])
+
+    def test_regenerate_units_scopes_feedback_and_is_idempotent(self):
+        from workflow import agent_tasks
+        units = [{"unit_id": "u1"}, {"unit_id": "u2"}]
+        with patch.object(agent_tasks, "confirmed_units", return_value=units):
+            claim = self.claim()
+            first = self.request(claim, "regenerate_units", {
+                "target_stage": "answers", "unit_ids": ["u1"], "reason": "答案与原文不符"}, request="regen")
+            self.assertEqual(first["status"], "completed", first)
+            self.assertEqual(first["evidence"]["unit_ids"], ["u1"])
+            feedback = json.loads((self.folder / first["evidence"]["feedback_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(feedback["unit_ids"], ["u1"])
+            self.assertTrue(feedback["scoped_units"])
+            self.assertFalse(feedback["all_units"])
+            self.assertEqual(op.mf.load(self.folder)["stages"]["answers"]["status"], op.mf.PENDING)
+            again = self.request(claim, "regenerate_units", {
+                "target_stage": "answers", "unit_ids": ["u1"], "reason": "答案与原文不符"}, request="regen2")
+            self.assertEqual(again["evidence"]["status"], "already_scheduled", again)
+            self.assertEqual(len([row for row in op._load(self.folder)["incident"]["attempts"]
+                                  if row["kind"] == "regenerate"]), 1)
+
+    def test_regenerate_units_rejects_unknown_and_non_content_scope(self):
+        from workflow import agent_tasks
+        with patch.object(agent_tasks, "confirmed_units", return_value=[{"unit_id": "u1"}]):
+            claim = self.claim()
+            unknown = self.request(claim, "regenerate_units", {
+                "target_stage": "answers", "unit_ids": ["u9"]}, request="unknown")
+            self.assertEqual(unknown["status"], "failed", unknown)
+            self.assertIn("regenerate_units_unknown_units", unknown["evidence"]["error"])
+            boundary = self.request(claim, "regenerate_units", {
+                "target_stage": "upload", "unit_ids": ["u1"]}, request="boundary")
+            self.assertEqual(boundary["status"], "failed", boundary)
+            self.assertIn("regenerate_units_refuses_boundary", boundary["evidence"]["error"])
+            other = self.request(claim, "regenerate_units", {
+                "target_stage": "assemble", "unit_ids": ["u1"]}, request="other")
+            self.assertEqual(other["status"], "failed", other)
+            self.assertIn("regenerate_units_stage_unsupported", other["evidence"]["error"])
+
+    def test_cross_round_budget_caps_repeats(self):
+        def rows(count, kind, outcome):
+            return [{"kind": kind, "name": "n%d" % index, "evidence": "e%d" % index,
+                     "outcome": outcome} for index in range(count)]
+        incident = {"attempts": rows(op.BUDGET_ATTEMPTS, "repair", "failed")}
+        with self.assertRaisesRegex(ValueError, "attempt_budget_exhausted"):
+            op._check_budget(incident, "repair")
+        self.assertEqual(incident["escalation"]["kind"], "human")
+        incident = {"attempts": rows(op.BUDGET_INSTALLS, "install", "installed")}
+        with self.assertRaisesRegex(ValueError, "install_budget_exhausted"):
+            op._check_budget(incident, "install")
+        # A different kind is not blocked by the install cap, but the total cap
+        # still applies once attempts are exhausted.
+        self.assertIsNone(op._check_budget(incident, "repair"))
+        incident = {"attempts": rows(op.BUDGET_REGENERATIONS, "regenerate", "scheduled")}
+        with self.assertRaisesRegex(ValueError, "regenerate_budget_exhausted"):
+            op._check_budget(incident, "regenerate")
+        # Refusals do not count toward the total: they changed nothing.
+        incident = {"attempts": rows(op.BUDGET_ATTEMPTS, "repair", "refused")}
+        self.assertIsNone(op._check_budget(incident, "repair"))
+
+    def test_packet_reports_budget(self):
+        claim = self.claim()
+        packet = self.request(claim, "diagnose", {}, request="packet")["evidence"]["packet"]
+        self.assertEqual(packet["budgets"]["attempts"], 0)
+        self.assertEqual(packet["budgets"]["installs"], 0)
+        self.assertEqual(packet["budgets"]["installs_limit"], op.BUDGET_INSTALLS)
+
+    def test_finish_settles_repair_record(self):
+        claim = self.claim()
+        self.request(claim, "request_code_repair", {"summary": "程序缺陷"}, request="repair")
+        record = op._code_record(self.folder)
+        record["status"] = "installed_pending_restart"
+        op._save_code_record(self.folder, record)
+        receipt = self.request(claim, "finish", {"outcome": "needs_human", "summary": "需人工决定"},
+                               request="human")
+        self.assertEqual(receipt["status"], "completed", receipt)
+        record = op._code_record(self.folder)
+        self.assertEqual(record["status"], "needs_human")
+        self.assertTrue(record.get("settled_at"))
+        incident = op.view(self.root, self.folder)["incident"]
+        self.assertEqual(incident["code_repair"]["status"], "needs_human")
 
 
 if __name__ == "__main__":

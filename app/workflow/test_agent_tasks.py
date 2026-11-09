@@ -295,6 +295,44 @@ class AgentTasksTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.accept("answers", {"answers": {"1": "A"}, "evidence": {"2": ["附录 L1"]}, "missing": {}})
 
+    def test_answer_contract_errors_name_the_offending_fields_and_numbers(self):
+        # 重试反馈要能让模型自己改对：只说 Invalid fields 时模型只能靠猜，白烧一次模型调用。
+        with self.assertRaisesRegex(ValueError, r"absent=\['missing'\]"):
+            self.accept("answers", {"answers": {"1": "A"}, "evidence": {"1": ["附录 L1"]}})
+        with self.assertRaisesRegex(ValueError, r"unexpected=\['answer'\]"):
+            self.accept("answers", {"answer": "A", "answers": {"1": "A"},
+                                    "evidence": {"1": ["附录 L1"]}, "missing": {}})
+        with self.assertRaisesRegex(ValueError, r"evidence_without_answer=2"):
+            self.accept("answers", {"answers": {"1": "A"}, "evidence": {"1": ["附录 L1"], "2": ["附录 L2"]},
+                                    "missing": {}})
+        with self.assertRaisesRegex(ValueError, r"not_in_batch=2"):
+            self.accept("answers", {"answers": {"1": "A"}, "evidence": {"1": ["附录 L1"]},
+                                    "missing": {"2": ["原文未提供"]}})
+
+    def test_answers_task_example_carries_every_required_field(self):
+        # 示例漏掉必填字段时，模型每一轮都会照抄，流程就会在同一个阶段无限重试（2026-11-09 卡点）。
+        unit = {"unit_id": "q-1", "numbers": [1], "unit_kind": "standalone"}
+        task = tasks._build_task_template("answers", 200000, {}, {}, [], [unit])
+        tail = task["prompt"].split("Complete valid JSON syntax example", 1)[1]
+        payload = json.loads(tail.split("\n", 1)[1].split("\nPreconditions:", 1)[0])
+        example = payload["artifacts"][tasks.ARTIFACTS["answers"]]
+        for field in ("answers", "evidence", "missing"):
+            self.assertIn(field, example)
+        self.assertFalse(set(example["answers"]) & set(example["missing"]))
+
+    def test_every_stage_example_satisfies_its_declared_contract(self):
+        # 覆盖所有内容阶段：任何一个阶段示例回退成缺键都会被这里挡住，不必再等真实批次空转。
+        unit = {"unit_id": "q-1", "numbers": [1], "unit_kind": "standalone"}
+        self.assertEqual(set(tasks.EXAMPLE_REQUIRED), set(tasks.ARTIFACTS))
+        for stage, required in tasks.EXAMPLE_REQUIRED.items():
+            with self.subTest(stage=stage):
+                task = tasks._build_task_template(stage, 200000, {}, {}, [], [unit])
+                tail = task["prompt"].split("Complete valid JSON syntax example", 1)[1]
+                payload = json.loads(tail.split("\n", 1)[1].split("\nPreconditions:", 1)[0])
+                example = payload["artifacts"][tasks.ARTIFACTS[stage]]
+                self.assertEqual([key for key in required if key not in example], [],
+                                 f"{stage} example lost a required key")
+
     def test_answer_comparison_only_normalizes_quotes_and_whitespace(self):
         expected = 'He said, “It’s  fine.”'
         tasks._provenance({"answer": 'He said, "It\'s\n fine."', "explanation": ""}, "", expected)
@@ -527,6 +565,47 @@ class AgentTasksTest(unittest.TestCase):
         installed = json.loads((self.batch / tasks.ARTIFACTS['assemble']).read_text())['items'][0]
         self.assertEqual(installed['options'], ['A. reads', 'B. read', 'C. reading', 'D. to read'])
         self.assertNotIn('breads', json.dumps(installed, ensure_ascii=False))
+
+    def test_assemble_preserves_source_bound_group_material_through_normalization(self):
+        from workflow import question_draft
+        from workflow.wire_format import normalize_item
+
+        uid = "group-1-2"
+        children_text = ["1. Where is Tom? A. At home. B. At school. C. At work.",
+                         "2. What will he do? A. Read. B. Swim. C. Run."]
+        for shared in ("", "M: Tom is at home. He will read a book."):
+            with self.subTest(shared=shared):
+                lines = ["听下面一段对话。", *([shared] if shared else []), *children_text]
+                sections = [{"type": "听力长对话理解", "questions": [[1, 2]]}]
+                self.write("01_source/正文.txt", "\n".join(lines))
+                self.write("01_source/structure.json", {"sections": sections, "groups": []})
+                units = _build_units(sections, [], lines)
+                self.write("01_source/structure.confirmed.json", {"units": units})
+                self.write(tasks.ARTIFACTS["types"], {"items": [{"unit_id": uid,
+                    "type": "听力长对话理解", "subtypes": ["选择2题"], "evidence": ["L1–3"]}]})
+                self.write(tasks.ARTIFACTS["answers"], {"answers": {"1": "A", "2": "A"}})
+                knowledge = {"items": [{"unit_id": uid, "knowledge": ["主题/人与自我/生活与学习/学校生活"],
+                    "answer": "", "explanation": "无", "articleSummary": "无", "evidence": ["L1–3"],
+                    "subquestions": [{"number": n, "knowledge": [], "answer": "A", "explanation": "无"}
+                                     for n in (1, 2)]}]}
+                self.write(tasks.ARTIFACTS["knowledge"], knowledge)
+                self.write(tasks.ARTIFACTS["explanations"], explanations_of(knowledge))
+                source = question_draft.build(self.batch)["items"][0]
+                self.assertEqual(source["material"], shared)
+                row = dict(source, question_type="听力长对话理解",
+                           filterMetadata={"subtypes": ["选择2题"]},
+                           knowledge=knowledge["items"][0]["knowledge"])
+                row.pop("knowledgeIds", None)
+                row.pop("knowledge_ids", None)
+                expected_children = copy.deepcopy(row["subquestions"])
+                self.assertTrue(self.accept("assemble", {"items": [row]})["completed"])
+                installed = json.loads((self.batch / tasks.ARTIFACTS["assemble"]).read_text(encoding="utf-8"))["items"][0]
+                self.assertEqual(installed["material"], shared)
+                self.assertEqual(installed["stem"], source["stem"])
+                for actual, expected in zip(installed["subquestions"], expected_children):
+                    self.assertEqual(actual["stem"], expected["stem"])
+                    self.assertEqual(actual["options"], expected["options"])
+                self.assertEqual(normalize_item(installed)["material"], shared)
 
     def test_assemble_preserves_upstream_and_strict_labels(self):
         row = dict(self.knowledge["items"][0], id="q-1", number=1, numbers=[1], unit_kind="standalone",

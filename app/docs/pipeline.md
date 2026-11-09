@@ -16,7 +16,7 @@
 | 5 | `types` | 填目录题型、子类、词数并确认原文完整性 | `03_types/types.json` | agent | `preassemble`、结构确认 | `contentComplete=false` 不交付 |
 | 7 | `explanations` | 按Word原文逐字匹配解析/大意，确认缺失填占位 | `04_knowledge/explanations.json` | agent | `types`、`answers` | 来源唯一且精确绑定；不生成 |
 | 8 | `knowledge` | 仅填知识点叶子/ID与适用教材映射 | `04_knowledge/knowledge.json` | agent | `types` | 只含标签；不读取答案或解析 |
-| 9 | `assemble` | 确定性合流，按原题身份合入并校验全部上游数据 | `06_batch/batch.json` | agent/command | `answers`、`types`、`audio`（或有效跳过）、`explanations`、`knowledge` | 任一上游未交付/不合规/过期即等待 |
+| 9 | `assemble` | 确定性合流，按原题身份合入并校验全部上游数据 | `06_batch/batch.json` | agent/command | `preassemble`、`answers`、`types`、`explanations`、`knowledge` | 前置对象冲突或标签未交付即等待；不等待听力 |
 | 10 | `meta` | 归一难度与分类，并逐字段回填同批次 | `06_batch/batch_meta.base.json` | command | `assemble` | 不改题文与知识标签 |
 | 11 | `underlines` | 补画线并生成最终上传序列化视图 | `06_batch/batch_meta.json` | command | `meta` | 无 DOCX 保留原有内容 |
 | 12 | `validate` | 本地体检与原卷逐题对账 | `07_review/validation-report.json` | gate | `underlines` | 失败保留质量问题 |
@@ -70,7 +70,9 @@
 
 ## 卡点分类与前置预检
 
-工作台诊断会为每个自身卡点附带 `failure_class` 与 `next_action`，把“代理输出格式失败、输入过期、确定性闸门失败、审核质量差异、缺必需输入、等待上游”分开显示。下游仅等待上游时不再伪装成新的失败。
+工作台诊断会为每个自身卡点附带 `failure_class` 与 `next_action`，把“代理输出格式失败、输入过期、确定性闸门失败、审核质量差异、缺必需输入、等待上游”分开显示。下游仅等待上游时不再伪装成新的失败。上游交付不满足时区分“尚未完成执行”“已执行但质量/交付未满足”和“已执行但当前产物/消费者校验未满足”，审核已执行不等于质量放行。
+
+最终格式脚本通过后仍须通过来源固化钩子；`upload-format.json` 的 `passed:true/errors:[]` 只证明该报告的格式检查，不覆盖台账中后续固化失败。诊断保留实际固化异常和上游交付条件，来源变化错误列出首个冲突题组及字段。来源解析器补回原卷导语等对象变化时，通过受控 `preassemble` 刷新来源基线并复验；同一来源切片、媒体、题号及子题身份未变时保留已有填充，真实正文编辑冲突仍拒绝，不能以空 errors 绕过固化。
 
 `validate` 阶段会额外写入 `07_upload/local-preflight.json`：这是离线本地预检，不访问远端、不冻结文件、不批准上传，但会提前检查最终批次、标签目录、解析来源、媒体引用和 payload 大小。远端目录、媒体可访问性、冻结文件一致性仍只由 `prepare-upload`/`verify` 在上传前复核。
 

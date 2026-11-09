@@ -48,6 +48,36 @@ class ReviewEvidenceScopeTest(unittest.TestCase):
     def record(self, rid, checks):
         return {'round_id': rid, 'input_binding': 'binding', 'execution_id': 'exec', 'checks': checks}
 
+    def test_supplied_ocr_and_authority_context_are_bound(self):
+        import hashlib
+        self.save('04_knowledge/knowledge.json', {'items': []})
+        self.save('06_batch/batch.json', {'items': []})
+        self.save('01_source/pdf-ocr.json', {'text': 'Shared passage about a library.'})
+        self.save('01_source/material-roles.json', {'documents': []})
+        plan = review.prepare_round_plan(self.batch)
+        for relative in ('01_source/pdf-ocr.json', '01_source/material-roles.json'):
+            self.assertEqual(plan['input_hashes'][relative],
+                             hashlib.sha256((self.batch / relative).read_bytes()).hexdigest())
+        self.plan['input_hashes'].update(plan['input_hashes'])
+        check = self.check('group', 'Shared passage about a library.', '2')
+        check['evidence'].append({'path': '01_source/pdf-ocr.json', 'locator': 'OCR',
+                                  'quote': 'Shared passage about a library.'})
+        self.assertEqual(review._round_checks(self.record('sample', [check]), 'sample', self.plan, self.batch), [])
+        check['evidence'][-1]['quote'] = 'Invented quotation not in the OCR report.'
+        with self.assertRaises(ValueError):
+            review._round_checks(self.record('sample', [check]), 'sample', self.plan, self.batch)
+        self.save('01_source/pdf-ocr.json', {'text': 'Changed auxiliary text.'})
+        self.assertNotEqual(review.prepare_round_plan(self.batch)['input_binding'], plan['input_binding'])
+        from workflow.local_agent import AgentError, _check_input_hashes
+        with self.assertRaisesRegex(AgentError, 'Bundled input changed during agent task'):
+            _check_input_hashes(self.batch, {'01_source/pdf-ocr.json': plan['input_hashes']['01_source/pdf-ocr.json']})
+        (self.batch / '01_source/pdf-ocr.json').unlink()
+        absent = review.prepare_round_plan(self.batch)
+        self.assertNotIn('01_source/pdf-ocr.json', absent['input_hashes'])
+        self.plan['input_hashes'] = absent['input_hashes']
+        with self.assertRaisesRegex(ValueError, 'Evidence must cite a bound batch input'):
+            review._round_checks(self.record('sample', [check]), 'sample', self.plan, self.batch)
+
     def test_year_or_another_unit_cannot_stand_in_for_target(self):
         for quote in ('2017', 'Different question here.'):
             with self.subTest(quote=quote), self.assertRaises(ValueError):
