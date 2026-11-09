@@ -11,6 +11,23 @@
 9 个节点连成一条链，且 `stage_cards` 只暴露单个 `current`，并行完成顺序交错时画面
 表现为“来回跳”，已完成的组被下一个成为 current 的组短暂盖掉。
 
+## 补充（2026-11-09 下午）：题型判定并入「批次组装」节点
+
+用户指出“题型大部分在题干就能表现出来，放在组装批次比较合理”。核查后确认：
+`types` 的依赖只有 `structure_gate + preassemble`，即**批次组装一完成，题型判定
+就在同一批里立即开始**，与答案并行；执行顺序本就等价于“组装后马上判题型”。
+因此采用显示层合并（不改执行契约）：
+
+- `lib/client.js::compactFlowStages`：把 `preassemble` 与 `types` 合并为一个节点
+  「批次组装与题型」，节点完成态要求两者都完成；题型不再单独占一个节点。
+- 知识点节点改为只含 `knowledge`，标题「知识点与教材」。
+
+未采用“把 types 阶段真正并入 preassemble”的执行层改法：`types` 是导出任务的
+绑定身份（`workflow/agent-bindings/<task_id>.json` 的 stage、角色提示词
+`app/prompts/roles/types.md`、多个调度测试与 `agent_protocol._spec` 都按阶段 id
+校验），直接删除该 id 会破坏历史任务绑定与 10+ 个调度测试，需要独立的版本化迁移，
+不适合与显示修复混在一起。
+
 ## 改了什么（只改显示）
 
 1. `app/workbench/server.py`
