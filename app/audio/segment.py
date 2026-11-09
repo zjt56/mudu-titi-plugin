@@ -1072,6 +1072,41 @@ def _batch_segment_lock(batch: Path):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def lock_is_held(batch: Path) -> bool:
+    """不阻塞地探测本批次切段锁是否仍被活着的进程持有。
+
+    状态文件能活过后端重启（进程被强杀时 finally 不会执行），所以「running=True」
+    不等于真在跑；锁才是权威证据。POSIX 用 flock、Windows 用 msvcrt 字节锁，
+    与 _batch_segment_lock 的加锁方式保持一致。
+    """
+    path = Path(batch) / "02_audio" / ".segment.lock"
+    if not path.is_file():
+        return False
+    try:
+        handle = path.open("r+b")
+    except OSError:
+        # 打不开（例如文件被独占）说明另一个进程正在用它。
+        return True
+    with handle:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            return False
+        import fcntl
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+
+
 def run(batch: Path, cfg: dict | None = None, audio: str | None = None,
         progress=None) -> dict:
     with _batch_segment_lock(Path(batch)):

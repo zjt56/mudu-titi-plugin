@@ -435,20 +435,21 @@ def _segment_lock_held(batch_dir: Path) -> bool:
     """Whether a live segmenter process still owns this batch's audio lock.
 
     The job status file survives a backend restart, so a dead worker otherwise
-    blocks the batch for the whole heartbeat timeout. Probing the flock is exact.
+    blocks the batch for the whole heartbeat timeout. Probing the OS lock is
+    exact on both POSIX (flock) and Windows (msvcrt byte-range lock); the old
+    fcntl-only probe reported "held" forever on Windows, which is why a killed
+    segmenter kept the batch waiting the full 15 minutes.
     """
     path = Path(batch_dir) / "02_audio" / ".segment.lock"
     if not path.is_file():
         return False
     try:
-        import fcntl
-    except ImportError:  # Windows: fall back to the heartbeat timeout.
+        from audio.segment import lock_is_held
+    except (ImportError, OSError):
+        # 探针不可用时宁可多等，也不并发启动第二个切段进程。
         return True
     try:
-        with path.open("a+") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            return False
+        return lock_is_held(Path(batch_dir))
     except OSError:
         return True
 

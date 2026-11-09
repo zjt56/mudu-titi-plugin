@@ -506,12 +506,16 @@ def _collect(batch, stage, speculative=False):
             add(ARTIFACTS["explanations"])
     if stage in ("assemble", "review"):
         add(ARTIFACTS["knowledge"])
-        # 用户选择跳过听力（批次内 02_audio/SKIP_LISTENING）：不强制 audio_map，
-        # 听力单元不挂音频附件，其余单元照常组装/审核。
+        # 硬规则 15 / contracts.assemble：听力是最慢的支线，组装不等听力。
+        # 内容审核（review）必须读转写核对听力语义，audio_map 在它这里是硬前置；
+        # 组装只搬运四路已验收产物并固化批次，音频由 audio 阶段随后写入
+        # attachments（batch_fill 按 stage=audio 同步），因此这里既不做硬前置，
+        # 也不把音频计入组装输入绑定——音频补齐不该让已完成的组装失效。
         from . import manifest as mf, contracts
         audio_context = dict(manifest, batch_dir=str(batch))
         skip_listening = bool(mf.skip_reason(audio_context, contracts.STAGE_BY_ID["audio"]))
-        add(ARTIFACTS["audio"], bool(inputs.get("audio")) and not skip_listening)
+        if stage == "review":
+            add(ARTIFACTS["audio"], bool(inputs.get("audio")) and not skip_listening)
         add("01_source/附录.txt", False)
         add("01_source/extraction.json", False)
     if stage == "review":
@@ -564,7 +568,7 @@ def _collect(batch, stage, speculative=False):
         final = "06_batch/batch_meta.json" if (batch / "06_batch/batch_meta.json").is_file() else ARTIFACTS["assemble"]
         add(final)
         add("07_review/validation-report.json", False)
-    if stage in ('audio', 'assemble', 'review') and any(
+    if stage in ('audio', 'review') and any(
             doc and doc.get('generation') for doc in audio_pair):
         for relative, expected in zip(('02_audio/audio_map.json', '02_audio/segment-evidence.json'), audio_pair):
             actual = add(relative)

@@ -1650,41 +1650,73 @@ def audio_status(batch: str | None = None):
                   "job": _audio_job["kind"]})
     if batch:
         state["batch"] = batch
+        if state.get("running") and time() - float(state.get("updated") or 0) > _AUDIO_STALE_GRACE \
+                and not _audio_has_live_worker(batch):
+            # 状态文件残留（进程已被杀、后端重启过）：界面不能再显示“正在运行”，
+            # 否则用户会一直等一个不存在的任务。下次点切段/自动推进时会真正重跑。
+            state["stale"] = True
+            state["running"] = False
+            state["detail"] = "切段进程已中断（状态为残留），可重新开始"
     return state
 
 
 # 后台听力任务稳定性的时间参数（秒）：心跳在 progress 里刷新。
-_AUDIO_STALE_SECONDS = 600          # 状态文件 running 但 >10min 无心跳：判定为僵死，允许重开
+_AUDIO_STALE_GRACE = 5             # 状态刚写入时的宽限，避免误报残留
 _AUDIO_WATCHDOG_SECONDS = 900       # 看门狗：>15min 无心跳则把任务判失败并清理，避免永久卡住
 _AUDIO_WATCHDOG_TICK = 30
 
 
-def _audio_has_live_worker(data_dir: Path) -> bool:
-    """是否还有本机 audio/worker.py 子进程在跑（用于区分“真在跑”与“线程/进程已死”）。"""
+def _audio_batch_folder(batch: str | None) -> Path | None:
+    """把批次名解析成在 workflows 下的真实目录；越界或不存在时返回 None。"""
+    if not batch:
+        return None
     try:
-        import subprocess
-        out = subprocess.run(["ps", "-Axo", "command"], capture_output=True, text=True, timeout=5).stdout
-        return "audio/worker.py" in out
-    except Exception:  # noqa: BLE001
-        return True  # 无法判断时保守地当作仍在跑，不误判重开
+        root = WORKFLOWS.resolve()
+        folder = (WORKFLOWS / batch).resolve()
+    except OSError:
+        return None
+    if folder.parent != root or not folder.is_dir():
+        return None
+    return folder
+
+
+def _audio_has_live_worker(batch: str | None) -> bool:
+    """切段任务是否真的还活着（用于区分“真在跑”与“进程已死的残留状态”）。
+
+    状态文件会活过后端重启：进程被强杀时线程的 finally 不会执行，running=True
+    会一直留着。因此不能用状态文件当存活证据，也不能依赖 `ps`（Windows 没有，
+    旧实现在 Windows 上恒返回 True，导致僵死状态永远清不掉）。权威证据只有两个：
+    本进程的后台任务仍在跑，或本批次的 02_audio/.segment.lock 仍被某个进程持有。
+    """
+    if _audio_job["running"] and (not batch or _audio_job.get("batch") == batch):
+        return True
+    folder = _audio_batch_folder(batch)
+    if folder is None:
+        return False
+    try:
+        from audio.segment import lock_is_held
+    except (ImportError, OSError):
+        return True  # 探针不可用时保守等待，不误判重开
+    try:
+        return lock_is_held(folder)
+    except OSError:
+        return True
 
 
 def _audio_reap_stale(kind: str, batch, data_dir: Path, boot) -> None:
-    """清理“状态 running 但线程/进程已死”的僵死任务，避免永久卡住无法重开。
+    """清理“状态 running 但进程已死”的僵死任务，避免永久卡住无法重开。
 
-    只有当状态文件 running 且心跳超时、且本机确实没有 worker.py 在跑时才清理。
+    只要有存活证据（本进程任务或批次锁）就不动；没有就立即重置，不再等 10 分钟
+    心跳——残留状态本身不是运行证据。
     """
     state = boot.read_status(data_dir, batch)
     if not state.get("running"):
         return
-    age = time() - float(state.get("updated") or 0)
-    if age < _AUDIO_STALE_SECONDS:
-        return
-    if _audio_has_live_worker(data_dir):
+    if _audio_has_live_worker(batch):
         return  # 有真实进程在跑，交给看门狗，不抢占
     boot.write_status(data_dir, batch=batch, job=state.get("job") or kind, running=False,
                       ok=False, phase="error",
-                      detail="", error="切段任务异常中断（进程已退出、心跳超时），已自动重置，可重跑")
+                      detail="", error="切段任务已中断（无存活进程，状态文件为残留），已自动重置，可重跑")
 
 
 @serialized
@@ -1695,8 +1727,7 @@ def start_audio_job(kind: str, options: dict) -> dict:
     batch = Path(options["folder"]).name if kind == "segment" and options.get("folder") else None
     if batch:
         _audio_reap_stale(kind, batch, data_dir, boot)
-        current = boot.read_status(data_dir, batch)
-        if current.get("running") and time() - float(current.get("updated") or 0) < _AUDIO_STALE_SECONDS:
+        if _audio_has_live_worker(batch):
             raise ValueError("该批次已有切段任务在运行，请等它结束")
     with _audio_job["lock"]:
         if _audio_job["running"]:
