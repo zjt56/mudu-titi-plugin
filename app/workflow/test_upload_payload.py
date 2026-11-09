@@ -330,6 +330,19 @@ class UploadPayloadTest(unittest.TestCase):
         self.assertEqual(report["payload"]["items"][0]["attachments"], q["attachments"])
         self.assertEqual(report["summary"]["attachments"], 2)
 
+    def test_legacy_material_and_stem_placements_normalized_for_question_bank(self):
+        # 题库逐题确认只接受 question/option/answer/explanation；历史批次和
+        # 装配阶段用 material/stem 标正文图片，若原样发送会报 invalid_attachment。
+        q = question()
+        q['attachments'] = [
+            {'kind': 'image', 'url': '/source-media/paper/material.png', 'placement': 'material'},
+            {'kind': 'image', 'url': '/source-media/paper/stem.png', 'placement': 'stem'},
+        ]
+        report = self.build(batch(q))
+        self.assertTrue(report['passed'], report['errors'])
+        wire = report['payload']['items'][0]['attachments']
+        self.assertEqual([attachment['placement'] for attachment in wire], ['question', 'question'])
+
     def test_existing_media_map_remaps_parent_and_child_without_mutation(self):
         q = reading_group()
         q['attachments'] = [
@@ -347,14 +360,17 @@ class UploadPayloadTest(unittest.TestCase):
         report = self.build(data, **options)
         self.assertTrue(report['passed'], report['errors'])
         wire = report['payload']['items'][0]
-        self.assertEqual(wire['attachments'][0], {**q['attachments'][0], 'url': options['media_map']['cut.mp3']})
+        # 旧批次/装配阶段的 stem/material 位置不是题库合法值，上线时归到题干位置。
+        legacy_audio = {**q['attachments'][0], 'url': options['media_map']['cut.mp3'], 'placement': 'question'}
+        self.assertEqual(wire['attachments'][0], legacy_audio)
         self.assertEqual(wire['attachments'][1], {**q['attachments'][1], 'url': options['media_map']['picture A.png']})
         self.assertEqual(wire['attachments'][2], q['attachments'][2])
         self.assertEqual(wire['subquestions'][0]['attachments'][0],
                          {**q['subquestions'][0]['attachments'][0], 'url': options['media_map']['picture A.png']})
         self.assertEqual(data, before)
         self.assertEqual(self.build(data, **json.loads(json.dumps(options)))['payload'], report['payload'])
-        self.assertEqual(self.build(data)['payload']['items'][0]['attachments'], q['attachments'])
+        self.assertEqual(self.build(data)['payload']['items'][0]['attachments'],
+                         [legacy_audio | {'url': q['attachments'][0]['url']}, *q['attachments'][1:]])
 
     def test_upload_verify_replays_frozen_media_mapping_options(self):
         from pathlib import Path

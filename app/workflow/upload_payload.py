@@ -398,7 +398,13 @@ class _Builder:
             if "name" in attachment and not isinstance(attachment["name"], str):
                 self.error("ATTACHMENT_NAME_INVALID", "附件 name 必须是字符串", uid)
             placement = attachment.get("placement")
-            if placement is not None and placement not in ("question", "stem", "option", "answer", "explanation", "material"):
+            if placement in ("stem", "material"):
+                # 题库只渲染 question/option/answer/explanation。旧批次或装配
+                # 阶段用 stem/material 标出正文里的图，按题干附件发送，不能把
+                # 非法位置留在线上载荷里（服务端逐题确认会报 invalid_attachment）。
+                placement = "question"
+                safe["placement"] = "question"
+            if placement is not None and placement not in ("question", "option", "answer", "explanation"):
                 self.error("ATTACHMENT_PLACEMENT_INVALID", "附件 placement 不是已支持位置", uid)
             if "optionKey" in attachment and (not isinstance(attachment["optionKey"], str) or not re.fullmatch(r"[A-Z]", attachment["optionKey"])):
                 self.error("ATTACHMENT_OPTION_INVALID", "optionKey 必须是单个大写 A–Z", uid)
@@ -637,7 +643,7 @@ class _Builder:
             # 由 scan_media 报错，绝不自动猜测 URL。
             from .wire_format import OPTION_PREFIX, replace_images
             attachments = list(output.get("attachments") or [])
-            for key, placement in (("stem", "question"), ("material", "material")):
+            for key, placement in (("stem", "question"), ("material", "question")):
                 if isinstance(output.get(key), str):
                     output[key] = replace_images(output[key], placement, None,
                                                  self.media_map, attachments)

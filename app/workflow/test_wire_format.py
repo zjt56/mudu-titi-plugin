@@ -56,6 +56,15 @@ class WireFormatTest(unittest.TestCase):
         self.assertEqual([(a["kind"], a["url"]) for a in out["attachments"]],
                          [("audio", "/source-media/b/seg-q-1.mp3")])
 
+    def test_material_image_uses_question_placement(self):
+        # 题库只渲染 question/option/answer/explanation；材料图片若带
+        # placement=material，逐题确认会被整批拒绝为 invalid_attachment。
+        item = {"unit_kind": "group", "stem": "阅读短文", "material": "见图 [IMG p1.jpeg]"}
+        out = normalize_item(item, media_map={"p1.jpeg": "/source-media/b/p1.jpeg"})
+        self.assertEqual([(a["kind"], a["placement"], a["url"]) for a in out["attachments"]],
+                         [("image", "question", "/source-media/b/p1.jpeg")])
+        self.assertNotIn("[IMG", out["material"])
+
     def test_group_material_filled_from_confirmed_by_numbers(self):
         item = {"unit_id": "g", "unit_kind": "group", "numbers": [6, 7],
                 "stem": "听下面一段对话。", "material": ""}

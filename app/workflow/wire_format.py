@@ -201,7 +201,9 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None):
     # 统一按身份去重，既幂等去重又不会误删已挂好的图片。
     existing = [a for a in (data.get("attachments") or []) if isinstance(a, dict)]
     attachments = list(existing)
-    for key, placement in (("stem", "question"), ("material", "material")):
+    # 题库只认 question/option/answer/explanation；材料里的图没有独立位置，
+    # 上传后随题干显示（放在 material 位置会被服务端判 invalid_attachment）。
+    for key, placement in (("stem", "question"), ("material", "question")):
         if isinstance(data.get(key), str):
             data[key] = replace_images(data[key], placement, None, media_map, attachments)
 
