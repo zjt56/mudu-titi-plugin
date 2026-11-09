@@ -43,6 +43,9 @@ def _last_error_line(text: str) -> str:
     noise = ("调用模型", "已校验并落盘", "复用已校验快照", "执行：", "$ ", "[stderr]")
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     clean = [line for line in lines if not any(marker in line for marker in noise)]
+    # 带尝试身份的 JSON 外框由 _agent_error 读取对应报告；不能再次作为原始日志展示，
+    # 否则会绕过阶段/尝试匹配，或把已被后续轮次修复的错误重新带回。
+    clean = [line for line in clean if not ('"attempt_dir"' in line and line.startswith("{"))]
     for line in reversed(clean):
         if line.startswith("{") and '"error"' in line:
             try:
@@ -73,20 +76,98 @@ def _review_failure_detail(batch: Path) -> str:
     return ""
 
 
-def _agent_error(batch: Path, stage_id: str) -> str:
-    """取该阶段最近一次 agent 尝试的具体错误：优先 import-report，其次响应外框。"""
+def _failed_units(report) -> dict:
+    if not isinstance(report, dict):
+        return {}
+    failed = report.get("failed_units")
+    if isinstance(failed, dict):
+        return failed
+    for note in report.get("notes", []) or []:
+        prefix = "Label repair exhausted for units: "
+        if isinstance(note, str) and note.startswith(prefix):
+            try:
+                failed = json.loads(note[len(prefix):])
+            except ValueError:
+                continue
+            if isinstance(failed, dict):
+                return failed
+    return {}
+
+
+def _unit_errors(failed: dict) -> str:
+    return "；".join(f"{unit}：{error if isinstance(error, str) else json.dumps(error, ensure_ascii=False)}"
+                    for unit, error in failed.items())
+
+
+def _agent_error(batch: Path, stage_id: str, record: dict | None = None) -> str:
+    """只解释当前阶段最近的绑定尝试，不从旧尝试中捞取失败。"""
+    from datetime import datetime
+
     runs = batch / "workflow" / "agent-runs"
     if not runs.is_dir():
         return ""
-    cands = sorted((p for p in runs.glob(f"{stage_id}-*") if p.is_dir()),
-                   key=lambda p: p.stat().st_mtime, reverse=True)
-    for run in cands:
-        report = _read(run / "import-report.json")
-        if isinstance(report, dict):
-            err = report.get("error") or report.get("message")
-            if err:
-                return str(err)
-        # 分片失败时错误在阶段日志，而不是这里；继续看下一个
+    record = record or {}
+    # CLI 日志中的 attempt_dir 是导入报告所属尝试的明确身份；mtime 不能覆盖它。
+    bound = record.get("attempt_dir")
+    log = _tail_file(batch / "workflow" / "logs" / f"{stage_id}.log", limit=None)
+    if not bound:
+        for line in reversed(log.splitlines()):
+            try:
+                envelope = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(envelope, dict) and envelope.get("attempt_dir"):
+                bound = envelope["attempt_dir"]
+                break
+    if bound:
+        if not isinstance(bound, str):
+            return ""
+        run = Path(bound)
+        run = (run if run.is_absolute() else batch / run).resolve()
+        if run.parent != runs.resolve() or not run.name.startswith(stage_id + "-") or not run.is_dir():
+            return ""
+    else:
+        cands = [p for p in runs.glob(f"{stage_id}-*") if p.is_dir() and p.name != stage_id + "-parts"]
+        if not cands:
+            return ""
+        run = max(cands, key=lambda p: p.stat().st_mtime_ns).resolve()
+        if run.parent != runs.resolve():
+            return ""
+    report_path = run / "import-report.json"
+    progress = sorted((p for p in run.glob("repair-progress-*.json")
+                       if re.fullmatch(r"repair-progress-\d+\.json", p.name)),
+                      key=lambda p: int(p.stem.rsplit("-", 1)[1]))
+    latest = progress[-1] if progress else None
+    # 阶段已开始新一轮但日志尚未更新时，不能显示上一轮失败。
+    if record.get("started_at"):
+        try:
+            started = datetime.fromisoformat(record["started_at"]).timestamp()
+        except (ValueError, TypeError):
+            return ""
+        evidence = [p for p in (report_path, latest) if p is not None and p.is_file()]
+        if not evidence or max(p.stat().st_mtime for p in evidence) < started:
+            return ""
+    report = _read(report_path)
+    if isinstance(report, dict):
+        if report.get("stage", stage_id) != stage_id or report.get("completed") is True:
+            return ""
+        err = report.get("error") or report.get("message")
+        if err:
+            return str(err)
+    if latest:
+        repair = _read(latest)
+        if isinstance(repair, dict) and repair.get("stage") == stage_id:
+            failed = _failed_units(repair)
+            # 最新轮次明确没有失败时，不复活先前报告里的失败单元。
+            if isinstance(repair.get("failed_units"), dict):
+                return _unit_errors(failed)
+    failed = _failed_units(report)
+    if failed:
+        return _unit_errors(failed)
+    if isinstance(report, dict):
+        notes = report.get("notes")
+        if isinstance(notes, list):
+            return "；".join(note for note in notes if isinstance(note, str))
     return ""
 
 
@@ -238,8 +319,14 @@ def _remedy(stage: contracts.Stage, batch_dir: str, detail: str = "") -> dict:
                         "如果这批次不需要听力音频，可在音频设置里明确跳过听力。",
                 "command": ""}
     if stage.kind == contracts.AGENT:
-        return {"hint": "代理阶段未产出合格产物：先看具体校验错误；多为内容抄写/格式可自动修复，"
-                        "重跑一次通常即过。若反复失败，缩小分片（assemble_part_units）或检查模型配置。",
+        if "not verbatim-bound to supplied answer material" in detail:
+            return {"hint": "答案来源逐字绑定检查未通过：按列出的失败单元和题号核对本次任务所供权威答案材料，"
+                            "先排除加粗、空白、引号、全半角及句末句号等不影响正确性的格式差异，此类差异自动按等价处理。"
+                            "保留原答案文字；归一化后仍不同才修正内容或来源绑定，再复验该检查。"
+                            "仅修复受影响单元，保留已验证单元；不得编造答案或原样重试。",
+                    "command": ""}
+        return {"hint": "代理阶段未产出合格产物：按具体失败单元与校验错误定位输入、输出或校验器问题，"
+                        "自动修正后用原检查复验；保留已验证单元，不原样重试。",
                 "command": f"{base} run --batch-dir {batch_dir} --stage {stage.id} --force"}
     return {"hint": "", "command": ""}
 
@@ -307,7 +394,7 @@ def diagnose(batch_dir) -> dict:
                 if invalidation.get("scope") == "stage":
                     detail = str(invalidation.get("reason") or note)
             elif status == mf.NEEDS_REVIEW:
-                reason = "代理产出待复核：需要修正后重跑或人工判断"
+                reason = "代理产出未通过校验：需定位具体检查并自动修正复验"
             elif status == mf.BLOCKED:
                 reason = "阶段被阻断"
             else:
@@ -332,13 +419,13 @@ def diagnose(batch_dir) -> dict:
                     reason = "审核放行条件未满足"
                     detail = note or "审核已执行；当前质量或交付证据尚未满足放行条件"
             if not detail:
-                err = _agent_error(batch, stage.id)
+                err = _agent_error(batch, stage.id, record)
                 if err:
                     detail = err
             if not detail and stage.id == "review":
                 detail = _review_failure_detail(batch)
             if not detail:
-                log_err = _last_error_line(_tail_file(batch / "workflow" / "logs" / f"{stage.id}.log"))
+                log_err = _last_error_line(_tail_file(batch / "workflow" / "logs" / f"{stage.id}.log", limit=None))
                 if log_err:
                     detail = log_err
             if not detail:

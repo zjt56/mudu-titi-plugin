@@ -295,6 +295,26 @@ class AgentTasksTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.accept("answers", {"answers": {"1": "A"}, "evidence": {"2": ["附录 L1"]}, "missing": {}})
 
+    def test_answers_ignore_extracted_word_markup_but_preserve_answer_text(self):
+        source = ('**73****.****(Watching) a video about the findings of ancient ruins****.****'
+                  '　【解析】原解析\n'
+                  '**74****.****It wasn****’****t easy****.****/(It was) hard /difficult****.**\n'
+                  '**75****.****Never give up****.****/Face difficulties bravely****.**')
+        answers = {'73': '(Watching) a video about the findings of ancient ruins.',
+                   '74': 'It wasn’t easy./(It was) hard /difficult.',
+                   '75': 'Never give up./Face difficulties bravely.'}
+        payload = {'answers': answers, 'evidence': {n: ['附录对应答案行'] for n in answers}, 'missing': {}}
+        units = [{'unit_id': 'group-73-74-75', 'numbers': [73, 74, 75], 'unit_kind': 'group'}]
+        tasks._validate(self.batch, 'answers', payload, {'01_source/附录.txt': source}, units)
+        self.assertEqual(payload['answers'], answers)
+        for wrong in ('Watching a video about the findings of ancient ruins.',
+                      '(Watching) a video about the findings of modern ruins.',
+                      '(Watching) a video about the findings of ancient ruins!',
+                      '(watching) a video about the findings of ancient ruins.'):
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(ValueError, 'Answer 73.*verbatim-bound'):
+                invalid = dict(payload, answers=dict(answers, **{'73': wrong}))
+                tasks._validate(self.batch, 'answers', invalid, {'01_source/附录.txt': source}, units)
+
     def test_answer_contract_errors_name_the_offending_fields_and_numbers(self):
         # 重试反馈要能让模型自己改对：只说 Invalid fields 时模型只能靠猜，白烧一次模型调用。
         with self.assertRaisesRegex(ValueError, r"absent=\['missing'\]"):
@@ -333,16 +353,36 @@ class AgentTasksTest(unittest.TestCase):
                 self.assertEqual([key for key in required if key not in example], [],
                                  f"{stage} example lost a required key")
 
-    def test_answer_comparison_only_normalizes_quotes_and_whitespace(self):
+    def test_answer_comparison_tolerates_layout_but_rejects_content_changes(self):
         expected = 'He said, “It’s  fine.”'
         tasks._provenance({"answer": 'He said, "It\'s\n fine."', "explanation": ""}, "", expected)
         for answer in ('He said, "Its fine."', 'He said, "It\'s not fine."',
                        'Hesaid, "It\'s fine."', 'he said, "It\'s fine."'):
             with self.subTest(answer=answer), self.assertRaisesRegex(ValueError, "differs"):
                 tasks._provenance({"answer": answer, "explanation": ""}, "", expected)
-        # Source extraction still requires verbatim text, even for equivalent punctuation.
-        with self.assertRaisesRegex(ValueError, "Unsourced answer"):
-            tasks._provenance({"answer": '"yes"', "explanation": ""}, '“yes”')
+        # The source gate and downstream comparison share format tolerance.
+        tasks._provenance({"answer": '"yes"', "explanation": ""}, '**“yes”**')
+        for answer in ('**He said, “It’s fine.”**', 'He said, “It’s fine”',
+                       'Ｈｅ said， “It’s fine。”', 'He said, “It’s fine.”'):
+            with self.subTest(answer=answer):
+                tasks._provenance({'answer': answer, 'explanation': ''}, '', expected)
+        for expected_answer, changed in (('3.14', '314'), ('-2', '2'), ('A', 'B'),
+                                         ('10²', '102'), ('do not go', 'do go')):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, 'differs'):
+                tasks._provenance({'answer': changed, 'explanation': ''}, '', expected_answer)
+
+    def test_answer_source_and_downstream_share_harmless_format_tolerance(self):
+        source = '**1****.****It wasn****’****t easy****.****/(It was) hard /difficult****.**'
+        variants = ('It wasn’t easy./(It was) hard /difficult.',
+                    "It wasn't easy/(It was) hard/difficult",
+                    'Ｉｔ wasn’t easy。／(It was) hard ／difficult。')
+        unit = [{'unit_id': 'q-1', 'numbers': [1], 'unit_kind': 'standalone'}]
+        for answer in variants:
+            with self.subTest(answer=answer):
+                payload = {'answers': {'1': answer}, 'evidence': {'1': ['附录']}, 'missing': {}}
+                tasks._validate(self.batch, 'answers', payload, {'01_source/附录.txt': source}, unit)
+                tasks._provenance({'answer': answer, 'explanation': ''}, '', variants[0])
+                self.assertEqual(payload['answers']['1'], answer)
 
     def test_answers_task_uses_appendix_without_explicit_answers_input(self):
         from workflow import contracts

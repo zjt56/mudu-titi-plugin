@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """卡点诊断聚合器回归：确保把分散在日志/报告里的真实原因翻译出来。"""
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -252,6 +253,102 @@ class DiagnoseTest(unittest.TestCase):
         self.assertIn("缺少可读取", item["detail"])
         self.assertNotIn("CATALOG_REQUIRED", item["detail"])
         self.assertNotIn("必须提示", item["detail"])
+
+    def _answer_attempt(self, name="answers-current", report=None):
+        manifest = self._load_manifest()
+        manifest["stages"]["answers"].update(status=mf.NEEDS_REVIEW, notes="")
+        mf.save(self.batch, manifest)
+        run = self.batch / "workflow/agent-runs" / name
+        _write(self.batch, str(run.relative_to(self.batch) / "import-report.json"),
+               report if report is not None else {"completed": False, "status": "needs_review"})
+        log = self.batch / "workflow/logs/answers.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(json.dumps({"attempt_dir": str(run), "report": report or {}}, ensure_ascii=False)
+                       + "\n[stderr]\n", encoding="utf-8")
+        return run
+
+    def _answer_detail(self):
+        # Minimal fixture intentionally lacks real upstream artifacts; dependency
+        # warnings are separate from the attempt failure being tested here.
+        return diagnose.explain(self.batch, "answers")["detail"].split("上游交付未满足：")[0].rstrip("；")
+
+    def _repair(self, run, index, failed, stage="answers"):
+        _write(self.batch, str(run.relative_to(self.batch) / f"repair-progress-{index:02d}.json"),
+               {"stage": stage, "validated_units": ["q-1"], "failed_units": failed})
+
+    def test_answers_latest_repair_shows_complete_unit_error_and_specific_remedy(self):
+        error = "Answer 73 is not verbatim-bound to supplied answer material" + " detail" * 300
+        failed = {"group-73-74-75": error}
+        report = {"completed": False, "notes": ["Label repair exhausted for units: "
+                                                 + json.dumps(failed)]}
+        run = self._answer_attempt(report=report)
+        self._repair(run, 1, {"q-old": "old error"})
+        self._repair(run, 2, failed)
+        before = {p: p.read_bytes() for p in self.batch.rglob("*") if p.is_file()}
+        item = diagnose.explain(self.batch, "answers")
+        self.assertEqual(self._answer_detail(), "group-73-74-75：" + error)
+        self.assertNotIn("attempt_dir", item["detail"])
+        self.assertNotIn("重跑一次通常即过", item["hint"])
+        self.assertNotIn("人工", item["reason"] + item["hint"])
+        self.assertIn("答案来源逐字绑定检查", item["hint"])
+        self.assertEqual(item["command"], "")
+        self.assertEqual(before, {p: p.read_bytes() for p in self.batch.rglob("*") if p.is_file()})
+
+    def test_answers_import_report_notes_fallback_is_complete(self):
+        failed = {"group-73-74-75": "Answer 73 is not verbatim-bound to supplied answer material"}
+        self._answer_attempt(report={"completed": False, "notes": [
+            "Label repair exhausted for units: " + json.dumps(failed)]})
+        self.assertEqual(self._answer_detail(),
+                         diagnose._unit_errors(failed))
+
+    def test_answers_log_binding_overrides_newer_unrelated_attempt(self):
+        run = self._answer_attempt()
+        self._repair(run, 2, {"q-73": "current error"})
+        _write(self.batch, "workflow/agent-runs/answers-unrelated/import-report.json",
+               {"error": "unrelated error"})
+        os.utime(self.batch / "workflow/agent-runs/answers-unrelated", (2000000000, 2000000000))
+        self.assertEqual(self._answer_detail(), "q-73：current error")
+
+    def test_answers_latest_progress_order_is_numeric_not_mtime(self):
+        run = self._answer_attempt()
+        self._repair(run, 10, {"q-73": "latest error"})
+        self._repair(run, 2, {"q-old": "old error"})
+        self.assertEqual(self._answer_detail(), "q-73：latest error")
+
+    def test_answers_latest_empty_progress_does_not_revive_old_failures(self):
+        run = self._answer_attempt(report={"notes": ['Label repair exhausted for units: {"q-old":"old error"}']})
+        self._repair(run, 1, {"q-old": "old error"})
+        self._repair(run, 2, {})
+        self.assertEqual(self._answer_detail(), "")
+
+    def test_answers_rejects_wrong_stage_or_outside_attempt_binding(self):
+        run = self._answer_attempt()
+        self._repair(run, 2, {"q-old": "wrong stage error"}, stage="explanations")
+        self.assertEqual(self._answer_detail(), "")
+        manifest = self._load_manifest()
+        for bound in (str(run.parent / "explanations-other"), str(self.batch.parent)):
+            with self.subTest(bound=bound):
+                manifest["stages"]["answers"]["attempt_dir"] = bound
+                mf.save(self.batch, manifest)
+                self.assertEqual(self._answer_detail(), "")
+
+    def test_answers_new_attempt_never_falls_back_to_older_error(self):
+        _write(self.batch, "workflow/agent-runs/answers-old/import-report.json", {"error": "old failure"})
+        self._answer_attempt()
+        self.assertEqual(self._answer_detail(), "")
+
+    def test_answers_new_stage_start_excludes_stale_bound_report(self):
+        run = self._answer_attempt(report={"error": "old failure" + " x" * 1000})
+        self._repair(run, 2, {"q-old": "old failure"})
+        manifest = self._load_manifest()
+        manifest["stages"]["answers"]["started_at"] = "2099-01-01T00:00:00+00:00"
+        mf.save(self.batch, manifest)
+        self.assertEqual(self._answer_detail(), "")
+
+    def test_answers_successful_import_does_not_revive_progress_failure(self):
+        run = self._answer_attempt(report={"completed": True})
+        self._repair(run, 2, {"q-old": "old failure"})
+        self.assertEqual(self._answer_detail(), "")
 
     def test_missing_input_reported(self):
         manifest = self._load_manifest()

@@ -966,9 +966,23 @@ def _types(payload, units):
 
 
 def _answer_comparison_text(value):
-    """Normalize quote style and whitespace only for comparing validated answers."""
-    quotes = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
-    return " ".join(value.translate(quotes).split())
+    """Compare answer content without extraction/layout-only differences.
+
+    Preserve words, case, digits, negation, signs and internal punctuation. Do
+    not use broad Unicode compatibility normalization: it changes exponents.
+    """
+    from .extract import _plain
+    text = _plain(value)
+    text = re.sub(r'</?(?:b|strong|em|i)(?:\s[^>]*)?>', '', text, flags=re.I)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.I)
+    fullwidth = {code: code - 0xFEE0 for code in range(0xFF01, 0xFF5F)}
+    text = text.translate(fullwidth).translate(str.maketrans(
+        {"‘": "'", "’": "'", "“": '"', "”": '"', "，": ",", "：": ":", "；": ";", "。": "."}))
+    # A sentence-ending period, including before an alternative or an appendix
+    # label, is presentation. Decimal points/internal punctuation remain intact.
+    text = re.sub(r"\.(?=\s*[\"']?\s*(?:/|【|$))", '', text, flags=re.M)
+    text = re.sub(r'\s*/\s*', '/', text)
+    return " ".join(text.split())
 
 
 def _provenance_text(value):
@@ -995,7 +1009,9 @@ def _provenance(row, source_text, expected_answer=None):
         raise ValueError("AI provenance belongs in answer, never answer")
     if answer and expected_answer and _answer_comparison_text(answer) != _answer_comparison_text(expected_answer):
         raise ValueError("Answer differs from validated supplied answers")
-    if answer and not expected_answer and answer not in source_text and not explanation.endswith(AI_MARK):
+    if (answer and not expected_answer
+            and _answer_comparison_text(answer) not in _answer_comparison_text(source_text)
+            and not explanation.endswith(AI_MARK)):
         raise ValueError("Unsourced answer needs explicit source or AI provenance in explanation")
     # 用户规则（2026-11）：有解析就直接用材料里的解析，不再要求 AI 生成、也不要求
     # 「（AI生成，待校对）」标记；缺失填「无」。解析只需在文本归一化后能在材料中找到
@@ -1128,9 +1144,10 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 return False
             if value in text:
                 return True
-            # 去空白/标点后再比对：问答和书面表达常跨行，不能因排版差异整段失败。
-            compact = re.sub(r"[\s\u3000]+", "", value)
-            haystack = re.sub(r"[\s\u3000]+", "", text)
+            # Use the same format tolerance here and in downstream assembly.
+            # Original files/payload strings remain unchanged.
+            compact = _answer_comparison_text(value)
+            haystack = _answer_comparison_text(text)
             return bool(compact) and compact in haystack
 
         for number, answer in answers.items():
