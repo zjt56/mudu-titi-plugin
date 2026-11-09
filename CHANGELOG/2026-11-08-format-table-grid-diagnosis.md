@@ -1,6 +1,6 @@
 # 2026-11-08 修复2017卷表格空列丢失及格式诊断误报
 
-## 触发与实际原因
+## 背景与触发
 
 用户报告【木牍教育】17年安徽中考英语“最终上传格式检查”卡住，原因显示“上传前必须读取当前启用通用知识点版本及完整节点快照”。
 
@@ -8,7 +8,7 @@
 
 独立读取 Word 原件发现诗歌表实际4列，首行 `gridBefore=1` 后接三首诗，第二行 Notes 的 `colspan=4` 正确。提取元数据已保留这一偏移，但 question_draft 转换丢了行首空列。原件 SHA256 与 extraction.source_sha256 一致，不应将 Notes 擅改为跨3列。
 
-## 实现
+## 改了什么（实现）
 
 - `question_draft._source_table_rows`：显式保留 Word grid_before/grid_after 的空白位置为线格式空 cell；保留原始文字及 rowspan/colspan，垂直合并续行仍由原始跨度表达。未定义/非法偏移不作猜测。
 - `self_heal_actions._prepare_tables`：扩展既有受控表格恢复，只有唯一源表绑定、旧 rows 严格等于已知丢空列投影时才补回空位置。验证提取所绑定原件摘要，拒绝双材料别名；通过原有备份/收据/来源审计/安装复验路径更新批次。无证据的缺格或非空文本变化不自动修。
@@ -27,7 +27,7 @@
 - 使用 runner 正常重跑 format_gate：completed；passed=true、errors=[]；48单元、96题、36附件。
 - 工作台实际 HTTP /api/batches：flow_done=true，diagnostics.blocking_count=0，uploaded=false。审核11项差异仍保留，未提交题库。真实上传时仍读取启用目录和完整节点，不放宽上传安全校验。
 
-## 测试
+## 验证（测试）
 
 最终针对 diagnose/question_draft/self_heal_actions/format_gate/docx_extract 共90项通过（1.699秒）。最终防护及加强断言后的隔离全量1690项（88.899秒），9 failures、0 errors、17 skipped，失败名称集合与既有9项基线完全一致，无新增失败。不能将基线失败表述为全通过。
 

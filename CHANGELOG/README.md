@@ -31,8 +31,9 @@
 ## 变更索引（新→旧）
 
 | 日期 | 记录 | 摘要 |
-|---|---|---|
+| 2026-11-09 | [2026-11-09-console-encoding-stage-wedge.md](2026-11-09-console-encoding-stage-wedge.md) | 控制台GBK回显不再崩：stdio改replace、阶段子进程UTF-8、执行器崩溃标failed不再卡running |
 | 2026-11-08 | [2026-11-08-harness-operations.md](2026-11-08-harness-operations.md) | 附加Harness运维会话、持久故障处理记录、受控修复及真实复验，保留已有流程 |
+| 2026-11-08 | [2026-11-08-image-attachment-preserve.md](2026-11-08-image-attachment-preserve.md) | 修复组级/子题图片附件在组装与沿用中被丢弃（上传 SOURCE_IMAGE_MISSING），23卷审计 0 issues |
 | 2026-11-08 | [2026-11-08-format-table-grid-diagnosis.md](2026-11-08-format-table-grid-diagnosis.md) | 修复Word空白网格列丢失及格式诊断误读deferred，2017卷体检和最终格式已通过 |
 | 2026-11-08 | [2026-11-08-source-type-select.md](2026-11-08-source-type-select.md) | 修改标签的来源类型改为目录下拉选择，具体来源名称保留文本输入 |
 | 2026-11-08 | [2026-11-08-writing-preview-no-duplicate.md](2026-11-08-writing-preview-no-duplicate.md) | 书面表达预览只补切片之前的导语，修复题干/要求/配图重复，原始与正式数据不变 |

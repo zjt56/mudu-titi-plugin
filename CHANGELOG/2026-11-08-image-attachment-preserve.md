@@ -12,7 +12,7 @@ group-56-57-58（image10）、group-59-60-61-62（image15）、group-63-64-65（
    从不采纳 draft（`question_draft`，权威）里的正确附件。
 3. 由此 batch.json/base 缺组级图片 → 上传源审计拒绝。
 
-## 修复
+## 改了什么（修复）
 - `wire_format.normalize_item`：**保留原 attachments**（不再预清空 image/audio），从文本 [IMG]/audio_map 追加后统一去重；
   去重身份对 image/audio 用 `(kind,name)`（同一媒体多一份引用只留首次，通常是 preassemble 权威附件），避免既有附件与文本各存一份重复。
 - `batch_fill.py` 新增 `_sync_media_attachments(kept,fresh)`：沿用未变单元时，把 draft 权威对象里存在、旧对象缺失的

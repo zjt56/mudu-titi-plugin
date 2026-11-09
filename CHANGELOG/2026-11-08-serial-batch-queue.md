@@ -4,7 +4,7 @@
 
 用户要求：上传多份试卷后，排队区必须**依次串行**执行——第一份跑完才轮到第二份，不能并行同时跑。
 
-## 改动
+## 改了什么
 
 - `app/workbench/server.py`：
   - 新增进程级 FIFO 队列 `_advance_queue` + 单一调度线程 `_advance_worker_loop`，同一时刻只允许一个批次在推进。

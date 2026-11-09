@@ -4,7 +4,7 @@
 
 `workflow.test_source_structure` 中多个回归用例失败，表现为完形填空、补全对话和 DOCX 换行场景的源头选项被判为空或不完整。根因不是题型规则，而是确认结构将选项记录在 `source_parts`，正式 `stem` 只保留题干/材料；审计只读取 `stem`，因此看不到题号后的选项。
 
-## 改动
+## 改了什么
 
 - `app/workflow/question_content.py`：`audit_source_unit` 在传入原文行时，按已确认 `source_span` 读取原始清理文本进行来源选项审计；不改写确认结构，也不把选项拼进正式 `stem`。
 - `app/workflow/structure_gate.py`：结构闸门调用来源审计时传入当前原文行。

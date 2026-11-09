@@ -4,7 +4,7 @@
 
 上一版把表格行内图片放到行尾独立单元格，用户要求图片必须和它所在单元格的文字放在一起，不要分开。
 
-## 改动
+## 改了什么
 
 - `app/workbench/server.py::source_blocks`：按单元格切分每行，逐单元格收集 `[IMG ...]` 图片名，输出 `cellImages[行][列] = [图片名...]`；单元格文本去掉 IMG 标记但保留原有文字。
 - `app/workbench/server.py::attach_media`：为 `table.cellImages` 每张图片补 `{name,url}`。

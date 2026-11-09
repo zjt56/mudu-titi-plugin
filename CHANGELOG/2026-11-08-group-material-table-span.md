@@ -8,7 +8,7 @@
 
 `question_draft._bound_source` 只对 `source_span.basis == "ai_classified"` 走整窗边界；本卷该组 basis 是 `cleaned_source`，于是退回“按 stem 唯一匹配定位”。stem 只含题干（第 56 题起），定位结果从第 160 行开始，把前面的表格材料（153–159 行）切掉，`build()` 的 group 分支据此得到空 material。
 
-## 改动
+## 改了什么
 
 - `app/workflow/question_draft.py::_bound_source`：当 `unit_kind == "group"` 且 `source_span.basis ∈ {ai_classified, cleaned_source}` 且行号合法、stem 能在窗口内定位时，返回**整个 confirmed span 窗口**（材料+题目）作为绑定文本，而非只框住 stem。定位仅用于证明 stem 在该窗内，不再缩短材料。
 - 仅作用于 group；standalone 仍只绑定自身题干，行为不变。

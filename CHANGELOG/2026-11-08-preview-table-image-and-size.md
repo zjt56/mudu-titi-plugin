@@ -4,7 +4,7 @@
 
 2022 年安徽卷第一篇阅读理解（group-56-57-58）的图片在原卷预览里不显示。核对发现该篇材料是表格型，图片 `[IMG image10.jpeg]` 等写在 `[TABLE ...]` 单元格内（`[IMG image10.jpeg]<br>Weather`），而后端 `source_blocks` 只按 `|` 切单元格，把图片当成单元格文本，导致图片块丢失。用户同时要求原卷图片显示小一点，不要占太大。
 
-## 改动
+## 改了什么
 
 - `app/workbench/server.py::source_blocks`：解析表格时先将单元格内 `[IMG ...]` 抽成独立 image 块（表格渲染后按原顺序追加），单元格文本保留（去掉 IMG 标记）。不再丢表格内图片。
 - `lib/client.js`：
