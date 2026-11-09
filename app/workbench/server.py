@@ -1073,7 +1073,15 @@ def review_snapshot(folder):
     rounds = []
     for rid, name in (("labels", "一审"), ("sample", "二审")):
         checks = records.get(rid, {}).get("checks", [])
-        rounds.append({"round_id": rid, "name": name, "completed": rid in checked,
+        historical = [r for r in payload.get("rounds", [])
+                      if isinstance(r, dict) and r.get("round_id") == rid
+                      and r.get("execution_id") and isinstance(r.get("checks"), list)
+                      and r["checks"]]
+        previous_checks = historical[0]["checks"] if len(historical) == 1 else []
+        current = rid in checked
+        rounds.append({"round_id": rid, "name": name, "completed": current,
+                       "state": "completed" if current else "needs_refresh" if previous_checks else "not_started",
+                       "historical_reviewed": len(previous_checks),
                        "reviewed": len(checks),
                        "ok": sum(c.get("verdict") == "ok" for c in checks),
                        "scope": "全量单元" if rid == "labels" else "抽查小题"})

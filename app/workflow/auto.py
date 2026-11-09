@@ -530,6 +530,28 @@ def advance(batch_dir: Path, bridge: dict, stop_at: str | None = None) -> dict:
         return _advance_locked(batch_dir, bridge, stop_at)
 
 
+def _refresh_completed_review(batch_dir, manifest):
+    """Requeue invalid review evidence, never quality-only differences."""
+    record = manifest["stages"].get("review", {})
+    if record.get("status") not in mf.TERMINAL_OK:
+        return False
+    rounds_file = Path(batch_dir) / "07_review" / "review-rounds.json"
+    try:
+        payload = json.loads(rounds_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    # 没有实际轮次证据（旧批次/测试夹具）时不把完成态改判为失效；
+    # 只有“确实执行过、但已不满足当前契约”的记录才补审。
+    if not isinstance(payload, dict) or not payload.get("rounds"):
+        return False
+    from . import review
+    if review.evaluate_rounds(batch_dir, payload).get("execution_completed"):
+        return False
+    mf.invalidate_stage(batch_dir, manifest, "review", "审核记录不再满足当前审核契约，自动补审")
+    mf.save(batch_dir, manifest)
+    return True
+
+
 def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -> dict:
     from . import operations
     if operations.lease_active(batch_dir):
@@ -623,6 +645,9 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
             mf.save(batch_dir, manifest)
             status = mf.PENDING
         incremental_requeued = False
+        if stage.id == "review" and _refresh_completed_review(batch_dir, manifest):
+            record = manifest["stages"][stage.id]
+            status = record.get("status")
         if status in mf.TERMINAL_OK:
             # 阶段级增量审计：终态但仍有缺口时只重跑当前阶段，
             # 不让下游整体失效，也不重复已完成的题目。

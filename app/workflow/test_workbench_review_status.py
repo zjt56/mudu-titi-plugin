@@ -60,6 +60,31 @@ class ReviewStatusOverviewTest(unittest.TestCase):
         self.assertEqual(data["counts"]["unverified"], 0)
         self.assertEqual(data["review_status"]["excluded_units"], 1)
 
+    def test_stale_round_keeps_history_without_claiming_current_completion(self):
+        import json
+        payload = {"rounds": [{"round_id": "labels", "execution_id": "real-run",
+                              "checks": [{"unit_id": "q-1", "verdict": "ok"}]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "07_review").mkdir()
+            (folder / "07_review/review-rounds.json").write_text(json.dumps(payload), encoding="utf-8")
+            with patch("workflow.review.evaluate_rounds", return_value={
+                    "checked_rounds": [], "execution_completed": False, "passed": False}):
+                status, records = server.review_snapshot(folder)
+            self.assertEqual(records, {})
+            first, second = status["rounds"]
+            self.assertEqual(first["state"], "needs_refresh")
+            self.assertEqual(first["historical_reviewed"], 1)
+            self.assertFalse(first["completed"])
+            self.assertEqual(first["reviewed"], 0)
+            self.assertEqual(second["state"], "not_started")
+            with patch("workflow.review.evaluate_rounds", return_value={
+                    "checked_rounds": ["labels"], "execution_completed": False, "passed": False}):
+                status, records = server.review_snapshot(folder)
+            self.assertEqual(status["rounds"][0]["state"], "completed")
+            self.assertEqual(status["rounds"][0]["reviewed"], 1)
+            self.assertIn("labels", records)
+
     def test_without_skip_marker_listening_units_stay_unverified(self):
         data = self.run_overview(False, {}, [])
         by_id = {row["unit_id"]: row for row in data["rows"]}
