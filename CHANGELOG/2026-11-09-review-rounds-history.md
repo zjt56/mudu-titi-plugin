@@ -62,7 +62,7 @@ $env:PYTHONPATH=(Get-Location); $env:PYTHONUTF8=1
 python -m unittest workflow.test_review_rounds
 ```
 
-结果：**Ran 70 tests, OK**（含新增 3 条）。
+结果：**Ran 70 tests, OK（70 项通过）**（含新增 3 条）。
 
 ```
 python -m unittest workflow.test_review_rounds workflow.test_review_rounds_recovery workflow.test_pipeline_regressions workflow.test_review_consensus

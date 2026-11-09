@@ -46,7 +46,7 @@
 
 ## 如何验证
 
-- `cd app && PYTHONPATH=. PYTHONUTF8=1 python -m unittest workflow.test_audio_liveness workflow.test_auto_audio workflow.test_agent_tasks workflow.test_paper_audio` → **Ran 72 tests, OK**。
+- `cd app && PYTHONPATH=. PYTHONUTF8=1 python -m unittest workflow.test_audio_liveness workflow.test_auto_audio workflow.test_agent_tasks workflow.test_paper_audio` → **Ran 72 tests, OK（72 项通过）**。
   - 不加 `PYTHONUTF8=1` 时 `test_agent_tasks` 有 5 个 `UnicodeDecodeError: 'gbk' codec ...`，是本机 GBK 默认编码下测试自身 `read_text()` 未指定编码的既有问题，与本次改动无关。
 - 现场复核（21:12–21:16）：心跳越过 900 秒后 supervisor 判 stale 并重跑切段，21:16:26 产出 `audio_map.json`/`segment-evidence.json`/17 个切片；同一 dispatch 内 `audio→assemble→meta→underlines→validate` 依次 completed，`review` 21:19:24 完成，`review_gate` 落盘 `needs_review`（10 条知识点差异，`manual_only=true`）。
 - `workflow/supervisor-result.json` 现为 `{"status":"reviewing","reason":"自动阶段已全部完成"}`，无残留 `running` 阻塞。

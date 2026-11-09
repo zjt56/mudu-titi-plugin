@@ -32,6 +32,9 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-answer-boundary-review-fixes.md](2026-11-09-answer-boundary-review-fixes.md) | 审查修复：换行句号、上下标语义、格式空答案及当前尝试错误详情 |
+| 2026-11-09 | [2026-11-09-review-rounds-history.md](2026-11-09-review-rounds-history.md) | 跨轮审核差异追加快照，过期观察先留档再出队 |
+| 2026-11-09 | [2026-11-09-audio-liveness-and-assemble-audio.md](2026-11-09-audio-liveness-and-assemble-audio.md) | 音频锁探活与残留状态清理，组装不再等待听力映射 |
 | 2026-11-09 | [2026-11-09-answer-format-tolerance.md](2026-11-09-answer-format-tolerance.md) | 2023卷答案误判：答案来源及下游共用格式容错，完整显示失败单元与检查原因 |
 | 2026-11-09 | [2026-11-09-2016-blocker-root-fixes.md](2026-11-09-2016-blocker-root-fixes.md) | 修复 2016 卷 explanations/review 反复卡点：证据路径重映射、source_ref 容错、sample 提示词、自愈重试预算、依赖放行、重复上传去重与彻底删除批次 |
 | 2026-11-09 | [2026-11-09-windows-shared-lock-and-review-freshness.md](2026-11-09-windows-shared-lock-and-review-freshness.md) | Windows 审核分片真正共享锁并行、审核并发 5 路；审核模型 stages.review/roles.review 生效；已完成审核在绑定输入变化时立即失效 |

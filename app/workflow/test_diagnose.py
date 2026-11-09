@@ -350,6 +350,124 @@ class DiagnoseTest(unittest.TestCase):
         self._repair(run, 2, {"q-old": "old failure"})
         self.assertEqual(self._answer_detail(), "")
 
+    def _producer_envelope(self, stage, *, error=None, task=None):
+        manifest = self._load_manifest()
+        manifest["stages"][stage].update(
+            status=mf.FAILED if error else mf.NEEDS_REVIEW, notes="代理桥执行失败")
+        mf.save(self.batch, manifest)
+        run = self.batch / "workflow/agent-runs" / (stage + "-current")
+        run.mkdir(parents=True)
+        if error:
+            # local_agent.invoke/main: no import-report exists when invocation fails.
+            payload = {"error": error, "code": "execution", "artifacts": {
+                "attempt_dir": str(run), "stderr": str(run / "stderr.txt")}}
+        else:
+            _write(self.batch, str(run.relative_to(self.batch) / "task-report.json"), task)
+            payload = {"attempt_dir": str(run), "status": "needs_review", "report": task}
+        log = self.batch / "workflow/logs" / (stage + ".log")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        # runner replaces the stage log with captured stdout followed by stderr.
+        log.write_text("$ agent run\n\n" + ("\n[stderr]\n" if error else "")
+                       + json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+        return run, log
+
+    def _stage_failure_detail(self, stage):
+        return diagnose.explain(self.batch, stage)["detail"].split("上游交付未满足：")[0].rstrip("；")
+
+    def test_invocation_error_with_nested_attempt_identity_is_recovered(self):
+        error = "Agent invocation failed: executable unavailable" + " detail" * 300
+        run, _ = self._producer_envelope("knowledge", error=error)
+        # A newer unrelated run must not override the invocation's explicit identity.
+        _write(self.batch, "workflow/agent-runs/knowledge-unrelated/import-report.json",
+               {"error": "unrelated failure"})
+        os.utime(run.parent / "knowledge-unrelated", (2000000000, 2000000000))
+        before = {p: p.read_bytes() for p in self.batch.rglob("*") if p.is_file()}
+        self.assertEqual(self._stage_failure_detail("knowledge"), error)
+        self.assertEqual(before, {p: p.read_bytes() for p in self.batch.rglob("*") if p.is_file()})
+
+    def test_task_report_preconditions_are_recovered_from_real_envelope(self):
+        task = {"stage": "knowledge", "status": "needs_review", "completed": False,
+                "preconditions": ["Missing confirmed units", "Missing current types artifact"]}
+        self._producer_envelope("knowledge", task=task)
+        self.assertEqual(self._stage_failure_detail("knowledge"), "；".join(task["preconditions"]))
+        self.assertNotIn("attempt_dir", diagnose.explain(self.batch, "knowledge")["detail"])
+
+    def test_real_envelopes_reject_wrong_stage_or_outside_record_binding(self):
+        for error in ("invocation failed", None):
+            with self.subTest(error=error):
+                stage = "knowledge" if error else "assemble"
+                run, _ = self._producer_envelope(stage, error=error, task={
+                    "stage": stage, "status": "needs_review", "preconditions": ["missing input"]})
+                manifest = self._load_manifest()
+                for binding in (str(run.parent / "review-other"), str(self.batch.parent)):
+                    manifest["stages"][stage]["attempt_dir"] = binding
+                    mf.save(self.batch, manifest)
+                    self.assertEqual(self._stage_failure_detail(stage), "代理桥执行失败")
+
+    def test_task_report_wrong_stage_is_not_exposed_by_log_fallback(self):
+        self._producer_envelope("knowledge", task={"stage": "review", "status": "needs_review",
+                                                 "preconditions": ["wrong stage missing input"]})
+        self.assertEqual(self._stage_failure_detail("knowledge"), "代理桥执行失败")
+
+    def test_real_envelopes_from_previous_stage_start_are_suppressed(self):
+        for stage, error in (("knowledge", "old invocation failed"), ("assemble", None)):
+            with self.subTest(stage=stage):
+                self._producer_envelope(stage, error=error, task={
+                    "stage": stage, "status": "needs_review", "preconditions": ["old missing input"]})
+                manifest = self._load_manifest()
+                manifest["stages"][stage]["started_at"] = "2099-01-01T00:00:00+00:00"
+                mf.save(self.batch, manifest)
+                self.assertEqual(self._stage_failure_detail(stage), "代理桥执行失败")
+
+    def test_fresh_envelope_does_not_revive_stale_import_or_task_report(self):
+        run, _ = self._producer_envelope("knowledge", error="current invocation failed")
+        manifest = self._load_manifest()
+        manifest["stages"]["knowledge"]["started_at"] = "2020-01-01T00:00:00+00:00"
+        mf.save(self.batch, manifest)
+        for filename, report in (
+                ("import-report.json", {"error": "stale import failure"}),
+                ("task-report.json", {"stage": "knowledge", "status": "needs_review",
+                                      "preconditions": ["stale missing input"]})):
+            _write(self.batch, str(run.relative_to(self.batch) / filename), report)
+            os.utime(run / filename, (1, 1))
+        self.assertEqual(self._stage_failure_detail("knowledge"), "current invocation failed")
+
+    def test_nested_invocation_binding_cannot_override_current_attempt(self):
+        run, log = self._producer_envelope("knowledge", error="old invocation failed")
+        manifest = self._load_manifest()
+        current = run.parent / "knowledge-next"
+        current.mkdir()
+        manifest["stages"]["knowledge"]["attempt_dir"] = str(current)
+        mf.save(self.batch, manifest)
+        self.assertEqual(self._stage_failure_detail("knowledge"), "代理桥执行失败")
+        # Even without a record binding, the logged attempt must belong to this stage.
+        manifest["stages"]["knowledge"].pop("attempt_dir")
+        mf.save(self.batch, manifest)
+        log.write_text(json.dumps({"error": "wrong stage invocation failed", "code": "execution",
+                                   "artifacts": {"attempt_dir": str(current.parent / "review-other")}}),
+                       encoding="utf-8")
+        self.assertEqual(self._stage_failure_detail("knowledge"), "代理桥执行失败")
+
+    def test_fresh_task_envelope_cannot_revive_stale_preconditions(self):
+        run, _ = self._producer_envelope("knowledge", task={
+            "stage": "knowledge", "status": "needs_review", "preconditions": ["old missing input"]})
+        os.utime(run / "task-report.json", (1, 1))
+        manifest = self._load_manifest()
+        manifest["stages"]["knowledge"]["started_at"] = "2020-01-01T00:00:00+00:00"
+        mf.save(self.batch, manifest)
+        self.assertEqual(self._stage_failure_detail("knowledge"), "代理桥执行失败")
+
+    def test_current_success_or_empty_repair_suppresses_invocation_envelope(self):
+        for stage, completed in (("knowledge", True), ("assemble", False)):
+            with self.subTest(stage=stage):
+                run, _ = self._producer_envelope(stage, error="obsolete invocation failed")
+                if completed:
+                    _write(self.batch, str(run.relative_to(self.batch) / "import-report.json"),
+                           {"stage": stage, "completed": True})
+                else:
+                    self._repair(run, 2, {}, stage=stage)
+                self.assertEqual(self._stage_failure_detail(stage), "代理桥执行失败")
+
     def test_missing_input_reported(self):
         manifest = self._load_manifest()
         manifest["stages"]["audio"]["status"] = mf.PENDING

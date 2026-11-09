@@ -384,6 +384,75 @@ class AgentTasksTest(unittest.TestCase):
                 tasks._provenance({'answer': answer, 'explanation': ''}, '', variants[0])
                 self.assertEqual(payload['answers']['1'], answer)
 
+    def test_answer_sentence_periods_are_independent_of_line_wrapping(self):
+        unit = [{'unit_id': 'q-1', 'numbers': [1], 'unit_kind': 'standalone'}]
+        cases = [
+            ('First sentence. Second sentence.', 'First sentence.\nSecond sentence.'),
+            ('The value is 3.14. It is positive.', 'The value is 3.14.\r\nIt is positive.'),
+            ('Never give up. Face difficulties bravely.', 'Never give up.<br>Face difficulties bravely.'),
+        ]
+        for answer, wrapped in cases:
+            for candidate, source in ((answer, wrapped), (wrapped, answer)):
+                with self.subTest(candidate=candidate, source=source):
+                    payload = {'answers': {'1': candidate}, 'evidence': {'1': ['附录 L1-L2']}, 'missing': {}}
+                    tasks._validate(self.batch, 'answers', payload, {'01_source/附录.txt': '1. ' + source}, unit)
+                    tasks._provenance({'answer': candidate, 'explanation': ''}, '', source)
+                    tasks._provenance({'answer': candidate, 'explanation': ''}, source)
+                    self.assertEqual(payload['answers']['1'], candidate)
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            tasks._provenance({'answer': 'The value is 314.', 'explanation': ''}, '', 'The value is 3.14.')
+
+    def test_answer_scripts_preserve_meaning_in_source_and_downstream_checks(self):
+        unit = [{'unit_id': 'q-1', 'numbers': [1], 'unit_kind': 'standalone'}]
+        for scripted, unicode_text, plain in (('10<sup>2</sup>', '10²', '102'),
+                                              ('H<sub>2</sub>O', 'H₂O', 'H2O'),
+                                              ('10<SUP class="raised"> 2 </SUP>', '10²', '102')):
+            with self.subTest(scripted=scripted):
+                tasks._provenance({'answer': scripted, 'explanation': ''}, '', unicode_text)
+                tasks._provenance({'answer': unicode_text, 'explanation': ''}, '', scripted)
+                for candidate, expected in ((scripted, plain), (plain, scripted), (plain, unicode_text)):
+                    with self.subTest(candidate=candidate, expected=expected):
+                        with self.assertRaisesRegex(ValueError, 'differs'):
+                            tasks._provenance({'answer': candidate, 'explanation': ''}, '', expected)
+                        payload = {'answers': {'1': candidate}, 'evidence': {'1': ['L1']}, 'missing': {}}
+                        with self.assertRaisesRegex(ValueError, 'verbatim-bound'):
+                            tasks._validate(self.batch, 'answers', payload, {'01_source/附录.txt': expected}, unit)
+
+    def test_scripted_source_cannot_bind_to_plain_digit_inside_script_token(self):
+        unit = [{'unit_id': 'q-1', 'numbers': [1], 'unit_kind': 'standalone'}]
+        for source in ('²', '₂', '<sup>2</sup>', '<sub>2</sub>', 'value 10² units'):
+            with self.subTest(source=source):
+                payload = {'answers': {'1': '2'}, 'evidence': {'1': ['L1']}, 'missing': {}}
+                with self.assertRaisesRegex(ValueError, 'verbatim-bound'):
+                    tasks._validate(self.batch, 'answers', payload, {'01_source/附录.txt': source}, unit)
+                with self.assertRaisesRegex(ValueError, 'Unsourced answer'):
+                    tasks._provenance({'answer': '2', 'explanation': ''}, source)
+        # A separate real occurrence must still be usable after a script match.
+        tasks._provenance({'answer': '2', 'explanation': ''}, '10²; answer: 2')
+
+    def test_answer_script_notation_is_normalized_once_per_script_run(self):
+        pairs = [('10<sup>²</sup>', '10²'), ('H<sub>₂</sub>O', 'H₂O'),
+                 ('10<sup>1</sup><sup>2</sup>', '10¹²'), ('x<sub>1</sub><sub>2</sub>', 'x₁₂')]
+        for answer, expected in pairs:
+            with self.subTest(answer=answer):
+                tasks._provenance({'answer': answer, 'explanation': ''}, '', expected)
+                self.assertTrue(tasks._answer_in_source(answer, expected))
+                self.assertEqual(tasks._answer_comparison_text(answer), tasks._answer_comparison_text(expected))
+
+    def test_answer_format_only_content_is_rejected_even_when_found_in_source(self):
+        unit = [{'unit_id': 'q-1', 'numbers': [1], 'unit_kind': 'standalone'}]
+        for answer in ('.', '**.**', '<b>.</b>', '。', '<u> </u>', '<sup> </sup>', '<sub></sub>'):
+            with self.subTest(answer=answer):
+                payload = {'answers': {'1': answer}, 'evidence': {'1': ['L1']}, 'missing': {}}
+                with self.assertRaisesRegex(ValueError, 'verbatim-bound'):
+                    tasks._validate(self.batch, 'answers', payload, {'01_source/附录.txt': answer}, unit)
+                for expected in (None, answer, 'A'):
+                    with self.subTest(expected=expected), self.assertRaisesRegex(ValueError, 'no content'):
+                        tasks._provenance({'answer': answer, 'explanation': ''}, answer, expected)
+        # Genuine absence placeholders keep their established representation.
+        for absent in ('', '无', '无答案'):
+            tasks._provenance({'answer': absent, 'explanation': ''}, '')
+
     def test_answers_task_uses_appendix_without_explicit_answers_input(self):
         from workflow import contracts
         self.assertEqual(contracts.STAGE_BY_ID["answers"].requires, ())

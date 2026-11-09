@@ -971,18 +971,50 @@ def _answer_comparison_text(value):
     Preserve words, case, digits, negation, signs and internal punctuation. Do
     not use broad Unicode compatibility normalization: it changes exponents.
     """
-    from .extract import _plain
-    text = _plain(value)
-    text = re.sub(r'</?(?:b|strong|em|i)(?:\s[^>]*)?>', '', text, flags=re.I)
+    # Only visual marks may disappear. Superscripts/subscripts carry meaning:
+    # 10<sup>2</sup> is 10², never 102. Canonicalize their notation separately.
+    text = value.replace('**', '')
+    text = re.sub(r'</?(?:u|b|strong|em|i)(?:\s[^>]*)?>', '', text, flags=re.I)
+    for tag, encoded, plain in (
+        ('sup', '⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ', '0123456789+-=()ni'),
+        ('sub', '₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎', '0123456789+-=()'),
+    ):
+        translation = str.maketrans(encoded, plain)
+        text = re.sub(r'<' + tag + r'(?:\s[^>]*)?>\s*(.*?)\s*</' + tag + r'\s*>',
+                      lambda match: '<' + tag + '>' + match[1].translate(translation) + '</' + tag + '>', text,
+                      flags=re.I | re.S)
+        # Already-scripted glyphs must not acquire a second script level.
+        text = re.sub(r'<(?:sup|sub)\b[^>]*>.*?</(?:sup|sub)\s*>|[' + encoded + ']+',
+                      lambda match: match[0] if match[0].startswith('<') else
+                      '<' + tag + '>' + match[0].translate(translation) + '</' + tag + '>', text,
+                      flags=re.I | re.S)
+        text = text.replace('</' + tag + '><' + tag + '>', '')
+        text = text.replace('<' + tag + '></' + tag + '>', '')
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.I)
     fullwidth = {code: code - 0xFEE0 for code in range(0xFF01, 0xFF5F)}
     text = text.translate(fullwidth).translate(str.maketrans(
         {"‘": "'", "’": "'", "“": '"', "”": '"', "，": ",", "：": ":", "；": ";", "。": "."}))
     # A sentence-ending period, including before an alternative or an appendix
     # label, is presentation. Decimal points/internal punctuation remain intact.
-    text = re.sub(r"\.(?=\s*[\"']?\s*(?:/|【|$))", '', text, flags=re.M)
+    text = re.sub(r"\.(?=\s*[\"']?\s*(?:/|【|$))", '', text)
     text = re.sub(r'\s*/\s*', '/', text)
     return " ".join(text.split())
+
+
+def _answer_in_source(answer, source_text):
+    """Match normalized text without cutting into a semantic script token."""
+    needle = _answer_comparison_text(answer)
+    if not needle:
+        return False
+    source = _answer_comparison_text(source_text)
+    scripts = [match.span() for match in re.finditer(r'<(?:sup|sub)>.*?</(?:sup|sub)>', source)]
+    start = source.find(needle)
+    while start >= 0:
+        end = start + len(needle)
+        if not any(left < start < right or left < end < right for left, right in scripts):
+            return True
+        start = source.find(needle, start + 1)
+    return False
 
 
 def _provenance_text(value):
@@ -1005,12 +1037,15 @@ def _provenance(row, source_text, expected_answer=None):
         raise ValueError("answer and explanation must be strings")
     if not answer.strip() or answer.strip() in {"无答案", "无"}:
         answer = ""
+    normalized_answer = _answer_comparison_text(answer)
+    if answer and not normalized_answer:
+        raise ValueError("Answer has no content after formatting normalization")
     if answer and AI_MARK in answer:
         raise ValueError("AI provenance belongs in answer, never answer")
-    if answer and expected_answer and _answer_comparison_text(answer) != _answer_comparison_text(expected_answer):
+    if answer and expected_answer and normalized_answer != _answer_comparison_text(expected_answer):
         raise ValueError("Answer differs from validated supplied answers")
     if (answer and not expected_answer
-            and _answer_comparison_text(answer) not in _answer_comparison_text(source_text)
+            and not _answer_in_source(answer, source_text)
             and not explanation.endswith(AI_MARK)):
         raise ValueError("Unsourced answer needs explicit source or AI provenance in explanation")
     # 用户规则（2026-11）：有解析就直接用材料里的解析，不再要求 AI 生成、也不要求
@@ -1142,13 +1177,10 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
         def _answer_found(value):
             if not isinstance(value, str) or not value.strip():
                 return False
-            if value in text:
-                return True
             # Use the same format tolerance here and in downstream assembly.
+            # Script tokens must stay whole even when source matching is partial.
             # Original files/payload strings remain unchanged.
-            compact = _answer_comparison_text(value)
-            haystack = _answer_comparison_text(text)
-            return bool(compact) and compact in haystack
+            return _answer_in_source(value, text)
 
         for number, answer in answers.items():
             if not _answer_found(answer):

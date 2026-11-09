@@ -43,7 +43,7 @@ def _last_error_line(text: str) -> str:
     noise = ("调用模型", "已校验并落盘", "复用已校验快照", "执行：", "$ ", "[stderr]")
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     clean = [line for line in lines if not any(marker in line for marker in noise)]
-    # 带尝试身份的 JSON 外框由 _agent_error 读取对应报告；不能再次作为原始日志展示，
+    # 带尝试身份的 JSON 外框由 _agent_error 校验身份并读取错误/报告；不能再次作为原始日志展示，
     # 否则会绕过阶段/尝试匹配，或把已被后续轮次修复的错误重新带回。
     clean = [line for line in clean if not ('"attempt_dir"' in line and line.startswith("{"))]
     for line in reversed(clean):
@@ -109,16 +109,25 @@ def _agent_error(batch: Path, stage_id: str, record: dict | None = None) -> str:
     record = record or {}
     # CLI 日志中的 attempt_dir 是导入报告所属尝试的明确身份；mtime 不能覆盖它。
     bound = record.get("attempt_dir")
-    log = _tail_file(batch / "workflow" / "logs" / f"{stage_id}.log", limit=None)
+    log_path = batch / "workflow" / "logs" / f"{stage_id}.log"
+    log = _tail_file(log_path, limit=None)
+    envelope = {}
+    log_bound = None
+    for line in reversed(log.splitlines()):
+        try:
+            candidate = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        artifacts = candidate.get("artifacts")
+        candidate_bound = candidate.get("attempt_dir") or (
+            artifacts.get("attempt_dir") if isinstance(artifacts, dict) else None)
+        if candidate_bound:
+            envelope, log_bound = candidate, candidate_bound
+            break
     if not bound:
-        for line in reversed(log.splitlines()):
-            try:
-                envelope = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(envelope, dict) and envelope.get("attempt_dir"):
-                bound = envelope["attempt_dir"]
-                break
+        bound = log_bound
     if bound:
         if not isinstance(bound, str):
             return ""
@@ -133,21 +142,35 @@ def _agent_error(batch: Path, stage_id: str, record: dict | None = None) -> str:
         run = max(cands, key=lambda p: p.stat().st_mtime_ns).resolve()
         if run.parent != runs.resolve():
             return ""
+    # 日志外框只有绑定到选中的尝试后才可读取；不能绕过显式 attempt_dir。
+    if isinstance(log_bound, str):
+        log_run = Path(log_bound)
+        log_run = (log_run if log_run.is_absolute() else batch / log_run).resolve()
+    else:
+        log_run = None
+    if log_run != run:
+        envelope = {}
     report_path = run / "import-report.json"
+    task_path = run / "task-report.json"
     progress = sorted((p for p in run.glob("repair-progress-*.json")
                        if re.fullmatch(r"repair-progress-\d+\.json", p.name)),
                       key=lambda p: int(p.stem.rsplit("-", 1)[1]))
     latest = progress[-1] if progress else None
-    # 阶段已开始新一轮但日志尚未更新时，不能显示上一轮失败。
+    # 分别检查证据的新鲜度；新日志不能使旧报告重新有效。
+    started = None
     if record.get("started_at"):
         try:
             started = datetime.fromisoformat(record["started_at"]).timestamp()
         except (ValueError, TypeError):
             return ""
-        evidence = [p for p in (report_path, latest) if p is not None and p.is_file()]
-        if not evidence or max(p.stat().st_mtime for p in evidence) < started:
-            return ""
-    report = _read(report_path)
+
+    def current(path):
+        return path is not None and path.is_file() and (
+            started is None or path.stat().st_mtime >= started)
+
+    report = _read(report_path) if current(report_path) else None
+    if not current(latest):
+        latest = None
     if isinstance(report, dict):
         if report.get("stage", stage_id) != stage_id or report.get("completed") is True:
             return ""
@@ -168,6 +191,17 @@ def _agent_error(batch: Path, stage_id: str, record: dict | None = None) -> str:
         notes = report.get("notes")
         if isinstance(notes, list):
             return "；".join(note for note in notes if isinstance(note, str))
+    task = _read(task_path) if current(task_path) else None
+    if isinstance(task, dict):
+        if task.get("stage") != stage_id or task.get("status") != "needs_review":
+            return ""
+        preconditions = task.get("preconditions")
+        if isinstance(preconditions, list):
+            return "；".join(item for item in preconditions if isinstance(item, str))
+    # invoke 启动/超时/协议失败未必写 import-report；实际错误在 stderr 外框。
+    if (envelope.get("stage", stage_id) == stage_id and current(log_path)
+            and envelope.get("error")):
+        return str(envelope["error"])
     return ""
 
 
