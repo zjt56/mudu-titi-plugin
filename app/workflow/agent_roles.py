@@ -51,12 +51,19 @@ def load(stage: str, artifact: str | None = None) -> dict:
 def section(stage: str, artifact: str | None = None, round_id: str | None = None) -> str:
     """拼进任务提示词的角色段落；审核阶段额外标注本轮具体职责。"""
     role = load(stage, artifact)
-    text = ("\n\n[子 Agent] " + role["title"] + "\n允许写入的产物：" + role["artifact"] + "\n" + role["body"])
     if stage == "review" and round_id:
+        # Generic review writes agent-review.json (findings/checked_units/unchecked).
+        # Semantic rounds have a different artifact and envelope; never append
+        # that incompatible output contract to a round prompt.
         duty = {"labels": "本轮为一审：全量逐单元语义复核，不得抽样代替。",
                 "sample": "本轮为二审：按抽样单元整组核对，结论只覆盖被抽到的小题。"}
-        text += "\n本轮职责：" + duty.get(round_id, "本轮职责以 ROUND 行为准。")
-    return text
+        return ("\n\n[子 Agent] " + role["title"]
+                + "\n本轮职责：" + duty.get(round_id, "本轮职责以 ROUND 行为准。")
+                + "\n权限边界：仅返回本轮 review_round.checks 判断；不改产物、不放行、不伪造审批。"
+                + "\n脑子检查：每个目标均有真实证据和独立 assessment；根对象包含 status、artifacts、notes、findings 四个同级键，findings=[]。"
+                + "不得输出 `checked_units` 或 `unchecked`。"
+                + "\n出问题怎么办：定位具体题目、字段与原文证据；无法判断时如实说明，不编造、不把未完成当通过。\n")
+    return ("\n\n[子 Agent] " + role["title"] + "\n允许写入的产物：" + role["artifact"] + "\n" + role["body"])
 
 
 def header(stage: str) -> str:

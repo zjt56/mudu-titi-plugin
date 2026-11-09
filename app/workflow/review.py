@@ -1067,6 +1067,44 @@ def _reject_blind_label_absence(check):
                 [{"unit_id": check.get("unit_id"), "number": check.get("number")}])
 
 
+def _evidence_source(item, plan, bound_texts):
+    """Resolve attribution only against bound inputs that contain the quote."""
+    if not isinstance(item, dict) or any(
+            not isinstance(item.get(k), str) or not item[k].strip()
+            for k in ("path", "locator", "quote")):
+        raise ValueError("Evidence needs a path, locator and quote")
+    path, quote = item["path"], item["quote"]
+    if path in plan["input_hashes"]:
+        key = path
+    elif "rules:" + path in plan["input_hashes"]:
+        key = "rules:" + path
+    else:
+        raise ValueError("Evidence must cite a bound batch input")
+    if _quote_matches(quote, bound_texts.get(key, "")):
+        return key
+    for candidate, text in bound_texts.items():
+        if _quote_matches(quote, text):
+            return candidate
+    raise ValueError("Evidence quote absent from bound input")
+
+
+def _canonical_check_sources(checks, plan, bound_texts):
+    """Compare validated attribution without rewriting retained responses/digests.
+
+    Older imports hashed the retained response before _round_checks corrected
+    evidence paths in the installed record. Canonicalize both comparison views
+    using that same source resolver; all other fields remain strictly compared.
+    """
+    import copy
+    result = copy.deepcopy(checks)
+    if isinstance(result, list):
+        for check in result:
+            if isinstance(check, dict):
+                for item in check.get("evidence") or []:
+                    item["path"] = _evidence_source(item, plan, bound_texts)
+    return result
+
+
 def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage=False):
     """收集每轮逐题判断，把与原标注的差异/问题转成人工 finding。
 
@@ -1126,31 +1164,8 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             # A real appendix/transcript quote may name the wrong bound input.
             # Repair that attribution only when another bound input proves it;
             # malformed, unbound or fabricated evidence still needs local repair.
-            if not isinstance(item, dict) or any(
-                not isinstance(item.get(k), str) or not item[k].strip()
-                for k in ("path", "locator", "quote")
-            ):
-                raise ValueError("Evidence needs a path, locator and quote")
+            matched = _evidence_source(item, plan, bound_texts)
             quote = item["quote"]
-            path = item["path"]
-            if path in plan["input_hashes"]:
-                key = path
-            elif "rules:" + path in plan["input_hashes"]:
-                key = "rules:" + path
-            else:
-                raise ValueError("Evidence must cite a bound batch input")
-            matched = None
-            if key is not None and _quote_matches(quote, bound_texts.get(key, "")):
-                matched = key
-            else:
-                # The quote may be real but attributed to the wrong bound file.
-                # Search every bound source; only an exact/normalized quote hits.
-                for candidate, text in bound_texts.items():
-                    if _quote_matches(quote, text):
-                        matched = candidate
-                        break
-            if matched is None:
-                raise ValueError("Evidence quote absent from bound input")
             item["path"] = matched
             if matched == "01_source/正文.txt":
                 # Bare numbers and punctuation cannot locate a substantive claim.
@@ -1380,6 +1395,7 @@ def _verify_round_sources(batch, plan, record, verify_reuse=True):
     if not isinstance(transaction, dict) or transaction.get("task_id") != ids[-1] or transaction.get("record") != record:
         raise ValueError("Review install transaction missing or mismatched")
     collected = []
+    bound_texts = _bound_source_texts(batch, plan)
     for index, (task_id, binding) in enumerate(zip(ids, bindings)):
         task = binding.get("task", {})
         expected_state_digest = (frozen_partition_digest(state) if binding.get("frozen_state")
@@ -1413,7 +1429,9 @@ def _verify_round_sources(batch, plan, record, verify_reuse=True):
         checks = artifact.get("checks")
         normalized = ([dict(c, number=_sample_number(c)) for c in checks]
                       if isinstance(checks, list) and record["round_id"] == "sample" else checks)
-        if not isinstance(checks, list) or (index < len(completed) and normalized != entry.get("checks")):
+        normalized = _canonical_check_sources(normalized, plan, bound_texts)
+        if not isinstance(checks, list) or (index < len(completed) and normalized !=
+                _canonical_check_sources(entry.get("checks"), plan, bound_texts)):
             raise ValueError("Review execution checks mismatch")
         targets = state_parts[index]["targets"]
         actual = ([{"unit_id": c.get("unit_id"), "number": _sample_number(c)} for c in checks]
@@ -1425,7 +1443,8 @@ def _verify_round_sources(batch, plan, record, verify_reuse=True):
             raise ValueError("Review receipt digest mismatch")
         collected.extend([dict(c, number=_sample_number(c))
                           for c in checks] if record["round_id"] == "sample" else checks)
-    if collected != fresh_checks:
+    collected = _canonical_check_sources(collected, plan, bound_texts)
+    if collected != _canonical_check_sources(fresh_checks, plan, bound_texts):
         raise ValueError("Review checks differ from retained responses")
 
 

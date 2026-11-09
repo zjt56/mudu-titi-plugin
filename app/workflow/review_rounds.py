@@ -176,6 +176,8 @@ def _round_prompt(round_id, targets, context):
         + "ROUND: " + round_id + "\n" + instruction
         + _agent_roles().section("review", "07_review/agent-review.json", round_id)
         + "\nTARGETS: " + json.dumps(targets, ensure_ascii=False)
+        + '\n返回根结构示例（checks 必须替换为覆盖 TARGETS 的实际判断）：'
+          '{"status":"completed","artifacts":{"review_round":{"checks":[]}},"notes":[],"findings":[]}'
         + "\nBEGIN SUPPLIED CONTENT" + context + "END SUPPLIED CONTENT\nReturn JSON only."
     )
 

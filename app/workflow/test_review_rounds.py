@@ -409,6 +409,70 @@ class ReviewRoundsTest(unittest.TestCase):
         return {'status': 'completed', 'artifacts': {'review_round': {'checks': checks}},
                 'notes': [], 'findings': []}
 
+    def test_four_parts_complete_after_earlier_evidence_path_correction(self):
+        self._parallel_batch()
+        self.write('01_source/附录.txt', '1~4 AAAA\n')
+        self.plan = review.prepare_round_plan(self.batch)
+        sample = review_rounds.export_task(self.batch, only_round='sample')
+        sample_task = review_rounds._check_bound_inputs(self.batch, sample['task_id'])['task']
+        review_rounds.import_result(self.batch, sample['task_id'],
+                                   self._part_response(sample_task['prompt'], 'sample'))
+        group = review_rounds.export_group(self.batch, max_units_per_part=1,
+                                           only_round='labels')
+        self.assertEqual(len(group['parts']), 4)
+        retained_paths = []
+        for index, part in enumerate(group['parts']):
+            binding = review_rounds._check_bound_inputs(self.batch, part['task_id'])
+            response = self._part_response(binding['task']['prompt'], 'labels')
+            if index == 1:
+                response['artifacts']['review_round']['checks'][0]['evidence'].append({
+                    'path': '01_source/正文.txt', 'locator': '附录答案', 'quote': '1~4 AAAA'})
+            original = copy.deepcopy(response)
+            result = review_rounds.import_result(self.batch, part['task_id'], response)
+            self.assertEqual(response, original, 'Caller response must remain unchanged')
+            retained_paths.extend((self.batch / 'workflow/review-results' / part['task_id']).glob('*.json'))
+        self.assertEqual(result['round_completed'], 'labels')
+        self.assertTrue(result['completed'])
+        self.assertEqual(result['review']['checked_rounds'], list(review.ROUND_IDS))
+        retained = {p: p.read_bytes() for p in retained_paths}
+        evaluated = review.evaluate_rounds(self.batch)
+        self.assertIn('labels', evaluated['checked_rounds'])
+        # Historical response was hashed before the validator corrected attribution.
+        state = json.loads((self.batch / binding['state_path']).read_text())
+        self.assertEqual(state['completed'][1]['checks'][0]['evidence'][-1]['path'],
+                         '01_source/附录.txt')
+        self.assertEqual({p: p.read_bytes() for p in retained_paths}, retained)
+        texts = review._bound_source_texts(self.batch, self.plan)
+        evidence_checks = copy.deepcopy(state['completed'][1]['checks'])
+        evidence_checks[0]['evidence'][-1]['path'] = 'unbound.txt'
+        with self.assertRaisesRegex(ValueError, 'bound batch input'):
+            review._canonical_check_sources(evidence_checks, self.plan, texts)
+        evidence_checks[0]['evidence'][-1]['path'] = '01_source/正文.txt'
+        evidence_checks[0]['evidence'][-1]['quote'] = 'A fabricated quote absent everywhere'
+        with self.assertRaisesRegex(ValueError, 'quote absent'):
+            review._canonical_check_sources(evidence_checks, self.plan, texts)
+        # Source attribution is the only tolerated difference. A changed judgment
+        # remains a provenance failure, even when its evidence resolves correctly.
+        state['completed'][1]['checks'][0]['rationale'] = 'Unproven replacement judgment'
+        self.write(binding['state_path'], state)
+        rejected = review.evaluate_rounds(self.batch)
+        self.assertNotIn('labels', rejected['checked_rounds'])
+        self.assertTrue(any(e.get('reason') == 'Review execution checks mismatch'
+                            for e in rejected['errors']))
+
+    def test_round_prompt_has_complete_envelope_and_scoped_role(self):
+        import re
+        for rid in review.ROUND_IDS:
+            prompt = review_rounds._round_prompt(rid, [], '{}')
+            example = re.search(r'返回根结构示例[^\n]*：(.*)\n', prompt)
+            self.assertIsNotNone(example)
+            envelope = json.loads(example.group(1))
+            self.assertEqual(set(envelope), {'status', 'artifacts', 'notes', 'findings'})
+            self.assertEqual(envelope['artifacts'], {'review_round': {'checks': []}})
+            self.assertNotIn('只写 `findings`、`checked_units`、`unchecked`', prompt)
+            self.assertNotIn('07_review/agent-review.json', prompt)
+            self.assertIn('不得输出 `checked_units` 或 `unchecked`', prompt)
+
     def test_three_rounds_run_concurrently(self):
         self._parallel_batch()
         import threading
