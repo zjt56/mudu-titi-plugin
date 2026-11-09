@@ -14,7 +14,7 @@
 | `AGENTS.md` | 本文件：Agent 总入口与硬规则 |
 | `app/AGENTS.md` | 工作流**任务协议**细节（导任务/交回/闸门） |
 | `app/docs/` | 各阶段规则与专项文档（extraction / review / upload 等） |
-| `app/prompts/roles/` | 7 个内置子 Agent 的角色提示词（职责/权限/自检/出问题怎么办） |
+| `app/prompts/roles/` | 8 个内置子 Agent 的角色提示词（职责/权限/自检/出问题怎么办） |
 | `app/workflow/` | 工作流实现（`contracts.py` 是 18 个阶段的唯一契约） |
 | `backend/` | 路由脚本 `wf-router.sh`、`route_pick.py`、插件宿主桥接 |
 | `lib/` | 宿主插件与前端（`client.js`、`index.js`） |
@@ -84,7 +84,7 @@
 
 ## 五、协作提示
 
-- 内置 7 个子 Agent（答案/听力/题型/解析/知识点/装配/审核）的角色规范在 `app/prompts/roles/`，每个都含"出问题怎么办"硬规则；改提示词时四个小节（职责/权限边界/脑子检查/出问题怎么办）必须齐全。
+- 内置 8 个子 Agent（前置组装题型判定/答案/听力/题型兼容/解析/知识点/装配/审核）的角色规范在 `app/prompts/roles/`，每个都含"出问题怎么办"硬规则；改提示词时四个小节（职责/权限边界/脑子检查/出问题怎么办）必须齐全。
 - 模型与子 Agent 路由在 `config/model-router.json`：`roles` 优先于 `stages`，`review` 轮次优先；选择逻辑在 `backend/route_pick.py`（有单测）。
 - 不确定先读 `app/AGENTS.md` 与 `app/docs/`，仍不确定就在变更记录里写清未决点，不要自行放宽质量或上传边界。
 - **版本控制在 `master` 上一条线推进**：不新开分支、不建 `develop`/`feature` 分支，后续提交直接落到 `master` 并推 `origin`（用户 2026-11-09 明确要求）。改动前先 `git fetch` 看远端是否领先，禁止强推。

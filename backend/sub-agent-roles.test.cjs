@@ -46,7 +46,7 @@ test('settings select a model per sub-agent and older stage configs still show',
   assert.match(client, /router\?\.roles\?\.\[s\] \|\| router\?\.stages\?\.\[s\]/);
   assert.match(client, /persist\(\{ \.\.\.router, roles \}\)/);
   assert.match(client, /各子 Agent 模型/);
-  assert.match(client, /内置 7 个子 Agent/);
+  assert.match(client, /内置 8 个子 Agent/);
 });
 
 test('router writes profiles for role entries too', () => {
