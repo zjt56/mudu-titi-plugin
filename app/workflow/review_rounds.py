@@ -1252,6 +1252,10 @@ def _run_parts_parallel(batch_dir, parts, config, workers, retries=1, feedbacks=
                 if code in ('rate_limit', 'quota'):
                     quota_stopped.set()
                     raise
+                if code == 'response':
+                    last_error += ("\n（上一次返回不是合法 JSON：请只输出一个完整 JSON 对象，"
+                                   "status/artifacts/notes/findings 四个根键齐全，每个 '{'/'[' 都有对应的 '}'/']'，"
+                                   "尤其别在根级 notes/findings 前漏写 artifacts 的 '}'。）")
                 if attempt + 1 < retries:
                     _time.sleep(min(2 ** attempt, 4))
         if last_exception is not None:
@@ -1511,6 +1515,13 @@ def _run(batch_dir, config=None, portable_max_input_chars=None):
                 if attempt:
                     _time.sleep(min(2 ** attempt, 8))
                 feedback = "\n前次结果未通过协议校验，请修正并重新完整审核。错误：" + last_error[:800]
+                if last_error_code == "response":
+                    # 让下一次重试能一次改对：JSON 结构错误通常是对齐/闭合漏写，
+                    # 讲清精确形态而不是只回显解析器的“Expecting ,”。
+                    feedback += ("\n上一次返回的不是合法 JSON（常见于大结果里对象/数组闭合漏写一层，"
+                                 "例如在根级 notes/findings 之前漏写 artifacts 的 '}'）。"
+                                 "请重新输出且只输出一个完整 JSON 对象：status、artifacts、notes、findings 四个根键；"
+                                 "检查每个 '{' 与 '[' 都有对应的 '}' 与 ']'，键之间用逗号分隔，不要有多余或缺失的括号。")
                 available = max(0, config.get("max_input_chars", 600000) - len(prompt))
                 prompt += feedback[:available]
             try:

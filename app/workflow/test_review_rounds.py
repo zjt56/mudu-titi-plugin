@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from workflow import agent_tasks, ingest, review, review_rounds
+from workflow import local_agent as agent
 
 
 class ReviewRoundsTest(unittest.TestCase):
@@ -517,6 +518,29 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertTrue(result['completed'], result)
         self.assertEqual(review.evaluate_rounds(self.batch)['checked_rounds'], list(review.ROUND_IDS))
         self.assertGreaterEqual(calls.count(('labels', '["u1"]')), 2)
+
+    def test_response_json_error_feedback_guides_retry(self):
+        # A JSON structural failure (error_code=response) must give the retry an
+        # explicit bracket/structure hint, not just echo the parser error.
+        self._parallel_batch()
+        prompts = []
+        def flaky(prompt, run_dir, config, permit_parallel=False):
+            import re
+            prompts.append(prompt)
+            round_id = re.search(r"ROUND: (\w+)", prompt).group(1)
+            targets = json.loads(re.search(r"TARGETS: (\[.*?\])\n", prompt).group(1))
+            # Fail each partition's first attempt with a JSON protocol error.
+            if "前次分片结果未通过协议" not in prompt:
+                raise agent.AgentError("Invalid final JSON response: Expecting ',' delimiter", "response")
+            return {'response': self._part_response(prompt, round_id)}
+        with patch.object(review_rounds, 'invoke', side_effect=flaky):
+            result = review_rounds.run(self.batch, config={
+                'provider': 'fixture', 'review_part_parallel': 4,
+                'review_max_units_per_part': 1, 'review_max_attempts': 2})
+        self.assertTrue(result['completed'], result)
+        retried = [p for p in prompts if "前次分片结果未通过协议" in p]
+        self.assertTrue(retried)
+        self.assertTrue(any("合法 JSON" in p and "artifacts" in p for p in retried))
 
     def test_parallel_failure_keeps_later_pending_for_next_run(self):
         self._parallel_batch()

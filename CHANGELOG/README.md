@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-review-json-error-feedback.md](2026-11-09-review-json-error-feedback.md) | 审核 JSON 结构错误重试给出括号/根键修复指引；保持严格解析、不自动改判 |
 | 2026-11-09 | [2026-11-09-review-subtype-gap-recoverable.md](2026-11-09-review-subtype-gap-recoverable.md) | 审核书面表达等漏填目录子类改为可恢复差异，不再阻塞整轮；提示词强化子类必填 |
 | 2026-11-09 | [2026-11-09-explanation-source-ref-column-snap.md](2026-11-09-explanation-source-ref-column-snap.md) | 解析 source_ref 起点落标签内/末尾截句中时吸附到正文，修复 17 年卷列号误差卡点 |
 | 2026-11-09 | [2026-11-09-answer-boundary-review-fixes.md](2026-11-09-answer-boundary-review-fixes.md) | 审查修复：换行句号、上下标语义、格式空答案及当前尝试错误详情 |
