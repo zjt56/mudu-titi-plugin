@@ -166,6 +166,9 @@ def merge(batch, stage, payload, context, units, *, notes=None):
             result.update({k: copy.deepcopy(candidate[k]) for k in ('unit_binding', 'generation') if k in candidate})
     agent_tasks._validate(Path(batch), stage, result, context, units, notes=notes)
     retained = _subset(stage, result, untouched)
-    if (retained.get('items') != old.get('items') if stage == 'audio' else retained != old):
+    retained_items = retained.get('items')
+    old_items = old.get('items')
+    changed = retained_items != old_items if stage == 'audio' else retained != old
+    if changed:
         raise ValueError('Scoped repair attempted to change untouched units')
     return result
