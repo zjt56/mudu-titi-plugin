@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-finalization-failure-diagnosis.md](2026-11-09-finalization-failure-diagnosis.md) | 空格式 errors 保留真实固化异常；来源冲突定位题组和字段，区分执行与质量交付；55项通过 |
 | 2026-11-09 | [2026-11-09-server-contract-alignment.md](2026-11-09-server-contract-alignment.md) | 混合 ID 批次逐题加前缀、保留自定义 ID；每题附件上限20，187项回归通过 |
 | 2026-11-09 | [2026-11-09-url-source-and-image-label-validation.md](2026-11-09-url-source-and-image-label-validation.md) | 修复网址误脱敏与图片段落字母误报；106项回归通过，2020安徽卷本地体检通过 |
 | 2026-11-09 | [2026-11-09-table-empty-items-body-equivalence.md](2026-11-09-table-empty-items-body-equivalence.md) | 表格空 items 与缺失等价，真实正文与跨度变化仍阻断；83项回归通过 |

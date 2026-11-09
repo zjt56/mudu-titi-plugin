@@ -21,7 +21,7 @@
 
 已快进合并远端 `ede2777`（共享导语来源与消费者一致性）和 `b48d104`（上传服务端契约），保留其它未提交修改。合并验证发现 Windows 草稿临时文件默认写 CRLF，而复用比较使用 LF，导致内容未变仍重写；`question_draft.ensure` 现显式写 LF，既有不重写回归覆盖此问题。合并后的五模块定向回归共 **177 项通过**。
 
-当前批次恢复前已在 `workflow/repairs/section-rubric-refresh-20261109-131118` 保存批次、审核报告和台账及 SHA256。通过现有 runner 实际重验 structure_gate（清除真实重建等待），再执行 preassemble，成功刷新 5 个共享导语变化单元；没有手改 manifest 或清理审核差异。后续由原自动调度续跑并重新校验。
+当前批次恢复前已在 `workflow/repairs/section-rubric-refresh-20261109-131118` 保存批次、审核报告和台账及 SHA256。通过现有 runner 实际重验 structure_gate（清除真实重建等待），再执行 preassemble，成功刷新 5 个共享导语变化单元；没有手改 manifest 或清理审核差异。后续由原自动调度续跑并重新校验。13:12 实际台账确认 `format_gate=completed`，`review=completed`，审核闸门保留 12 项差异、`release_ready=false`；没有上传或发布。
 
 ## 边界与回退
 
