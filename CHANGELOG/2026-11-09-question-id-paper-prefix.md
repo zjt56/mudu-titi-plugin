@@ -43,12 +43,13 @@
 - 先在数据库副本上重放确认：**201**，创建 48 个单元，无 ID 冲突。
 - 生产暂存已按同一脚本应用；碰撞检查为 0。
 
-### 2016 / 2019 本地回执清理
+### 2016 / 2019 / 2024 本地回执清理
 
-这两卷本地 `receipt.json`/accepted attempt 指向的云端暂存已被删除（云端无该
+这些卷本地 `receipt.json`/accepted attempt 指向的云端暂存已被删除（云端无该
 staging，也无对应单元），工作台按设计会阻止重复上传。已把 `receipt.json` 与
-accepted attempt 移到各卷 `07_upload/backups/stale-receipt-20261109T105231/`
-（可原样恢复），`upload_state` 回到 `idle`；云端没有需要保留的旧暂存。
+accepted attempt 移到各卷 `07_upload/backups/stale-receipt-<时间戳>/`（可原样
+恢复），`upload_state` 回到 `idle`；云端没有需要保留的旧暂存。2024 卷为
+`stale-receipt-20261109T105516`。
 
 ## 没改什么 / 边界
 
