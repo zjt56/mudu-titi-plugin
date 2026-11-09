@@ -1145,10 +1145,17 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             continue
         if not isinstance(assessment, dict):
             raise ValueError("Every certain target needs a comparison assessment")
+        from workbench import taxonomy
         def valid_strings(value):
             return isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value)
+        # subtypes must be a list of strings; an empty list is tolerated when
+        # the catalog type requires a subtype and the model omitted it (see the
+        # recoverable subtype-gap handling below). A malformed list still fails.
+        subtype_gap_type = taxonomy.subtypes_required_but_missing(
+            assessment.get("type"), assessment.get("subtypes"))
         if (not isinstance(assessment.get("type"), str)
-                or not assessment["type"].strip() or not valid_strings(assessment.get("subtypes"))):
+                or not assessment["type"].strip()
+                or not (valid_strings(assessment.get("subtypes")) or subtype_gap_type)):
             raise ValueError("Every review needs type and subtypes")
         if True:
             difficulty = assessment.get("difficulty")
@@ -1182,11 +1189,19 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             expected_children = expected_numbers if unit.get("unit_kind") == "group" else set()
             if set(numbers) != expected_children:
                 raise ValueError("Knowledge subquestions must cover the selected children exactly")
-            from workbench import taxonomy
             labels = {"type": assessment["type"], "subtypes": assessment["subtypes"],
                       "knowledge": assessment["knowledge"], "subquestions": children,
                       "unit_kind": unit.get("unit_kind")}
             problems = taxonomy.check_question_labels(labels)
+            # A model occasionally omits the catalog subtype for a type that
+            # requires one (e.g. 书面表达). That is a recoverable label gap, not
+            # a fatal invalid round: keep it out of the fatal problem list so the
+            # remaining targets/rounds continue. The gap still surfaces as a
+            # real "子类：原值 → 空" difference via evaluate_rounds/consensus and
+            # enters the human queue. Any other structural problem (wrong or
+            # unknown subtype, bad knowledge path, missing children) still fails.
+            if taxonomy.subtypes_required_but_missing(assessment["type"], assessment["subtypes"]):
+                problems = [p for p in problems if "必须填写目录子类" not in p]
             if problems:
                 raise ValueError("Invalid review labels: " + "; ".join(problems))
         if round_id == "sample":

@@ -56,6 +56,22 @@ def subtype_map():
     return {t.get("name", ""): list(t.get("subtypes") or []) for t in framework().get("question_types", [])}
 
 
+def subtypes_required_but_missing(main_type, subs):
+    """True only for the recoverable "a catalog subtype exists but none was
+    given" defect. A non-catalog / wrong subtype is not this case and still
+    fails full validation; an empty subtype list on a typeless question is not
+    a subtype defect either."""
+    if not isinstance(main_type, str) or main_type not in types():
+        return False
+    allowed = subtypes(main_type)
+    if not allowed:
+        return False
+    if not isinstance(subs, list):
+        return False
+    return not any(isinstance(v, str) and v.strip() for v in subs)
+
+
+
 def difficulties():
     return [d.get("name", "") for d in framework().get("difficulties", []) if d.get("name")]
 

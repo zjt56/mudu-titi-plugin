@@ -1254,6 +1254,34 @@ class ReviewRoundsTest(unittest.TestCase):
             review_rounds.import_result(self.batch, exported["task_id"], response)
         self.assertFalse((self.batch / "07_review/review-rounds.json").exists())
 
+    def _single_label_record(self, subtypes):
+        record = {"round_id": "labels", "input_binding": self.plan["input_binding"],
+                  "execution_id": "fixture-separate-labels", "checks": self.checks("labels")}
+        record["checks"][0]["assessment"]["subtypes"] = subtypes
+        return record
+
+    def test_blank_catalog_subtype_is_recoverable_not_a_fatal_round(self):
+        # A type with catalog subtypes but an empty list (e.g. 书面表达 omitted)
+        # must not fail the whole target/round; the gap still becomes a visible
+        # 子类 difference through evaluate_rounds/consensus.
+        findings = review._round_checks(self._single_label_record([]), "labels", self.plan, self.batch)
+        self.assertEqual(findings, [])
+        # A subtype that is not in the catalog still fails deterministically.
+        with self.assertRaisesRegex(ValueError, "Invalid review labels"):
+            review._round_checks(self._single_label_record(["不存在的子类"]), "labels", self.plan, self.batch)
+        # A malformed subtype list (non-strings) also still fails.
+        with self.assertRaises(ValueError):
+            review._round_checks(self._single_label_record([1, 2]), "labels", self.plan, self.batch)
+
+    def test_blank_subtype_diff_is_reported_against_original_labels(self):
+        # Original label has 子类 ['阅读判断']; a blank blind subtype must surface
+        # as a real difference via consensus (never silently accepted).
+        from workflow import review_consensus
+        record = self._single_label_record([])
+        findings = review_consensus.compare(self.batch, self.plan, [record])
+        subtype_diffs = [f for f in findings if f.get("field") == "subtypes"]
+        self.assertTrue(subtype_diffs, findings)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,7 @@ from .local_agent import _agent_lock, _check_input_hashes, invoke, load_config
 # Bumped whenever the prompt builder or blind context changes, so stale
 # partition states and bindings are never reused silently.
 CONTEXT_VERSION = "blind-context-v11"
-PROMPT_VERSION = "review-prompt-v11"
+PROMPT_VERSION = "review-prompt-v12"
 
 
 ARTIFACT = "review_round"
@@ -128,6 +128,7 @@ def _round_prompt(round_id, targets, context):
                    "单题 subquestions=[]；整篇题组列出目标子题且其 knowledge=[]。一审覆盖单元全部小题；二审对整组题只做组级核对（整组抽取、不拆小题），对独立单题仅列抽中小题，不宣称同组其他小题已审核。"
                    "knowledge 路径必须逐字取自供给目录（references/knowledge-catalog.json），不得自造更深的子级：目录里 '语用/情景交际' 已是叶子时只能写它，不能写 '语用/情景交际/询问目的'；某维度没有合法叶子就不写该维度。"
                    "assessment.knowledge 还必须遵守 references/type-knowledge-map.json 的题型维度：例如听力长对话理解只允许主题、设题角度/听力，不得写语篇体裁；路径不在目录或超出允许维度会让整轮校验失败。"
+                   "【子类必填·必须遵守】只要主类在目录里有子类（如『书面表达』有 列中文要点/列英文要点/思维导图/图片/图文结合/表格/图表/论坛帖文/其他，『单项填空』有 四个选项 等），assessment.subtypes 必须给出至少一个取自目录的合法子类，不得留空数组；留空会被判为标签缺项并作为差异送人工核对。只有目录里确实无子类的主类才可写 subtypes:[]，不得自造目录外子类。"
                    "整篇题型（阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话）只判定组级知识点，其子题 knowledge=[]。"
                    "无法判断标签时使用 verdict=uncertain、assessment=null 并说明具体原因及可核验证据，继续审其他目标；不得猜测。"
                    "【标签分层口径·必须遵守】以组题为准的单元在组级挂体裁/主题/内容标签，subquestions[].knowledge 允许为空数组；"
