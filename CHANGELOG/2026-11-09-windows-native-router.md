@@ -17,7 +17,7 @@
 - 保留原 `backend/wf-router.sh`，不改变 POSIX 环境的既有入口；本次只是给插件的 Windows agent 配置提供原生 Node 入口。
 - 不修改模型选择优先级，不使用静默模型兜底；路由配置、profile、凭证或 dsh 调用失败都会返回错误。
 - 不自动上传或发布；当前批次必须在真实 agent 调用成功并通过各阶段校验后继续。
-- 工作区另有未提交的 `backend/wf-router.py`、相关 Python 测试及 `app/workflow/local_agent.py`/`lib/index.js` 改动，本次不覆盖、不回退，也不把它们混入本次记录的 Node 方案提交。
+- 工作区另有未提交的 `app/workflow/local_agent.py`、运维相关实现与测试、`lib/index.js` 及其他变更记录，本次保留这些并行改动，不混入 Node router 提交。
 
 ## 路由启动修正
 
@@ -26,11 +26,12 @@
 ## 如何验证
 
 - `node --check backend/wf-router.mjs`：通过。
-- `WF_ROUTER_REAL_DSH=<installed dsh.cmd> node --test backend/wf-router-native.test.cjs`：5 项通过、1 项跳过（本机真实 CLI 空任务启动校验按条件启用）；含 custom-provider 保留/UI 配置过滤/endpoint 变更缓存失效、Windows 双空格路径与完整 stdin argv 断言，以及 reasoningEffort 清理回归。
-- 直接调用已安装 `dsh.cmd` 的 headless 真实探针：退出码 0，响应文件为 `OK`；随后批次 `answers-bag8d6rt` attempt `exit_code=0/status=completed`，生成 `response.json`，`types-f7068e7efb314a2286405af99f3e37e3` attempt 同样 `exit_code=0/status=completed`。
+- `node --test backend/wf-router-native.test.cjs`：最终复验 6 项，5 项通过、1 项跳过（未设置 `WF_ROUTER_REAL_DSH`，条件真实 CLI 空任务测试跳过）；含 custom-provider 保留/UI 配置过滤/endpoint 变更缓存失效、Windows 双空格路径与完整 stdin argv 断言，以及 reasoningEffort 清理回归。
+- 直接调用已安装 `dsh.cmd` 的 headless 真实探针：退出码 0，响应文件为 `OK`；随后批次 `answers-bag8d6rt` 正式 attempt `exit_code=0/status=completed`，生成含 81 题答案的 `response.json`。`types-f7068e7efb314a2286405af99f3e37e3` 是成功的自愈调用，不当作正式 types attempt；11:02 manifest 已确认 answers/types 均 completed。
 - 真实 CLI 启动校验确认生成 overlay 可解析，但不是模型请求，也不能证明目标批次阶段已恢复；需由受控 workflow attempt 的真实产物复验。
 - 全 backend suite：155 项中 138 通过、17 失败。失败分别涉及既有 lifecycle/Windows Python (`python3` 不可用，8 项)、旧 shell router 在 Windows 不可执行（5 项）、operations HTTP Python 启动失败（2 项）、review-layout 旧 CSS 断言（2 项）；定向 router 测试与这些失败无依赖。
-- `git diff --check`：之前发现本索引行尾空格，已移除；需在最终验证重跑确认。
+- 批次之后因交付清单检测到产物指纹变化而重建 `preassemble`，于 11:13 失败：`Batch fill正文 conflict for group-6-7; existing content preserved`。这是独立的既有内容冲突；本次没有覆盖原内容，也未自动上传或发布。编码修复和 Windows agent 调用已验证，但整批流程仍未完成。
+- `git diff --check`：最终验证通过。
 
 ## 回退方式
 
