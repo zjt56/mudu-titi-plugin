@@ -73,6 +73,32 @@ class DiagnoseTest(unittest.TestCase):
         self.assertIn("Evidence quote absent from bound input", item["detail"])
         self.assertNotEqual(item["detail"], "[stderr]")
 
+    def test_legacy_review_failure_before_current_stage_is_not_revived(self):
+        _write(self.batch, "workflow/review-failures/legacy.json", {
+            "round_id": "labels", "error": "obsolete review failure"})
+        record = {"started_at": "2099-01-01T00:00:00+00:00"}
+        self.assertEqual(diagnose._review_failure_detail(self.batch, record), "")
+
+    def test_old_review_log_does_not_revive_rejected_failure(self):
+        manifest = self._load_manifest()
+        manifest["stages"]["review"].update(status=mf.NEEDS_REVIEW,
+            started_at="2099-01-01T00:00:00+00:00", notes="current review waiting")
+        mf.save(self.batch, manifest)
+        _write(self.batch, "workflow/review-failures/legacy.json", {
+            "round_id": "labels", "error": "obsolete structured failure"})
+        log = self.batch / "workflow/logs/review.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("Error: obsolete log failure", encoding="utf-8")
+        detail = diagnose.explain(self.batch, "review")["detail"]
+        self.assertNotIn("obsolete", detail)
+        self.assertIn("current review waiting", detail)
+
+    def test_legacy_review_failure_cannot_override_explicit_task(self):
+        _write(self.batch, "workflow/review-failures/legacy.json", {
+            "round_id": "labels", "error": "unbound review failure"})
+        self.assertEqual(diagnose._review_failure_detail(
+            self.batch, {"task_id": "round-" + "a" * 32}), "")
+
     def test_quality_gate_reports_quality_findings_class(self):
         manifest = self._load_manifest()
         manifest["stages"]["review_gate"].update(status=mf.BLOCKED, notes="13 条未解决")
@@ -499,6 +525,73 @@ class DiagnoseTest(unittest.TestCase):
         self.assertEqual(result["items"], [])
         self.assertIn("已完成", result["summary"])
         self.assertEqual(result["blocked_at"], None)
+
+
+class BoundReviewFailureDiagnoseTest(unittest.TestCase):
+    def setUp(self):
+        from workflow import review_rounds
+        from workflow.test_review_rounds import ReviewRoundsTest
+        self.fixture = ReviewRoundsTest()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.batch = self.fixture.batch
+        self.rounds = review_rounds
+        self.task = review_rounds.export_task(self.batch)
+        self.task_id = self.task["task_id"]
+        binding = json.loads((self.batch / f"workflow/review-bindings/{self.task_id}.json").read_text())
+        self.state_path = binding["state_path"]
+        self.state = json.loads((self.batch / self.state_path).read_text())
+        self.failure = {"task_id": self.task_id, "round_id": "labels", "error": "current failure",
+                        "input_binding": binding["plan"]["input_binding"],
+                        "state_path": self.state_path, "part_index": binding["part_index"],
+                        "targets": self.state["parts"][binding["part_index"]]["targets"]}
+        self.save_failure()
+
+    def save_failure(self, **changes):
+        _write(self.batch, f"workflow/review-failures/{self.task_id}.json", self.failure | changes)
+
+    def detail(self, record=None):
+        return diagnose._review_failure_detail(self.batch, record)
+
+    def test_current_bound_failure_is_read_without_writing_state(self):
+        before = {str(path.relative_to(self.batch)): path.read_bytes()
+                  for path in self.batch.rglob("*") if path.is_file()}
+        self.assertEqual(self.detail({"task_id": self.task_id}), "current failure")
+        after = {str(path.relative_to(self.batch)): path.read_bytes()
+                 for path in self.batch.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
+
+    def test_bound_failure_rejects_wrong_task_and_report_identity(self):
+        self.assertEqual(self.detail({"task_id": "round-" + "f" * 32}), "")
+        for changes in ({"input_binding": "old-input"}, {"state_path": "workflow/other.json"},
+                        {"part_index": 999}, {"targets": ["unrelated-unit"]}, {"round_id": "sample"}):
+            with self.subTest(changes=changes):
+                self.save_failure(**changes)
+                self.assertEqual(self.detail(), "")
+
+    def test_bound_failure_rejects_changed_input_bytes(self):
+        source = self.batch / "01_source/正文.txt"
+        source.write_text(source.read_text() + "\nChanged actual question content.", encoding="utf-8")
+        self.assertEqual(self.detail(), "")
+
+    def test_bound_failure_rejects_retired_generation(self):
+        self.rounds.restart_rounds(self.batch)
+        self.assertEqual(self.detail(), "")
+
+    def test_bound_failure_rejects_completed_part(self):
+        self.state["completed"] = [{"task_id": self.task_id}]
+        _write(self.batch, self.state_path, self.state)
+        self.assertEqual(self.detail(), "")
+
+    def test_checked_round_suppresses_bound_and_legacy_failures(self):
+        self.rounds.import_result(self.batch, self.task_id, self.fixture.response("labels"))
+        _write(self.batch, "workflow/review-failures/legacy.json", {
+            "round_id": "labels", "error": "historical legacy failure"})
+        self.assertEqual(self.detail(), "")
+
+    def test_legacy_task_named_file_uses_its_existing_binding(self):
+        self.save_failure(task_id=None)
+        self.assertEqual(self.detail(), "current failure")
 
 
 if __name__ == "__main__":

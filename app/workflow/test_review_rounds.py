@@ -1393,7 +1393,7 @@ class ReviewRoundsTest(unittest.TestCase):
     def test_identical_round_failure_stops_after_strike_budget(self):
         # A deterministic per-round failure that repeats across re-exported tasks
         # must stop after a small strike budget instead of spinning forever.
-        def fake_run(batch_dir, config=None, portable_max_input_chars=None):
+        def fake_run(batch_dir, config=None, portable_max_input_chars=None, **kwargs):
             return {"action": "blocked", "completed": False,
                     "summary": {"execution_failures": {"labels": {
                         "attempts": 2,
@@ -1411,6 +1411,142 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertFalse(stall["completed"])
         # Once stalled, subsequent runs keep being blocked (do not spin again).
         self.assertTrue(all(r.get("stall") for r in results[-2:]))
+
+    def test_persistent_stall_guard_stops_paid_calls_until_route_or_inputs_change(self):
+        seen = []
+        def invoke(prompt, run_dir, config, permit_parallel=False):
+            import re
+            rid = re.search(r'ROUND: (\w+)', prompt).group(1)
+            seen.append(rid)
+            if rid == 'labels':
+                raise ValueError('repeatable protocol defect')
+            return {'response': self.response(rid)}
+        config = {'provider': 'fixture', 'review_max_attempts': 1, 'review_part_parallel': 2}
+        with patch.object(review_rounds, 'invoke', side_effect=invoke):
+            for _ in range(5):
+                result = review_rounds.run(self.batch, config)
+            self.assertTrue(result['repair_required'])
+            self.assertEqual(seen.count('labels'), 3)
+            self.assertEqual(seen.count('sample'), 1)
+            self.assertIn('sample', review.evaluate_rounds(self.batch)['checked_rounds'])
+            review_rounds.run(self.batch, dict(config, model='explicit-new-route'))
+            review_rounds.run(self.batch, config)
+        self.assertEqual(seen.count('labels'), 4, 'A new route gets a fresh budget; reverting cannot reset the old one')
+        before = review_rounds._stall_context(self.batch, config)
+        self.write('01_source/正文.txt', (self.batch / '01_source/正文.txt').read_text() + '\nNew source fact.')
+        self.assertNotEqual(before, review_rounds._stall_context(self.batch, config))
+
+    def test_no_progress_import_escalates_without_reinvoking_or_losing_sample(self):
+        original = review_rounds.import_result
+        calls = []
+        def invoke(prompt, run_dir, config, permit_parallel=False):
+            import re
+            rid = re.search(r'ROUND: (\w+)', prompt).group(1)
+            calls.append(rid)
+            return {'response': self.response(rid)}
+        def stalled_import(batch, tid, response):
+            rid = review_rounds._check_bound_inputs(batch, tid)['task']['round_id']
+            if rid == 'labels':
+                return {'action': 'continue', 'completed': False}
+            return original(batch, tid, response)
+        config = {'provider': 'fixture', 'review_max_attempts': 2, 'review_part_parallel': 2}
+        with patch.object(review_rounds, 'invoke', side_effect=invoke):
+            with patch.object(review_rounds, 'import_result', side_effect=stalled_import):
+                first = review_rounds.run(self.batch, config)
+            self.assertEqual(first['stall']['error_code'], 'review_consumer')
+            self.assertIn('sample', review.evaluate_rounds(self.batch)['checked_rounds'])
+            self.assertEqual(len(list((self.batch / 'workflow/review-pending').glob('*.json'))), 1)
+            with patch.object(review_rounds, 'import_result', side_effect=stalled_import):
+                second = review_rounds.run(self.batch, config)
+            self.assertTrue(second['repair_required'])
+            self.assertEqual(sorted(calls), ['labels', 'sample'])
+            # Restored local acceptance can replay retained evidence even with an
+            # unchanged budget scope. The guard stops paid calls, not recovery.
+            repaired = review_rounds.run(self.batch, config)
+            self.assertTrue(repaired['completed'], repaired)
+            self.assertEqual(sorted(calls), ['labels', 'sample'])
+
+    def test_stall_accounting_does_not_mask_disappearing_inputs(self):
+        calls = []
+        def invoke(prompt, run_dir, config):
+            calls.append(prompt)
+            source = self.batch / '01_source/正文.txt'
+            self.assertTrue(source.resolve().is_relative_to(self.batch.resolve()))
+            source.unlink()
+            return {'response': self.response('labels')}
+        with patch.object(review_rounds, 'invoke', side_effect=invoke):
+            result = review_rounds.run(self.batch, {'provider': 'fixture', 'review_max_attempts': 2})
+        self.assertTrue(result['inputs_changed'], result)
+        self.assertTrue(result['resumable'])
+        self.assertEqual(len(calls), 1)
+        self.assertFalse((self.batch / 'workflow/review-stall.json').exists())
+
+    def test_parallel_missing_root_fields_gets_feedback_before_pending_cache(self):
+        seen = []
+        def invoke(prompt, run_dir, config, permit_parallel=False):
+            import re
+            rid = re.search(r'ROUND: (\w+)', prompt).group(1)
+            seen.append((rid, prompt))
+            response = self.response(rid)
+            if rid == 'labels' and sum(r == rid for r, _ in seen) == 1:
+                response.pop('notes')
+                response.pop('findings')
+            return {'response': response}
+        with patch.object(review_rounds, 'invoke', side_effect=invoke), patch.object(review_rounds._time, 'sleep'):
+            result = review_rounds.run(self.batch, {'provider': 'fixture', 'review_part_parallel': 2,
+                                                    'review_max_attempts': 2})
+        self.assertTrue(result['completed'], result)
+        label_prompts = [p for rid, p in seen if rid == 'labels']
+        self.assertEqual(len(label_prompts), 2)
+        self.assertIn("absent=['findings', 'notes']", label_prompts[-1])
+        self.assertEqual(sum(rid == 'sample' for rid, _ in seen), 1)
+
+    def test_install_provenance_failure_never_publishes_round_or_success_receipt(self):
+        exported = review_rounds.export_task(self.batch, only_round='labels')
+        with patch.object(review, '_verify_round_sources', side_effect=ValueError('retained checks mismatch')):
+            with self.assertRaisesRegex(review_rounds.ReviewConsumerError, 'retained checks mismatch'):
+                review_rounds.import_result(self.batch, exported['task_id'], self.response('labels'))
+        self.assertFalse((self.batch / '07_review/review-rounds.json').exists())
+        self.assertFalse((self.batch / 'workflow/review-bindings' / (exported['task_id'] + '.receipt.json')).exists())
+        self.assertTrue((self.batch / 'workflow/review-transactions' / (exported['task_id'] + '.json')).exists())
+        # Recovery uses the retained transaction after the verifier is repaired.
+        review_rounds.export_task(self.batch)
+        self.assertIn('labels', review.evaluate_rounds(self.batch)['checked_rounds'])
+
+    def test_bad_example_contract_is_rejected_before_any_model_call(self):
+        example = review_rounds._round_envelope()
+        example.pop('notes')
+        with patch.object(review_rounds, '_round_envelope', return_value=example):
+            with patch.object(review_rounds, 'invoke') as invoke:
+                result = review_rounds.run(self.batch, {'provider': 'fixture', 'review_part_parallel': 2})
+        self.assertEqual(result['action'], 'blocked')
+        self.assertIn("absent=['notes']", result['reason'])
+        invoke.assert_not_called()
+
+    def test_invalid_legacy_pending_is_not_replayed_forever_and_retry_has_feedback(self):
+        part = review_rounds.export_task(self.batch, only_round='labels')
+        response = self.response('labels')
+        response.pop('notes')
+        response.pop('findings')
+        review_rounds._save_pending(self.batch, part['task_id'], response)
+        seen = []
+        def invoke(prompt, run_dir, config, permit_parallel=False):
+            import re
+            rid = re.search(r'ROUND: (\w+)', prompt).group(1)
+            seen.append((rid, prompt))
+            return {'response': self.response(rid)}
+        config = {'provider': 'fixture', 'review_part_parallel': 2, 'review_max_attempts': 1}
+        with patch.object(review_rounds, 'invoke', side_effect=invoke):
+            first = review_rounds.run(self.batch, config)
+            self.assertFalse(first['completed'])
+            self.assertEqual([rid for rid, _ in seen], ['sample'])
+            result = review_rounds.run(self.batch, config)
+        self.assertTrue(result['completed'], result)
+        self.assertEqual([rid for rid, _ in seen], ['sample', 'labels'])
+        self.assertIn("absent=['findings', 'notes']", seen[-1][1])
+        failure = json.loads((self.batch / 'workflow/review-failures' / (part['task_id'] + '.json')).read_text())
+        self.assertEqual(failure['input_binding'], self.plan['input_binding'])
+        self.assertEqual(failure['targets'], ['group-1-6'])
 
     def test_leaf_markers_present_in_review_catalog(self):
         # The blind review catalog must label every node as a leaf (terminal) or

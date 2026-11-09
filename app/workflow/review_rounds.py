@@ -26,6 +26,12 @@ PROMPT_VERSION = "review-prompt-v12"
 
 
 ARTIFACT = "review_round"
+ROUND_ROOT_FIELDS = ('status', 'artifacts', 'notes', 'findings')
+
+
+def _round_envelope(status='completed', notes=None):
+    return {'status': status, 'artifacts': {ARTIFACT: {'checks': []}},
+            'notes': list(notes or []), 'findings': []}
 
 
 def _attempt_dir(batch, name: str):
@@ -177,7 +183,7 @@ def _round_prompt(round_id, targets, context):
         + _agent_roles().section("review", "07_review/agent-review.json", round_id)
         + "\nTARGETS: " + json.dumps(targets, ensure_ascii=False)
         + '\n返回根结构示例（checks 必须替换为覆盖 TARGETS 的实际判断）：'
-          '{"status":"completed","artifacts":{"review_round":{"checks":[]}},"notes":[],"findings":[]}'
+        + json.dumps(_round_envelope(), ensure_ascii=False, separators=(',', ':'))
         + "\nBEGIN SUPPLIED CONTENT" + context + "END SUPPLIED CONTENT\nReturn JSON only."
     )
 
@@ -575,6 +581,48 @@ class ReviewInputsChanged(ValueError):
     """A task must be re-exported, never retried against changed inputs."""
 
 
+class ReviewConsumerError(ValueError):
+    """A retained result failed local acceptance; another model call cannot fix it."""
+    code = 'review_consumer'
+
+    def __init__(self, message, round_id=None):
+        super().__init__(message)
+        self.round_id = round_id
+
+
+def _check_response_envelope(result):
+    """Check the round envelope before caching a model response for installation."""
+    agent_tasks._fields(result, ROUND_ROOT_FIELDS, ROUND_ROOT_FIELDS)
+    agent_tasks._strings(result['notes'], 'notes')
+    if result['findings'] != []:
+        raise ValueError('Round findings must be represented in real checks')
+    if result['status'] not in ('completed', 'needs_review'):
+        raise ValueError('Round response needs completed or needs_review status')
+    if result['status'] == 'completed':
+        agent_tasks._fields(result['artifacts'], (ARTIFACT,), (ARTIFACT,))
+        agent_tasks._fields(result['artifacts'][ARTIFACT], ('checks',), ('checks',))
+        if not isinstance(result['artifacts'][ARTIFACT]['checks'], list):
+            raise ValueError('Round checks must be a list')
+
+
+def _assert_part_progress(batch, task_id, report):
+    """An accepted import must advance its partition or a verified round."""
+    if report.get('action') == 'blocked':
+        return
+    binding = _check_bound_inputs(batch, task_id)
+    state = _load(_path(Path(batch), binding['state_path']).read_bytes())
+    if any(entry.get('task_id') == task_id for entry in state.get('completed', [])):
+        return
+    evaluated = review.evaluate_rounds(batch)
+    rid = binding['task']['round_id']
+    if rid in evaluated['checked_rounds']:
+        return
+    errors = [e.get('reason') or e.get('message') for e in evaluated['errors']
+              if e.get('round_id') == rid and e.get('code') != 'REVIEW_ROUND_FINDING']
+    raise ReviewConsumerError(f'{rid} 分片 {binding["part_index"] + 1} 安装未推进；'
+                              + '; '.join(str(e) for e in errors), rid)
+
+
 def _check_bound_inputs(batch, task_id, plan=None):
     """Check original provenance before spending a call or replaying a result."""
     batch = Path(batch)
@@ -665,7 +713,7 @@ def _write_part_package(batch, state, state_path, plan, input_hashes, index, fro
     package = "workflow/review-tasks/" + execution_id
     _save(batch, package + "/task.json", task)
     schema = {"type": "object", "additionalProperties": False,
-              "required": ["status", "artifacts", "notes", "findings"],
+              "required": list(ROUND_ROOT_FIELDS),
               "properties": {"status": {"enum": ["completed", "needs_review"]},
                              "artifacts": {"type": "object", "additionalProperties": False,
                                            "required": [ARTIFACT], "properties": {ARTIFACT: {"type": "object", "additionalProperties": False,
@@ -699,8 +747,12 @@ def _write_part_package(batch, state, state_path, plan, input_hashes, index, fro
         "type": "array", "maxItems": len(targets),
         "items": {"type": "object", "additionalProperties": False, "required": required_properties, "properties": properties}}
     _save(batch, package + "/response.schema.json", schema)
-    _save(batch, package + "/response.example.json", {"status": "needs_review", "artifacts": {ARTIFACT: {"checks": []}},
-          "notes": ["Illustrative shape only. Read task and submit real checks; this example is not reviewed evidence."], "findings": []})
+    example = _round_envelope('needs_review', [
+        'Illustrative shape only. Read task and submit real checks; this example is not reviewed evidence.'])
+    _check_response_envelope(dict(example, status='completed'))
+    if set(schema['required']) != set(example):
+        raise ValueError('Review example/schema root contract mismatch')
+    _save(batch, package + "/response.example.json", example)
     _atomic(_path(batch, package + "/README.md"), (
         "# Separate semantic round\n\nRead task.json and its complete prompt. Return the result object described there; "
         "do not return names, signatures, task IDs or hashes as evidence. "
@@ -711,7 +763,7 @@ def _write_part_package(batch, state, state_path, plan, input_hashes, index, fro
 def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_per_part=None,
                  only_round=None):
     batch = Path(batch_dir)
-    _recover_installs(batch)
+    _recover_installs(batch, only_round=only_round, skip_rounds=skip_rounds)
     plan = _effective_round_plan(batch)
     if only_round is not None:
         evaluated = review.evaluate_rounds(batch)
@@ -831,6 +883,20 @@ def export_group(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
         return {"action": "exported", "round_id": state["round_id"], "parts": parts}
 
 
+def _save_review_failure(batch, task_id, round_id, error, error_code=None, attempt=None):
+    """Bind diagnostics to this task/input generation, never just newest mtime."""
+    batch = Path(batch)
+    binding = _load(_path(batch, 'workflow/review-bindings/' + task_id + '.json').read_bytes())
+    state = _load(_path(batch, binding['state_path']).read_bytes())
+    part = state['parts'][binding['part_index']]
+    _save(batch, 'workflow/review-failures/' + task_id + '.json', {
+        'task_id': task_id, 'round_id': round_id,
+        'input_binding': binding['plan']['input_binding'],
+        'state_path': binding['state_path'], 'part_index': binding['part_index'],
+        'targets': part['targets'], 'error': str(error), 'error_code': error_code,
+        'attempt': attempt})
+
+
 def _pending_path(task_id):
     return "workflow/review-pending/" + task_id + ".json"
 
@@ -858,6 +924,12 @@ def _finish_install(batch, transaction):
     binding = _check_bound_inputs(batch, task_id, plan)
     record = transaction['record']
     findings = review._round_checks(record, record['round_id'], plan, batch, lenient=True)
+    # Verify retained responses/transactions BEFORE publishing the combined round
+    # or replacing its findings. Failed local acceptance is not a model retry.
+    try:
+        review._verify_round_sources(batch, plan, record)
+    except ValueError as exc:
+        raise ReviewConsumerError(f'{record["round_id"]} 审核来源复验失败：{exc}', record['round_id']) from exc
     current = _existing(batch, plan)
     present = [r for r in current['rounds'] if r['round_id'] == record['round_id']]
     if present:
@@ -877,6 +949,10 @@ def _finish_install(batch, transaction):
     # Recompute after installing the record so the last round contributes the
     # full field-by-field comparison. This is replayable after interruption.
     evaluated = review.evaluate_rounds(batch)
+    if record['round_id'] not in evaluated['checked_rounds']:
+        reasons = [e.get('reason') or e.get('message') for e in evaluated['errors']
+                   if e.get('round_id') == record['round_id']]
+        raise ReviewConsumerError(f'{record["round_id"]} 审核消费者未验收：' + str(reasons), record['round_id'])
     ingest.build_review_files(batch, {'findings': evaluated['findings']})
     evaluated = review.evaluate_rounds(batch)
     if evaluated.get("execution_completed"):
@@ -890,13 +966,16 @@ def _finish_install(batch, transaction):
     return report
 
 
-def _recover_installs(batch):
+def _recover_installs(batch, *, only_round=None, skip_rounds=()):
     folder = _path(batch, 'workflow/review-transactions/.probe').parent
     if not folder.is_dir():
         return
     plan = _effective_round_plan(batch)
     for path in sorted(folder.glob('round-*.json')):
         transaction = _load(_path(batch, 'workflow/review-transactions/' + path.name).read_bytes())
+        rid = (transaction.get('record') or {}).get('round_id')
+        if rid in skip_rounds or (only_round is not None and rid != only_round):
+            continue
         task_id = transaction['task_id']
         if not isinstance(task_id, str) or path.name != task_id + '.json':
             raise ValueError('Review transaction task ID does not match its filename')
@@ -1219,7 +1298,12 @@ def _run_parts_parallel(batch_dir, parts, config, workers, retries=1, feedbacks=
     if not missing:
         return outcomes, quota_hit
     retries = max(1, min(5, int(retries or 1)))
-    feedbacks = feedbacks or {}
+    feedbacks = dict(feedbacks or {})
+    for part in missing:
+        previous = review._load(_path(batch, 'workflow/review-failures/' + part['task_id'] + '.json'))
+        if (isinstance(previous, dict) and previous.get('task_id') == part['task_id']
+                and isinstance(previous.get('error'), str)):
+            feedbacks.setdefault(part['task_id'], previous['error'])
     budget = int(config.get("max_input_chars", 600000))
     feedback_limit = int(config.get("retry_feedback_chars", 1200) or 1200)
 
@@ -1231,7 +1315,9 @@ def _run_parts_parallel(batch_dir, parts, config, workers, retries=1, feedbacks=
             room = max(0, budget - len(prompt))
             prompt += ("\n前次分片结果未通过协议/语义校验，请修正并完整返回本分片全部目标的 JSON。错误："
                        + feedback[:feedback_limit])[:room]
-        return invoke(prompt, run_dir, config, permit_parallel=True)["response"]
+        response = invoke(prompt, run_dir, config, permit_parallel=True)["response"]
+        _check_response_envelope(response)
+        return response
 
     def run_one(part):
         last_error = ""
@@ -1401,8 +1487,9 @@ def _stall_key(round_id, error):
     Task ids/attempt dirs change on every export, so they cannot bound a loop.
     round + normalized error detail is the real "same problem" identity.
     """
-    detail = " ".join(str(error or "").split())[:300]
-    return round_id + "\n" + detail
+    detail = ' '.join(str(error or '').split())
+    detail = re.sub(r'round-(?:group-)?[0-9a-f]{32}(?:-[0-9a-f]{32})?', 'round-<task>', detail)
+    return round_id + '\n' + detail[:300]
 
 
 def _load_stall(batch):
@@ -1410,11 +1497,95 @@ def _load_stall(batch):
     return data if isinstance(data, dict) and isinstance(data.get("counts"), dict) else {"counts": {}}
 
 
-def _record_stall(batch, round_id, error, *, max_strikes):
-    """Increment the cross-run counter for this exact failure; return count."""
+def _stall_context(batch, config):
+    """Bind a retry budget to actual review inputs, implementation and route."""
+    root = Path(__file__).resolve().parent
+    code = {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+            for name in ('review_rounds.py', 'review.py', 'agent_roles.py',
+                         'agent_protocol.py', 'local_agent.py')}
+    try:
+        plan = _effective_round_plan(batch)
+        generation = _review_generation(Path(batch), plan)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ReviewInputsChanged(f'Cannot bind current review inputs: {exc}') from exc
+    return review._digest({'plan': plan, 'code': code, 'config': config,
+                           'generation': generation.get('nonce') if generation else None})
+
+
+def _blocked_stall_rounds(batch, config):
+    """Read the persistent budget BEFORE any paid work, per independent round."""
+    scope = _stall_context(batch, config)
+    checked = review.evaluate_rounds(batch)['checked_rounds']
+    blocked = {}
+    for entry in _load_stall(batch)['counts'].values():
+        if not isinstance(entry, dict):
+            continue
+        rid = entry.get('round_id')
+        count, limit = entry.get('count', 0), entry.get('limit', _stall_limit(config))
+        if (rid in review.ROUND_IDS and rid not in checked
+                and entry.get('scope') == scope
+                and isinstance(count, int) and isinstance(limit, int) and count >= limit):
+            blocked[rid] = {'reason': entry['error'], 'error_code': entry.get('error_code'),
+                            'attempts': entry['count'], 'guarded': True}
+    return blocked
+
+
+def _recover_guarded_rounds(batch, blocked):
+    """The guard forbids model work, not verification of retained local evidence."""
+    for rid in list(blocked):
+        try:
+            with _agent_lock(60):
+                _recover_installs(Path(batch), only_round=rid)
+        except ReviewInputsChanged:
+            raise
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            continue
+        pending_folder = _path(Path(batch), 'workflow/review-pending/.probe').parent
+        pending = []
+        for path in pending_folder.glob('round-*.json'):
+            task_id = path.stem
+            if not re.fullmatch(r'round-[0-9a-f]{32}', task_id):
+                continue
+            try:
+                binding = _check_bound_inputs(batch, task_id)
+                if binding['task']['round_id'] == rid:
+                    pending.append((binding['part_index'], task_id, path))
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                continue
+        # UUID order has no relation to installment order. Replay earlier parts
+        # first so a full set of retained responses recovers in one local pass.
+        for _, task_id, path in sorted(pending):
+            try:
+                response = _load(path.read_bytes())
+                _check_response_envelope(response)
+                report = import_result(batch, task_id, response)
+                _assert_part_progress(batch, task_id, report)
+                if report.get('action') != 'blocked':
+                    _clear_pending(batch, task_id)
+            except ReviewInputsChanged:
+                # A pending response from an obsolete generation is not a reason
+                # to block recovery of this generation or an independent round.
+                continue
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                continue
+        if rid in review.evaluate_rounds(batch)['checked_rounds']:
+            _clear_stall(batch, rid)
+            blocked.pop(rid)
+    return blocked
+
+
+def _record_stall(batch, round_id, error, *, max_strikes, scope=None, error_code=None):
+    """Increment the cross-run counter under the normal workflow write lock."""
+    with _agent_lock(60):
+        return _record_stall_locked(batch, round_id, error, max_strikes=max_strikes,
+                                    scope=scope, error_code=error_code)
+
+
+def _record_stall_locked(batch, round_id, error, *, max_strikes, scope, error_code):
     ledger = _load_stall(batch)
-    key = _stall_key(round_id, error)
+    key = _stall_key(round_id, error) + '\n' + str(scope or '')
     entry = ledger["counts"].get(key) or {"count": 0}
+    entry.update(scope=scope, limit=max_strikes, error_code=error_code)
     entry["count"] = int(entry.get("count", 0)) + 1
     entry["round_id"] = round_id
     entry["error"] = " ".join(str(error or "").split())[:400]
@@ -1424,6 +1595,11 @@ def _record_stall(batch, round_id, error, *, max_strikes):
 
 
 def _clear_stall(batch, round_id):
+    with _agent_lock(60):
+        _clear_stall_locked(batch, round_id)
+
+
+def _clear_stall_locked(batch, round_id):
     ledger = _load_stall(batch)
     changed = False
     for key in [k for k, v in ledger["counts"].items() if v.get("round_id") == round_id]:
@@ -1438,8 +1614,18 @@ def run(batch_dir, config=None, portable_max_input_chars=None, *, fresh=False):
     if not isinstance(fresh, bool):
         raise ValueError('fresh must be a boolean')
     restarted = restart_rounds(batch_dir) if fresh else None
+    # Resolve once so dispatch and the persisted budget see the same route.
+    if config is None and (os.environ.get('MUDU_AGENT_CONFIG')
+                           or Path(__file__).with_name('local-agent.json').is_file()):
+        config = load_config()
     try:
-        report = _run(batch_dir, config, portable_max_input_chars)
+        blocked = _blocked_stall_rounds(Path(batch_dir), config) if config is not None else {}
+        if blocked:
+            blocked = _recover_guarded_rounds(Path(batch_dir), blocked)
+        if blocked:
+            report = _run(batch_dir, config, portable_max_input_chars, blocked_rounds=blocked)
+        else:
+            report = _run(batch_dir, config, portable_max_input_chars)
     except ReviewInputsChanged as exc:
         report = _inputs_changed_report(exc)
     report = _apply_stall_budget(batch_dir, config, report)
@@ -1466,7 +1652,7 @@ def _apply_stall_budget(batch_dir, config, report):
     reaching the limit, stop re-exporting and return a clear blocked reason with
     the concrete offending error instead of spinning.
     """
-    if not isinstance(report, dict):
+    if not isinstance(report, dict) or report.get('inputs_changed'):
         return report
     batch = Path(batch_dir)
     checked = set()
@@ -1480,7 +1666,11 @@ def _apply_stall_budget(batch_dir, config, report):
         # (execution_failures) or nested review summary; gather what we can.
         summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
         failures = summary.get("execution_failures") if isinstance(summary.get("execution_failures"), dict) else {}
-    limit = _stall_limit(config)
+    try:
+        scope = _stall_context(batch, config)
+    except ReviewInputsChanged as exc:
+        return _inputs_changed_report(exc)
+    stalled = []
     for round_id in review.ROUND_IDS:
         if round_id in checked:
             _clear_stall(batch, round_id)
@@ -1493,19 +1683,24 @@ def _apply_stall_budget(batch_dir, config, report):
             continue
         if entry.get("error_code") in ("rate_limit", "quota"):
             continue
-        count = _record_stall(batch, round_id, error, max_strikes=limit)
+        code = entry.get('error_code')
+        limit = 1 if code == 'review_consumer' else _stall_limit(config)
+        count = (entry.get('attempts', limit) if entry.get('guarded') else
+                 _record_stall(batch, round_id, error, max_strikes=limit,
+                               scope=scope, error_code=code))
         if count >= limit:
-            detail = " ".join(str(error).split())[:400]
-            return {"action": "blocked", "completed": False, "quality_passed": False,
-                    "stall": {"round_id": round_id, "strikes": count, "limit": limit,
-                              "error": detail},
-                    "reason": (f"{round_id} 轮同一校验错误已连续 {count} 次（上限 {limit}），"
-                               f"停止原样重试，需按具体错误修复：" + detail),
-                    "summary": report.get("summary", report)}
+            stalled.append({'round_id': round_id, 'strikes': count, 'limit': limit,
+                            'error': ' '.join(str(error).split())[:400], 'error_code': code})
+    if stalled:
+        first = stalled[0]
+        return {**report, 'action': 'blocked', 'completed': False, 'quality_passed': False,
+                'repair_required': True, 'stall': first, 'stalled_rounds': stalled,
+                'reason': (f'{first["round_id"]} 轮同一校验错误已达预算，已禁止原样模型重试；'
+                           '保留已验证分片与待安装响应，需修复对应检查：' + first['error'])}
     return report
 
 
-def _run(batch_dir, config=None, portable_max_input_chars=None):
+def _run(batch_dir, config=None, portable_max_input_chars=None, *, blocked_rounds=None):
     """Run separate fresh processes, or export one portable round without config."""
     if config is None:
         configured = os.environ.get("MUDU_AGENT_CONFIG") or Path(__file__).with_name("local-agent.json").is_file()
@@ -1514,7 +1709,7 @@ def _run(batch_dir, config=None, portable_max_input_chars=None):
                 return export_task(batch_dir, max_input_chars=portable_max_input_chars)
             return export_task(batch_dir)
         config = load_config()
-    failures = {}
+    failures = dict(blocked_rounds or {})
     quota_hit = False
     retries = max(1, min(5, int(config.get("review_max_attempts", 1))))
     with _agent_lock(60):
@@ -1541,6 +1736,8 @@ def _run(batch_dir, config=None, portable_max_input_chars=None):
                 except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
                     if _failure_code(exc) == 'context_changed':
                         raise ReviewInputsChanged(str(exc)) from exc
+                    if _failure_code(exc) == 'review_consumer':
+                        failures[rid] = {'reason': str(exc), 'error_code': 'review_consumer', 'attempts': 0}
                     blocked = blocked or {"action": "blocked", "completed": False, "reason": str(exc)}
                     continue
                 if group.get("action") == "exported":
@@ -1579,14 +1776,17 @@ def _run(batch_dir, config=None, portable_max_input_chars=None):
                             report = import_result(batch_dir, part["task_id"], response)
                         except review.RoundCheckError:
                             report = _repair_round(batch_dir, part["task_id"], config)
+                        _assert_part_progress(batch_dir, part["task_id"], report)
                     except ReviewInputsChanged:
                         raise
                     except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
                         last_error, last_error_code = str(exc), _failure_code(exc)
                         if last_error_code == 'context_changed':
                             raise ReviewInputsChanged(last_error) from exc
-                        _save(batch_dir, "workflow/review-failures/" + part["task_id"] + ".json",
-                              {"round_id": round_id, "error": last_error, "error_code": last_error_code})
+                        if isinstance(exc, ValueError) and last_error_code != 'review_consumer':
+                            _clear_pending(batch_dir, part['task_id'])
+                        _save_review_failure(batch_dir, part['task_id'], round_id,
+                                             last_error, last_error_code)
                         break
                     _clear_pending(batch_dir, part["task_id"])
                     if report["action"] == "blocked":
@@ -1599,8 +1799,14 @@ def _run(batch_dir, config=None, portable_max_input_chars=None):
                         return {"action": "blocked", "completed": False, "quota": True,
                                 "reason": "代理额度/限流不可用，已停止重试", "summary": summary}
             continue
-        exported = export_task(batch_dir, max_input_chars=config.get("max_input_chars", 600000),
-                               skip_rounds=failures, max_units_per_part=_part_units(config))
+        try:
+            exported = export_task(batch_dir, max_input_chars=config.get("max_input_chars", 600000),
+                                   skip_rounds=failures, max_units_per_part=_part_units(config))
+        except ReviewConsumerError as exc:
+            if exc.round_id not in review.ROUND_IDS:
+                raise
+            failures[exc.round_id] = {'reason': str(exc), 'error_code': exc.code, 'attempts': 0}
+            continue
         if exported["action"] != "exported":
             exported["summary"] = write_summary(batch_dir, failures)
             return exported
@@ -1631,11 +1837,13 @@ def _run(batch_dir, config=None, portable_max_input_chars=None):
                 if response is None:
                     run_dir = _attempt_dir(batch_dir, exported["task_id"])
                     response = invoke(prompt, run_dir, config)["response"]
+                    _check_response_envelope(response)
                     _save_pending(batch_dir, exported["task_id"], response)
                 try:
                     report = import_result(batch_dir, exported["task_id"], response)
                 except review.RoundCheckError:
                     report = _repair_round(batch_dir, exported["task_id"], config)
+                _assert_part_progress(batch_dir, exported["task_id"], report)
                 _clear_pending(batch_dir, exported["task_id"])
                 if report["action"] == "blocked":
                     raise ValueError("该轮返回未完成：" + str(report.get("notes", [])))
@@ -1646,15 +1854,18 @@ def _run(batch_dir, config=None, portable_max_input_chars=None):
                 last_error, last_error_code = str(exc), _failure_code(exc)
                 if last_error_code == 'context_changed':
                     raise ReviewInputsChanged(last_error) from exc
-                if isinstance(exc, ValueError):
+                if isinstance(exc, ValueError) and last_error_code != 'review_consumer':
                     _clear_pending(batch_dir, exported["task_id"])
-                _save(batch_dir, "workflow/review-failures/" + exported["task_id"] + ".json",
-                      {"round_id": round_id, "attempt": attempt + 1,
-                       "error": last_error, "error_code": last_error_code})
+                _save_review_failure(batch_dir, exported['task_id'], round_id,
+                                     last_error, last_error_code, attempt + 1)
                 # If installation succeeded but a later report/receipt write
                 # failed, do not accidentally spend this round's retry on the
                 # next one. The outer scheduler resumes from valid records.
                 if round_id in review.evaluate_rounds(batch_dir)["checked_rounds"]:
+                    break
+                if last_error_code == 'review_consumer':
+                    failures[round_id] = {"attempts": attempt + 1, "reason": last_error,
+                                          "error_code": last_error_code}
                     break
                 # 额度/限流：本轮和后续轮次都不可用，立即停止，不逐轮重试。
                 if last_error_code in ('rate_limit', 'quota'):

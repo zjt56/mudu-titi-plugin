@@ -346,6 +346,66 @@ class ServerSupervisorTest(SupervisorFixture):
             p.start()
             self.addCleanup(p.stop)
 
+    def test_supervised_dispatch_preserves_retry_budget_across_no_progress_passes(self):
+        folder = self.make_batch(stages={"extract": {"status": "failed"}})
+        with patch.object(server, "_advance_queue", []), \
+             patch.object(server, "_ensure_advance_worker"):
+            watch = self.make_supervisor(server._dispatch_supervised)
+            for expected in (1, 2, 3):
+                self.assertEqual(watch.one_tick()["batches"]["active"], "dispatched")
+                state = self.state(folder)
+                self.assertEqual(state["no_progress_attempts"], expected)
+                self.assertEqual(state["retry_reservation_at"], state["next_retry_at"])
+                self.assertGreater(state["next_retry_at"], self.clock.now)
+                # Simulate a finished pass with unchanged artifacts; no model or
+                # actual worker runs, but dispatch uses the real server adapter.
+                server._advance_queue.clear()
+                server._advance_state.clear()
+                self.due(folder)
+            self.assertEqual(watch.one_tick()["batches"]["active"], "exhausted")
+            self.assertEqual(self.state(folder)["no_progress_attempts"], 3)
+
+    def test_automatic_operations_enqueue_preserves_retry_reservation(self):
+        from workflow import operations
+        folder = self.make_batch()
+        ledger = {"status": "waiting_external", "next_retry_at": 2000,
+                  "retry_reservation_at": 2000, "no_progress_attempts": 5,
+                  "escalation": "keep failure evidence"}
+        put(folder / "workflow" / supervisor.LEDGER, ledger)
+        expected = {"identity": "identity", "incident_id": "incident"}
+        with patch.object(server, "_advance_queue", []), \
+             patch.object(server, "_ensure_advance_worker"), \
+             patch.object(operations, "_identity", return_value="identity"), \
+             patch.object(operations, "_load", return_value={"incident": {"incident_id": "incident"}}):
+            result = server._launch_advance("active", folder, operations_expectation=expected)
+        self.assertTrue(result["started"])
+        self.assertEqual(self.state(folder), ledger)
+
+    def test_explicit_continue_resets_retry_budget_without_changing_artifacts(self):
+        folder = self.make_batch(stages={"extract": {"status": "failed"}})
+        before = (folder / "workflow/manifest.json").read_bytes()
+        put(folder / "workflow" / supervisor.LEDGER,
+            {"status": "exhausted", "next_retry_at": 2000,
+             "retry_reservation_at": 2000, "no_progress_attempts": 5,
+             "escalation": "long cooldown"})
+        with patch.object(server, "_advance_queue", []), \
+             patch.object(server, "_ensure_advance_worker"):
+            self.assertTrue(server.start_advance("active", reset_budget=True)["started"])
+        state = self.state(folder)
+        self.assertEqual(state["status"], "progress")
+        self.assertEqual(state["no_progress_attempts"], 0)
+        self.assertEqual(state["next_retry_at"], 0)
+        self.assertEqual(state["retry_reservation_at"], 0)
+        self.assertNotIn("escalation", state)
+        self.assertEqual((folder / "workflow/manifest.json").read_bytes(), before)
+
+    def test_explicit_rerun_requests_retry_budget_reset(self):
+        folder = self.make_batch()
+        with patch.object(server, "_launch_advance", return_value={"started": True}) as launch:
+            server.start_rerun("active", "review")
+        self.assertEqual(launch.call_args.args, ("active", folder))
+        self.assertIs(launch.call_args.kwargs["reset_budget"], True)
+
     def test_worker_single_pass_holds_claim_and_does_not_reenter(self):
         folder = self.make_batch()
         entered, finish, done = threading.Event(), threading.Event(), threading.Event()

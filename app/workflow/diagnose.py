@@ -60,19 +60,75 @@ def _last_error_line(text: str) -> str:
     return clean[-1] if clean else ""
 
 
-def _review_failure_detail(batch: Path) -> str:
-    """Recent structured review-part failure; the stage log only has [stderr]."""
+def _review_failure_detail(batch: Path, record: dict | None = None) -> str:
+    """Read failures for current unfinished tasks; historical evidence stays history."""
+    from datetime import datetime
+    from . import review, review_rounds
+
     folder = batch / "workflow" / "review-failures"
     if not folder.is_dir():
         return ""
+    record = record or {}
+    try:
+        evaluated = review.evaluate_rounds(batch)
+    except (OSError, ValueError, KeyError, TypeError):
+        evaluated = {}
+    checked = set(evaluated.get("checked_rounds") or [])
+    plan = evaluated.get("plan")
+    current_task = record.get("task_id")
+    current_task = current_task if isinstance(current_task, str) and current_task.startswith("round-") else None
+    started = None
+    if record.get("started_at"):
+        try:
+            started = datetime.fromisoformat(record["started_at"]).timestamp()
+        except (ValueError, TypeError):
+            return ""
     files = sorted((p for p in folder.glob("*.json") if p.is_file()),
                    key=lambda p: p.stat().st_mtime_ns, reverse=True)
-    for path in files[:4]:
+    for path in files:
         report = _read(path)
-        if isinstance(report, dict):
-            error = report.get("error") or report.get("reason")
-            if error:
-                return str(error)[:1200]
+        if (not isinstance(report, dict) or report.get("round_id") not in review.ROUND_IDS
+                or report.get("round_id") in checked):
+            continue
+        error = report.get("error") or report.get("reason")
+        if not error:
+            continue
+        task_id = report.get("task_id")
+        if task_id is None and re.fullmatch(r"round-[0-9a-f]{32}", path.stem):
+            task_id = path.stem
+        if task_id is None:
+            # Legacy records lack provenance. Never use them to override an
+            # identified task or revive a failure from before this stage attempt.
+            if (current_task or any(k in report for k in ("input_binding", "state_path", "part_index", "targets"))
+                    or started is not None and path.stat().st_mtime < started):
+                continue
+            return str(error)[:1200]
+        if (not isinstance(task_id, str) or not re.fullmatch(r"round-[0-9a-f]{32}", task_id)
+                or current_task and task_id != current_task or not isinstance(plan, dict)):
+            continue
+        try:
+            # This checks input hashes, protocol, effective plan and retired
+            # generations without recovering installs or exporting new work.
+            binding = review_rounds._check_bound_inputs(batch, task_id, plan)
+            task = binding["task"]
+            state = _read(review_rounds._path(batch, binding["state_path"]))
+            index = binding["part_index"]
+            if (not isinstance(state, dict) or state.get("plan") != plan
+                    or not isinstance(index, int) or isinstance(index, bool) or index < 0
+                    or index >= len(state.get("parts") or [])):
+                continue
+            part = state["parts"][index]
+            if (task.get("task_id") != task_id or task.get("round_id") != report.get("round_id")
+                    or part.get("task_id") != task_id
+                    or any(row.get("task_id") == task_id for row in state.get("completed", []) if isinstance(row, dict))):
+                continue
+            identity = {"input_binding": plan["input_binding"], "state_path": binding["state_path"],
+                        "part_index": index, "targets": part["targets"]}
+            if any(key in report and report[key] != value for key, value in identity.items()):
+                continue
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
+            continue
+        return str(error)[:1200]
     return ""
 
 
@@ -457,9 +513,18 @@ def diagnose(batch_dir) -> dict:
                 if err:
                     detail = err
             if not detail and stage.id == "review":
-                detail = _review_failure_detail(batch)
+                detail = _review_failure_detail(batch, record)
             if not detail:
-                log_err = _last_error_line(_tail_file(batch / "workflow" / "logs" / f"{stage.id}.log", limit=None))
+                log_path = batch / "workflow" / "logs" / f"{stage.id}.log"
+                current_log = True
+                if stage.id == "review" and record.get("started_at"):
+                    from datetime import datetime
+                    try:
+                        current_log = (log_path.is_file() and log_path.stat().st_mtime
+                                       >= datetime.fromisoformat(record["started_at"]).timestamp())
+                    except (OSError, ValueError, TypeError):
+                        current_log = False
+                log_err = _last_error_line(_tail_file(log_path, limit=None)) if current_log else ""
                 if log_err:
                     detail = log_err
             if not detail:

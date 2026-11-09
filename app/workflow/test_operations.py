@@ -339,10 +339,37 @@ class OperationsTests(unittest.TestCase):
         self.put("workflow/self-heal.json", {"events": [{"at": "now", "stage": "review", "detail": "broken", "signature": signature, "outcome": "repair_failed"}]})
         self.manifest["stages"]["review"] = {"status": "needs_review", "execution_completed": True}
         self.put("workflow/manifest.json", self.manifest)
-        self.assertEqual(op.incidents(self.root)["incidents"], [])
+        with patch("workflow.review.evaluate_rounds", return_value={
+                "execution_completed": True, "passed": False, "findings": [{"field": "knowledge"}]}):
+            self.assertEqual(op.incidents(self.root)["incidents"], [])
         self.manifest["stages"]["review"]["status"] = "failed"
         self.put("workflow/manifest.json", self.manifest)
         self.assertEqual(len(op.incidents(self.root)["incidents"]), 1)
+
+    def test_incomplete_review_needs_review_escalates_despite_cached_completion(self):
+        self.candidate.return_value = ("review", "labels protocol stall")
+        self.put("workflow/self-heal.json", {"events": [{"at": "now", "stage": "review",
+            "detail": "labels protocol stall", "signature": "current-review-failure",
+            "outcome": "retry_failed"}]})
+        self.manifest["stages"]["review"] = {"status": "needs_review", "execution_completed": True}
+        self.put("workflow/manifest.json", self.manifest)
+        # No real round evidence exists: a stale manifest flag cannot hide an
+        # internal review failure from the operations agent.
+        found = op.incidents(self.root)["incidents"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["stage"], "review")
+        self.assertEqual(found[0]["signature"], "current-review-failure")
+        self.assertEqual(found[0]["status"], "queued")
+        self.assertTrue(found[0]["eligible"])
+
+    def test_unreadable_review_evidence_does_not_hide_failed_execution(self):
+        self.candidate.return_value = ("review", "broken")
+        self.put("workflow/self-heal.json", {"events": [{"at": "now", "stage": "review",
+            "detail": "broken", "signature": "unreadable-review", "outcome": "repair_failed"}]})
+        self.manifest["stages"]["review"] = {"status": "needs_review"}
+        self.put("workflow/manifest.json", self.manifest)
+        with patch("workflow.review.evaluate_rounds", side_effect=ValueError("damaged review record")):
+            self.assertEqual(len(op.incidents(self.root)["incidents"]), 1)
 
     def test_view_returns_persisted_snapshot_when_batch_runner_holds_lock(self):
         incident = op.incidents(self.root)["incidents"][0]

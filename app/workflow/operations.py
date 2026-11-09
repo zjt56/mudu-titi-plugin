@@ -362,8 +362,20 @@ def _discover(folder):
     record = manifest.get("stages", {}).get(stage) or {}
     if record.get("status") == mf.RUNNING:
         return state
-    if stage == "review" and record.get("status") in {mf.NEEDS_REVIEW, mf.COMPLETED, mf.APPROVED}:
-        return state
+    if stage == "review":
+        if record.get("status") in {mf.COMPLETED, mf.APPROVED}:
+            return state
+        if record.get("status") == mf.NEEDS_REVIEW:
+            # Quality differences are valid review output, but needs_review also
+            # represents protocol/stall failures. Verify the current round
+            # evidence instead of trusting a status or cached completion flag.
+            from . import review
+            try:
+                execution_completed = review.evaluate_rounds(folder).get("execution_completed") is True
+            except (OSError, ValueError, KeyError, TypeError):
+                execution_completed = False
+            if execution_completed:
+                return state
     # Match real failed-repair events by stage + exact current detail. Do NOT
     # recompute a hash: self_heal's signature includes retry evidence (input/code
     # hashes), so a locally derived stage+detail hash can never equal it. Use the

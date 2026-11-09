@@ -822,8 +822,9 @@ def _ensure_advance_worker():
     threading.Thread(target=_advance_worker_loop, daemon=True, name="workbench-advance-worker").start()
 
 
-def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expectation=None, **details) -> dict:
-    """Enqueue one batch into the global serial queue (never parallel)."""
+def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expectation=None,
+                    reset_budget=False, **details) -> dict:
+    """Enqueue one batch; only an explicit user action resets retry accounting."""
     from workflow import supervisor as wf_supervisor
     if operations_expectation is not None:
         from workflow import operations
@@ -844,10 +845,11 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
             if (operations_expectation.get("identity") != operations._identity(folder)
                     or operations_expectation.get("incident_id") != (operations._load(folder).get("incident") or {}).get("incident_id")):
                 return {"started": False, "error": "stale_operations_identity"}
-        try:
-            wf_supervisor.clear_exhausted(folder)
-        except (OSError, ValueError, TypeError):
-            pass
+        if reset_budget:
+            try:
+                wf_supervisor.clear_exhausted(folder)
+            except (OSError, ValueError, TypeError):
+                pass
         if prepare is not None:
             details.update(prepare())
     with _lock:
@@ -860,11 +862,11 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
 
 
 @serialized
-def start_advance(name: str) -> dict:
-    """Run one local pass; the durable supervisor schedules subsequent recovery."""
+def start_advance(name: str, *, reset_budget=False) -> dict:
+    """Run one local pass; automatic callers preserve durable retry accounting."""
     if auto_flow is None:
         raise ValueError("流水线模块不可用")
-    return _launch_advance(name, batch_dir(name))
+    return _launch_advance(name, batch_dir(name), reset_budget=reset_budget)
 
 
 def advance_state(name: str) -> dict:
@@ -911,7 +913,7 @@ def start_rerun(name: str, mode: str) -> dict:
         prepared.update(mode=mode, invalidated=changed)
         return prepared
 
-    result = _launch_advance(name, folder, prepare=prepare)
+    result = _launch_advance(name, folder, prepare=prepare, reset_budget=True)
     if result.get("started"):
         result.update(prepared, **{"from": start_stage})
     return result
@@ -2668,7 +2670,7 @@ class Handler(BaseHTTPRequestHandler):
                 fields, files = parse_multipart(self)
                 return self.send_json({"ok": True, **handle_upload(fields, files)})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "advance":
-                return self.send_json({"ok": True, **start_advance(parts[2])})
+                return self.send_json({"ok": True, **start_advance(parts[2], reset_budget=True)})
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
