@@ -53,3 +53,28 @@ test('selecting the same default again keeps existing overrides untouched', () =
   context.setDefault({ provider: 'magpie', model: 'auto/deepseek-v4.1-flash' });
   assert.equal(saved.stages.answers.model, 'auto/deepseek-v4.1-flash');
 });
+
+// Malformed (non-object) maps must be left untouched so downstream `|| {}` guards
+// handle them; the setter must not "clean" a broken config into a different shape.
+test('non-object stage/role/review maps stay unchanged when the default changes', () => {
+  const client = fs.readFileSync(path.join(root, 'lib/client.js'), 'utf8');
+  const start = client.indexOf('      const inferProfile = () =>');
+  const end = client.indexOf('      function ModelSelect(', start);
+  const body = client.slice(start, end) + '\nthis.setDefault = setDefault;';
+  function run(router) {
+    let saved = null;
+    const context = vm.createContext({ router, persist: (next) => { saved = next; } });
+    vm.runInContext(body, context);
+    context.setDefault({ provider: 'deepseek-official', model: 'deepseek-v4.1-flash' });
+    return saved;
+  }
+  const A = { provider: 'magpie', model: 'auto/deepseek-v4.1-flash' };
+  const stagesArr = run({ default: A, stages: [] });
+  assert.ok(Array.isArray(stagesArr.stages), 'array stages preserved');
+  const rolesStr = run({ default: A, roles: 'x' });
+  assert.equal(rolesStr.roles, 'x');
+  const reviewStr = run({ default: A, review: 'bad' });
+  assert.equal(reviewStr.review, 'bad');
+  const roundsArr = run({ default: A, review: { rounds: [] } });
+  assert.ok(Array.isArray(roundsArr.review.rounds), 'array rounds preserved');
+});
