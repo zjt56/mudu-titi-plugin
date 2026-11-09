@@ -396,6 +396,28 @@ def _table_blocks(text, extraction, issues, uid, unit_type=""):
     return blocks
 
 
+def _rubric_line(line, unit_type):
+    """A real作答导语 line, never material, a numbered题号 or article prose."""
+    text = line.strip()
+    if not text:
+        return False
+    from .preview import _strong_number
+    from .extract import material_label
+    if _strong_number(line) is not None or material_label(line):
+        return False
+    plain = question_content.SECTION_LEAD.sub("", text, count=1)
+    if question_content._generic_choice_instruction(line, unit_type):
+        return True
+    kind = str(unit_type or "")
+    if "任务型阅读" in kind or "回答问题" in kind:
+        return bool(re.search(r"阅读下面短文|回答问题|词数要求", plain))
+    if "补全对话" in kind:
+        return bool(re.search(r"补全对话|方框中选择|对话内容", plain))
+    if kind:
+        return bool(_INSTRUCTION.match(plain))
+    return False
+
+
 def _rubric_lines(lines, unit_type):
     """Return the leading verbatim section rubric, if the source states one.
 
@@ -403,19 +425,41 @@ def _rubric_lines(lines, unit_type):
     must stay in the shared material rather than become a fake stem.
     """
     rubric = []
-    from .preview import _strong_number
     for line in lines:
         text = line.strip()
-        if not text or _strong_number(line) is not None:
+        if not text or not _rubric_line(line, unit_type):
             break
-        from .extract import material_label
-        if material_label(line):
-            break
-        if question_content._generic_choice_instruction(line, unit_type) or _INSTRUCTION.match(text):
-            rubric.append(line)
-            continue
-        break
+        rubric.append(line)
     return rubric
+
+
+def _section_rubric(lines, unit):
+    """Return the section's own verbatim作答导语 shared by several题组.
+
+    Later groups bind only their article/table, so the section instruction sits
+    outside their span. Scan back to the nearest preceding大题标题 and reuse the
+    exact source line of the same section; absent/ambiguous text returns [].
+    """
+    span = unit.get("source_span") or {}
+    stop = span.get("start_line")
+    if type(stop) is not int or stop < 1:
+        return []
+    kind = unit.get("type") or ""
+    from .preview import SECTION
+    from .extract import _plain
+    for index in range(min(stop, len(lines)) - 2, -1, -1):
+        line = lines[index]
+        if _rubric_line(line, kind):
+            block = [line]
+            cursor = index + 1
+            while cursor < stop - 1 and _rubric_line(lines[cursor], kind):
+                block.append(lines[cursor])
+                cursor += 1
+            return block
+        # 「第一节　阅读下列短文…」同时像分段标题；先按导语识别，再当作边界。
+        if SECTION.match(_plain(line)):
+            return []  # Reached the section title without a real rubric.
+    return []
 
 
 def _empty(number):
@@ -441,6 +485,7 @@ def build(batch_dir, *, units=None):
     structure = _json(root, "01_source/structure.json", {})
     extraction = _json(root, "01_source/extraction.json", {})
     cleaned, _, _ = denoise.clean_body(source)
+    cleaned_lines = cleaned.splitlines()
     from .structure_gate import _build_units
     from .preview import _find, _strong_number, _weak_numbers
     fresh = _build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
@@ -483,13 +528,20 @@ def build(batch_dir, *, units=None):
                 # source line and belongs in the group's stem; leaving it empty
                 # makes every grouped question fail the upload stem requirement.
                 rubric = _rubric_lines(lines, unit.get("type") or "")
+                own_rubric = bool(rubric)
+                if not rubric:
+                    # 完形 A/B、阅读各篇共用同一大题题干：后一篇的绑定窗口只含
+                    # 自己的文章，必须补回同大题的原文导语，不能留空。
+                    # 补入的导语不属于本组切片，绝不能据此截断材料正文。
+                    rubric = _section_rubric(cleaned_lines, unit)
                 if rubric:
                     row["stem"] = "\n".join(rubric).strip()
-                body_lines = lines[len(rubric):] if rubric else lines
-                body_first = max(0, first - len(rubric))
+                offset_lines = len(rubric) if own_rubric else 0
+                body_lines = lines[offset_lines:] if offset_lines else lines
+                body_first = max(0, first - offset_lines)
                 if option_start is not None:
                     line, offset = option_start
-                    line -= len(rubric)
+                    line -= offset_lines
                     row["material"] = "\n".join([*body_lines[:line], body_lines[line][:offset]]).strip()
                     raw_options = "\n".join([body_lines[line][offset:], *body_lines[line + 1:]])
                     cursor = 0

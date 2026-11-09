@@ -217,6 +217,100 @@ class QuestionDraftTest(unittest.TestCase):
         self.assertEqual(row["options"], ["A. How are you?", "B. Thank you."])
         self.assertTrue(all(c["options"] == [] and c["stem"] == "______" for c in row["subquestions"]))
 
+    def test_section_rubric_is_shared_by_every_reading_group(self):
+        text = "\n".join([
+            "2024年九年级英语",
+            "Ⅷ.阅读理解(共4小题;每小题2分)",
+            "第一节　阅读下列短文，从每小题所给的A、B、C、D四个选项中选出最佳选项。",
+            "A",
+            "Tom is a boy. He likes apples.",
+            "1. What does Tom like?",
+            "A. Apples B. Pears C. Cats D. Dogs",
+            "2. Who is Tom?",
+            "A. A boy B. A girl C. A cat D. A dog",
+            "B",
+            "Mary is a girl. She likes music.",
+            "3. What does Mary like?",
+            "A. Music B. Art C. Math D. PE",
+            "4. Who is Mary?",
+            "A. A boy B. A girl C. A cat D. A dog",
+        ])
+        rubric = "第一节　阅读下列短文，从每小题所给的A、B、C、D四个选项中选出最佳选项。"
+        self.source(text, [([1, 2], "group", "阅读理解", 4, 9),
+                           ([3, 4], "group", "阅读理解", 10, 15)])
+        rows = question_draft.build(self.root)["items"]
+        self.assertEqual([row["stem"] for row in rows], [rubric, rubric])
+        # The shared rubric is not part of the later group's slice: its own
+        # material/label must survive verbatim.
+        self.assertTrue(rows[0]["material"].startswith("A\n"))
+        self.assertTrue(rows[1]["material"].startswith("B\n"))
+        self.assertNotIn("阅读下列短文", rows[1]["material"])
+        for row in rows:
+            self.assertEqual([child["number"] for child in row["subquestions"]], [1, 2] if row is rows[0] else [3, 4])
+            self.assertFalse(any("阅读下列短文" in (child["stem"] or "") for child in row["subquestions"]))
+
+    def test_cloze_ab_share_the_same_section_rubric_without_losing_material(self):
+        text = "\n".join([
+            "2024年九年级英语",
+            "Ⅶ.完形填空(共4小题)",
+            "阅读下列短文,从每小题所给的A、B、C、D四个选项中选出一个最佳选项。",
+            "A",
+            "Tom has a __1__ and a __2__.",
+            "1. A. cat B. dog C. pen D. cup",
+            "2. A. hat B. cap C. bag D. box",
+            "B",
+            "Mary has a __3__ and a __4__.",
+            "3. A. cat B. dog C. pen D. cup",
+            "4. A. hat B. cap C. bag D. box",
+        ])
+        rubric = "阅读下列短文,从每小题所给的A、B、C、D四个选项中选出一个最佳选项。"
+        self.source(text, [([1, 2], "group", "完形填空", 4, 7),
+                           ([3, 4], "group", "完形填空", 8, 11)])
+        rows = question_draft.build(self.root)["items"]
+        self.assertEqual([row["stem"] for row in rows], [rubric, rubric])
+        self.assertTrue(rows[0]["material"].startswith("A\n"))
+        self.assertTrue(rows[1]["material"].startswith("B\n"))
+        self.assertIn("__3__", rows[1]["material"])
+
+    def test_reading_subsection_uses_its_own_rubric_not_the_choice_one(self):
+        text = "\n".join([
+            "2024年九年级英语",
+            "Ⅷ.阅读理解(共4小题)",
+            "第一节　阅读下列短文，从每小题所给的A、B、C、D四个选项中选出最佳选项。",
+            "A",
+            "Tom is a boy.",
+            "1. Who is Tom?",
+            "A. A boy B. A girl C. A cat D. A dog",
+            "2. Who is Tom?",
+            "A. A boy B. A girl C. A cat D. A dog",
+            "第二节　阅读下面短文，并用英语回答问题（请注意每小题的词数要求）。",
+            "B",
+            "Mary is a girl.",
+            "3. Who is Mary?",
+            "4. Who is Mary?",
+        ])
+        choice = "第一节　阅读下列短文，从每小题所给的A、B、C、D四个选项中选出最佳选项。"
+        answer = "第二节　阅读下面短文，并用英语回答问题（请注意每小题的词数要求）。"
+        self.source(text, [([1, 2], "group", "阅读理解", 4, 9),
+                           ([3, 4], "group", "阅读理解", 11, 14)])
+        rows = question_draft.build(self.root)["items"]
+        self.assertEqual(rows[0]["stem"], choice)
+        self.assertEqual(rows[1]["stem"], answer)
+
+    def test_missing_section_rubric_stays_empty_instead_of_being_invented(self):
+        text = "\n".join([
+            "2024年九年级英语",
+            "Ⅷ.阅读理解(共4小题)",
+            "A",
+            "Tom is a boy.",
+            "1. Who is Tom?",
+            "A. A boy B. A girl C. A cat D. A dog",
+            "2. Who is Tom?",
+            "A. A boy B. A girl C. A cat D. A dog",
+        ])
+        self.source(text, [([1, 2], "group", "阅读理解", 3, 8)])
+        self.assertEqual(question_draft.build(self.root)["items"][0]["stem"], "")
+
     def test_table_uses_proven_word_spans_and_retains_source_grid(self):
         table = "[TABLE 1]\nTitle | \n__16__ | Detail\n[/TABLE]"
         text = "Listen and complete.\n" + table

@@ -70,13 +70,19 @@ def _canonical(value: str) -> str:
     return re.sub(r"[\W_]", "", re.sub(r"<[^>]+>", "", _plain(value)), flags=re.UNICODE).casefold()
 
 
+# 「第一节　阅读下列短文…」是同一大题下的分段标记，题干本身从「阅读下列」开始。
+# 只用于识别与去重豁免，原文行仍按原样保存。
+SECTION_LEAD = re.compile(r"^\s*第[一二三四五六七八九十百零]+\s*[节部分]\s*")
+
+
 def _generic_choice_instruction(line: str, question_type: str) -> bool:
     """Recognize a complete reusable rubric, never an article or numbered lead-in."""
     if question_type not in {"完形填空", "语法选择", "阅读理解"}:
         return False
+    text = SECTION_LEAD.sub("", str(line), count=1)
     return bool(re.fullmatch(
         r"阅读(?:下列|下面)短文从每小题所给的abcd四个选项中选出"
-        r"(?:一个)?(?:可以填入空白处的)?最佳选项", _canonical(line)))
+        r"(?:一个)?(?:可以填入空白处的)?最佳选项", _canonical(text)))
 
 
 def _field_text(value) -> str:
