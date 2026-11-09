@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +25,12 @@ class StageConsoleEncodingTest(unittest.TestCase):
         self.root = Path(self.tmp.name).resolve()
         mf.save(self.root, mf.new_manifest("console-fixture", self.root, {}, {},
                                           {"source": "2020年安徽省中考英语"}))
+
+    def put(self, relative, text):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
 
     # ------------------------------------------------------------- 子进程 UTF-8
     def test_stage_env_makes_child_print_utf8(self):
@@ -85,6 +92,16 @@ class StageConsoleEncodingTest(unittest.TestCase):
         self.assertIn("提取完成 16150 字符", log)
         self.assertNotIn("\ufffd", log)
         self.assertEqual(mf.load(self.root)["stages"]["preassemble"]["status"], mf.FAILED)
+
+    def test_real_child_output_lands_in_log_without_replacement(self):
+        script = self.put("echo_zh.py", "print('提取完成 16150 字符')\n")
+        stage = replace(contracts.STAGE_BY_ID["preassemble"], command=(str(script),))
+        code = runner._execute_command(self.root, mf.load(self.root), stage)
+        log = (self.root / "workflow" / "logs" / "preassemble.log").read_text(encoding="utf-8")
+        # 子进程真的按 UTF-8 输出，父进程按 UTF-8 解码：中文原样进日志。
+        self.assertIn("提取完成 16150 字符", log)
+        self.assertNotIn("\ufffd", log)
+        self.assertEqual(code, 1)  # 没有产物，命令成功也不算完成
 
     def test_executor_crash_leaves_failed_not_running(self):
         def boom(*_args, **_kwargs):
