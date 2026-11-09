@@ -208,7 +208,7 @@ test('manager tools round-trip real Python receipts, preserve failure truth and 
   const findingSchema = agent.definitions.get('operations_record_finding').parameters;
   assert.equal(findingSchema.properties.paths.type, 'array');
   assert.equal(findingSchema.properties.paths.items.type, 'string');
-  assert.deepEqual(agent.definitions.get('operations_finish').parameters.properties.outcome.enum, ['resolved', 'needs_deep_repair']);
+  assert.deepEqual(agent.definitions.get('operations_finish').parameters.properties.outcome.enum, ['resolved', 'needs_deep_repair', 'needs_human']);
   const state = await f.ledger();
   assert.equal(state.incident.status, 'needs_deep_repair');
   assert.equal(state.incident.session_id, 'manager-http-session');

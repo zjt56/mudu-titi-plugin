@@ -262,7 +262,7 @@ class RepairFeedbackTest(unittest.TestCase):
                         row["knowledge" if stage == "knowledge" else "subtypes"] = ["语用/情景交际/询问目的" if stage == "knowledge" else "非法子类型"]
                     return {"response": self.response(stage, [row])}
 
-                config = dict(self.config)
+                config = dict(self.config, label_split=True)
                 config.pop("_part_model_binding")
                 first_error = io.StringIO()
                 with patch.object(local_agent, "load_config", return_value=config), \

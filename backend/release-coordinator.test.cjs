@@ -115,3 +115,61 @@ test('rolled_back marker is discarded and releases the pause', async () => {
   assert.equal(existsSync(path), false);
   rmSync(dir, { recursive: true, force: true });
 });
+
+for (const [at, paused] of [
+  ['2026-11-09T12:00:00+0800', true],
+  ['2026-11-09T11:50:00+0800', false],
+  ['not-a-time', false],
+  [null, false],
+  ['2026-11-10T12:00:00+0800', false],
+  [1794196800, true],
+  [1794196800000, true],
+]) {
+  test(`prepared timestamp ${at} has bounded pause=${paused}`, async (t) => {
+    const { createReleaseCoordinator } = await moduleReady;
+    const dir = mkdtempSync(join(tmpdir(), 'release-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const path = marker(dir, { state: 'prepared', at });
+    const c = createReleaseCoordinator({ markerPath: path, now: () => Date.parse('2026-11-09T12:01:00+0800') });
+    await c.check();
+    assert.equal(c.status.paused, paused);
+  });
+}
+
+test('thrown rollback becomes a failed marker and never restarts again', async (t) => {
+  const { createReleaseCoordinator } = await moduleReady;
+  const dir = mkdtempSync(join(tmpdir(), 'release-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = marker(dir, { state: 'installed', journal: 'fake' });
+  let restarts = 0;
+  const c = createReleaseCoordinator({ markerPath: path,
+    restart: async () => { restarts++; return { ok: false }; },
+    rollback: async () => { throw new Error('unreadable_journal'); } });
+  await c.check();
+  await c.check();
+  assert.equal(restarts, 1);
+  assert.equal(c.status.state, 'failed');
+  assert.match(JSON.parse(readFileSync(path, 'utf8')).error, /unreadable_journal/);
+});
+
+test('stop cancels timer and prevents rollback or another restart after an in-flight boot', async (t) => {
+  const { createReleaseCoordinator } = await moduleReady;
+  const dir = mkdtempSync(join(tmpdir(), 'release-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = marker(dir, { state: 'installed' });
+  let finish;
+  let restarts = 0;
+  let rollbacks = 0;
+  const c = createReleaseCoordinator({ markerPath: path,
+    restart: () => { restarts++; return new Promise((resolve) => { finish = resolve; }); },
+    rollback: async () => { rollbacks++; return { ok: true }; } });
+  c.start();
+  const pending = c.check();
+  c.stop();
+  finish({ ok: false, error: 'stopped' });
+  await pending;
+  await c.check();
+  assert.equal(restarts, 1);
+  assert.equal(rollbacks, 0);
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).state, 'installed');
+});

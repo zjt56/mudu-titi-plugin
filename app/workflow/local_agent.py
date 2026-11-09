@@ -954,7 +954,7 @@ def main(argv=None):
                     _check_input_hashes(batch_dir, hashes)
                     report = agent_tasks.accept_result(batch_dir, args.stage, response)
             except AgentError as exc:
-                exc.artifacts = result["artifacts"]
+                exc.artifacts = result.get("artifacts", {})
                 _json_write(run_dir / "import-report.json", {"completed": False, "error_code": exc.code, "error": str(exc)})
                 raise
             except ValueError as exc:

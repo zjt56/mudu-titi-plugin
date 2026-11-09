@@ -99,21 +99,6 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
         agent_tasks._validate(batch, stage, candidate, scoped, [by_id[uid]])
         return {"status": "completed", "artifacts": {path: candidate}, "notes": [], "findings": []}
 
-    repair = context.get("repair_feedback") or {}
-    if repair.get("scoped_units"):
-        selected = set(repair["unit_ids"])
-        existing = batch / path
-        try:
-            prior = json.loads(existing.read_text(encoding="utf-8-sig"))
-            for uid in set(singleton) - selected:
-                payload = _unit_payload(stage, prior, by_id[uid])
-                retained = validate(uid, payload)
-                if retained["artifacts"][path] != payload:
-                    raise ValueError("Unselected unit would need content changes: " + uid)
-                accepted[uid] = retained
-        except (OSError, ValueError, TypeError, KeyError) as exc:
-            raise ValueError("Scoped repair cannot validate untouched units; refusing whole-paper regeneration: " + str(exc)) from exc
-
     for uid, part in singleton.items():
         if uid in accepted:
             continue
@@ -214,7 +199,9 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
     for part in singles:
         unit_tasks.check_part_inputs(batch, part)
     merged = unit_tasks.merge(stage, singles, [accepted[p["unit_ids"][0]] for p in singles])
-    agent_tasks._validate(batch, stage, merged["artifacts"][path], context, units)
+    from . import scoped_regeneration
+    complete = scoped_regeneration.merge(batch, stage, merged['artifacts'][path], context, units)
+    agent_tasks._validate(batch, stage, complete, context, units)
     local_agent._json_write(run_dir / "response.json", merged)
     return {"response": merged, "input_hashes": hashes, "collected_hashes": current_hashes,
             "artifacts": {"response": str(run_dir / "response.json")}}

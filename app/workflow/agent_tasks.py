@@ -265,7 +265,7 @@ MISSING_INPUT = "missing"
 CONTENT_OPTIONAL_INPUTS = frozenset({
     "01_source/附录.txt", "01_source_ans/正文.txt",
     "07_review/structure-gate.json",
-}) | REPAIR_FEEDBACK_INPUTS
+}) | REPAIR_FEEDBACK_INPUTS | frozenset(ARTIFACTS[s] for s in ('answers', 'explanations', 'types', 'knowledge', 'audio'))
 # 01_source/metadata.json is a required extract product, not optional content.
 
 
@@ -559,6 +559,15 @@ def _collect(batch, stage, speculative=False):
             actual = add(relative)
             if actual != expected:
                 raise ValueError('Multi-audio aggregates changed during collection')
+    if feedback is not None and feedback.get('scoped_units'):
+        from . import scoped_regeneration
+        chosen = scoped_regeneration.selected(stage, contexts, units)
+        base_path = _safe_path(batch, ARTIFACTS[stage])
+        eligible = [u for u in units if stage != 'audio' or str(u.get('type', '')).startswith('听力')]
+        if len(chosen) < len(eligible) and not base_path.is_file():
+            missing.append('Scoped repair needs a baseline for untouched units: ' + ARTIFACTS[stage])
+        hashes[ARTIFACTS[stage]] = (hashlib.sha256(base_path.read_bytes()).hexdigest()
+                                   if base_path.is_file() else MISSING_INPUT)
     return contexts, hashes, missing, units
 
 
@@ -619,6 +628,11 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
         # the progress ledger is never part of it.
         hashes.pop("workflow/manifest.json", None)
         hashes.pop("manifest.json", None)
+    from . import scoped_regeneration
+    chosen = scoped_regeneration.selected(stage, context, units)
+    if chosen is not None:
+        context = scoped_regeneration.project(stage, context, chosen)
+        units = chosen
     if blind:
         context = _blind_context(context)
     # 规则按阶段绑定，避免仅修改装配版式/上传约束就让解析、知识点和审核
@@ -1104,6 +1118,9 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
     if stage == "explanations":
         return content_rules.validate(payload, units, _types(context[ARTIFACTS["types"]], units), batch)
     if stage == "audio":
+        if isinstance(payload, dict) and 'unit_binding' in payload:
+            from .scoped_regeneration import audio_validation
+            payload = audio_validation(payload, context)
         listening = [u for u in units if str(u.get("type", "")).startswith("听力")]
         rows = _coverage(payload, listening)
         verification = context.get("02_audio/segment-evidence.json", {})
@@ -1559,7 +1576,9 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
     except (ValueError, TypeError) as exc:
         raise ValueError("Response must contain JSON values only") from exc
     context, _, missing, units = _collect(batch_dir, stage)
-    _findings(result["findings"], units)
+    from . import scoped_regeneration
+    chosen = scoped_regeneration.selected(stage, context, units)
+    _findings(result["findings"], chosen if chosen is not None else units)
     report = {"completed": False, "status": result["status"], "artifacts": [],
               "notes": result["notes"], "findings": result["findings"]}
     if stage == "review" and ARTIFACTS[stage] in artifacts:
@@ -1570,6 +1589,8 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
         if not isinstance(candidate["unchecked"], list):
             raise ValueError("unchecked must be an explicit list")
     if result["status"] == "needs_review":
+        if chosen is not None:
+            return report  # A failed scoped repair never rewrites canonical data.
         # 模型优先模式：部分结果也可进入后续阶段。缺失字段保留为空，
         # 不把 needs_review 变成整批停止点；正式语义校验仍由后续模型/装配阶段继续完成。
         if (stage != "review" and not missing and os.environ.get("WF_MODEL_FIRST", "1") != "0"
@@ -1596,6 +1617,9 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
     if set(artifacts) != {ARTIFACTS[stage]}:
         raise ValueError("Completed response must contain exactly its whitelisted artifact")
     payload = artifacts[ARTIFACTS[stage]]
+    if chosen is not None:
+        payload = scoped_regeneration.merge(batch_dir, stage, payload, context, units, notes=report['notes'])
+        artifacts[ARTIFACTS[stage]] = payload
     try:
         _validate(Path(batch_dir), stage, payload, context, units, notes=report["notes"])
     except (TypeError, KeyError, AttributeError) as exc:

@@ -803,6 +803,134 @@ class FastRepairOperationsTests(unittest.TestCase):
         incident = op.view(self.root, self.folder)["incident"]
         self.assertEqual(incident["code_repair"]["status"], "needs_human")
 
+    def test_restart_reclaim_failed_verify_creates_fresh_second_repair(self):
+        claim = self.claim()
+        self.request(claim, "request_code_repair", request="start")
+        self.request(claim, "code_repair", {"operation": "write", "path": "app/workflow/test_new.py",
+                     "content": "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n"}, request="write")
+        tested = self.request(claim, "code_repair", {"operation": "test",
+                              "tests": ["workflow.test_new"]}, request="tests")
+        self.assertTrue(tested["evidence"]["passed"], tested)
+        self.request(claim, "code_repair", {"operation": "prepare"}, request="prepare")
+        with patch.dict(os.environ, {"MD_OPERATIONS_INSTALL": "1"}):
+            installed = self.request(claim, "install_code_repair", {"confirm": True}, request="install")
+        self.assertEqual(installed["status"], "completed", installed)
+        first = op._code_record(self.folder)
+        self.assertEqual(first["install_process"], op._process_identity())
+        blocked = self.request(claim, "verify", request="verify-before-restart")
+        self.assertIn("installed_pending_restart", blocked["evidence"]["error"])
+        self.request(claim, "release", request="release")
+        state = op._load(self.folder)
+        state["incident"]["not_before"] = 0
+        op._save(self.folder, state)
+        same_process = self.claim()
+        self.assertEqual(op._code_record(self.folder)["status"], "installed_pending_restart")
+        with patch.object(op, "_process_identity", return_value={"pid": 99999, "generation": "new-interpreter"}):
+            # The old process lease cannot authorize actions in a new process.
+            with self.assertRaisesRegex(ValueError, "stale_lease"):
+                self.request(same_process, "verify", request="stale-after-restart")
+            restarted = op.claim(self.root, self.folder, {
+                "incident_id": claim["incident_id"], "session_id": "session"})
+            self.assertNotEqual(restarted["attempt_id"], same_process["attempt_id"])
+            self.assertEqual(op._code_record(self.folder)["status"], "restarted_pending_verify")
+            reuse = self.request(restarted, "request_code_repair", request="before-verify")
+            self.assertTrue(reuse["evidence"]["reused"])
+            with patch.object(op, "_verify", return_value={"verified": False, "stage": "validate",
+                                                         "snapshot": "snapshot1", "evidence_id": "real-failure"}):
+                verified = self.request(restarted, "verify", request="failed-verify")
+            self.assertFalse(verified["evidence"]["verified"])
+            self.assertEqual(op._code_record(self.folder)["status"], "failed")
+            fresh = self.request(restarted, "request_code_repair", request="second-repair")
+            self.assertEqual(fresh["status"], "completed", fresh)
+            second = op._code_record(self.folder)
+            self.assertNotEqual(second["job_id"], first["job_id"])
+            self.assertEqual(second["history"][0]["job_id"], first["job_id"])
+            self.assertEqual(second["history"][0]["status"], "failed")
+            current = dev.load(second["path"])
+            self.assertIn("app/workflow/test_new.py", current["base"]["files"])
+            self.assertEqual(dev.diff(current)["files"], [])
+            self.assertEqual(op._budgets(op._load(self.folder)["incident"])["installs"], 1)
+            self.assertTrue(Path(first["path"]).is_file())
+            second_write = self.request(restarted, "code_repair", {"operation": "write",
+                "path": "app/workflow/fixture_mod.py", "content": "def answer():\n    return 1  # second fix\n",
+                "expected_sha": current["base"]["files"]["app/workflow/fixture_mod.py"]["sha256"]}, request="second-write")
+            self.assertEqual(second_write["status"], "completed", second_write)
+            second_test = self.request(restarted, "code_repair", {"operation": "test",
+                "tests": ["workflow.test_fixture"]}, request="second-test")
+            self.assertTrue(second_test["evidence"]["passed"], second_test)
+            second_plan = self.request(restarted, "code_repair", {"operation": "prepare"}, request="second-plan")
+            self.assertEqual(second_plan["status"], "completed", second_plan)
+            with patch.dict(os.environ, {"MD_OPERATIONS_INSTALL": "1"}):
+                second_install = self.request(restarted, "install_code_repair", {"confirm": True}, request="second-install")
+            self.assertEqual(second_install["status"], "completed", second_install)
+            self.assertEqual(op._budgets(op._load(self.folder)["incident"])["installs"], 2)
+            self.assertIn("second fix", (self.source / "app/workflow/fixture_mod.py").read_text())
+
+    def test_process_identity_is_stable_across_calls_and_distinct_in_child(self):
+        import subprocess, sys
+        identity = op._process_identity()
+        self.assertEqual(identity, op._process_identity())
+        child = subprocess.run([sys.executable, "-c",
+            "import json; from workflow.operations import _process_identity; print(json.dumps(_process_identity()))"],
+            capture_output=True, text=True, check=True)
+        self.assertNotEqual(identity, json.loads(child.stdout))
+
+    def test_regeneration_failed_execution_reclaim_escalates_same_evidence(self):
+        from workflow import agent_tasks
+        with patch.object(agent_tasks, "confirmed_units", return_value=[{"unit_id": "u1"}]):
+            claim = self.claim()
+            data = {"target_stage": "answers", "unit_ids": ["u1"]}
+            self.assertEqual(self.request(claim, "regenerate_units", data, request="regen")["status"], "completed")
+            self.request(claim, "resume", request="resume", enqueue=lambda expected: {"queued": True})
+            manifest = op.mf.load(self.folder)
+            manifest["stages"]["answers"]["status"] = op.mf.FAILED
+            self.put("workflow/manifest.json", manifest)
+            op.observe_execution(self.folder)
+            state = op._load(self.folder)
+            self.assertEqual(state["incident"]["attempts"][0]["outcome"], "failed")
+            self.assertEqual(op._budgets(state["incident"])["regenerations"], 1)
+            state["incident"]["not_before"] = 0
+            op._save(self.folder, state)
+            claim = self.claim()
+            failed = self.request(claim, "regenerate_units", data, request="again")
+            self.assertEqual(failed["status"], "failed", failed)
+            self.assertIn("repeat_without_new_evidence", failed["evidence"]["error"])
+            self.assertEqual(op._load(self.folder)["incident"]["escalation"]["kind"], "code_repair")
+
+    def test_regeneration_pending_stays_scheduled_success_settles_once(self):
+        from workflow import agent_tasks
+        with patch.object(agent_tasks, "confirmed_units", return_value=[{"unit_id": "u1"}]):
+            claim = self.claim()
+            self.request(claim, "regenerate_units", {"target_stage": "answers", "unit_ids": ["u1"]})
+            op.observe_execution(self.folder)
+            self.assertEqual(op._load(self.folder)["incident"]["attempts"][0]["outcome"], "scheduled")
+            manifest = op.mf.load(self.folder)
+            manifest["stages"]["answers"]["status"] = op.mf.COMPLETED
+            self.put("workflow/manifest.json", manifest)
+            with patch.object(op, "_verify", return_value={"verified": True, "evidence_id": "consumer-proof"}) as verify:
+                op.observe_execution(self.folder)
+                op.observe_execution(self.folder)
+                self.assertEqual(verify.call_count, 1)
+            row = op._load(self.folder)["incident"]["attempts"][0]
+            self.assertEqual(row["outcome"], "succeeded")
+            self.assertEqual(row["verification"]["evidence_id"], "consumer-proof")
+
+    def test_partial_regeneration_feedback_or_requeue_failure_stays_unknown(self):
+        from workflow import agent_tasks
+        for failing_function in ("_feedback", "_requeue"):
+            with self.subTest(failing_function=failing_function):
+                # Independent incident; an unknown request must remain quarantined.
+                self.put("workflow/operations.json", {})
+                with patch.object(agent_tasks, "confirmed_units", return_value=[{"unit_id": "u1"}]), \
+                     patch.object(op.self_heal, failing_function, side_effect=OSError("interrupted after write")):
+                    claim = self.claim()
+                    result = self.request(claim, "regenerate_units", {"target_stage": "answers", "unit_ids": ["u1"]})
+                    self.assertEqual(result["status"], "unknown", result)
+                    self.assertEqual(self.request(claim, "regenerate_units", {
+                        "target_stage": "answers", "unit_ids": ["u1"]}), result)
+                    with self.assertRaisesRegex(ValueError, "unknown_receipt_quarantine"):
+                        self.request(claim, "regenerate_units", request="another")
+
 
 if __name__ == "__main__":
     unittest.main()

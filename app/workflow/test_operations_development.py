@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from workflow import operations_development as dev
 
@@ -107,7 +108,7 @@ class DevelopmentWorkspaceTests(unittest.TestCase):
         self.assertFalse(failed["passed"])
         with self.assertRaisesRegex(ValueError, "passing_tests_required"):
             dev.prepare_install(job)
-        dev.write(job, "app/workflow/fixture_mod.py", "def answer():\n    return 1\n",
+        dev.write(job, "app/workflow/fixture_mod.py", "def answer():\n    return 1  # fixed regression\n",
                   expected_sha=dev.diff(job)["files"][0]["new_sha256"])
         passed = dev.run_tests(job, ["workflow.test_fixture"])
         self.assertTrue(passed["passed"], passed["output"])
@@ -198,6 +199,145 @@ class DevelopmentWorkspaceTests(unittest.TestCase):
     def test_copy_never_overlaps_the_source_tree(self):
         with self.assertRaisesRegex(ValueError, "copy_overlap"):
             dev.create(self.root, self.root / "app" / "jobs")
+
+    def installed_pair(self):
+        job = self.create()
+        for relative in ("app/workflow/fixture_mod.py", "app/workflow/test_fixture.py"):
+            before = dev.read(job, relative)
+            dev.write(job, relative, before["text"] + "\n# repaired\n", expected_sha=job["base"]["files"][relative]["sha256"])
+        self.assertTrue(dev.run_tests(job, ["workflow.test_fixture"])["passed"])
+        dev.prepare_install(job)
+        installed = dev.install(job, backup_dir=self.backups, allow=True)
+        return job, Path(installed["journal"])
+
+    def test_rollback_prevalidates_all_backups_and_installed_files(self):
+        job, journal_path = self.installed_pair()
+        journal = json.loads(journal_path.read_text())
+        before = {path: (self.root / path).read_bytes() for path in journal["backups"]}
+        last = list(journal["backups"])[-1]
+        backup = Path(journal["backups"][last])
+        backup.write_bytes(b"corrupted backup")
+        with self.assertRaisesRegex(ValueError, "backup_hash_mismatch"):
+            dev.rollback(job, backup_dir=self.backups)
+        for relative, raw in before.items():
+            self.assertEqual((self.root / relative).read_bytes(), raw)
+        backup.unlink()
+        with self.assertRaisesRegex(ValueError, "backup_missing"):
+            dev.rollback(job, backup_dir=self.backups)
+        self.assertEqual(json.loads(journal_path.read_text())["status"], "installed")
+
+    def test_rollback_rejects_missing_installed_file_and_foreign_journal(self):
+        job, journal_path = self.installed_pair()
+        journal = json.loads(journal_path.read_text())
+        journal["source_root"] = str(Path(self.tmp.name) / "foreign")
+        journal_path.write_text(json.dumps(journal))
+        with self.assertRaisesRegex(ValueError, "journal_mismatch"):
+            dev.rollback(job, backup_dir=self.backups)
+        journal["source_root"] = str(self.root)
+        journal_path.write_text(json.dumps(journal))
+        self.module.unlink()
+        with self.assertRaisesRegex(ValueError, "source_changed_after_install"):
+            dev.rollback(job, backup_dir=self.backups)
+        self.assertIn("# repaired", self.test_module.read_text())
+
+    def test_rollback_write_failure_restores_installed_tree(self):
+        job, journal_path = self.installed_pair()
+        before = {change["path"]: (self.root / change["path"]).read_bytes()
+                  for change in job["plan"]["changes"]}
+        replace = os.replace
+        calls = []
+        def fail_second(source, destination):
+            if str(source).endswith(".rolling-back"):
+                calls.append(destination)
+                if len(calls) == 2:
+                    raise OSError("injected second rollback write failure")
+            return replace(source, destination)
+        with patch.object(dev.os, "replace", side_effect=fail_second):
+            with self.assertRaisesRegex(OSError, "second rollback"):
+                dev.rollback(job, backup_dir=self.backups)
+        self.assertEqual(len(calls), 2)
+        for relative, raw in before.items():
+            self.assertEqual((self.root / relative).read_bytes(), raw)
+        self.assertEqual(json.loads(journal_path.read_text())["status"], "installed")
+
+    def prepared_job(self):
+        job = self.create()
+        relative = "app/workflow/fixture_mod.py"
+        dev.write(job, relative, "def answer():\n    return 1  # planned\n",
+                  expected_sha=job["base"]["files"][relative]["sha256"])
+        self.assertTrue(dev.run_tests(job, ["workflow.test_fixture"])["passed"])
+        dev.prepare_install(job)
+        return job
+
+    def test_prepare_and_install_refuse_production_symlink_components(self):
+        job = self.prepared_job()
+        linked_root = Path(self.tmp.name) / "linked-source"
+        linked_root.mkdir()
+        (linked_root / "app").symlink_to(self.root / "app", target_is_directory=True)
+        job["source_root"] = str(linked_root)
+        for operation in (lambda: dev.prepare_install(job),
+                          lambda: dev.install(job, backup_dir=self.backups, allow=True)):
+            with self.assertRaisesRegex(ValueError, "symlink_refused"):
+                operation()
+        self.assertNotIn("# planned", self.module.read_text())
+        job["source_root"] = str(self.root)
+        original = self.module.read_bytes()
+        other = Path(self.tmp.name) / "other-module.py"
+        other.write_bytes(original)
+        self.module.unlink()
+        self.module.symlink_to(other)
+        with self.assertRaisesRegex(ValueError, "symlink_refused"):
+            dev.prepare_install(job)
+        with self.assertRaisesRegex(ValueError, "symlink_refused"):
+            dev.install(job, backup_dir=self.backups, allow=True)
+        self.assertEqual(other.read_bytes(), original)
+
+    def test_install_refuses_candidate_symlink_and_prewrite_hash_mismatch(self):
+        job = self.prepared_job()
+        candidate = Path(job["workspace"]) / "app/workflow/fixture_mod.py"
+        raw = candidate.read_bytes()
+        other = Path(self.tmp.name) / "candidate.py"
+        other.write_bytes(raw)
+        candidate.unlink()
+        candidate.symlink_to(other)
+        with self.assertRaisesRegex(ValueError, "symlink_refused"):
+            dev.install(job, backup_dir=self.backups, allow=True)
+        candidate.unlink()
+        candidate.write_text("def answer():\n    return 987\n")
+        # Simulate a change after the initial fingerprint was checked.
+        with patch.object(dev, "fingerprint", return_value=job["plan"]["code_fingerprint"]):
+            with self.assertRaisesRegex(ValueError, "candidate_hash_mismatch"):
+                dev.install(job, backup_dir=self.backups, allow=True)
+        self.assertNotIn("987", self.module.read_text())
+        self.assertFalse((self.root / dev.RELEASE_MARKER).exists())
+
+    def test_install_ignores_predictable_temporary_symlink(self):
+        job = self.prepared_job()
+        sentinel = Path(self.tmp.name) / "sentinel"
+        sentinel.write_text("do not overwrite")
+        predictable = self.module.with_suffix(".py.installing")
+        predictable.symlink_to(sentinel)
+        installed = dev.install(job, backup_dir=self.backups, allow=True)
+        self.assertEqual(installed["status"], "installed")
+        self.assertIn("# planned", self.module.read_text())
+        self.assertEqual(sentinel.read_text(), "do not overwrite")
+        self.assertTrue(predictable.is_symlink())
+
+    def test_rollback_journal_write_failure_restores_installed_tree(self):
+        job, journal_path = self.installed_pair()
+        before = {change["path"]: (self.root / change["path"]).read_bytes()
+                  for change in job["plan"]["changes"]}
+        replace = dev._replace_bytes
+        def fail_journal(target, raw, *, suffix):
+            if Path(target) == journal_path:
+                raise OSError("injected rollback journal failure")
+            return replace(target, raw, suffix=suffix)
+        with patch.object(dev, "_replace_bytes", side_effect=fail_journal):
+            with self.assertRaisesRegex(OSError, "rollback journal failure"):
+                dev.rollback(job, backup_dir=self.backups)
+        for relative, raw in before.items():
+            self.assertEqual((self.root / relative).read_bytes(), raw)
+        self.assertEqual(json.loads(journal_path.read_text())["status"], "installed")
 
 
 if __name__ == "__main__":

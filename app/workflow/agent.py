@@ -402,6 +402,8 @@ def main(argv=None):
     parser.add_argument('--config', type=Path)
     parser.add_argument('--dry-run', action='store_true')
     values = parser.parse_args(args)
+    from . import scoped_regeneration
+    scoped = (not values.dry_run and scoped_regeneration.requested(values.batch_dir, values.stage))
     if values.stage == 'assemble' and not values.dry_run:
         from . import batch_fill, assemble_local
         if (values.batch_dir / batch_fill.STATE).is_file():
@@ -411,7 +413,7 @@ def main(argv=None):
             if code == 0:
                 _mark_stage_completed(values.batch_dir, 'assemble')
             return code if code is not None else 3
-    if values.stage == 'explanations' and not values.dry_run:
+    if values.stage == 'explanations' and not values.dry_run and not scoped:
         # 正文/答案材料已确定时，解析与大意按题号直接取原文，不调用模型。
         from . import explanations_direct
         if explanations_direct.install(values.batch_dir) is not None:
@@ -420,13 +422,13 @@ def main(argv=None):
                               "detail": "按题号从已确定正文/答案材料直接取解析，未调用模型"},
                              ensure_ascii=False))
             return 0
-    if values.stage == 'audio' and not values.dry_run and _audio_evidence_ready(values.batch_dir):
+    if values.stage == 'audio' and not values.dry_run and not scoped and _audio_evidence_ready(values.batch_dir):
         # 切段器已产出并通过契约校验：不再调用模型，避免慢调用与无谓改写。
         _mark_stage_completed(values.batch_dir, 'audio')
         print(json.dumps({"stage": "audio", "status": "completed",
                           "detail": "切段产物已通过校验，未调用模型"}, ensure_ascii=False))
         return 0
-    if values.stage == 'audio' and not values.dry_run:
+    if values.stage == 'audio' and not values.dry_run and not scoped:
         evidence_path = values.batch_dir / '02_audio' / 'segment-evidence.json'
         if evidence_path.is_file():
             print(json.dumps({"stage": "audio", "status": "needs_review", "completed": False,

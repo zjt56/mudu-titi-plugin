@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import time
 import uuid
@@ -107,6 +108,19 @@ def _redact(text):
 
 def _snapshot(folder, stage):
     return _hash(self_heal._snapshot(folder, mf.load(folder), stage))
+
+
+def _process_identity():
+    """Interpreter lifetime, stable across module reloads and distinct after fork/exec.
+
+    Kept on sys rather than this module: reimporting code is not restart proof.
+    Never accept a caller supplied generation or a lease/session change as proof.
+    """
+    identity = getattr(sys, "_mdu_operations_process", None)
+    if not identity or identity["pid"] != os.getpid():
+        identity = {"pid": os.getpid(), "generation": uuid.uuid4().hex}
+        sys._mdu_operations_process = identity
+    return dict(identity)
 
 
 def _source_root():
@@ -219,7 +233,8 @@ def _attempt(incident, kind, name, evidence, outcome, error=""):
 def _repeated(incident, kind, name, evidence):
     return [row for row in incident.get("attempts", [])
             if row.get("kind") == kind and row.get("name") == name
-            and row.get("evidence") == evidence and not row.get("transient")]
+            and row.get("evidence") == evidence and not row.get("transient")
+            and (kind != "regenerate" or row.get("outcome") == "failed")]
 
 
 def _block_repeat(incident, kind, name, evidence):
@@ -251,7 +266,8 @@ def _budgets(incident):
         "attempts_limit": BUDGET_ATTEMPTS,
         "installs": sum(1 for row in rows if row.get("kind") == "install" and row.get("outcome") == "installed"),
         "installs_limit": BUDGET_INSTALLS,
-        "regenerations": sum(1 for row in rows if row.get("kind") == "regenerate" and row.get("outcome") == "scheduled"),
+        "regenerations": sum(1 for row in rows if row.get("kind") == "regenerate"
+                             and (row.get("scheduled_at") or row.get("outcome") == "scheduled")),
         "regenerations_limit": BUDGET_REGENERATIONS,
     }
 
@@ -414,6 +430,11 @@ def claim(root, folder, payload):
         incident = state.get("incident") or {}
         if incident.get("incident_id") != payload.get("incident_id"):
             raise ValueError("incident_mismatch")
+        process = _process_identity()
+        if (incident.get("status") == "claimed" and incident.get("execution_process")
+                and incident["execution_process"] != process):
+            incident.update(status="queued", attempt_id=None, lease_expires_at=0, not_before=0,
+                            queue_generation=incident.get("queue_generation", 0) + 1)
         if incident.get("status") == "claimed" and incident.get("session_id") == session:
             return dict(incident)
         if incident.get("status") != "queued" or incident.get("not_before", 0) > time.time():
@@ -425,7 +446,17 @@ def claim(root, folder, payload):
         incident.update(status="claimed", eligible=False, session_id=session,
                         attempt_id=uuid.uuid4().hex, fence=incident.get("fence", 0) + 1,
                         lease_expires_at=time.time() + LEASE_SECONDS,
-                        snapshot=_snapshot(folder, incident["stage"]))
+                        snapshot=_snapshot(folder, incident["stage"]), execution_process=process)
+        record = _code_record(folder)
+        if (record and record.get("status") == "installed_pending_restart"
+                and record.get("install_process") and record["install_process"] != process
+                and record.get("install_attempt_id") != incident["attempt_id"]):
+            record.update(status="restarted_pending_verify", restart_process=process,
+                          restart_attempt_id=incident["attempt_id"], restarted_at=mf.now_iso())
+            _save_code_record(folder, record)
+            incident["code_repair"] = {**(incident.get("code_repair") or {}),
+                                       "status": record["status"], "restarted_at": record["restarted_at"]}
+            _event(incident, "restart", "acknowledged", "新执行进程已重新认领；仍须原检查复验")
         _event(incident, "claim", "claimed", session)
         _save(folder, state)
         return dict(incident)
@@ -505,7 +536,7 @@ def _settle_code_repair(folder, incident, outcome):
     """
     record = _code_record(folder)
     if not record or record.get("status") not in {"workspace_ready", "tests_passed", "prepared",
-                                                  "installed_pending_restart"}:
+                                                  "installed_pending_restart", "restarted_pending_verify", "tests_failed"}:
         return
     status = {"resolved": "verified", "needs_human": "needs_human",
               "needs_deep_repair": "failed"}.get(outcome)
@@ -592,15 +623,15 @@ def _regenerate_units(folder, incident, data):
     _check_budget(incident, "regenerate")
     reason = str(data.get("reason") or "").strip()[:500] or detail.strip()[:500] or "局部重新生成受影响题目"
     attempt = len(incident.get("attempts", [])) + 1
-    feedback = self_heal._feedback(folder, target, reason, detail, attempt, unit_ids=unit_ids)
     manifest = mf.load(folder)
+    # Feedback itself writes; retain this flag through every uncertain exception.
     incident["_regenerate_started"] = True
-    try:
-        self_heal._requeue(folder, manifest, target,
-                           "AI 局部重生成 %d 题：%s" % (len(unit_ids), reason[:120]))
-    finally:
-        incident.pop("_regenerate_started", None)
+    feedback = self_heal._feedback(folder, target, reason, detail, attempt, unit_ids=unit_ids)
+    self_heal._requeue(folder, manifest, target,
+                       "AI 局部重生成 %d 题：%s" % (len(unit_ids), reason[:120]))
     _attempt(incident, "regenerate", name, evidence, "scheduled")
+    incident["attempts"][-1].update(stage=target, unit_ids=unit_ids, scheduled_at=mf.now_iso())
+    incident.pop("_regenerate_started", None)
     incident.pop("verification", None)
     return {"status": "requeued", "stage": target, "unit_ids": unit_ids,
             "unit_count": len(unit_ids), "feedback_path": feedback,
@@ -612,7 +643,7 @@ def _request_code_repair(folder, incident, data):
     from . import operations_development as dev
     _check_budget(incident, "repair")
     existing = _code_record(folder)
-    if existing:
+    if existing and existing.get("status") not in {"failed", "verified", "needs_human", "rolled_back"}:
         record, job = _code_job(folder)
         return {"reused": True, "job_id": job["job_id"], "status": record.get("status"),
                 "workspace": job["workspace"], "base": job["base"].get("code_fingerprint"),
@@ -623,7 +654,9 @@ def _request_code_repair(folder, incident, data):
     record = {"job_id": job["job_id"], "path": str(parent / (job["job_id"] + ".json")),
               "workspace": job["workspace"], "status": "workspace_ready",
               "created_at": mf.now_iso(), "incident_id": incident["incident_id"],
-              "stage": incident["stage"], "summary": _redact(str(data.get("summary") or ""))[:2000]}
+              "stage": incident["stage"], "summary": _redact(str(data.get("summary") or ""))[:2000],
+              "history": ([*(existing.get("history") or []),
+                           {k: v for k, v in existing.items() if k != "history"}] if existing else [])}
     _save_code_record(folder, record)
     incident["code_repair"] = {"job_id": job["job_id"], "status": "workspace_ready",
                                "created_at": record["created_at"]}
@@ -643,8 +676,8 @@ def _code_repair(folder, incident, data):
     operation = data.get("operation")
     if operation == "status":
         return _code_status(record, job)
-    if record.get("status") == "installed_pending_restart":
-        raise ValueError("code_repair_installed_pending_restart: 先重启后端并复验")
+    if record.get("status") in {"installed_pending_restart", "restarted_pending_verify", "failed", "verified", "needs_human"}:
+        raise ValueError("code_repair_closed_or_pending_restart: 先重启后端并复验，再 request_code_repair")
     result = {}
     if operation == "read":
         result = dev.read(job, data.get("path"), offset=data.get("offset", 0), limit=data.get("limit", 12000))
@@ -683,19 +716,22 @@ def _install_code_repair(folder, incident, data):
         raise ValueError("install_disabled: 宿主须暂停源码监听并设置 MD_OPERATIONS_INSTALL=1")
     _check_budget(incident, "install")
     record, job = _code_job(folder)
+    if record.get("status") != "prepared":
+        raise ValueError("current_install_plan_required")
     plan = job.get("plan") or {}
     if not plan or plan.get("code_fingerprint") != dev.fingerprint(job):
         raise ValueError("current_install_plan_required")
     incident["_install_started"] = True
     installed = dev.install(job, backup_dir=_code_root(folder), allow=True)
-    incident.pop("_install_started", None)
-    record.update(status="installed_pending_restart", installed_at=mf.now_iso(), plan_id=plan["plan_id"])
+    record.update(status="installed_pending_restart", installed_at=mf.now_iso(), plan_id=plan["plan_id"],
+                  install_process=_process_identity(), install_attempt_id=incident["attempt_id"])
     _save_code_record(folder, record)
     dev.save(job, record["path"])
     incident["code_repair"] = {**(incident.get("code_repair") or {}), "status": "installed_pending_restart",
                                "plan_id": plan["plan_id"], "installed_at": record["installed_at"]}
     _attempt(incident, "install", plan["plan_id"], _evidence(folder, incident), "installed")
     incident.pop("verification", None)
+    incident.pop("_install_started", None)
     return {"status": "installed_pending_restart", "plan_id": plan["plan_id"],
             "changes": [change["path"] for change in plan["changes"]], "journal": installed.get("journal"),
             "restart_required": True, "rolled_back": False,
@@ -731,7 +767,8 @@ def action(root, folder, payload, *, enqueue=None):
             raise ValueError("unknown_receipt_quarantine")
         _expire(incident)
         if (incident.get("status") != "claimed" or incident.get("attempt_id") != payload.get("attempt_id")
-                or incident.get("session_id") != payload.get("session_id")):
+                or incident.get("session_id") != payload.get("session_id")
+                or (incident.get("execution_process") and incident["execution_process"] != _process_identity())):
             _save(folder, state)
             raise ValueError("stale_lease")
         if name not in {"release", "cancel"} and incident.get("snapshot") != _snapshot(folder, incident["stage"]):
@@ -796,13 +833,21 @@ def action(root, folder, payload, *, enqueue=None):
                              "applied" if result.get("installed") or result.get("passed") else "refused")
                     incident.pop("verification", None)
             elif name == "verify":
+                record = _code_record(folder)
+                if record and record.get("status") == "installed_pending_restart":
+                    raise ValueError("code_repair_installed_pending_restart: 必须真实重启并重新认领")
                 result = _verify(folder, incident)
                 incident["verification"] = result
+                if record and record.get("status") == "restarted_pending_verify":
+                    _settle_code_repair(folder, incident, "resolved" if result["verified"] else "needs_deep_repair")
             elif name == "finish":
                 outcome = data.get("outcome")
                 if outcome not in {"resolved", "needs_deep_repair", "needs_human"} or not isinstance(data.get("summary"), str) or not data["summary"].strip():
                     raise ValueError("invalid_finish")
                 previous = incident.get("verification") or {}
+                repair_record = _code_record(folder) or {}
+                if outcome == "resolved" and repair_record.get("status") in {"installed_pending_restart", "restarted_pending_verify"}:
+                    raise ValueError("restart_and_verification_required")
                 if outcome == "resolved" and not (previous.get("verified") is True and previous.get("evidence_id")
                         and previous.get("snapshot") == incident["snapshot"] and _verify(folder, incident)["verified"]):
                     raise ValueError("verification_required")
@@ -818,6 +863,7 @@ def action(root, folder, payload, *, enqueue=None):
                           "verified": outcome == "resolved", "evidence_id": previous.get("evidence_id")}
             elif name == "regenerate_units":
                 result = _regenerate_units(folder, incident, data)
+                mutating = result.get("status") == "requeued"
             elif name in {"release", "cancel", "resume"}:
                 if name == "resume" and enqueue is None:
                     raise ValueError("resume_unavailable")
@@ -872,6 +918,7 @@ def action(root, folder, payload, *, enqueue=None):
                 result = _code_repair(folder, incident, data)
             elif name == "install_code_repair":
                 result = _install_code_repair(folder, incident, data)
+                mutating = True
                 incident["snapshot"] = _snapshot(folder, incident["stage"])
             elif name == "record_finding":
                 result = {key: _redact(str(data.get(key) or ""))[:4000]
@@ -943,12 +990,32 @@ def _dispatch_resume(root, folder, enqueue):
         pass  # Worker already owns lock; durable outbox is reconciled next read.
 
 
+def _settle_regenerations(folder, incident):
+    """Queue admission is not a result. Settle only actual terminal execution."""
+    manifest = mf.load(folder)
+    for row in incident.get("attempts", []):
+        if row.get("kind") != "regenerate" or row.get("outcome") != "scheduled":
+            continue
+        stage = row.get("stage") or row.get("name", "").split(":", 1)[0]
+        status = (manifest.get("stages", {}).get(stage) or {}).get("status")
+        if status in {mf.PENDING, mf.RUNNING, None}:
+            continue
+        checked = _verify(folder, {**incident, "stage": stage})
+        row.update(outcome="succeeded" if checked["verified"] else "failed",
+                   scheduled_at=row.get("scheduled_at") or row.get("at"),
+                   executed_at=mf.now_iso(), verification=checked)
+        _event(incident, "regenerate_units", row["outcome"], row["name"], checked)
+
+
 def observe_execution(folder):
     """Called by the FIFO worker while it still holds the original auto lock."""
     folder = Path(folder)
     state = _load(folder)
     incident = state.get("incident") or {}
+    _settle_regenerations(folder, incident)
     if incident.get("status") != "awaiting_execution":
+        if incident:
+            _save(folder, state)
         return
     changed = incident.get("snapshot") != _snapshot(folder, incident["stage"])
     incident.update(status="queued", eligible=True,

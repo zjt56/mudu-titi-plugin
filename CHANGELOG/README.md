@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-operations-recovery-contracts.md](2026-11-09-operations-recovery-contracts.md) | 修复发布标记、回滚事务与路径边界、重启后二次修复、重生成结算；五个内容阶段统一局部任务与导入 |
 | 2026-11-09 | [2026-11-09-parallel-stage-display.md](2026-11-09-parallel-stage-display.md) | 流程进度显示：并行阶段同时显示处理中，完成态不再被压回（只改显示） |
 | 2026-11-09 | [2026-11-09-upstream-review.md](2026-11-09-upstream-review.md) | 拉取2f51429并评估工作流与运维变更；发现反馈契约、局部重生成、发布标记及回滚事务等高优先级问题 |
 | 2026-11-09 | [2026-11-09-answers-example-missing-field.md](2026-11-09-answers-example-missing-field.md) | 答案阶段提示词示例补回必填 `missing`，并在报错里点名缺失键/题号；修复2017卷在该阶段无限重试，47+63项测试通过 |

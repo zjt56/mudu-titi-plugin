@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -70,10 +71,11 @@ def _inside(root, path):
 
 def _regular(path):
     """Reject links/junctions and non-regular files before reading or writing."""
-    path = _real(path)
-    if path.is_symlink() or not path.is_file():
+    path = Path(path)
+    if path.is_symlink():
         return None
-    return path
+    path = _real(path)
+    return path if path.is_file() else None
 
 
 def allowed(relative):
@@ -386,7 +388,8 @@ def prepare_install(job, *, require_tests=True, require_regression=True):
             raise ValueError("changed_tests_not_run")
     for change in changes:
         relative = change["path"]
-        target = _regular(root / relative)
+        _safe(workspace, relative)
+        target = _regular(_safe(root, relative))
         if target is None and change["base_sha256"] != "missing":
             raise ValueError("source_missing:" + relative)
         if target is not None and _sha(target.read_bytes()) != change["base_sha256"]:
@@ -407,14 +410,27 @@ def _journal(backup_dir, plan):
 RELEASE_MARKER = ".operations-release.json"
 
 
+def _replace_bytes(target, raw, *, suffix):
+    """Replace from an exclusively created sibling, never a predictable link."""
+    target = Path(target)
+    descriptor, name = tempfile.mkstemp(prefix=target.name + ".", suffix=suffix, dir=target.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+        os.replace(temporary, target)
+    finally:
+        # This is the exact exclusive temporary created above, not a caller path.
+        if temporary.exists():
+            temporary.unlink()
+
+
 def _release_marker(root, state, **extra):
     """Tell the Host a release is in flight so it can pause its watcher and
     perform exactly one restart. The Host owns removal after a healthy boot."""
-    path = Path(root) / RELEASE_MARKER
+    path = _safe(root, RELEASE_MARKER)
     body = {"state": state, "at": _now(), **extra}
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(body, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(temporary, path)
+    _replace_bytes(path, json.dumps(body, ensure_ascii=False, indent=1).encode("utf-8"), suffix=".release")
     return path
 
 
@@ -427,7 +443,21 @@ def install(job, *, backup_dir, allow=False):
     if not plan or plan.get("code_fingerprint") != fingerprint(job):
         raise ValueError("current_install_plan_required")
     root = Path(job["source_root"])
+    candidates = {}
+    for change in plan["changes"]:
+        relative = change["path"]
+        if not allowed(relative):
+            raise ValueError("source_not_allowlisted")
+        _safe(root, relative)
+        source = _regular(_safe(_workspace(job), relative))
+        if source is None:
+            raise ValueError("candidate_missing:" + relative)
+        raw = source.read_bytes()
+        if _sha(raw) != change["new_sha256"]:
+            raise ValueError("candidate_hash_mismatch:" + relative)
+        candidates[relative] = raw
     backups, journal_path = {}, _journal(backup_dir, plan)
+    installed = []
     journal = {"plan_id": plan["plan_id"], "status": "prepared", "source_root": str(root),
                "changes": plan["changes"], "at": _now(), "backups": backups}
     journal_path.write_text(json.dumps(journal, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -435,7 +465,7 @@ def install(job, *, backup_dir, allow=False):
     try:
         for change in plan["changes"]:
             relative = change["path"]
-            target = _regular(root / relative)
+            target = _regular(_safe(root, relative))
             if target is None and change["base_sha256"] != "missing":
                 raise ValueError("source_missing:" + relative)
             if target is not None and _sha(target.read_bytes()) != change["base_sha256"]:
@@ -447,17 +477,15 @@ def install(job, *, backup_dir, allow=False):
                 backups[relative] = str(stored)
         journal["status"] = "prepared"
         journal_path.write_text(json.dumps(journal, ensure_ascii=False, indent=1), encoding="utf-8")
-        installed = []
         for change in plan["changes"]:
             relative = change["path"]
-            source = _regular(Path(job["workspace"]) / relative)
-            if source is None:
-                raise ValueError("candidate_missing:" + relative)
-            target = root / relative
+            target = _safe(root, relative)
             target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_suffix(target.suffix + ".installing")
-            temporary.write_bytes(source.read_bytes())
-            os.replace(temporary, target)
+            current = _regular(target)
+            current_sha = _sha(current.read_bytes()) if current is not None else "missing"
+            if current_sha != change["base_sha256"]:
+                raise ValueError("source_changed:" + relative)
+            _replace_bytes(target, candidates[relative], suffix=".installing")
             installed.append(relative)
             if _sha(target.read_bytes()) != change["new_sha256"]:
                 raise ValueError("installed_hash_mismatch:" + relative)
@@ -469,8 +497,12 @@ def install(job, *, backup_dir, allow=False):
         restored = []
         for change in plan["changes"]:
             relative = change["path"]
+            if relative not in installed:
+                continue
             try:
-                target = root / relative
+                target = _safe(root, relative)
+                if not target.is_file() or _sha(target.read_bytes()) != change["new_sha256"]:
+                    continue
                 if change["base_sha256"] == "missing":
                     if target.is_file() and _sha(target.read_bytes()) == change["new_sha256"]:
                         target.unlink()
@@ -481,12 +513,14 @@ def install(job, *, backup_dir, allow=False):
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(Path(stored).read_bytes())
                     restored.append(relative)
-            except OSError:
+            except (OSError, ValueError):
                 pass
-        journal.update(status="rolled_back", error=str(exc)[:1000], restored=restored, at=_now())
+        rollback_status = "rolled_back" if set(restored) == set(installed) else "rollback_failed"
+        journal.update(status=rollback_status, error=str(exc)[:1000], restored=restored, at=_now())
         journal_path.write_text(json.dumps(journal, ensure_ascii=False, indent=1), encoding="utf-8")
-        _release_marker(root, "rolled_back", plan_id=plan["plan_id"], error=str(exc)[:1000])
-        job["install"] = {"status": "rolled_back", "journal": str(journal_path), "error": str(exc)[:1000]}
+        _release_marker(root, "rolled_back" if rollback_status == "rolled_back" else "failed",
+                        plan_id=plan["plan_id"], error=str(exc)[:1000])
+        job["install"] = {"status": rollback_status, "journal": str(journal_path), "error": str(exc)[:1000]}
         raise
     job["install"] = {"status": "installed", "journal": str(journal_path), "changes": [c["path"] for c in plan["changes"]]}
     return dict(job["install"])
@@ -500,22 +534,50 @@ def rollback(job, *, backup_dir):
     journal = json.loads(Path(journal_path).read_text(encoding="utf-8"))
     if journal.get("status") != "installed":
         raise ValueError("nothing_to_rollback")
-    root = Path(journal["source_root"])
+    plan = job.get("plan") or {}
+    if (_real(journal_path) != _real(Path(backup_dir) / (str(plan.get("plan_id")) + ".json"))
+            or journal.get("plan_id") != plan.get("plan_id")
+            or _real(journal.get("source_root", "")) != _real(job["source_root"])
+            or journal.get("changes") != plan.get("changes")):
+        raise ValueError("journal_mismatch")
+    root = Path(job["source_root"])
+    prepared = []
+    # Validate the entire transaction, including every backup, before the first write.
     for change in journal["changes"]:
-        target = root / change["path"]
-        if target.is_file() and _sha(target.read_bytes()) != change["new_sha256"]:
-            raise ValueError("source_changed_after_install:" + change["path"])
-    for change in journal["changes"]:
-        target = root / change["path"]
-        stored = journal["backups"].get(change["path"])
-        if change.get("base_sha256") == "missing":
-            if target.is_file() and _sha(target.read_bytes()) == change["new_sha256"]:
+        relative = change["path"]
+        if not allowed(relative):
+            raise ValueError("source_not_allowlisted")
+        target = _safe(root, relative)
+        if not target.is_file() or _sha(target.read_bytes()) != change["new_sha256"]:
+            raise ValueError("source_changed_after_install:" + relative)
+        original = None
+        if change.get("base_sha256") != "missing":
+            stored = journal.get("backups", {}).get(relative)
+            expected = _safe(Path(backup_dir) / plan["plan_id"], relative)
+            if not stored or _real(stored) != expected or not expected.is_file():
+                raise ValueError("backup_missing:" + relative)
+            original = expected.read_bytes()
+            if _sha(original) != change["base_sha256"]:
+                raise ValueError("backup_hash_mismatch:" + relative)
+        prepared.append((target, original, target.read_bytes()))
+    restored = []
+    try:
+        for target, original, installed in prepared:
+            if _sha(target.read_bytes()) != _sha(installed):
+                raise ValueError("source_changed_after_install:" + target.name)
+            if original is None:
                 target.unlink()
-            continue
-        if stored and Path(stored).is_file():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(Path(stored).read_bytes())
-    journal.update(status="rolled_back", at=_now())
-    Path(journal_path).write_text(json.dumps(journal, ensure_ascii=False, indent=1), encoding="utf-8")
+            else:
+                _replace_bytes(target, original, suffix=".rolling-back")
+            restored.append((target, installed))
+        settled_journal = {**journal, "status": "rolled_back", "at": _now()}
+        _replace_bytes(Path(journal_path), json.dumps(settled_journal, ensure_ascii=False, indent=1).encode("utf-8"),
+                       suffix=".journal")
+    except Exception:
+        # A write failure must not strand a half-restored source tree.
+        for target, installed in reversed(restored):
+            _replace_bytes(target, installed, suffix=".rolling-forward")
+        raise
+    _release_marker(root, "rolled_back", plan_id=plan["plan_id"])
     job["install"] = {**(job.get("install") or {}), "status": "rolled_back"}
     return {"status": "rolled_back", "changes": [c["path"] for c in journal["changes"]]}
