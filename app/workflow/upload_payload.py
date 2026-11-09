@@ -372,6 +372,8 @@ class _Builder:
         if not isinstance(attachments, list):
             self.error("ATTACHMENTS_INVALID", "attachments 必须是数组", uid)
             return []
+        if len(attachments) > 20:
+            self.error("ATTACHMENTS_LIMIT_EXCEEDED", "题库每题最多接受 20 个附件，不能截断附件上传", uid)
         result = []
         for attachment in attachments:
             if not isinstance(attachment, dict):
@@ -836,7 +838,8 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
     for index, item in enumerate(items):
         uid = str(item.get("id") or item.get("unit_id") or index) if isinstance(item, dict) else str(index)
         output = builder.item(item, uid)
-        if id_prefix and isinstance(output.get("id"), str) and output["id"]:
+        if (id_prefix and isinstance(output.get("id"), str)
+                and re.fullmatch(r"(?:q-\d+|group-\d+(?:-\d+)*)", output["id"])):
             # 题库的题目 ID 是全局主键；本地 q-N 只在单卷内唯一，跨卷上传会
             # 触发 question_id_exists。前缀由批次身份生成，稳定且可复算。
             output["id"] = f"{id_prefix}-{output['id']}"

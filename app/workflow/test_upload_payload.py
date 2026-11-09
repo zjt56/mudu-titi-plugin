@@ -354,6 +354,27 @@ class UploadPayloadTest(unittest.TestCase):
         self.assertEqual(report['summary']['id_prefix'], '2024-abcdef1234')
         self.assertEqual(data, before)
 
+    def test_mixed_ids_only_namespace_local_ids(self):
+        local = question(); local['id'] = 'q-1'
+        explicit = question(); explicit['id'] = 'AH-2024-002'
+        data = batch(local); data['items'].append(explicit)
+        before = deepcopy(data)
+        report = self.build(data, id_prefix='2024-abcdef1234')
+        self.assertTrue(report['passed'], report['errors'])
+        self.assertEqual([q['id'] for q in report['payload']['items']],
+                         ['2024-abcdef1234-q-1', 'AH-2024-002'])
+        self.assertEqual(data, before)
+
+    def test_server_attachment_limit_blocks_without_truncation(self):
+        q = question()
+        q['attachments'] = [{'kind': 'image', 'url': f'/source-media/p{i}.png'}
+                            for i in range(20)]
+        self.assertTrue(self.build(batch(q))['passed'])
+        q['attachments'].append({'kind': 'image', 'url': '/source-media/p20.png'})
+        report = self.build(batch(q))
+        self.assertIn('ATTACHMENTS_LIMIT_EXCEEDED', self.codes(report))
+        self.assertEqual(len(report['payload']['items'][0]['attachments']), 21)
+
     def test_invalid_id_prefix_blocks_build(self):
         report = self.build(batch(question()), id_prefix='bad prefix')
         self.assertIn('ID_PREFIX_INVALID', self.codes(report))

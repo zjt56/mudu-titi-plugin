@@ -77,6 +77,8 @@ API Key 由所属科目的上传账号绑定，上传只需要适当的 `draft` 
 
 附件只允许 image/audio；选项字母为大写 A–Z。拒绝外链、Base64、路径穿越、查询串与片段。准备和提交前会通过同一站点只读 HEAD 检查路径与类型，媒体请求不附带 Bearer。文件不存在或类型不符则停止。
 
+每个题目或子题最多携带 **20 个附件**，超限在插件侧报 `ATTACHMENTS_LIMIT_EXCEEDED`，不截断附件继续上传。混合 ID 批次逐题处理：`q-N/group-N` 加批次前缀，已有自定义 ID 保持原样，不能因混入自定义 ID 而跳过本地题号的前缀保护。
+
 题库只渲染 `placement` 的 `question` / `option` / `answer` / `explanation` 四个位置。正文（题干、材料）里的 `[IMG]`，以及历史批次中显式的 `material` / `stem` 位置，生成线上载荷时统一按 `question` 发送；原样发送 `material` 会在远端的「逐题确认」阶段被整批拒绝为 `400 invalid_request`（内部原因 `invalid_attachment`）。
 
 `[IMG image.png]`、本地音频路径和未部署图像不能自动替换成看似存在的 URL。听力必须已完成真实边界切分和回听；部署可达并不能证明没有串题。HEAD 本身也不能证明内容与本地源件逐字节一致，媒体哈希、题号对应和版面仍应在批次证据中归档。

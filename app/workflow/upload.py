@@ -73,16 +73,16 @@ _LOCAL_WIRE_ID = re.compile(r"^(?:q-\d+|group-\d+(?:-\d+)*)$")
 
 
 def _auto_id_prefix(source, batch_id):
-    """Derive a stable, paper-scoped prefix for local q-N/group-N ids.
+    """Derive a stable prefix when any local q-N/group-N id is present.
 
-    Explicit ids (AH-2014-001, UUIDs, …) are left untouched: a batch that
-    already names its questions is assumed to manage global uniqueness itself.
+    The payload mapper applies it only to local ids; explicit ids in a mixed
+    batch (AH-2014-001, UUIDs, …) remain unchanged.
     """
     items = source.get("items") if isinstance(source, dict) else None
     if not isinstance(items, list) or not items:
         return None
     ids = [item.get("id") for item in items if isinstance(item, dict)]
-    if len(ids) != len(items) or not all(
+    if not any(
             isinstance(value, str) and _LOCAL_WIRE_ID.fullmatch(value) for value in ids):
         return None
     years = set()

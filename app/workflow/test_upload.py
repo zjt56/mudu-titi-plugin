@@ -74,6 +74,19 @@ class UploadFlowTest(unittest.TestCase):
         frozen = upload.verify(self.batch, config=self.settings)
         self.assertEqual(json.loads(frozen['payload'])['items'][0]['id'], f'{prefix}-q-1')
 
+    def test_mixed_ids_receive_prefix_only_for_local_questions(self):
+        data = valid_batch(); data['items'][0]['id'] = 'q-1'
+        explicit = deepcopy(data['items'][0]); explicit['id'] = 'AH-2024-002'
+        data['items'].append(explicit)
+        self.source.write_text(json.dumps(data, ensure_ascii=False))
+        original = self.source.read_bytes()
+        self.prepare()
+        frozen = upload.verify(self.batch, config=self.settings)
+        ids = [q['id'] for q in json.loads(frozen['payload'])['items']]
+        self.assertRegex(ids[0], r'^2024-[0-9a-f]{10}-q-1$')
+        self.assertEqual(ids[1], 'AH-2024-002')
+        self.assertEqual(original, self.source.read_bytes())
+
     def test_explicit_question_ids_are_not_renamed(self):
         self.prepare()
         plan = json.loads((self.batch / '07_upload/plan.json').read_text(encoding='utf-8'))
