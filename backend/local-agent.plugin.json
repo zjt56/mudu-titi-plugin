@@ -1,6 +1,6 @@
 {
   "_comment": "插件版专用 local-agent 配置。模型调用走 Node 原生 wf-router.mjs，按 model-router.json 选模型，不依赖 /bin/sh。",
-  "_concurrency_note": "并行上限按本机内存保守设置：每个分片都是独立 dsh 进程，16 路并发在 16GB 机器上曾把整机压到内存紧张并导致宿主重启。仍不按 API 限流，这是本地资源保护。",
+  "_concurrency_note": "并行上限按本机内存保守设置：每个分片都是独立 dsh 进程，16 路并发在 16GB 机器上曾把整机压到内存紧张并导致宿主重启。普通阶段保持 4 路；审核分片固定为 5 路（48 单元批次通常 4 个标签片 + 1 个 sample 片，正好同波跑完）。这不是按 provider 速率限流，而是本地资源保护。",
   "provider": "command",
   "command": [
     "node",
@@ -11,7 +11,7 @@
   "timeout_seconds": 1500,
   "max_input_chars": 900000,
   "part_concurrency": 4,
-  "review_part_parallel": 4,
+  "review_part_parallel": 5,
   "response_mode": "file",
   "input_mode": "none",
   "retries": 2,

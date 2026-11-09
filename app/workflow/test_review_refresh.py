@@ -84,6 +84,27 @@ class ReviewRefreshTest(unittest.TestCase):
         self.assertIn('review:07_review/validation-report.json',
                       mf.review_bound_inputs_changed(self.batch, self.manifest))
 
+    def test_upstream_delivery_invalidates_completed_review_immediately(self):
+        self._write_rounds()
+        types_path = self.batch / '03_types/types.json'
+        types_path.parent.mkdir(parents=True)
+        types_path.write_text('{"items": []}', encoding='utf-8')
+        types_stage = contracts.STAGE_BY_ID['types']
+        mf.touch_stage(self.manifest, 'types', mf.COMPLETED,
+                       output_hashes=mf.output_hashes(self.batch, types_stage))
+        review_stage = contracts.STAGE_BY_ID['review']
+        for rel in review_stage.produces:
+            path = self.batch / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}', encoding='utf-8')
+        mf.touch_stage(self.manifest, 'review', mf.COMPLETED,
+                       input_hashes=mf.input_hashes(self.batch, self.manifest, review_stage))
+        mf.save(self.batch, self.manifest)
+        types_path.write_text('{"items": [{"unit_id": "q-1"}]}', encoding='utf-8')
+        mf.record_delivery(self.batch, self.manifest, types_stage)
+        self.assertEqual(self.manifest['stages']['review']['status'], mf.INVALIDATED)
+        self.assertIn('审核绑定输入已变化', self.manifest['stages']['review']['notes'])
+
 
 if __name__ == '__main__':
     unittest.main()

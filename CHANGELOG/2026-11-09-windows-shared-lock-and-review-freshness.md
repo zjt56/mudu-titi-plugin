@@ -18,20 +18,30 @@
    - 兼容旧台账：旧记录用裸 SHA-256，当前记录用 `json:`/`raw:` 规范化内容摘要；按每个键记录时的表示形式分别比较，忽略 `rule:` 规则文件及旧记录中不存在的后加键，避免把代码/规则更新误判为批次内容变化。
 3. **`app/workflow/auto.py`：`_refresh_completed_review()`**
    - 在审核契约检查前先检查绑定输入；一旦变化，立即把 review 置为 `invalidated` 并写明“审核绑定输入已变化”，下一轮自动调度重新导出审核任务，而不是等数小时后才由任务绑定过期发现。
-4. **`app/docs/local-agent.md`**：删除“Windows 仍独占、会串行”的旧说明，记录 Windows 字节区间共享/独占锁语义。
+   - `manifest.record_delivery()` 在任何上游阶段重新交付时也执行同一检查，单步 `runner run --stage assemble` 等路径同样会立即作废旧审核。
+4. **插件审核并发配置（`backend/local-agent.plugin.json`）**
+   - `review_part_parallel` 从 4 调到 5：48 单元批次通常是 4 个标签片（15/15/15/3）+ 1 个 sample 片，5 路正好让 5 片同波跑完，避免 4 路下一片排队。普通阶段仍保持 4 路内存保护。
+   - `review_part_units` 保持默认 15，不放大单次上下文。
+5. **`backend/route_pick.py` / `backend/wf-router.mjs`：审核模型路由**
+   - 修复审核分支漏读 `stages.review`、以及审核提示词没有 `Agent:` 头时 `roles.review` 不生效的问题。
+   - 审核路由顺序明确为：`review.rounds[round]` → `roles[agent]` → `roles.review` → `stages.review` → `review.default` → 设备默认模型。这样插件设置里“审核”单独指定模型和 `config/model-router.json` 的 `stages.review` 都会真正生效，不会静默落回设备当前慢模型。
+6. **`app/docs/local-agent.md`**：删除“Windows 仍独占、会串行”的旧说明，记录 Windows 字节区间共享/独占锁语义与插件并发默认值。
 
 ## 没改什么 / 边界
 
 - **不引入全局下游级联失效**：`test_changed_producer_does_not_auto_invalidate_descendants` 所代表的既有规则保持不变——普通填充阶段的内容变化不自动把所有下游判失效；这里只保护最终审核闸门自身的输入绑定。
-- 不修改 `review_part_units` / `review_part_parallel` 默认值，也不在 `config/model-router.json` 固定审核模型：这些是设备级性能配置，且仓库规则 8 要求模型跟随各设备 Harness 当前选择，不能为了单机速度写死。
+- 不固定任何具体模型：`config/model-router.json` 的 `default` 仍为空，审核模型由各设备插件设置或显式 `stages.review` / `review.rounds` 指定；没有可用模型时仍报错，不静默兜底。
 - 不改变审核口径、人工审核范围、上传/发布边界；不自动上传。
 - Windows 共享锁只影响并发调度，不改变任何阶段产物或质量判定。
 
 ## 如何验证
 
 - `cd app && PYTHONPATH=. python3 -m unittest workflow.test_local_agent` → **37 tests OK**（含新增 `WindowsByteRangeLockTest` 3 项：共享调用占不同字节、独占排除全部、`_agent_lock` 真实分支加解锁）。
-- `workflow.test_review_refresh workflow.test_delivery workflow.test_stage_semantics workflow.test_local_agent` → **78 tests OK**，含新增 `test_changed_bound_input_invalidates_completed_review`、`test_legacy_raw_review_binding_does_not_false_positive`。
+- `workflow.test_review_refresh workflow.test_delivery workflow.test_stage_semantics workflow.test_local_agent` → **79 tests OK**，含新增 `test_changed_bound_input_invalidates_completed_review`、`test_legacy_raw_review_binding_does_not_false_positive`、`test_upstream_delivery_invalidates_completed_review_immediately`。
 - `workflow.test_runner_auto workflow.test_review_rounds workflow.test_review_rounds_recovery workflow.test_review_local_reuse workflow.test_agent_entry` → **178 tests OK**。
+- `workflow.test_route_pick` → **12 tests OK**（含 `stages.review` 与无 `Agent:` 头的 `roles.review` 回退）。
+- `node --test backend/wf-router-native.test.cjs` → **8 passed / 2 skipped**（含 `stages.review` 路由）；`node --test backend/model-router.test.cjs` → **8 passed**（插件并发配置断言已随 5 路更新）。
+- `node --test backend/*.test.cjs` 全量 → 209 项：205 通过、2 跳过、2 失败；两个失败均为既有 `review-layout.test.cjs` 的 CSS 断言，与本次锁/路由改动无关。
 - 真实存量批次只读核对：16年安徽 / 19年安徽 / 2024卷的 `review_bound_inputs_changed` 均返回 `[]`（不会因本次改动误重审）。
 - `workflow.test_local_agent_ownership` 在本机受沙箱限制（`ps` PermissionError）无法完整执行；POSIX 锁语义相关项 `test_local_agent` 中已通过。
 

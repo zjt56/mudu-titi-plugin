@@ -92,6 +92,8 @@ function choose(data, stage, round, agent) {
   if (stage === 'review') {
     entry = round && data.review?.rounds?.[round];
     if (!valid(entry)) entry = agent && data.roles?.[agent];
+    if (!valid(entry)) entry = data.roles?.review;
+    if (!valid(entry)) entry = data.stages?.review;
     if (!valid(entry)) entry = data.review?.default;
   } else {
     entry = agent && data.roles?.[agent];

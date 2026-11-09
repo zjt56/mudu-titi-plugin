@@ -52,6 +52,18 @@ class RoutePickTest(unittest.TestCase):
                            stage="review", rnd="labels", agent="review")
         self.assertEqual(result.stdout.strip().split("\t")[:2], ["r", "role-model"])
 
+    def test_review_stage_used_when_round_and_role_absent(self):
+        result = self.pick(self.base(stages={"review": {"provider": "s", "model": "stage-review"}}),
+                           stage="review", rnd="labels", agent="review")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().split("\t")[:2], ["s", "stage-review"])
+
+    def test_review_role_used_without_agent_header(self):
+        result = self.pick(self.base(roles={"review": {"provider": "r", "model": "role-model"}}),
+                           stage="review", rnd="labels", agent="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().split("\t")[:2], ["r", "role-model"])
+
     def test_empty_default_without_harness_model_fails(self):
         # 仓库不固定模型：default 为空且本机也没有 Harness 默认时才报错。
         with tempfile.TemporaryDirectory() as empty:

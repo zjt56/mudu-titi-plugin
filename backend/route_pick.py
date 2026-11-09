@@ -143,6 +143,10 @@ if stage == "review":
     if not (isinstance(entry, dict) and entry.get("provider") and entry.get("model")):
         entry = roles.get(agent) if agent else None
     if not (isinstance(entry, dict) and entry.get("provider") and entry.get("model")):
+        entry = roles.get("review")
+    if not (isinstance(entry, dict) and entry.get("provider") and entry.get("model")):
+        entry = stages.get("review")
+    if not (isinstance(entry, dict) and entry.get("provider") and entry.get("model")):
         entry = review.get("default")
     chosen = pick(entry, default)
 else:

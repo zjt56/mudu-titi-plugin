@@ -102,9 +102,9 @@ test('router script has no hardcoded substitute model', () => {
 test('plugin agent config 按本地资源保守设置并发，不按 API 限流', () => {
   const config = JSON.parse(readFileSync(join(__dirname, 'local-agent.plugin.json'), 'utf8'));
   // 每个分片都是独立 dsh 进程；16 路在 16GB 机器上曾把整机压到内存紧张并导致宿主重启，
-  // 因此改为 4。这是本地资源保护，不是按 provider 速率上限做 API 限流。
+  // 因此普通阶段保持 4 路、审核固定 5 路。这是本地资源保护，不是按 provider 速率上限做 API 限流。
   assert.equal(config.part_concurrency, 4);
-  assert.equal(config.review_part_parallel, 4);
+  assert.equal(config.review_part_parallel, 5);
   assert.match(config._concurrency_note || '', /内存/);
 });
 

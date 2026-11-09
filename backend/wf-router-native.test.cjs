@@ -50,6 +50,18 @@ test('native router runs a Windows cmd dsh entry and writes the response file', 
   assert.doesNotMatch(patch, /reasoningEffort: medium/);
 });
 
+test('native router honours stages.review when no round or role override exists', t => {
+  const f = fixture(t, 'Stage: review\nROUND: labels\nAgent: review\n');
+  const cfg = JSON.parse(fs.readFileSync(path.join(f.plugin, 'config', 'model-router.json'), 'utf8'));
+  cfg.stages = { review: { provider: 'deepseek-official', model: 'deepseek-flash', profile: 'fake' } };
+  fs.writeFileSync(path.join(f.plugin, 'config', 'model-router.json'), JSON.stringify(cfg));
+  const result = spawnSync(process.execPath, [router, f.prompt, f.response], {
+    encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /stage=review.*provider=deepseek-official model=deepseek-flash/);
+});
+
 test('native router quotes a Harness path containing spaces', t => {
   const f = fixture(t);
   const install = path.join(f.dir, 'DeepSeek Harness', 'resources', 'runtime', 'cli', 'bin');

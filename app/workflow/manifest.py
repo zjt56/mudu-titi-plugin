@@ -534,6 +534,11 @@ def record_delivery(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
             batch_fill.sync(batch_dir, stage.id)
     record_semantics(batch_dir, manifest, stage)
     invalidate_changed_consumers(batch_dir, manifest, stage.id)
+    if stage.id != "review":
+        changed_review = review_bound_inputs_changed(batch_dir, manifest)
+        if changed_review:
+            invalidate_stage(batch_dir, manifest, "review",
+                             "审核绑定输入已变化，旧审核结论作废：" + "、".join(changed_review[:8]))
     delivery = _load_delivery(batch_dir)
     delivery["version"] = DELIVERY_VERSION
     delivery["workflow_id"] = manifest.get("workflow_id", Path(batch_dir).name)

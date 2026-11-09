@@ -70,7 +70,7 @@ python -m workflow.auto run --inbox inbox --once
 
 装配默认每片最多 8 个单元、审核每片最多 15 个单元；可用 `"assemble_part_units"` / `"review_part_units"` 分别调整；设置 `"unit_split": false` 可关闭。分片按单元裁剪上游产物，但不再让每片重背整份上下文：原卷提取只保留表格、图片、警告与溯源（重复正文与逐段版式块剔除），装配片不再附知识点目录与打标规则（标签合法性由导入器与 `label_audit` 程序校验），审核片仍保留目录以核对叶子。全部通过覆盖检查后合并并进行整批校验。若单个单元连同必要来源仍超过上限，明确报错，不截断原卷或规则。独立审核各轮也按目标分片，保留每片执行记录并支持从已接收分片继续；每轮仍须分别执行，不能复用其他轮的模型结果。
 
-分片并发：`"part_concurrency"`（默认 1；上限 64）控制同一阶段内分片的并行调用数，`"review_part_parallel"` 单独控制审核。官方 API 支持高并发，真正的限制是本机同时运行的 dsh 进程与内存；插件生效配置默认 16。分片之间没有依赖，只有合并需要按原顺序，因此并发只压缩墙钟，不改变产物语义；单片校验、快照落盘与整批导入规则不变。
+分片并发：`"part_concurrency"`（默认 1；上限 64）控制同一阶段内分片的并行调用数，`"review_part_parallel"` 单独控制审核。官方 API 支持高并发，真正的限制是本机同时运行的 dsh 进程与内存；插件生效配置普通阶段默认 4 路、审核默认 5 路（48 单元批次通常 4 个标签片 + 1 个 sample 片，正好同波跑完，仍可按机器内存调整）。分片之间没有依赖，只有合并需要按原顺序，因此并发只压缩墙钟，不改变产物语义；单片校验、快照落盘与整批导入规则不变。
 
 分片级断点续跑：每个分片通过本地校验后，其候选答复按“精确提示 + 单元集合 + 输入摘要 + 模型配置”指纹存入 `workflow/agent-runs/<阶段>-parts/`。该阶段重跑时，指纹未变的成功分片直接复用，只重新调用失败或尚未产出的分片；任一上游输入或模型路由变化都会使旧分片失效。复用前仍重跑 `validate_part`，不把未校验结果当成品。
 
@@ -79,6 +79,8 @@ python -m workflow.auto run --inbox inbox --once
 限流/额度退避：`classify_failure` 识别的 429/`DAILY_LIMIT_EXCEEDED`/quota 属可恢复失败，不是判死。`auto run` 撞到后在该批次登记冷却（`workflow/agent-runs/.rate-limit-cooldown`，默认 300s，可用 `--rate-limit-backoff` 调整），冷却期内本轮不再调用模型，常驻循环睡到最早冷却到期再扫，避免空转反复撞同一限额；一旦有阶段成功推进即清除冷却标记。`scripts/bin/wf-agent.sh` 在限流时会自动切换到备用 profile 重试一次，两条通道都受限才按 rate_limit 交回；这是**独立 CLI** 的旧行为。插件面板使用 `wf-router.mjs`，不做这种切换：选中哪个模型就只调用哪个，路由缺失时直接报错。其它失败（解析、崩溃）不盲目重跑，仍按原规则处理。
 
 可选 provider 的范围：`wf-router.mjs` 生成 headless 路由 profile 时，只复制 base profile 的 `llm-pi-ai` / `llm-deepseek` / `llm-deepseek-account` 条目。桌面端启用、但 profile 没有声明的 provider（例如 WorkBuddy 的 `magpie` 中转）在该 profile 里没有适配器，选中会 `NO_ADAPTER`。因此设置页的模型列表只列路由真正能服务的 provider；`wf-router` 调用前也会校验，不在列表里就带可选值直接报错，不会静默换成默认模型。要在工作流里用某个 provider，先在 profile 的 `llm-pi-ai.providers` 里声明它。
+
+审核模型路由顺序：`review.rounds[round]` > `roles[agent]` > `roles.review` > `stages.review` > `review.default` > 设备默认。插件设置里的「审核」行写入 `roles.review`，一审/二审行写入 `review.rounds`；外部配置直接写 `stages.review` 也会被读取，不再静默落回设备默认模型。
 
 并行模型调用使用共享锁，普通调用使用独占锁，两者互斥；POSIX 与 Windows 均生效（Windows 通过字节区间锁实现共享/独占，不再把并行调用串行化）。POSIX 超时取消进程组，Windows 当前只能可靠终止直接子进程。
 
