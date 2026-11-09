@@ -311,6 +311,62 @@ class QuestionDraftTest(unittest.TestCase):
         self.source(text, [([1, 2], "group", "阅读理解", 3, 8)])
         self.assertEqual(question_draft.build(self.root)["items"][0]["stem"], "")
 
+    def test_shared_rubric_review_regressions(self):
+        from workflow.shared_rubric import section_rubric
+        from workflow.question_content import _generic_choice_instruction
+        rubric = '阅读下列短文，从每小题所给的A、B、C、D四个选项中选出最佳选项。'
+        tail = '将答案填写在答题卡上。'
+        for prefix in ('第一部分　', '**第一节　'):
+            line = prefix + rubric + ('**' if prefix.startswith('**') else '')
+            self.assertTrue(_generic_choice_instruction(line, '阅读理解'))
+            self.assertEqual(section_rubric(['Ⅷ.阅读理解', line, 'A', 'Article'], 4, '阅读理解'), [line])
+        lines = ['Ⅷ.阅读理解', rubric, tail, 'A', 'Article A', '1. Question',
+                 '阅读下面短文，回答第2至3题。', 'B', 'Article B', '2. Question', 'C']
+        self.assertEqual(section_rubric(lines, 11, '阅读理解'), [rubric, tail])
+        self.assertEqual(section_rubric(lines, 11, '听力长对话理解'), [])
+        self.assertEqual(section_rubric(['Ⅷ.阅读理解', 'A', 'Article',
+                                      '阅读下面短文，回答第2至3题。', 'B'], 5, '阅读理解'), [])
+
+    def test_shared_rubric_survives_preview_payload_and_is_required_by_audit(self):
+        from workflow import extract, structure_gate, preview, question_content, upload_payload
+        from workflow.test_source_structure import reading_body
+        from workbench.server import source_blocks
+        rubric = '阅读下列短文，从每小题所给的A、B、C、D四个选项中选出最佳选项。'
+        tail = '将答案填写在答题卡指定位置，所有答案必须使用黑色笔填写。'
+        body = reading_body().replace('A\n', rubric + '\n' + tail + '\nA\n', 1)
+        structure, body, _ = extract.infer_structure(body)
+        from workflow import denoise
+        cleaned = denoise.clean_body(body)[0]
+        units = structure_gate._build_units(structure['sections'], structure['groups'], cleaned.splitlines())
+        self.write('01_source/正文.txt', body)
+        self.write('01_source/structure.json', structure)
+        self.write('01_source/structure.confirmed.json', {'units': units})
+        draft = question_draft.build(self.root)
+        rows = draft['items']
+        self.assertEqual([row['stem'] for row in rows], [rubric + '\n' + tail] * 2)
+        report = question_content.audit_batch_source(self.root, {'items': rows})
+        self.assertEqual(report['issues'], [])
+        chunk = preview.source_slice(self.root, [58, 59])
+        self.assertIn(rubric, chunk)
+        self.assertIn(rubric, json.dumps(source_blocks(chunk), ensure_ascii=False))
+        for row in rows:
+            row['question_type'] = '阅读理解'
+        payload = upload_payload.build_payload({'items': rows}, catalog=None)['payload']
+        self.assertEqual(payload['items'][1]['stem'], rubric + '\n' + tail)
+        rows[1]['stem'] = ''
+        problems = question_content.audit_batch_source(self.root, {'items': rows})['issues']
+        self.assertIn('SOURCE_SHARED_RUBRIC_MISSING', [p['code'] for p in problems])
+
+    def test_raw_source_coordinates_do_not_borrow_future_rubric(self):
+        lines = ['扫码练听力'] * 5 + ['Ⅰ.任务型阅读',
+                 '阅读下面短文，回答问题（每题不超过五个词）。', 'A', 'Tom is here.', '1. Who is here?',
+                 'Ⅱ.任务型阅读', '阅读下面短文，回答问题（每题不超过十个词）。',
+                 'B', 'Mary is here.', '2. Who is here?']
+        units = self.source('\n'.join(lines), [([1], 'group', '任务型阅读', 8, 10)])
+        units[0]['source_span']['basis'] = 'source_lines'
+        self.write('01_source/structure.confirmed.json', {'units': units})
+        self.assertEqual(question_draft.build(self.root)['items'][0]['stem'], lines[6])
+
     def test_table_uses_proven_word_spans_and_retains_source_grid(self):
         table = "[TABLE 1]\nTitle | \n__16__ | Detail\n[/TABLE]"
         text = "Listen and complete.\n" + table

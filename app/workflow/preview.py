@@ -287,6 +287,14 @@ def source_slice(batch_dir, numbers, lines: list[str] | None = None) -> list[str
         return []
     chunk = slice_range(lines, nums) if len(nums) > 1 else slice_text(lines, nums[0])
     if chunk or len(nums) != 1:
+        if chunk and len(nums) > 1:
+            from .shared_rubric import section_rubric
+            anchors = [i + 1 for i, line in enumerate(lines) if line.strip() == chunk[0].strip()]
+            anchor = anchors[0] if len(anchors) == 1 else None
+            has_own_rubric = any(re.match(r"阅读(?:下列|下面)短文", _plain(line).strip())
+                                 for line in chunk[:2])
+            rubric = [] if has_own_rubric else section_rubric(lines, anchor)
+            chunk = [line for line in rubric if line.strip() not in {x.strip() for x in chunk}] + chunk
         return chunk
     try:
         from . import denoise, structure_gate

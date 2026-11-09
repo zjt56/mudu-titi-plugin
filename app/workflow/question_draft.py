@@ -405,7 +405,8 @@ def _rubric_line(line, unit_type):
     from .extract import material_label
     if _strong_number(line) is not None or material_label(line):
         return False
-    plain = question_content.SECTION_LEAD.sub("", text, count=1)
+    from .extract import _plain
+    plain = question_content.SECTION_LEAD.sub("", _plain(text).strip(), count=1)
     if question_content._generic_choice_instruction(line, unit_type):
         return True
     kind = str(unit_type or "")
@@ -434,32 +435,9 @@ def _rubric_lines(lines, unit_type):
 
 
 def _section_rubric(lines, unit):
-    """Return the section's own verbatim作答导语 shared by several题组.
-
-    Later groups bind only their article/table, so the section instruction sits
-    outside their span. Scan back to the nearest preceding大题标题 and reuse the
-    exact source line of the same section; absent/ambiguous text returns [].
-    """
-    span = unit.get("source_span") or {}
-    stop = span.get("start_line")
-    if type(stop) is not int or stop < 1:
-        return []
-    kind = unit.get("type") or ""
-    from .preview import SECTION
-    from .extract import _plain
-    for index in range(min(stop, len(lines)) - 2, -1, -1):
-        line = lines[index]
-        if _rubric_line(line, kind):
-            block = [line]
-            cursor = index + 1
-            while cursor < stop - 1 and _rubric_line(lines[cursor], kind):
-                block.append(lines[cursor])
-                cursor += 1
-            return block
-        # 「第一节　阅读下列短文…」同时像分段标题；先按导语识别，再当作边界。
-        if SECTION.match(_plain(line)):
-            return []  # Reached the section title without a real rubric.
-    return []
+    from .shared_rubric import section_rubric
+    return section_rubric(lines, (unit.get("source_span") or {}).get("start_line"),
+                          unit.get("type") or "")
 
 
 def _empty(number):
@@ -533,7 +511,12 @@ def build(batch_dir, *, units=None):
                     # 完形 A/B、阅读各篇共用同一大题题干：后一篇的绑定窗口只含
                     # 自己的文章，必须补回同大题的原文导语，不能留空。
                     # 补入的导语不属于本组切片，绝不能据此截断材料正文。
-                    rubric = _section_rubric(cleaned_lines, unit)
+                    from .shared_rubric import section_rubric
+                    rubric_source = (source.splitlines() if proof.get("line_basis") == "01_source/正文.txt"
+                                     else cleaned_lines)
+                    rubric = section_rubric(rubric_source, proof.get("start_line"), unit.get("type") or "")
+                    if rubric:
+                        proof["shared_rubric"] = rubric
                 if rubric:
                     row["stem"] = "\n".join(rubric).strip()
                 offset_lines = len(rubric) if own_rubric else 0

@@ -72,14 +72,15 @@ def _canonical(value: str) -> str:
 
 # 「第一节　阅读下列短文…」是同一大题下的分段标记，题干本身从「阅读下列」开始。
 # 只用于识别与去重豁免，原文行仍按原样保存。
-SECTION_LEAD = re.compile(r"^\s*第[一二三四五六七八九十百零]+\s*[节部分]\s*")
+from .shared_rubric import SECTION_LEAD
 
 
 def _generic_choice_instruction(line: str, question_type: str) -> bool:
     """Recognize a complete reusable rubric, never an article or numbered lead-in."""
     if question_type not in {"完形填空", "语法选择", "阅读理解"}:
         return False
-    text = SECTION_LEAD.sub("", str(line), count=1)
+    from .extract import _plain
+    text = SECTION_LEAD.sub("", _plain(str(line)).strip(), count=1)
     return bool(re.fullmatch(
         r"阅读(?:下列|下面)短文从每小题所给的abcd四个选项中选出"
         r"(?:一个)?(?:可以填入空白处的)?最佳选项", _canonical(text)))
@@ -794,6 +795,16 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                     candidate_material += "\n" + " | ".join(texts)
         if unit["unit_kind"] == "group":
             candidate_text = _canonical_image_text(candidate_material)
+            from .question_draft import _bound_source, _rubric_lines
+            from .shared_rubric import section_rubric
+            confirmed_unit = next((u for u in expected_units if tuple(u.get("numbers") or []) == key), unit)
+            bound, proof = _bound_source(confirmed_unit, source, cleaned, fresh)
+            rubric_lines = source.splitlines() if proof.get("line_basis") == "01_source/正文.txt" else cleaned.splitlines()
+            shared_rubric = (_rubric_lines(bound.splitlines(), unit.get("type") or "")
+                             or section_rubric(rubric_lines, proof.get("start_line"), unit.get("type") or ""))
+            for required in shared_rubric:
+                if _canonical_image_text(required) not in candidate_text:
+                    issue("SOURCE_SHARED_RUBRIC_MISSING", "同节共享作答导语缺失：" + required[:100], uid)
             for line in materials[key]:
                 # 表格行常把多个单元格/要点用 | 或 <br> 写在一行；逐段比对，
                 # 不能要求整行作为一个连续字符串出现。
@@ -812,6 +823,8 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                 if other == key:
                     continue
                 for line in lines:
+                    if any(_canonical(line) == _canonical(r) for r in shared_rubric):
+                        continue
                     # A section rubric may be repeated on every article in that
                     # section. Keep requiring it on its original unit above,
                     # but do not treat that exact rubric as exclusive prose.
