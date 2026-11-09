@@ -67,16 +67,25 @@ class LabelPartReuseTest(unittest.TestCase):
     def context(self, part):
         return json.loads(part["prompt"].split(unit_tasks._BEGIN, 1)[1].rsplit(unit_tasks._END, 1)[0])
 
+    def source_text(self, context, path):
+        if path in context:
+            return context[path]
+        return "\n".join(line["text"] for source in context["source_fragment_index"]["sources"]
+                         if source["path"] == path for line in source["lines"])
+
     def test_all_label_stages_project_actual_prompt_and_keep_full_import_hashes(self):
         for stage in unit_context.STAGES:
             with self.subTest(stage=stage):
                 base, parts = self.build(stage)
                 value = self.context(parts[0])
-                self.assertIn(self.first, value["01_source/正文.txt"])
+                self.assertIn(self.first, self.source_text(value, "01_source/正文.txt"))
                 self.assertNotIn("Who went", parts[0]["prompt"])
                 self.assertIn("Paper title", parts[0]["prompt"])
                 self.assertIn("End of paper", parts[0]["prompt"])
-                self.assertEqual([u["unit_id"] for u in value["01_source/structure.confirmed.json"]["units"]], ["q-1"])
+                if stage in ("answers", "explanations"):
+                    self.assertNotIn("01_source/structure.confirmed.json", value)
+                else:
+                    self.assertEqual([u["unit_id"] for u in value["01_source/structure.confirmed.json"]["units"]], ["q-1"])
                 self.assertNotIn("workflow/manifest.json", base["input_hashes"])
                 self.assertIn("01_source/正文.txt", base["input_hashes"])
                 self.assertTrue(any(Path(k).is_absolute() and Path(k).resolve() == self.original.resolve()
@@ -107,11 +116,11 @@ class LabelPartReuseTest(unittest.TestCase):
         self.write("01_source/附录.txt", appendix)
         _, parts = self.build("explanations")
         value = self.context(parts[1])
-        self.assertIn(self.second, value["01_source/正文.txt"])
-        self.assertNotIn(self.first, value["01_source/正文.txt"])
+        self.assertIn(self.second, self.source_text(value, "01_source/正文.txt"))
+        self.assertNotIn(self.first, self.source_text(value, "01_source/正文.txt"))
         # Repeated A headings cannot establish ownership: keep the authoritative
         # appendix and its boundary/number context complete, including original lines.
-        self.assertEqual(value["01_source/附录.txt"], appendix)
+        self.assertEqual(self.source_text(value, "01_source/附录.txt"), appendix.rstrip("\n"))
         self.assertEqual(value["partition_source_scope"]["selected_spans"], [
             {"unit_id": "group-2-3", "path": "01_source/正文.txt", "start_line": 3, "end_line": 5}])
         self.assertEqual([r["unit_id"] for r in value[agent_tasks.ARTIFACTS["types"]]["items"]], ["group-2-3"])
@@ -141,7 +150,10 @@ class LabelPartReuseTest(unittest.TestCase):
             self.write("original.txt", self.source)
             after = self.keys(stage)
             self.assertNotEqual(before[0], after[0])
-            self.assertEqual(before[1], after[1])
+            if stage == "explanations":
+                self.assertNotEqual(before[1], after[1])  # Full-file source refs must be refreshed.
+            else:
+                self.assertEqual(before[1], after[1])
             self.source = self.source.replace("She likes", "She reads")
             self.units[0]["stem"] = self.first
             self.write_source()
@@ -164,8 +176,11 @@ class LabelPartReuseTest(unittest.TestCase):
                 old_keys = [local_agent._part_snapshot_key(stage, p, before_base["input_hashes"], self.config) for p in before]
                 new_keys = [local_agent._part_snapshot_key(stage, p, after_base["input_hashes"], self.config) for p in after]
                 self.assertNotEqual(old_keys[0], new_keys[0])
-                self.assertEqual(old_keys[1], new_keys[1])
-                self.assertEqual(before[1]["prompt"], after[1]["prompt"])
+                if stage == "explanations":
+                    self.assertNotEqual(old_keys[1], new_keys[1])
+                else:
+                    self.assertEqual(old_keys[1], new_keys[1])
+                    self.assertEqual(before[1]["prompt"], after[1]["prompt"])
                 self.assertNotEqual(before_base["input_hashes"]["01_source/extraction.json"],
                                     after_base["input_hashes"]["01_source/extraction.json"])
                 self.assertNotEqual(before[1]["freshness_guards"]["01_source/extraction.json"],

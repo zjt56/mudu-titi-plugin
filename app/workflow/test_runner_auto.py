@@ -96,7 +96,7 @@ class RunnerAutoTest(unittest.TestCase):
             return code
         return execute
 
-    def test_parallel_wave_overlaps_calls_and_imports_after_all_workers(self):
+    def test_parallel_wave_overlaps_calls_and_imports_ready_workers(self):
         from workflow import agent, agent_protocol, agent_tasks, local_agent, agent_prepare
         self._ready_after_structure()
         barrier = threading.Barrier(2, timeout=5)
@@ -116,7 +116,7 @@ class RunnerAutoTest(unittest.TestCase):
         def build(batch, stage, **kwargs):
             return {"status": "ready", "prompt": stage}
 
-        def invoke(prompt, run_dir, config, permit_parallel=False):
+        def invoke(prompt, run_dir, config, permit_parallel=False, coordinated_imports=False):
             if permit_parallel and prompt in {"answers", "types"}:
                 barrier.wait()
                 with lock:
@@ -134,9 +134,14 @@ class RunnerAutoTest(unittest.TestCase):
             if stage == "types" and validation.count(stage) == 1:
                 raise ValueError("test validation failure")
 
+        def execute(batch, manifest, stage):
+            mf.touch_stage(manifest, stage.id, mf.COMPLETED)
+            mf.save(batch, manifest)
+            return 0
+
         def import_result(batch, task_id, path):
             expected = {"answers", "types", "audio"} if task_id == "audio" else {"answers", "types"}
-            self.assertTrue(expected.issubset(completed))
+            self.assertIn(task_id, completed)
             imports.append(task_id)
             current = mf.load(batch)
             mf.touch_stage(current, task_id, mf.COMPLETED)
@@ -147,15 +152,17 @@ class RunnerAutoTest(unittest.TestCase):
              patch.object(agent, "configured", return_value=True), \
              patch.object(local_agent, "load_config", return_value={"max_input_chars": 10000, "retries": 1}), \
              patch.object(agent_prepare, "prepare_answers"), \
+             patch.object(runner, "_execute_command", side_effect=execute), \
              patch.object(agent_protocol, "export_task", side_effect=export), \
              patch.object(agent_tasks, "build_task", side_effect=build), \
              patch.object(agent_tasks, "accept_result", side_effect=validate), \
              patch.object(local_agent, "invoke", side_effect=invoke), \
+             patch("workflow.label_execution.run", side_effect=lambda b, s, c, r, **kw: invoke(s, r, c, permit_parallel=True)), \
              patch.object(agent_protocol, "import_result", side_effect=import_result):
             outcome = auto.advance(self.batch, default, stop_at="explanations")
         # Audio now depends on types, so it runs in the following wave rather
         # than overlapping unvalidated types; both still finish before assemble.
-        self.assertEqual(imports, ["answers", "types"])
+        self.assertCountEqual(imports, ["answers", "types"])
         self.assertEqual(len(retries), 1)
         self.assertIn("test validation failure", retries[0])
         self.assertEqual(outcome["failed_stages"], [])
@@ -182,7 +189,7 @@ class RunnerAutoTest(unittest.TestCase):
             (package / "task.json").write_text(json.dumps({"prompt": stage + "\nFILE PROTOCOL: test"}))
             return {"status": "ready", "task_id": stage, "package_dir": str(package)}
 
-        def invoke(prompt, run_dir, config, permit_parallel=False):
+        def invoke(prompt, run_dir, config, permit_parallel=False, coordinated_imports=False):
             self.assertTrue(permit_parallel)
             with lock:
                 entered.add(prompt)
@@ -199,9 +206,37 @@ class RunnerAutoTest(unittest.TestCase):
              patch.object(agent_tasks, "build_task", side_effect=lambda batch, stage, **kw: {"status": "ready", "prompt": stage}), \
              patch.object(agent_tasks, "accept_result"), \
              patch.object(local_agent, "invoke", side_effect=invoke), \
+             patch("workflow.label_execution.run", side_effect=lambda b, s, c, r, **kw: invoke(s, r, c, permit_parallel=True)), \
              patch.object(agent_protocol, "import_result", side_effect=import_result):
             outcomes = auto._parallel_ready_agents(self.batch, stages, {"max_input_chars": 10000, "retries": 0})
         self.assertEqual(outcomes, {stage.id: 0 for stage in stages})
+
+    def test_ready_stage_is_imported_before_slow_peer_finishes(self):
+        from workflow import agent_protocol, agent_tasks, local_agent
+        stages = [contracts.STAGE_BY_ID[s] for s in ('answers', 'types')]
+        imported = threading.Event()
+        def export(batch, stage, **kw):
+            package = self.batch / 'early-packages' / stage
+            package.mkdir(parents=True)
+            (package / 'task.json').write_text(json.dumps({'prompt': stage + '\nFILE PROTOCOL: test'}))
+            return {'status': 'ready', 'task_id': stage, 'package_dir': str(package)}
+        def slow(prompt, *a, **kw):
+            self.assertTrue(imported.wait(3), 'Fast stage was held behind slow peer')
+            return {'response': {'status': 'completed'}}
+        def install(batch, task_id, path):
+            if task_id == 'answers':
+                imported.set()
+            return {'completed': True}
+        with patch('workflow.agent_prepare.prepare_answers'), \
+             patch.object(mf, 'dependency_satisfied', return_value=True), \
+             patch.object(agent_protocol, 'export_task', side_effect=export), \
+             patch.object(agent_tasks, 'build_task', side_effect=lambda b, s, **kw: {'status': 'ready', 'prompt': s}), \
+             patch.object(agent_tasks, 'accept_result'), \
+             patch('workflow.label_execution.run', return_value={'response': {'status': 'completed'}}), \
+             patch.object(local_agent, 'invoke', side_effect=slow), \
+             patch.object(agent_protocol, 'import_result', side_effect=install):
+            self.assertEqual(auto._parallel_ready_agents(self.batch, stages, {'max_input_chars': 10000, 'retries': 0}),
+                             {'answers': 0, 'types': 0})
 
     def test_rate_limit_wrapper_code_is_authoritative(self):
         self.assertTrue(auto._is_rate_limited(
@@ -220,7 +255,7 @@ class RunnerAutoTest(unittest.TestCase):
             (package / "task.json").write_text(json.dumps({"prompt": stage + "\nFILE PROTOCOL: test"}))
             return {"status": "ready", "task_id": stage, "package_dir": str(package)}
 
-        def invoke(prompt, run_dir, config, permit_parallel=False):
+        def invoke(prompt, run_dir, config, permit_parallel=False, coordinated_imports=False):
             raise RuntimeError(
                 "Agent subprocess failed (exit 1, rate_limit); inspect stderr.log\n"
                 'wf-agent-result: {"error_code": "rate_limit", "http_status": 429}')
@@ -231,6 +266,7 @@ class RunnerAutoTest(unittest.TestCase):
              patch.object(agent_tasks, "build_task", side_effect=lambda batch, stage, **kw: {"status": "ready", "prompt": stage}), \
              patch.object(agent_tasks, "accept_result"), \
              patch.object(local_agent, "invoke", side_effect=invoke), \
+             patch("workflow.label_execution.run", side_effect=lambda b, s, c, r, **kw: invoke(s, r, c, permit_parallel=True)), \
              patch.object(agent_protocol, "import_result"):
             outcomes = auto._parallel_ready_agents(self.batch, stages, {"max_input_chars": 10000, "retries": 0})
         self.assertEqual(outcomes, {stage.id: 4 for stage in stages})
@@ -325,7 +361,7 @@ class RunnerAutoTest(unittest.TestCase):
         def build(batch, stage, **kwargs):
             return {"status": "ready", "prompt": stage}
 
-        def invoke(prompt, run_dir, config, permit_parallel=False):
+        def invoke(prompt, run_dir, config, permit_parallel=False, coordinated_imports=False):
             self.assertTrue(marker.wait(10))
             return {"response": {"status": "completed", "artifacts": {}, "notes": [], "findings": []}}
 
@@ -348,6 +384,7 @@ class RunnerAutoTest(unittest.TestCase):
                  patch.object(agent_tasks, "build_task", side_effect=build), \
                  patch.object(agent_tasks, "accept_result", return_value={"completed": True}), \
                  patch.object(local_agent, "invoke", side_effect=invoke), \
+             patch("workflow.label_execution.run", side_effect=lambda b, s, c, r, **kw: invoke(s, r, c, permit_parallel=True)), \
                  patch.object(agent_protocol, "import_result", side_effect=import_result):
                 self.assertTrue(started.wait(10))
                 # Model calls are blocked until the marker is set, so a real

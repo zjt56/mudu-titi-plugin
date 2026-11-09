@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import agent_tasks
 
-STAGES = ("types", "explanations", "knowledge")
+STAGES = ("answers", "types", "explanations", "knowledge")
 VERSION = "label-unit-context/v3"
 DRAFT = "06_batch/question-draft.json"
 _SOURCE = "01_source/正文.txt"
@@ -130,6 +130,8 @@ class Projection:
             "selected_spans": [{"unit_id": uid, "path": _SOURCE,
                                 "start_line": start + 1, "end_line": end}
                                for uid, start, end in self.spans if uid in ids],
+            "omitted_spans": [{"path": _SOURCE, "start_line": start + 1, "end_line": end}
+                              for uid, start, end in self.spans if uid not in ids],
             "notice": "仅省略已唯一定位的其它题组；未归属原文、附件和警告保留。分片不代表整卷核验。"}
         return value
 

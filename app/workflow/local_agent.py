@@ -15,7 +15,7 @@ artifacts.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import errno
 import hashlib
@@ -412,7 +412,7 @@ def _json_write(path, payload):
         handle.write("\n")
 
 
-def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False) -> dict:
+def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False, coordinated_imports=False) -> dict:
     """Run one fresh CLI process; preserve all attempt evidence, even on failure.
 
     run_dir is the caller's isolated attempt directory. Its reserved output files
@@ -466,7 +466,13 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False) ->
         with paths["stdout"].open("xb") as stdout, paths["stderr"].open("xb") as stderr:
             # The shared lock excludes all ordinary exclusive callers; only an
             # orchestrator that bounds concurrency and serializes imports opts in.
-            lock = (_agent_lock(settings["timeout_seconds"], shared=True) if permit_parallel
+            if coordinated_imports and not permit_parallel:
+                raise AgentError("Coordinated imports require a parallel read-only orchestrator", "integration")
+            # Auto owns the per-batch scheduler lock, fences every input and
+            # serializes protocol imports. Its private model outputs need not
+            # retain a global read lock that would block those imports.
+            lock = (nullcontext(None) if coordinated_imports else
+                    _agent_lock(settings["timeout_seconds"], shared=True) if permit_parallel
                     else _agent_lock(settings["timeout_seconds"]))
             with lock as lock_handle:
                 # None remains valid for Windows and mock/no-op lock contexts.
@@ -620,7 +626,7 @@ def _part_snapshot_key(stage, part, hashes, config):
     local/global dependency guards. Import and in-flight checks keep ALL hashes.
     """
     scope = part.get("cache_scope")
-    local = stage in ("types", "explanations", "knowledge") and isinstance(scope, dict)
+    local = stage in ("answers", "types", "explanations", "knowledge") and isinstance(scope, dict)
     from workflow import agent_tasks
     # Repair data already binds the exact selected prompt. Keep whole-file
     # feedback hashes for freshness, not unrelated partitions' cache identity.
@@ -634,7 +640,7 @@ def _part_snapshot_key(stage, part, hashes, config):
 
 def _load_part_snapshot(batch_dir, stage, part, hashes, config):
     """Return a previously validated partition response, or None."""
-    if stage in ("types", "explanations", "knowledge") and (
+    if stage in ("answers", "types", "explanations", "knowledge") and (
             not part.get("cache_scope") or config.get("_part_model_binding") is None):
         return None  # Unproven evidence/model scope must be recomputed conservatively.
     directory = _part_snapshot_dir(batch_dir, stage)
@@ -657,7 +663,7 @@ def _load_part_snapshot(batch_dir, stage, part, hashes, config):
 
 def _store_part_snapshot(batch_dir, stage, part, hashes, config, candidate):
     """Atomically persist a validated partition response for future reuse."""
-    if stage in ("types", "explanations", "knowledge") and (
+    if stage in ("answers", "types", "explanations", "knowledge") and (
             not part.get("cache_scope") or config.get("_part_model_binding") is None):
         return
     directory = _part_snapshot_dir(batch_dir, stage)
@@ -696,7 +702,7 @@ def _part_concurrency(config):
 
 def _part_units(config, stage):
     """标签默认一题/题组一片；组装8、审核15，可分别调整。"""
-    key = ("label_part_units" if stage in ("types", "explanations", "knowledge") else
+    key = ("label_part_units" if stage in ("answers", "types", "explanations", "knowledge") else
            "assemble_part_units" if stage == "assemble" else "review_part_units")
     value = config.get(key, DEFAULTS[key])
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -741,7 +747,20 @@ def main(argv=None):
             outcome = assemble_local.try_assemble(batch_dir, config)
             if outcome is not None:
                 return outcome
-        _label_stage = args.stage in ("types", "explanations", "knowledge")
+        if args.stage in ("answers", "explanations") and not args.dry_run:
+            from workflow import label_execution
+            attempts = batch_dir / "workflow" / "agent-runs"
+            attempts.mkdir(parents=True, exist_ok=True)
+            run_dir = Path(tempfile.mkdtemp(prefix=args.stage + "-", dir=attempts))
+            result = label_execution.run(batch_dir, args.stage, config, run_dir, invoke=invoke)
+            with _agent_lock(config.get("timeout_seconds", 900)):
+                _check_input_hashes(batch_dir, result["input_hashes"])
+                label_execution.check_inputs(batch_dir, args.stage, result["collected_hashes"])
+                report = agent_tasks.accept_result(batch_dir, args.stage, result["response"])
+            _json_write(run_dir / "import-report.json", report)
+            print(json.dumps({"attempt_dir": str(run_dir), "report": report}, ensure_ascii=False))
+            return 0 if report.get("completed") else 3
+        _label_stage = args.stage in ("answers", "types", "explanations", "knowledge")
         # 标注阶段默认整卷一次分析（label_split=False）；装配/审核仍按 unit_split 分片。
         split_enabled = ((bool(config.get("label_split", False)) if _label_stage
                           else bool(config.get("unit_split", True)))
@@ -760,7 +779,7 @@ def main(argv=None):
                 _unit_count = len(agent_tasks.confirmed_units(batch_dir))
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 _unit_count = 0
-            if (args.stage in ("types", "explanations", "knowledge") and _unit_count > 0) or _unit_count > _part_units(config, args.stage):
+            if (args.stage in ("answers", "types", "explanations", "knowledge") and _unit_count > 0) or _unit_count > _part_units(config, args.stage):
                 from workflow import unit_tasks
                 task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
                                                      max_units=_part_units(config, args.stage))
@@ -776,7 +795,7 @@ def main(argv=None):
             raise AgentError("candidate_cache must be a boolean", "config")
         # The private cache requires POSIX dir_fd/O_NOFOLLOW; keep Windows on the normal path.
         cache_enabled = cache_enabled and os.name != "nt" and args.stage != "review" and not args.dry_run
-        if parts is not None and args.stage in ("types", "explanations", "knowledge"):
+        if parts is not None and args.stage in ("answers", "types", "explanations", "knowledge"):
             cache_enabled = cache_enabled and bool(config.get("_part_model_binding")) and all(
                 part.get("cache_scope") for part in parts)
         hashes = task.get("input_hashes", {})

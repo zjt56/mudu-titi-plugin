@@ -25,7 +25,8 @@ def is_placeholder(text) -> bool:
     return value == '' or value in PLACEHOLDER_TEXTS
 
 
-RULES = """Artifact: {items:[{unit_id,explanation:string,articleSummary:string,subquestions:[{number,explanation:string}],evidence:[nonempty location strings]}]}.
+RULES = """Artifact: {items:[{unit_id,explanation:string|source_ref,articleSummary:string|source_ref,subquestions:[{number,explanation:string|source_ref}],evidence:[nonempty location strings]}]}.
+优先定位后引用原文，避免重新抄写长段解析：source_fragment_index 提供文件 path、完整文件 sha256 和原始行号。字段可返回 {"source_ref":{"path":"01_source/附录.txt","sha256":"索引中的完整摘要","start_line":12,"end_line":13,"start_column":0,"end_column":20}}；行号1起含首尾，列号0起、末列不含，列号可省略。程序逐字复制该范围后仍校验题号与材料归属；引用不证明归属。仅选择已提供的来源，不猜行号，不用确定性直抄标记。缺失仍填字符串「无」，也可沿用既有字符串格式。
 你只做匹配与定位，不判题型、不打知识点、不改答案、不改结构，也**不撰写、不生成、不推断**任何解析或文章大意。
 1) 解析匹配：按真实题号、章节和材料边界，在原卷正文、附录、答案册中定位该题原解析，逐字保留（去掉“【解析】”等字段标题），evidence 写明来源文件与行号/题号。
 2) 文章大意匹配：按实际篇章及其所属题号匹配原【文章大意】，逐字保留并记录来源位置；重复的 A/B 篇号不是唯一标识。大意只写组级一份，不在每个子题重复。
@@ -106,6 +107,8 @@ def normalize_optional_content(row):
 def validate(payload, units, typed, batch):
     """校验子智能体1的产物；返回按 unit_id 索引的行，供下游搬运与比对。"""
     rows = _coverage(payload, units)
+    from .content_fragments import expand_references
+    has_references = expand_references(rows.values(), batch)
     for row in rows.values():
         normalize_optional_content(row)
     prepared = []
@@ -144,7 +147,9 @@ def validate(payload, units, typed, batch):
     # 确定性直抄的解析（按题号从原文抄录）不再做“逐字绑定原题”的严格溯源：
     # 用户明确要求答案/解析形式多样，不做繁复格式校验，抄原文即可。
     from .explanations_direct import DIRECT_COPY_EVIDENCE
-    if all(DIRECT_COPY_EVIDENCE in (row.get("evidence") or []) for row in prepared):
+    # Model-supplied references always require the original ownership audit;
+    # a caller-provided direct-copy evidence string cannot authorize a bypass.
+    if not has_references and all(DIRECT_COPY_EVIDENCE in (row.get("evidence") or []) for row in prepared):
         report = {"passed": True, "errors": [], "warnings": [], "restorations": []}
     else:
         report = audit_ownership(batch, prepared)

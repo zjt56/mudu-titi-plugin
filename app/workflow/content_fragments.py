@@ -1,0 +1,146 @@
+"""Hash-bound, read-only source slices for explanation-stage input values.
+
+References are a copying convenience, never a proof of question ownership. The
+caller must run the usual content/ownership validation after expansion.
+"""
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+import re
+
+FORMAT = 'source-fragment/v1'
+_REQUIRED = frozenset(('path', 'sha256', 'start_line', 'end_line'))
+_OPTIONAL = frozenset(('start_column', 'end_column'))
+
+
+def _allowed_path(relative):
+    from .upload_content import SOURCES
+    return isinstance(relative, str) and (
+        relative in SOURCES or re.fullmatch(r'01_source/materials/attachment_\d{3,}\.txt', relative) is not None)
+
+
+def _read_source(batch, relative):
+    from .upload_content import reference_only_sources
+    if not _allowed_path(relative):
+        raise ValueError('Source fragment path is not an allowed content source')
+    if relative in reference_only_sources(batch):
+        raise ValueError('Source fragment cannot use a reference-only content source')
+    # Check the original path before resolve(), including parent-directory links.
+    path = batch / relative
+    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+        raise ValueError('Source fragment paths must not contain symlinks')
+    if not path.is_file() or not path.resolve().is_relative_to(batch.resolve()):
+        raise ValueError('Source fragment must name an existing file inside the batch')
+    try:
+        raw = path.read_bytes()
+        lines = raw.decode('utf-8-sig').splitlines(keepends=True)
+    except (OSError, UnicodeError) as exc:
+        raise ValueError('Source fragment source is not readable UTF-8 text') from exc
+    return hashlib.sha256(raw).hexdigest(), lines
+
+
+def source_index(batch):
+    """Return allowed authoritative sources, raw-file hashes and numbered lines.
+
+    Text excludes each line terminator and a UTF-8 BOM. No content is truncated;
+    consumers can choose which source entries to include in their task context.
+    """
+    from .upload_content import SOURCES, reference_only_sources
+    batch = Path(batch).resolve()
+    materials = batch / '01_source/materials'
+    paths = list(SOURCES)
+    if materials.is_dir():
+        paths.extend(f'01_source/materials/{path.name}' for path in sorted(materials.glob('attachment_*.txt'))
+                     if re.fullmatch(r'attachment_\d{3,}\.txt', path.name))
+    reference_only = reference_only_sources(batch)
+    sources = []
+    for relative in paths:
+        if relative in reference_only or not (batch / relative).exists():
+            continue
+        digest, lines = _read_source(batch, relative)
+        sources.append({'path': relative, 'sha256': digest,
+                        'lines': [{'number': number, 'text': line.rstrip('\r\n')}
+                                  for number, line in enumerate(lines, 1)]})
+    return {'format': FORMAT, 'sources': sources}
+
+
+def expand_references(rows, batch):
+    """Expand reference objects in place; return whether any were present.
+
+    Only explanation/articleSummary on rows and explanation on subquestions are
+    supported. Resolve all references before applying any replacement. Existing
+    strings and malformed non-object values are left for the existing validator.
+    """
+    batch = Path(batch).resolve()
+    rows = list(rows)
+    cache, replacements = {}, []
+
+    def resolve(value):
+        if set(value) != {'source_ref'} or not isinstance(value['source_ref'], dict):
+            raise ValueError('Content reference must be an object containing only source_ref')
+        ref = value['source_ref']
+        if not _REQUIRED <= set(ref) or set(ref) - (_REQUIRED | _OPTIONAL):
+            raise ValueError('Invalid source_ref fields')
+        relative = ref['path']
+        if not _allowed_path(relative):
+            raise ValueError('Source fragment path is not an allowed content source')
+        digest = ref['sha256']
+        if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise ValueError('source_ref.sha256 must be a lowercase full-file SHA256')
+        if relative not in cache:
+            cache[relative] = _read_source(batch, relative)
+        actual, lines = cache[relative]
+        if actual != digest:
+            raise ValueError('Source fragment hash is stale or forged')
+        start, end = ref['start_line'], ref['end_line']
+        if (type(start) is not int or type(end) is not int
+                or not 1 <= start <= end <= len(lines)):
+            raise ValueError('Source fragment line range is out of bounds')
+        first = lines[start - 1].rstrip('\r\n')
+        last = lines[end - 1].rstrip('\r\n')
+        left, right = ref.get('start_column', 0), ref.get('end_column', len(last))
+        if (type(left) is not int or type(right) is not int
+                or not 0 <= left <= len(first) or not 0 <= right <= len(last)
+                or (start == end and left > right)):
+            raise ValueError('Source fragment column range is out of bounds')
+        if start == end:
+            text = first[left:right]
+        else:
+            # Preserve internal CRLF/LF line endings and all source whitespace.
+            text = lines[start - 1][left:] + ''.join(lines[start:end - 1]) + last[:right]
+        if not text.strip():
+            raise ValueError('Source fragment must not be empty')
+        evidence = (f"source_ref {relative}:{start}:{left}-{end}:{right} "
+                    f"sha256={digest}")
+        return text, evidence
+
+    def visit(obj, fields, row):
+        if not isinstance(obj, dict):
+            return
+        for field in fields:
+            if isinstance(obj.get(field), dict):
+                text, evidence = resolve(obj[field])
+                replacements.append((obj, field, text, evidence, row))
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        visit(row, ('explanation', 'articleSummary'), row)
+        children = row.get('subquestions')
+        if isinstance(children, list):
+            for child in children:
+                visit(child, ('explanation',), row)
+    if replacements:
+        from .explanations_direct import DIRECT_COPY_EVIDENCE
+        if any(isinstance(row.get('evidence'), list) and DIRECT_COPY_EVIDENCE in row['evidence']
+               for row in rows):
+            raise ValueError('Source references cannot claim deterministic direct-copy evidence')
+    for obj, field, text, evidence, row in replacements:
+        obj[field] = text
+        # Do not fix malformed/missing evidence: the normal validator rejects it.
+        for owner in (row,) if row is obj else (row, obj):
+            if (isinstance(owner.get('evidence'), list) and owner['evidence']
+                    and evidence not in owner['evidence']):
+                owner['evidence'].append(evidence)
+    return bool(replacements)

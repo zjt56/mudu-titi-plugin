@@ -274,8 +274,12 @@ class LocalAgentTest(unittest.TestCase):
         self.assertEqual(sorted(i["unit_id"] for i in merged["artifacts"]["04_knowledge/knowledge.json"]["items"]), ["u1", "u2"])
         with self.assertRaises(ValueError):
             unit_tasks.merge("explanations", parts, [exp2, exp2])  # overlapping/duplicate ids
-        with self.assertRaises(ValueError):
-            unit_tasks.build_parts(self.root, "answers", 1000, max_units=5)
+        a1 = {"status": "completed", "notes": [], "findings": [], "artifacts": {
+            "01_source_ans/answers.json": {"answers": {"1": "A"}, "evidence": {"1": ["L1"]}, "missing": {}}}}
+        a2 = {"status": "completed", "notes": [], "findings": [], "artifacts": {
+            "01_source_ans/answers.json": {"answers": {"2": "B"}, "evidence": {"2": ["L2"]}, "missing": {}}}}
+        self.assertEqual(unit_tasks.merge("answers", parts, [a1, a2])["artifacts"][
+            "01_source_ans/answers.json"]["answers"], {"1": "A", "2": "B"})
 
     def test_failure_is_classified_saved_and_never_retried(self):
         with patch.object(agent.subprocess, "Popen", side_effect=self.process(stdout="bad", stderr="helpful error", returncode=7)) as spawn:

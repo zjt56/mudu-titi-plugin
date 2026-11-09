@@ -236,6 +236,38 @@ class LocalInvocationEvidenceTest(unittest.TestCase):
         self.assertEqual((self.root / "truncated" / "stdout.log").read_text(), raw[:-1])
         self.assertFalse((self.root / "truncated" / "response.json").exists())
 
+    @unittest.skipIf(os.name == "nt", "flock is POSIX only")
+    def test_coordinated_model_does_not_block_serialized_protocol_import(self):
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        def spawn(command, **kwargs):
+            kwargs['stdout'].write(json.dumps(RESPONSE).encode())
+            process = MagicMock(returncode=0)
+            def communicate(**ignored):
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError('Import did not release model')
+            process.communicate.side_effect = communicate
+            return process
+        def model():
+            try:
+                agent.invoke('bounded read-only prompt', self.root / 'coordinated', self.config,
+                             permit_parallel=True, coordinated_imports=True)
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(agent.subprocess, 'Popen', side_effect=spawn):
+            worker = threading.Thread(target=model)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                with agent._agent_lock(0.1):
+                    release.set()
+            finally:
+                release.set()
+                worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+
     @unittest.skipIf(os.name == "nt", "shared flock is POSIX only")
     def test_main_parts_really_overlap_while_import_remains_exclusive(self):
         barrier = threading.Barrier(2)
@@ -264,7 +296,7 @@ class LocalInvocationEvidenceTest(unittest.TestCase):
         parts = [{"prompt": "part one", "unit_ids": ["u1"]},
                  {"prompt": "part two", "unit_ids": ["u2"]}]
         config = {**self.config, "part_concurrency": 2, "max_input_chars": 180000,
-                  "unit_split": True, "retries": 1}
+                  "unit_split": True, "label_split": True, "retries": 1}
         with patch.object(agent, "load_config", return_value=config), \
              patch.object(agent_tasks, "build_task", side_effect=ValueError("exceeding max_input_chars")), \
              patch.object(unit_tasks, "build_parts", return_value=(task, parts)), \
@@ -273,7 +305,7 @@ class LocalInvocationEvidenceTest(unittest.TestCase):
              patch.object(agent_tasks, "accept_result", side_effect=accept) as importer, \
              patch.object(agent.subprocess, "Popen", side_effect=spawn) as popen, \
              contextlib.redirect_stdout(io.StringIO()):
-            result = agent.main(["--stage", "explanations", "--batch-dir", str(self.root / "batch")])
+            result = agent.main(["--stage", "types", "--batch-dir", str(self.root / "batch")])
         self.assertEqual(result, 0)
         self.assertEqual(popen.call_count, 2)
         self.assertEqual(importer.call_count, 1)

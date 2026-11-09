@@ -281,6 +281,9 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
             stage_budget = config["max_input_chars"]
             if stage.id in {"explanations", "knowledge"}:
                 stage_budget = max(stage_budget, 600000)
+            if stage.id in {"answers", "explanations"}:
+                # This package binds inputs; only bounded partitions reach the model.
+                stage_budget = sys.maxsize
             exported = agent_protocol.export_task(batch_dir, stage.id,
                                                   max_input_chars=stage_budget)
             task = agent_tasks.build_task(batch_dir, stage.id, max_input_chars=stage_budget)
@@ -304,39 +307,26 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
         invoke_config = dict(config)
         if stage_id in {"explanations", "knowledge"}:
             invoke_config["max_input_chars"] = max(int(invoke_config.get("max_input_chars", 180000)), 600000)
-        return local_agent.invoke(task["prompt"], run_dir, invoke_config, permit_parallel=True)
+        if stage_id in {"answers", "explanations"}:
+            from . import label_execution
+            return label_execution.run(batch_dir, stage_id, invoke_config, run_dir, coordinated_imports=True)
+        return local_agent.invoke(task["prompt"], run_dir, invoke_config, permit_parallel=True, coordinated_imports=True)
 
-    with ThreadPoolExecutor(max_workers=min(4, max(1, len(prepared)))) as executor:
-        futures = {stage_id: executor.submit(invoke, (stage_id, item)) for stage_id, item in prepared.items()}
-        for stage in stages:
-            if stage.id not in futures:
-                continue
-            exported, _, run_dir = prepared[stage.id]
-            try:
-                response = futures[stage.id].result()["response"]
-                envelope = {"protocol": agent_protocol.PROTOCOL, "task_id": exported["task_id"],
-                            "result": response}
-                result_path = run_dir / "portable-result.json"
-                result_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
-                outcomes[stage.id] = (0, result_path)
-            except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
-                outcomes[stage.id] = (1, str(exc))
-
-    for stage in stages:
+    def import_outcome(stage):
         code, value = outcomes[stage.id]
         imported = False
         if code == 0:
             try:
                 exported, task, _ = prepared[stage.id]
                 response_path = value
-                for retry in range(int(config.get("retries", 0)) + 1):
+                for retry in range(1 if stage.id in {"answers", "explanations"} else int(config.get("retries", 0)) + 1):
                     envelope = json.loads(response_path.read_text(encoding="utf-8"))
                     try:
                         with agent_protocol._agent_lock(5):
                             agent_tasks.accept_result(batch_dir, stage.id, envelope["result"], validate_only=True)
                         break
                     except ValueError as exc:
-                        if retry >= int(config.get("retries", 0)):
+                        if stage.id in {"answers", "explanations"} or retry >= int(config.get("retries", 0)):
                             raise
                         feedback = ("\n\n上一次返回未通过校验，错误："
                                     + str(exc)[:int(config.get("retry_feedback_chars", 1200))]
@@ -371,8 +361,29 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
                     mf.save(batch_dir, manifest)
             if limited:
                 outcomes[stage.id] = 4
-                continue
+                return
         outcomes[stage.id] = code
+
+    from concurrent.futures import as_completed
+    by_id = {stage.id: stage for stage in stages}
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(prepared)))) as executor:
+        futures = {executor.submit(invoke, (sid, item)): sid for sid, item in prepared.items()}
+        for future in as_completed(futures):
+            sid = futures[future]
+            exported, _, run_dir = prepared[sid]
+            try:
+                response = future.result()["response"]
+                envelope = {"protocol": agent_protocol.PROTOCOL, "task_id": exported["task_id"],
+                            "result": response}
+                result_path = run_dir / "portable-result.json"
+                result_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
+                outcomes[sid] = (0, result_path)
+            except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+                outcomes[sid] = (1, str(exc))
+            import_outcome(by_id[sid])
+    for stage in stages:
+        if stage.id not in prepared:
+            import_outcome(stage)
     return outcomes
 
 

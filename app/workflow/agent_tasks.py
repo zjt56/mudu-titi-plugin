@@ -283,7 +283,11 @@ def _repair_feedback(batch, stage, units, hashes):
         value = json.loads(raw.decode("utf-8-sig"))
         fields = {"version", "stage", "reason", "error", "unit_ids",
                   "feedback_by_unit", "all_units", "attempt"}
-        _fields(value, fields, fields)
+        _fields(value, fields | {"scoped_units"}, fields)
+        if "scoped_units" in value and type(value["scoped_units"]) is not bool:
+            raise ValueError("scoped_units must be a boolean")
+        if value.get("scoped_units") and (value["all_units"] or not value["unit_ids"]):
+            raise ValueError("scoped repair needs explicit nonempty unit_ids")
         if type(value["version"]) is not int or value["version"] != 1 or value["stage"] != stage:
             raise ValueError("version/stage must match this repair task")
         if type(value["attempt"]) is not int or value["attempt"] < 1:
@@ -324,7 +328,7 @@ def _collect(batch, stage, speculative=False):
         if not path.is_file():
             if required:
                 missing.append(f"Prepare {relative} before {stage}")
-            elif stage in ("knowledge", "assemble") and relative in CONTENT_OPTIONAL_INPUTS:
+            elif stage in ("answers", "explanations", "knowledge", "assemble") and relative in CONTENT_OPTIONAL_INPUTS:
                 hashes[relative] = MISSING_INPUT
             return None
         raw = path.read_bytes()
@@ -525,6 +529,19 @@ def _collect(batch, stage, speculative=False):
         contexts["existing_audio_files"] = media
         if not media:
             missing.append("No already-cut audio segments exist inside batch; parent must prepare and verify real cuts")
+    if stage == "explanations":
+        from .content_fragments import source_index
+        index = source_index(batch)
+        # Word source is authoritative and already present as 正文; PDF/material
+        # copies are duplicate evidence for this stage and only bloat every part.
+        if (materials_dir / "source.txt").is_file():
+            index["sources"] = [entry for entry in index["sources"]
+                                if not entry["path"].startswith("01_source/materials/")]
+        # Bind every offered source, including the authoritative Word extraction.
+        for entry in index["sources"]:
+            path = _safe_path(batch, entry["path"])
+            hashes[entry["path"]] = hashlib.sha256(path.read_bytes()).hexdigest()
+        contexts["source_fragment_index"] = _sanitized(index)
     # Every retry receives an explicit gap list so the model can fill only missing
     # units/fields instead of regenerating a complete artifact.
     try:
@@ -543,6 +560,46 @@ def _collect(batch, stage, speculative=False):
             if actual != expected:
                 raise ValueError('Multi-audio aggregates changed during collection')
     return contexts, hashes, missing, units
+
+
+def compact_label_context(context):
+    """Drop proved duplicate representations; retain raw unknown source evidence."""
+    context = copy.deepcopy(context)
+    draft = context.get("06_batch/question-draft.json")
+    units = context.get("confirmed_units_with_stable_ids")
+    if isinstance(draft, dict) and draft.get("items") and isinstance(units, list):
+        ids = {r.get("unit_id") for r in draft["items"] if isinstance(r, dict)}
+        if ids == {u.get("unit_id") for u in units}:
+            draft.pop("input_hashes", None)
+            draft.pop("content_sha256", None)
+            fields = {"unit_id", "id", "unit_kind", "numbers", "number", "stem", "material",
+                      "materialBlocks", "material_blocks", "options", "subquestions"}
+            draft["items"] = [{k: v for k, v in row.items() if k in fields}
+                              for row in draft["items"] if isinstance(row, dict)]
+            for row in draft["items"]:
+                children = row.get("subquestions")
+                if isinstance(children, list):
+                    row["subquestions"] = [{k: v for k, v in child.items() if k in fields}
+                                           for child in children if isinstance(child, dict)]
+            context.pop("01_source/structure.confirmed.json", None)
+            context["confirmed_units_with_stable_ids"] = [
+                {k: v for k, v in u.items() if k != "stem"} for u in units]
+    index = context.get("source_fragment_index")
+    if isinstance(index, dict):
+        omitted = (context.get("partition_source_scope") or {}).get("omitted_spans", [])
+        for source in index.get("sources", []):
+            path = source["path"]
+            original = "\n".join(row["text"] for row in source["lines"])
+            raw = context.get(path)
+            # Full indexed source replaces only the same text, never unknown evidence.
+            if isinstance(raw, str) and raw.splitlines() == original.splitlines():
+                context.pop(path)
+            if path == "01_source/正文.txt" and omitted:
+                source["lines"] = [row for row in source["lines"] if not any(
+                    span["path"] == path and span["start_line"] <= row["number"] <= span["end_line"]
+                    for span in omitted)]
+                context.pop(path, None)
+    return context
 
 
 def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _speculative=False, slim=False):
@@ -572,6 +629,8 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
         docs += ["skills-reference/type-taxonomy.md"]
     if stage in ("explanations", "knowledge", "assemble", "review"):
         docs += ["docs/content-labeling.md"]
+    if stage == "explanations":
+        docs += ["docs/source-fragments.md"]
     if stage in ("knowledge", "assemble", "review"):
         docs += ["skills-reference/knowledge-matching-rules.md",
                  "skills-reference/type-knowledge-map.md", "docs/knowledge-tagging.md"]
@@ -598,6 +657,8 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
     # Discovery and safe-path checks always run before lookup. Bind the entire
     # generated context as well as its input hashes, including absent inputs,
     # dynamic media listings, current rules, examples and the budget.
+    if slim and stage in ("answers", "explanations"):
+        context = compact_label_context(context)
     if slim and stage in ("types", "explanations", "knowledge"):
         # 单次整卷分析（不分片）：题目数据已由 question-draft 提供，
         # 结构文件与单元题干是重复内容；这里只保留最小的单元索引

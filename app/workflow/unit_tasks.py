@@ -40,14 +40,14 @@ def compact_extraction(value):
     return _compact_extraction(value)
 
 
-_SPLIT_STAGES = ("assemble", "review", "types", "explanations", "knowledge")
+_SPLIT_STAGES = ("answers", "assemble", "review", "types", "explanations", "knowledge")
 
 
-def build_parts(batch, stage, max_input_chars, max_units=15):
+def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=None):
     if isinstance(max_units, bool) or not isinstance(max_units, int) or max_units < 1:
         raise ValueError("max_units must be a positive integer")
     if stage not in _SPLIT_STAGES:
-        raise ValueError("Unit splitting supports assemble, review, types, explanations and knowledge only")
+        raise ValueError("Unit splitting supports answers, assemble, review, types, explanations and knowledge only")
     base = agent_tasks.build_task(batch, stage, max_input_chars=sys.maxsize)
     if base["preconditions"]:
         return base, []
@@ -125,11 +125,16 @@ def build_parts(batch, stage, max_input_chars, max_units=15):
             extra = ("按所选 unit_id、确认题号及 source_bindings 定位正文，答案 evidence 仅为来源定位线索；"
                      "它们不证明解析或大意归属。原解析/文章大意仍须结合完整来源的章节与材料边界核实，"
                      "不得仅凭重复的 A/B 篇号匹配。未证明归属的原始来源完整保留，引用其原始行号。\n")
+        if stage == "answers":
+            extra = ("答案产物仍使用 answers/evidence/missing 等题号映射，不能输出 items；"
+                     "只返回所选单元内的题号，缺失须给来源证据，题组内全部子题必须覆盖。\n")
         if stage == "assemble":
             for key in _ASSEMBLE_DROP:
                 subset.pop(key, None)
             extra = ("标签、答案与解析按四路产物原样搬运，合法性由导入器程序校验；"
                      "本分片不附知识点目录与打标规则，不要自行新增、改写或推断标签。\n")
+        if stage in ("answers", "explanations"):
+            subset = agent_tasks.compact_label_context(subset)
         instruction = ("\nThis is one partition of a whole batch. Return ONLY these exact unit IDs: "
                        + json.dumps([u["unit_id"] for u in selected], ensure_ascii=False)
                        + ". Other source and structure data is context only. Cover every selected unit exactly once.\n"
@@ -137,6 +142,11 @@ def build_parts(batch, stage, max_input_chars, max_units=15):
                        "与媒体证据，缺证据时记入 unchecked，不要凭印象补齐。\n" + extra)
         return before + instruction + _BEGIN + json.dumps(subset, ensure_ascii=False, indent=1) + _END
 
+    if selected_ids is not None:
+        chosen_ids = set(selected_ids)
+        if not chosen_ids or not chosen_ids <= set(ids):
+            raise ValueError("Retry unit IDs must be a nonempty confirmed subset")
+        units = [u for u in units if u["unit_id"] in chosen_ids]
     parts, selected = [], []
     for unit in units:
         candidate = selected + [unit]
@@ -191,7 +201,10 @@ def merge(stage, parts, responses):
     path = agent_tasks.ARTIFACTS[stage]
     item_artifacts = stage in ("assemble", "types", "explanations", "knowledge")
     merged = {"status": "completed", "artifacts": {path: {"items": []}}, "notes": [], "findings": []}
-    if not item_artifacts:
+    if stage == "answers":
+        merged["artifacts"][path] = {"answers": {}, "evidence": {}, "missing": {},
+                                     "difficulty": {}, "difficultyEvidence": {}}
+    elif not item_artifacts:
         merged["artifacts"][path] = {"findings": [], "checked_units": [], "unchecked": []}
     seen = set()
     for part, response in zip(parts, responses):
@@ -217,7 +230,14 @@ def merge(stage, parts, responses):
             raise ValueError("Completed partition must return its whitelisted artifact")
         payload = response["artifacts"][path]
         target = merged["artifacts"][path]
-        if item_artifacts:
+        if stage == "answers":
+            agent_tasks._fields(payload, tuple(target), ("answers", "evidence", "missing"))
+            for key in target:
+                values = payload.get(key, {})
+                if not isinstance(values, dict) or set(target[key]).intersection(values):
+                    raise ValueError("Answer partitions must have disjoint question mappings")
+                target[key].update(values)
+        elif item_artifacts:
             agent_tasks._fields(payload, ("items",), ("items",))
             agent_tasks._coverage(payload, selected_units)
             target["items"].extend(payload["items"])

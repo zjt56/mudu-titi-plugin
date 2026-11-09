@@ -32,12 +32,14 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-upstream-review.md](2026-11-09-upstream-review.md) | 拉取2f51429并评估工作流与运维变更；发现反馈契约、局部重生成、发布标记及回滚事务等高优先级问题 |
 | 2026-11-09 | [2026-11-09-answers-example-missing-field.md](2026-11-09-answers-example-missing-field.md) | 答案阶段提示词示例补回必填 `missing`，并在报错里点名缺失键/题号；修复2017卷在该阶段无限重试，47+63项测试通过 |
 | 2026-11-09 | [2026-11-09-model-list-host-providers.md](2026-11-09-model-list-host-providers.md) | 设置页模型下拉补上宿主实际可用的 provider 与账号目录模型，不再只正则解析两个补丁块 |
 | 2026-11-09 | [2026-11-09-upload-local-settings.md](2026-11-09-upload-local-settings.md) | 经运行中插件设置接口保存本机上传参数与私钥，凭据仅存宿主私有目录并收紧 ACL；无代码改动 |
 | 2026-11-09 | [2026-11-09-operations-fast-repair.md](2026-11-09-operations-fast-repair.md) | 故障证据包、同证据重复失败升级、局部重生成、隔离代码修复与受控安装、发布标记、宿主单次重启与失败自动还原、跨轮次预算与人工出口；Python 71项、JS 45项测试通过 |
-| 2026-11-09 | [2026-11-09-server-contract-alignment.md](2026-11-09-server-contract-alignment.md) | 混合 ID 批次逐题加前缀、保留自定义 ID；每题附件上限20，187项回归通过 |
+| 2026-11-09 | [2026-11-09-answer-explanation-local-repair.md](2026-11-09-answer-explanation-local-repair.md) | 答案/解析有界分片、失败单元修复、来源片段复制与及时交付，保留整批验收 |
 | 2026-11-09 | [2026-11-09-finalization-failure-diagnosis.md](2026-11-09-finalization-failure-diagnosis.md) | 空格式 errors 保留真实固化异常；来源冲突定位题组和字段，区分执行与质量交付；55项通过 |
+| 2026-11-09 | [2026-11-09-server-contract-alignment.md](2026-11-09-server-contract-alignment.md) | 混合 ID 批次逐题加前缀、保留自定义 ID；每题附件上限20，187项回归通过 |
 | 2026-11-09 | [2026-11-09-review-pdf-evidence-binding.md](2026-11-09-review-pdf-evidence-binding.md) | 审核计划补齐提示词已提供的OCR与来源角色摘要，保持原文证据和过期检查 |
 | 2026-11-09 | [2026-11-09-operations-model-diagnostics.md](2026-11-09-operations-model-diagnostics.md) | 运维失败保留脱敏 cause，不被摘要覆盖；42项相关测试通过，真实TRANSPORT根因仍待证据 |
 | 2026-11-09 | [2026-11-09-url-source-and-image-label-validation.md](2026-11-09-url-source-and-image-label-validation.md) | 修复网址误脱敏与图片段落字母误报；106项回归通过，2020安徽卷本地体检通过 |
