@@ -4,8 +4,51 @@
 用法: route_pick.py <router.json> <stage> <round> <agent>
 输出: provider\tmodel\tprofile；无有效默认模型时以 1 退出，绝不静默换模型。
 """
-import json, sys
+import json, os, re, sys
+from pathlib import Path
+
 router_path, stage, rnd, agent = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+
+def _default_model_block(path):
+    """Read `- id: agent-default-model` provider/model from a DSH profile patch."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    inside, provider, model = False, None, None
+    for line in lines:
+        if re.match(r"^-\s*id:\s*['\"]?agent-default-model['\"]?\s*(?:#.*)?$", line):
+            inside = True
+            continue
+        if inside:
+            if re.match(r"^-\s", line):
+                break
+            found = re.match(r"^\s+provider:\s*['\"]?([^'\"#\s]+)", line)
+            if found:
+                provider = found.group(1)
+            found = re.match(r"^\s+model:\s*['\"]?([^'\"#]+?)['\"]?\s*(?:#.*)?$", line)
+            if found:
+                model = found.group(1).strip()
+    return {"provider": provider, "model": model} if provider and model else None
+
+
+def harness_default():
+    """The model currently chosen in this device's Harness profile.
+
+    The repository must not pin one model: every device picks its own Harness
+    model in the DSH model menu or in the plugin settings.
+    """
+    home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh"))
+    names = []
+    if os.environ.get("DSH_PROFILE"):
+        names.append(os.environ["DSH_PROFILE"])
+    names += ["desktop", "wf-deepseek-fast", "wf-deepseek"]
+    for name in names:
+        found = _default_model_block(home / "profiles" / name / "cordis.patch.yml")
+        if found:
+            return dict(found, profile=name)
+    return None
 try:
     data = json.load(open(router_path, encoding="utf-8"))
 except Exception as exc:
@@ -17,14 +60,21 @@ def pick(entry, fallback):
         return entry
     return fallback
 
-default = data.get("default") or {}
+raw_default = data.get("default")
+default = raw_default if isinstance(raw_default, dict) else {}
+if raw_default is None or raw_default == {}:
+    # 仓库不固定模型：未显式配置时跟随本机 Harness 当前模型。
+    default = harness_default() or {}
+elif not (default.get("provider") and default.get("model")):
+    # present but corrupt is an error, never a silent fallback
+    default = {}
 stages = data.get("stages") or {}
 roles = data.get("roles") or {}
 review = data.get("review") or {}
 
 if not (isinstance(default, dict) and default.get("provider") and default.get("model")):
-    sys.stderr.write("wf-router: model-router.json has no valid default provider/model; "
-                     "select a model again in the plugin settings\n")
+    sys.stderr.write("wf-router: model-router.json has no valid default provider/model and no "
+                     "Harness agent-default-model was found; select a model in the plugin settings\n")
     sys.exit(1)
 
 chosen = None

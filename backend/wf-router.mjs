@@ -21,9 +21,42 @@ function firstHeader(name, limit) {
   return match ? match[1] : '';
 }
 function valid(entry) { return entry && typeof entry === 'object' && entry.provider && entry.model; }
+/** Read `- id: agent-default-model` provider/model from one profile patch. */
+function defaultModelBlock(file) {
+  if (!existsSync(file)) return null;
+  let inside = false; let provider = ''; let model = '';
+  for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
+    if (/^-\s*id:\s*['"]?agent-default-model['"]?\s*(?:#.*)?$/.test(line)) { inside = true; continue; }
+    if (inside) {
+      if (/^-\s/.test(line)) break;
+      const p = line.match(/^\s+provider:\s*['"]?([^'"#\s]+)/);
+      if (p) provider = p[1];
+      const m = line.match(/^\s+model:\s*['"]?([^'"#]+?)['"]?\s*(?:#.*)?$/);
+      if (m) model = m[1].trim();
+    }
+  }
+  return provider && model ? { provider, model } : null;
+}
+/** The model this device currently has selected in its Harness profile. */
+function harnessDefault() {
+  const names = [process.env.DSH_PROFILE, 'desktop', 'wf-deepseek-fast', 'wf-deepseek'].filter(Boolean);
+  for (const name of names) {
+    const found = defaultModelBlock(join(dshHome, 'profiles', name, 'cordis.patch.yml'));
+    if (found) return { ...found, profile: name };
+  }
+  return null;
+}
 function choose(data, stage, round, agent) {
-  const def = data.default;
-  if (!valid(def)) fail('model-router.json has no valid default provider/model; select a model again in the plugin settings');
+  const raw = data.default;
+  let def;
+  if (raw === undefined || raw === null || (typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length === 0)) {
+    // Repository config pins no model; follow this device's Harness selection.
+    def = harnessDefault();
+  } else {
+    // Present but corrupt stays an error: never a silent fallback.
+    def = valid(raw) ? raw : null;
+  }
+  if (!valid(def)) fail('model-router.json has no valid default provider/model and no Harness agent-default-model was found; select a model in the plugin settings');
   let entry;
   if (stage === 'review') {
     entry = round && data.review?.rounds?.[round];

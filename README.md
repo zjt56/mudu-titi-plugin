@@ -105,9 +105,9 @@ Word 与 PDF 同时存在时，以 Word 原文为权威；PDF OCR 主要用于�
 
 ## 模型配置
 
-在「模型与设置 → 大模型配置」选择默认模型，也可以分别指定阶段和审核轮次模型。路由写入 `config/model-router.json`，由插件生成生效配置后，经 `backend/wf-router.sh` 按阶段调用。
+在「模型与设置 → 大模型配置」选择默认模型，也可以分别指定阶段和审核轮次模型。路由写入 `config/model-router.json`，由插件生成生效配置后，经 `backend/wf-router.sh` / `backend/wf-router.mjs` 按阶段调用。
 
-选中的 provider/model 会被严格使用：配置缺失、损坏或没有默认模型时直接报错，不会静默切换到其他模型。凭据由 Harness 的凭据系统提供，不写入题目文件、任务包或浏览器存储。
+**仓库不固定任何模型**：`default` 留空时，每台设备自动跟随自己 Harness 菜单里当前选中的模型（读取该设备 `profiles/<profile>/cordis.patch.yml` 的 `agent-default-model`）。也可以在插件设置里显式指定 default 或按阶段/角色覆盖；一旦显式配置，选中的 provider/model 一定被严格使用，配置损坏时直接报错，不会静默切换到其他模型。凭据由 Harness 的凭据系统提供，不写入题目文件、任务包或浏览器存储。
 
 插件生效配置中的本地并发默认较保守：分片并发和审核并发为 4，用于保护本机内存；这不是 API 限流。标注阶段默认整卷一次分析，因此通常不会启动大量分片进程。
 

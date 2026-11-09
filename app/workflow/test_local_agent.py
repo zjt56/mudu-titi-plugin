@@ -190,7 +190,12 @@ class LocalAgentTest(unittest.TestCase):
         self.assertEqual(data["response_mode"], "file")
         configured = agent._validate_config({**data, "command": ["node", str(router_path), "{prompt_file}", "{response_file}"]}, self.root)
         binding = agent._part_model_binding(configured)
-        self.assertEqual(set(binding["files"]), {str(router_path.resolve()), str((config_path.parent.parent / "config" / "model-router.json").resolve())})
+        files = set(binding["files"])
+        self.assertIn(str(router_path.resolve()), files)
+        self.assertIn(str((config_path.parent.parent / "config" / "model-router.json").resolve()), files)
+        # 仓库不固定默认模型：模型身份改为跟随本机 Harness 的 agent-default-model，
+        # 该 profile 文件也必须进入缓存键，换模型后不得复用旧结果。
+        self.assertTrue(any(path.endswith("cordis.patch.yml") for path in files), files)
         self.assertTrue(all(len(digest) == 64 for digest in binding["files"].values()))
 
     def test_command_relative_executable_path_lookup_and_check(self):

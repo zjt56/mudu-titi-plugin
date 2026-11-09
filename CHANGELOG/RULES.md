@@ -1,5 +1,14 @@
 # RULES — 规则与强调台账
 
+## 2026-11-09 模型不固定：每台设备跟随自己的 Harness 模型（用户明确）
+
+- 原话：“模型不是固定的，是随着不同设备自由选择他们harness的模型”。
+- 仓库 `config/model-router.json` 的 `default` 保持为空，不再把任何厂商/中转写死为默认。
+- 路由在 `default` 为空时读取本机 `profiles/<profile>/cordis.patch.yml` 的 `agent-default-model`（顺序：`DSH_PROFILE` → `desktop` → `wf-deepseek-fast` → `wf-deepseek`），跟随该设备 Harness 菜单当前模型。
+- 插件设置里显式指定的 `default` / `stages` / `roles` 仍然严格优先；显式配置存在但不完整或损坏时必须报错，不得静默换成其他模型。
+- 缓存与分片快照的模型身份也绑定该 profile 文件，换模型后不会复用旧结果。
+- 落地：`backend/route_pick.py`、`backend/wf-router.mjs`、`lib/index.js`、`lib/client.js`、`app/workflow/local_agent.py::_part_model_binding`；根规则8。
+
 ## 2026-11-09 题型判断真正纳入前置组装（用户明确）
 
 - 原话：“按照我的要求修改，题型放在组装流程中”；“在切题的过程中顺便判断了题型”。

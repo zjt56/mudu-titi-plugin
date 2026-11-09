@@ -1,5 +1,7 @@
 # 2026-11-09 代理失败信息可见化 + 恢复默认模型路由
 
+> 后续更正：本记录里“恢复为 deepseek-official/deepseek-flash”的固定默认已由 [device-harness-model](2026-11-09-device-harness-model.md) 取代——仓库不再固定模型，`default` 保持为空，各设备跟随自己 Harness 的 `agent-default-model`。stderr 可见化部分仍然有效。
+
 ## 背景
 
 用户另一台设备在前置批次组装时报告：

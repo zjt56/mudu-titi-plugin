@@ -597,8 +597,45 @@ def _part_snapshot_dir(batch_dir, stage):
     return Path(batch_dir) / "workflow" / "agent-runs" / (stage + "-parts")
 
 
+def _default_model_block(path):
+    """Read `- id: agent-default-model` provider/model from one DSH profile patch."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    inside, provider, model = False, "", ""
+    for line in lines:
+        if re.match(r"^-\s*id:\s*['\"]?agent-default-model['\"]?\s*(?:#.*)?$", line):
+            inside = True
+            continue
+        if inside:
+            if re.match(r"^-\s", line):
+                break
+            found = re.match(r"^\s+provider:\s*['\"]?([^'\"#\s]+)", line)
+            if found:
+                provider = found.group(1)
+            found = re.match(r"^\s+model:\s*['\"]?([^'\"#]+?)['\"]?\s*(?:#.*)?$", line)
+            if found:
+                model = found.group(1).strip()
+    return {"provider": provider, "model": model} if provider and model else None
+
+
+def _harness_default_route():
+    """The model this device selected in its Harness model menu (repo never pins one)."""
+    home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh"))
+    names = [os.environ.get("DSH_PROFILE"), "desktop", "wf-deepseek-fast", "wf-deepseek"]
+    for name in names:
+        if not name:
+            continue
+        path = home / "profiles" / name / "cordis.patch.yml"
+        found = _default_model_block(path)
+        if found:
+            return dict(found, profile=name), path
+    return None, None
+
+
 def _part_model_binding(config):
-    """Observe explicit model identity or the repository's actual router config.
+    """Observe explicit model identity or the device's actual router selection.
 
     Unknown host-default models cannot safely use cross-batch-change snapshots.
     Hashes only are retained; no credential/config contents are logged or saved.
@@ -613,9 +650,15 @@ def _part_model_binding(config):
         try:
             route = json.loads(router.read_text(encoding="utf-8-sig"))
             default = route.get("default")
-            if not isinstance(default, dict) or not default.get("provider") or not default.get("model"):
-                return None
-            for path in (script, router):
+            extra = ()
+            if not (isinstance(default, dict) and default.get("provider") and default.get("model")):
+                # Repository config intentionally has no fixed model; follow the
+                # Harness selection of this device and bind that profile file too.
+                default, profile_path = _harness_default_route()
+                if not default:
+                    return None
+                extra = (profile_path,)
+            for path in (script, router, *extra):
                 files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
         except (OSError, ValueError, AttributeError):
             return None

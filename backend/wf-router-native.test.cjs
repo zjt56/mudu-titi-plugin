@@ -149,3 +149,23 @@ test('plugin config uses node native router and does not require /bin/sh', () =>
   const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'local-agent.plugin.json'), 'utf8'));
   assert.deepEqual(config.command.slice(0, 2), ['node', '__PLUGIN_BACKEND__/wf-router.mjs']);
 });
+
+test('native router follows the device Harness model when no plugin default is pinned', t => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.plugin, 'config', 'model-router.json'), JSON.stringify({
+    default: {}, stages: {}, roles: {}, review: { rounds: {} },
+  }));
+  fs.mkdirSync(path.join(f.home, 'profiles', 'desktop'), { recursive: true });
+  fs.writeFileSync(path.join(f.home, 'profiles', 'desktop', 'cordis.patch.yml'),
+    '- id: agent-default-model # device menu\n  config:\n    provider: magpie\n    model: auto/deepseek-v4.1-flash\n');
+  const result = spawnSync(process.execPath, [router, f.prompt, f.response], {
+    encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
+  });
+  // The fake dsh entry cannot execute on this host; the routing decision and the
+  // generated overlay are what this test proves.
+  assert.match(result.stderr, /provider=magpie model=auto\/deepseek-v4\.1-flash/);
+  const routeProfile = fs.readdirSync(path.join(f.home, 'profiles')).find(name => name.startsWith('wf-plugin-route-'));
+  const patch = fs.readFileSync(path.join(f.home, 'profiles', routeProfile, 'cordis.patch.yml'), 'utf8');
+  assert.match(patch, /provider: "magpie"/);
+  assert.match(patch, /model: "auto\/deepseek-v4\.1-flash"/);
+});
