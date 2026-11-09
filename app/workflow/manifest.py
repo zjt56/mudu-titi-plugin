@@ -201,9 +201,13 @@ def register_input(batch_dir, key: str, path, required: bool = True) -> dict:
     return {key: record}
 
 
-def input_hashes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
-    """阶段声明依赖的输入哈希：源文件 + 上游产物。"""
-    return _input_fingerprint(batch_dir, manifest, stage, use_mtime=False)
+def input_hashes(batch_dir, manifest: dict, stage: contracts.Stage, *, raw: bool = False) -> dict:
+    """阶段声明依赖的输入哈希：源文件 + 上游产物。
+
+    ``raw=True`` returns exact SHA-256 only, used to compare legacy ledger
+    records that predate normalized content digests.
+    """
+    return _input_fingerprint(batch_dir, manifest, stage, use_mtime=False, raw=raw)
 
 
 def input_mtimes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
@@ -211,7 +215,8 @@ def input_mtimes(batch_dir, manifest: dict, stage: contracts.Stage) -> dict:
     return _input_fingerprint(batch_dir, manifest, stage, use_mtime=True)
 
 
-def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use_mtime: bool) -> dict:
+def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use_mtime: bool,
+                       raw: bool = False) -> dict:
     def _fp(path, missing="missing"):
         if not path or not Path(path).is_file():
             return missing
@@ -220,7 +225,7 @@ def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use
                 return Path(path).stat().st_mtime
             except OSError:
                 return missing
-        return _content_digest(path)
+        return sha256_file(path) if raw else _content_digest(path)
     hashes = {}
     for key in stage.requires:
         item = manifest.get("inputs", {}).get(key)
@@ -647,6 +652,37 @@ def invalidate_downstream(batch_dir, manifest: dict, stage_id: str, reason: str)
         touch_stage(manifest, target, INVALIDATED, notes=reason)
         changed.append(target)
     return changed
+
+
+def review_bound_inputs_changed(batch_dir, manifest: dict) -> list[str]:
+    """Return changed content inputs for an already-completed review, or [].
+
+    Review is the quality gate: a completed review that was produced from
+    different source/batch bytes must not keep claiming the current batch was
+    reviewed. This deliberately checks only review's own recorded binding, not
+    every downstream ancestor, so re-running ordinary fill stages never causes
+    a blanket cascade (see ``test_changed_producer_does_not_auto_invalidate_descendants``).
+    Rule files and keys absent from the old ledger are ignored; legacy records
+    stored exact SHA-256 while current records store normalized content digests,
+    so each key is compared in the representation it was recorded with.
+    """
+    record = manifest.get("stages", {}).get("review", {})
+    if record.get("status") not in TERMINAL_OK or record.get("status") == SKIPPED:
+        return []
+    saved = record.get("input_hashes") or {}
+    if not saved:
+        return []
+    stage = contracts.STAGE_BY_ID["review"]
+    current = input_hashes(batch_dir, manifest, stage)
+    legacy = input_hashes(batch_dir, manifest, stage, raw=True)
+    changed = []
+    for key, old in saved.items():
+        if key.startswith("rule:") or key not in current:
+            continue
+        expected = current[key] if str(old).startswith(("json:", "raw:")) else legacy[key]
+        if old != expected:
+            changed.append(key)
+    return sorted(changed)
 
 
 def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, str]:

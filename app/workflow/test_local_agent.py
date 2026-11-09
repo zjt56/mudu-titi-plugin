@@ -1,5 +1,6 @@
 """No model/API calls: provider contracts use mocks and a local fake CLI."""
 import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -554,6 +555,103 @@ class LocalAgentTest(unittest.TestCase):
         with self.assertRaises(agent.AgentError) as caught:
             agent.invoke("timeout", self.root / "real-timeout", {**settings, "timeout_seconds": 0.1})
         self.assertEqual(caught.exception.code, "timeout")
+
+
+class WindowsByteRangeLockTest(unittest.TestCase):
+    """Exercise the Windows lock layout without a Windows host.
+
+    ``msvcrt.locking`` has no shared mode. The production helper uses one
+    distinct byte per shared caller and bytes 0..1023 for exclusive callers;
+    a fake msvcrt keeps the same overlap rules so macOS/Linux CI catches a
+    regression in the range layout.
+    """
+
+    class FakeMsvcrt:
+        LK_NBLCK = 2
+        LK_UNLCK = 0
+
+        def __init__(self):
+            self.exclusive = False
+            self.shared = set()
+            self.positions = {}
+            self.calls = []
+
+        def locking(self, fd, mode, nbytes):
+            start = self.positions.get(fd)
+            if start is None:
+                start = os.lseek(fd, 0, os.SEEK_CUR)
+            self.calls.append((fd, start, mode, nbytes))
+            if mode == self.LK_UNLCK:
+                if nbytes == agent.WINDOWS_LOCK_RANGE:
+                    self.exclusive = False
+                else:
+                    self.shared.discard(start)
+                return
+            if nbytes == agent.WINDOWS_LOCK_RANGE:
+                if self.exclusive or self.shared:
+                    raise OSError(errno.EACCES, "exclusive range busy")
+                self.exclusive = True
+                return
+            if self.exclusive or start in self.shared:
+                raise OSError(errno.EACCES, "shared slot busy")
+            self.shared.add(start)
+
+    class FakeHandle:
+        next_fd = 100
+
+        def __init__(self, fake):
+            self.fake = fake
+            self.fd = WindowsByteRangeLockTest.FakeHandle.next_fd
+            WindowsByteRangeLockTest.FakeHandle.next_fd += 1
+            self.position = 0
+            fake.positions[self.fd] = 0
+
+        def fileno(self):
+            return self.fd
+
+        def seek(self, position):
+            self.position = position
+            self.fake.positions[self.fd] = position
+
+    def setUp(self):
+        self.fake = self.FakeMsvcrt()
+        self.addCleanup(patch.stopall)
+        patch.dict(sys.modules, {"msvcrt": self.fake}).start()
+
+    def handle(self):
+        return self.FakeHandle(self.fake)
+
+    def test_shared_callers_take_distinct_bytes_and_exclusive_excludes_all(self):
+        first, second = self.handle(), self.handle()
+        self.assertEqual(agent._windows_lock(first, shared=True), (1, 1))
+        self.assertEqual(agent._windows_lock(second, shared=True), (2, 1))
+        self.assertFalse(self.fake.exclusive)
+        with self.assertRaises(OSError) as caught:
+            agent._windows_lock(self.handle(), shared=False)
+        self.assertEqual(caught.exception.errno, errno.EACCES)
+        agent._windows_unlock(first, 1, 1)
+        agent._windows_unlock(second, 2, 1)
+        third = self.handle()
+        self.assertEqual(agent._windows_lock(third, shared=False), (0, agent.WINDOWS_LOCK_RANGE))
+        with self.assertRaises(OSError):
+            agent._windows_lock(self.handle(), shared=True)
+        agent._windows_unlock(third, 0, agent.WINDOWS_LOCK_RANGE)
+        self.assertEqual(agent._windows_lock(self.handle(), shared=True), (1, 1))
+
+    def test_shared_slot_search_skips_occupied_bytes(self):
+        self.fake.shared.update(range(1, 10))
+        self.assertEqual(agent._windows_lock(self.handle(), shared=True), (10, 1))
+
+    def test_agent_lock_windows_branch_acquires_and_releases_ranges(self):
+        shim = types.SimpleNamespace(name="nt", SEEK_END=os.SEEK_END)
+        with patch.object(agent, "os", shim):
+            with agent._agent_lock(1, shared=True):
+                self.assertIn(1, self.fake.shared)
+                self.assertFalse(self.fake.exclusive)
+            self.assertNotIn(1, self.fake.shared)
+            with agent._agent_lock(1):
+                self.assertTrue(self.fake.exclusive)
+            self.assertFalse(self.fake.exclusive)
 
 
 if __name__ == "__main__":

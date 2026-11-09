@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-windows-shared-lock-and-review-freshness.md](2026-11-09-windows-shared-lock-and-review-freshness.md) | Windows 审核分片真正共享锁并行；已完成审核在绑定输入变化时立即失效，不再白等数小时 |
 | 2026-11-09 | [2026-11-09-router-provider-guard.md](2026-11-09-router-provider-guard.md) | 模型列表只列路由 profile 可服务的 provider；wf-router 调用前校验 provider，避免 NO_ADAPTER 被当成阶段失败 |
 | 2026-11-09 | [2026-11-09-device-harness-model.md](2026-11-09-device-harness-model.md) | 仓库不再固定模型：default 为空时各设备跟随自己 Harness 的 agent-default-model |
 | 2026-11-09 | [2026-11-09-agent-failure-visibility-and-default-model.md](2026-11-09-agent-failure-visibility-and-default-model.md) | 代理失败附带脱敏stderr尾部；默认模型恢复 deepseek-official/deepseek-flash |

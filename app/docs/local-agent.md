@@ -17,7 +17,7 @@
 
 结构闸门、体检（validate）、审核闸门都会先在私有目录计算，再在锁内重读台账、核对原卷/审核证据未变化后才提交；期间有并发写入或证据变化时拒绝发布过期结论，而不是覆盖新状态。`mark`、`invalidate` 等人工命令与闸门共用同一独占锁。
 
-同一批次的多个自动推进进程会互斥。自动推进期间，不要在其它进程里直接改 `manifest.json` 或手工写入批次产物：这些非协作写入不在锁内，无法保证并发安全。不同批次可各自推进，仍受本机 Agent 锁约束（POSIX 并行调用用共享锁，Windows 仍独占，故 Windows 会串行）。
+同一批次的多个自动推进进程会互斥。自动推进期间，不要在其它进程里直接改 `manifest.json` 或手工写入批次产物：这些非协作写入不在锁内，无法保证并发安全。不同批次可各自推进，仍受本机 Agent 锁约束（POSIX 与 Windows 都支持并行调用共享锁；Windows 用字节区间锁模拟共享/独占语义）。
 
 ## 本机配置
 
@@ -80,7 +80,7 @@ python -m workflow.auto run --inbox inbox --once
 
 可选 provider 的范围：`wf-router.mjs` 生成 headless 路由 profile 时，只复制 base profile 的 `llm-pi-ai` / `llm-deepseek` / `llm-deepseek-account` 条目。桌面端启用、但 profile 没有声明的 provider（例如 WorkBuddy 的 `magpie` 中转）在该 profile 里没有适配器，选中会 `NO_ADAPTER`。因此设置页的模型列表只列路由真正能服务的 provider；`wf-router` 调用前也会校验，不在列表里就带可选值直接报错，不会静默换成默认模型。要在工作流里用某个 provider，先在 profile 的 `llm-pi-ai.providers` 里声明它。
 
-并行模型调用使用共享锁，普通调用使用独占锁，两者互斥；因此并行只在 POSIX 生效，Windows 串行。POSIX 超时取消进程组，Windows 当前只能可靠终止直接子进程。
+并行模型调用使用共享锁，普通调用使用独占锁，两者互斥；POSIX 与 Windows 均生效（Windows 通过字节区间锁实现共享/独占，不再把并行调用串行化）。POSIX 超时取消进程组，Windows 当前只能可靠终止直接子进程。
 
 可选设置 `"candidate_cache": true` 启用本地非审核候选缓存（当前仅 POSIX）；缓存绑定完整提示、输入摘要和本机模型配置，命中仍重新检查与导入。审核阶段不复用模型结果。模板缓存仅在当前进程内有效，缓存文件可能含试卷内容，应随本地批次保管。模型配置可能由 CLI 在配置文件之外改变，更换模型或规则时应清理缓存或关闭复用。
 

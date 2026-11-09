@@ -569,6 +569,14 @@ def _refresh_completed_review(batch_dir, manifest):
     # 只有“确实执行过、但已不满足当前契约”的记录才补审。
     if not isinstance(payload, dict) or not payload.get("rounds"):
         return False
+    # 上游重建后，旧审核的绑定输入已经变化：必须在进入新一轮自动推进时立刻
+    # 作废旧结论，而不是等审核闸门或下次实际调用时才发现（后者会白等数小时）。
+    changed = mf.review_bound_inputs_changed(batch_dir, manifest)
+    if changed:
+        mf.invalidate_stage(batch_dir, manifest, "review",
+                            "审核绑定输入已变化，旧审核结论作废：" + "、".join(changed[:8]))
+        mf.save(batch_dir, manifest)
+        return True
     from . import review
     if review.evaluate_rounds(batch_dir, payload).get("execution_completed"):
         return False

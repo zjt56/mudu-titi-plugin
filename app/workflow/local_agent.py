@@ -33,6 +33,11 @@ import time
 
 
 MAX_FINAL_BYTES = 8 * 1024 * 1024
+# Windows byte-range lock layout. msvcrt.locking has no shared mode: byte 0..1023
+# is the exclusive range, while each shared caller holds one distinct byte in
+# 1..1023. Overlapping ranges conflict in the OS, so this reproduces POSIX
+# flock semantics without serializing parallel model calls.
+WINDOWS_LOCK_RANGE = 1024
 DEFAULTS = {"provider": "dsh", "timeout_seconds": 900, "max_input_chars": 180000,
             "retries": 2, "retry_feedback_chars": 1600, "unit_split": True,
             # 每片更小，减少单次模型上下文压力；审核片默认可稍大但仍可调。
@@ -247,27 +252,36 @@ def load_config(path=None) -> dict:
 
 @contextmanager
 def _agent_lock(timeout, *, shared=False):
-    """Exclusive by default; explicit parallel callers share a POSIX lock.
+    """Exclusive by default; explicit parallel callers share the lock.
 
     POSIX callers may pass the yielded handle to their child via pass_fds.
     Closing our reference (without LOCK_UN) keeps the same open-file-description
-    lock held until the last inheriting process closes it. Windows retains its
-    existing exclusive locking and yields None. Never unlink the lock inode.
+    lock held until the last inheriting process closes it. Windows has no shared
+    mode in msvcrt.locking, so its byte-range equivalent is used: exclusive
+    callers lock bytes 0..1023, while each shared caller holds a distinct byte
+    from 1..1023. Windows yields None (no descriptor inheritance). Never unlink
+    the lock inode.
     """
     key = hashlib.sha256(str(Path(__file__).resolve().parent).encode()).hexdigest()
     lock_path = Path(tempfile.gettempdir()) / f"mudu-local-agent-{key}.lock"
     with lock_path.open("a+b") as handle:
         handle.seek(0, os.SEEK_END)
-        if not handle.tell():
+        size = handle.tell()
+        if os.name == "nt":
+            # Shared slot locks must address real bytes; extending is harmless
+            # for legacy 1-byte lock files and avoids EOF-specific behaviour.
+            if size < WINDOWS_LOCK_RANGE:
+                handle.write(b"\0" * (WINDOWS_LOCK_RANGE - size))
+                handle.flush()
+        elif not size:
             handle.write(b"0")
             handle.flush()
         deadline = time.monotonic() + timeout
+        locked_range = None
         while True:
             try:
                 if os.name == "nt":
-                    import msvcrt
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    locked_range = _windows_lock(handle, shared)
                 else:
                     import fcntl
                     fcntl.flock(handle.fileno(), (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
@@ -281,12 +295,40 @@ def _agent_lock(timeout, *, shared=False):
         try:
             yield handle if os.name != "nt" else None
         finally:
-            if os.name == "nt":
-                import msvcrt
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            if os.name == "nt" and locked_range is not None:
+                _windows_unlock(handle, *locked_range)
             # POSIX: the outer with closes only our reference. Explicit LOCK_UN
             # would also unlock a still-running child sharing this description.
+
+
+def _windows_lock(handle, shared):
+    """Acquire a Windows byte-range lock; return ``(position, length)``.
+
+    Kept separate from :func:`_agent_lock` so the range layout is testable on
+    non-Windows hosts with a fake ``msvcrt`` module.
+    """
+    import msvcrt
+    if not shared:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, WINDOWS_LOCK_RANGE)
+        return 0, WINDOWS_LOCK_RANGE
+    for slot in range(1, WINDOWS_LOCK_RANGE):
+        handle.seek(slot)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise
+            continue
+        return slot, 1
+    raise OSError(errno.EACCES, "No free shared lock slot")
+
+
+def _windows_unlock(handle, position, length):
+    """Release the exact Windows byte range acquired by :func:`_windows_lock`."""
+    import msvcrt
+    handle.seek(position)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, length)
 
 
 def _command(config, final_path, prompt_path=None, work_dir=None):
