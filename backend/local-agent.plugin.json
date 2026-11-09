@@ -1,10 +1,10 @@
 {
-  "_comment": "插件版专用 local-agent 配置。插件拉起 Python 后端时通过 MUDU_AGENT_CONFIG 指向本文件，从而让工作流（runner/auto/review_rounds）的模型调用全部走 wf-router.sh，按 model-router.json 选模型。不改动 workflow/local-agent.json 与 scripts/bin/wf-agent.sh。",
+  "_comment": "插件版专用 local-agent 配置。模型调用走 Node 原生 wf-router.mjs，按 model-router.json 选模型，不依赖 /bin/sh。",
   "_concurrency_note": "并行上限按本机内存保守设置：每个分片都是独立 dsh 进程，16 路并发在 16GB 机器上曾把整机压到内存紧张并导致宿主重启。仍不按 API 限流，这是本地资源保护。",
   "provider": "command",
   "command": [
-    "/bin/sh",
-    "__PLUGIN_BACKEND__/wf-router.sh",
+    "node",
+    "__PLUGIN_BACKEND__/wf-router.mjs",
     "{prompt_file}",
     "{response_file}"
   ],
@@ -13,6 +13,7 @@
   "part_concurrency": 4,
   "review_part_parallel": 4,
   "response_mode": "file",
+  "input_mode": "none",
   "retries": 2,
   "retry_feedback_chars": 1600,
   "review_max_attempts": 2
