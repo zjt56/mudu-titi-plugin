@@ -32,6 +32,8 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-url-source-and-image-label-validation.md](2026-11-09-url-source-and-image-label-validation.md) | 修复网址误脱敏与图片段落字母误报；106项回归通过，2020安徽卷本地体检通过 |
+| 2026-11-09 | [2026-11-09-table-empty-items-body-equivalence.md](2026-11-09-table-empty-items-body-equivalence.md) | 表格空 items 与缺失等价，真实正文与跨度变化仍阻断；83项回归通过 |
 | 2026-11-09 | [2026-11-09-shared-section-rubric.md](2026-11-09-shared-section-rubric.md) | 完形 A/B、阅读各篇补回同一大题导语，`第一节/第二节` 前缀可识别，材料与 A/B 标签保留 |
 | 2026-11-09 | [2026-11-09-question-id-paper-prefix.md](2026-11-09-question-id-paper-prefix.md) | 修复多卷上传 question_id_exists：本地 q-N 按批次自动加年份+哈希前缀，2015 存量暂存已修 |
 | 2026-11-09 | [2026-11-09-upload-attachment-placement.md](2026-11-09-upload-attachment-placement.md) | 修复逐题确认 invalid_request：材料图 placement=material 归一为 question，服务端兼容旧暂存 |

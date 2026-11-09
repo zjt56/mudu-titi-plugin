@@ -48,6 +48,33 @@ class BatchFillTest(unittest.TestCase):
         return {rel: ((self.root / rel).read_bytes(), (self.root / rel).stat().st_mtime_ns)
                 for rel in (batch_fill.BATCH, batch_fill.BATCH_BASE, batch_fill.STATE)}
 
+    def test_table_empty_items_equivalence_keeps_real_body_conflicts(self):
+        batch_fill.initialize(self.root)
+        payload = batch_fill._read(self.root, batch_fill.BATCH)
+        state = batch_fill._read(self.root, batch_fill.STATE)
+        row = payload["items"][0]
+        uid = row["unit_id"]
+        row["materialBlocks"] = [{"type": "table", "rows": [{"cells": [
+            {"text": "", "items": [], "colspan": 2},
+            {"text": "Original", "items": [{"text": "Nested", "items": []}]}]}]}]
+        state["managed_bodies"] = {uid: batch_fill._body(row)}
+        self.put(batch_fill.STATE, batch_fill._seal(state))
+        row["materialBlocks"][0]["rows"][0]["cells"][0].pop("items")
+        row["materialBlocks"][0]["rows"][0]["cells"][1]["items"][0].pop("items")
+        self.put(batch_fill.BATCH, payload)
+        self.assertTrue(batch_fill.is_filling(self.root))
+        unchanged = copy.deepcopy(payload)
+        for key, value in (("text", "Changed"), ("colspan", 1),
+                           ("items", [{"text": "New content"}])):
+            with self.subTest(key=key):
+                candidate = copy.deepcopy(unchanged)
+                candidate["items"][0]["materialBlocks"][0]["rows"][0]["cells"][0][key] = value
+                self.put(batch_fill.BATCH, candidate)
+                with self.assertRaisesRegex(ValueError, "正文 conflict"):
+                    batch_fill.is_filling(self.root)
+        self.put(batch_fill.BATCH, unchanged)
+        self.assertTrue(batch_fill.is_filling(self.root))
+
     def test_early_real_payload_without_label_artifacts_and_empty_unknowns(self):
         result = batch_fill.initialize(self.root)
         self.assertEqual(result["status"], "initialized")

@@ -141,9 +141,28 @@ def _canonical_body(row):
     """
     result = _body(row)
 
+    def clean_blocks(node):
+        # A missing empty list and items=[] carry the same cell content. Limit
+        # this equivalence to table cells/nested text items; keep spans, text,
+        # images and nonempty lists protected by the normal body comparison.
+        if not isinstance(node, dict):
+            return
+        if node.get("items") == []:
+            node.pop("items")
+        for child in node.get("items", []):
+            clean_blocks(child)
+
     def clean(node):
         if not isinstance(node, dict):
             return node
+        for key in ("materialBlocks", "material_blocks"):
+            for block in node.get(key) or []:
+                if not isinstance(block, dict):
+                    continue
+                for row in block.get("rows") or []:
+                    if isinstance(row, dict):
+                        for cell in row.get("cells") or []:
+                            clean_blocks(cell)
         attachments = node.get("attachments")
         if isinstance(attachments, list):
             rows = []

@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -81,7 +82,15 @@ def _check_adjacent_materials(unit_list):
     mats = []
     for u in unit_list:
         uid = u.get("unit_id") or u.get("id") or "?"
-        mats.append((uid, plain(u.get("material") or "").strip()))
+        text = plain(u.get("material") or "").strip()
+        # Image-only passages retain the original A/B/C section label in text.
+        # That label is not a duplicate passage merely because it occurs in prose.
+        image_material = any(isinstance(a, dict) and a.get("kind") == "image"
+                             and a.get("placement") == "question"
+                             for a in u.get("attachments") or [])
+        if image_material and re.fullmatch(r"[A-Z]", text):
+            text = ""
+        mats.append((uid, text))
     for i in range(len(mats) - 1):
         (ida, a), (idb, b) = mats[i], mats[i + 1]
         if not a or not b:

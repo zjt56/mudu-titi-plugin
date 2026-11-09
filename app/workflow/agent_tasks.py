@@ -235,7 +235,7 @@ def _sanitized(value):
     if isinstance(value, list):
         return [_sanitized(v) for v in value]
     if isinstance(value, str):
-        text = re.sub(r"(?:/Users/|/home/|/private/|/tmp/|[A-Za-z]:[\\/])[^\s\"'<>]+", "[host-path-redacted]", value)
+        text = re.sub(r"(?<![\w:/\\])(?:/Users/|/home/|/private/|/tmp/|[A-Za-z]:[\\/])[^\s\"'<>]+", "[host-path-redacted]", value)
         text = re.sub(r"(?i)(?:bearer\s+|(?:api[_-]?key|password|secret|token)\s*[=:]\s*)[^\s\"'<>]+", "[credential-redacted]", text)
         return text
     return value
