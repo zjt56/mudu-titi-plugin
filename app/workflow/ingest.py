@@ -203,6 +203,23 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
             existing[name] = [item for item in existing[name] if item not in stale_existing]
 
     if current_binding:
+        # 旧轮次绑定过期不等于“这条观察从未存在”：先归档再丢弃，否则两轮之间
+        # 出现又消失的差异会无声蒸发，而用户要的正是这些跨轮差异（看哪类知识点、
+        # 哪个模型头容易误判）。归档只追加，重复导入不会重复记账。
+        superseded = [(item, "manual-review-queue.json") for item in queue
+                      if _superseded(item) and _open(item)]
+        superseded += [(row, name) for name in existing for row in existing[name]
+                       if _superseded(row) and _open(row)]
+        if superseded:
+            archive_path = review_dir / "retired-round-findings.json"
+            archive = _load(archive_path) or {"records": []}
+            saved = archive.setdefault("records", [])
+            for item, name in superseded:
+                retired = dict(item, retired_from=name,
+                               retired_reason="旧轮次输入绑定已过期；原判据保留，供跨轮比对")
+                if retired not in saved:
+                    saved.append(retired)
+            _write_json(archive_path, archive)
         for name in existing:
             existing[name] = [r for r in existing[name] if not _superseded(r)]
         queue = [item for item in queue if not (_superseded(item) and _open(item))]

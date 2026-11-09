@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import copy
+import hashlib
 import time as _time
 import json
 import math
@@ -1048,11 +1049,75 @@ def _import_result(batch_dir, task_id, result):
     return _finish_install(batch, transaction)
 
 
+def _rounds_history_path(batch):
+    return _path(batch, "07_review/rounds-history.jsonl")
+
+
+def _rounds_history_rows(evaluated):
+    rows = []
+    for finding in evaluated.get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        rows.append({
+            "unit_id": str(finding.get("unit_id") or ""),
+            "field": str(finding.get("field") or ""),
+            "severity": str(finding.get("severity") or ""),
+            "reason": " ".join(str(finding.get("reason") or "").split()),
+            "rounds": sorted({str(src.get("round_id")) for src in (finding.get("round_sources") or [])
+                              if isinstance(src, dict) and src.get("round_id")}),
+        })
+    rows.sort(key=lambda row: (row["unit_id"], row["field"], row["reason"]))
+    return rows
+
+
+def record_rounds_history(batch_dir, evaluated=None):
+    """Append one snapshot per review run; earlier runs are never rewritten.
+
+    同一单元这一轮被判为标签差异、下一轮模型不再上报，正是用户要看的东西
+    （哪类知识点、哪个模型头容易出错）。轮次快照只追加，不随队列重投影消失。
+    """
+    batch = Path(batch_dir)
+    evaluated = evaluated or review.evaluate_rounds(batch)
+    plan = evaluated.get("plan", {}) if isinstance(evaluated, dict) else {}
+    # 没有真正完成的轮次（记录缺失/过期）不是一次审核，不写空快照冒充历史。
+    if not (isinstance(evaluated, dict) and evaluated.get("checked_rounds")):
+        return None
+    rows = _rounds_history_rows(evaluated)
+    digest = hashlib.sha256(json.dumps(
+        {"binding": plan.get("input_binding"), "protocol": review.ROUND_PROTOCOL, "rows": rows},
+        sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    path = _rounds_history_path(batch)
+    last = None
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                last = json.loads(line)
+            except json.JSONDecodeError:
+                last = None
+    if isinstance(last, dict) and last.get("digest") == digest:
+        return None
+    record = {"recorded_at": _time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+              "protocol": review.ROUND_PROTOCOL,
+              "input_binding": plan.get("input_binding"),
+              "checked_rounds": list(evaluated.get("checked_rounds") or []),
+              "passing": bool(evaluated.get("passed")),
+              "digest": digest,
+              "findings": rows}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
 def write_summary(batch_dir, failures=None):
     """Publish coverage independently of release eligibility; never clear findings."""
     batch = Path(batch_dir)
     evaluated = review.evaluate_rounds(batch)
     plan = evaluated.get("plan", {})
+    record_rounds_history(batch, evaluated)
     payload = _existing(batch, plan) if plan else {"rounds": []}
     queue = review._load(_path(batch, "07_review/manual-review-queue.json"))
     open_items = [f for f in review._findings(queue) if isinstance(f, dict) and review._is_open(f)]
@@ -1088,6 +1153,7 @@ def write_summary(batch_dir, failures=None):
                "unchecked": evaluated["unchecked"], "gate_errors": gate["errors"],
                "required_unchecked_count": gate["counts"]["required_unchecked"],
                "execution_failures": failures or {},
+               "rounds_history": "07_review/rounds-history.jsonl",
                "coverage_note": "一审覆盖所有单元；二审仅覆盖计划抽中的目标（整组题型整组核对，独立单题按小题），未抽中的目标不声称已核验。"}
     _save(batch, "07_review/overall-review-report.json", summary)
     lines = ["# 整卷审核报告", "", "审核执行：" + ("两轮已全部完成" if summary["execution_completed"] else "仍有轮次未完成"),
@@ -1109,6 +1175,7 @@ def write_summary(batch_dir, failures=None):
     if validation_notes:
         lines += ["", "## 来源缺项与体检提示", "", "下列提示保留供查阅，不冒充已经补齐的原文解析："]
         lines += ["", *["- " + note for note in validation_notes]]
+    lines += ["", "跨轮留档：每轮审核的判据追加写入 `07_review/rounds-history.jsonl`（只追加，供比对不同轮次/模型的差异）。"]
     lines += ["", "核验范围说明：" + summary["evidence_limits"]]
     for rid, failure in (failures or {}).items():
         lines += ["", f"执行异常（{names[rid]}）：已重试{failure['attempts']}次，仍未完成；{failure['reason']}"]

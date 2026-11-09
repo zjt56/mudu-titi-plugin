@@ -784,6 +784,41 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertIn('WF-9002', ids)             # 已有人工结论保留
         self.assertEqual(len([r for r in items if r.get('round_sources') and
                               r['round_sources'][0].get('input_binding') == binding and r['status'] == 'open']), 0)
+        # 过期不等于没发生：旧观察必须先归档再出队，否则跨轮差异会无声蒸发。
+        archived = json.loads((self.batch / '07_review/retired-round-findings.json').read_text())['records']
+        self.assertIn('WF-9001', {r['finding_id'] for r in archived})
+        self.assertTrue(all(r.get('retired_reason') for r in archived))
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_rounds_history_is_append_only_and_deduplicates(self):
+        self.write('07_review/review-rounds.json', self.payload())
+        path = self.batch / '07_review/rounds-history.jsonl'
+        first = review_rounds.record_rounds_history(self.batch)
+        self.assertIsNotNone(first)
+        self.assertEqual(len(path.read_text(encoding='utf-8').splitlines()), 1)
+        # 同一轮重复结算（导入重放、闸门刷新）不得重复记账。
+        self.assertIsNone(review_rounds.record_rounds_history(self.batch))
+        self.assertEqual(len(path.read_text(encoding='utf-8').splitlines()), 1)
+        # 没有完成的轮次（记录过期）不写空快照冒充历史。
+        self.assertIsNone(review_rounds.record_rounds_history(
+            self.batch, {'plan': self.plan, 'checked_rounds': [], 'findings': [], 'passed': False}))
+        self.assertEqual(len(path.read_text(encoding='utf-8').splitlines()), 1)
+        # 新一轮判据不同：追加一行，旧快照原样保留。
+        changed = {'plan': self.plan, 'checked_rounds': list(review.ROUND_IDS), 'passed': False,
+                   'findings': [{'unit_id': 'group-1-6', 'field': 'knowledge', 'severity': 'major',
+                                 'reason': '知识点应为动词辨析', 'round_sources': [{'round_id': 'labels'}]}]}
+        self.assertIsNotNone(review_rounds.record_rounds_history(self.batch, changed))
+        lines = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[-1]['findings'][0]['unit_id'], 'group-1-6')
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_write_summary_publishes_rounds_history_pointer(self):
+        self.write('07_review/review-rounds.json', self.payload())
+        review_rounds.write_summary(self.batch)
+        summary = json.loads((self.batch / '07_review/overall-review-report.json').read_text(encoding='utf-8'))
+        self.assertEqual(summary['rounds_history'], '07_review/rounds-history.jsonl')
+        self.assertTrue((self.batch / '07_review/rounds-history.jsonl').is_file())
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_completed_round_refresh_retires_obsolete_comparisons_with_archive(self):
