@@ -16,6 +16,36 @@ _EXPL_LABEL = re.compile(r'^\s*【\s*(?:解析|答案|分析|详解)\s*】\s*[:�
 _SUMMARY_LABEL = re.compile(r'^\s*【\s*文章大意\s*】\s*[:：]?\s*')
 _ANSWER_PREFIX = re.compile(
     r'^\s*\d{1,3}\s*[.．、]\s*[A-H]?\s*(?=【\s*(?:解析|分析|详解)\s*】)')
+# A field label such as 【解析】/【答案】/【文章大意】. Models sometimes set
+# start_column a character or two into this label, slicing off part of it
+# (e.g. "析】"). Snap such a start to the body text right after the closing 】.
+_FIELD_LABEL = re.compile(r'【\s*(?:解析|答案|分析|详解|文章大意)\s*】\s*[:：]?\s*')
+
+
+def _snap_label_start(first, left):
+    """Move a start column that lands inside a field label to the label end."""
+    label = _FIELD_LABEL.search(first)
+    if label is None:
+        return left
+    begin, end = label.span()
+    if begin < left < end:
+        return end
+    return left
+
+
+# Sentence/clause boundaries: a short quote that ends here is intentional.
+_BOUNDARY_CHARS = frozenset('。．！？!?；;，,、.…—）)」』”"\' \u3000\t')
+
+
+def _clean_boundary(line, right):
+    """True when the character just before ``right`` ends a clause/sentence.
+
+    A short quote that stops right after a boundary is intentional; stopping mid
+    word (e.g. after 知, before a comma) means the width was miscounted.
+    """
+    if right >= len(line):
+        return True
+    return line[right - 1:right] in _BOUNDARY_CHARS
 
 
 def _allowed_path(relative):
@@ -111,6 +141,18 @@ def expand_references(rows, batch):
         # can only mean "through the end of this line"; clamping preserves the
         # exact source text and avoids discarding otherwise valid references.
         if right > len(last):
+            right = len(last)
+        # A start column inside a field label (【解析】/【答案】/【文章大意】)
+        # usually means "start at the body", since the label is not part of the
+        # body. Snap to the label end; do not touch starts already after it.
+        if start == end and left < right:
+            snapped = _snap_label_start(first, left)
+            if snapped != left:
+                left = snapped
+        # An end column that stops mid-text (not on a sentence/clause boundary)
+        # is a miscounted width, not an intentional short quote: the fragment
+        # would be cut mid-sentence. Extend only then to the physical line end.
+        if start == end and right < len(last) and left < right and not _clean_boundary(last, right):
             right = len(last)
         if start == end and left > right:
             raise ValueError('Source fragment column range is out of bounds')

@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-explanation-source-ref-column-snap.md](2026-11-09-explanation-source-ref-column-snap.md) | 解析 source_ref 起点落标签内/末尾截句中时吸附到正文，修复 17 年卷列号误差卡点 |
 | 2026-11-09 | [2026-11-09-answer-boundary-review-fixes.md](2026-11-09-answer-boundary-review-fixes.md) | 审查修复：换行句号、上下标语义、格式空答案及当前尝试错误详情 |
 | 2026-11-09 | [2026-11-09-review-rounds-history.md](2026-11-09-review-rounds-history.md) | 跨轮审核差异追加快照，过期观察先留档再出队 |
 | 2026-11-09 | [2026-11-09-audio-liveness-and-assemble-audio.md](2026-11-09-audio-liveness-and-assemble-audio.md) | 音频锁探活与残留状态清理，组装不再等待听力映射 |

@@ -104,6 +104,60 @@ class ContentFragmentsTest(unittest.TestCase):
         self.assertTrue(expand_references(rows, self.batch))
         self.assertEqual(rows[0]['explanation'], '考查交际用语。')
 
+    def test_start_column_inside_field_label_snaps_to_body(self):
+        self.source.write_text('31.D\u3000【解析】考查交际用语。句意:——别紧张。\n', encoding='utf-8')
+        digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        expected = '考查交际用语。句意:——别紧张。'
+        for sc in (5, 6, 7, 8, 9):
+            with self.subTest(start_column=sc):
+                ref = {'path': '01_source/附录.txt', 'sha256': digest,
+                       'start_line': 1, 'end_line': 1, 'start_column': sc}
+                rows = [{'explanation': {'source_ref': ref}, 'evidence': ['附录']}]
+                self.assertTrue(expand_references(rows, self.batch))
+                self.assertEqual(rows[0]['explanation'], expected)
+        # Starts after the label body must not be pulled back.
+        ref = {'path': '01_source/附录.txt', 'sha256': digest,
+               'start_line': 1, 'end_line': 1, 'start_column': 11}
+        rows = [{'explanation': {'source_ref': ref}, 'evidence': ['附录']}]
+        expand_references(rows, self.batch)
+        self.assertEqual(rows[0]['explanation'], '交际用语。句意:——别紧张。')
+
+    def test_truncated_end_column_is_extended_only_when_cut_mid_sentence(self):
+        self.source.write_text('72.B\u3000【解析】细节理解题。这是一句。这是第二句。\n', encoding='utf-8')
+        digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        base = {'path': '01_source/附录.txt', 'sha256': digest,
+                'start_line': 1, 'end_line': 1}
+        body = self.source.read_text(encoding='utf-8').splitlines()[0]
+        body_start = body.index('】') + 1
+        # Cut mid-sentence (after 一) must extend to the full line.
+        cut_mid = body_start + body[body_start:].index('一') + 1
+        ref = dict(base, start_column=body_start, end_column=cut_mid)
+        rows = [{'explanation': {'source_ref': ref}, 'evidence': ['附录']}]
+        expand_references(rows, self.batch)
+        self.assertEqual(rows[0]['explanation'], body[body_start:].rstrip('\n'))
+        # Cut exactly on a sentence boundary is an intentional short quote.
+        cut_boundary = body_start + body[body_start:].index('这是第二句。')
+        ref = dict(base, start_column=body_start, end_column=cut_boundary)
+        rows = [{'explanation': {'source_ref': ref}, 'evidence': ['附录']}]
+        expand_references(rows, self.batch)
+        self.assertEqual(rows[0]['explanation'], '细节理解题。这是一句。')
+        # An explicit short body followed directly by end-of-line is unchanged.
+        ref = dict(base, start_column=body_start)
+        rows = [{'explanation': {'source_ref': ref}, 'evidence': ['附录']}]
+        expand_references(rows, self.batch)
+        self.assertEqual(rows[0]['explanation'], body[body_start:].rstrip('\n'))
+
+    def test_start_column_snapping_also_covers_article_summary_label(self):
+        self.source.write_text('【文章大意】本文是一篇说明文,介绍了茶文化。\n', encoding='utf-8')
+        digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        for sc in (1, 3, 5):
+            with self.subTest(start_column=sc):
+                ref = {'path': '01_source/附录.txt', 'sha256': digest,
+                       'start_line': 1, 'end_line': 1, 'start_column': sc}
+                rows = [{'articleSummary': {'source_ref': ref}, 'evidence': ['附录']}]
+                expand_references(rows, self.batch)
+                self.assertEqual(rows[0]['articleSummary'], '本文是一篇说明文,介绍了茶文化。')
+
     def test_numbered_explanation_body_is_not_mistaken_for_answer_prefix(self):
         for text in ('3.14 is the value.', '1. Choose the correct form.', '1.A reason for this choice.'):
             with self.subTest(text=text):
