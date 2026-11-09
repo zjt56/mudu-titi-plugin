@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 from pathlib import Path
+import re
 import tempfile
 import os
 
@@ -64,6 +65,40 @@ def _config(config=None):
 
 def _mapping(source, catalog, options=None):
     return upload_payload.build_payload(source, catalog, **(options or {}))
+
+
+# 本地装配产物的题目 ID 只有单卷内唯一（q-1、group-16-17）。题库的题目 ID 是
+# 全局主键，多卷或重传会撞上 question_id_exists；上传时为这些 ID 加批次前缀。
+_LOCAL_WIRE_ID = re.compile(r"^(?:q-\d+|group-\d+(?:-\d+)*)$")
+
+
+def _auto_id_prefix(source, batch_id):
+    """Derive a stable, paper-scoped prefix for local q-N/group-N ids.
+
+    Explicit ids (AH-2014-001, UUIDs, …) are left untouched: a batch that
+    already names its questions is assumed to manage global uniqueness itself.
+    """
+    items = source.get("items") if isinstance(source, dict) else None
+    if not isinstance(items, list) or not items:
+        return None
+    ids = [item.get("id") for item in items if isinstance(item, dict)]
+    if len(ids) != len(items) or not all(
+            isinstance(value, str) and _LOCAL_WIRE_ID.fullmatch(value) for value in ids):
+        return None
+    years = set()
+    for item in items:
+        value = item.get("year")
+        if isinstance(value, bool):
+            continue
+        try:
+            year = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1900 <= year <= 2100:
+            years.add(year)
+    year = next(iter(years)) if len(years) == 1 else None
+    digest = hashlib.sha256(str(batch_id).encode("utf-8")).hexdigest()[:10]
+    return f"{year}-{digest}" if year else digest
 
 
 def _media_map(batch):
@@ -190,6 +225,10 @@ def prepare(batch_dir, *, catalog=None, config=None, check_media=True, **options
                 options["media_map"] = media_map
         if not source.get('batch_id') and not options.get('batch_id'):
             options['batch_id'] = manifest['workflow_id']
+        if 'id_prefix' not in options:
+            prefix = _auto_id_prefix(source, options.get('batch_id') or manifest.get('workflow_id'))
+            if prefix:
+                options['id_prefix'] = prefix
         # 标题可从已绑定当前正文的元信息确定性继承，不使用目录名或上传年份猜测。
         from .agent_tasks import _safe_path
         metadata_path = _safe_path(batch, '01_source/metadata.json')

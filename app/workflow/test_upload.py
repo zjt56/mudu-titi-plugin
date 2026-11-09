@@ -63,6 +63,31 @@ class UploadFlowTest(unittest.TestCase):
         self.assertTrue(result['remote_confirmation_required'])
         self.assertEqual(json.loads((self.batch / '07_upload/receipt.json').read_text())['stage'], 'pending_confirmation')
 
+    def test_local_question_ids_receive_paper_scoped_prefix(self):
+        data = valid_batch(); data['items'][0]['id'] = 'q-1'
+        self.source.write_text(json.dumps(data, ensure_ascii=False))
+        self.prepare()
+        plan = json.loads((self.batch / '07_upload/plan.json').read_text(encoding='utf-8'))
+        prefix = plan['mapping_options']['id_prefix']
+        self.assertRegex(prefix, r'^2024-[0-9a-f]{10}$')
+        self.assertEqual(plan['summary']['id_prefix'], prefix)
+        frozen = upload.verify(self.batch, config=self.settings)
+        self.assertEqual(json.loads(frozen['payload'])['items'][0]['id'], f'{prefix}-q-1')
+
+    def test_explicit_question_ids_are_not_renamed(self):
+        self.prepare()
+        plan = json.loads((self.batch / '07_upload/plan.json').read_text(encoding='utf-8'))
+        self.assertNotIn('id_prefix', plan['mapping_options'])
+        frozen = upload.verify(self.batch, config=self.settings)
+        self.assertEqual(json.loads(frozen['payload'])['items'][0]['id'], 'Q1')
+
+    def test_auto_id_prefix_is_stable_per_batch_and_skips_explicit_ids(self):
+        data = valid_batch(); data['items'][0]['id'] = 'q-1'
+        first = upload._auto_id_prefix(data, 'paper-a')
+        self.assertEqual(first, upload._auto_id_prefix(data, 'paper-a'))
+        self.assertNotEqual(first, upload._auto_id_prefix(data, 'paper-b'))
+        self.assertIsNone(upload._auto_id_prefix(valid_batch(), 'paper-a'))
+
     def test_missing_batch_name_uses_only_hash_bound_original_title(self):
         source = valid_batch(); source.pop('name')
         self.source.write_text(json.dumps(source, ensure_ascii=False))

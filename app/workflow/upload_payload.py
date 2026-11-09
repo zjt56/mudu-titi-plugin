@@ -771,14 +771,23 @@ class _Builder:
 
 
 def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, name=None,
-                  upload_mode=None, upload_target=None, media_map=None) -> dict:
+                  upload_mode=None, upload_target=None, media_map=None,
+                  id_prefix=None) -> dict:
     """Return validation evidence and an allowlisted staging batch; never mutate input.
 
     ``catalog_sha256`` binds canonical version/points JSON (full metadata), excluding
     transport metadata such as fetched_at. ``payload`` on failure is preview only.
     Known workflow controls are omitted; unknown extensions block readiness.
+
+    ``id_prefix`` prefixes every top-level wire ``id`` so question IDs from
+    different papers cannot collide in the server's global question table.
     """
     builder = _Builder(media_map)
+    if id_prefix is not None:
+        if not isinstance(id_prefix, str) or (id_prefix and not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}", id_prefix)):
+            builder.error("ID_PREFIX_INVALID", "id_prefix 只能由字母、数字、点、下划线、连字符组成")
+            id_prefix = None
     if not isinstance(batch, dict):
         builder.error("BATCH_INVALID", "批次必须是 JSON 对象")
         batch = {}
@@ -827,6 +836,10 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
     for index, item in enumerate(items):
         uid = str(item.get("id") or item.get("unit_id") or index) if isinstance(item, dict) else str(index)
         output = builder.item(item, uid)
+        if id_prefix and isinstance(output.get("id"), str) and output["id"]:
+            # 题库的题目 ID 是全局主键；本地 q-N 只在单卷内唯一，跨卷上传会
+            # 触发 question_id_exists。前缀由批次身份生成，稳定且可复算。
+            output["id"] = f"{id_prefix}-{output['id']}"
         qid = output.get("id")
         if isinstance(qid, str):
             if qid in seen:
@@ -836,6 +849,8 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
             builder.error("SOURCE_TARGET_CONFLICT", "显式题目 source_type 与来源上传目标不一致", uid)
         payload["items"].append(output)
     builder.summary["units"] = len(items)
+    if id_prefix:
+        builder.summary["id_prefix"] = id_prefix
     try:
         encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
         if len(encoded) > 2_000_000:

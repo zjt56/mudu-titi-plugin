@@ -343,6 +343,21 @@ class UploadPayloadTest(unittest.TestCase):
         wire = report['payload']['items'][0]['attachments']
         self.assertEqual([attachment['placement'] for attachment in wire], ['question', 'question'])
 
+    def test_id_prefix_namespaces_wire_ids_without_mutation(self):
+        q = question()
+        q['id'] = 'q-1'
+        data = batch(q)
+        before = deepcopy(data)
+        report = self.build(data, id_prefix='2024-abcdef1234')
+        self.assertTrue(report['passed'], report['errors'])
+        self.assertEqual(report['payload']['items'][0]['id'], '2024-abcdef1234-q-1')
+        self.assertEqual(report['summary']['id_prefix'], '2024-abcdef1234')
+        self.assertEqual(data, before)
+
+    def test_invalid_id_prefix_blocks_build(self):
+        report = self.build(batch(question()), id_prefix='bad prefix')
+        self.assertIn('ID_PREFIX_INVALID', self.codes(report))
+
     def test_existing_media_map_remaps_parent_and_child_without_mutation(self):
         q = reading_group()
         q['attachments'] = [
