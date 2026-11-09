@@ -76,7 +76,9 @@ python -m workflow.auto run --inbox inbox --once
 
 组装确定性重跑：每次组装被接受后，`assemble_local` 在 `06_batch/assemble-guard.json` 登记结构确认与批次产物的指纹。之后重跑组装时，只有“结构未变、批次未被手工改动、确认单元集合一致”才走确定性路径：题干、选项、材料、表格与子题结构沿用已审核批次，仅用最新四路产物覆盖题型、子类、词数、答案、难度、解析、大意和知识标签，**零模型调用**。产物仍须通过 `accept_result` 的整批校验才安装；校验不过或守卫不满足都自动回落模型组装，并在 `06_batch/deterministic-fallback.json` 留下原因。首次组装（无基线）始终走模型。旧批次可用 `python -m workflow.assemble_local --batch-dir <批次> --seed` 补登记基线，登记前逐题核对单元、题号与每个选项都能回指当前结构，核对不过不登记；`--check` 只读报告确定性结果与已接受批次的字段差异。
 
-限流/额度退避：`classify_failure` 识别的 429/`DAILY_LIMIT_EXCEEDED`/quota 属可恢复失败，不是判死。`auto run` 撞到后在该批次登记冷却（`workflow/agent-runs/.rate-limit-cooldown`，默认 300s，可用 `--rate-limit-backoff` 调整），冷却期内本轮不再调用模型，常驻循环睡到最早冷却到期再扫，避免空转反复撞同一限额；一旦有阶段成功推进即清除冷却标记。`scripts/bin/wf-agent.sh` 在限流时会自动切换到备用 profile 重试一次，两条通道都受限才按 rate_limit 交回；这是**独立 CLI** 的旧行为。插件面板使用 `wf-router.sh`，不做这种切换：选中哪个模型就只调用哪个，路由缺失时直接报错。其它失败（解析、崩溃）不盲目重跑，仍按原规则处理。
+限流/额度退避：`classify_failure` 识别的 429/`DAILY_LIMIT_EXCEEDED`/quota 属可恢复失败，不是判死。`auto run` 撞到后在该批次登记冷却（`workflow/agent-runs/.rate-limit-cooldown`，默认 300s，可用 `--rate-limit-backoff` 调整），冷却期内本轮不再调用模型，常驻循环睡到最早冷却到期再扫，避免空转反复撞同一限额；一旦有阶段成功推进即清除冷却标记。`scripts/bin/wf-agent.sh` 在限流时会自动切换到备用 profile 重试一次，两条通道都受限才按 rate_limit 交回；这是**独立 CLI** 的旧行为。插件面板使用 `wf-router.mjs`，不做这种切换：选中哪个模型就只调用哪个，路由缺失时直接报错。其它失败（解析、崩溃）不盲目重跑，仍按原规则处理。
+
+可选 provider 的范围：`wf-router.mjs` 生成 headless 路由 profile 时，只复制 base profile 的 `llm-pi-ai` / `llm-deepseek` / `llm-deepseek-account` 条目。桌面端启用、但 profile 没有声明的 provider（例如 WorkBuddy 的 `magpie` 中转）在该 profile 里没有适配器，选中会 `NO_ADAPTER`。因此设置页的模型列表只列路由真正能服务的 provider；`wf-router` 调用前也会校验，不在列表里就带可选值直接报错，不会静默换成默认模型。要在工作流里用某个 provider，先在 profile 的 `llm-pi-ai.providers` 里声明它。
 
 并行模型调用使用共享锁，普通调用使用独占锁，两者互斥；因此并行只在 POSIX 生效，Windows 串行。POSIX 超时取消进程组，Windows 当前只能可靠终止直接子进程。
 

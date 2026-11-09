@@ -1,5 +1,12 @@
 # RULES — 规则与强调台账
 
+## 2026-11-09 模型列表/路由只能出现真正可调用的 provider（NO_ADAPTER 卡点修复）
+
+- 触发：批次【木牍教育】18年安徽中考英语 前置组装失败，stderr 实为 `dsh: NO_ADAPTER: no adapter registered for provider "magpie"`，界面却显示「Agent subprocess failed…重跑一次通常即过」。
+- 路由 profile 只复制 base profile 的 `llm-pi-ai` / `llm-deepseek` 条目；宿主独有的中转 provider（WorkBuddy `magpie`、账号目录）不在其中，选中必然失败。
+- 模型列表不得列出路由 profile 不能服务的 provider；`wf-router` 调用前必须校验 provider 在生成的路由 profile 中，否则带可选列表直接报错，不得静默换模型，也不得把配置错误伪装成阶段产物不合格。
+- 落地：`lib/index.js::servableHostModels`、`backend/wf-router.mjs::overlayProviders`；测试 `backend/wf-router-native.test.cjs`、`backend/model-list.test.cjs`；记录 `CHANGELOG/2026-11-09-router-provider-guard.md`。
+
 ## 2026-11-09 模型不固定：每台设备跟随自己的 Harness 模型（用户明确）
 
 - 原话：“模型不是固定的，是随着不同设备自由选择他们harness的模型”。

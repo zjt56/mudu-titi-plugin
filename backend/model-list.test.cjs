@@ -37,6 +37,17 @@ test('duplicate entries are never repeated', () => {
   ]);
 });
 
+test('host-only providers are not offered because the route profile cannot serve them', () => {
+  const detected = [{ provider: 'opencode-go', model: 'deepseek-v4.1-flash' }];
+  const host = [
+    { provider: 'opencode-go', model: 'deepseek-v4.1-flash' },
+    { provider: 'magpie', model: 'auto/deepseek-v4.1-flash' },
+  ];
+  assert.deepEqual(plugin.servableHostModels(detected, host), [
+    { provider: 'opencode-go', model: 'deepseek-v4.1-flash' },
+  ]);
+});
+
 test('parsing a profile exposes every llm-pi-ai provider', () => {
   const models = plugin.parseProfileModels('desktop');
   const providers = new Set(models.map((m) => m.provider));

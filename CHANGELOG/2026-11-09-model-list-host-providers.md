@@ -1,5 +1,12 @@
 # 2026-11-09 模型列表：把宿主实际可用的 provider 也列出来
 
+> **后续修订（2026-11-09 晚）**：本记录基于「`wf-router.sh` 会把 desktop 里缺失的 provider
+> 合入路由 profile」这一旧前提。现在插件走 `backend/wf-router.mjs`，headless 路由 profile
+> **只复制 base profile 的 `llm-pi-ai` / `llm-deepseek` 条目**，宿主独有的中转 provider
+> （WorkBuddy `magpie`、账号目录等）不会被复制，选中它们会直接 `NO_ADAPTER`。因此模型列表
+> 已改为只列「路由 profile 能真正服务」的 provider，详见
+> [2026-11-09-router-provider-guard.md](2026-11-09-router-provider-guard.md)。
+
 ## 背景
 
 用户反馈（原话）：「本地里有这么多模型，他都没选择映射出来」——DSH 设置→模型页里能看到 `DeepSeek 账号`、`第三方`、`opencode-go` 等 provider 及其模型目录，但插件「设置 → 大模型配置」的下拉只有 5 条（opencode-go/deepseek-v4.1-flash、openai/gpt-6.1-sol、openai/gpt-6.1-terra、openai/gpt-6-astra、deepseek-official/deepseek-flash）。

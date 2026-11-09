@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-09 | [2026-11-09-router-provider-guard.md](2026-11-09-router-provider-guard.md) | 模型列表只列路由 profile 可服务的 provider；wf-router 调用前校验 provider，避免 NO_ADAPTER 被当成阶段失败 |
 | 2026-11-09 | [2026-11-09-device-harness-model.md](2026-11-09-device-harness-model.md) | 仓库不再固定模型：default 为空时各设备跟随自己 Harness 的 agent-default-model |
 | 2026-11-09 | [2026-11-09-agent-failure-visibility-and-default-model.md](2026-11-09-agent-failure-visibility-and-default-model.md) | 代理失败附带脱敏stderr尾部；默认模型恢复 deepseek-official/deepseek-flash |
 | 2026-11-09 | [2026-11-09-plugin-selfupdate-not-batch-change.md](2026-11-09-plugin-selfupdate-not-batch-change.md) | 插件自更新（wf-router.mjs）不再被误判为批次输入变化；模型指纹只用于缓存键 |

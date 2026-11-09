@@ -145,6 +145,36 @@ test('real installed CLI accepts the generated overlay and stdin argument withou
   assert.equal(fs.existsSync(f.response), false);
 });
 
+function providerFixture(t, provider, model) {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.home, 'profiles', 'fake', 'cordis.patch.yml'),
+    '- id: llm-pi-ai\n  name: "@deepseek-ai/dsh-llm-pi-ai"\n  config:\n    providers:\n      opencode-go:\n        api: openai-completions\n        baseURL: https://example.invalid/v1\n        apiKeyEnv: KEY\n        models:\n          - id: deepseek-v4.1-flash\n');
+  fs.writeFileSync(path.join(f.plugin, 'config', 'model-router.json'), JSON.stringify({
+    default: { provider, model, profile: 'fake' }, stages: {}, roles: {}, review: { rounds: {} },
+  }));
+  return f;
+}
+
+test('native router refuses a provider the route profile cannot serve', t => {
+  const f = providerFixture(t, 'magpie', 'auto/deepseek-v4.1-flash');
+  const result = spawnSync(process.execPath, [router, f.prompt, f.response], {
+    encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /provider "magpie"/);
+  assert.match(result.stderr, /opencode-go/);
+  assert.equal(fs.existsSync(f.response), false);
+});
+
+test('native router accepts a provider declared by the route profile', t => {
+  const f = providerFixture(t, 'opencode-go', 'deepseek-v4.1-flash');
+  const result = spawnSync(process.execPath, [router, f.prompt, f.response], {
+    encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(f.response, 'utf8'), 'OK\r\n');
+});
+
 test('plugin config uses node native router and does not require /bin/sh', () => {
   const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'local-agent.plugin.json'), 'utf8'));
   assert.deepEqual(config.command.slice(0, 2), ['node', '__PLUGIN_BACKEND__/wf-router.mjs']);

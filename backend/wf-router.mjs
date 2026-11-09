@@ -100,6 +100,22 @@ function providerOverlay(file) {
   }
   return out.join('\n').trimEnd();
 }
+/** Provider ids the route profile can actually serve, derived from the overlay
+ * itself (llm-pi-ai provider map and llm-deepseek adapters). Host-only providers
+ * such as a WorkBuddy relay are not in the overlay, so selecting one makes dsh
+ * fail with NO_ADAPTER; the router must refuse it up front instead. */
+function overlayProviders(patch) {
+  const ids = new Set();
+  let block = '';
+  for (const line of patch.split(/\r?\n/)) {
+    const idMatch = line.match(/^- id:\s*['"]?([A-Za-z0-9_-]+)/);
+    if (idMatch) { block = idMatch[1]; continue; }
+    if (block === 'llm-deepseek' || block === 'llm-deepseek-account') ids.add('deepseek-official');
+    const providerMatch = block === 'llm-pi-ai' && line.match(/^ {6}([A-Za-z0-9._-]+):\s*$/);
+    if (providerMatch) ids.add(providerMatch[1]);
+  }
+  return ids;
+}
 function makeProfile(baseProfile, provider, model) {
   let baseDir = join(dshHome, 'profiles', baseProfile);
   if (!existsSync(baseDir)) {
@@ -149,6 +165,13 @@ for (const key of ['DEEPSEEK_API_KEY', 'MAGPIE_GATEWAY_KEY', 'OPENCODE_GO_API_KE
   if (value) env[key] = value;
 }
 const routePatch = join(dshHome, 'profiles', profile, 'cordis.patch.yml');
+// 选中的 provider 必须真的出现在路由 profile 里：桌面端启用的中转 provider
+// （如 WorkBuddy 的 magpie）不会被复制进 headless overlay，继续调用只会得到
+// NO_ADAPTER。这里提前失败并给出可选列表，避免模型错误被当成普通阶段失败。
+const available = overlayProviders(readFileSync(routePatch, 'utf8'));
+if (available.size && !available.has(selected.provider)) {
+  fail(`provider "${selected.provider}" 不在路由 profile 的可用 provider 中（可用: ${[...available].sort().join(', ')}）。请在插件设置里重新选择模型`);
+}
 const result = runDsh(bin, ['--profile', 'headless', '--patch', routePatch, '-'], readFileSync(promptFile), env);
 if (result.status === 0 && result.stdout) {
   writeFileSync(responseFile, result.stdout, 'utf8');
