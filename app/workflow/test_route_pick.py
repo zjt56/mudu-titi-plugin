@@ -1,5 +1,6 @@
 """子 Agent 路由：角色优先、阶段次之、默认兜底，绝不在无默认模型时静默换模型。"""
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -10,12 +11,13 @@ SCRIPT = Path(__file__).resolve().parents[2] / "backend/route_pick.py"
 
 
 class RoutePickTest(unittest.TestCase):
-    def pick(self, router, stage="", rnd="", agent=""):
+    def pick(self, router, stage="", rnd="", agent="", env=None):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "model-router.json"
             path.write_text(json.dumps(router, ensure_ascii=False), encoding="utf-8")
+            run_env = {**os.environ, **(env or {})}
             return subprocess.run([sys.executable, str(SCRIPT), str(path), stage, rnd, agent],
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, env=run_env)
 
     @staticmethod
     def base(**overrides):
@@ -50,9 +52,39 @@ class RoutePickTest(unittest.TestCase):
                            stage="review", rnd="labels", agent="review")
         self.assertEqual(result.stdout.strip().split("\t")[:2], ["r", "role-model"])
 
-    def test_missing_default_fails_instead_of_switching_models(self):
-        result = self.pick({"roles": {"answers": {"provider": "r", "model": "role-model"}}},
-                           stage="answers", agent="answers")
+    def test_empty_default_without_harness_model_fails(self):
+        # 仓库不固定模型：default 为空且本机也没有 Harness 默认时才报错。
+        with tempfile.TemporaryDirectory() as empty:
+            result = self.pick({"default": {}, "roles": {"answers": {"provider": "r", "model": "role-model"}}},
+                               stage="answers", agent="answers",
+                               env={"DSH_HOME": empty, "DSH_PROFILE": ""})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no valid default", result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_empty_default_follows_device_harness_model(self):
+        # 每台设备跟随自己 Harness 菜单当前模型。
+        with tempfile.TemporaryDirectory() as home:
+            desktop = Path(home) / "profiles" / "desktop"
+            desktop.mkdir(parents=True)
+            (desktop / "cordis.patch.yml").write_text(
+                '- id: agent-default-model # device menu\n  config:\n    provider: magpie\n    model: auto/deepseek-v4.1-flash\n',
+                encoding="utf-8")
+            result = self.pick({"default": {}, "roles": {}}, stage="types", agent="types",
+                               env={"DSH_HOME": home, "DSH_PROFILE": ""})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().split("\t")[:2], ["magpie", "auto/deepseek-v4.1-flash"])
+
+    def test_corrupt_explicit_default_never_falls_back_to_harness(self):
+        # 显式配置存在但不完整是错误，不能悄悄改用 Harness 模型。
+        with tempfile.TemporaryDirectory() as home:
+            desktop = Path(home) / "profiles" / "desktop"
+            desktop.mkdir(parents=True)
+            (desktop / "cordis.patch.yml").write_text(
+                '- id: agent-default-model\n  config:\n    provider: magpie\n    model: from-harness\n',
+                encoding="utf-8")
+            result = self.pick({"default": {"provider": "only-provider"}}, stage="types", agent="types",
+                               env={"DSH_HOME": home, "DSH_PROFILE": ""})
         self.assertEqual(result.returncode, 1)
         self.assertIn("no valid default", result.stderr)
         self.assertEqual(result.stdout.strip(), "")
