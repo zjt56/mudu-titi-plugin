@@ -55,6 +55,55 @@ class DirectExplanationDeliveryTest(unittest.TestCase):
         self.assertTrue(any(b.get('stage') == 'explanations' and b.get('status') == 'accepted'
                             for b in bindings), bindings)
 
+    def test_scoped_repair_also_uses_model_free_direct_copy(self):
+        # 局部修复请求（scoped）此前会绕过直抄路径，于是来源类失败（解析/大意未
+        # 逐字绑定原题）只能交给模型反复重写；直抄既保真又零模型开销，必须优先。
+        units = agent_tasks.confirmed_units(self.batch)
+        unit_id = units[0]['unit_id']
+        feedback = {'version': 1, 'stage': 'explanations',
+                    'reason': '解析未逐字绑定原题',
+                    'error': 'EXPLANATION_SOURCE_UNVERIFIED',
+                    'unit_ids': [unit_id],
+                    'feedback_by_unit': {unit_id: {
+                        'reason': '解析未逐字绑定原题',
+                        'error': 'EXPLANATION_SOURCE_UNVERIFIED'}},
+                    'all_units': False, 'scoped_units': True, 'attempt': 2}
+        (self.batch / 'workflow/repair-feedback').mkdir(parents=True, exist_ok=True)
+        self.fixture.write('workflow/repair-feedback/explanations.json', feedback)
+        with patch('workflow.local_agent.invoke', side_effect=AssertionError('must not call model')):
+            self.assertEqual(self.run_direct(), 0)
+        self.assertEqual(mf.load(self.batch)['stages']['explanations']['status'], mf.COMPLETED)
+        payload = json.loads((self.batch / agent_tasks.ARTIFACTS['explanations']).read_text())
+        self.assertTrue(payload['items'])
+
+    def test_scoped_repair_falls_back_to_the_task_path_when_copy_is_unavailable(self):
+        units = agent_tasks.confirmed_units(self.batch)
+        unit_id = units[0]['unit_id']
+        feedback = {'version': 1, 'stage': 'explanations',
+                    'reason': '解析未逐字绑定原题',
+                    'error': 'EXPLANATION_SOURCE_UNVERIFIED',
+                    'unit_ids': [unit_id],
+                    'feedback_by_unit': {unit_id: {
+                        'reason': '解析未逐字绑定原题',
+                        'error': 'EXPLANATION_SOURCE_UNVERIFIED'}},
+                    'all_units': False, 'scoped_units': True, 'attempt': 2}
+        (self.batch / 'workflow/repair-feedback').mkdir(parents=True, exist_ok=True)
+        self.fixture.write('workflow/repair-feedback/explanations.json', feedback)
+        # 直抄不接受（例如来源不可唯一绑定）时不得把局部修复变成硬失败，
+        # 仍须回到通用任务路径让受影响题号带反馈继续。
+        with patch.object(explanations_direct, 'install', return_value=None) as install:
+            code = self.run_direct()
+        # 走到通用任务路径即算通过：本机 fixture 没有可执行的 Agent CLI，返回码
+        # 取决于本机配置；关键是直抄被判不可用后没有冒充成功。
+        self.assertEqual(install.call_count, 1, '局部修复也必须先尝试直抄')
+        # 直抄不可用时的返回码取决于本机 Agent 是否可执行；这里只钉住「不得假成功」：
+        # 报成功就必须真有产物，报失败就不得留下半成品。
+        artifact = self.batch / agent_tasks.ARTIFACTS['explanations']
+        if code == 0:
+            self.assertTrue(artifact.exists(), '返回成功必须真的交付产物')
+        else:
+            self.assertFalse(artifact.exists(), '失败时不得留下半成品')
+
     def test_direct_copy_marker_cannot_authorize_omitting_original_content(self):
         candidate = explanations_direct.build_payload(self.batch)
         candidate['items'][0]['explanation'] = '无'
