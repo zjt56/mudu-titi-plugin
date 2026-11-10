@@ -63,10 +63,12 @@ test('harness default resolves to a servable model without entering any API key'
     `${found.provider}/${found.model} must be declared by its profile`);
 });
 
-test('AI operations route prefers explicit role, then default, then Harness model', () => {
+test('AI operations route prefers explicit role, then Harness model, then plugin default', () => {
   const harness = { provider: 'h', model: 'hm' };
   assert.deepEqual(plugin.operationsRouteFor({ roles: { operations: { provider: 'q', model: 'ops' } } }, harness), { provider: 'q', model: 'ops' });
-  assert.deepEqual(plugin.operationsRouteFor({ default: { provider: 'p', model: 'd' } }, harness), { provider: 'p', model: 'd' });
+  // The host-native AI运维 session must use a provider the host actually has.
+  assert.deepEqual(plugin.operationsRouteFor({ default: { provider: 'p', model: 'd' } }, harness), { provider: 'h', model: 'hm' });
+  assert.deepEqual(plugin.operationsRouteFor({ default: { provider: 'p', model: 'd' } }, null), { provider: 'p', model: 'd' });
   assert.deepEqual(plugin.operationsRouteFor({ default: {} }, harness), { provider: 'h', model: 'hm' });
   assert.throws(() => plugin.operationsRouteFor({ default: {} }, null));
 });

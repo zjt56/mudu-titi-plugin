@@ -15,7 +15,7 @@ code=MODEL_ROUTE_INVALID
 
 1. `lib/client.js`：大模型配置的阶段/角色列表新增 **「AI运维」**（写入 `roles.operations`），并更新说明文字。
 2. `lib/index.js`：新增 `operationsRouteFor(router, harness)`，AI运维模型解析顺序为
-   **显式 `roles.operations` → 插件 `default` → 本机 Harness 当前模型**；仍不静默换到别的模型。
+   **显式 `roles.operations` → 本机 Harness 当前模型 → 插件 `default`**。AI运维运行在宿主原生会话里，必须用宿主实际注册的 provider，所以 Harness 模型优先于面向 headless 的插件 default；仍不静默换到别的模型。
    `resolveRoute` 改为使用它。
 3. `lib/operations-settings.js`：`MODEL_ROUTE_INVALID` 提示补充“请在「模型与设置 → 大模型配置」为 AI运维 选择模型，或设置全局默认模型。”
 4. `README.md`：说明 AI运维 模型可在设置页单独选择，未选时跟随 default/Harness。
