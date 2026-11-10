@@ -308,6 +308,9 @@ class SupervisorTest(SupervisorFixture):
         dispatch.return_value = {"started": True}
         self.assertEqual(watch.one_tick()["batches"]["active"], "dispatched")
 
+    @unittest.skipIf(os.name == "nt",
+                     "Windows forbids renaming a batch folder while the tick's .supervisor.lock "
+                     "handle is open, so the folder cannot vanish mid-tick; POSIX rename succeeds.")
     def test_removed_batch_is_not_recreated(self):
         folder = self.make_batch()
         destination = self.root / "user-archived"

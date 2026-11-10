@@ -160,6 +160,48 @@ def _auto_lock_path(folder):
     return Path(tempfile.gettempdir()) / ("mudu-auto-" + key + ".lock")
 
 
+def _agent_lock_busy(path):
+    """True when any live agent holds the lock, including Windows shared slots.
+
+    Windows has no shared flock: ``local_agent`` gives exclusive callers bytes
+    0..1023 and each shared caller one byte in 1..1023. Probing a single byte
+    therefore misses a running shared model call, and the supervisor would
+    dispatch a duplicate advance on top of it. Probe the whole exclusive range
+    so both layouts conflict.
+    """
+    path = Path(path)
+    if not path.exists() or path.is_symlink():
+        return False
+    if os.name != "nt":
+        with _try_file_lock(path) as acquired:
+            return not acquired
+    import msvcrt
+    from .local_agent import WINDOWS_LOCK_RANGE
+    try:
+        handle = path.open("a+b")
+    except OSError:
+        return True
+    try:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        if size < WINDOWS_LOCK_RANGE:
+            handle.write(b"\0" * (WINDOWS_LOCK_RANGE - size))
+            handle.flush()
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, WINDOWS_LOCK_RANGE)
+        except OSError:
+            return True
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, WINDOWS_LOCK_RANGE)
+        except OSError:
+            pass
+        return False
+    finally:
+        handle.close()
+
+
 def execution_busy(folder, *, include_auto=True):
     """Probe the same locks used by auto, runner and live model/import workers.
 
@@ -168,8 +210,7 @@ def execution_busy(folder, *, include_auto=True):
     """
     from . import local_agent
     key = hashlib.sha256(str(Path(local_agent.__file__).resolve().parent).encode()).hexdigest()
-    paths = [Path(folder) / "workflow/.run.lock",
-             Path(tempfile.gettempdir()) / ("mudu-local-agent-" + key + ".lock")]
+    paths = [Path(folder) / "workflow/.run.lock"]
     if include_auto:
         paths.insert(0, _auto_lock_path(folder))
     for path in paths:
@@ -178,7 +219,7 @@ def execution_busy(folder, *, include_auto=True):
         with _try_file_lock(path) as acquired:
             if not acquired:
                 return True
-    return False
+    return _agent_lock_busy(Path(tempfile.gettempdir()) / ("mudu-local-agent-" + key + ".lock"))
 
 
 def clear_exhausted(folder):

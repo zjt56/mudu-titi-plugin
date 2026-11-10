@@ -1,4 +1,4 @@
-# CHANGELOG — 项目变更记录制度
+﻿# CHANGELOG — 项目变更记录制度
 
 本目录专门记录「录题插件版」的一切重要变更与规则强调。**改完就记，不等提醒。**
 
@@ -120,3 +120,4 @@
 | 2026-11-07 | [2026-11-07-subagent-roles.md](2026-11-07-subagent-roles.md) | 内置 7 个子 Agent 角色化提示词 + 按角色独立路由 |
 | 2026-11-07 | [2026-11-07-never-park.md](2026-11-07-never-park.md) | 任何单点失败不得停住流程：上游重推/延后并继续 |
 | 2026-11-07 | [2026-11-07-fix-stem-table-queue.md](2026-11-07-fix-stem-table-queue.md) | 修复装配改写题干、信息转换表格空档、排队区进度分母 |
+| 2026-11-10 | [2026-11-10-windows-shared-agent-lock-probe.md](2026-11-10-windows-shared-agent-lock-probe.md) | Windows 并行模型调用（共享锁槽）不被 supervisor 看见，可能重复派发；探活改为独占整个锁区间 |
