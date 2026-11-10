@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-delete-oneclick-fill.md](2026-11-10-delete-oneclick-fill.md) | 彻底删除确认弹层增加“一键填入”批次名按钮 |
 | 2026-11-10 | [2026-11-10-delete-dialog-no-prompt.md](2026-11-10-delete-dialog-no-prompt.md) | 修复“彻底删除”点击无反应：Electron 不支持 window.prompt，改为页面内确认弹层 |
 | 2026-11-10 | [2026-11-10-skip-sent-papers-dedupe.md](2026-11-10-skip-sent-papers-dedupe.md) | 上传不再校验/复用已发过的试卷；删除批次彻底清除 |
 | 2026-11-10 | [2026-11-10-duplicate-upload-visible.md](2026-11-10-duplicate-upload-visible.md) | 重复上传已上传试卷不再“任务消失”：明确提示已复用批次 |
