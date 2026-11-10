@@ -346,6 +346,14 @@ def _plan(batch: Path, stage_id: str, detail: str, config: dict | None = None) -
               '"stage":"当前阶段ID","reason":"简短、具体的判断依据"}},"notes":[],"findings":[]}。'
               "不能用普通重试解决已反复出现的同一数据错误；优先选择有证据的实际修复或带局部错误反馈的重试。"
               "证据不足或无法安全修复则record_only，不能编造；此时也可返回status=needs_review，仍须完整self_heal对象。"
+              "审核差异是产出，不是故障：REVIEW_ROUND_FINDING、MANUAL_REVIEW_OPEN、REVIEW_FINDING_OPEN"
+              "以及 review_gate=needs_review 的差异设计态必须保留，不能用 rejudge_knowledge、upstream_rederive、"
+              "局部重生成、resolve/dismiss 或重复语义审核来消除差异。"
+              "差异数量不证明执行失败；旧 execution_completed 不证明当前审核完成。"
+              "审核 JSON/键集/覆盖/绑定失败只修审核协议和未完成目标，不改正式标签。"
+              "只有原检查器给出的独立确定性错误码、当前失败检查与题号同时定位生产者时才可修内容；"
+              "日志或模型建议中的知识点名称、差异项的 field=knowledge 均不是内容修复授权。"
+              "本地格式检查继续，手动上传不受审核差异阻碍，标签/结构硬校验保留。"
               "禁止远端上传、发布、静默更换模型或伪称质量通过。\n"
               + _context(batch, stage_id, detail))
     run_dir = batch / "workflow/self-heal-runs" / (stage_id + "-" + uuid.uuid4().hex)
@@ -435,6 +443,10 @@ def _requeue(batch, manifest, stage_id, reason):
 
 def _producer_for_issue(issue):
     """Resolve only explicit structured defect ownership; unknowns stay unknown."""
+    # Review disagreement is an output, even when it names a content producer.
+    # Never route it upstream to rewrite accepted labels or erase the finding.
+    if issue.get("code") in {"REVIEW_ROUND_FINDING", "MANUAL_REVIEW_OPEN", "REVIEW_FINDING_OPEN"}:
+        return None
     explicit = issue.get("producer_stage")
     if explicit in contracts.STAGE_BY_ID and explicit not in BOUNDARIES:
         return explicit

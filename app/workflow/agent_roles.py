@@ -56,13 +56,20 @@ def section(stage: str, artifact: str | None = None, round_id: str | None = None
         # Semantic rounds have a different artifact and envelope; never append
         # that incompatible output contract to a round prompt.
         duty = {"labels": "本轮为一审：全量逐单元语义复核，不得抽样代替。",
-                "sample": "本轮为二审：按抽样单元整组核对，结论只覆盖被抽到的小题。"}
+                "sample": "本轮为二审：只核对计划 TARGET；整组题型按整组核对，独立单题按小题，不扩写到未抽中目标。"}
         return ("\n\n[子 Agent] " + role["title"]
                 + "\n本轮职责：" + duty.get(round_id, "本轮职责以 ROUND 行为准。")
                 + "\n权限边界：仅返回本轮 review_round.checks 判断；不改产物、不放行、不伪造审批。"
                 + "\n脑子检查：每个目标均有真实证据和独立 assessment；根对象包含 status、artifacts、notes、findings 四个同级键，findings=[]。"
                 + "不得输出 `checked_units` 或 `unchecked`。"
-                + "\n出问题怎么办：定位具体题目、字段与原文证据；无法判断时如实说明，不编造、不把未完成当通过。\n")
+                + "\n审核差异是产出，不是执行故障：独立填写 assessment，由程序比较原标签并保留队列及 rounds.errors；"
+                + "不得要求上游知识点重判，不得改正式标签、自动 resolve/dismiss、迎合旧判断或反复重审直到差异消失。"
+                + "盲审隐藏标签不等于正式标签缺失，不能猜原标签。"
+                + "知识点与基本差异（题型/子类/答案/解析/原文）照实记录；难度/来源/分类/选题/词数不进审核差异。"
+                + "图片/音频能力限制只作 informational，但不能据此过滤已经比较出的真实标签差异。"
+                + "\n出问题怎么办：只对 JSON/键集/覆盖/引证/绑定失败修复本次响应或补齐未执行目标，"
+                + "不改语义判断来减少差异，不重跑已合格目标；当前审核未完成不得靠旧完成标记背书。"
+                + "差异不阻止本地格式检查或用户手动上传，也不授权自动上传/发布；质量仍未放行。\n")
     return ("\n\n[子 Agent] " + role["title"] + "\n允许写入的产物：" + role["artifact"] + "\n" + role["body"])
 
 

@@ -145,7 +145,6 @@ class DiagnoseTest(unittest.TestCase):
         manifest['stages']['review_gate'].update(status=mf.NEEDS_REVIEW,
             execution_completed=True, continue_unqualified=True,
             quality_status='pending', release_ready=False, notes='18 项真实差异保留')
-        manifest['stages']['format_gate'].update(status=mf.PENDING)
         mf.save(self.batch, manifest)
         _write(self.batch, '07_review/manual-review-queue.json', {'items': [{'status': 'open'}] * 18})
         result = diagnose.diagnose(self.batch)
@@ -166,6 +165,51 @@ class DiagnoseTest(unittest.TestCase):
         self.assertIn('未宣称放行', result['summary'])
         # 不因为诊断展示而改台账状态。
         self.assertEqual(self._load_manifest()['stages']['review_gate']['status'], mf.NEEDS_REVIEW)
+
+    def test_pending_or_running_work_with_old_differences_never_claims_completion(self):
+        for sid in ('review', 'format_gate'):
+            for status in (mf.PENDING, mf.RUNNING):
+                with self.subTest(stage=sid, status=status):
+                    manifest = self._load_manifest()
+                    manifest['stages']['review_gate'].update(
+                        status=mf.NEEDS_REVIEW, execution_completed=True,
+                        continue_unqualified=True, release_ready=False)
+                    manifest['stages']['review']['status'] = mf.COMPLETED
+                    manifest['stages']['format_gate']['status'] = mf.COMPLETED
+                    manifest['stages'][sid]['status'] = status
+                    mf.save(self.batch, manifest)
+                    result = diagnose.diagnose(self.batch)
+                    self.assertEqual(result['blocking_count'], 0)
+                    self.assertNotIn('自动阶段已执行完成', result['summary'])
+                    self.assertIn('审核差异保留', result['summary'])
+                    self.assertIn('等待', result['summary'])
+
+    def test_historical_gate_report_does_not_override_current_failure_or_invalidation(self):
+        _write(self.batch, '07_review/review-gate.json', {
+            'errors': [{'code': 'OLD_LABEL_ERROR', 'message': '历史标签错误'}]})
+        for status in (mf.FAILED, mf.INVALIDATED):
+            with self.subTest(status=status):
+                manifest = self._load_manifest()
+                manifest['stages']['review_gate'].update(
+                    status=status, notes='current gate failure',
+                    invalidation={'scope': 'stage', 'reason': 'current input changed'})
+                mf.save(self.batch, manifest)
+                item = diagnose.explain(self.batch, 'review_gate')
+                self.assertTrue(item['blocking'])
+                self.assertNotIn('OLD_LABEL_ERROR', item['detail'])
+                self.assertIn('current input changed' if status == mf.INVALIDATED
+                              else 'current gate failure', item['detail'])
+
+    def test_blocked_gate_without_deterministic_evidence_does_not_invent_it(self):
+        manifest = self._load_manifest()
+        manifest['stages']['review_gate'].update(status=mf.BLOCKED, notes='20 项差异')
+        mf.save(self.batch, manifest)
+        _write(self.batch, '07_review/review-gate.json', {
+            'errors': [{'code': 'REVIEW_ROUND_FINDING', 'field': 'knowledge'}]})
+        item = diagnose.explain(self.batch, 'review_gate')
+        self.assertIn('待核验', item['reason'])
+        self.assertNotIn('存在确定性阻断项', item['reason'])
+        self.assertNotIn('REVIEW_ROUND_FINDING', item['detail'])
 
     def test_validation_report_blockers_surface(self):
         manifest = self._load_manifest()

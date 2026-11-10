@@ -552,13 +552,14 @@ def diagnose(batch_dir) -> dict:
                 bl = _validation_blockers(batch)
                 if bl:
                     detail = "；".join(bl[:6])
-            if stage.id == "review_gate":
+            if stage.id == "review_gate" and status not in (mf.INVALIDATED, mf.FAILED):
                 if status == mf.BLOCKED:
                     blockers = _review_gate_blockers(batch)
                     open_items = _open_manual_items(batch)
-                    reason = "审核闸门未通过：存在确定性阻断项"
+                    reason = ("审核闸门未通过：存在确定性阻断项" if blockers
+                              else "审核闸门阻断原因待核验")
                     detail = ("；".join(blockers[:6]) if blockers
-                              else (note or "闸门报告未列出具体阻断项"))
+                              else "缺少具体非差异阻断码；不能把人工差异数量当成失败证据")
                     if open_items:
                         detail += (f"；另有 {open_items} 项人工审核差异待判断"
                                    "（差异是产出，不作为卡点）")
@@ -672,9 +673,19 @@ def diagnose(batch_dir) -> dict:
                + [it for it in items if not it["blocking"]])
     ordered.sort(key=lambda it: (0 if it["stage"] in ("model",) else 1,
                                   order.get(it["stage"], len(order))))
-    head = ordered[0] if ordered else None
+    # Prefer a real failure, then actual unfinished work, before quality output.
+    head = next((it for it in ordered if it["blocking"]), None)
+    if head is None:
+        head = next((it for it in ordered
+                     if it["stage"] not in ("upload_gate", "upload", "publish_gate")
+                     and it.get("failure_class") != "quality_differences"), None)
+    if head is None:
+        head = ordered[0] if ordered else None
     differences = [it for it in items if it.get("failure_class") == "quality_differences"]
-    if not any(it["blocking"] for it in items) and differences:
+    from . import execution_state
+    local_executed = all(execution_state.executed(stages.get(sid), allow_unqualified=True)
+                         for sid in execution_state.LOCAL_STAGES)
+    if not any(it["blocking"] for it in items) and differences and local_executed:
         open_items = _open_manual_items(batch)
         count = f"{open_items} 项" if open_items else ""
         summary = (f"批次「{batch.name}」：自动阶段已执行完成；"
@@ -683,6 +694,8 @@ def diagnose(batch_dir) -> dict:
         summary = f"批次「{batch.name}」：{'卡在' if head['blocking'] else '等待'}「{head['title']}」：{head['reason']}"
         if head["detail"]:
             summary += "——" + head["detail"][:120]
+        if differences:
+            summary += "；已记录的审核差异保留，不作为卡点或当前执行完成的证明"
     else:
         summary = "自动阶段已执行完成；存在质量差异，未宣称放行" if quality_notes else "流程已完成"
     return {"batch": manifest.get("workflow_id") or batch.name,

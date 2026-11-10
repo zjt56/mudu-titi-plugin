@@ -4,6 +4,15 @@ const { pathToFileURL } = require('node:url');
 const { resolve } = require('node:path');
 const moduleReady = import(pathToFileURL(resolve(__dirname, '../lib/operations-agent.js')));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+test('operations prompt keeps review differences outside content repair authority', async () => {
+  const { OPERATIONS_PROMPT } = await moduleReady;
+  for (const text of ['审核产出，不是卡点', 'field=knowledge 不是内容故障证据',
+    '禁止借 resume upstream_rederive/rejudge_knowledge', '旧 execution_completed、0 卡点、空队列',
+    '人工决定不作为本地续跑前置条件']) {
+    assert.ok(OPERATIONS_PROMPT.includes(text), text);
+  }
+});
+
 const incident = (extra = {}) => ({ incident_id: 'inc-1', batch_name: 'test batch/一', batch_dir: '/mock/batches/test', status: 'queued', eligible: true, ...extra });
 
 async function fixture(options = {}) {

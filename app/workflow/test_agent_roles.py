@@ -38,6 +38,19 @@ class AgentRoleContractTest(unittest.TestCase):
         self.assertIn("二审", sample)
         self.assertNotEqual(labels, sample)
 
+    def test_review_prompts_preserve_differences_without_content_regeneration(self):
+        for round_id in ('labels', 'sample'):
+            prompt = agent_roles.section('review', agent_tasks.ARTIFACTS['review'], round_id)
+            self.assertIn('审核差异是产出，不是执行故障', prompt)
+            self.assertIn('不得要求上游知识点重判', prompt)
+            self.assertIn('JSON', prompt)
+        unit = {'unit_id': 'q-1', 'numbers': [1], 'unit_kind': 'standalone'}
+        task = agent_tasks._build_task_template('review', 200000, {}, {}, [], [unit])
+        self.assertIn('request upstream regeneration', task['prompt'])
+        self.assertIn('审核差异是产出，不是执行故障', task['prompt'])
+        self.assertIn('request upstream regeneration', agent_tasks.RULES['review'])
+        self.assertIn('not execution failures', agent_tasks.RULES['review'])
+
     def test_header_is_machine_readable_for_routing(self):
         for stage in agent_tasks.ARTIFACTS:
             self.assertEqual(agent_roles.header(stage), f"Agent: {stage}\n")

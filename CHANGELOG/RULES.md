@@ -1,5 +1,11 @@
 # RULES — 规则与强调台账
 
+## 2026-11-10 审核上次改动并加强提示词约束
+
+- 用户要求：“审核上面改动，加强提示词的约束”。审核差异保护必须进入实际一审/二审专用提示，而不只写在角色文件；审核/自愈/运维不得靠改正式标签、resolve/dismiss、换恢复动作或重审到一致消除差异。
+- 0 卡点、空队列和旧执行标记不证明当前审核/最终格式工作完成；当前执行失败、输入失效必须保留真实证据。差异码即使含 field=knowledge/producer_stage，也不作为内容生产者故障定位依据。
+- 落地：agent_roles.section、prompts/roles/review.md、agent_tasks.RULES[review]、self_heal._plan/_producer_for_issue、lib/operations-agent.js、diagnose 摘要及历史错误处理；记录见 `2026-11-10-review-difference-audit-prompts.md`。
+
 ## 2026-11-10 用户选择的模型必须保存在设备本地（用户反馈“我选的是官方，却显示额度用尽”）
 
 - 触发：用户选择的官方模型被仓库内 `config/model-router.json` 的检出/重置覆盖，路由回落到 WorkBuddy 中转并报“额度已用尽”。

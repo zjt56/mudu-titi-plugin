@@ -37,8 +37,22 @@ class SelfHealTest(unittest.TestCase):
         # stages that had prior work, so the scheduler can execute them normally.
         self.assertEqual(mf.load(self.batch)["stages"]["structure_gate"]["status"], mf.PENDING)
         invoke.assert_called_once()
+        prompt = invoke.call_args.args[0]
+        self.assertIn('审核差异是产出，不是故障', prompt)
+        self.assertIn('field=knowledge 均不是内容修复授权', prompt)
+        self.assertIn('不能用 rejudge_knowledge、upstream_rederive', prompt)
         ledger = json.loads((self.batch / self_heal.LEDGER).read_text(encoding="utf-8"))
         self.assertEqual(ledger["events"][-1]["plan"]["action"], "retry_stage")
+
+    def test_review_differences_never_select_a_content_producer(self):
+        for code in ('REVIEW_ROUND_FINDING', 'MANUAL_REVIEW_OPEN', 'REVIEW_FINDING_OPEN'):
+            for field, producer in (('knowledge', 'knowledge'), ('answer', 'answers')):
+                with self.subTest(code=code, field=field):
+                    issue = {'code': code, 'field': field, 'producer_stage': producer,
+                             'message': '知识点与答案存在差异'}
+                    self.assertIsNone(self_heal._producer_for_issue(issue))
+        self.assertEqual(self_heal._producer_for_issue(
+            {'code': 'KNOWLEDGE_INVALID', 'field': 'knowledge'}), 'knowledge')
 
     def test_invalid_model_action_is_recorded_without_state_mutation(self):
         response = {"response": {"status": "completed", "artifacts": {
