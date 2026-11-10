@@ -289,7 +289,9 @@ test('repair feedback preserves twelve classes and never claims success before v
 test('idle upload view retains all twelve neutral nodes and the same dependency arrows', () => {
   const { tree } = renderFlow([], null, { batches: [] });
   assert.deepEqual(nodesOf(tree).map(node => node.props.key), classIds);
-  assert.deepEqual(nodesOf(tree).map(node => tipOf(node)), classNames);
+  // 悬浮层显示分类名 + 子流程；首行是分类名，其余行以 · 列出子流程。
+  assert.deepEqual(nodesOf(tree).map(node => tipOf(node).split('\n')[0]), classNames);
+  assert.ok(nodesOf(tree).every(node => tipOf(node).split('\n').length >= 2));
   const svg = walk(tree, node => node.type === 'svg' && node.props.role === 'group')[0];
   assert.equal(svg.props['aria-label'], '试卷处理流程总览：12 个环节');
   assert.equal(walk(tree, node => node.props['data-flow-from']).length, 11);
@@ -304,11 +306,20 @@ test('idle upload view retains all twelve neutral nodes and the same dependency 
 test('finished batches leave a neutral demonstration chart and retain the review handoff', () => {
   const items = stages().map(item => ({ ...item, status: 'completed', active: true }));
   const { tree } = renderFlow(items, items[0], { finished: true, advance: { running: true } });
-  assert.deepEqual(nodesOf(tree).map(node => tipOf(node)), classNames);
+  assert.deepEqual(nodesOf(tree).map(node => tipOf(node).split('\n')[0]), classNames);
   assert.match(text(tree), /已完成 1 份 · 待人工确认/);
   assert.match(text(tree), /前往人工确认 →/);
   assert.doesNotMatch(text(tree), /12 \/ 12|继续处理|进度更新/);
   assert.equal(walk(tree, node => node.props.className === 'wf-node-pulse').length, 0);
+});
+
+test('overview tooltip lists each class substeps, not only the class name', () => {
+  const { tree } = renderFlow([], null, { batches: [] });
+  const tip = id => tipOf(nodeOf(tree, id));
+  // 首行分类名，后续以 · 列出该分类包含的子流程。
+  assert.match(tip('extract'), /^内容提取\n· 原卷提取$/);
+  assert.match(tip('preassemble'), /组装判型\n· 前置批次组装\n· 题型填充/);
+  assert.match(tip('upload'), /审核上传\n· .+\n· .+\n· /);
 });
 
 test('chart is width-adaptive: no fixed pixel size, svg stretches with its container', () => {
