@@ -783,6 +783,14 @@ class FastRepairOperationsTests(unittest.TestCase):
             self.assertEqual(len([row for row in op._load(self.folder)["incident"]["attempts"]
                                   if row["kind"] == "regenerate"]), 1)
 
+    def test_regenerate_units_refuses_review_differences_as_blocker(self):
+        # 审核差异是产出，不是内容故障；不允许用局部重生成把差异“改没”。
+        incident = {"stage": "review", "detail": "REVIEW_ROUND_FINDING q-1", "attempts": []}
+        with self.assertRaisesRegex(ValueError, "review_differences_are_output_not_blocker"):
+            op._regenerate_units(self.folder, incident, {
+                "target_stage": "knowledge", "unit_ids": ["q-1"]})
+        self.assertFalse((self.folder / "workflow/repair-feedback/knowledge.json").exists())
+
     def test_regenerate_units_rejects_unknown_and_non_content_scope(self):
         from workflow import agent_tasks
         with patch.object(agent_tasks, "confirmed_units", return_value=[{"unit_id": "u1"}]):

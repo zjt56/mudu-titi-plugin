@@ -611,6 +611,13 @@ def _regenerate_units(folder, incident, data):
     narrows the feedback and requeues that stage instead of the whole paper.
     """
     from .agent_tasks import ARTIFACTS, confirmed_units
+    if incident.get("stage") in ("review", "review_gate"):
+        # 一审/二审与原标签的差异是审核产出，不是内容阶段故障（AGENTS.md 规则 6）。
+        # 自动重生成只会把差异“改没”或改标签，破坏用户要的人工判断证据。
+        raise ValueError(
+            "review_differences_are_output_not_blocker: 审核差异是审核产出，不是卡点；"
+            "不得用局部重生成自动改标签/改判通过或消除差异。请保留差异交人工判断；"
+            "只有审核执行或协议本身失败时才重跑审核阶段")
     target = str(data.get("target_stage") or "")
     detail = str(incident.get("detail") or "")
     if not target:

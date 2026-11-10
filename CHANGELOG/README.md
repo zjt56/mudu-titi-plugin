@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-review-differences-not-a-blocker.md](2026-11-10-review-differences-not-a-blocker.md) | 审核差异不再算卡点：诊断改 quality_differences，运维禁止用局部重生成消除差异 |
 | 2026-11-10 | [2026-11-10-model-selection-persistence.md](2026-11-10-model-selection-persistence.md) | 模型选择改存设备本地，避免仓库检出覆盖；恢复官方模型，修正 WorkBuddy 限流被误用 |
 | 2026-11-10 | [2026-11-10-operations-model-selection.md](2026-11-10-operations-model-selection.md) | 大模型配置新增AI运维模型选择；operations 路由增加 Harness 兜底，修复 MODEL_ROUTE_INVALID |
 | 2026-11-10 | [2026-11-10-writing-not-objective.md](2026-11-10-writing-not-objective.md) | 书面表达不再按客观题严格校验：无答案/解析正常，有范文只提示不阻断 |

@@ -108,7 +108,10 @@ class DiagnoseTest(unittest.TestCase):
         _write(self.batch, "07_review/manual-review-queue.json", {"items": [{"status": "open"}] * 2})
         item = diagnose.explain(self.batch, "review_gate")
         self.assertEqual(item["failure_class"], "quality_findings")
-        self.assertIn("质量差异", item["next_action"])
+        self.assertTrue(item["blocking"])
+        # 确定性阻断项才是卡点；人工差异保留，不自动改判。
+        self.assertIn("确定性阻断项", item["next_action"])
+        self.assertIn("不自动改判", item["next_action"])
 
     def test_executed_review_quality_failure_is_not_called_unexecuted(self):
         manifest = self._load_manifest()
@@ -117,31 +120,52 @@ class DiagnoseTest(unittest.TestCase):
         manifest["stages"]["format_gate"].update(status=mf.PENDING)
         mf.save(self.batch, manifest)
         _write(self.batch, "07_review/manual-review-queue.json", {"items": [{"status": "open"}] * 12})
+        _write(self.batch, "07_review/review-gate.json", {
+            "passed": False,
+            "errors": [
+                {"code": "LABEL_AUDIT_INVALID", "unit_id": "q-1", "reason": "知识点不是目录叶子"},
+                {"code": "REVIEW_ROUND_FINDING", "unit_id": "q-2", "reason": "标签差异"},
+            ],
+        })
         gate = diagnose.explain(self.batch, "review_gate")
-        self.assertIn("质量差异", gate["reason"])
-        self.assertIn("12 项未解决", gate["detail"])
+        self.assertIn("确定性阻断项", gate["reason"])
+        self.assertIn("LABEL_AUDIT_INVALID", gate["detail"])
+        self.assertIn("q-1", gate["detail"])
+        self.assertIn("知识点不是目录叶子", gate["detail"])
+        # 差异码不能冒充卡点原因；只提示另有若干人工差异。
+        self.assertNotIn("REVIEW_ROUND_FINDING", gate["detail"])
+        self.assertIn("12 项人工审核差异待判断", gate["detail"])
         self.assertNotIn("代理产出", gate["reason"])
         downstream = diagnose.explain(self.batch, "format_gate")
         self.assertIn("review_gate（已执行，质量或交付条件未满足", downstream["detail"])
         self.assertFalse(downstream["blocking"])
 
-    def test_executed_unqualified_review_does_not_block_final_format(self):
+    def test_executed_unqualified_review_differences_are_not_a_blocker(self):
         manifest = self._load_manifest()
-        manifest['stages']['review_gate'].update(status=mf.BLOCKED,
+        manifest['stages']['review_gate'].update(status=mf.NEEDS_REVIEW,
             execution_completed=True, continue_unqualified=True,
-            quality_status='failed', release_ready=False, notes='18 项真实差异保留')
+            quality_status='pending', release_ready=False, notes='18 项真实差异保留')
         manifest['stages']['format_gate'].update(status=mf.PENDING)
         mf.save(self.batch, manifest)
+        _write(self.batch, '07_review/manual-review-queue.json', {'items': [{'status': 'open'}] * 18})
         result = diagnose.diagnose(self.batch)
-        # review_gate is a genuine blocking quality difference now; format_gate
-        # waits on it rather than silently proceeding.
-        self.assertGreaterEqual(result['blocking_count'], 1)
-        blocked_stages = {row.get('stage') for row in result.get('items', [])}
-        self.assertTrue({'review_gate', 'format_gate'} & blocked_stages)
-        # format_gate correctly reports review_gate as an unmet upstream now.
-        unmet = result['items'][0].get('unmet') or []
-        self.assertTrue(set(unmet) & {'review', 'review_gate'})
-        self.assertEqual(self._load_manifest()['stages']['review_gate']['status'], mf.BLOCKED)
+        gate = diagnose.explain(self.batch, 'review_gate')
+        # 差异是审核产出：保留在队列与报告里，但不是要修掉的卡点。
+        self.assertFalse(gate['blocking'])
+        self.assertEqual(gate['failure_class'], 'quality_differences')
+        self.assertIn('待人工判断', gate['reason'])
+        self.assertIn('18 项', gate['detail'])
+        self.assertIn('不阻断手动上传', gate['detail'])
+        self.assertIn('人工判断', gate['hint'])
+        self.assertNotIn('自动修正', gate['hint'])
+        self.assertEqual(gate['command'], '')
+        self.assertEqual(gate['unmet'], [])
+        self.assertEqual(result['blocking_count'], 0)
+        self.assertIsNone(result['blocked_at'])
+        self.assertIn('18 项审核差异待人工判断', result['summary'])
+        self.assertIn('未宣称放行', result['summary'])
+        # 不因为诊断展示而改台账状态。
+        self.assertEqual(self._load_manifest()['stages']['review_gate']['status'], mf.NEEDS_REVIEW)
 
     def test_validation_report_blockers_surface(self):
         manifest = self._load_manifest()

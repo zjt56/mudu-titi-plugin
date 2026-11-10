@@ -347,6 +347,47 @@ def _open_manual_items(batch: Path) -> int:
                if isinstance(x, dict) and str(x.get("status") or "").lower() not in closed)
 
 
+# 人工审核差异的代码：它们是审核产出，不是闸门故障；不能当作卡点原因展示。
+DIFFERENCE_CODES = {"REVIEW_ROUND_FINDING", "MANUAL_REVIEW_OPEN", "REVIEW_FINDING_OPEN"}
+
+
+def _review_gate_blockers(batch: Path) -> list[str]:
+    """只读 review-gate.json，挑出确定性阻断项；人工差异另行计数、不混入。"""
+    report = _read(batch / "07_review" / "review-gate.json")
+    if not isinstance(report, dict):
+        return []
+    rounds = report.get("rounds") if isinstance(report.get("rounds"), dict) else {}
+    errors = report.get("errors")
+    if not isinstance(errors, list):
+        errors = rounds.get("errors")
+    out, seen = [], set()
+    for item in errors or []:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or "").strip()
+        if not code or code in DIFFERENCE_CODES:
+            continue
+        unit = f" [{item['unit_id']}]" if item.get("unit_id") else ""
+        reason = str(item.get("message") or item.get("reason") or "").strip()
+        text = f"{code}{unit}" + (f"：{reason}" if reason else "")
+        if text not in seen:
+            seen.add(text)
+            out.append(text[:200])
+    return out
+
+
+def _review_differences(record: dict) -> bool:
+    """一审/二审差异的设计状态：已执行完成、按策略继续、但没有放行。
+
+    这正是 ``runner.do_review_gate`` 在 ``manual_only`` 时写入的状态。差异属于
+    审核产出，必须保留给人工判断；它不是故障，也不能靠自动改标签/改判通过消除。
+    """
+    return (record.get("status") == mf.NEEDS_REVIEW
+            and record.get("execution_completed") is True
+            and record.get("continue_unqualified") is True
+            and not record.get("release_ready"))
+
+
 # 常见阻断检查的“为什么+怎么修”。说明必须能指向具体判定口径，避免只给
 # 一句“按阻断项修复”让用户反复试错。
 CHECK_HINTS = {
@@ -380,7 +421,8 @@ def _remedy(stage: contracts.Stage, batch_dir: str, detail: str = "") -> dict:
         return {"hint": "这是人工闸门，需你本人确认（不代签）：核对批次/来源/目标/查重后标记批准。",
                 "command": f"{base} mark --batch-dir {batch_dir} --stage {stage.id} --status approved"}
     if stage.id == "review_gate":
-        return {"hint": "按具体审核质量差异自动修正并复验；审核执行完成或队列为空均不能单独证明放行。",
+        return {"hint": "只修复审核闸门的确定性阻断项（标签体检/流程图/协议失败）；"
+                        "一审二审与原标签的差异是审核产出，保留给人工判断，不自动改判或改标签。",
                 "command": ""}
     if stage.kind == contracts.GATE:
         specific = _check_hint(detail)
@@ -462,13 +504,9 @@ def diagnose(batch_dir) -> dict:
         status = record.get("status") or mf.PENDING
         if status in mf.TERMINAL_OK:
             continue
-        if (status in (mf.BLOCKED, mf.NEEDS_REVIEW) and record.get("execution_completed")
-                and record.get("continue_unqualified")
-                and mf.dependency_satisfied(manifest, stage.id, allow_unqualified=True)):
-            quality_notes.append({"stage": stage.id, "status": status,
-                                  "reason": "已执行，有质量差异（未放行）",
-                                  "notes": str(record.get("notes") or ""), "blocking": False})
-            continue
+        # 只有 review_gate 会带 continue_unqualified；它是「审核已执行、差异待人工」
+        # 的设计态，统一走下面的 review_differences 分支，不再因依赖复验结果不同
+        # 而在“质量备注/卡点”两种展示间摇摆。
         # 只把「真正卡住当前推进」的阶段列为卡点：已失败/待复核/阻断，或第一个未完成的。
         note = str(record.get("notes") or "")
         unmet = [d for d in stage.depends_on
@@ -477,7 +515,21 @@ def diagnose(batch_dir) -> dict:
                           if not (inputs.get(k) or {}).get("exists")]
 
         reason, detail = "", ""
-        if status in (mf.FAILED, mf.NEEDS_REVIEW, mf.BLOCKED, mf.INVALIDATED):
+        review_differences = stage.id == "review_gate" and _review_differences(record)
+        if review_differences:
+            # 差异是审核产出（AGENTS.md 硬规则 6）：保留在人工队列与 review-gate.json，
+            # 供人工判断模型/知识头的偏差；不是要修掉的故障，也不阻断手动上传。
+            open_items = _open_manual_items(batch)
+            reason = "审核已执行：差异待人工判断（设计状态，不是卡点）"
+            detail = (f"审核差异队列有 {open_items} 项待人工判断"
+                      if open_items else "审核差异明细保留在 07_review/review-gate.json")
+            detail += "；未放行（release_ready=false），不阻断手动上传"
+            # 审核已消费上游并执行完成，上游 review 不再作为未满足依赖展示。
+            unmet = []
+            quality_notes.append({"stage": stage.id, "status": status,
+                                  "reason": "已执行，有质量差异（未放行）",
+                                  "notes": note, "blocking": False})
+        elif status in (mf.FAILED, mf.NEEDS_REVIEW, mf.BLOCKED, mf.INVALIDATED):
             if status == mf.INVALIDATED:
                 reason = "当前阶段需按内容变化更新"
                 invalidation = record.get("invalidation") or {}
@@ -501,13 +553,21 @@ def diagnose(batch_dir) -> dict:
                 if bl:
                     detail = "；".join(bl[:6])
             if stage.id == "review_gate":
-                open_items = _open_manual_items(batch)
-                if open_items:
-                    reason = "审核存在未解决的质量差异，尚未放行"
-                    detail = f"审核差异队列仍有 {open_items} 项未解决"
-                elif record.get("execution_completed"):
-                    reason = "审核放行条件未满足"
-                    detail = note or "审核已执行；当前质量或交付证据尚未满足放行条件"
+                if status == mf.BLOCKED:
+                    blockers = _review_gate_blockers(batch)
+                    open_items = _open_manual_items(batch)
+                    reason = "审核闸门未通过：存在确定性阻断项"
+                    detail = ("；".join(blockers[:6]) if blockers
+                              else (note or "闸门报告未列出具体阻断项"))
+                    if open_items:
+                        detail += (f"；另有 {open_items} 项人工审核差异待判断"
+                                   "（差异是产出，不作为卡点）")
+                else:
+                    # 没有 continue_unqualified 的 needs_review/failed 不能拿“差异”
+                    # 掩盖审核未执行完成；真正的失败原因由日志/结构化错误给出。
+                    reason = "审核未执行完成，不能按差异放行"
+                    blockers = _review_gate_blockers(batch)
+                    detail = "；".join(blockers[:6])
             if not detail:
                 err = _agent_error(batch, stage.id, record)
                 if err:
@@ -536,7 +596,7 @@ def diagnose(batch_dir) -> dict:
                     detail = "切片候选已生成，需核对边界的单元：" + units
                 elif not (batch / "02_audio" / "segment-evidence.json").is_file():
                     detail = "缺少 02_audio/segment-evidence.json：听力切段尚未运行或未启用（可选能力）"
-        if unmet:
+        if unmet and not review_differences:
             reason = reason or "等待上游交付满足条件"
             dependency_details = []
             for dep in unmet:
@@ -555,12 +615,20 @@ def diagnose(batch_dir) -> dict:
             detail = (detail + "；" if detail else "") + "缺少输入：" + "、".join(missing_inputs)
 
         remedy = _remedy(stage, str(batch), detail)
+        if review_differences:
+            remedy = {"hint": "差异是审核产出：在工作台「审核」页逐项人工判断；"
+                              "不要自动改标签或改判通过，也不必为了放行重跑审核。",
+                      "command": ""}
         # 真正的「卡点」是本阶段自身有问题（失败/待复核/阻断/失效，或它自己
         # 缺必需输入且没有被上游挡住），而不是单纯被上游拖住等着的下游阶段。
-        own_problem = (status in (mf.FAILED, mf.NEEDS_REVIEW, mf.BLOCKED, mf.INVALIDATED)
-                       or (bool(missing_inputs) and not unmet))
+        # 审核差异设计态虽然 status=needs_review，但属于已验证产出，不算卡点。
+        own_problem = (not review_differences
+                       and (status in (mf.FAILED, mf.NEEDS_REVIEW, mf.BLOCKED, mf.INVALIDATED)
+                            or (bool(missing_inputs) and not unmet)))
         failure_class = ""
-        if status == mf.INVALIDATED:
+        if review_differences:
+            failure_class = "quality_differences"
+        elif status == mf.INVALIDATED:
             failure_class = "stale_input"
         elif status == mf.FAILED:
             failure_class = "agent_or_script_failure" if stage.kind in (contracts.AGENT, contracts.COMMAND) else "gate_failure"
@@ -573,12 +641,13 @@ def diagnose(batch_dir) -> dict:
                 failure_class = "deterministic_gate_failure"
             else:
                 failure_class = "blocked_dependency_or_evidence"
-        if missing_inputs:
+        if missing_inputs and not review_differences:
             failure_class = "missing_required_input"
         next_action = (
+            "人工判断审核差异；未放行但不阻断手动上传" if failure_class == "quality_differences" else
             "重新导出并重跑当前阶段" if failure_class == "stale_input" else
             "修正代理输出后重试" if failure_class == "agent_output_needs_retry" else
-            "按具体质量差异自动修正并复验审核放行条件" if failure_class == "quality_findings" else
+            "修复审核闸门确定性阻断项后复验（人工差异保留，不自动改判）" if failure_class == "quality_findings" else
             "查看阻断码并修复源文件/批次产物" if failure_class in ("deterministic_gate_failure", "gate_failure") else
             "补齐必需输入" if failure_class == "missing_required_input" else
             "等待上游阶段完成" if unmet else
@@ -604,7 +673,13 @@ def diagnose(batch_dir) -> dict:
     ordered.sort(key=lambda it: (0 if it["stage"] in ("model",) else 1,
                                   order.get(it["stage"], len(order))))
     head = ordered[0] if ordered else None
-    if head:
+    differences = [it for it in items if it.get("failure_class") == "quality_differences"]
+    if not any(it["blocking"] for it in items) and differences:
+        open_items = _open_manual_items(batch)
+        count = f"{open_items} 项" if open_items else ""
+        summary = (f"批次「{batch.name}」：自动阶段已执行完成；"
+                   f"{count}审核差异待人工判断（不阻断手动上传），未宣称放行")
+    elif head:
         summary = f"批次「{batch.name}」：{'卡在' if head['blocking'] else '等待'}「{head['title']}」：{head['reason']}"
         if head["detail"]:
             summary += "——" + head["detail"][:120]
