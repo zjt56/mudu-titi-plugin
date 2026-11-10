@@ -25,6 +25,20 @@ class UploadStatusTests(unittest.TestCase):
         self.jobs.start()
         self.addCleanup(self.jobs.stop)
 
+    def test_duplicate_upload_reports_reused_batch_and_uploaded_state(self):
+        fake_files = [{"filename": "原卷.docx", "data": b"source-bytes"}]
+        with patch.object(server, "auto_flow", object()), \
+                patch.object(server, "wf_manifest", SimpleNamespace(load=lambda folder: {})), \
+                patch.object(server, "paper_info", return_value={}), \
+                patch.object(server, "stage_cards", return_value={}), \
+                patch.object(server, "_existing_upload_batch", return_value=self.folder), \
+                patch.object(server, "overview", return_value={"uploaded": True}):
+            result = server.handle_upload({"title": "原卷"}, fake_files)
+        self.assertTrue(result["duplicate"])
+        self.assertTrue(result["uploaded"])
+        self.assertIn("已上传完成", result["message"])
+        self.assertEqual(result["name"], "batch")
+
     def test_flow_timing_uses_real_stage_timestamps_in_minutes(self):
         manifest = {"created_at": "2026-11-09T22:18:45+08:00", "stages": {
             "extract": {"started_at": "2026-11-09T22:18:45+08:00", "finished_at": "2026-11-09T22:18:53+08:00"},

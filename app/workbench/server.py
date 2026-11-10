@@ -1060,7 +1060,17 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
         extra_audio)
     if existing is not None:
         state = wf_manifest.load(existing) if wf_manifest else {}
+        try:
+            existing_uploaded = bool(overview(existing.name).get("uploaded"))
+        except (ValueError, OSError, KeyError, TypeError):
+            existing_uploaded = str(((state.get("stages") or {}).get("upload") or {}).get("status")) == "completed"
+        # A reused batch that is already uploaded is hidden from both the queue
+        # and the review list, so a silent reuse looks like the task vanished.
+        message = ("该试卷已上传完成，无需重复上传（批次：" + existing.name + "）"
+                   if existing_uploaded else
+                   "该试卷已存在，已定位到已有任务（批次：" + existing.name + "）")
         return {"name": existing.name, "duplicate": True, "reused": True,
+                "uploaded": existing_uploaded, "message": message,
                 "inbox": "", "paper": paper_info(existing, {}, state),
                 "stage": stage_cards(state), "files": []}
     # 未填写标题时保留用户上传文件的识别线索，不再一律变成「新试卷」。
