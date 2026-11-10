@@ -954,7 +954,7 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
 
 
 @serialized
-def start_advance(name: str, *, reset_budget=False) -> dict:
+def start_advance(name: str, *, reset_budget=True) -> dict:
     """Run one local pass; automatic callers preserve durable retry accounting."""
     if auto_flow is None:
         raise ValueError("流水线模块不可用")

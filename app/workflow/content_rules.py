@@ -184,16 +184,23 @@ def audit_ownership(batch, rows):
     return report
 
 
+def _preserve_text(value):
+    """Compare content after removing media markers consumed by final wire format."""
+    if not isinstance(value, str):
+        return value
+    return re.sub(r"\[IMG\s+[^\]\r\n]+\]", "", value)
+
+
 def preserve(row, upstream):
-    """知识点/装配阶段只能逐字搬运子智能体1的解析与大意，不能改写。"""
+    """知识点/装配阶段只能逐字搬运子智能体1的解析与大意；媒体标记按统一线格式归一。"""
     for key, default in (("explanation", ""), ("articleSummary", "")):
         actual, expected = row.get(key, default), upstream.get(key, default)
-        if actual != expected and not (is_placeholder(actual) and is_placeholder(expected)):
+        if _preserve_text(actual) != _preserve_text(expected) and not (is_placeholder(actual) and is_placeholder(expected)):
             raise ValueError(f"Knowledge/assemble must preserve the explanation artifact field {key}")
     prior = {_number(c["number"]): c for c in upstream.get("subquestions") or []}
     for child in row.get("subquestions") or []:
         number = _number(child.get("number"))
         if number not in prior:
             raise ValueError("Explanation artifact is missing this child")
-        if child.get("explanation", "") != prior[number].get("explanation", ""):
+        if _preserve_text(child.get("explanation", "")) != _preserve_text(prior[number].get("explanation", "")):
             raise ValueError("Knowledge/assemble must preserve each child explanation verbatim")

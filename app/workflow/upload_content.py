@@ -122,6 +122,7 @@ _QUOTE_MAP = str.maketrans({"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019
 def _verbatim(value):
     """只忽略排版标记、Markdown 星号、空白，以及引号的弯/直弯样式；
     实词、全半角逗号句号等标点严格保留——标点或措辞差异仍判为不同。"""
+    value = re.sub(r'\[IMG\s+[^\]\r\n]+\]', '', value, flags=re.I)
     value = re.sub(r'</?(?:u|b|strong|em|i|sup|sub)(?:\s[^>]*)?>', '', value, flags=re.I)
     value = re.sub(r'\*{1,3}', '', value)
     value = value.translate(_QUOTE_MAP)
