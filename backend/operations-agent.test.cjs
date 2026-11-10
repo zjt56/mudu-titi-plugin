@@ -619,3 +619,25 @@ test('transient poll errors are recognised and never pinned as a standing failur
   assert.equal(manager.status().lastPollError, '');
   await manager.dispose();
 });
+
+test('a long-ago non-transient scan error does not stay pinned on the panel', async () => {
+  const { createOperationsAgentManager } = await moduleReady;
+  let fail = true;
+  const manager = createOperationsAgentManager({ effect: () => {} }, {
+    backendRequest: async () => {
+      if (fail) { const e = new Error('INVALID_INCIDENT_LIST'); e.code = 'INVALID_INCIDENT_LIST'; throw e; }
+      return { incidents: [] };
+    },
+    resolveRoute: () => ({ provider: 'p', model: 'm' }),
+    cwd: '/tmp/ops-prompt',
+    enabled: () => true,
+    hasWork: () => ({ has_work: true, batches: [] }),
+  });
+  await manager.tick();
+  const stuck = manager.status().lastPollError;
+  // Simulate a later successful scan that clears the error.
+  fail = false;
+  await manager.tick();
+  assert.equal(manager.status().lastPollError, '', 'successful scan must clear: ' + stuck);
+  await manager.dispose();
+});
