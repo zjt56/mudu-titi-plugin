@@ -1,5 +1,11 @@
 # RULES — 规则与强调台账
 
+## 2026-11-10 原解析溯源与模型 JSON 结构必须稳健（用户要求彻底修复并加强提示词）
+
+- 原话要点：“彻底修复此类 bug，并加强提示词的说明”。
+- 规则：①原解析/原大意/书面表达【思路点拨】等合法原文，字段标题（【解析】【答案】【分析】【详解】【思路点拨】【文章大意】）由程序统一剥离后再溯源，严格与非严格口径一致；真正改写/半截/跨材料仍拒绝。②模型输出只允许一个根 JSON 对象，多余 `}`/`]` 在非严格阶段可去掉后重解析（能解析成完整对象才接受），严格审核不修补；`valid+valid` 拼接仍拒绝。③各阶段提示词必须显式写明上述 JSON 单对象纪律、标签剥离、书面表达思路点拨用法、整组题型必带维度。
+- 落地：`app/workflow/content_fragments.py`、`upload_content.py`、`local_agent.py`、`content_rules.py`、`agent_tasks.py`、`app/prompts/roles/explanations.md`、`knowledge.md`；回归 `test_upload_content`、`test_content_fragments`、`test_local_agent`；记录 `CHANGELOG/2026-11-10-thorough-fix-explanation-and-json.md`。
+
 ## 2026-11-10 上传不校验已发过的试卷、删除必须干净（用户明确）
 
 - 原话要点：“不去校验之前已经发过的试卷，也不留存对应的记录，只要删除批次了，就删除干净”。

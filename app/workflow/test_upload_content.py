@@ -122,6 +122,15 @@ class UploadContentTest(unittest.TestCase):
         hashes = {p: hashlib.sha256((self.batch / p).read_bytes()).hexdigest() for p in paths}
         (self.batch / '07_review/structure-gate.json').write_text(json.dumps({'passed': True, 'input_hashes': hashes}))
 
+    def test_prompts_strengthen_label_handling_and_json_discipline(self):
+        from workflow import content_rules, agent_tasks, local_agent
+        rules = content_rules.RULES
+        for keyword in ('思路点拨', '字段标题处理', 'JSON 输出', '只返回一个根 JSON 对象'):
+            self.assertIn(keyword, rules)
+        self.assertIn('mandatory dimension', agent_tasks.RULES['knowledge'])
+        self.assertIn('JSON discipline', agent_tasks.RULES['knowledge'])
+        self.assertIn('EXACTLY ONE root object', local_agent.INSTRUCTIONS)
+
     def test_appendixed_writing_hint_explanation_passes_strict(self):
         # The original 解析 for 书面表达 is the appendix 【思路点拨】 paragraph; it is not
         # a question line, so strict validation must still accept the verbatim hint.
