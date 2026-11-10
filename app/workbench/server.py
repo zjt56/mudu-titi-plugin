@@ -2217,8 +2217,15 @@ def upload_state(name):
     elif receipt:
         # A later preflight failure cannot erase evidence of an accepted upload.
         # Keep its diagnostic visible without enabling a duplicate submission.
-        result.update(state="accepted", ok=True)
-        result["step"] = "已暂存，等待远端确认"
+        if receipt.get('state') in ('staged_attachments_pending', 'attachment_rejected'):
+            result.update(state="failed", ok=False)
+            result["step"] = "审核附件未追加完成"
+            error = receipt.get('attachment_error') or {}
+            result["error"] = str(error.get('details') or error.get('code')
+                                  or "审核附件未追加完成，请重试或检查远端暂存")
+        else:
+            result.update(state="accepted", ok=True)
+            result["step"] = "已暂存，等待远端确认"
     elif job.get("ok") is False:
         result["state"] = "failed"
     elif rejected:

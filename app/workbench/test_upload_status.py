@@ -202,6 +202,19 @@ class UploadStatusTests(unittest.TestCase):
                 server.start_batch_upload('batch')
             thread.assert_not_called()
 
+    def test_attachment_pending_receipt_is_retryable_not_accepted(self):
+        self.record('receipt.json', {'id': 'stage-1', 'payload_sha256': 'abc',
+                                     'state': 'staged_attachments_pending',
+                                     'attachment_error': {'code': 'submission_unknown'}})
+        status = server.upload_state('batch')
+        self.assertEqual(status['state'], 'failed')
+        self.assertFalse(status['ok'])
+        self.assertIn('审核附件未追加完成', status['step'])
+        with patch.object(server.threading, 'Thread') as thread:
+            result = server.start_batch_upload('batch')
+        self.assertTrue(result['started'])
+        thread.assert_called_once()
+
     def test_running_and_unknown_submission(self):
         self.record("attempts/a.json", {"state": "submitting", "payload_sha256": "a"})
         server._upload_jobs["batch"] = {"running": True, "step": "写入云端上传暂存"}
