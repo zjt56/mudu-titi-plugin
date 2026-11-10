@@ -48,8 +48,21 @@ def _inline_numbers(text):
 
 def _question(line):
     match = QUESTION.match(line)
-    if match and next(_inline_numbers(line[match.end(1):]), None):
-        return None  # A second question on this line makes the label ambiguous.
+    if not match:
+        return None
+    current = int(match.group(1))
+    rest = line[match.end(1):]
+    # A second *numbered question* on this line (e.g. "1.A ... 2.B ...") makes the
+    # label ambiguous. Sentence numbers inside the explanation ("at age 5.",
+    # "page 3.") are always smaller than the current question number, so they are
+    # ignored; otherwise the row is dropped and its passage summary loses owner.
+    for extra in _inline_numbers(rest):
+        number = int(re.match(r'\d+', extra.group(0)).group())
+        if number <= current:
+            continue
+        following = rest[extra.end():]
+        if re.match(r'\s*(?:[A-Da-d](?=\s|　|[.．、]|$|【)|【\s*(?:解析|详解|分析)\s*】)', following):
+            return None
     return match
 
 
@@ -279,6 +292,10 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                                 continue
                             break
                         members.append(int(question.group(1)))
+                # 纯答案行（无【解析】）也能被 members 收集；此时直接用它所属的
+                # 第一个题号作为 owner，而不是因为向前扫描遇到纯答案行就丢失归属。
+                if owner is None and members:
+                    owner = members[0]
                 # 段落末尾的【文章大意】后面通常直接是下一篇材料，前面才是它概括的
                 # 46–55 题。此时向前找本段起始边界，把大意归属到前面这组题号。
                 if owner is None:

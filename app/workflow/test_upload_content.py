@@ -48,6 +48,36 @@ class UploadContentTest(unittest.TestCase):
         self.path.write_text(self.text + '31.B 【解析】另一种说法。\n')
         self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
 
+    def test_summary_owner_survives_digit_inside_explanation(self):
+        # "at age 5." is sentence text, not a second question number. The row must
+        # still be recognised so the passage summary keeps its owner.
+        self.path.write_text(
+            'Ⅷ.阅读理解\nB\n　　【文章大意】天才少年Mike文章。\n'
+            '59.A　【解析】根据第二段第二句“He began to study computer programming at age 5.”可知。\n'
+            '60.C　【解析】推理判断题。\n')
+        item = {'unit_id': 'b', 'numbers': [59, 60], 'articleSummary': '天才少年Mike文章。',
+                'subquestions': [{'number': 59, 'explanation': '根据第二段第二句“He began to study computer programming at age 5.”可知。'},
+                                 {'number': 60, 'explanation': '推理判断题。'}]}
+        report = inspect_content(self.batch, {'items': [item]}, strict=True)
+        self.assertTrue(report['passed'], report)
+        owners = [row['owner'] for row in report['summaries'] if row['text'] == '天才少年Mike文章。']
+        self.assertEqual(owners, [59], report['summaries'])
+
+    def test_summary_owner_survives_pure_answer_lines(self):
+        # Answers printed alone with the explanation on the next paragraph must
+        # still let the group summary bind to its first question.
+        self.path.write_text(
+            'Ⅷ.阅读理解\nF\n　　【文章大意】智者和儿子的故事。\n'
+            '73.Because he had no goal in life.\n【解析】根据第一段第二句可知。\n'
+            '74.He thought everything was nice.\n【解析】根据第四段最后一句可知。\n')
+        item = {'unit_id': 'f', 'numbers': [73, 74], 'articleSummary': '智者和儿子的故事。',
+                'subquestions': [{'number': 73, 'explanation': '根据第一段第二句可知。'},
+                                 {'number': 74, 'explanation': '根据第四段最后一句可知。'}]}
+        report = inspect_content(self.batch, {'items': [item]}, strict=True)
+        self.assertTrue(report['passed'], report)
+        owners = [row['owner'] for row in report['summaries'] if row['text'] == '智者和儿子的故事。']
+        self.assertEqual(owners, [73], report['summaries'])
+
     def test_markdown_prefixed_annotation_heading_ends_explanation(self):
         self.path.write_text('Ⅵ.完形填空\n31.A 【解析】游泳原因。\n##【词汇积累】swim v.游泳\n')
         payload = {'items': [{'number': 31, 'explanation': '游泳原因。'}]}
