@@ -33,9 +33,10 @@ test('当前试卷内容审核与上传格式检查结束后自动切到下一�
   assert.match(client, /pending\.some\(\(b\) => b\.name === cur\) \? cur : pending\[0\]\.name/);
   // 流程图只跟踪处理中的试卷。
   assert.match(client, /const selBatch = pendingBatches\.find\(\(b\) => b\.name === sel\) \|\| pendingBatches\[0\]/);
-  // 本轮全部结束时给出收尾状态与人工确认入口。
-  assert.match(client, /本轮流程已结束/);
-  assert.match(client, /上传新试卷会开始一轮新流程/);
+  // 无任务时仍显示完整中性流程图，已完成的确认入口保留在左侧。
+  assert.match(client, /const isFlowOverview = !selBatch/);
+  assert.match(client, /compactFlowStages\(sourceItems, isFlowOverview\)/);
+  assert.doesNotMatch(client, /const flowDone =|!selBatch \? flowDone/);
   // 排队区常驻显示：即使没有处理中的试卷也保留这块区域和空状态，
   // 不因队列为空而整块收起；内容审核与上传格式检查结束的试卷仍不占用队列。
   assert.match(client, /排队区常驻显示/);
@@ -50,12 +51,20 @@ test('流程图精修：紧凑两行节点名、方向箭头、已完成段用�
   assert.match(client, /const DONE = \{ completed: true, approved: true, skipped: true, completed_with_findings: true \}/);
   assert.match(client, /doneN \+ ' \/ ' \+ items\.length\)/);
   assert.match(client, /arrows\.map/);   // 方向箭头消除蛇形回绕的阅读歧义
-  assert.match(client, /s\.reached \? doneLine : todoLine/); // 已完成段用中性灰
-  // 紧凑布局：节点间距从 210×132 收到 120×78，不再顶出右栏。
-  assert.match(client, /const COLS = 3, CW = 120, ROW_H = 78/);
+  assert.match(client, /s\.line/); // 连线按状态取色：已走过/运行中/未走
+  assert.match(client, /--wf-flow-line-live/); // 运行中连线流动虚线
+  assert.match(client, /className: s\.live \? 'wf-flow-live'/);
+  assert.match(client, /@keyframes wf-flow-dash/);
+  // 十二类使用四行依赖布局，四路并行明确分叉，不再强制蛇形串行。
+  // 行距与半径加大，避免纵向拥挤；仍保持同一四行依赖布局。
+  assert.match(client, /const R = 13, CW = 100, ROW_H = 108/);
+  assert.match(client, /flowDependencies\(\)\.forEach/);
   // 整图是带 viewBox 的自适应 SVG：随容器等比缩放，节点名在 SVG 内两行居中。
   assert.match(client, /viewBox: '0 0 ' \+ svgW/);
-  assert.match(client, /maxWidth: svgW, height: 'auto'/);
+  // 自适应：不设固定宽高，随列宽拉伸，高度按比例自动。
+  assert.match(client, /preserveAspectRatio: 'xMidYMid meet'/);
+  assert.match(client, /style: \{ display: 'block', width: '100%', height: 'auto', aspectRatio: svgW \+ ' \/ ' \+ svgH \}/);
+  assert.doesNotMatch(client, /maxWidth: svgW/);
   assert.match(client, /function flowLabelLines\(name\)/);
   assert.match(client, /flowLabelLines\(shortStageName\(it\)\)/);
   assert.match(client, /textAnchor: 'middle'/);

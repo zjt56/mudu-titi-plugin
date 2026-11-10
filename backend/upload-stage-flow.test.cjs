@@ -14,9 +14,8 @@ function renderFlow(items, current = items[0], options = {}) {
     flow_done: !!options.finished, advance: options.advance || {}, stage: { items, current, done: 0, total: items.length } };
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter((x) => x != null && x !== false) }),
-    useState(initial) { const index = stateIndex++; return [index === 6 ? [batch] : initial, value => updates.push({ index, value })]; },
-    useRef: (current) => ({ current }),
-    useEffect() {},
+    useState(initial) { const index = stateIndex++; return [index === 6 ? (options.batches || [batch]) : index === 11 ? (options.refreshError || initial) : initial, value => updates.push({ index, value })]; },
+    useRef: (current) => ({ current }), useEffect() {},
     useCallback: (callback) => { callbacks.push(callback); return callback; },
   };
   const context = vm.createContext({
@@ -28,13 +27,11 @@ function renderFlow(items, current = items[0], options = {}) {
   });
   vm.runInContext(client.slice(client.indexOf('    var TEXT ='), client.indexOf('    // 统一的线性图标')), context);
   const start = client.indexOf('    function UploadView(');
-  // Keep the component plus its adjacent pure label helpers, excluding other views.
   const helpersEnd = client.indexOf('    function diagBanner(', start);
   assert.ok(start >= 0 && helpersEnd > start);
   vm.runInContext(client.slice(start, helpersEnd), context);
   return { tree: context.UploadView({}), context, refresh: callbacks[0], updates };
 }
-
 function walk(node, predicate, found = []) {
   if (!node || typeof node !== 'object') return found;
   if (predicate(node)) found.push(node);
@@ -45,200 +42,223 @@ function text(node) {
   if (typeof node === 'string' || typeof node === 'number') return String(node);
   return (node && node.children || []).map(text).join(' ');
 }
-
+function visibleText(node) {
+  if (node && node.type === 'title') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  return (node && node.children || []).map(visibleText).join(' ');
+}
+const nodesOf = (tree) => walk(tree, node => node.type === 'g');
+const nodeOf = (tree, id) => nodesOf(tree).find(node => node.props.key === id);
+const tipOf = (node) => text(walk(node, entry => entry.type === 'title')[0]);
 const ids = ['extract', 'structure_gate', 'preassemble', 'answers', 'audio', 'types',
   'explanations', 'knowledge', 'assemble', 'meta', 'underlines', 'validate', 'review',
   'review_gate', 'format_gate', 'upload_gate', 'upload', 'publish_gate'];
-const stages = () => ids.map((id) => ({ id, status: 'pending' }));
+const stages = () => ids.map(id => ({ id, status: 'pending' }));
+const classIds = ['extract', 'structure_gate', 'preassemble', 'audio', 'answers', 'explanations',
+  'knowledge', 'assemble', 'validate', 'review', 'format_gate', 'upload'];
+const classNames = ['内容提取', '结构确认', '组装判型', '听力处理', '答案填充', '解析填充',
+  '知识标注', '汇总整理', '本地体检', '内容审核', '格式检查', '审核上传'];
 
-test('main flow stays under ten nodes while retaining every actual substage', () => {
+test('main flow uses the approved twelve classes and retains every configured stage', () => {
   const items = stages().concat([{ id: 'future_contract_stage', title: '契约扩展阶段', status: 'pending' }]);
   const { tree } = renderFlow(items);
-  const svg = walk(tree, (node) => node.type === 'svg' && node.props.role === 'img')[0];
-  const nodes = walk(svg, (node) => node.type === 'g');
-  assert.deepEqual(nodes.map((node) => node.props.key), ['extract', 'preassemble', 'audio', 'answers', 'knowledge', 'assemble', 'review', 'format_gate', 'upload']);
-  assert.equal(nodes.length, 9);
-  assert.deepEqual(nodes.flatMap((node) => node.props['data-stage-ids'].split(' ')).sort(), items.map((item) => item.id).sort());
-  assert.match(text(svg), /批次组装与题型/);
-  assert.match(text(svg), /来源难度与汇总/);
-  assert.match(text(svg), /上传格式检查/);
-  assert.match(text(svg), /进入人工审核/);
-  assert.doesNotMatch(text(svg), /front_assemble/);
-  // 用户要求：流程图不再显示长说明、可展开说明与悬停长文案。
-  assert.equal(walk(tree, (node) => node.type === 'details').length, 0);
-  assert.doesNotMatch(text(tree), /查看分项处理与状态/);
+  const nodes = nodesOf(tree);
+  assert.deepEqual(nodes.map(node => node.props.key), classIds);
+  assert.equal(nodes.length, 12);
+  assert.deepEqual(nodes.flatMap(node => node.props['data-stage-ids'].split(' ')).sort(), items.map(item => item.id).sort());
+  assert.deepEqual(nodes.map(node => visibleText(node).trim()), classNames);
+  assert.equal(walk(tree, node => node.type === 'details').length, 0);
+  assert.doesNotMatch(text(tree), /查看分项处理与状态|06_batch\/batch\.json/);
 });
 
-test('preassembly completion remains independent from fill summary and final format check', () => {
-  const items = stages();
-  for (const id of ['preassemble', 'types']) items.find((item) => item.id === id).status = 'completed';
-  items.find((item) => item.id === 'answers').status = 'running';
-  items.find((item) => item.id === 'audio').status = 'running';
-  const { tree } = renderFlow(items, items.find((item) => item.id === 'answers'));
-  const nodes = walk(tree, (node) => node.type === 'g');
-  const node = (id) => nodes.find((entry) => entry.props.key === id);
-  assert.match(text(node('preassemble')), /已完成/);
-  assert.match(text(node('preassemble')), /✓/);
-  for (const id of ['assemble', 'format_gate', 'upload']) {
-    assert.match(text(node(id)), /待处理/);
-    assert.doesNotMatch(text(node(id)), /✓/);
-  }
-  for (const id of ['answers', 'audio']) {
-    assert.match(text(node(id)), /处理中/);
-    assert.ok(walk(node(id), (entry) => entry.type === 'circle' && entry.props.r === 4).length);
-  }
-});
-
-test('format gate failures remain visible after content review completes, with contract detail', () => {
-  const items = stages();
-  for (const item of items.slice(0, ids.indexOf('format_gate'))) item.status = 'completed';
-  const format = items.find((item) => item.id === 'format_gate');
-  Object.assign(format, { title: '最终本地上传格式检查', description: '核验冻结前的最终上传形状', status: 'failed', notes: 'knowledgeIds 类型错误' });
-  const { tree } = renderFlow(items, format);
-  const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'format_gate')[0];
-  assert.match(text(node), /上传格式检查 · 失败/);
-  assert.doesNotMatch(text(node), /最终本地上传格式检查：失败/);
-  assert.doesNotMatch(text(node), /knowledgeIds 类型错误/);
-  assert.doesNotMatch(text(tree), /本轮流程已结束/);
-});
-
-test('stage labels honor authoritative backend titles and fallback labels cover new semantics', () => {
-  const { context } = renderFlow([]);
-  assert.equal(context.shortStageName({ id: 'assemble', title: '契约中的汇总名称' }), '契约中的汇总名称');
-  assert.equal(context.shortStageName({ id: 'preassemble' }), '前置批次组装');
-  assert.equal(context.shortStageName({ id: 'assemble' }), '填充汇总');
-  assert.equal(context.shortStageName({ id: 'format_gate' }), '上传格式检查');
-  assert.equal(context.shortStageName({ id: 'future' }), 'future');
-});
-
-test('each flow node lists its real substeps with short statuses, no long copy', () => {
-  const items = [
-    { id: 'extract', title: '原卷提取', status: 'completed' },
-    { id: 'structure_gate', title: '结构确认', status: 'completed' },
-    { id: 'preassemble', title: '前置批次组装', status: 'running' },
-    { id: 'types', title: '题型填充', status: 'pending' },
-    { id: 'review', title: '内容审核', status: 'failed', description: '超长描述不应出现', notes: '超长备注不应出现' },
-  ];
-  const { tree, context } = renderFlow(items, items[2]);
-  const groups = context.compactFlowStages(items);
-  const extract = groups.find((g) => g.id === 'extract');
-  assert.deepEqual(Array.from(extract.members, (m) => Array.from([m.title, m.status])),
-    [['原卷提取', 'completed'], ['结构确认', 'completed']]);
-  const pre = groups.find((g) => g.id === 'preassemble');
-  assert.deepEqual(Array.from(pre.members, (m) => String(m.title)), ['前置批次组装', '题型填充']);
-  const svg = walk(tree, (node) => node.type === 'svg' && node.props.role === 'img')[0];
-  const textOf = text(svg);
-  // 子步骤及状态在图上可见。
-  assert.match(textOf, /原卷提取 · 已完成/);
-  assert.match(textOf, /结构确认 · 已完成/);
-  assert.match(textOf, /题型填充 · 待处理/);
-  assert.match(textOf, /内容审核 · 失败/);
-  // 长描述/备注不再出现。
-  assert.doesNotMatch(textOf, /超长描述不应出现/);
-  assert.doesNotMatch(textOf, /超长备注不应出现/);
-});
-
-test('flow chart omits long explanatory copy and expandable details', () => {
+test('four-row chart draws actual parallel dependencies with audio joining only at review', () => {
   const { tree } = renderFlow(stages());
-  const content = text(tree);
-  // 用户要求：流程图上的长说明文字与可展开说明都不要。
-  assert.doesNotMatch(content, /识别与结构 → 前置组装 → 分项处理/);
-  assert.doesNotMatch(content, /查看分项处理与状态/);
-  assert.doesNotMatch(content, /主图合并为最多 9 个环节/);
-  assert.doesNotMatch(content, /06_batch\/batch\.json/);
-  assert.doesNotMatch(content, /后续只填充同一个批次/);
-  assert.doesNotMatch(content, /前置批次组装同时完成题型与子类判定/);
-  assert.doesNotMatch(content, /通过即打包成可上传批次并进入人工审核区/);
-  assert.equal(walk(tree, (node) => node.type === 'details').length, 0);
+  const edges = walk(tree, node => node.props['data-flow-from']).map(node => [node.props['data-flow-from'], node.props['data-flow-to']]);
+  assert.deepEqual(edges, [
+    ['extract', 'structure_gate'], ['structure_gate', 'preassemble'],
+    ['preassemble', 'audio'], ['preassemble', 'answers'], ['preassemble', 'explanations'], ['preassemble', 'knowledge'],
+    ['answers', 'assemble'], ['explanations', 'assemble'], ['knowledge', 'assemble'],
+    ['assemble', 'validate'], ['validate', 'review'], ['audio', 'review'],
+    ['review', 'format_gate'], ['format_gate', 'upload'],
+  ]);
+  const center = id => walk(nodeOf(tree, id), node => node.type === 'circle' && [11, 13].includes(node.props.r))[0].props;
+  assert.equal(new Set(classIds.map(id => center(id).cy)).size, 4);
+  assert.ok(center('audio').cy > center('preassemble').cy);
+  for (const id of ['answers', 'explanations', 'knowledge']) assert.equal(center(id).cy, center('audio').cy);
 });
 
-test('grouped status never completes while a real child is pending or failed', () => {
+test('tooltip expands backend substeps and preserves exact child statuses without permanent labels', () => {
+  const items = [
+    { id: 'extract', title: '原卷提取', status: 'completed', substeps: [
+      { id: 'word', title: 'Word文字提取', status: 'completed' },
+      { id: 'ocr', title: 'PDF识别', status: 'pending' },
+      { id: 'media', title: '媒体索引', status: 'skipped' },
+    ] },
+    { id: 'preassemble', title: '前置组装', status: 'running', substeps: [{ id: 'split', title: '原卷切题', status: 'running' }] },
+    { id: 'types', title: '题型交接', status: 'pending' },
+    { id: 'review', title: '两轮审核', status: 'failed', description: '长描述不出现', notes: '长备注不出现', substeps: [
+      { id: 'first', title: '首轮审核', status: 'failed' }, { id: 'second', title: '次轮审核', status: 'pending' },
+    ] },
+  ];
+  const { tree, context } = renderFlow(items, items[1]);
+  const extract = context.compactFlowStages(items).find(group => group.id === 'extract');
+  assert.deepEqual(Array.from(extract.substeps, step => [step.id, step.title, step.status]), [
+    ['word', 'Word文字提取', 'completed'], ['ocr', 'PDF识别', 'pending'], ['media', '媒体索引', 'skipped'],
+  ]);
+  assert.equal(extract.status, 'completed'); // UI does not invent a different backend stage verdict.
+  assert.match(tipOf(nodeOf(tree, 'extract')), /Word文字提取 · 已完成\nPDF识别 · 待处理\n媒体索引 · 已跳过/);
+  assert.doesNotMatch(tipOf(nodeOf(tree, 'extract')), /原卷提取/); // substeps replace the stage fallback.
+  assert.match(tipOf(nodeOf(tree, 'preassemble')), /原卷切题 · 处理中\n题型交接 · 待处理/);
+  assert.match(tipOf(nodeOf(tree, 'review')), /首轮审核 · 失败\n次轮审核 · 待处理/);
+  assert.doesNotMatch(visibleText(tree), /Word文字提取|PDF识别|媒体索引|原卷切题|题型交接|首轮审核|次轮审核/);
+  assert.doesNotMatch(text(tree), /长描述不出现|长备注不出现/);
+});
+
+test('nodes expose keyboard focus and accessible tooltip labels with authoritative substep titles', () => {
+  const items = stages();
+  items[0].substeps = [{ id: 'answers', title: '原卷答案段识别', status: 'pending' }];
+  const { tree } = renderFlow(items);
+  const svg = walk(tree, node => node.type === 'svg' && node.props.role === 'group')[0];
+  assert.ok(svg); // A parent image role would flatten the individually named children.
+  for (const node of nodesOf(tree)) {
+    assert.equal(node.props.tabIndex, 0);
+    assert.equal(node.props.role, 'img');
+    assert.equal(node.props['aria-label'], tipOf(node));
+  }
+  const extract = nodeOf(tree, 'extract');
+  assert.match(extract.props['aria-label'], /原卷答案段识别 · 待处理/);
+  assert.doesNotMatch(extract.props['aria-label'], /答案填充/);
+  assert.equal(visibleText(extract).trim(), '内容提取');
+});
+
+test('nonblocking warning substeps use localized tooltip text without changing stage completion', () => {
+  const items = stages();
+  Object.assign(items.find(item => item.id === 'validate'), { status: 'completed', substeps: [
+    { id: 'format_hints', title: '格式表达检查', status: 'warning' },
+  ] });
+  const { tree, context } = renderFlow(items);
+  const validate = nodeOf(tree, 'validate');
+  assert.match(tipOf(validate), /格式表达检查 · 提示/);
+  assert.doesNotMatch(tipOf(validate), /warning/);
+  assert.equal(validate.props['aria-label'], tipOf(validate));
+  assert.doesNotMatch(visibleText(validate), /格式表达检查|提示/);
+  assert.equal(context.compactFlowStages(items).find(item => item.id === 'validate').status, 'completed');
+});
+
+test('missing empty or invalid substeps fall back to the original stage without fabricated completion', () => {
+  const items = [
+    { id: 'assemble', title: '填充汇总', status: 'completed' },
+    { id: 'meta', title: '元数据', status: 'pending', substeps: [] },
+    { id: 'underlines', title: '画线', status: 'blocked', substeps: [null] },
+  ];
+  const { tree, context } = renderFlow(items);
+  assert.equal(context.compactFlowStages(items)[0].status, 'blocked');
+  assert.match(tipOf(nodeOf(tree, 'assemble')), /填充汇总 · 已完成\n元数据 · 待处理\n画线 · 受阻/);
+});
+
+test('preassembly completion remains independent from parallel fills summary and local checks', () => {
+  const items = stages();
+  for (const id of ['preassemble', 'types']) items.find(item => item.id === id).status = 'completed';
+  for (const id of ['answers', 'audio', 'explanations', 'knowledge']) items.find(item => item.id === id).status = 'running';
+  const { tree, context } = renderFlow(items, items.find(item => item.id === 'answers'));
+  assert.match(tipOf(nodeOf(tree, 'preassemble')), /组装判型 · 已完成/);
+  assert.equal(context.compactProgress({ items }).done, 1);
+  for (const id of ['assemble', 'validate', 'format_gate', 'upload']) {
+    assert.match(tipOf(nodeOf(tree, id)), /待处理/);
+    assert.doesNotMatch(visibleText(nodeOf(tree, id)), /✓/);
+  }
+  for (const id of ['answers', 'audio', 'explanations', 'knowledge']) {
+    assert.ok(walk(nodeOf(tree, id), entry => entry.props.className === 'wf-node-pulse').length);
+  }
+});
+
+test('grouped status never completes while a real stage is pending or failed', () => {
   const { context } = renderFlow([]);
   for (const [first, second, expected] of [
     ['completed', 'pending', 'pending'], ['running', 'pending', 'running'],
     ['completed', 'failed', 'failed'], ['running', 'blocked', 'blocked'],
-    ['completed', 'needs_review', 'needs_review'], ['completed', 'skipped', 'completed'],
-    ['skipped', 'skipped', 'skipped'],
+    ['completed', 'needs_review', 'needs_review'], ['completed', 'skipped', 'completed'], ['skipped', 'skipped', 'skipped'],
   ]) {
-    const grouped = context.compactFlowStages([{ id: 'preassemble', status: first }, { id: 'types', status: second }]);
-    assert.equal(grouped.length, 1);
-    assert.equal(grouped[0].status, expected);
+    const group = context.compactFlowStages([{ id: 'preassemble', status: first }, { id: 'types', status: second }])[0];
+    assert.equal(group.status, expected);
   }
 });
 
-test('preassembly and type checkpoint share completion without waiting for parallel fill', () => {
+test('format failures stay separate from completed content review', () => {
   const items = stages();
-  const preassemble = items.find((item) => item.id === 'preassemble');
-  const types = items.find((item) => item.id === 'types');
-  Object.assign(preassemble, { kind: 'agent', status: 'completed' });
-  Object.assign(types, { kind: 'gate', status: 'pending' });
-  for (const id of ['answers', 'audio', 'knowledge']) items.find((item) => item.id === id).status = 'running';
+  for (const item of items.slice(0, ids.indexOf('format_gate'))) item.status = 'completed';
+  const format = items.find(item => item.id === 'format_gate');
+  Object.assign(format, { status: 'failed', notes: 'knowledgeIds 类型错误' });
+  const { tree } = renderFlow(items, format);
+  assert.match(tipOf(nodeOf(tree, 'format_gate')), /格式检查 · 失败/);
+  assert.match(tipOf(nodeOf(tree, 'review')), /内容审核 · 已完成/);
+  assert.doesNotMatch(text(tree), /knowledgeIds 类型错误|本轮流程已结束/);
+});
+
+test('executed findings finish execution without manufacturing quality approval', () => {
+  const items = stages();
+  items.find(item => item.id === 'review').status = 'completed';
+  const gate = items.find(item => item.id === 'review_gate');
+  Object.assign(gate, { status: 'needs_review', execution_completed: true, continue_unqualified: true, quality_status: 'failed', release_ready: false });
+  const { tree, context } = renderFlow(items);
+  const group = () => context.compactFlowStages(items).find(item => item.id === 'review');
+  assert.equal(group().status, 'completed_with_findings');
+  assert.match(tipOf(nodeOf(tree, 'review')), /内容审核 · 已执行，有差异/);
+  assert.match(visibleText(nodeOf(tree, 'review')), /!/);
+  assert.doesNotMatch(visibleText(nodeOf(tree, 'review')), /✓/);
+  gate.continue_unqualified = false;
+  assert.equal(group().status, 'needs_review');
+  Object.assign(gate, { status: 'blocked', continue_unqualified: true });
+  assert.equal(group().status, 'blocked');
+});
+
+test('active overrides inProgress including false and sibling failures preserve live activity', () => {
+  const items = stages();
+  Object.assign(items.find(item => item.id === 'review'), { status: 'running', active: true });
+  items.find(item => item.id === 'review_gate').status = 'failed';
+  Object.assign(items.find(item => item.id === 'extract'), { status: 'completed', active: true });
+  Object.assign(items.find(item => item.id === 'answers'), { status: 'running', active: false, inProgress: true });
+  Object.assign(items.find(item => item.id === 'explanations'), { status: 'pending', inProgress: true });
+  Object.assign(items.find(item => item.id === 'knowledge'), { status: 'pending', active: false, inProgress: true });
+  const { tree, context } = renderFlow(items, items.find(item => item.id === 'answers'));
+  const groups = context.compactFlowStages(items);
+  assert.equal(groups.find(item => item.id === 'review').status, 'failed');
+  for (const id of ['review', 'extract', 'explanations']) {
+    assert.equal(groups.find(item => item.id === id).inProgress, true);
+    assert.ok(walk(nodeOf(tree, id), node => node.props.className === 'wf-node-pulse').length);
+  }
+  for (const id of ['answers', 'knowledge']) {
+    assert.equal(groups.find(item => item.id === id).inProgress, false);
+    assert.equal(walk(nodeOf(tree, id), node => node.props.className === 'wf-node-pulse').length, 0);
+  }
+  assert.equal(context.compactFlowStages(stages()).some(item => item.inProgress), false);
+});
+
+test('queue progress counts twelve visible classes rather than the eighteen-stage ledger', () => {
+  const items = stages();
+  for (const item of items) item.status = item.id === 'review' ? 'pending' : 'completed';
   const { context } = renderFlow(items);
-  const group = () => context.compactFlowStages(items).find((item) => item.id === 'preassemble');
-  assert.deepEqual(Array.from(group().stage_ids), ['preassemble', 'types']);
-  assert.equal(group().status, 'pending');
-  assert.equal(context.compactProgress({ items }).done, 0);
-
-  for (const status of ['completed', 'skipped']) {
-    types.status = status;
-    const { tree } = renderFlow(items, items.find((item) => item.id === 'answers'));
-    const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'preassemble')[0];
-    assert.equal(group().status, 'completed');
-    assert.equal(context.compactProgress({ items }).done, 1);
-    const tip = text(node);
-    assert.match(tip, /批次组装与题型 · 已完成/);
-    assert.match(tip, /前置批次组装 · /);
-    assert.match(tip, /题型填充 · /);
-    assert.ok(node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
-    for (const id of ['answers', 'audio', 'knowledge']) {
-      assert.equal(context.compactFlowStages(items).find((item) => item.id === id).status, 'running');
-    }
-  }
+  assert.deepEqual(JSON.parse(JSON.stringify(context.compactProgress({ items }))), { done: 11, total: 12 });
+  assert.match(client, /const progress = compactProgress\(st\)/);
+  assert.doesNotMatch(client, /const done = st\.done \|\| 0, total = st\.total \|\| 0/);
 });
 
-test('either preassembly or type checkpoint failure keeps the merged node incomplete', () => {
-  for (const failedId of ['preassemble', 'types']) {
-    const items = stages();
-    for (const id of ['preassemble', 'types', 'answers', 'audio', 'knowledge']) {
-      items.find((item) => item.id === id).status = 'completed';
-    }
-    const failed = items.find((item) => item.id === failedId);
-    Object.assign(failed, { status: 'failed', notes: failedId + ' 产物校验失败' });
-    const { tree, context } = renderFlow(items, failed);
-    const grouped = context.compactFlowStages(items).find((item) => item.id === 'preassemble');
-    const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'preassemble')[0];
-    assert.equal(grouped.status, 'failed');
-    assert.equal(grouped.done, 1);
-    assert.equal(grouped.total, 2);
-    assert.equal(context.compactProgress({ items }).done, 2); // Only audio and knowledge are complete.
-    assert.equal(node.props['data-stage-ids'], 'preassemble types');
-    assert.match(text(node), /批次组装与题型 · 失败/);
-    assert.match(text(node), new RegExp(failedId === 'preassemble' ? '前置批次组装 · 失败' : '题型填充 · 失败'));
-    assert.doesNotMatch(text(node), new RegExp(failed.notes));
-    assert.ok(!node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
-  }
+test('backend stage titles remain authoritative in tooltip fallbacks', () => {
+  const { context } = renderFlow([]);
+  assert.equal(context.shortStageName({ id: 'assemble', title: '契约中的汇总名称' }), '契约中的汇总名称');
+  assert.equal(context.shortStageName({ id: 'preassemble' }), '前置批次组装');
+  assert.equal(context.shortStageName({ id: 'format_gate' }), '上传格式检查');
+  assert.equal(context.shortStageName({ id: 'future' }), 'future');
 });
 
-test('executed quality findings finish execution without implying quality approval', () => {
-  const items = stages();
-  for (const id of ['validate', 'review']) items.find((item) => item.id === id).status = 'completed';
-  Object.assign(items.find((item) => item.id === 'review_gate'), {
-    status: 'needs_review', execution_completed: true, continue_unqualified: true,
-    quality_status: 'failed', release_ready: false, notes: '18 项真实差异保留',
-  });
-  const { tree, context } = renderFlow(items, items.find((item) => item.id === 'format_gate'));
-  const grouped = context.compactFlowStages(items).find((item) => item.id === 'review');
-  assert.equal(grouped.status, 'completed_with_findings');
-  const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'review')[0];
-  assert.match(text(node), /内容审核 · 已执行，有差异/);
-  assert.doesNotMatch(text(node), /18 项真实差异保留/);
-  assert.ok(node.children.some((entry) => entry.type === 'text' && text(entry) === '!'));
-  assert.ok(!node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
-  items.find((item) => item.id === 'review_gate').continue_unqualified = false;
-  assert.equal(context.compactFlowStages(items).find((item) => item.id === 'review').status, 'needs_review');
+test('unknown configured stages affect their preceding visible class without adding nodes', () => {
+  const items = stages().concat(Array.from({ length: 12 }, (_, i) => ({ id: 'future-' + i, status: i === 5 ? 'failed' : 'completed' })));
+  const { tree } = renderFlow(items, items[items.length - 1]);
+  assert.equal(nodesOf(tree).length, 12);
+  assert.match(tipOf(nodeOf(tree, 'upload')), /失败/);
 });
 
-test('late polling response cannot overwrite newer progress and errors become visible', async () => {
+test('late polling responses cannot overwrite newer progress and errors remain visible', async () => {
   const replies = [];
   const f = renderFlow(stages(), undefined, { jget: () => new Promise((resolve, reject) => replies.push({ resolve, reject })) });
   const older = f.refresh(), newer = f.refresh();
@@ -249,73 +269,87 @@ test('late polling response cannot overwrite newer progress and errors become vi
   assert.ok(f.updates.some(x => typeof x.value === 'string' && x.value.includes('进度刷新失败')));
 });
 
-test('active work remains animated when a sibling failed and pending readiness is inactive', () => {
-  const items = stages();
-  Object.assign(items.find(x => x.id === 'validate'), { status: 'failed' });
-  Object.assign(items.find(x => x.id === 'review'), { status: 'running', active: true });
-  const { tree, context } = renderFlow(items);
-  const group = context.compactFlowStages(items).find(x => x.id === 'review');
-  assert.equal(group.status, 'failed');
-  assert.equal(group.inProgress, true);
-  const node = walk(tree, x => x.type === 'g' && x.props.key === 'review')[0];
-  assert.ok(walk(node, x => x.props.className === 'wf-node-pulse').length);
-  assert.equal(context.compactFlowStages(stages()).some(x => x.inProgress), false);
-});
-
-test('blocked flags never manufacture completed findings and extraction activity survives completion', () => {
-  const items = stages();
-  for (const id of ['validate', 'review']) items.find(x => x.id === id).status = 'completed';
-  Object.assign(items.find(x => x.id === 'review_gate'), { status: 'blocked', execution_completed: true, continue_unqualified: true });
-  Object.assign(items.find(x => x.id === 'extract'), { status: 'completed', active: true });
-  const { context } = renderFlow(items);
-  assert.equal(context.compactFlowStages(items).find(x => x.id === 'review').status, 'blocked');
-  assert.equal(context.compactFlowStages(items).find(x => x.id === 'extract').inProgress, true);
-  items.find(x => x.id === 'review_gate').status = 'needs_review';
-  items.find(x => x.id === 'review_gate').release_ready = true;
-  assert.equal(context.compactFlowStages(items).find(x => x.id === 'review').status, 'needs_review');
-});
-
-test('queue progress counts the visible flow nodes, never the internal stage ledger', () => {
-  // The diagram has at most nine nodes; a queue row must not print e.g. "16/18".
-  const items = [];
-  const ids = ['extract', 'structure_gate', 'preassemble', 'audio', 'answers', 'explanations',
-    'types', 'knowledge', 'assemble', 'meta', 'underlines', 'validate', 'review', 'review_gate',
-    'format_gate', 'upload_gate', 'upload', 'publish_gate'];
-  for (const id of ids) items.push({ id, title: id, status: id === 'review' ? 'pending' : 'completed', kind: 'command' });
-  items.push({ id: 'review', title: '内容审核', status: 'pending', kind: 'agent' });
-  const html = renderFlow(items.slice(0, items.length - 1), items[0], { finished: false });
-  const text = JSON.stringify(html);
-  assert.doesNotMatch(text, /\b(1[0-9])\/18\b/);
-  const queueText = client.slice(client.indexOf('function compactProgress'), client.indexOf('function shortStageName'));
-  assert.match(queueText, /compactFlowStages/);
-  assert.match(client, /const progress = compactProgress\(st\)/);
-  assert.doesNotMatch(client, /const done = st\.done \|\| 0, total = st\.total \|\| 0/);
-});
-
-test('unknown configured stages affect a visible group without adding nodes', () => {
-  const items = stages().concat(Array.from({ length: 12 }, (_, i) => ({ id: 'future-' + i, status: i === 5 ? 'failed' : 'completed' })));
-  const { tree } = renderFlow(items, items[items.length - 1]);
-  const svg = walk(tree, (node) => node.type === 'svg' && node.props.role === 'img')[0];
-  const nodes = walk(svg, (node) => node.type === 'g');
-  assert.equal(nodes.length, 9);
-  assert.match(text(nodes.find((node) => node.props.key === 'upload')), /失败/);
-});
-
-test('automatic repair is visible without adding workflow nodes or claiming success early', () => {
+test('repair feedback preserves twelve classes and never claims success before verification', () => {
   const { tree, context } = renderFlow(stages(), null, { advance: { running: true, self_heal: { status: 'diagnosing', stage: 'format_gate' } } });
-  const status = walk(tree, (node) => node.props.role === 'status')[0];
+  const status = walk(tree, node => node.props.role === 'status')[0];
   assert.match(text(status), /AI 自动修复：正在判断卡点原因/);
   assert.equal(status.props['aria-live'], 'polite');
-  const svg = walk(tree, (node) => node.type === 'svg' && node.props.role === 'img')[0];
-  assert.equal(walk(svg, (node) => node.type === 'g').length, 9);
+  assert.equal(nodesOf(tree).length, 12);
   assert.match(context.recoveryProgressText({ self_heal: { status: 'repaired' } }), /局部修复，继续校验/);
-  assert.match(context.recoveryProgressText({ self_heal: { status: 'requeued', has_feedback: true } }), /受影响题目带反馈重试/);
   assert.match(context.recoveryProgressText({ self_heal: { status: 'failed' } }), /尚未修复/);
-  assert.match(context.recoveryProgressText({ supervisor: { status: 'exhausted' } }), /稍后重试/);
   assert.match(context.recoveryProgressText({ self_heal: { status: 'verified' } }), /校验已通过/);
 });
 
-test('handoff completion describes content review plus upload format check', () => {
-  const { tree } = renderFlow(stages(), null, { finished: true });
-  assert.match(text(tree), /已完成内容审核与上传格式检查，等待人工确认/);
+test('idle upload view retains all twelve neutral nodes and the same dependency arrows', () => {
+  const { tree } = renderFlow([], null, { batches: [] });
+  assert.deepEqual(nodesOf(tree).map(node => node.props.key), classIds);
+  assert.deepEqual(nodesOf(tree).map(node => tipOf(node)), classNames);
+  const svg = walk(tree, node => node.type === 'svg' && node.props.role === 'group')[0];
+  assert.equal(svg.props['aria-label'], '试卷处理流程总览：12 个环节');
+  assert.equal(walk(tree, node => node.props['data-flow-from']).length, 14);
+  for (const node of nodesOf(tree)) {
+    assert.equal(walk(node, entry => /wf-node-(pulse|dot)/.test(entry.props.className || '')).length, 0);
+    assert.doesNotMatch(text(node), /✓|!|已完成|待处理|处理中|失败|受阻/);
+    assert.equal(walk(node, entry => entry.type === 'circle')[0].props.stroke, 'var(--wf-flow-node-ring)');
+  }
+  assert.doesNotMatch(text(tree), /0 \/ 12|正在读取进度|继续处理|暂无进行中的流程|本轮流程已结束/);
+});
+
+test('finished batches leave a neutral demonstration chart and retain the review handoff', () => {
+  const items = stages().map(item => ({ ...item, status: 'completed', active: true }));
+  const { tree } = renderFlow(items, items[0], { finished: true, advance: { running: true } });
+  assert.deepEqual(nodesOf(tree).map(node => tipOf(node)), classNames);
+  assert.match(text(tree), /已完成 1 份 · 待人工确认/);
+  assert.match(text(tree), /前往人工确认 →/);
+  assert.doesNotMatch(text(tree), /12 \/ 12|继续处理|进度更新/);
+  assert.equal(walk(tree, node => node.props.className === 'wf-node-pulse').length, 0);
+});
+
+test('chart is width-adaptive: no fixed pixel size, svg stretches with its container', () => {
+  const { tree } = renderFlow(stages());
+  const svg = walk(tree, node => node.type === 'svg')[0];
+  // 不允许出现固定像素宽高：宽度100%、高度按 viewBox 比例自动。
+  assert.equal(svg.props.width, undefined);
+  assert.equal(svg.props.height, undefined);
+  assert.equal(svg.props.preserveAspectRatio, 'xMidYMid meet');
+  assert.equal(svg.props.style.width, '100%');
+  assert.equal(svg.props.style.height, 'auto');
+  assert.match(svg.props.style.aspectRatio, /^\d+ \/ \d+$/);
+  assert.equal(svg.props.style.maxWidth, undefined);
+  // 节点与连线都留在同一 viewBox 坐标系内，缩放时整体等比，不会错位。
+  assert.match(svg.props.viewBox, /^0 0 \d+ \d+$/);
+  assert.equal(walk(tree, node => node.props['data-flow-from']).length, 14);
+});
+
+test('each node carries the three-state style tokens for completion, idle and running', () => {
+  const items = stages();
+  Object.assign(items.find(item => item.id === 'extract'), { status: 'completed', active: true });
+  Object.assign(items.find(item => item.id === 'answers'), { status: 'running', active: true });
+  const { tree } = renderFlow(items, items.find(item => item.id === 'answers'));
+  const node = id => nodeOf(tree, id);
+  const ring = id => walk(node(id), n => n.type === 'circle' && n.props.r === 13 && n.props.fill !== 'none')[0].props;
+  // 已完成：实心浅底 + 灰勾
+  assert.equal(ring('extract').fill, 'var(--wf-flow-node-done)');
+  assert.match(visibleText(node('extract')), /✓/);
+  // 运行中：呼吸圆点 + 脉冲外圈
+  assert.equal(walk(node('answers'), n => n.props.className === 'wf-node-dot').length, 1);
+  assert.equal(walk(node('answers'), n => n.props.className === 'wf-node-pulse').length, 1);
+  // 未运行：空心浅底、无状态标记
+  assert.equal(ring('structure_gate').fill, 'var(--wf-flow-node-idle)');
+  assert.doesNotMatch(visibleText(node('structure_gate')), /✓|!/);
+});
+
+test('an idle read failure keeps the complete chart and displays the real error', () => {
+  const { tree } = renderFlow([], null, { batches: [], refreshError: '进度刷新失败：offline' });
+  assert.equal(nodesOf(tree).length, 12);
+  assert.match(text(tree), /进度刷新失败：offline/);
+});
+
+test('active batches restore real progress and statuses after the neutral overview', () => {
+  const items = stages();
+  Object.assign(items.find(item => item.id === 'answers'), { status: 'running', active: true });
+  const { tree } = renderFlow(items);
+  assert.match(tipOf(nodeOf(tree, 'answers')), /答案填充 · 处理中/);
+  assert.equal(walk(nodeOf(tree, 'answers'), node => node.props.className === 'wf-node-pulse').length, 1);
+  assert.match(text(tree), /0 \/ 12|继续处理/);
 });
