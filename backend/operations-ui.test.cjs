@@ -114,6 +114,21 @@ test('host attempt error and real recovery evidence remain separate', () => {
   assert.equal(view.verified, false);
 });
 
+test('operations toolbar keeps title and controls together with status on the next row', () => {
+  const toolbarStart = client.indexOf("className: 'wf-operations-toolbar'");
+  const statusStart = client.indexOf("className: 'wf-operations-status'", toolbarStart);
+  assert.ok(toolbarStart > 0 && statusStart > toolbarStart);
+  const toolbar = client.slice(toolbarStart, statusStart);
+  assert.match(toolbar, /flexWrap: 'nowrap'/);
+  assert.match(toolbar, /'AI运维'/);
+  assert.match(toolbar, /host\.enabled \? '关闭运维' : '启动运维'/);
+  assert.match(toolbar, /setRefresh\(\(n\) => n \+ 1\)/);
+  assert.match(toolbar, /'刷新'/);
+  assert.doesNotMatch(toolbar, /OperationsStatus|T\.hint \}, service/);
+  assert.match(client.slice(statusStart, statusStart + 750), /T\.hint \}, service/);
+  assert.match(client.slice(statusStart, statusStart + 750), /OperationsStatus/);
+});
+
 test('panel is isolated beside diagnostics and has no repair or invented session navigation', () => {
   const panel = client.slice(start, end);
   assert.match(client, /diagBanner\(selBatch, stage\),\s*h\(OperationsPanel/);

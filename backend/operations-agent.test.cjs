@@ -603,7 +603,7 @@ test('transient poll errors are recognised and never pinned as a standing failur
     () => ({ incidents: [] }),
   ];
   let call = 0;
-  const manager = createOperationsAgentManager({ effect: () => {} }, {
+  const manager = createOperationsAgentManager({ effect: () => {}, agents: { create() {}, resume() {} } }, {
     backendRequest: async () => {
       const script = scripts[Math.min(call++, scripts.length - 1)];
       return script();
@@ -613,9 +613,12 @@ test('transient poll errors are recognised and never pinned as a standing failur
     enabled: () => true,
     hasWork: () => ({ has_work: true, batches: [] }),
   });
+  manager.start();
   await manager.tick();
+  assert.equal(call, 1, 'the failing scan actually ran');
   assert.equal(manager.status().lastPollError, '');
   await manager.tick();
+  assert.equal(call, 2, 'a later scan recovered');
   assert.equal(manager.status().lastPollError, '');
   await manager.dispose();
 });
@@ -623,7 +626,7 @@ test('transient poll errors are recognised and never pinned as a standing failur
 test('a long-ago non-transient scan error does not stay pinned on the panel', async () => {
   const { createOperationsAgentManager } = await moduleReady;
   let fail = true;
-  const manager = createOperationsAgentManager({ effect: () => {} }, {
+  const manager = createOperationsAgentManager({ effect: () => {}, agents: { create() {}, resume() {} } }, {
     backendRequest: async () => {
       if (fail) { const e = new Error('INVALID_INCIDENT_LIST'); e.code = 'INVALID_INCIDENT_LIST'; throw e; }
       return { incidents: [] };
@@ -633,8 +636,10 @@ test('a long-ago non-transient scan error does not stay pinned on the panel', as
     enabled: () => true,
     hasWork: () => ({ has_work: true, batches: [] }),
   });
+  manager.start();
   await manager.tick();
   const stuck = manager.status().lastPollError;
+  assert.match(stuck, /INVALID_INCIDENT_LIST/, 'the failed scan must actually run');
   // Simulate a later successful scan that clears the error.
   fail = false;
   await manager.tick();
@@ -662,5 +667,36 @@ test('polling loop re-arms itself and a backend-not-ready error never wedges it'
   await manager.tick();
   assert.ok(readyCalls >= 2, 'loop keeps retrying readiness: ' + readyCalls);
   assert.equal(manager.status().loopAlive, true);
+  assert.equal(listCalls, 1, 'failed readiness does not masquerade as a successful scan');
   await manager.dispose();
+});
+
+test('work-state scan timeout releases single flight and stop/start restores the timer', async () => {
+  let reads = 0, firstSignal;
+  const f = await fixture({ rows: [], managerOptions: {
+    intervalMs: 10, requestTimeoutMs: 20,
+    hasWork: ({ signal }) => {
+      reads++;
+      if (reads === 1) { firstSignal = signal; return new Promise(() => {}); }
+      return { has_work: false, batches: [] };
+    },
+  } });
+  // Keep the test alive while the production deadline timer is unref'ed.
+  const keepAlive = setTimeout(() => {}, 1000);
+  try {
+    f.manager.start();
+    await f.manager.tick();
+    assert.equal(firstSignal.aborted, true);
+    await f.manager.tick();
+    assert.ok(f.manager.status().pollCount > 0, 'scan proceeds after a hung work-state read');
+    await f.manager.stop();
+    assert.equal(f.manager.status().loopAlive, false);
+    const before = reads;
+    f.manager.start();
+    await f.manager.tick();
+    await new Promise(resolve => setTimeout(resolve, 35));
+    assert.ok(reads > before + 1, 'timer continues without status reads or manual ticks');
+    assert.equal(f.calls.length, 0, 'no incident scans when there is no work');
+    assert.equal(f.agents.length, 0);
+  } finally { clearTimeout(keepAlive); await f.manager.dispose(); }
 });
