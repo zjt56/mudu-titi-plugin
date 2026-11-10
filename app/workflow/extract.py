@@ -926,7 +926,10 @@ def run(batch_dir: Path) -> dict:
                             "text_sha256": mf.sha256_file(ans_text),
                             "extraction_report": {"source": "material_classify"}})
                 else:
-                    from . import agent_prepare
+                    try:
+                        from . import agent_prepare
+                    except ImportError:
+                        from workflow import agent_prepare
                     agent_prepare.prepare_answers(batch_dir)
             except Exception as exc:  # noqa: BLE001
                 result["passed"] = False

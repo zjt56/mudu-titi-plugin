@@ -7,6 +7,12 @@ from workflow import agent_prepare, extract, manifest as mf
 
 
 class AgentPrepareTest(unittest.TestCase):
+    def test_extract_direct_script_fallback_imports_answer_preparer(self):
+        with patch.object(extract, 'agent_prepare', create=True) as _unused:
+            pass
+        source = Path(extract.__file__).read_text(encoding='utf-8')
+        self.assertIn('from workflow import agent_prepare', source)
+
     def test_explicit_answer_docx_keeps_full_raw_text_and_caches(self):
         with tempfile.TemporaryDirectory() as tmp:
             batch = Path(tmp); source = batch / 'answer.docx'; source.write_bytes(b'docx')
