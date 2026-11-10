@@ -2995,6 +2995,9 @@ class Handler(BaseHTTPRequestHandler):
                 name = str(payload.get("name") or "").strip()
                 if not name:
                     raise ValueError("请指定批次名称")
+            if parts == ["api", "operations", "service"]:
+                from workflow import operations
+                return self.send_json(operations.service_heartbeat(payload.get('available')))
                 folder = batch_dir(name)
                 return self.send_json({"ok": True, **start_audio_job(
                     "segment", {"folder": str(folder), "audio": payload.get("audio")})})

@@ -102,6 +102,18 @@ const envelope = (claim, action, input = {}, request_id = `direct-${action}`) =>
   request_id, action, input,
 });
 
+test('real Handler accepts bounded host readiness and rejects invalid heartbeat values', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const before = await readFile(join(f.folder, 'workflow/manifest.json'), 'utf8');
+  const on = await f.backendRequest('/api/operations/service', { method: 'POST', body: { available: true } });
+  assert.equal(on.available, true);
+  assert.equal(on.ttl_seconds, 20);
+  const off = await f.backendRequest('/api/operations/service', { method: 'POST', body: { available: false } });
+  assert.equal(off.available, false);
+  await assert.rejects(f.backendRequest('/api/operations/service', { method: 'POST', body: { available: 'true' } }), /available must be boolean/);
+  assert.equal(await readFile(join(f.folder, 'workflow/manifest.json'), 'utf8'), before);
+});
+
 test('real Handler list and claim do not mistake their own locks for a busy worker', { timeout: 20000 }, async t => {
   const f = await fixture(t);
   const listed = await f.backendRequest('/api/operations/incidents');

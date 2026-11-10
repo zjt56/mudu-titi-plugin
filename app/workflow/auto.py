@@ -612,12 +612,14 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
     # 模型不可用或返回非法计划时只留痕，不阻断本轮自动调度。
     try:
         from . import self_heal
-        healed = (self_heal.recover(batch_dir) if cooldown <= 0 else
-                  {"changed": False, "status": "model_cooldown"})
+        healed = operations.handoff_if_available(batch_dir)
+        if healed is None:
+            healed = (self_heal.recover(batch_dir) if cooldown <= 0 else
+                      {"changed": False, "status": "model_cooldown"})
         if healed.get("changed"):
             manifest = mf.load(batch_dir)
             print(f"  · {healed.get('stage')} AI自愈已执行动作：{healed.get('status', 'requeued')}，继续校验")
-        elif healed.get("stage") and healed.get("status") in {"cooldown", "busy", "waiting_external", "failed", "recorded", "retry_budget_exhausted"}:
+        elif healed.get("stage") and healed.get("status") in {"cooldown", "busy", "waiting_external", "failed", "recorded", "retry_budget_exhausted", "operations_pending"}:
             # A wait recorded against older inputs must not outrank a real upstream
             # repair: if the failed stage is now stale, schedule it again instead
             # of stopping this round and showing a cooldown to the user.
@@ -627,7 +629,8 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
             # into an endless rerun of the same deterministic validation error.
             saved_inputs = (self_heal._load(batch_dir).get('last_inputs') or {}).get(healed['stage'])
             current_inputs = mf.input_hashes(batch_dir, manifest, spec) if spec else None
-            stale = saved_inputs is not None and current_inputs != saved_inputs
+            stale = (healed.get('status') != 'operations_pending'
+                     and saved_inputs is not None and current_inputs != saved_inputs)
             reason_text = '上游输入内容已更新' if stale else ''
             if stale:
                 print(f"  · {healed['stage']} 输入已变化，忽略旧的自愈等待并重新调度（{reason_text[:60]}）")
@@ -667,8 +670,9 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                                                  "no_audio", "running"})
             if not capability_limited_audio:
                 wait = recovery_wait[stage.id]
-                reason = (wait.get("event") or {}).get("error") or (wait.get("event") or {}).get("reason") or "AI修复已记录，等待自动重试窗口"
-                blocked(stage.id, str(reason)[:300], "cooldown", next_retry_at=wait.get("next_retry_at"),
+                reason = wait.get('reason') or (wait.get("event") or {}).get("error") or (wait.get("event") or {}).get("reason") or "AI修复已记录，等待自动重试窗口"
+                wait_action = 'operations_pending' if wait.get('status') == 'operations_pending' else 'cooldown'
+                blocked(stage.id, str(reason)[:300], wait_action, next_retry_at=wait.get("next_retry_at"),
                         retry_after=wait.get("retry_after"), self_heal_status=wait.get("status"))
                 continue
         if stage.id in parallel_done:
@@ -998,6 +1002,10 @@ def _result(batch_dir: Path, manifest: dict, stage_id, reason: str,
     try:
         from . import self_heal
         observed = self_heal.observe_outcomes(batch_dir, manifest)
+        from . import operations
+        # Publish a new blocker before releasing the execution claim. The Host
+        # can claim on its next scan instead of waiting through a heal-model turn.
+        operations.handoff_if_available(batch_dir)
     except (OSError, ValueError, KeyError, TypeError):
         pass
     return {

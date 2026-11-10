@@ -20,6 +20,22 @@ from . import contracts, manifest as mf, self_heal, supervisor
 
 LEDGER = "operations.json"
 LEASE_SECONDS = 180
+SERVICE_TTL = 20
+_service_until = 0.0
+
+
+def service_heartbeat(available):
+    """Volatile host readiness; restart/disabled/stale host restores legacy healing."""
+    if not isinstance(available, bool):
+        raise ValueError('available must be boolean')
+    global _service_until
+    _service_until = time.monotonic() + SERVICE_TTL if available else 0.0
+    return {'available': service_available(), 'ttl_seconds': SERVICE_TTL}
+
+
+def service_available():
+    return _service_until > time.monotonic()
+
 ACTIONS = frozenset(("diagnose", "read_evidence", "preview_repair", "apply_repair",
                      "verify", "resume", "regenerate_units", "record_finding", "finish", "heartbeat",
                      "progress", "release", "cancel", "request_code_repair",
@@ -400,13 +416,50 @@ def _discover(folder):
     count = sum(1 for x in state["failures"].values()
                 if x.get("stage") == stage and x.get("detail") == detail)
     signature = failed[-1]["signature"] if failed else ""
-    if count and not (incident and incident.get("signature") == signature):
+    # An online Host can investigate the first actual blocker. Do not wait for
+    # an ordinary self-heal model to fail first. Stable substantive evidence
+    # deduplicates this handoff; historical retry counters/timestamps do not.
+    unusable_structure = (stage == 'structure_gate'
+                          and (record.get('status') in mf.TERMINAL_OK or record.get('rebuild_required'))
+                          and bool(self_heal._structure_unusable(folder)))
+    early = (service_available()
+             and (record.get('status') in {mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW} or unusable_structure)
+             and not TRANSIENT.search(detail) and not re.search(
+                 r'(?i)429|quota|rate[_ -]?limit|额度|限流|冷却|等待外部', detail))
+    if early or (incident and incident.get('trigger') == 'first_blocker'
+                 and incident.get('stage') == stage and incident.get('detail') == _redact(detail)):
+        evidence = json.dumps(self_heal._retry_evidence(folder, manifest, stage), sort_keys=True)
+        signature = hashlib.sha256((stage + '\n' + detail + '\n' + evidence).encode('utf-8')).hexdigest()[:16]
+    if (count or early) and not (incident and incident.get("signature") == signature):
         state["incident"] = {"incident_id": uuid.uuid4().hex, "batch_name": folder.name,
             "batch_dir": str(folder), "status": "queued", "eligible": True, "stage": stage,
             "signature": signature, "detail": _redact(detail), "self_heal_failures": count,
-            "created_at": mf.now_iso(), "events": [], "fence": 0, "queue_generation": 1}
+            "created_at": mf.now_iso(), "events": [], "fence": 0, "queue_generation": 1,
+            "trigger": "first_blocker" if early else "failed_self_heal"}
         _event(state["incident"], "discover", "queued", detail)
     return state
+
+
+def handoff_if_available(folder):
+    """Called only by the lock-owning scheduler, before paid self-heal work.
+
+    Queue normal exclusive operations and yield the failed stage at a safe
+    checkpoint. Never loosen claim/action locks to race a live executor.
+    """
+    if not service_available():
+        return None
+    folder = Path(folder)
+    state = _discover(folder)
+    incident = state.get('incident') or {}
+    if not incident or incident.get('status') not in {'queued', 'claimed', 'needs_deep_repair', 'needs_human'}:
+        return None
+    stage, _ = self_heal._candidate(folder, mf.load(folder))
+    if stage != incident.get('stage'):
+        return None
+    _save(folder, state)
+    return {'changed': False, 'status': 'operations_pending', 'stage': stage,
+            'incident_id': incident['incident_id'],
+            'reason': '异常已交 AI 运维分析，等待接手或查看已记录的修复建议'}
 
 
 def pending_incident(folder):

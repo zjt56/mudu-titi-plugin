@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-operations-first-blocker.md](2026-11-10-operations-first-blocker.md) | 运维在线时首个阻断异常安全建单接手，先落账分析建议；不可用时保留原自愈 |
 | 2026-11-10 | [2026-11-10-idle-flow-svg-adaptive.md](2026-11-10-idle-flow-svg-adaptive.md) | 无任务也全量展示流程图；自绘 SVG 节点/连线三态（运行中闪烁）；整图自适应宽度 |
 | 2026-11-10 | [2026-11-10-runtime-efficiency.md](2026-11-10-runtime-efficiency.md) | 共用零模型快路、单次诊断验收复用、审核来源读取复用、运行态缓存与只读巡检提示优化 |
 | 2026-11-10 | [2026-11-10-twelve-phase-workflow.md](2026-11-10-twelve-phase-workflow.md) | 十二类真实依赖图、悬浮子流程状态、文字三路并行与听力独立调度 |

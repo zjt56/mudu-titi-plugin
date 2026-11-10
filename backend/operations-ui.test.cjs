@@ -129,6 +129,14 @@ test('operations toolbar keeps title and controls together with status on the ne
   assert.match(client.slice(statusStart, statusStart + 750), /OperationsStatus/);
 });
 
+test('panel presents analysis advice and never labels ordinary progress as active self healing', () => {
+  const panel = client.slice(start, end);
+  assert.match(panel, /分析与建议/);
+  assert.match(panel, /current\.incident\.findings\[current\.incident\.findings\.length - 1\]\.summary/);
+  assert.match(panel, /首个阻断异常在执行锁释放后接手分析/);
+  assert.doesNotMatch(panel, /仅在普通自愈失败后接手|个批次，自愈进行中/);
+});
+
 test('panel is isolated beside diagnostics and has no repair or invented session navigation', () => {
   const panel = client.slice(start, end);
   assert.match(client, /diagBanner\(selBatch, stage\),\s*h\(OperationsPanel/);
