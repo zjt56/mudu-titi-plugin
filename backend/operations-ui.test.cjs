@@ -87,6 +87,33 @@ test('malformed and failed host responses are readable errors, never success', a
   }
 });
 
+test('heartbeat does not replace repair phase and unknown receipts are explicit', () => {
+  const ctx = harness();
+  const item = { status: 'claimed', events: [
+    { action: 'code_repair', timestamp: '2026-11-10T01:00:00Z', outcome: 'completed' },
+    { action: 'heartbeat', timestamp: '2026-11-10T01:00:15Z', outcome: 'completed' },
+  ] };
+  const view = ctx.operationsView(item);
+  assert.equal(view.label, '修复');
+  assert.equal(view.action, 'code_repair');
+  assert.equal(view.heartbeat, '2026-11-10T01:00:15Z');
+  const quarantined = ctx.operationsView({ ...item, status: 'queued' }, { receipts: [{ status: 'unknown' }] });
+  assert.equal(quarantined.label, '待核对动作回执');
+  assert.equal(quarantined.unknown, 1);
+  assert.equal(ctx.operationsView({ status: 'queued', not_before: 200 }, { now: 100000 }).label, '冷却等待');
+  assert.equal(ctx.operationsView({ status: 'claimed', lease_expires_at: 50 }, { now: 100000 }).label, '接手已过期');
+});
+
+test('host attempt error and real recovery evidence remain separate', () => {
+  const ctx = harness();
+  const view = ctx.operationsView({ incident_id: 'i', status: 'claimed' }, {
+    batchName: 'b', host: { attempts: [{ batch_name: 'b', incident_id: 'i', active: true, state: 'session_failed', error: 'quota' }] },
+  });
+  assert.equal(view.label, '会话失败');
+  assert.equal(view.error, 'quota');
+  assert.equal(view.verified, false);
+});
+
 test('panel is isolated beside diagnostics and has no repair or invented session navigation', () => {
   const panel = client.slice(start, end);
   assert.match(client, /diagBanner\(selBatch, stage\),\s*h\(OperationsPanel/);

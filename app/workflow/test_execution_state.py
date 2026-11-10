@@ -48,6 +48,14 @@ class ExecutionStateTest(unittest.TestCase):
         (self.root / '07_review/review-gate.json').write_text('{"passed": false}')
         self.assertEqual(mf.derive_status(self.manifest), 'pending_confirmation')
         self.assertTrue(state.local_complete(self.root, self.manifest))
+        before = copy.deepcopy(self.manifest)
+        progress = state.projection(self.manifest, stage_ids=state.LOCAL_STAGES)
+        self.assertEqual(progress['done'], len(state.LOCAL_STAGES))
+        self.assertIsNone(progress['current'])
+        strict = state.projection(self.manifest, stage_ids=state.LOCAL_STAGES, allow_unqualified=False)
+        self.assertFalse(strict['execution_completed'])
+        self.assertEqual(strict['current'], 'review_gate')
+        self.assertEqual(before, self.manifest)
         # 差异没有被当作质量通过：release_ready 仍为 False。
         self.assertFalse(self.manifest['stages']['review_gate'].get('release_ready'))
 

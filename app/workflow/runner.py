@@ -32,10 +32,10 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from workflow import (checks, contracts, doctor, ingest, inventory,  # type: ignore
+    from workflow import (activity, checks, contracts, doctor, ingest, inventory,  # type: ignore
                           manifest as mf, report, review)
 else:
-    from . import checks, contracts, doctor, ingest, inventory, independent_review, manifest as mf, report, review
+    from . import activity, checks, contracts, doctor, ingest, inventory, independent_review, manifest as mf, report, review
 
 if __package__ in (None, ""):
     from workflow import independent_review
@@ -315,6 +315,7 @@ def _validate_inputs(batch_dir: Path, manifest: dict) -> tuple:
     return evidence
 
 
+@activity.observed("validate", "正在执行本地内容体检")
 def do_validate(batch_dir: Path, manifest: dict) -> int:
     batch_json = batch_dir / "06_batch" / "batch_meta.json"
     if not batch_json.is_file():
@@ -620,6 +621,7 @@ def _structure_inputs(batch_dir: Path, manifest: dict) -> tuple:
             mf.sha256_file(original) if original else "")
 
 
+@activity.observed("structure_gate", "正在确认题目结构与来源边界")
 def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
     """Check the immutable extraction delivery and publish only a gate result."""
     from .local_agent import _agent_lock

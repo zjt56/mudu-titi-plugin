@@ -1570,7 +1570,8 @@ def _overview_key(folder):
                      "07_review/content-review.json", "07_review/metadata-review.json",
                      "07_review/unchecked.json", "06_batch/batch_meta.json", "06_batch/batch.json",
                      "01_source/structure.confirmed.json", "workflow/self-heal-status.json",
-                     "workflow/supervisor.json"):
+                     "workflow/supervisor.json", "07_review/upload-format.json", "07_review/review-gate.json",
+                     "receipt.json", "07_upload/receipt.json", "workflow/activity.json"):
         path = folder / relative
         try:
             stat = path.stat()
@@ -1588,11 +1589,39 @@ def overview(name):
     key = (str(folder), _overview_key(folder))
     hit = _OVERVIEW_CACHE.get(key)
     if hit is not None:
-        return hit
+        return _live_overview(hit, name, folder)
     value = _overview_uncached(name, folder)
     if len(_OVERVIEW_CACHE) > 64:
         _OVERVIEW_CACHE.clear()
     _OVERVIEW_CACHE[key] = value
+    return _live_overview(value, name, folder)
+
+
+def _live_overview(value, name, folder):
+    """Overlay runtime ownership on the cached document projection, without mutation."""
+    from workflow import activity
+    value = dict(value)
+    advance = advance_state(name)
+    value["advance"] = advance
+    value["upload_status"] = upload_state(name)
+    manifest = load(folder / "workflow/manifest.json", {})
+    stage = (stage_cards(manifest, bool(value.get("rows")), bool(advance.get("running")), value.get("diagnostics"))
+             if manifest.get("stages") else dict(value.get("stage") or {}))
+    stage["items"] = [dict(card) for card in stage.get("items") or []]
+    work = activity.read(folder)
+    if work:
+        for card in stage["items"]:
+            if card.get("id") == work["stage"]:
+                card.update(active=True, activity_detail=work.get("detail", ""))
+                stage["current"] = card
+                stage["hint"] = work.get("detail") or "工作台正在处理"
+        stage["activity"] = work
+    stage["running_unknown"] = bool((manifest.get("status") == "running"
+                                    or any(c.get("status") == "running" for c in stage["items"]))
+                                    and not advance.get("running") and not work)
+    value["stage"] = stage
+    from datetime import timezone
+    value["observed_at"] = datetime.now(timezone.utc).isoformat()
     return value
 
 
@@ -2742,6 +2771,24 @@ class Handler(BaseHTTPRequestHandler):
                 from workflow import operations
                 operations.recover_resumes(WORKFLOWS, _launch_advance)
                 return self.send_json(operations.incidents(WORKFLOWS))
+            if decoded_path == "/api/operations/work-state":
+                from workflow import operations
+                active = []
+                if WORKFLOWS.is_dir():
+                    for folder in WORKFLOWS.iterdir():
+                        if not folder.is_dir() or not (folder / "workflow/manifest.json").is_file():
+                            continue
+                        try:
+                            manifest = wf_manifest.load(folder) if wf_manifest else {}
+                            stages = manifest.get("stages") or {}
+                            local_done = bool(wf_execution_state and wf_execution_state.local_complete(folder, manifest))
+                            active_stage = any((row or {}).get("status") in {"running", "blocked", "failed"}
+                                               for row in stages.values())
+                            if (not local_done and active_stage) or operations.view(WORKFLOWS, folder).get("incident"):
+                                active.append(folder.name)
+                        except (OSError, ValueError, TypeError):
+                            continue
+                return self.send_json({"has_work": bool(active), "batches": active[:40]})
             if decoded_path == "/api/batches":
                 return self.send_json({"batches": cached_list_batches()})
             if decoded_path == "/api/taxonomy":

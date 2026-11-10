@@ -9,20 +9,21 @@ const client = fs.readFileSync(path.join(__dirname, '../lib/client.js'), 'utf8')
 // Render only the existing upload component: no timers, requests, models or real batches.
 function renderFlow(items, current = items[0], options = {}) {
   let stateIndex = 0;
+  const callbacks = [], updates = [];
   const batch = { name: 'fixture', paper: { title: '测试试卷' },
     flow_done: !!options.finished, advance: options.advance || {}, stage: { items, current, done: 0, total: items.length } };
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter((x) => x != null && x !== false) }),
-    useState(initial) { return [stateIndex++ === 5 ? [batch] : initial, () => {}]; },
+    useState(initial) { const index = stateIndex++; return [index === 6 ? [batch] : initial, value => updates.push({ index, value })]; },
     useRef: (current) => ({ current }),
     useEffect() {},
-    useCallback: (callback) => callback,
+    useCallback: (callback) => { callbacks.push(callback); return callback; },
   };
   const context = vm.createContext({
     require: (name) => { assert.equal(name, 'react'); return React; },
     formField: (label, control) => React.createElement('label', null, label, control),
     EmptyState() {}, uploadIcon() {}, docIcon() {}, diagBanner: () => null,
-    jget: () => { throw new Error('No network in flow tests'); },
+    jget: options.jget || (() => { throw new Error('No network in flow tests'); }),
     jpost: () => { throw new Error('No network in flow tests'); },
   });
   vm.runInContext(client.slice(client.indexOf('    var TEXT ='), client.indexOf('    // 统一的线性图标')), context);
@@ -31,7 +32,7 @@ function renderFlow(items, current = items[0], options = {}) {
   const helpersEnd = client.indexOf('    function diagBanner(', start);
   assert.ok(start >= 0 && helpersEnd > start);
   vm.runInContext(client.slice(start, helpersEnd), context);
-  return { tree: context.UploadView({}), context };
+  return { tree: context.UploadView({}), context, refresh: callbacks[0], updates };
 }
 
 function walk(node, predicate, found = []) {
@@ -196,7 +197,7 @@ test('executed quality findings finish execution without implying quality approv
   const items = stages();
   for (const id of ['validate', 'review']) items.find((item) => item.id === id).status = 'completed';
   Object.assign(items.find((item) => item.id === 'review_gate'), {
-    status: 'blocked', execution_completed: true, continue_unqualified: true,
+    status: 'needs_review', execution_completed: true, continue_unqualified: true,
     quality_status: 'failed', release_ready: false, notes: '18 项真实差异保留',
   });
   const { tree, context } = renderFlow(items, items.find((item) => item.id === 'format_gate'));
@@ -209,7 +210,44 @@ test('executed quality findings finish execution without implying quality approv
   assert.ok(node.children.some((entry) => entry.type === 'text' && text(entry) === '!'));
   assert.ok(!node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
   items.find((item) => item.id === 'review_gate').continue_unqualified = false;
-  assert.equal(context.compactFlowStages(items).find((item) => item.id === 'review').status, 'blocked');
+  assert.equal(context.compactFlowStages(items).find((item) => item.id === 'review').status, 'needs_review');
+});
+
+test('late polling response cannot overwrite newer progress and errors become visible', async () => {
+  const replies = [];
+  const f = renderFlow(stages(), undefined, { jget: () => new Promise((resolve, reject) => replies.push({ resolve, reject })) });
+  const older = f.refresh(), newer = f.refresh();
+  replies[1].resolve({ batches: [{ name: 'fresh' }] }); await newer;
+  replies[0].resolve({ batches: [{ name: 'old' }] }); await older;
+  assert.deepEqual(f.updates.filter(x => x.index === 6).map(x => x.value[0].name), ['fresh']);
+  const failing = f.refresh(); replies[2].reject(new Error('offline')); await failing;
+  assert.ok(f.updates.some(x => typeof x.value === 'string' && x.value.includes('进度刷新失败')));
+});
+
+test('active work remains animated when a sibling failed and pending readiness is inactive', () => {
+  const items = stages();
+  Object.assign(items.find(x => x.id === 'validate'), { status: 'failed' });
+  Object.assign(items.find(x => x.id === 'review'), { status: 'running', active: true });
+  const { tree, context } = renderFlow(items);
+  const group = context.compactFlowStages(items).find(x => x.id === 'review');
+  assert.equal(group.status, 'failed');
+  assert.equal(group.inProgress, true);
+  const node = walk(tree, x => x.type === 'g' && x.props.key === 'review')[0];
+  assert.ok(walk(node, x => x.props.className === 'wf-node-pulse').length);
+  assert.equal(context.compactFlowStages(stages()).some(x => x.inProgress), false);
+});
+
+test('blocked flags never manufacture completed findings and extraction activity survives completion', () => {
+  const items = stages();
+  for (const id of ['validate', 'review']) items.find(x => x.id === id).status = 'completed';
+  Object.assign(items.find(x => x.id === 'review_gate'), { status: 'blocked', execution_completed: true, continue_unqualified: true });
+  Object.assign(items.find(x => x.id === 'extract'), { status: 'completed', active: true });
+  const { context } = renderFlow(items);
+  assert.equal(context.compactFlowStages(items).find(x => x.id === 'review').status, 'blocked');
+  assert.equal(context.compactFlowStages(items).find(x => x.id === 'extract').inProgress, true);
+  items.find(x => x.id === 'review_gate').status = 'needs_review';
+  items.find(x => x.id === 'review_gate').release_ready = true;
+  assert.equal(context.compactFlowStages(items).find(x => x.id === 'review').status, 'needs_review');
 });
 
 test('queue progress counts the visible flow nodes, never the internal stage ledger', () => {

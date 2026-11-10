@@ -922,7 +922,9 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                 # 上传后自动识别题源分类/卷名/地区/年份；失败只记录原因，不阻断流程。
                 try:
                     from . import metadata_ai
-                    identified = metadata_ai.auto_identify(batch_dir)
+                    from .activity import track
+                    with track(batch_dir, "extract", "正在识别卷头与试卷元信息"):
+                        identified = metadata_ai.auto_identify(batch_dir)
                 except (OSError, ValueError, TypeError) as exc:
                     identified = {"ran": False, "reason": str(exc)}
                 if identified.get("ran"):

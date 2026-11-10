@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-operations-lifecycle-and-progress.md](2026-11-10-operations-lifecycle-and-progress.md) | AI 运维按活动批次巡检，先诊断后介入；流程与缓存状态实时可观测 |
 | 2026-11-10 | [2026-11-10-review-attachment-upload.md](2026-11-10-review-attachment-upload.md) | 审核 Word/PDF 随暂存附件追加：冻结清单、逐文件上传、丢失响应对账续传、人工会话清理 |
 | 2026-11-10 | [2026-11-10-blocker-ledger-code-enforcement.md](2026-11-10-blocker-ledger-code-enforcement.md) | 卡点台账升级为代码强制：自愈/监督器自动写批次内 blockers.json，sync 汇总进 ISSUES/open |
 | 2026-11-10 | [2026-11-10-blocker-ledger-issues.md](2026-11-10-blocker-ledger-issues.md) | 新增 ISSUES/ 卡点台账：每次卡点留档并跟踪是否已修复，未修复在 open/、已修复在 fixed/ |

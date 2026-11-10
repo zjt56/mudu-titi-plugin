@@ -64,7 +64,8 @@ def projection(manifest, *, stage_ids=None, allow_unqualified=True):
     # consumption is guarded separately by dependency_satisfied.
     done = []
     for sid in ids:
-        if executed(stages.get(sid)) and all(executed(stages.get(dep)) for dep in contracts.upstream_of(sid)):
+        if executed(stages.get(sid), allow_unqualified=allow_unqualified) and all(
+                executed(stages.get(dep), allow_unqualified=allow_unqualified) for dep in contracts.upstream_of(sid)):
             done.append(sid)
     differences = [sid for sid in ids if isinstance(stages.get(sid), dict) and
                    (stages[sid].get("status") in (BLOCKED, NEEDS_REVIEW, FAILED)

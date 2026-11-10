@@ -487,6 +487,15 @@ test('route error is visible and stop/start retries corrected route without fall
   assert.equal(f.agents.length, 1); assert.equal(f.agents[0].agent.route.model, 'fixed'); await f.manager.dispose();
 });
 
+test('idle work-state skips incident inspection and model takeover', async () => {
+  const calls = [];
+  const f = await fixture({ backend: async (path) => { calls.push(path); return undefined; }, hasWork: async () => false });
+  await f.manager.tick();
+  assert.deepEqual(calls, []);
+  assert.equal(f.manager.status().incidentCount, 0);
+  await f.manager.dispose();
+});
+
 test('temporary list failure is retried on later tick without disabling manager', async () => {
   let offline = true;
   const f = await fixture({ backend: path => { if (path === '/api/operations/incidents' && offline) throw new Error('404 backend starting'); } });
@@ -510,6 +519,24 @@ test('scoped regeneration and code repair stay incident-scoped and forward exact
     { operation: 'read', path: 'app/workflow/checks.py' });
   assert.equal(f.calls.filter(x => x.body?.action === 'install_code_repair').length, 0);
   await f.manager.dispose();
+});
+
+test('status exposes successful polling, active work and separate scan errors', async () => {
+  const entered = deferred(), release = deferred();
+  const f = await fixture({ program: async a => { await a.call('diagnose'); entered.resolve(); await release.promise; } });
+  f.manager.start();
+  try {
+    await entered.promise;
+    const status = f.manager.status();
+    assert.equal(status.running, true);
+    assert.equal(status.activeCount, 1);
+    assert.equal(status.pollCount, 1);
+    assert.ok(Date.parse(status.lastPollAt));
+    assert.equal(status.lastPollError, '');
+    assert.equal(status.attempts[0].action, 'diagnose');
+    assert.equal(status.attempts[0].active, true);
+  } finally { release.resolve(); await f.manager.drain(); await f.manager.dispose(); }
+  assert.equal(f.manager.status().activeCount, 0);
 });
 
 test('install awaits host restart and cannot be reported as a fix in the same attempt', async () => {
