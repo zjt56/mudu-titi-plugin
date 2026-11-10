@@ -641,3 +641,26 @@ test('a long-ago non-transient scan error does not stay pinned on the panel', as
   assert.equal(manager.status().lastPollError, '', 'successful scan must clear: ' + stuck);
   await manager.dispose();
 });
+
+test('polling loop re-arms itself and a backend-not-ready error never wedges it', async () => {
+  const { createOperationsAgentManager } = await moduleReady;
+  let readyCalls = 0, listCalls = 0;
+  const manager = createOperationsAgentManager({ effect: () => {}, agents: { create() {}, resume() {} } }, {
+    backendRequest: async (path) => {
+      listCalls++;
+      if (path === '/api/operations/incidents') return { incidents: [] };
+      return {};
+    },
+    resolveRoute: () => ({ provider: 'p', model: 'm' }),
+    cwd: '/tmp/ops-loop',
+    enabled: () => true,
+    hasWork: async () => ({ has_work: true, batches: ['b'] }),
+    ensureBackendReady: async () => { readyCalls++; if (readyCalls === 1) throw new Error('fetch failed'); },
+  });
+  manager.start();
+  await manager.tick();
+  await manager.tick();
+  assert.ok(readyCalls >= 2, 'loop keeps retrying readiness: ' + readyCalls);
+  assert.equal(manager.status().loopAlive, true);
+  await manager.dispose();
+});
