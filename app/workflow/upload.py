@@ -17,6 +17,9 @@ from .local_agent import _agent_lock
 ROOT = Path(__file__).resolve().parents[1]
 FOLDER = '07_upload'
 MAX_BYTES = 2_000_000
+EVIDENCE_TYPES = upload_client.ATTACHMENT_TYPES
+MAX_EVIDENCE_BYTES = upload_client.MAX_ATTACHMENT_BYTES
+MAX_EVIDENCE_COUNT = upload_client.MAX_ATTACHMENTS
 
 
 def _bytes(value):
@@ -146,6 +149,73 @@ def _media_map(batch):
     return result or None
 
 
+def _evidence_files(batch, manifest):
+    """Uploadable Word/PDF/PNG/JPEG review evidence, bound by path and hash."""
+    batch = Path(batch).resolve()
+    inputs = manifest.get("inputs") or {}
+    keys = ["source", "docx", "answers", "explanations"]
+    keys += sorted(key for key in inputs if re.fullmatch(r"attachment_\d{3,}", str(key)))
+    seen, names, result = set(), set(), []
+    for key in keys:
+        value = inputs.get(key) or {}
+        raw_path = value.get("path")
+        if not raw_path:
+            continue
+        path = Path(str(raw_path)).expanduser()
+        if not path.is_absolute():
+            path = batch / path
+        if path.is_symlink():
+            raise ValueError("审核附件不允许软链接")
+        try:
+            path = path.resolve(strict=True)
+        except OSError:
+            continue
+        if path in seen:
+            continue
+        suffix = path.suffix.lower()
+        if suffix not in EVIDENCE_TYPES:
+            continue
+        try:
+            relative = path.relative_to(batch)
+        except ValueError:
+            raise ValueError("审核附件必须位于批次目录内：" + path.name) from None
+        cursor = batch
+        for part in relative.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise ValueError("审核附件不允许软链接")
+        size = path.stat().st_size
+        if size <= 0 or size > MAX_EVIDENCE_BYTES:
+            raise ValueError("审核附件大小不符合要求：" + path.name)
+        if path.name in names:
+            raise ValueError("审核附件文件名重复：" + path.name)
+        seen.add(path)
+        names.add(path.name)
+        result.append({"key": key, "path": path.relative_to(batch).as_posix(),
+                       "filename": path.name, "bytes": size,
+                       "sha256": _sha(path.read_bytes())})
+    if len(result) > MAX_EVIDENCE_COUNT:
+        raise ValueError("审核附件最多 20 个，当前 " + str(len(result)))
+    return result
+
+
+def _evidence_signature(rows):
+    return [(row.get("path"), row.get("filename"), row.get("bytes"), row.get("sha256"))
+            for row in rows or []]
+
+
+def _read_evidence(batch, planned):
+    batch = Path(batch).resolve()
+    files = []
+    for row in planned:
+        path = Path(batch) / row["path"]
+        data = path.read_bytes()
+        if len(data) != row["bytes"] or _sha(data) != row["sha256"]:
+            raise ValueError("审核附件已变化，必须重新准备并批准：" + row["filename"])
+        files.append({"filename": row["filename"], "data": data})
+    return files
+
+
 def _media(payload):
     urls = {}
     def visit(value):
@@ -218,6 +288,7 @@ def prepare(batch_dir, *, catalog=None, config=None, check_media=True, **options
                 'errors': [{'code': exc.code, 'message': str(exc)}], 'details': exc.details}))
             raise
         manifest = mf.load(batch)
+        evidence = _evidence_files(batch, manifest)
         options = {key: value for key, value in options.items() if value is not None}
         if "media_map" not in options:
             media_map = _media_map(batch)
@@ -247,6 +318,13 @@ def prepare(batch_dir, *, catalog=None, config=None, check_media=True, **options
         report['source_sha256'] = _sha(source_raw)
         report['api_base'] = settings['base_url']
         report['catalog_origin'] = 'live_api' if catalog is None else 'supplied_snapshot'
+        report['evidence'] = evidence
+        if not isinstance(report.get('warnings'), list):
+            report['warnings'] = []
+        if not evidence:
+            report['warnings'].append({
+                'code': 'EVIDENCE_REQUIRED',
+                'message': '远端确认至少需要一个审核附件；当前批次没有可追加的 Word/PDF/图片'})
         _write(_path(batch, 'preflight.json'), _bytes({k: v for k, v in report.items() if k != 'payload'}))
         if not report['passed']:
             return {k: v for k, v in report.items() if k != 'payload'}
@@ -282,7 +360,7 @@ def prepare(batch_dir, *, catalog=None, config=None, check_media=True, **options
                 'api_base': settings['base_url'], 'mapping_options': options, 'bytes': len(raw),
                 'summary': report.get('summary', {}), 'warnings': report.get('warnings', []),
                 'media': media_reports, 'content_source_sha256': content['source_sha256'],
-                'catalog_origin': report['catalog_origin']}
+                'catalog_origin': report['catalog_origin'], 'evidence': evidence}
         if payload_path.is_file() and payload_path.read_bytes() != raw:
             raise ValueError('既有内容寻址冻结文件发生变化')
         _write(payload_path, raw)
@@ -330,7 +408,40 @@ def verify(batch_dir, *, config=None):
     content = inspect_content(batch, source, strict=True)
     if not content['passed'] or content['source_sha256'] != plan.get('content_source_sha256', {}):
         raise ValueError('解析或文章大意的来源不符、串材料或来源文件已变化，须重新准备和复核')
+    if 'evidence' in plan:
+        current = _evidence_files(batch, mf.load(batch))
+        if _evidence_signature(current) != _evidence_signature(plan.get('evidence')):
+            raise ValueError('审核附件已变化，必须重新准备、审核和批准')
+        _read_evidence(batch, plan.get('evidence'))
     return {'plan': plan, 'plan_sha256': _sha(plan_raw), 'payload': raw}
+
+
+def _finish_attachments(batch, plan, digest, attempt_path, client, staging_id, receipt):
+    """Append the approved evidence files; a receipt keeps the staging id on failure."""
+    files = _read_evidence(batch, plan.get('evidence') or [])
+    receipt = dict(receipt, state='staged_attachments_pending', attachments=[])
+    _write(_path(batch, 'receipt.json'), _bytes(receipt))
+    try:
+        result = client.append_evidence(staging_id, files)
+    except upload_client.APIError as exc:
+        details = exc.details or {}
+        state = 'attachment_rejected' if exc.code == 'rejected' else 'staged_attachments_pending'
+        receipt['attachments'] = details.get('uploaded') or []
+        receipt['state'] = state
+        receipt['attachment_error'] = {'code': exc.code, 'http_status': exc.http_status,
+                                       'details': details}
+        _write(_path(batch, 'receipt.json'), _bytes(receipt))
+        _write(attempt_path, _bytes({'state': state,
+                                     'payload_sha256': digest, 'public_id': staging_id,
+                                     'error_code': exc.code, 'http_status': exc.http_status,
+                                     'details': details}))
+        raise
+    receipt.update(state='staged', attachments=result.get('attachments') or [],
+                   staging_attachments=result.get('all') or [])
+    receipt.pop('attachment_error', None)
+    _write(_path(batch, 'receipt.json'), _bytes(receipt))
+    _write(attempt_path, _bytes({'state': 'accepted', 'payload_sha256': digest, 'receipt': receipt}))
+    return receipt
 
 
 def approval_binding(batch_dir, *, config=None):
@@ -356,17 +467,30 @@ def submit_approved(batch_dir, manifest, *, config=None, lock_held=False):
             if prior == attempt_path:
                 continue
             previous = _read(_path(batch, 'attempts/' + prior.name))
-            if previous.get('state') in ('submitting', 'unknown'):
-                raise ValueError('该批另一次提交结果未知，修改载荷也不能重发；先由人工在远端核实')
+            if previous.get('state') in ('submitting', 'unknown',
+                                          'staged_attachments_pending', 'attachment_rejected'):
+                raise ValueError('该批另一次提交结果未知（仍在暂存/附件阶段），修改载荷也不能重发；先核对远端暂存')
             if previous.get('state') == 'accepted':
                 raise ValueError('该批已有不同载荷的成功暂存记录；如需新增或替换须明确范围并另建批次')
+        if not plan.get('evidence'):
+            raise ValueError('远端确认至少需要一个审核附件；本批次没有可追加的 Word/PDF/图片，请重新准备')
+        client = upload_client.ApiClient(settings)
         if attempt_path.is_file():
             previous = _read(attempt_path)
             if previous.get('state') == 'accepted':
                 return previous['receipt']
             if previous.get('state') in ('submitting', 'unknown'):
                 raise ValueError('前次提交结果未知，禁止重发；请人工在远端工作台核实暂存记录')
-        client = upload_client.ApiClient(settings)
+            if previous.get('state') == 'attachment_rejected':
+                raise ValueError('审核附件追加被远端拒绝，须修正附件或权限后重新准备：'
+                                 + str((previous.get('details') or {}).get('error') or previous.get('error_code')))
+            if previous.get('state') == 'staged_attachments_pending':
+                receipt = _read(_path(batch, 'receipt.json'))
+                if (receipt.get('payload_sha256') != digest or not receipt.get('id')
+                        or receipt.get('api_base') != plan['api_base']):
+                    raise ValueError('暂存附件续传回执与冻结计划不一致，须人工核实')
+                return _finish_attachments(batch, plan, digest, attempt_path, client,
+                                           receipt['id'], receipt)
         current = client.fetch_catalog()
         catalog = _read(_path(batch, plan['catalog_file']))
         # fetched_at 不属于目录语义；其余目录值有变化时必须重新准备。
@@ -388,12 +512,15 @@ def submit_approved(batch_dir, manifest, *, config=None, lock_held=False):
                                         'error_code': exc.code, 'http_status': exc.http_status, 'details': exc.details}))
             raise
         receipt = {'id': response['id'], 'stage': 'pending_confirmation',
-                   'state': 'staged', 'payload_sha256': digest, 'source_sha256': plan['source_sha256'],
-                   'api_base': plan['api_base'], 'submitted_at': mf.now_iso(),
-                   'summary': plan.get('summary', {}), 'remote_confirmation_required': True}
+                   'state': 'staged_attachments_pending', 'payload_sha256': digest,
+                   'source_sha256': plan['source_sha256'], 'api_base': plan['api_base'],
+                   'submitted_at': mf.now_iso(), 'summary': plan.get('summary', {}),
+                   'attachments': [], 'remote_confirmation_required': True}
         _write(_path(batch, 'receipt.json'), _bytes(receipt))
-        _write(attempt_path, _bytes({'state': 'accepted', 'payload_sha256': digest, 'receipt': receipt}))
-        return receipt
+        _write(attempt_path, _bytes({'state': 'staged_attachments_pending',
+                                     'payload_sha256': digest, 'public_id': response['id']}))
+        return _finish_attachments(batch, plan, digest, attempt_path, client,
+                                   response['id'], receipt)
 
 
 def main(argv=None):

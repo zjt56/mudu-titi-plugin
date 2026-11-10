@@ -26,13 +26,19 @@ class UploadFlowTest(unittest.TestCase):
         self.batch = self.root / 'batch'; self.batch.mkdir()
         self.source = self.batch / '06_batch' / 'batch_meta.json'; self.source.parent.mkdir()
         self.source.write_text(json.dumps(valid_batch(), ensure_ascii=False))
+        self.doc = self.batch / 'attachments' / 'source.docx'; self.doc.parent.mkdir()
+        self.doc.write_bytes(b'synthetic docx review evidence')
         self.catalog = catalog_snapshot()
         self.settings = upload_client.load_config()
-        self.state = mf.new_manifest('fixture-upload', self.batch, {}, {})
+        self.state = mf.new_manifest('fixture-upload', self.batch,
+                                     {'source': {'path': str(self.doc), 'exists': True}}, {})
         mf.save(self.batch, self.state)
         self.client = patch.object(upload_client, 'ApiClient').start(); self.addCleanup(patch.stopall)
         self.client.return_value.fetch_catalog.side_effect = lambda: deepcopy(self.catalog)
         self.client.return_value.submit.return_value = {'id': 'STAGE-123', 'stage': 'pending_confirmation'}
+        self.client.return_value.append_evidence.return_value = {
+            'staging_id': 'STAGE-123', 'attachments': ['source.docx'],
+            'uploaded': ['source.docx'], 'all': ['source.docx']}
 
     def prepare(self):
         result = upload.prepare(self.batch, catalog=self.catalog, config=self.settings)
@@ -61,7 +67,11 @@ class UploadFlowTest(unittest.TestCase):
         self.assertEqual(wire['items'][0]['difficulty'], '中')
         self.assertEqual(result['id'], 'STAGE-123')
         self.assertTrue(result['remote_confirmation_required'])
+        self.assertEqual(result['attachments'], ['source.docx'])
         self.assertEqual(json.loads((self.batch / '07_upload/receipt.json').read_text())['stage'], 'pending_confirmation')
+        files = self.client.return_value.append_evidence.call_args.args[1]
+        self.assertEqual([(row['filename'], len(row['data'])) for row in files],
+                         [('source.docx', len(b'synthetic docx review evidence'))])
 
     def test_local_question_ids_receive_paper_scoped_prefix(self):
         data = valid_batch(); data['items'][0]['id'] = 'q-1'
@@ -304,3 +314,53 @@ class UploadFlowTest(unittest.TestCase):
         self.assertEqual(state['stages']['upload']['status'], mf.COMPLETED)
         self.assertEqual(state['status'], 'staged')
         self.assertEqual(state['stages']['publish_gate']['status'], mf.PENDING)
+
+    def test_word_and_pdf_are_collected_as_review_evidence(self):
+        pdf = self.batch / 'attachments' / 'attachment_001.pdf'
+        pdf.write_bytes(b'%PDF-1.4 synthetic')
+        self.state['inputs']['attachment_001'] = {'path': str(pdf), 'exists': True}
+        mf.save(self.batch, self.state)
+        report = self.prepare()
+        self.assertEqual([row['filename'] for row in report['evidence']],
+                         ['source.docx', 'attachment_001.pdf'])
+
+    def test_review_evidence_is_hash_bound_and_required_before_network(self):
+        report = self.prepare()
+        self.assertEqual(report['evidence'][0]['filename'], 'source.docx')
+        plan = json.loads((self.batch / '07_upload/plan.json').read_text(encoding='utf-8'))
+        self.assertEqual(plan['evidence'][0]['sha256'], mf.sha256_file(self.doc))
+        self.doc.write_bytes(b'changed review evidence')
+        with self.assertRaisesRegex(ValueError, '审核附件已变化'):
+            upload.verify(self.batch, config=self.settings)
+        self.doc.write_bytes(b'synthetic docx review evidence')
+        self.state['inputs'].pop('source')
+        mf.save(self.batch, self.state)
+        empty = self.prepare()
+        self.assertEqual(empty['evidence'], [])
+        self.assertEqual(empty['warnings'][-1]['code'], 'EVIDENCE_REQUIRED')
+        self.approve()
+        with self.assertRaisesRegex(ValueError, '至少需要一个审核附件'):
+            upload.submit_approved(self.batch, self.state, config=self.settings)
+        self.client.return_value.submit.assert_not_called()
+
+    def test_attachment_failure_keeps_staging_and_resumes_without_resubmit(self):
+        self.prepare(); self.approve()
+        self.client.return_value.append_evidence.side_effect = upload_client.APIError(
+            'submission_unknown', details={'uploaded': []})
+        with self.assertRaises(upload_client.APIError):
+            upload.submit_approved(self.batch, self.state, config=self.settings)
+        receipt = json.loads((self.batch / '07_upload/receipt.json').read_text(encoding='utf-8'))
+        self.assertEqual(receipt['id'], 'STAGE-123')
+        self.assertEqual(receipt['state'], 'staged_attachments_pending')
+        plan = json.loads((self.batch / '07_upload/plan.json').read_text())
+        attempt = json.loads((self.batch / '07_upload/attempts' /
+                              (plan['payload_sha256'] + '.json')).read_text(encoding='utf-8'))
+        self.assertEqual(attempt['state'], 'staged_attachments_pending')
+        self.client.return_value.append_evidence.side_effect = None
+        self.client.return_value.append_evidence.return_value = {
+            'staging_id': 'STAGE-123', 'attachments': ['source.docx'],
+            'uploaded': ['source.docx'], 'all': ['source.docx']}
+        result = upload.submit_approved(self.batch, self.state, config=self.settings)
+        self.assertEqual(result['state'], 'staged')
+        self.assertEqual(self.client.return_value.submit.call_count, 1)
+        self.assertEqual(self.client.return_value.append_evidence.call_count, 2)

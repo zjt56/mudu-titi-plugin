@@ -6,7 +6,7 @@
 
 `POST /api/uploads` 只创建**上传暂存**，成功返回 `id` 和 `stage=pending_confirmation`。这不表示已生成草稿或已发布。所属科目的人工编辑在远端“上传暂存”确认后才创建草稿，之后另行人工核验与发布。
 
-客户端只实现目录读取、媒体只读 HEAD 核验与上传暂存提交。不调用上传暂存列表、确认、删除、发布、撤回、知识点确认或清除警告接口。不创建管理员账号、不操作服务器数据库、不新增知识点；缺知识点时报告具体路径和缺项，另行走建议/人工批准流程。
+客户端只实现目录读取、媒体只读 HEAD 核验、上传暂存提交、暂存审核附件追加与人工会话下的审核附件清理；附件追加前后会以人工会话读取暂存列表核对名称/数量。不调用上传确认、删除草稿、发布、撤回、知识点确认或清除警告接口。不创建管理员账号、不操作服务器数据库、不新增知识点；缺知识点时报告具体路径和缺项，另行走建议/人工批准流程。
 
 ## 连接与凭据
 
@@ -64,7 +64,7 @@ API Key 由所属科目的上传账号绑定，上传只需要适当的 `draft` 
 
 ## 媒体是独立部署步骤
 
-文档没有提供媒体上传 HTTP API，本次不会虚构接口。使用者通过既有受控运维流程部署媒体到站点的 `static/source-media/<批次>/`，随后在题目 `attachments` 中引用 `/source-media/...`。
+题目媒体仍没有上传 HTTP API，本次不会虚构接口。使用者通过既有受控运维流程部署媒体到站点的 `static/source-media/<批次>/`，随后在题目 `attachments` 中引用 `/source-media/...`。原卷/答案等审核附件另走上一节的暂存附件接口，二者不要混用。
 
 ```json
 {
@@ -82,6 +82,18 @@ API Key 由所属科目的上传账号绑定，上传只需要适当的 `draft` 
 题库只渲染 `placement` 的 `question` / `option` / `answer` / `explanation` 四个位置。正文（题干、材料）里的 `[IMG]`，以及历史批次中显式的 `material` / `stem` 位置，生成线上载荷时统一按 `question` 发送；原样发送 `material` 会在远端的「逐题确认」阶段被整批拒绝为 `400 invalid_request`（内部原因 `invalid_attachment`）。
 
 `[IMG image.png]`、本地音频路径和未部署图像不能自动替换成看似存在的 URL。听力必须已完成真实边界切分和回听；部署可达并不能证明没有串题。HEAD 本身也不能证明内容与本地源件逐字节一致，媒体哈希、题号对应和版面仍应在批次证据中归档。
+
+## 审核附件（Word/PDF/图片）
+
+审核附件挂在“上传暂存”上，供审核工作台查看原卷、答案和分页预览；它与题目 JSON 里的 `attachments` 不是一回事。题目 `attachments` 仍只允许 `image`/`audio`，见上一节。
+
+1. 必须用人工会话调用 `POST /api/uploads` 保存题目并取得暂存 `id`；创建暂存不能用 Harness API Key。
+2. 对每个文件分别以二进制调用 `POST /api/uploads/{staging_id}/attachments`，`X-Filename` 传 URL 编码后的文件名。支持 PDF、DOCX、PNG、JPEG，单文件最多 **20,000,000** 字节，每批最多 **20** 个。
+3. 上传者会话或同账号具有 `draft` 权限的 API Key 可以追加；至少一个附件后才能由远端人工确认。
+4. 追加不是幂等操作。响应丢失时先读取暂存列表的附件名称和数量：同名附件已存在且唯一则不再补传，只补缺失项；无法核对时停止并保留暂存 ID，不能重新创建暂存或盲目重发。
+5. 审核批次结算后，有权限的人工账号可调用 `DELETE /api/reviews/{batch_id}/evidence` 清除审核附件；正式题目及素材保留。
+
+插件把这组文件作为“审核附件”冻结在上传计划中：`prepare-upload` 记录文件路径、大小和完整 SHA-256，人工批准的冻结计划因此覆盖这些文件；`upload` 在暂存创建成功后逐个追加。附件追加失败时 `07_upload/receipt.json` 保留暂存 ID 和已上传清单，下次只对账续传，不重新 `POST /api/uploads`。默认收集批次输入中的 `source`、`docx`、`answers`、`explanations` 及 `attachment_NNN` 文档；音频不进入审核附件。
 
 ## 四步提交
 
@@ -116,18 +128,18 @@ python -m workflow.runner upload --batch-dir workflows/<批次> --dry-run
 python -m workflow.runner upload --batch-dir workflows/<批次> --yes
 ```
 
-上传时重新检查最终文件、冻结计划、目标、远端目录、媒体、结构证据和审核闸门，再把已批准的冻结字节原样 POST。自动推进不会自行执行提交，Agent 不能代签人工上传批准。
+上传时重新检查最终文件、冻结计划、目标、远端目录、媒体、审核附件、结构证据和审核闸门，再把已批准的冻结字节原样 POST，并逐个追加冻结计划中的审核附件。自动推进不会自行执行提交，Agent 不能代签人工上传批准。
 
 ## 产物与防重复
 
 | 产物 | 用途 |
 | --- | --- |
 | `07_upload/preflight.json` | 本地到 API 的只读校验结果、缺项、摘要和警告 |
-| `07_upload/plan.json` | 源文件摘要、冻结请求摘要、目录摘要、目标、映射选项与媒体检查 |
+| `07_upload/plan.json` | 源文件摘要、冻结请求摘要、目录摘要、目标、映射选项、媒体检查与审核附件清单（路径/大小/SHA-256） |
 | `07_upload/frozen/<sha256>/payload.json` | 实际发送的冻结字节 |
 | `07_upload/frozen/<sha256>/catalog.json` | 准备时的目录快照 |
 | `07_upload/attempts/<sha256>.json` | submitting / unknown / rejected / accepted 提交记录 |
-| `07_upload/receipt.json` | 远端暂存 ID、pending_confirmation、文件摘要与提交时间 |
+| `07_upload/receipt.json` | 远端暂存 ID、pending_confirmation、文件摘要、审核附件名称与提交时间；附件失败时保留暂存 ID 供对账续传 |
 
 人工批准绑定本地最终批次、payload、plan 和目标 API。任何一个变化都需要重新检查和批准。上传过程不运行会改写批次的后处理脚本。
 

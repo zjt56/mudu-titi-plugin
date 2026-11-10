@@ -34,6 +34,7 @@ class Handler(BaseHTTPRequestHandler):
 
     do_GET = handle_request
     do_POST = handle_request
+    do_DELETE = handle_request
     do_HEAD = handle_request
 
 
@@ -235,6 +236,76 @@ class UploadClientTests(unittest.TestCase):
             self.assert_code("invalid_media_url", self.client.check_media, url)
         self.assertEqual(self.server.calls, [])
 
+    def test_staging_attachment_binary_upload_and_existing_reconciliation(self):
+        state = {'attachments': []}
+
+        def reply(method, path, body):
+            if method == "GET" and path == "/api/uploads":
+                return 200, {}, {"items": [{"id": "STAGE-1", "attachments": state["attachments"]}]}
+            if method == "POST" and path == "/api/uploads/STAGE-1/attachments":
+                from urllib.parse import unquote
+                name = unquote(self.server.calls[-1][2]["X-Filename"])
+                state["attachments"].append({"name": name})
+                return 201, {}, {"ok": True}
+            return default_reply(method, path, body)
+
+        self.server.reply = reply
+        first = self.client.append_evidence("STAGE-1", [{
+            "filename": "原卷 2024.docx", "data": b"synthetic-docx"}])
+        self.assertEqual(first["uploaded"], ["原卷 2024.docx"])
+        posts = [call for call in self.server.calls
+                 if call[:2] == ("POST", "/api/uploads/STAGE-1/attachments")]
+        self.assertEqual(len(posts), 1)
+        method, path, headers, body = posts[0]
+        self.assertEqual((method, path, body),
+                         ("POST", "/api/uploads/STAGE-1/attachments", b"synthetic-docx"))
+        self.assertEqual(headers["X-Filename"], "%E5%8E%9F%E5%8D%B7%202024.docx")
+        self.assertEqual(headers["Content-Type"],
+                         "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        self.assertEqual(headers["Authorization"], "Bearer " + TOKEN)
+        second = self.client.append_evidence("STAGE-1", [{
+            "filename": "原卷 2024.docx", "data": b"synthetic-docx"}])
+        self.assertEqual(second["uploaded"], [])
+        self.assertEqual(sum(1 for call in self.server.calls
+                             if call[1] == "/api/uploads/STAGE-1/attachments"), 1)
+
+    def test_lost_attachment_response_is_reconciled_before_any_retry(self):
+        state = {'attachments': []}
+
+        def reply(method, path, body):
+            if method == "GET" and path == "/api/uploads":
+                return 200, {}, {"items": [{"id": "STAGE-1", "attachments": state["attachments"]}]}
+            if method == "POST" and path == "/api/uploads/STAGE-1/attachments":
+                from urllib.parse import unquote
+                state["attachments"].append({"name": unquote(self.server.calls[-1][2]["X-Filename"])})
+                return 500, {}, {"error": "temporary"}
+            return default_reply(method, path, body)
+
+        self.server.reply = reply
+        result = self.client.append_evidence("STAGE-1", [{"filename": "a.pdf", "data": b"pdf"}])
+        self.assertEqual(result["uploaded"], ["a.pdf"])
+        self.assertEqual(sum(1 for call in self.server.calls
+                             if call[1] == "/api/uploads/STAGE-1/attachments"), 1)
+
+    def test_staging_attachment_duplicate_and_limits_refuse_before_post(self):
+        state = {'attachments': [{"name": "a.pdf"}, {"name": "a.pdf"}]}
+
+        def reply(method, path, body):
+            if method == "GET" and path == "/api/uploads":
+                return 200, {}, {"items": [{"id": "STAGE-1", "attachments": state["attachments"]}]}
+            return default_reply(method, path, body)
+
+        self.server.reply = reply
+        self.assert_code("attachment_duplicate_on_staging", self.client.append_evidence,
+                         "STAGE-1", [{"filename": "a.pdf", "data": b"pdf"}])
+        self.assertEqual([call for call in self.server.calls if call[0] == "POST"], [])
+        self.assert_code("attachment_too_large", self.client.append_evidence, "STAGE-1", [
+            {"filename": "b.pdf", "data": b"x" * 20_000_001}])
+        self.assert_code("attachment_type_invalid", self.client.append_evidence, "STAGE-1", [
+            {"filename": "b.exe", "data": b"x"}])
+        self.assert_code("attachments_limit_invalid", self.client.append_evidence, "STAGE-1",
+                         [{"filename": "b.pdf", "data": b"x"}] * 21)
+
     def test_no_undocumented_write_routes(self):
         for method, route in (("DELETE", "/uploads"), ("PUT", "/uploads"),
                               ("POST", "/publish"), ("POST", "/media"), ("GET", "/questions")):
@@ -402,6 +473,24 @@ class HumanSessionUploadTests(unittest.TestCase):
             client = ApiClient({"base_url": self.origin + "/api"})
             result = client.submit(payload)
         self.assertEqual(result["id"], "upload-session")
+
+    def test_review_evidence_cleanup_requires_human_session(self):
+        def reply(method, path, body):
+            if path == "/api/auth/login":
+                return 200, {"Set-Cookie": "mudu_session=synthetic; Path=/"}, {"user": {"username": "admin"}}
+            if method == "DELETE" and path == "/api/reviews/B1/evidence":
+                return 204, {}, b""
+            return default_reply(method, path, body)
+        self.server.reply = reply
+        with self.assertRaises(APIError) as caught:
+            self.client.clear_review_evidence("B1")
+        self.assertEqual(caught.exception.code, "human_session_required")
+        self.assertEqual(self.server.calls, [])
+        with patch.dict(os.environ, {"MUDU_UPLOAD_ACCOUNT": "admin", "MUDU_UPLOAD_PASSWORD": "synthetic-pass"}):
+            client = ApiClient({"base_url": self.origin + "/api"})
+            self.assertEqual(client.clear_review_evidence("B1"), {"batch_id": "B1", "cleared": True})
+        calls = [(m, p) for m, p, _, _ in self.server.calls]
+        self.assertEqual(calls, [("POST", "/api/auth/login"), ("DELETE", "/api/reviews/B1/evidence")])
 
     def test_expired_session_relogins_once(self):
         state = {"uploads": 0}

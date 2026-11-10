@@ -1,5 +1,11 @@
 # RULES — 规则与强调台账
 
+## 2026-11-10 审核附件与题目附件分离（用户指向官方文档）
+
+- 用户原话：了解题库服务器附件上传要求，准备把 Word 和 PDF 作为附件一起上传到批次；随后给出 `POST /api/uploads/{staging_id}/attachments` 协议并指向 `http://101.43.1.57/docs/#format`。
+- 规则：审核 Word/PDF/图片走暂存附件接口，创建暂存必须人工会话，至少一个附件才能确认；追加非幂等，响应丢失先核对暂存列表名称/数量；题目 JSON 的 `attachments` 仍只允许 image/audio。审核结算后清理审核附件只能由人工会话显式调用，不自动上传、发布或清理。
+- 落地：`workflow/upload_client.py`、`workflow/upload.py`、`docs/upload-api.md`；记录 `2026-11-10-review-attachment-upload.md`。
+
 ## 2026-11-10 加强解析防遗漏提示词并写入代码规则
 
 - 用户原话：“加强提示词约束并写进代码规则，确保后续不会出现”。
