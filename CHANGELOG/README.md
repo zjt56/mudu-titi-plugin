@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-flow-tooltip-substeps.md](2026-11-10-flow-tooltip-substeps.md) | 流程节点悬停浮层显示各环节子流程短状态，长描述仍不显示 |
 | 2026-11-10 | [2026-11-10-ops-transient-poll-error.md](2026-11-10-ops-transient-poll-error.md) | 运维扫描偶发网络错误不再常驻显示：成功即清、瞬时错误自动消退 |
 | 2026-11-10 | [2026-11-10-auto-supervisor-idle-pause.md](2026-11-10-auto-supervisor-idle-pause.md) | 无试卷任务时自动巡检暂停并等待唤醒；修复监督器派发把重试预算清零导致停不下来 |
 | 2026-11-10 | [2026-11-10-operations-lifecycle-and-progress.md](2026-11-10-operations-lifecycle-and-progress.md) | AI 运维按活动批次巡检，先诊断后介入；流程与缓存状态实时可观测 |
