@@ -136,6 +136,30 @@ class OperationsTests(unittest.TestCase):
         self.put("workflow/self-heal.json", {"events": []})
         self.assertEqual(op.incidents(self.root), {"incidents": []})
 
+    def test_discovery_accepts_every_recorded_blocker_outcome(self):
+        # 回归：self_heal 判定“卡住”的 outcome 不止 repair_failed/retry_failed。
+        # retry_budget_exhausted（预算耗尽）等同样是真实卡点，运维必须能建单接手。
+        for outcome in ("repair_not_applicable", "retry_budget_exhausted",
+                        "gate_retry_budget_exhausted"):
+            with self.subTest(outcome=outcome):
+                self.put("workflow/operations.json", {"identity": None, "incident": None,
+                                                      "receipts": [], "failures": {}})
+                self.put("workflow/self-heal.json", {"events": [{"at": "2026-01-03",
+                    "stage": "validate", "detail": "broken", "signature": self.signature,
+                    "outcome": outcome, "attempt": 3}]})
+                found = op.incidents(self.root)["incidents"]
+                self.assertEqual(len(found), 1)
+                self.assertEqual(found[0]["signature"], self.signature)
+
+    def test_discovery_ignores_retries_still_in_progress(self):
+        for outcome in ("diagnosing", "retry_scheduled", "upstream_escalated",
+                        "content_retry_with_feedback"):
+            with self.subTest(outcome=outcome):
+                self.put("workflow/self-heal.json", {"events": [{"at": "2026-01-03",
+                    "stage": "validate", "detail": "broken", "signature": self.signature,
+                    "outcome": outcome, "attempt": 4}]})
+                self.assertEqual(op.incidents(self.root), {"incidents": []})
+
     def test_rate_limit_does_not_escalate(self):
         self.put("workflow/self-heal.json", {"events": [{"stage": "validate", "detail": "broken",
                  "signature": self.signature, "outcome": "repair_failed", "error_code": "rate_limited"}]})

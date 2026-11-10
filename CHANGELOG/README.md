@@ -143,3 +143,4 @@
 | 2026-11-07 | [2026-11-07-fix-stem-table-queue.md](2026-11-07-fix-stem-table-queue.md) | 修复装配改写题干、信息转换表格空档、排队区进度分母 |
 | 2026-11-10 | [2026-11-10-windows-shared-agent-lock-probe.md](2026-11-10-windows-shared-agent-lock-probe.md) | Windows 并行模型调用（共享锁槽）不被 supervisor 看见，可能重复派发；探活改为独占整个锁区间 |
 | 2026-11-10 | [2026-11-10-atomic-replace-windows-share-violation.md](2026-11-10-atomic-replace-windows-share-violation.md) | Windows 上替换审核报告遇共享冲突（WinError 5）中断审核；改为有界重试后仍抛真实错误 |
+| 2026-11-10 | [2026-11-10-operations-discovery-blocker-outcomes.md](2026-11-10-operations-discovery-blocker-outcomes.md) | 运维建单只认两种 outcome，「预算耗尽」类卡点永远不接手；改为接管 self_heal 全部 BLOCKER_OUTCOMES |
