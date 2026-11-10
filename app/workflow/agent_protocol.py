@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import uuid
 
 from . import agent_tasks, contracts, manifest as mf
@@ -58,6 +59,24 @@ def _path(batch, relative):
     return agent_tasks._safe_path(batch, relative)
 
 
+def _replace_atomic(temporary, path, attempts=10, delay=0.05):
+    """os.replace, retrying the Windows share-violation window.
+
+    Windows refuses to replace a path while any process still holds a read
+    handle on it (a panel/overview read, an antivirus scan of the fresh temp
+    file). Those readers are short-lived, but a single failing replace used to
+    abort the whole review import. Retry briefly, then surface the real error.
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
+
+
 def _atomic(path, raw):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".protocol-", dir=path.parent)
@@ -66,7 +85,7 @@ def _atomic(path, raw):
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _replace_atomic(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

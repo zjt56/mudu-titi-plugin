@@ -709,5 +709,45 @@ print(json.dumps(result, ensure_ascii=False))
                                             "--result", str(response)]), 3)
 
 
+class AtomicReplaceRetryTest(unittest.TestCase):
+    """Windows share violations while replacing must not abort the write."""
+
+    def test_retries_share_violation_then_succeeds(self):
+        with tempfile.TemporaryDirectory(prefix="atomic retry ") as tmp:
+            target = Path(tmp) / "out" / "report.md"
+            real_replace = os.replace
+            calls = []
+
+            def flaky(source, destination):
+                calls.append(destination)
+                if len(calls) < 3:
+                    raise PermissionError(13, "Access is denied", str(destination))
+                return real_replace(source, destination)
+
+            with patch.object(protocol.os, "replace", side_effect=flaky), \
+                    patch.object(protocol.time, "sleep", return_value=None):
+                protocol._atomic(target, b"hello")
+            self.assertEqual(target.read_bytes(), b"hello")
+            self.assertEqual(len(calls), 3)
+            self.assertEqual([p.name for p in target.parent.iterdir()], ["report.md"])
+
+    def test_persistent_violation_still_raises_after_bounded_retries(self):
+        with tempfile.TemporaryDirectory(prefix="atomic retry ") as tmp:
+            target = Path(tmp) / "out" / "report.md"
+            calls = []
+
+            def always_blocked(source, destination):
+                calls.append(destination)
+                raise PermissionError(13, "Access is denied", str(destination))
+
+            with patch.object(protocol.os, "replace", side_effect=always_blocked), \
+                    patch.object(protocol.time, "sleep", return_value=None):
+                with self.assertRaises(PermissionError):
+                    protocol._atomic(target, b"hello")
+            self.assertEqual(len(calls), 10)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(target.parent.iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()

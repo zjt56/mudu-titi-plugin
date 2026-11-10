@@ -242,3 +242,4 @@
 ## 2026-11-10：AI 运维按活动批次巡检并先诊断后介入
 
 用户要求无活动试卷时 AI 运维不巡检；有卡点时先找出具体问题，再依据当前任务方向决定观察、续跑、局部修复或隔离代码修复。落地：`lib/operations-agent.js` 的工作状态门控与诊断阶段、`app/workbench/server.py` 的 `/api/operations/work-state`、`app/workflow/activity.py` 的真实执行生命周期、`lib/client.js` 的分状态显示和防旧响应覆盖。无活动批次不创建运维会话；未知回执、审核差异和等待依赖不直接修复或宣称完成。
+| 2026-11-10 | **写盘替换必须容忍 Windows 共享冲突**：目标文件被只读句柄短暂占用时 `os.replace` 会报 `WinError 5`，一次失败不得中断整轮审核；替换需有界重试，耗尽后仍抛原始错误，禁止静默改成成功。 | `app/workflow/agent_protocol.py::_replace_atomic`、`_atomic`；回归 `workflow.test_agent_protocol::AtomicReplaceRetryTest`、`workflow.test_review_rounds`；`CHANGELOG/2026-11-10-atomic-replace-windows-share-violation.md` |
