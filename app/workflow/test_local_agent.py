@@ -193,7 +193,8 @@ class LocalAgentTest(unittest.TestCase):
         binding = agent._part_model_binding(configured)
         files = set(binding["files"])
         self.assertIn(str(router_path.resolve()), files)
-        self.assertIn(str((config_path.parent.parent / "config" / "model-router.json").resolve()), files)
+        # 模型选择保存在本机插件状态目录（仓库 config 只是默认模板）。
+        self.assertTrue(any(path.endswith("model-router.json") for path in files), files)
         # 仓库不固定默认模型：模型身份改为跟随本机 Harness 的 agent-default-model，
         # 该 profile 文件也必须进入缓存键，换模型后不得复用旧结果。
         self.assertTrue(any(path.endswith("cordis.patch.yml") for path in files), files)

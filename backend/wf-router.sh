@@ -22,8 +22,10 @@ response="$2"
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PLUGIN_DIR="${WF_PLUGIN_DIR:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
-ROUTER="$PLUGIN_DIR/config/model-router.json"
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+# 设备本地模型选择优先；仓库 config 只是默认模板。
+ROUTER="${WF_ROUTER_FILE:-$DSH_HOME/plugin-state/md-upload-tiku/model-router.json}"
+[ -f "$ROUTER" ] || ROUTER="$PLUGIN_DIR/config/model-router.json"
 DSH_BIN="${DSH_BIN:-}"
 if [ -z "$DSH_BIN" ]; then
   if [ -x "$HOME/.local/bin/dsh" ]; then DSH_BIN="$HOME/.local/bin/dsh"; else DSH_BIN="dsh"; fi

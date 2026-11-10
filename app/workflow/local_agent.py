@@ -701,6 +701,33 @@ def _overlay_providers(path):
     return ids
 
 
+def _first_model(path):
+    """First declared model in a profile patch (bootstrap fallback)."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    block, provider = "", ""
+    for line in lines:
+        found = re.match(r"^-\s*id:\s*['\"]?([A-Za-z0-9_-]+)", line)
+        if found:
+            block, provider = found.group(1), ""
+            continue
+        if block == "llm-pi-ai":
+            found = re.match(r"^ {6}([A-Za-z0-9._-]+):\s*$", line)
+            if found:
+                provider = found.group(1)
+                continue
+            found = re.match(r"^ {10}-\s*id:\s*(.+?)\s*$", line)
+            if found and provider:
+                return {"provider": provider, "model": found.group(1).strip().strip('"\'')}
+        elif block in ("llm-deepseek", "llm-deepseek-account"):
+            found = re.match(r"^ {6}-\s*id:\s*(.+?)\s*$", line)
+            if found:
+                return {"provider": "deepseek-official", "model": found.group(1).strip().strip('"\'')}
+    return None
+
+
 def _harness_default_route():
     """The model this device selected in its Harness model menu (repo never pins one).
 
@@ -708,7 +735,7 @@ def _harness_default_route():
     route profile and would fail with NO_ADAPTER, so it is skipped here.
     """
     home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh"))
-    names = [os.environ.get("DSH_PROFILE"), "desktop", "wf-deepseek-fast", "wf-deepseek"]
+    names = [os.environ.get("DSH_PROFILE"), "desktop"]
     for name in names:
         if not name:
             continue
@@ -717,7 +744,23 @@ def _harness_default_route():
         if not found or found["provider"] not in _overlay_providers(path):
             continue
         return dict(found, profile=name), path
+    # 没有显式 agent-default-model 时，用宿主 profile 里第一个模型兜底。
+    for name in ("desktop", "wf-deepseek-fast", "wf-deepseek"):
+        path = home / "profiles" / name / "cordis.patch.yml"
+        first = _first_model(path)
+        if first:
+            return dict(first, profile=name), path
     return None, None
+
+
+def _router_file(plugin):
+    """Device-local model selection; repository config is only the template."""
+    override = os.environ.get("WF_ROUTER_FILE")
+    if override:
+        return Path(override).expanduser().resolve()
+    home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh"))
+    state = home / "plugin-state" / "md-upload-tiku" / "model-router.json"
+    return state if state.is_file() else plugin / "config" / "model-router.json"
 
 
 def _part_model_binding(config):
@@ -732,18 +775,18 @@ def _part_model_binding(config):
             continue
         script = Path(token).expanduser().resolve()
         plugin = Path(os.environ.get("WF_PLUGIN_DIR") or script.parent.parent).expanduser().resolve()
-        router = plugin / "config" / "model-router.json"
+        router = _router_file(plugin)
         try:
             route = json.loads(router.read_text(encoding="utf-8-sig"))
             default = route.get("default")
-            extra = ()
+            harness_route, profile_path = _harness_default_route()
+            extra = (profile_path,) if profile_path else ()
             if not (isinstance(default, dict) and default.get("provider") and default.get("model")):
                 # Repository config intentionally has no fixed model; follow the
                 # Harness selection of this device and bind that profile file too.
-                default, profile_path = _harness_default_route()
-                if not default:
+                if not harness_route:
                     return None
-                extra = (profile_path,)
+                default = harness_route
             for path in (script, router, *extra):
                 files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
         except (OSError, ValueError, AttributeError):

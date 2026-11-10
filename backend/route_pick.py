@@ -90,7 +90,7 @@ def harness_default():
     names = []
     if os.environ.get("DSH_PROFILE"):
         names.append(os.environ["DSH_PROFILE"])
-    names += ["desktop", "wf-deepseek-fast", "wf-deepseek"]
+    names.append("desktop")
     for name in names:
         patch = home / "profiles" / name / "cordis.patch.yml"
         found = _default_model_block(patch)
@@ -100,8 +100,8 @@ def harness_default():
         if found["provider"] not in _overlay_providers(patch):
             continue
         return dict(found, profile=name)
-    # 没有显式 Harness 默认模型时，用 profile 里第一个可服务模型兜底。
-    for name in names:
+    # 没有显式 Harness 默认模型时，用宿主 profile 里第一个可服务模型兜底。
+    for name in ("desktop", "wf-deepseek-fast", "wf-deepseek"):
         patch = home / "profiles" / name / "cordis.patch.yml"
         if patch.is_file():
             first = _first_model(patch)

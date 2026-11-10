@@ -200,9 +200,13 @@ class LabelExecutionTest(unittest.TestCase):
         router.parent.mkdir(parents=True)
         router.write_text(json.dumps({'default': {'provider': 'test', 'model': 'one'}}))
         import os
-        with patch.dict(os.environ, {'WF_PLUGIN_DIR': str(self.batch / 'plugin')}):
+        with patch.dict(os.environ, {'WF_PLUGIN_DIR': str(self.batch / 'plugin'),
+                                     'WF_ROUTER_FILE': str(router)}):
             binding = local_agent._part_model_binding({'command': ['node', str(script)]})
-            self.assertEqual(set(binding['files']), {str(script.resolve()), str(router.resolve())})
+            files = set(binding['files'])
+            self.assertIn(str(script.resolve()), files)
+            self.assertIn(str(router.resolve()), files)
+            self.assertTrue(all(len(value) == 64 for value in binding['files'].values()))
             router.write_text(json.dumps({'default': {'provider': 'test', 'model': 'two'}}))
             self.assertNotEqual(binding, local_agent._part_model_binding({'command': ['node', str(script)]}))
 

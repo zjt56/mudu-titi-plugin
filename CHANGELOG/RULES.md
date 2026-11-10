@@ -1,5 +1,12 @@
 # RULES — 规则与强调台账
 
+## 2026-11-10 用户选择的模型必须保存在设备本地（用户反馈“我选的是官方，却显示额度用尽”）
+
+- 触发：用户选择的官方模型被仓库内 `config/model-router.json` 的检出/重置覆盖，路由回落到 WorkBuddy 中转并报“额度已用尽”。
+- 规则：模型选择属于设备本地设置，必须存 `~/.dsh/plugin-state/md-upload-tiku/model-router.json`；仓库 `config/model-router.json` 只作默认模板（default 为空）。升级、检出、重新克隆不得覆盖用户选择。
+- 显式模型仍严格优先，损坏必须报错不静默替换；AI运维顺序 `roles.operations` → 用户 default → Harness。
+- 落地：`lib/index.js::ensureRouterFile/readRouter`、`backend/wf-router.mjs`、`backend/wf-router.sh`、`app/workflow/local_agent.py::_router_file`；记录 `CHANGELOG/2026-11-10-model-selection-persistence.md`。
+
 ## 2026-11-10 书面表达不按客观题校验（用户明确）
 
 - 原话：“书面表达题型没有确定的答案，它是作文，可能有范文与怎么写作的类似指导，请你不要以常规题目校验答案，如果没有范文和解析都是正常的，只要题目存在就行了，不要严格校验这么多。”

@@ -101,11 +101,11 @@ Word 与 PDF 同时存在时，以 Word 原文为权威；PDF OCR 主要用于�
 
 运维会话只能通过批次范围内的工具读取证据、预演与应用已有受控修复、复验、交回正常队列续跑。只有后端验证证据成立才显示已恢复；模型自述、已安排重试和会话空闲不算完成。遇到未知程序缺陷会记录「需深入修复」及复现证据，不直接修改正在运行的插件或自动上传题库。
 
-模型来自 `config/model-router.json` 的可选 `roles.operations`（可在「模型与设置 → 大模型配置 → AI运维」单独选择），未单列时跟随本机 Harness 当前模型，再没有时使用 `default`；显式角色配置非法时不回落到其它模型。当前宿主缺少原生会话服务时会显示不可用，原流程保留。详见 [Harness 运维说明](app/docs/harness-operations.md)。
+模型来自 `config/model-router.json` 的可选 `roles.operations`（可在「模型与设置 → 大模型配置 → AI运维」单独选择），未单列时使用 `default`，再没有时跟随本机 Harness 当前模型；显式角色配置非法时不回落到其它模型。当前宿主缺少原生会话服务时会显示不可用，原流程保留。详见 [Harness 运维说明](app/docs/harness-operations.md)。
 
 ## 模型配置
 
-在「模型与设置 → 大模型配置」选择默认模型，也可以分别指定阶段和审核轮次模型。路由写入 `config/model-router.json`，由插件生成生效配置后，经 `backend/wf-router.sh` / `backend/wf-router.mjs` 按阶段调用。
+在「模型与设置 → 大模型配置」选择默认模型，也可以分别指定阶段和审核轮次模型。路由保存在本机 `~/.dsh/plugin-state/md-upload-tiku/model-router.json`（仓库 `config/model-router.json` 只是默认模板，`default` 为空），由插件生成生效配置后，经 `backend/wf-router.sh` / `backend/wf-router.mjs` 按阶段调用。升级或重新检出仓库不会覆盖你选好的模型。
 
 **仓库不固定任何模型**：`default` 留空时，每台设备自动跟随自己 Harness 菜单里当前选中的模型（读取该设备 `profiles/<profile>/cordis.patch.yml` 的 `agent-default-model`）。也可以在插件设置里显式指定 default 或按阶段/角色覆盖；一旦显式配置，选中的 provider/model 一定被严格使用，配置损坏时直接报错，不会静默切换到其他模型。凭据由 Harness 的凭据系统提供，不写入题目文件、任务包或浏览器存储。
 

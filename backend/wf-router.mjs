@@ -11,8 +11,12 @@ const [promptFile, responseFile] = process.argv.slice(2);
 if (!promptFile || !responseFile) fail('usage: wf-router.mjs <prompt_file> <response_file>');
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const pluginDir = process.env.WF_PLUGIN_DIR || resolve(scriptDir, '..');
-const routerFile = join(pluginDir, 'config', 'model-router.json');
 const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh');
+// Per-device model selection lives in the plugin state dir; the repository
+// config is only the default template and must never override a saved choice.
+const stateRouter = join(dshHome, 'plugin-state', 'md-upload-tiku', 'model-router.json');
+const routerFile = process.env.WF_ROUTER_FILE
+  || (existsSync(stateRouter) ? stateRouter : join(pluginDir, 'config', 'model-router.json'));
 const prompt = readFileSync(promptFile, 'utf8');
 
 function fail(message, code = 1) { console.error(`wf-router: ${message}`); process.exit(code); }
@@ -58,7 +62,7 @@ function firstModel(file) {
   return null;
 }
 function harnessDefault() {
-  const names = [process.env.DSH_PROFILE, 'desktop', 'wf-deepseek-fast', 'wf-deepseek'].filter(Boolean);
+  const names = [process.env.DSH_PROFILE, 'desktop'].filter(Boolean);
   for (const name of names) {
     const file = join(dshHome, 'profiles', name, 'cordis.patch.yml');
     const found = defaultModelBlock(file);
@@ -71,7 +75,7 @@ function harnessDefault() {
   }
   // No explicit agent-default-model: fall back to the first servable model of the
   // Harness profile so a fresh device works without entering any API key.
-  for (const name of names) {
+  for (const name of ['desktop', 'wf-deepseek-fast', 'wf-deepseek']) {
     const first = firstModel(join(dshHome, 'profiles', name, 'cordis.patch.yml'));
     if (first) return { ...first, profile: name };
   }

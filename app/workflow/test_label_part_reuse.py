@@ -333,9 +333,9 @@ class LabelPartReuseTest(unittest.TestCase):
 
     def test_router_configuration_is_fingerprinted_without_logging_contents(self):
         script = self.write("backend/wf-router.sh", "#!/bin/sh\n")
-        self.write("config/model-router.json", {"default": {"provider": "provider", "model": "A"}})
+        router = self.write("config/model-router.json", {"default": {"provider": "provider", "model": "A"}})
         config = {"provider": "command", "command": [str(script), "{prompt_file}", "{response_file}"]}
-        with patch.dict(os.environ, {"WF_PLUGIN_DIR": str(self.batch)}):
+        with patch.dict(os.environ, {"WF_PLUGIN_DIR": str(self.batch), "WF_ROUTER_FILE": str(router)}):
             first = local_agent._part_model_binding(config)
             self.write("config/model-router.json", {"default": {"provider": "provider", "model": "B"}})
             second = local_agent._part_model_binding(config)
