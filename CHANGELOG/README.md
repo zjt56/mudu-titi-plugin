@@ -147,3 +147,4 @@
 | 2026-11-10 | [2026-11-10-no-restart-mid-flight.md](2026-11-10-no-restart-mid-flight.md) | 后端在途模型调用被热重启整树杀掉，自愈诊断停在 diagnosing；改为空闲再重启 + 探测失败再给长窗口 |
 | 2026-11-10 | [2026-11-10-interrupted-diagnosis-and-upload-busy.md](2026-11-10-interrupted-diagnosis-and-upload-busy.md) | 重启中断的诊断不再冒充内容失败、不吃重试预算；上传任务计入在途工作 |
 | 2026-11-10 | [2026-11-10-scoped-direct-copy-and-healing-state.md](2026-11-10-scoped-direct-copy-and-healing-state.md) | 局部修复绕过直抄导致连烧模型；运维面板在自愈进行中仍显示待命 |
+| 2026-11-10 | [2026-11-10-label-dialog-knowledge-duplicates.md](2026-11-10-label-dialog-knowledge-duplicates.md) | 修改标签弹窗把预览短名当标签来源，同一知识点显示两遍并误报目录外路径 |

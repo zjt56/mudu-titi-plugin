@@ -2311,6 +2311,37 @@ def load_unit_labels(folder: Path, unit_id) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _knowledge_projection(path):
+    """「二级/末级」短名投影，与 preview 快速核对标签的写法一致。"""
+    parts = [p for p in str(path or "").split("/") if p.strip()]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return parts[1]
+    return parts[1] + "/" + parts[-1]
+
+
+def drop_short_knowledge_copies(paths):
+    """去掉同一知识点的短名副本，保留目录全路径。
+
+    旧批次/预览行会把 `设题角度/阅读/细节理解` 记成 `阅读/细节理解`、
+    把 `主题/人与社会/历史、社会与文化/文化习俗` 记成 `人与社会/文化习俗`
+    这类「二级/末级」写法；它与全路径指向同一叶子，混在一起会在修改标签
+    弹窗里显示两遍，并让短名被校验成目录外路径。
+    """
+    unique = []
+    for raw in paths or []:
+        path = str(raw or "").strip()
+        if path and path not in unique:
+            unique.append(path)
+    return [path for path in unique
+            if not any(other != path and (other.endswith("/" + path)
+                                          or _knowledge_projection(other) == path)
+                       for other in unique)]
+
+
 def label_payload(row, batch_item, subs, folder, unit_id=None):
     """当前标签值 + 目录校验结果，供人工核对/修改。
 
@@ -2323,11 +2354,20 @@ def label_payload(row, batch_item, subs, folder, unit_id=None):
     filters = item.get("filterMetadata") if isinstance(item.get("filterMetadata"), dict) else {}
     knowledge = []
     explicit_knowledge = "knowledge" in unit_labels
-    knowledge_sources = [unit_labels["knowledge"]] if explicit_knowledge else [item.get("knowledge"), row.get("knowledge")]
+    if explicit_knowledge:
+        knowledge_sources = [unit_labels["knowledge"]]
+    else:
+        knowledge_sources = [item.get("knowledge")]
+        # 预览行里的知识点是「二级/末级」短名投影（preview 的 knowledge_projection /
+        # 重新分组候选的 source_projection），只能用于卷面速览；与批次全路径合并
+        # 会让同一条知识点出现两遍，且短名会被判成「目录外路径」。
+        if not row.get("source_projection") and not row.get("knowledge_projection"):
+            knowledge_sources.append(row.get("knowledge"))
     for source in knowledge_sources:
         for path in source or []:
             if str(path).strip() and str(path).strip() not in knowledge:
                 knowledge.append(str(path).strip())
+    knowledge = drop_short_knowledge_copies(knowledge)
     if not knowledge and not explicit_knowledge:
         for sub in subs:
             for path in sub.get("knowledge") or []:

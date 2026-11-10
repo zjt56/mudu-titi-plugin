@@ -511,6 +511,9 @@ def _rows_from_batch(batch_dir: Path, review_rows: list[dict]) -> list[dict] | N
             "answer": item.get("answer", ""),
             "difficulty": item.get("difficulty", ""),
             "knowledge": _short_knowledge_list(item.get("knowledge")),
+            # 卡片上的知识点是「二级/末级」短名投影，只用于卷面速览；
+            # 标签核对/修改必须读批次的完整目录路径，不能把这份短名当标签来源。
+            "knowledge_projection": True,
             "state": state,
             "rounds": 0 if item.get("source_projection") else max([r.get("rounds") or 0 for r in related] or [0]),
             "verdict": "missing" if item.get("source_projection") else next((r.get("verdict") for r in related if r.get("verdict")), "missing"),
