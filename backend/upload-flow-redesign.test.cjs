@@ -57,8 +57,10 @@ test('流程图精修：紧凑两行节点名、方向箭头、已完成段用�
   assert.match(client, /@keyframes wf-flow-dash/);
   // 十二类使用四行依赖布局，四路并行明确分叉，不再强制蛇形串行。
   // 行距与半径加大，避免纵向拥挤；仍保持同一四行依赖布局。
-  assert.match(client, /const R = 13, CW = 100, ROW_H = 108/);
-  assert.match(client, /flowDependencies\(\)\.forEach/);
+  assert.match(client, /const R = 11, CW = 84, ROW_H = 86/);
+  // 单条蛇形连线：相邻节点两两相连，首尾相接成一条线。
+  assert.match(client, /for \(let k = 0; k < grid\.length - 1; k \+= 1\)/);
+  assert.match(client, /const lineFor = \(a, b, reached\)/);
   // 整图是带 viewBox 的自适应 SVG：随容器等比缩放，节点名在 SVG 内两行居中。
   assert.match(client, /viewBox: '0 0 ' \+ svgW/);
   // 自适应：不设固定宽高，随列宽拉伸，高度按比例自动。

@@ -71,20 +71,26 @@ test('main flow uses the approved twelve classes and retains every configured st
   assert.doesNotMatch(text(tree), /查看分项处理与状态|06_batch\/batch\.json/);
 });
 
-test('four-row chart draws actual parallel dependencies with audio joining only at review', () => {
+test('chart connects the twelve nodes as one sequential snake line, 3 per row', () => {
   const { tree } = renderFlow(stages());
   const edges = walk(tree, node => node.props['data-flow-from']).map(node => [node.props['data-flow-from'], node.props['data-flow-to']]);
+  // 首尾相接：相邻节点两两相连，共 11 段，恰为一条从头到尾的线。
   assert.deepEqual(edges, [
-    ['extract', 'structure_gate'], ['structure_gate', 'preassemble'],
-    ['preassemble', 'audio'], ['preassemble', 'answers'], ['preassemble', 'explanations'], ['preassemble', 'knowledge'],
-    ['answers', 'assemble'], ['explanations', 'assemble'], ['knowledge', 'assemble'],
-    ['assemble', 'validate'], ['validate', 'review'], ['audio', 'review'],
+    ['extract', 'structure_gate'], ['structure_gate', 'preassemble'], ['preassemble', 'audio'],
+    ['audio', 'answers'], ['answers', 'explanations'], ['explanations', 'knowledge'],
+    ['knowledge', 'assemble'], ['assemble', 'validate'], ['validate', 'review'],
     ['review', 'format_gate'], ['format_gate', 'upload'],
   ]);
-  const center = id => walk(nodeOf(tree, id), node => node.type === 'circle' && [11, 13].includes(node.props.r))[0].props;
-  assert.equal(new Set(classIds.map(id => center(id).cy)).size, 4);
-  assert.ok(center('audio').cy > center('preassemble').cy);
-  for (const id of ['answers', 'explanations', 'knowledge']) assert.equal(center(id).cy, center('audio').cy);
+  assert.equal(edges.length, 11);
+  const centers = classIds.map(id => walk(nodeOf(tree, id), node => node.type === 'circle' && node.props.fill !== 'none')[0].props);
+  // 每行 3 个、共 4 行
+  assert.equal(new Set(centers.map(c => c.cy)).size, 4);
+  for (let r = 0; r < 4; r += 1) {
+    assert.equal(centers.slice(r * 3, r * 3 + 3).filter(c => c.cy === centers[r * 3].cy).length, 3);
+  }
+  // 蛇形：奇偶行左右交替
+  assert.ok(centers[0].cx < centers[2].cx);
+  assert.ok(centers[3].cx > centers[5].cx);
 });
 
 test('tooltip expands backend substeps and preserves exact child statuses without permanent labels', () => {
@@ -286,11 +292,11 @@ test('idle upload view retains all twelve neutral nodes and the same dependency 
   assert.deepEqual(nodesOf(tree).map(node => tipOf(node)), classNames);
   const svg = walk(tree, node => node.type === 'svg' && node.props.role === 'group')[0];
   assert.equal(svg.props['aria-label'], '试卷处理流程总览：12 个环节');
-  assert.equal(walk(tree, node => node.props['data-flow-from']).length, 14);
+  assert.equal(walk(tree, node => node.props['data-flow-from']).length, 11);
   for (const node of nodesOf(tree)) {
     assert.equal(walk(node, entry => /wf-node-(pulse|dot)/.test(entry.props.className || '')).length, 0);
     assert.doesNotMatch(text(node), /✓|!|已完成|待处理|处理中|失败|受阻/);
-    assert.equal(walk(node, entry => entry.type === 'circle')[0].props.stroke, 'var(--wf-flow-node-ring)');
+    assert.equal(walk(node, entry => entry.type === 'circle' && entry.props.fill !== 'none')[0].props.stroke, 'var(--wf-flow-node-ring)');
   }
   assert.doesNotMatch(text(tree), /0 \/ 12|正在读取进度|继续处理|暂无进行中的流程|本轮流程已结束/);
 });
@@ -318,7 +324,7 @@ test('chart is width-adaptive: no fixed pixel size, svg stretches with its conta
   assert.equal(svg.props.style.maxWidth, undefined);
   // 节点与连线都留在同一 viewBox 坐标系内，缩放时整体等比，不会错位。
   assert.match(svg.props.viewBox, /^0 0 \d+ \d+$/);
-  assert.equal(walk(tree, node => node.props['data-flow-from']).length, 14);
+  assert.equal(walk(tree, node => node.props['data-flow-from']).length, 11);
 });
 
 test('each node carries the three-state style tokens for completion, idle and running', () => {
@@ -327,7 +333,7 @@ test('each node carries the three-state style tokens for completion, idle and ru
   Object.assign(items.find(item => item.id === 'answers'), { status: 'running', active: true });
   const { tree } = renderFlow(items, items.find(item => item.id === 'answers'));
   const node = id => nodeOf(tree, id);
-  const ring = id => walk(node(id), n => n.type === 'circle' && n.props.r === 13 && n.props.fill !== 'none')[0].props;
+  const ring = id => walk(node(id), n => n.type === 'circle' && n.props.r === 11 && n.props.fill !== 'none')[0].props;
   // 已完成：实心浅底 + 灰勾
   assert.equal(ring('extract').fill, 'var(--wf-flow-node-done)');
   assert.match(visibleText(node('extract')), /✓/);
