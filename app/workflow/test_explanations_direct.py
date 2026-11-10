@@ -54,6 +54,35 @@ class ExplanationsDirectTest(unittest.TestCase):
         subs = {c["number"]: c["explanation"] for c in payload["items"][0]["subquestions"]}
         self.assertIn("58题独立成段", subs[58])
 
+    def test_pdf_fills_fields_word_lacks_but_never_overrides_word(self):
+        # Word 只有 56 的解析；57/58 与文章大意只在 PDF 提取文本里。
+        (self.batch / "01_source/materials/source.txt").write_text(
+            "56. A 【解析】Word 里的56解析。\n57. B\n58. C\n", encoding="utf-8")
+        (self.batch / "01_source/materials/attachment_001.txt").write_text(
+            "【文章大意】PDF 里的文章大意。\n"
+            "56. A 【解析】PDF 改写的56解析。\n"
+            "57. B 【解析】PDF 提供的57解析。\n"
+            "58. C 【解析】PDF 提供的58解析。\n", encoding="utf-8")
+        payload = explanations_direct.build_payload(self.batch)
+        unit = payload["items"][0]
+        subs = {c["number"]: c["explanation"] for c in unit["subquestions"]}
+        self.assertIn("Word 里的56解析", subs[56])      # Word 优先，不被 PDF 覆盖
+        self.assertIn("PDF 提供的57解析", subs[57])     # Word 缺失 → PDF 兜底
+        self.assertIn("PDF 提供的58解析", subs[58])
+        self.assertIn("PDF 里的文章大意", unit["articleSummary"])
+        self.assertTrue(any("PDF" in e for e in unit["evidence"]), unit["evidence"])
+
+    def test_pdf_only_builds_payload_when_word_absent(self):
+        (self.batch / "01_source/materials/source.txt").unlink()
+        (self.batch / "01_source/materials/attachment_001.txt").write_text(
+            "【文章大意】PDF 文章大意。\n56. A 【解析】PDF 56。\n57. B 【解析】PDF 57。\n58. C 【解析】PDF 58。\n",
+            encoding="utf-8")
+        payload = explanations_direct.build_payload(self.batch)
+        self.assertIsNotNone(payload)
+        subs = {c["number"]: c["explanation"] for c in payload["items"][0]["subquestions"]}
+        self.assertIn("PDF 56", subs[56])
+        self.assertIn("PDF 文章大意", payload["items"][0]["articleSummary"])
+
     def test_no_word_source_returns_none_so_model_path_used(self):
         (self.batch / "01_source/materials/source.txt").unlink()
         (self.batch / "01_source/正文.txt").unlink(missing_ok=True)

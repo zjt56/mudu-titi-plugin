@@ -36,6 +36,7 @@ RULES = """Artifact: {items:[{unit_id,explanation:string|source_ref,articleSumma
 非听力题组每个子题各自填（缺失填「无」）；独立题缺失也填「无」；articleSummary 仅在需要大意的题型填写，缺失填「无」。
 字段标题处理：原解析/原大意所在行常带【解析】【答案】【分析】【详解】【思路点拨】【文章大意】等标题；用 source_ref 指向该行即可，程序会自动去掉标题只保留正文，不要自己连标题一起抄进 explanation/articleSummary。
 书面表达：其原解析就是附录的【思路点拨】（写作指导）；用 source_ref 指向该【思路点拨】行（可含标题，程序会剥掉），逐字保留，不要改写或改写成范文。
+来源优先级（用户规则，必须遵守）：以 Word 原卷/答案材料（01_source/正文.txt、01_source/materials/source.txt、01_source_ans/正文.txt、附录）为准；Word 确实没有该题解析或该篇文章大意时，才在随附 PDF/OCR 提取文本（01_source/materials/attachment_*.txt）中定位同一题/同一篇并逐字保留，evidence 注明来自 PDF；PDF 也没有时按上面规则填「无」。有 Word 时绝不用 PDF 覆盖或改写，也不得跨材料借用。
 JSON 输出：只返回一个根 JSON 对象，根键恰为 status、artifacts、notes、findings；不要在对象后追加第二个对象、说明文字或多余的花括号/方括号，多一个 `}` 或 `]` 会导致整份产物被判协议失败。"""
 
 

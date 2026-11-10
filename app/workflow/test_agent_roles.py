@@ -54,6 +54,19 @@ class AgentRoleContractTest(unittest.TestCase):
         self.assertIn("[子 Agent] 题型判定员", prompt)
         self.assertIn("Agent: types\n", prompt.split("BEGIN SUPPLIED CONTENT")[0])
 
+    def test_content_source_priority_is_stated_in_prompts(self):
+        # 用户规则：Word > PDF/OCR > 空占位，提示词必须显式声明。
+        from workflow import agent_tasks, content_rules
+        exp = content_rules.RULES
+        self.assertIn('Word', exp)
+        self.assertIn('PDF', exp)
+        self.assertIn('「无」', exp)
+        self.assertIn('PDF/OCR', agent_tasks.RULES['answers'])
+        for stage in ('explanations', 'answers'):
+            role = agent_roles.load(stage, agent_tasks.ARTIFACTS[stage])
+            self.assertIn('Word', role['body'], stage)
+            self.assertIn('PDF', role['body'], stage)
+
     def test_role_text_never_changes_the_json_contract(self):
         unit = {"unit_id": "q-1", "numbers": [1], "unit_kind": "standalone"}
         for stage in agent_tasks.ARTIFACTS:

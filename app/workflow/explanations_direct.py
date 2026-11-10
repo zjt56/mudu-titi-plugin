@@ -24,6 +24,11 @@ _EXPL_LABEL = re.compile(r"(?:【\s*解析\s*】|【\s*答案\s*】)")
 _SUMMARY_LABEL = re.compile(r"【\s*文章大意\s*】(.*)$")
 
 
+def _summary_key(text):
+    from .upload_content import _norm
+    return _norm(text or "")
+
+
 def _clean(line):
     """去 OCR 星号与行内空白，保留实词标点。"""
     return re.sub(r"\*{1,3}", "", line).strip()
@@ -34,6 +39,17 @@ def _word_sources(batch):
     batch = Path(batch)
     candidates = [batch / "01_source/materials/source.txt", batch / "01_source/正文.txt"]
     return [p for p in candidates if p.is_file()]
+
+
+def _pdf_sources(batch):
+    """PDF/OCR 提取文本，仅在 Word 缺少该题解析或该篇文章大意时兜底。"""
+    batch = Path(batch)
+    material_dir = batch / "01_source/materials"
+    if not material_dir.is_dir():
+        return []
+    import re as _re
+    return [p for p in sorted(material_dir.glob("attachment_*.txt"))
+            if _re.fullmatch(r"attachment_\d{3,}\.txt", p.name) and p.is_file()]
 
 
 def _parse(lines):
@@ -91,12 +107,35 @@ def _assign_summaries(units, summaries):
 def build_payload(batch_dir):
     batch = Path(batch_dir)
     paths = _word_sources(batch)
-    if not paths:
+    pdf_paths = _pdf_sources(batch)
+    if not paths and not pdf_paths:
         return None
     lines = []
     for path in paths:
         lines.extend(path.read_text(encoding="utf-8-sig", errors="ignore").splitlines())
     expl, summaries = _parse(lines)
+    used_pdf = []
+    # 用户规则：Word 为准；Word 确实没有该题解析/该篇文章大意时，优先取 PDF，
+    # 再没有才留空占位。PDF 只补充 Word 缺失的字段，绝不覆盖 Word 原文。
+    if pdf_paths:
+        seen = {_summary_key(item) for item in summaries}
+        for path in pdf_paths:
+            try:
+                label = str(path.relative_to(batch))
+            except ValueError:
+                label = path.name
+            extra_expl, extra_summaries = _parse(
+                path.read_text(encoding="utf-8-sig", errors="ignore").splitlines())
+            for number, text in extra_expl.items():
+                if number not in expl:
+                    expl[number] = text
+                    used_pdf.append(label)
+            for text in extra_summaries:
+                key = _summary_key(text)
+                if key and key not in seen:
+                    summaries.append(text)
+                    seen.add(key)
+                    used_pdf.append(label + "（文章大意）")
     units = _units(batch)
     summary_by_uid = _assign_summaries(units, summaries)
     items = []
@@ -114,7 +153,8 @@ def build_payload(batch_dir):
             "explanation": group_expl,
             "articleSummary": summary_by_uid.get(uid, PLACEHOLDER),
             "subquestions": children,
-            "evidence": [DIRECT_COPY_EVIDENCE],
+            "evidence": [DIRECT_COPY_EVIDENCE] + (
+                ["PDF OCR 兜底：" + "、".join(sorted(set(used_pdf)))] if used_pdf else []),
         })
     return {"items": items}
 

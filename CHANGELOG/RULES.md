@@ -1,5 +1,14 @@
 # RULES — 规则与强调台账
 
+## 2026-11-10 内容来源优先级：Word ＞ PDF ＞ 空占位（用户明确）
+
+- 原话：“无论是试卷还是答案解析，文章大意等，都以world为准，如果world没有，优先取PDF，如果还是没有，就留空的占位符。”
+- 答案、解析、文章大意一律以 Word 原卷/答案材料为准；Word 有的一律用 Word，PDF 不得覆盖、纠正或改写。
+- Word 确实没有该题/该篇内容时，才用随附 PDF/OCR 提取原文兜底并记录来源；两者都没有时解析/大意填「无」、答案记缺失并留证据。
+- 禁止生成、改写、跨材料借用或用 AI 内容充当原文。
+- 提示词与代码必须同时落地：`content_rules.RULES`、`RULES["answers"]`、`RULES["assemble"]`、`roles/explanations.md`、`roles/answers.md`；`explanations_direct._pdf_sources`、`upload_content` 附件兜底；根规则 4/22。
+- 记录：`CHANGELOG/2026-11-10-content-source-priority.md`。
+
 ## 2026-11-10 排队区严格串行：前一份未完成不得启动后一份（用户明确）
 
 - 原话要点：“前一个试卷遇到卡点或者问题时，排队区的其他试卷就自动开始任务了，这是错误的逻辑，必须等到上分任务全部完成且从排队区移除后才可以启动”。

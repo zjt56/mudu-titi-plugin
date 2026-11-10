@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-content-source-priority.md](2026-11-10-content-source-priority.md) | 强化来源优先级：Word > PDF/OCR > 空占位，提示词与解析直抄代码同步 |
 | 2026-11-10 | [2026-11-10-summary-owner-question-parse.md](2026-11-10-summary-owner-question-parse.md) | 修复大意归属丢失与解析行被“age 5.”误判为两题号导致的 SUMMARY/EXPLANATION_SOURCE_UNVERIFIED |
 | 2026-11-10 | [2026-11-10-strict-queue-serialization.md](2026-11-10-strict-queue-serialization.md) | 修复排队区串行：前一份未完成并移出前，后面的批次不得启动 |
 | 2026-11-10 | [2026-11-10-thorough-fix-explanation-and-json.md](2026-11-10-thorough-fix-explanation-and-json.md) | 系统加固解析溯源与 JSON 结构类问题，并强化各阶段提示词 |
