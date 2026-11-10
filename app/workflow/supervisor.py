@@ -48,6 +48,9 @@ class SupervisorConfig:
     exhausted_cooldown: float = 900.0
     max_no_progress: int = 5
     max_dispatch_per_tick: int = 1
+    # While nothing needs attention the loop parks on wake(); this is only a
+    # bounded safety re-check for batches created by an external process.
+    pause_poll: float = 600.0
 
     @classmethod
     def from_env(cls):
@@ -57,6 +60,7 @@ class SupervisorConfig:
             retry_max=_number(os.getenv("WF_SUPERVISOR_MAX_RETRY_SECONDS"), 900.0, 1.0),
             exhausted_cooldown=_number(os.getenv("WF_SUPERVISOR_EXHAUSTED_SECONDS"), 900.0, 60.0),
             max_no_progress=int(_number(os.getenv("WF_SUPERVISOR_MAX_NO_PROGRESS"), 5, 1)),
+            pause_poll=_number(os.getenv("WF_SUPERVISOR_PAUSE_SECONDS"), 600.0, 30.0),
         )
 
 
@@ -418,6 +422,53 @@ def _dispatch_order(folder):
     return (_number(state.get("last_dispatched_at"), -1, 0), folder.name)
 
 
+def needs_attention(folder, busy=None):
+    """Whether this batch still has automatic work the watchdog must drive.
+
+    The watchdog is an idle-recovery loop, not a poller. A batch that is fully
+    delivered (local_complete, including review differences kept as output) or
+    has crossed the remote upload authorization boundary needs no automatic
+    driving: in both cases it must NOT keep the watchdog running. A local
+    stage that is still pending / running / failed / invalidated does need it.
+    """
+    folder = Path(folder)
+    manifest = _read(folder / "workflow/manifest.json")
+    if not isinstance(manifest.get("stages"), dict):
+        return False
+    if _remote_boundary(folder, manifest):
+        return False
+    if local_complete(folder, manifest):
+        return False
+    if busy is not None:
+        try:
+            if busy(folder):
+                return True
+        except (OSError, ValueError, TypeError):
+            pass
+    for stage in contracts.STAGES:
+        if stage.kind == contracts.HUMAN:
+            continue
+        record = (manifest.get("stages") or {}).get(stage.id) or {}
+        if not isinstance(record, dict):
+            continue
+        if record.get("status") in OK or record.get("status") == "skipped":
+            continue
+        return True
+    return False
+
+
+def has_pending_work(root, busy=None):
+    """True while at least one local batch still needs automatic driving."""
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        return False
+    try:
+        folders = [f for f in root.iterdir() if _active_folder(root, f)]
+    except OSError:
+        return False
+    return any(needs_attention(folder, busy=busy) for folder in folders)
+
+
 class WorkflowSupervisor:
     def __init__(self, workflows, dispatch, *, is_active=None, clock=None, config=None, busy=None):
         self.workflows = Path(workflows).absolute()
@@ -430,11 +481,23 @@ class WorkflowSupervisor:
         self._thread = None
         self._tick_lock = threading.Lock()
         self._last_tick_at = None
+        # Idle pause: the loop stops spending ticks while no batch needs work and
+        # wakes on the next request/activity signal, so "no paper task" pauses it.
+        self._wake = threading.Event()
+        self._paused = False
 
     def health(self):
         """Expose actual watchdog liveness separately from any batch's success."""
         return {"running": bool(self._thread and self._thread.is_alive()),
-                "last_tick_at": self._last_tick_at, "interval_seconds": self.config.interval}
+                "last_tick_at": self._last_tick_at, "interval_seconds": self.config.interval,
+                "paused": bool(self._paused)}
+
+    def wake(self):
+        """Signal new activity (advanced/queued work or a new batch) to resume."""
+        self._wake.set()
+
+    def _has_work(self):
+        return has_pending_work(self.workflows, busy=self.busy)
 
     def _tick_batch(self, folder, now):
         manifest = _read(folder / "workflow/manifest.json")
@@ -565,6 +628,18 @@ class WorkflowSupervisor:
         def watch():
             while not self._stop.is_set():
                 try:
+                    if not self._has_work():
+                        # No paper task needs automatic driving: pause instead of
+                        # polling everything forever. Resume on wake() or any of
+                        # the bounded idle re-checks below.
+                        self._paused = True
+                        self._wake.clear()
+                        if self._wake.wait(self.config.pause_poll):
+                            self._paused = False
+                            continue
+                        self._paused = False
+                        continue
+                    self._paused = False
                     self.one_tick()
                 except Exception:
                     LOGGER.exception("Workflow watchdog tick failed; will retry")

@@ -1,5 +1,11 @@
 # RULES — 规则与强调台账
 
+## 2026-11-10 没有试卷任务时自动巡检必须暂停（用户强调）
+
+- 用户原话：自动巡检在没有试卷任务的时候要暂停，但目前没有暂停。
+- 规则：监督器只在存在未完成本地批次（或正被占用）时运行；全部批次已完成/已到远端上传边界时必须暂停等待唤醒，不能按固定间隔空转。监督器自身派发不得清空已提交的重试预算，否则 no_progress 永不累计、永远不会进入 exhausted。
+- 落地：supervisor.needs_attention/has_pending_work、watch() 的 wake/pause_poll、server._wake_supervisor、server._dispatch_supervised(reset_budget=False)；记录 `2026-11-10-auto-supervisor-idle-pause.md`。
+
 ## 2026-11-10 审核附件与题目附件分离（用户指向官方文档）
 
 - 用户原话：了解题库服务器附件上传要求，准备把 Word 和 PDF 作为附件一起上传到批次；随后给出 `POST /api/uploads/{staging_id}/attachments` 协议并指向 `http://101.43.1.57/docs/#format`。

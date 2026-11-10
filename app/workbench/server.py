@@ -950,6 +950,7 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
         _advance_queue.append({"name": name, "operations_expectation": operations_expectation}
                               if operations_expectation is not None else name)
     _ensure_advance_worker()
+    _wake_supervisor()
     return {"started": True, "queued": True, "running": False}
 
 
@@ -959,6 +960,21 @@ def start_advance(name: str, *, reset_budget=True) -> dict:
     if auto_flow is None:
         raise ValueError("流水线模块不可用")
     return _launch_advance(name, batch_dir(name), reset_budget=reset_budget)
+
+
+def _dispatch_supervised(name):
+    # HTTP overview reads may hold this lock while inspecting many media files.
+    # The watchdog must remain bounded and never queue behind such a request.
+    if not _lock.acquire(blocking=False):
+        return {"started": False, "running": False, "busy": True}
+    try:
+        # The watchdog already decided this batch needs work and committed its
+        # retry reservation. Enqueueing must NOT clear that budget (that would
+        # reset no_progress_attempts and defeat exhaustion); only an explicit
+        # user action may reset it.
+        return start_advance(name, reset_budget=False)
+    finally:
+        _lock.release()
 
 
 def advance_state(name: str) -> dict:
@@ -1225,6 +1241,7 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
                  "extra_audio": [str(path) for path in saved_extra_audio]}
     batch_folder = auto_flow.ensure_batch(candidate, WORKFLOWS)
     start_advance(batch_folder.name)
+    _wake_supervisor()
     manifest = wf_manifest.load(batch_folder) if wf_manifest else {}
     try:
         inbox_rel = str(folder.relative_to(ROOT))
@@ -3135,15 +3152,13 @@ class Handler(BaseHTTPRequestHandler):
 _workflow_supervisor = None
 
 
-def _dispatch_supervised(name):
-    # HTTP overview reads may hold this lock while inspecting many media files.
-    # The watchdog must remain bounded and never queue behind such a request.
-    if not _lock.acquire(blocking=False):
-        return {"started": False, "running": False, "busy": True}
+def _wake_supervisor():
+    """Resume the idle-paused watchdog when new work appears (never raises)."""
     try:
-        return start_advance(name)
-    finally:
-        _lock.release()
+        if _workflow_supervisor is not None:
+            _workflow_supervisor.wake()
+    except Exception:  # noqa: BLE001 - a wake failure must not block uploads/advance
+        pass
 
 
 def serve(http_server):

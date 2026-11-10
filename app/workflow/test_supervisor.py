@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import threading
 import unittest
 from unittest.mock import Mock, patch
@@ -547,3 +548,70 @@ class DeferredBatchKeepsMovingTest(unittest.TestCase):
         # 只验证"延后不会被当作无进展"这一判定；具体的派发由现有调度逻辑完成。
         self.assertIn("answers", supervisor._deferred_stages(manifest))
         self.assertNotIn("validate", supervisor._deferred_stages(manifest))
+
+
+class IdlePauseTest(SupervisorFixture):
+    """No paper task = watchdog must pause instead of polling everything."""
+
+    def test_needs_attention_ignores_finished_and_remote_batches(self):
+        done = self.make_batch("done")
+        manifest = supervisor._read(done / "workflow/manifest.json")
+        manifest["stages"] = {sid: {"status": "completed"} for sid in supervisor.LOCAL_STAGES}
+        put(done / "workflow/manifest.json", manifest)
+        put(done / "06_batch/batch_meta.json", valid_final_batch())
+        put(done / format_gate.FINAL_PATH, valid_final_batch())
+        put(done / format_gate.REPORT_PATH,
+            {"passed": True, "final_sha256": supervisor._digest(done / format_gate.FINAL_PATH)})
+        self.assertTrue(supervisor.local_complete(done, supervisor._read(done / "workflow/manifest.json")))
+        self.assertFalse(supervisor.needs_attention(done))
+
+        remote = self.make_batch("remote", stages={"validation": {"status": "pending"}})
+        put(remote / "07_upload/receipt.json", {"remote_confirmation_required": True})
+        self.assertFalse(supervisor.needs_attention(remote))
+
+        waiting = self.make_batch("waiting", stages={"review": {"status": "pending"}})
+        self.assertTrue(supervisor.needs_attention(waiting))
+
+        broken = self.make_batch("broken", stages={"review": {"status": "failed"}})
+        self.assertTrue(supervisor.needs_attention(broken))
+
+    def test_has_pending_work_requires_at_least_one_unfinished_local_batch(self):
+        done = self.make_batch("done")
+        manifest = supervisor._read(done / "workflow/manifest.json")
+        manifest["stages"] = {sid: {"status": "completed"} for sid in supervisor.LOCAL_STAGES}
+        put(done / "workflow/manifest.json", manifest)
+        put(done / format_gate.FINAL_PATH, valid_final_batch())
+        put(done / format_gate.REPORT_PATH,
+            {"passed": True, "final_sha256": supervisor._digest(done / format_gate.FINAL_PATH)})
+        self.assertFalse(supervisor.has_pending_work(self.workflows, busy=lambda folder: False))
+        self.make_batch("waiting", stages={"review": {"status": "pending"}})
+        self.assertTrue(supervisor.has_pending_work(self.workflows, busy=lambda folder: False))
+
+    def test_watch_loop_parks_on_wake_while_nothing_needs_work(self):
+        done = self.make_batch("done")
+        manifest = supervisor._read(done / "workflow/manifest.json")
+        manifest["stages"] = {sid: {"status": "completed"} for sid in supervisor.LOCAL_STAGES}
+        put(done / "workflow/manifest.json", manifest)
+        put(done / format_gate.FINAL_PATH, valid_final_batch())
+        put(done / format_gate.REPORT_PATH,
+            {"passed": True, "final_sha256": supervisor._digest(done / format_gate.FINAL_PATH)})
+        dispatch = Mock()
+        watch = supervisor.WorkflowSupervisor(self.workflows, dispatch, clock=self.clock,
+            config=supervisor.SupervisorConfig(interval=0.05, retry_base=10, retry_max=40,
+                exhausted_cooldown=1000, max_no_progress=3, pause_poll=0.2))
+        watch.tiled = None
+        watch.start()
+        self.addCleanup(watch.stop)
+        # Idle: it must not run a tick, i.e. never dispatch, and report paused.
+        deadline = time.time() + 2
+        while time.time() < deadline and not watch.health().get("paused"):
+            time.sleep(0.02)
+        self.assertTrue(watch.health().get("paused"))
+        dispatch.assert_not_called()
+        # New work appears, an explicit wake resumes the loop and drives it.
+        self.make_batch("waiting", stages={"review": {"status": "pending"}})
+        watch.wake()
+        deadline = time.time() + 2
+        while time.time() < deadline and dispatch.call_count == 0:
+            time.sleep(0.02)
+        self.assertGreaterEqual(dispatch.call_count, 1)
