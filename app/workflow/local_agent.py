@@ -393,9 +393,11 @@ def _parse_response(text, *, strict=False):
                     raise ValueError(f"Duplicate JSON key: {key}")
                 result[key] = value
             return result
-        def load_json(value):
+        def load_json(value, *, lenient=False):
+            # lenient 仅放宽 JSON 对字符串内原始控制字符的限制（制表符/换行），
+            # 仍拒绝 NaN、重复键与非法常数；不改变任何内容语义。
             return json.loads(value, parse_constant=reject_constant, parse_float=finite_float,
-                              object_pairs_hook=unique_object)
+                              object_pairs_hook=unique_object, strict=not lenient)
         try:
             response = load_json(text)
         except (ValueError, RecursionError) as exc:
@@ -403,13 +405,26 @@ def _parse_response(text, *, strict=False):
             # 补齐/去掉后再解析，避免把可用的整份结果当成协议失败。截断的半截 JSON
             # 不会以 }/] 结尾，不会被误收。严格模式（审核）不做任何修补。
             repaired = None
-            if not strict and (text.endswith("}") or text.endswith("]")):
+            # 结构完整但字符串内含原始制表符/换行：只放宽控制字符再解析。
+            for lenient in (True,):
+                try:
+                    repaired = load_json(text, lenient=lenient)
+                    break
+                except (ValueError, RecursionError):
+                    continue
+            # 审核等严格模式也允许“补齐结构闭合”：模型常少写一个根右花括号或
+            # 在字符串里输出原始制表符；这类修补只补括号/容错控制字符，绝不删改
+            # 内容。真正的截断（内容缺项）仍会因解析失败而拒绝。
+            if repaired is None and (text.endswith("}") or text.endswith("]")):
                 for extra in ("}", "}}", "}}}"):
-                    try:
-                        repaired = load_json(text + extra)
+                    for lenient in (False, True):
+                        try:
+                            repaired = load_json(text + extra, lenient=lenient)
+                            break
+                        except (ValueError, RecursionError):
+                            continue
+                    if repaired is not None:
                         break
-                    except (ValueError, RecursionError):
-                        continue
                 if repaired is None:
                     # 反向：模型多写了一个尾随 }/]（over-closed）。仅当去掉末尾
                     # 纯括号后能解析成完整对象时才接受，避免截断或改写内容。
@@ -418,7 +433,7 @@ def _parse_response(text, *, strict=False):
                             break
                         candidate = text[:-trim].rstrip()
                         try:
-                            parsed = load_json(candidate)
+                            parsed = load_json(candidate, lenient=True)
                         except (ValueError, RecursionError):
                             continue
                         if isinstance(parsed, dict):

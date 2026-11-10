@@ -38,6 +38,19 @@ class ExecutionStateTest(unittest.TestCase):
             self.assertFalse(mf.dependency_satisfied(self.manifest, 'extract'))
             self.assertFalse(mf.dependency_satisfied(self.manifest, 'extract', allow_unqualified=True))
 
+    def test_review_differences_show_pending_confirmation_not_reviewing(self):
+        # 规则 6：审核差异是产出。执行完成 + 差异待人工 + 未放行时，本地流程
+        # 已完成，入口状态应显示“待确认/可上传”，而不是永久“审核中”。
+        self.finish_local()
+        self.manifest['stages']['review_gate'].update(
+            status=mf.NEEDS_REVIEW, execution_completed=True,
+            continue_unqualified=True, release_ready=False)
+        (self.root / '07_review/review-gate.json').write_text('{"passed": false}')
+        self.assertEqual(mf.derive_status(self.manifest), 'pending_confirmation')
+        self.assertTrue(state.local_complete(self.root, self.manifest))
+        # 差异没有被当作质量通过：release_ready 仍为 False。
+        self.assertFalse(self.manifest['stages']['review_gate'].get('release_ready'))
+
     def test_review_success_does_not_finish_a_pending_format_gate(self):
         self.finish_local()
         self.manifest['stages']['format_gate']['status'] = mf.PENDING

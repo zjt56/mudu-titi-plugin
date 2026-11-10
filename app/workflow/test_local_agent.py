@@ -256,6 +256,17 @@ class LocalAgentTest(unittest.TestCase):
         self.assertEqual(parsed["findings"], [])
         self.assertEqual(parsed["artifacts"]["04_knowledge/knowledge.json"], {"items": []})
 
+    def test_parse_response_repairs_review_output_missing_brace_and_control_chars(self):
+        # 审核使用 strict 模式，但模型少写一个根右花括号、或在字符串里输出原始
+        # 制表符时，结构仍完整；补括号/放宽控制字符不得删改内容。
+        text = ('{"status":"completed","artifacts":{"review_round":{"checks":['
+                '{"unit_id":"q-1","quote":"A.\tB.","verdict":"ok"}]}},"notes":[],"findings":[]}')
+        parsed = agent._parse_response(text, strict=True)
+        self.assertEqual(parsed["artifacts"]["review_round"]["checks"][0]["quote"], "A.\tB.")
+        # 真正截断（内容缺项）仍必须拒绝。
+        with self.assertRaises(agent.AgentError):
+            agent._parse_response(text[:-40], strict=True)
+
     def test_parse_response_repairs_single_extra_trailing_brace(self):
         valid = json.dumps(RESPONSE)
         # Model sometimes over-closes the root object by one brace; only remove

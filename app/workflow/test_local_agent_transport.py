@@ -166,7 +166,7 @@ class ShellBridgeTest(unittest.TestCase):
         cases = [("HTTP 401", 1, "invalid", "authentication"),
                  ('{"error":{"code":"insufficient_quota"},"status":429}', 2, "bad", "quota"),
                  ("quota QUOTA 429 RATE_LIMIT", 3, "bad", "exit"),
-                 ("", 0, '{"status":"completed","artifacts":{}', "response")]
+                 ("", 0, '{"status":"completed","artifacts":{},"notes":["x', "response")]
         for index, (stderr, exit, stdout, code) in enumerate(cases):
             # Each invocation has its own fake home and isolated output paths.
             with self.subTest(code=code):
@@ -222,18 +222,23 @@ class LocalInvocationEvidenceTest(unittest.TestCase):
             self.assertGreaterEqual(meta["total_duration"], meta["duration"])
             self.assertNotIn("MOCK-SECRET", json.dumps(meta))
 
-    def test_review_json_is_not_repaired_or_hoisted(self):
+    def test_review_json_allows_structural_completion_but_not_truncation(self):
         raw = '{"status":"completed","artifacts":{"review_round":{"checks":[],"findings":["keep"]}}}'
         with patch.object(agent.subprocess, "Popen", side_effect=self.spawn(raw)):
             result = agent.invoke("x" * 3000 + "\nROUND: labels\n", self.root / "strict", self.config)
         self.assertEqual(result["response"], json.loads(raw))
         self.assertEqual(json.loads((self.root / "strict" / "response.json").read_text()), json.loads(raw))
-        with patch.object(agent.subprocess, "Popen", side_effect=self.spawn(raw[:-1])) as spawn:
+        # 结构闭合（少写根右花括号）可安全补齐；真正截断的内容仍必须拒绝。
+        with patch.object(agent.subprocess, "Popen", side_effect=self.spawn(raw[:-1])):
+            repaired = agent.invoke("ROUND: labels\n", self.root / "repaired", self.config)
+        self.assertEqual(repaired["response"], json.loads(raw))
+        truncated = raw[:70]
+        with patch.object(agent.subprocess, "Popen", side_effect=self.spawn(truncated)) as spawn:
             with self.assertRaises(agent.AgentError) as caught:
                 agent.invoke("ROUND: sample\n", self.root / "truncated", self.config)
         self.assertEqual(caught.exception.code, "response")
         self.assertEqual(spawn.call_count, 1)
-        self.assertEqual((self.root / "truncated" / "stdout.log").read_text(), raw[:-1])
+        self.assertEqual((self.root / "truncated" / "stdout.log").read_text(), truncated)
         self.assertFalse((self.root / "truncated" / "response.json").exists())
 
     @unittest.skipIf(os.name == "nt", "flock is POSIX only")

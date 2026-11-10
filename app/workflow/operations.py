@@ -911,6 +911,13 @@ def action(root, folder, payload, *, enqueue=None):
                     if strategy == "rejudge_knowledge" and incident["stage"] not in (
                             "format_gate", "validate", "assemble", "knowledge"):
                         raise ValueError("Knowledge rejudgment is not applicable to this stage")
+                    if strategy == "upstream_rederive" and incident["stage"] in (
+                            "review", "review_gate"):
+                        # 审核失败（含模型 JSON 协议错误）应重跑审核本身；重派生上游
+                        # 会改写 knowledge/batch，反过来让审核绑定失效，形成死循环。
+                        raise ValueError(
+                            "review_failure_requires_stage_retry: 审核失败应重跑审核阶段，"
+                            "不得重派生上游内容；请用 retry_stage_with_fresh_context")
                     manifest = mf.load(folder)
                     evidence = _evidence(folder, incident)
                     _block_repeat(incident, "resume", strategy, evidence)

@@ -137,6 +137,15 @@ def derive_status(manifest):
         return "staged"
     if FAILED in statuses.values():
         return "failed"
+    # 审核差异是产出，不是卡点（AGENTS.md 规则 6）：一审/二审执行完成、
+    # 差异待人工判断且未放行时，本地流程已经完成，应显示“待确认/可上传”，
+    # 不能一直显示“审核中”。人工上传仍由用户确认。
+    gate = stages.get("review_gate") or {}
+    if (gate.get("status") == NEEDS_REVIEW and gate.get("execution_completed") is True
+            and gate.get("continue_unqualified") is True and not gate.get("release_ready")
+            and statuses.get("validate") == COMPLETED
+            and statuses.get("format_gate") == COMPLETED):
+        return "pending_confirmation"
     if projection(manifest, stage_ids=LOCAL_STAGES)["execution_completed"]:
         return "pending_confirmation"
     if BLOCKED in statuses.values():

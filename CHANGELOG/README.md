@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-review-loop-and-status.md](2026-11-10-review-loop-and-status.md) | 审核 JSON 容错、禁止运维重生成上游、差异状态显示待确认 |
 | 2026-11-10 | [2026-11-10-review-difference-audit-prompts.md](2026-11-10-review-difference-audit-prompts.md) | 复审修复误报执行完成和旧报告覆盖；审核/两轮角色/自愈/运维统一差异保护提示，生产者定位不消费差异码 |
 | 2026-11-10 | [2026-11-10-review-differences-not-a-blocker.md](2026-11-10-review-differences-not-a-blocker.md) | 审核差异不再算卡点：诊断改 quality_differences，运维禁止用局部重生成消除差异 |
 | 2026-11-10 | [2026-11-10-model-selection-persistence.md](2026-11-10-model-selection-persistence.md) | 模型选择改存设备本地，避免仓库检出覆盖；恢复官方模型，修正 WorkBuddy 限流被误用 |
