@@ -53,7 +53,10 @@ PYTHONPATH=app python3 -m workflow.issue_log list --status open
 - 必须写清具体批次、阶段、失败检查与判定口径；只写“按阻断项修复”不算记录。
 - 未复验不得标记已修复；修好后不删除记录，留档避免同类问题重复排查。
 - 审核差异（`review_gate=needs_review + execution_completed`）与限流等瞬时错误**不算卡点**，不登记。
-- 台账只写 `ISSUES/`，不改批次数据、manifest、收据或上传边界。详见 `ISSUES/README.md` 与根 `AGENTS.md` 硬规则 24。
+- 自愈/监督器判定真实卡点时**代码会自动写**批次内 `workflow/blockers.json`；用
+  `PYTHONPATH=app python3 -m workflow.issue_log sync --batch 'workflows/<批次>'`（或 `--all`）
+  汇总进 `ISSUES/open/`，按「批次+阶段+检查」去重。自动留档不等于已修复。
+- 台账只写 `ISSUES/` 与批次内 `workflow/blockers.json`，不改批次数据、manifest、收据或上传边界。详见 `ISSUES/README.md` 与根 `AGENTS.md` 硬规则 24。
 
 ## 自动 CLI 接入（可选）
 

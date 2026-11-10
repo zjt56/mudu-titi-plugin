@@ -126,6 +126,85 @@ class IssueLogTest(unittest.TestCase):
             self.assertEqual(issue_log.summary()["fixed"], 1)
             self.assertEqual(issue_log.main(["list", "--status", "open"]), 0)
 
+    def test_record_blocker_upserts_per_batch_without_repo_pollution(self):
+        batch = self.root / "batch"
+        (batch / "workflow").mkdir(parents=True)
+        first = issue_log.record_blocker(batch, "explanations",
+                                         check="EXPLANATION_SOURCE_UNVERIFIED",
+                                         symptom="q-81 未溯源", why="标题未剥离",
+                                         how="剥离标题", source="self_heal")
+        second = issue_log.record_blocker(batch, "explanations",
+                                          check="EXPLANATION_SOURCE_UNVERIFIED",
+                                          symptom="q-81 未溯源", why="标题未剥离",
+                                          how="剥离标题", source="self_heal")
+        self.assertEqual(first["occurrences"], 1)
+        self.assertEqual(second["occurrences"], 2)  # 同卡点累加，不重复建条目
+        data = issue_log.load_blockers(batch)
+        self.assertEqual(len(data["blockers"]), 1)
+        # 只写批次内台账，仓库 ISSUES/ 不受影响（测试/离线操作不污染）。
+        self.assertFalse((self.root / "open").exists())
+
+    def test_record_blocker_is_best_effort(self):
+        # 批次目录不可写/不存在时返回 None，绝不抛异常打断自愈。
+        missing = self.root / "nope"
+        self.assertIsNone(issue_log.record_blocker(missing, "knowledge", check="x"))
+        self.assertEqual(issue_log.load_blockers(missing)["blockers"], {})
+
+    def test_sync_moves_batch_blockers_into_open_ledger(self):
+        batch = self.root / "batch"
+        (batch / "workflow").mkdir(parents=True)
+        issue_log.record_blocker(batch, "explanations", check="EXPLANATION_SOURCE_UNVERIFIED",
+                                 symptom="q-81 未溯源", why="标题未剥离", how="剥离标题")
+        issue_log.record_blocker(batch, "knowledge", check="Extra data", symptom="多写括号")
+        result = issue_log.sync(batch, root=self.root)
+        self.assertEqual(len(result["created"]), 2)
+        self.assertEqual(result["updated"], [])
+        # 再同步一次只更新计数，不重复建单。
+        again = issue_log.sync(batch, root=self.root)
+        self.assertEqual(again["created"], [])
+        self.assertEqual(len(again["updated"]), 2)
+        self.assertEqual(len(issue_log.listing("open", self.root)), 2)
+        text = Path(again["updated"] and (self.root / "open" / (again["updated"][0] + ".md"))
+                    or "").read_text(encoding="utf-8")
+        self.assertIn("q-81 未溯源", text)
+
+    def test_self_heal_records_only_real_blockers(self):
+        from workflow import self_heal
+        batch = self.root / "batch"
+        (batch / "workflow").mkdir(parents=True)
+        ledger = {"events": [{"at": "2026-11-10T10:00:00+08:00", "stage": "knowledge",
+                              "outcome": "repair_not_applicable",
+                              "plan": {"reason": "自愈无法定位"},
+                              "repair": {"action": "rejudge_knowledge", "status": "refused",
+                                         "errors": [{"code": "KNOWLEDGE_REPAIR_FAILED",
+                                                     "message": "batch_meta.json 不存在"}]}}]}
+        self_heal._save(batch, ledger)
+        data = issue_log.load_blockers(batch)
+        entries = list(data["blockers"].values())
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["stage"], "knowledge")
+        self.assertEqual(entries[0]["check"], "KNOWLEDGE_REPAIR_FAILED")
+        # 同一事件重复 _save 不重复计数（去重状态随 self-heal.json 持久化）。
+        self_heal._save(batch, ledger)
+        self.assertEqual(list(issue_log.load_blockers(batch)["blockers"].values())[0]["occurrences"], 1)
+        # 正常推进（retry_scheduled）不是卡点，不登记。
+        progressed = {"events": [{"at": "2026-11-10T10:05:00+08:00", "stage": "knowledge",
+                                  "outcome": "retry_scheduled"}]}
+        self_heal._save(batch, progressed)
+        self.assertEqual(len(issue_log.load_blockers(batch)["blockers"]), 1)
+
+    def test_supervisor_exhaustion_records_blocker(self):
+        from workflow import supervisor
+        batch = self.root / "batch"
+        (batch / "workflow").mkdir(parents=True)
+        supervisor._record_exhausted_blocker(
+            batch, {"stages": {"knowledge": {"status": "failed"}}},
+            {"escalation": "连续调度无有效本地进展"}, 6)
+        entries = list(issue_log.load_blockers(batch)["blockers"].values())
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["stage"], "knowledge")
+        self.assertEqual(entries[0]["check"], "no_progress_exhausted")
+
     def test_repository_ships_the_ledger_folders(self):
         base = Path(issue_log.__file__).resolve().parents[2] / "ISSUES"
         self.assertTrue((base / "README.md").is_file())

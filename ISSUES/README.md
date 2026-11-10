@@ -28,6 +28,27 @@
 - 限流/额度等瞬时错误（等恢复即可，且会自行重试）；
 - 用户主动停止、主动删除批次。
 
+## 自动留档（代码强制）
+
+不只靠人记：**真正判定卡点的代码会自动写台账**。
+
+- 自愈（`self_heal`）判定 `repair_not_applicable` / `repair_failed` / `retry_budget_exhausted` /
+  `gate_retry_budget_exhausted` 时，写入批次内 `workflow/blockers.json`；
+- 监督器（`supervisor`）判定「连续多次调度无有效本地进展 → exhausted」时同样写入；
+- 同一卡点（阶段+检查+现象）只累加 `occurrences`、更新 `last_seen`，同一事件不重复计数；
+- 写台账是 **best-effort**：台账失败绝不影响自愈/调度本身；也不会创建幽灵批次目录。
+
+批次内台账只写该批次自己的 `workflow/blockers.json`，**测试和离线操作不会污染仓库 `ISSUES/`**。
+要把它汇总成仓库待修复清单：
+
+```bash
+PYTHONPATH=app python3 -m workflow.issue_log sync --batch 'workflows/<批次>'
+PYTHONPATH=app python3 -m workflow.issue_log sync --all
+```
+
+`sync` 按「批次+阶段+检查」去重：首次建单，之后再同步只累加次数。
+**自动留档 ≠ 已修复**：条目仍留在 `open/`，必须真的修好并复验后再 `issue_log fix`。
+
 ## 怎么记
 
 统一用台账命令（在仓库根目录，`PYTHONPATH=app`）：

@@ -394,6 +394,24 @@ def _new_deferred_work(folder, manifest, deferred, state):
     return new_work
 
 
+def _record_exhausted_blocker(folder, manifest, state, attempts):
+    """长时间无有效进展＝真实卡点，按硬规则 24 写进批次内台账（best-effort）。"""
+    try:
+        from . import issue_log
+        stage = next((sid for sid, record in (manifest.get("stages") or {}).items()
+                      if isinstance(record, dict)
+                      and str(record.get("status") or "") not in ("completed", "approved", "skipped")),
+                     "workflow")
+        issue_log.record_blocker(
+            folder, stage, check="no_progress_exhausted",
+            symptom=str(state.get("escalation") or "连续调度无有效本地进展"),
+            why=f"连续 {attempts} 次调度未产生有效本地进展（attempts={attempts}）",
+            how="检查该阶段输入/产物与自愈动作；修正后点继续处理或等冷却探测",
+            error_code="exhausted", source="supervisor")
+    except Exception:  # noqa: BLE001 - 台账绝不能影响调度
+        pass
+
+
 def _dispatch_order(folder):
     # Durable ordering also survives restarts; absent/invalid timestamps go first.
     state = _read(folder / "workflow" / LEDGER)
@@ -482,6 +500,7 @@ class WorkflowSupervisor:
                          escalation="连续调度无有效本地进展；已降频，保留质量阻断，等待输入/配置修正或长冷却探测",
                          updated_at=now)
             _write_existing(folder, LEDGER, state)
+            _record_exhausted_blocker(folder, manifest, state, attempts)
             return "exhausted"
         delay = self.config.exhausted_cooldown if exhausted else min(
             self.config.retry_max, self.config.retry_base * (2 ** min(attempts, 20)))

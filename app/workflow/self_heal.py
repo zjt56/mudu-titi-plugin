@@ -56,7 +56,64 @@ def _load(batch: Path) -> dict:
     return {"attempts": {}, "events": []}
 
 
+# 自愈结果里真正代表“卡住了”的 outcome：修复不可用、修复失败、预算耗尽。
+# 其它（retry_scheduled/upstream_escalated/content_retry_with_feedback）是仍在推进，
+# 不算卡点，不能污染台账。
+BLOCKER_OUTCOMES = frozenset(("repair_not_applicable", "repair_failed",
+                              "retry_budget_exhausted", "gate_retry_budget_exhausted"))
+_RECORDED_LIMIT = 200
+
+
+def _record_blockers(batch: Path, value: dict) -> None:
+    """把本次自愈判定出的真实卡点写进批次内台账（硬规则 24）。
+
+    best-effort：台账写入失败绝不影响自愈本身；同一事件（阶段+检查+时间）只记一次，
+    去重状态存进 self-heal.json，避免每次 _save 都把 occurrences 刷高。
+    """
+    try:
+        events = value.get("events") or []
+        latest = events[-1] if events else {}
+        outcome = str(latest.get("outcome") or "")
+        if outcome not in BLOCKER_OUTCOMES or latest.get("verified"):
+            return
+        stage = str(latest.get("stage") or value.get("last_stage") or "").strip()
+        if not stage:
+            return
+        plan = latest.get("plan") if isinstance(latest.get("plan"), dict) else {}
+        repair = latest.get("repair") if isinstance(latest.get("repair"), dict) else {}
+        errors = [item for item in (repair.get("errors") or []) if isinstance(item, dict)]
+        check = (str(latest.get("error_code") or "")
+                 or (str(errors[0].get("code") or "") if errors else "")
+                 or str(repair.get("status") or "") or outcome)
+        symptom = ((str(errors[0].get("message") or "") if errors else "")
+                   or str(repair.get("error") or "")
+                   or str(plan.get("reason") or "") or str(latest.get("detail") or "") or outcome)
+        event_at = str(latest.get("at") or "")
+        recorded = value.get("blockers_recorded")
+        if not isinstance(recorded, dict):
+            recorded = value["blockers_recorded"] = {}
+        dedupe = f"{stage}|{check}|{event_at}"
+        if dedupe in recorded:
+            return
+        from . import issue_log
+        entry = issue_log.record_blocker(
+            batch, stage, check=check, symptom=symptom,
+            why=str(plan.get("reason") or latest.get("detail") or ""),
+            how=str(repair.get("action") or latest.get("effective_action") or ""),
+            error_code=str(latest.get("error_code") or ""), source="self_heal")
+        if entry is not None:
+            recorded[dedupe] = event_at
+            if len(recorded) > _RECORDED_LIMIT:
+                for key in list(recorded)[:-_RECORDED_LIMIT]:
+                    recorded.pop(key, None)
+    except Exception:  # noqa: BLE001 - 台账绝不能影响自愈本身
+        pass
+
+
 def _save(batch: Path, value: dict) -> None:
+    # 硬规则 24：真正判定卡点的自愈结果必须落档，且必须在写台账之前完成，
+    # 这样去重状态能随 self-heal.json 一起持久化。
+    _record_blockers(batch, value)
     from .agent_protocol import _atomic, _encoded
     _atomic(_path(batch), _encoded(value))
     from .agent_tasks import _safe_path

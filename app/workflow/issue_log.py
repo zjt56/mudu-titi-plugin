@@ -40,6 +40,9 @@ HEADER_FIELDS = ("id", "status", "batch", "batch_dir", "stage", "check",
                  "created", "last_seen", "occurrences",
                  "fixed_at", "fix_commit", "verification", "title")
 _ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[^\s/\\:*?\"<>|]+$")
+# 批次内台账：由工作流代码在真正判定卡点时自动写入，测试/离线操作不会污染仓库。
+BLOCKERS_FILE = "workflow/blockers.json"
+BLOCKERS_VERSION = 1
 
 
 class IssueError(ValueError):
@@ -66,7 +69,7 @@ def _slug(text: str, limit: int = 48) -> str:
     value = unicodedata.normalize("NFKC", str(text or "")).strip()
     value = re.sub(r"[\s/\\:*?\"<>|\x00-\x1f]+", "-", value)
     value = re.sub(r"-{2,}", "-", value).strip("-.")
-    return value[:limit] or "issue"
+    return value[:limit].strip("-.") or "issue"
 
 
 def _one_line(value) -> str:
@@ -339,6 +342,109 @@ def summary(root: Path | None = None) -> dict:
             "total": len(rows)}
 
 
+# ---------------------------------------------------------------- 批次内自动台账
+#
+# 硬规则 24 要求“每次卡点都记录”。光有命令靠人执行不算代码约束，所以在真正判定
+# 卡点的地方（self_heal 修复不可用/预算耗尽、supervisor 长时间无进展）由代码调用
+# `record_blocker`，写进**该批次自己**的 workflow/blockers.json：
+#   - 测试、离线操作、其它批次互不影响，不会污染仓库 ISSUES/；
+#   - 同一卡点（阶段+检查+现象）只累加 occurrences，不刷屏；
+#   - `issue_log sync` 再把这些按批次汇总进仓库 ISSUES/open/。
+
+def _blocker_key(stage: str, check: str, symptom: str) -> str:
+    import hashlib
+    digest = hashlib.sha256(" ".join(str(symptom or "").split()).encode("utf-8")).hexdigest()[:12]
+    return f"{stage}|{check}|{digest}"
+
+
+def blockers_path(batch_dir) -> Path:
+    return Path(batch_dir) / BLOCKERS_FILE
+
+
+def load_blockers(batch_dir) -> dict:
+    """读取批次内台账；缺失或损坏时返回空结构（只读诊断，不改批次）。"""
+    path = blockers_path(batch_dir)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"version": BLOCKERS_VERSION, "blockers": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("blockers"), dict):
+        return {"version": BLOCKERS_VERSION, "blockers": {}}
+    return data
+
+
+def record_blocker(batch_dir, stage: str, *, check: str = "", symptom: str = "",
+                   why: str = "", how: str = "", error_code: str = "",
+                   source: str = "") -> dict | None:
+    """把一次真实卡点写进批次内台账；best-effort，绝不因台账失败而中断流程。
+
+    返回写入后的条目（含 occurrences），失败返回 None。调用方不得依赖它成功。
+    """
+    stage = _one_line(stage)
+    if not stage:
+        return None
+    check_value = _one_line(check) or _one_line(error_code) or "unknown"
+    symptom_value = str(symptom or "").strip() or "（未提供现象）"
+    batch = Path(batch_dir)
+    path = blockers_path(batch)
+    try:
+        # 不创建批次目录本身（避免造出幽灵批次），只补 workflow/ 子目录。
+        if batch.is_symlink() or not batch.is_dir():
+            return None
+        parent = path.parent
+        if parent.is_symlink():
+            return None
+        parent.mkdir(parents=True, exist_ok=True)
+        data = load_blockers(batch)
+        key = _blocker_key(stage, check_value, symptom_value)
+        entry = data["blockers"].get(key) or {"key": key, "first_seen": _now(), "occurrences": 0}
+        entry.update(stage=stage, check=check_value, symptom=symptom_value,
+                     why=str(why or "").strip(), how=str(how or "").strip(),
+                     error_code=_one_line(error_code), source=_one_line(source),
+                     last_seen=_now())
+        entry["occurrences"] = int(entry.get("occurrences") or 0) + 1
+        data["version"] = BLOCKERS_VERSION
+        data["blockers"][key] = entry
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+        return entry
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def sync(batch_dir, *, root: Path | None = None) -> dict:
+    """把某个批次的批次内台账汇总进仓库 ISSUES/open/（同卡点累加，不重复建单）。"""
+    batch = Path(batch_dir)
+    data = load_blockers(batch)
+    batch_name = batch.name
+    batch_dir = str(batch)
+    created, updated = [], []
+    for entry in sorted((data.get("blockers") or {}).values(),
+                        key=lambda item: str(item.get("first_seen") or "")):
+        if not isinstance(entry, dict) or not entry.get("stage"):
+            continue
+        result = add(
+            batch_name, entry["stage"],
+            _sync_title(entry),
+            check=str(entry.get("check") or ""),
+            symptom=str(entry.get("symptom") or ""),
+            why=str(entry.get("why") or ""),
+            how=str(entry.get("how") or ""),
+            batch_dir=batch_dir, root=root)
+        (updated if result.get("deduplicated") else created).append(result["id"])
+    return {"batch": batch_name, "created": created, "updated": updated,
+            "total": len(created) + len(updated)}
+
+
+def _sync_title(entry: dict) -> str:
+    """标题只要“阶段 + 失败检查”，现象留在正文，避免编号被截断成半句。"""
+    stage = str(entry.get("stage") or "")
+    check = str(entry.get("check") or "")
+    return f"{stage} 卡点 {check}".strip() or "卡点"
+
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="试卷流程卡点台账（ISSUES/）")
     sub = parser.add_subparsers(dest="action", required=True)
@@ -361,6 +467,10 @@ def main(argv=None) -> int:
     list_parser.add_argument("--json", action="store_true")
     show_parser = sub.add_parser("show", help="查看一条问题")
     show_parser.add_argument("--id", required=True)
+    sync_parser = sub.add_parser("sync", help="把批次的自动台账汇总进 ISSUES/open/")
+    sync_group = sync_parser.add_mutually_exclusive_group(required=True)
+    sync_group.add_argument("--batch", help="批次目录，例如 workflows/<批次>")
+    sync_group.add_argument("--all", action="store_true", help="汇总 workflows/ 下全部批次")
     args = parser.parse_args(argv)
     try:
         if args.action == "add":
@@ -376,6 +486,16 @@ def main(argv=None) -> int:
             status, path = find(args.id)
             print(json.dumps({"status": status, "path": str(path), **_read(path)},
                              ensure_ascii=False, indent=2))
+            return 0
+        if args.action == "sync":
+            targets = []
+            if args.batch:
+                targets = [Path(args.batch)]
+            else:
+                root = Path(__file__).resolve().parents[2] / "workflows"
+                targets = sorted(p for p in root.glob("*") if (p / "workflow").is_dir()) if root.is_dir() else []
+            results = [sync(target) for target in targets]
+            print(json.dumps(results, ensure_ascii=False, indent=2))
             return 0
         rows = listing(args.status)
         if args.json:
