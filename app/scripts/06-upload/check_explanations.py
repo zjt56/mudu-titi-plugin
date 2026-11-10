@@ -51,6 +51,9 @@ def audit(items, source):
     bad = []
     for item in items:
         uid = item.get('unit_id') or item.get('id') or '<无 unit_id>'
+        # 书面表达不是客观题：范文/写作指导可有可无，不要求逐字溯源。
+        if str(item.get('question_type') or item.get('type') or '').strip() == '书面表达':
+            continue
         fields = list(iter_explanations(item)) + [('文章大意', article_summary(item))]
         for where, text in fields:
             if text is None or (isinstance(text, str) and is_placeholder(text)):

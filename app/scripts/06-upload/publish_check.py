@@ -70,10 +70,11 @@ def main(argv=None):
         elif qt not in MAIN_TYPES:
             problems.append(f"{uid}: question_type「{qt}」不在 27 主类中（A6）")
 
-        # A3：难度
+        # A3：难度（书面表达不强制；作文难有客观特征，缺失不阻断）
         diff = _difficulty(unit)
         if diff is None:
-            problems.append(f"{uid}: 缺少 difficulty（A3）")
+            if qt != '书面表达':
+                problems.append(f"{uid}: 缺少 difficulty（A3）")
         elif diff not in DIFFICULTIES:
             problems.append(f"{uid}: difficulty「{diff}」不合法，须为 容易/适中/困难（A3）")
 

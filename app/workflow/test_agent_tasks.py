@@ -288,7 +288,7 @@ class AgentTasksTest(unittest.TestCase):
                            "missing": {"1": ["原文中未提供第1题答案，按无答案占位"]},
                            "difficulty": {"1": "容易"}}
         self.assertTrue(self.accept("answers", decided_missing)["completed"])
-        with self.assertRaisesRegex(ValueError, "Every confirmed question"):
+        with self.assertRaisesRegex(ValueError, "Every non-writing question"):
             self.accept("answers", {"answers": {}, "evidence": {}, "missing": {}})
         with self.assertRaisesRegex(ValueError, "verbatim-bound"):
             self.accept("answers", {"answers": {"1": "fabricated"}, "evidence": {"1": ["附录 L1"]}, "missing": {}})
@@ -314,6 +314,16 @@ class AgentTasksTest(unittest.TestCase):
             with self.subTest(wrong=wrong), self.assertRaisesRegex(ValueError, 'Answer 73.*verbatim-bound'):
                 invalid = dict(payload, answers=dict(answers, **{'73': wrong}))
                 tasks._validate(self.batch, 'answers', invalid, {'01_source/附录.txt': source}, units)
+
+    def test_answers_allow_writing_to_omit_answer_or_use_model_essay(self):
+        units = [{'unit_id': 'q-81', 'numbers': [81], 'unit_kind': 'standalone', 'type': '书面表达'}]
+        # 书面表达没有确定答案：完全不提供 answers/missing 也通过。
+        tasks._validate(self.batch, 'answers', {'answers': {}, 'evidence': {}, 'missing': {}},
+                        {'01_source/附录.txt': ''}, units)
+        # 提供范文（即使原文没有）也不做逐字绑定。
+        payload = {'answers': {'81': 'My dream is to be a teacher.'},
+                   'evidence': {'81': ['附录范文']}, 'missing': {}}
+        tasks._validate(self.batch, 'answers', payload, {'01_source/附录.txt': ''}, units)
 
     def test_answer_contract_errors_name_the_offending_fields_and_numbers(self):
         # 重试反馈要能让模型自己改对：只说 Invalid fields 时模型只能靠猜，白烧一次模型调用。

@@ -61,6 +61,8 @@
 
 22. **内容来源优先级（Word > PDF > 空占位）**：答案、解析、文章大意一律以 Word 原卷/答案材料为准；Word 确实没有该题/该篇内容时才用随附 PDF/OCR 提取原文兜底，并记录来源；两者都没有时解析/大意填「无」、答案记缺失。任何情况下不得用 PDF 覆盖已有 Word 内容，也不得生成、改写或跨材料借用。落地：`explanations_direct._pdf_sources`、`upload_content` 的 attachment 兜底；提示词 `content_rules.RULES`、`RULES["answers"]`、`app/prompts/roles/explanations.md`、`roles/answers.md`。
 
+23. **书面表达不按客观题校验**：书面表达是作文，没有确定答案；范文/写作指导可有可无。只要题目存在即可，不要求答案、解析或文章大意逐字绑定原文，缺失填「无」属正常；禁止自行撰写范文或讲解充当原文。若原卷确有【参考范文】/【思路点拨】则逐字保留，无法逐字定位只提示、不阻断。落地：`upload_content` 对 `书面表达` 只告警不报错、`agent_tasks` 答案覆盖豁免、`check_answers`/`check_explanations`/`publish_check` 书面表达豁免；提示词 `content_rules.RULES`、`RULES["answers"]`、`roles/explanations.md`、`roles/answers.md`。
+
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 
 ## 三、变更记录制度（强制）

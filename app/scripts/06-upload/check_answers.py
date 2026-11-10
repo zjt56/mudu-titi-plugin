@@ -138,11 +138,31 @@ def load_answers(path):
     raise AnswerError("独立答案仅支持 JSON、带明确题号的 TXT 或原生 DOCX")
 
 
+def _writing_numbers(batch):
+    """书面表达没有确定答案：范文可有可无，不参与答案覆盖/一致性核对。"""
+    result = set()
+    for item in batch.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("question_type") or item.get("type") or "").strip() != "书面表达":
+            continue
+        nums = item.get("numbers") or ([item.get("number")] if item.get("number") is not None else [])
+        for n in nums:
+            try:
+                result.add(number(n))
+            except AnswerError:
+                pass
+    return result
+
+
 def inspect(batch, answers):
     actual = collect_json({"items": batch.get("items")})
     issues = []
+    writing = _writing_numbers(batch)
     placeholders = {"无答案", "无解析"}
     for n in sorted(actual, key=int):
+        if n in writing:
+            continue
         entry = actual[n]
         # 以规范化结果判定"有没有答案"：None/空白/「无答案」都代表该题没有可
         # 核对的答案，不能要求独立答案覆盖，否则书面表达这类题会让整卷失败。

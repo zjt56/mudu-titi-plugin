@@ -1,5 +1,13 @@
 # RULES — 规则与强调台账
 
+## 2026-11-10 书面表达不按客观题校验（用户明确）
+
+- 原话：“书面表达题型没有确定的答案，它是作文，可能有范文与怎么写作的类似指导，请你不要以常规题目校验答案，如果没有范文和解析都是正常的，只要题目存在就行了，不要严格校验这么多。”
+- 书面表达不要求答案/解析/文章大意逐字绑定原文；缺失填「无」属正常；有范文/写作指导只提示、不阻断。
+- 禁止要求或编造书面表达答案，禁止自写范文冒充原文；题目/题干仍必须存在。
+- 只放宽书面表达；其他客观题保持严格。
+- 落地：`agent_tasks._validate`（answers 覆盖与绑定豁免）、`upload_content`（书面表达只 warning）、`check_answers`、`check_explanations`、`publish_check`；提示词 `content_rules.RULES`、`RULES["answers"]`、`roles/explanations.md`、`roles/answers.md`；根规则 23；记录 `CHANGELOG/2026-11-10-writing-not-objective.md`。
+
 ## 2026-11-10 内容来源优先级：Word ＞ PDF ＞ 空占位（用户明确）
 
 - 原话：“无论是试卷还是答案解析，文章大意等，都以world为准，如果world没有，优先取PDF，如果还是没有，就留空的占位符。”

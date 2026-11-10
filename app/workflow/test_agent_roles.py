@@ -62,6 +62,8 @@ class AgentRoleContractTest(unittest.TestCase):
         self.assertIn('PDF', exp)
         self.assertIn('「无」', exp)
         self.assertIn('PDF/OCR', agent_tasks.RULES['answers'])
+        self.assertIn('书面表达', agent_tasks.RULES['answers'])
+        self.assertIn('书面表达', content_rules.RULES)
         for stage in ('explanations', 'answers'):
             role = agent_roles.load(stage, agent_tasks.ARTIFACTS[stage])
             self.assertIn('Word', role['body'], stage)

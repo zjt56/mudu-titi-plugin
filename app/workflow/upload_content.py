@@ -372,6 +372,9 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     confirmed_units[str(uid)] = unit
     except (OSError, ValueError):
         confirmed_units = {}
+    writing_number_set = {str(n) for unit in confirmed_units.values()
+                          if str(unit.get('type') or '').strip() == '书面表达'
+                          for n in (unit.get('numbers') or [])}
 
     def unit_numbers(uid, item):
         numbers = item.get('numbers') or [item.get('number')]
@@ -620,6 +623,11 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
     def check(item, uid, numbers, child=False, listening=False, has_any_expl=False, unit_type=''):
         if not isinstance(item, dict):
             return
+        # 书面表达不是客观题：没有确定答案，范文/写作指导可有可无，只要题目存在
+        # 即可。不做答案/解析/大意的逐字来源绑定与“原文有却缺失”判定。
+        writing_unit = (str(unit_type or '').strip() == '书面表达'
+                        or str(item.get('question_type') or item.get('type') or '').strip() == '书面表达'
+                        or any(str(n) in writing_number_set for n in numbers))
         restore_field(item, uid, numbers, 'explanation')
         restore_field(item, uid, numbers, 'articleSummary')
         summary = item.get('articleSummary', item.get('article_summary', ''))
@@ -636,13 +644,13 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     error('CONTENT_TYPE_INVALID', '解析/大意必须是字符串', uid, field)
                 elif AI_MARK in value:
                     error('AI_CONTENT_FORBIDDEN', '禁止 AI 生成解析或文章大意；不得用标记代替原文', uid, field)
-            if not listening and not explanation and (child or not item.get('subquestions')):
+            if not writing_unit and not listening and not explanation and (child or not item.get('subquestions')):
                 originals = [row for row in questions if row['number'] in numbers and row['text'] and not is_placeholder(row['text'])
                              and unique_anchor(row['number'], row['path'], row['line'], expected=row['verbatim'])]
                 if originals:
                     error('ORIGINAL_EXPLANATION_OMITTED', '原题有解析，不能用缺失占位替代', uid, 'explanation',
                           [f"{row['path']}:{row['line']}" for row in originals])
-            if not child and not summary:
+            if not writing_unit and not child and not summary:
                 originals = [row for row in summaries if row['owner'] in numbers and numbers and not is_placeholder(row['text']) and all(
                     n in row['members'] and unique_anchor(n, row['path'], row['line'], allow_answer_source=True, expected=row['verbatim'])
                     for n in numbers)]
@@ -664,8 +672,13 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                                 for other in summaries) == 1 for row in matches)
             # 允许两种：可逐字溯源到该题组材料，或明确标注为 AI 生成待校对（F3/F5）。
             if not marked and not owned:
-                (error if strict else warning)('SUMMARY_SOURCE_UNVERIFIED', '文章大意未能唯一逐字绑定原材料；严格校验拒绝交付', uid, 'articleSummary',
-                      [f"{row['path']}:{row['line']} -> 题 {row['owner']}" for row in matches])
+                detail = [f"{row['path']}:{row['line']} -> 题 {row['owner']}" for row in matches]
+                if writing_unit:
+                    # 书面表达不是客观题：不要求答案/大意逐字绑定，只提示便于核对。
+                    warning('SUMMARY_SOURCE_UNVERIFIED', '书面表达的文章大意未逐字绑定原文（不阻断）', uid, 'articleSummary', detail)
+                else:
+                    (error if strict else warning)('SUMMARY_SOURCE_UNVERIFIED', '文章大意未能唯一逐字绑定原材料；严格校验拒绝交付', uid, 'articleSummary',
+                          detail)
         if isinstance(explanation, str) and explanation.strip():
             value = _norm(explanation)
             marked = AI_MARK in explanation
@@ -695,11 +708,20 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 if hint and value == hint:
                     traceable = True
             if not marked and not traceable:
-                (error if strict else warning)('EXPLANATION_SOURCE_UNVERIFIED', '解析未能唯一逐字绑定原题；严格校验拒绝交付', uid, 'explanation')
+                if writing_unit:
+                    # 书面表达：范文/写作指导可有可无；有内容但不逐字绑定只提示，不阻断。
+                    warning('EXPLANATION_SOURCE_UNVERIFIED', '书面表达的解析/指导未逐字绑定原文（不阻断）', uid, 'explanation')
+                else:
+                    (error if strict else warning)('EXPLANATION_SOURCE_UNVERIFIED', '解析未能唯一逐字绑定原题；严格校验拒绝交付', uid, 'explanation')
             for row in summaries:
-                if row['owner'] is not None and row['owner'] not in numbers and row['text'] in value:
-                    error('EXPLANATION_CROSSES_MATERIAL', f"解析包含属于题 {row['owner']} 的另一材料大意，需按真实材料边界重新装配", uid, 'explanation',
-                          [f"{row['path']}:{row['line']}"])
+                if (row['owner'] is not None and row['owner'] not in numbers
+                        and row['text'] in value):
+                    if writing_unit:
+                        warning('EXPLANATION_CROSSES_MATERIAL', '书面表达的解析包含其它材料大意（不阻断）', uid, 'explanation',
+                                [f"{row['path']}:{row['line']}"])
+                    else:
+                        error('EXPLANATION_CROSSES_MATERIAL', f"解析包含属于题 {row['owner']} 的另一材料大意，需按真实材料边界重新装配", uid, 'explanation',
+                              [f"{row['path']}:{row['line']}"])
         for index, sub in enumerate(item.get('subquestions') or []):
             if isinstance(sub, dict):
                 number = sub.get('number')

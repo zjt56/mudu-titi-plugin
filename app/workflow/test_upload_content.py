@@ -78,6 +78,26 @@ class UploadContentTest(unittest.TestCase):
         owners = [row['owner'] for row in report['summaries'] if row['text'] == '智者和儿子的故事。']
         self.assertEqual(owners, [73], report['summaries'])
 
+    def test_writing_unit_is_not_validated_like_an_objective_question(self):
+        (self.batch / '01_source/structure.confirmed.json').write_text(json.dumps({
+            'units': [{'unit_id': 'q-81', 'unit_kind': 'standalone', 'type': '书面表达',
+                       'numbers': [81]}]}), encoding='utf-8')
+        self.path.write_text('Ⅸ.书面表达\n81.请以 My dream 为题写一篇短文。\n', encoding='utf-8')
+        item = {'unit_id': 'q-81', 'number': 81, 'question_type': '书面表达',
+                'explanation': '无', 'articleSummary': '无', 'subquestions': []}
+        self.assertTrue(inspect_content(self.batch, {'items': [item]}, strict=True)['passed'])
+        # 有范文/写作指导，即使不能逐字绑定原文也允许。
+        item2 = dict(item, explanation='参考范文：My dream is to be a teacher. 写作要点：先总述再举例。')
+        self.assertTrue(inspect_content(self.batch, {'items': [item2]}, strict=True)['passed'])
+        # 普通题仍严格：无法溯源的解析必须拒绝。
+        (self.batch / '01_source/structure.confirmed.json').write_text(json.dumps({
+            'units': [{'unit_id': 'q-1', 'unit_kind': 'standalone', 'type': '单项填空',
+                       'numbers': [1]}]}), encoding='utf-8')
+        self.path.write_text('1.题目\n', encoding='utf-8')
+        fake = {'unit_id': 'q-1', 'number': 1, 'question_type': '单项填空',
+                'explanation': '完全不是原文的解析', 'subquestions': []}
+        self.assertFalse(inspect_content(self.batch, {'items': [fake]}, strict=True)['passed'])
+
     def test_markdown_prefixed_annotation_heading_ends_explanation(self):
         self.path.write_text('Ⅵ.完形填空\n31.A 【解析】游泳原因。\n##【词汇积累】swim v.游泳\n')
         payload = {'items': [{'number': 31, 'explanation': '游泳原因。'}]}
@@ -124,8 +144,11 @@ class UploadContentTest(unittest.TestCase):
         (self.batch / '01_source/structure.confirmed.json').write_text(json.dumps(confirmed))
         payload = {'items': [{'unit_id': 'q-96', 'number': 96, 'explanation': '先总写，再提出建议。'}]}
         self.assertTrue(inspect_content(self.batch, payload, strict=True)['passed'])
+        # 书面表达不阻断；改写只提示。
         payload['items'][0]['explanation'] = '先总写，再生成建议。'
-        self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
+        report = inspect_content(self.batch, payload, strict=True)
+        self.assertTrue(report['passed'], report)
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {w['code'] for w in report['warnings']})
 
     def writing_fixture(self):
         body = ('Ⅸ.单词拼写\n80.题目\nⅩ.书面表达（共1小题；满分20分）\n'
@@ -172,14 +195,18 @@ class UploadContentTest(unittest.TestCase):
                               'explanation': '本篇要求写一封自荐信，注意人称与时态。'}]}
         result = inspect_content(self.batch, payload, strict=True)
         self.assertTrue(result['passed'], result)
+        # 书面表达不按客观题阻断：改写只提示，不判失败。
         payload['items'][0]['explanation'] = '本篇要求写一封自荐信，注意人称。'
-        self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
+        report = inspect_content(self.batch, payload, strict=True)
+        self.assertTrue(report['passed'], report)
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {w['code'] for w in report['warnings']})
 
     def test_unprinted_writing_requires_complete_owned_source(self):
         explanation = self.writing_fixture()
         def report(value=explanation, number=81):
             return inspect_content(self.batch, {'items': [{'number': number, 'explanation': value}]})
         self.assertTrue(report()['passed'], report())
+        # 书面表达不做阻断，但改写/串材料仍给出提示便于人工核对。
         for value in (explanation.split('\n')[0], explanation + '\n范文。', explanation.replace('说明文', '记叙文')):
             self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report(value)['warnings']})
         self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {e['code'] for e in report(number=80)['warnings']})
@@ -278,10 +305,11 @@ class UploadContentTest(unittest.TestCase):
         (materials / 'attachment_001.txt').write_text(self.path.read_text())
         report = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': explanation}]}, strict=True)
         self.assertTrue(report['passed'], report)
-        # Repetition in the authority itself remains ambiguous, even with a PDF.
+        # 书面表达不阻断：权威来源重复只提示，便于人工核对。
         self.path.write_text(self.path.read_text() + '【思路点拨】另一段。\n')
         report = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': explanation}]}, strict=True)
-        self.assertFalse(report['passed'])
+        self.assertTrue(report['passed'], report)
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {w['code'] for w in report['warnings']})
 
     def test_writing_two_primary_sources_remain_ambiguous(self):
         explanation = self.writing_fixture()
@@ -289,7 +317,8 @@ class UploadContentTest(unittest.TestCase):
         answer.parent.mkdir()
         answer.write_text('【思路点拨】另一个权威来源。\n')
         report = inspect_content(self.batch, {'items': [{'number': 81, 'explanation': explanation}]}, strict=True)
-        self.assertFalse(report['passed'])
+        self.assertTrue(report['passed'], report)
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {w['code'] for w in report['warnings']})
 
     def test_source_restoration_copies_word_characters_and_keeps_inspection_read_only(self):
         from workflow.upload_content import restore_source_content
