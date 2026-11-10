@@ -255,6 +255,15 @@ class LocalAgentTest(unittest.TestCase):
         self.assertEqual(parsed["findings"], [])
         self.assertEqual(parsed["artifacts"]["04_knowledge/knowledge.json"], {"items": []})
 
+    def test_parse_response_repairs_single_extra_trailing_brace(self):
+        valid = json.dumps(RESPONSE)
+        # Model sometimes over-closes the root object by one brace; only remove
+        # trailing brackets when the shortened text parses to a full object.
+        self.assertEqual(agent._parse_response(valid + "}"), RESPONSE)
+        self.assertEqual(agent._parse_response(valid + "]"), RESPONSE)
+        with self.assertRaises(agent.AgentError):
+            agent._parse_response(valid + "}}extra")
+
     def test_unit_merge_supports_explanations_and_knowledge_partitions(self):
         from workflow import unit_tasks
         parts = [{"unit_ids": ["u1"]}, {"unit_ids": ["u2"]}]

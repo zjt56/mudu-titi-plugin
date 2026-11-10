@@ -394,9 +394,9 @@ def _parse_response(text, *, strict=False):
         try:
             response = load_json(text)
         except (ValueError, RecursionError) as exc:
-            # 大结果里模型偶尔少写根对象的最后一个右花括号；内容与嵌套完整时
-            # 补齐后再解析，避免把可用的整份结果当成协议失败。截断的半截 JSON
-            # 不会以 }/] 结尾，不会被误收。
+            # 大结果里模型偶尔少写或多写根对象的最后一个右花括号；内容与嵌套完整时
+            # 补齐/去掉后再解析，避免把可用的整份结果当成协议失败。截断的半截 JSON
+            # 不会以 }/] 结尾，不会被误收。严格模式（审核）不做任何修补。
             repaired = None
             if not strict and (text.endswith("}") or text.endswith("]")):
                 for extra in ("}", "}}", "}}}"):
@@ -405,6 +405,20 @@ def _parse_response(text, *, strict=False):
                         break
                     except (ValueError, RecursionError):
                         continue
+                if repaired is None:
+                    # 反向：模型多写了一个尾随 }/]（over-closed）。仅当去掉末尾
+                    # 纯括号后能解析成完整对象时才接受，避免截断或改写内容。
+                    for trim in (1, 2, 3):
+                        if trim >= len(text) or any(ch not in "}]" for ch in text[-trim:]):
+                            break
+                        candidate = text[:-trim].rstrip()
+                        try:
+                            parsed = load_json(candidate)
+                        except (ValueError, RecursionError):
+                            continue
+                        if isinstance(parsed, dict):
+                            repaired = parsed
+                            break
             if repaired is None:
                 raise exc
             response = repaired

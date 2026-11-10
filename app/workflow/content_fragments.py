@@ -12,7 +12,7 @@ import re
 FORMAT = 'source-fragment/v1'
 _REQUIRED = frozenset(('path', 'sha256', 'start_line', 'end_line'))
 _OPTIONAL = frozenset(('start_column', 'end_column'))
-_EXPL_LABEL = re.compile(r'^\s*【\s*(?:解析|答案|分析|详解)\s*】\s*[:：]?\s*')
+_EXPL_LABEL = re.compile(r'^\s*【\s*(?:解析|答案|分析|详解|思路点拨)\s*】\s*[:：]?\s*')
 _SUMMARY_LABEL = re.compile(r'^\s*【\s*文章大意\s*】\s*[:：]?\s*')
 _ANSWER_PREFIX = re.compile(
     r'^\s*\d{1,3}\s*[.．、]\s*[A-H]?\s*(?=【\s*(?:解析|分析|详解)\s*】)')

@@ -670,7 +670,10 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                             expected=row['verbatim'])
                         for number in numbers)))
                     for row in summaries)
-            if not strict and not traceable and unit_type == '书面表达':
+            # 书面表达的原始「解析」就是附录的【思路点拨】（写作指导），它必然能逐字
+            # 定位到该行，但不是“题目行”。严格模式也要接受这条真实原文解析，否则
+            # 书面表达会因无法绑定题目行被判 EXPLANATION_SOURCE_UNVERIFIED 而卡住。
+            if not traceable and unit_type == '书面表达':
                 hint = writing_hint()
                 if hint and value == hint:
                     traceable = True

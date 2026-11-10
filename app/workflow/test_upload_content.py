@@ -122,6 +122,20 @@ class UploadContentTest(unittest.TestCase):
         hashes = {p: hashlib.sha256((self.batch / p).read_bytes()).hexdigest() for p in paths}
         (self.batch / '07_review/structure-gate.json').write_text(json.dumps({'passed': True, 'input_hashes': hashes}))
 
+    def test_appendixed_writing_hint_explanation_passes_strict(self):
+        # The original 解析 for 书面表达 is the appendix 【思路点拨】 paragraph; it is not
+        # a question line, so strict validation must still accept the verbatim hint.
+        (self.batch / '01_source/正文.txt').write_text('Ⅹ.书面表达(共1小题;满分20分)\n请写一封自荐信。\n')
+        self.path.write_text('Ⅹ.书面表达\n\u3000\u3000【思路点拨】本篇要求写一封自荐信，注意人称与时态。\n\u3000\u3000【参考范文】\nDear Sir,\nI am Li Hua.\n')
+        (self.batch / '01_source/structure.confirmed.json').write_text(json.dumps({'units': [
+            {'unit_id': 'q-81', 'type': '书面表达', 'unit_kind': 'standalone', 'numbers': [81]}]}))
+        payload = {'items': [{'unit_id': 'q-81', 'number': 81,
+                              'explanation': '本篇要求写一封自荐信，注意人称与时态。'}]}
+        result = inspect_content(self.batch, payload, strict=True)
+        self.assertTrue(result['passed'], result)
+        payload['items'][0]['explanation'] = '本篇要求写一封自荐信，注意人称。'
+        self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
+
     def test_unprinted_writing_requires_complete_owned_source(self):
         explanation = self.writing_fixture()
         def report(value=explanation, number=81):
