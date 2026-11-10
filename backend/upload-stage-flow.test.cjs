@@ -98,6 +98,7 @@ test('format gate failures remain visible after content review completes, with c
   const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'format_gate')[0];
   assert.match(text(node), /上传格式检查 · 失败/);
   assert.doesNotMatch(text(node), /最终本地上传格式检查：失败/);
+  assert.doesNotMatch(text(node), /knowledgeIds 类型错误/);
   assert.doesNotMatch(text(tree), /本轮流程已结束/);
 });
 
@@ -108,6 +109,33 @@ test('stage labels honor authoritative backend titles and fallback labels cover 
   assert.equal(context.shortStageName({ id: 'assemble' }), '填充汇总');
   assert.equal(context.shortStageName({ id: 'format_gate' }), '上传格式检查');
   assert.equal(context.shortStageName({ id: 'future' }), 'future');
+});
+
+test('each flow node lists its real substeps with short statuses, no long copy', () => {
+  const items = [
+    { id: 'extract', title: '原卷提取', status: 'completed' },
+    { id: 'structure_gate', title: '结构确认', status: 'completed' },
+    { id: 'preassemble', title: '前置批次组装', status: 'running' },
+    { id: 'types', title: '题型填充', status: 'pending' },
+    { id: 'review', title: '内容审核', status: 'failed', description: '超长描述不应出现', notes: '超长备注不应出现' },
+  ];
+  const { tree, context } = renderFlow(items, items[2]);
+  const groups = context.compactFlowStages(items);
+  const extract = groups.find((g) => g.id === 'extract');
+  assert.deepEqual(Array.from(extract.members, (m) => Array.from([m.title, m.status])),
+    [['原卷提取', 'completed'], ['结构确认', 'completed']]);
+  const pre = groups.find((g) => g.id === 'preassemble');
+  assert.deepEqual(Array.from(pre.members, (m) => String(m.title)), ['前置批次组装', '题型填充']);
+  const svg = walk(tree, (node) => node.type === 'svg' && node.props.role === 'img')[0];
+  const textOf = text(svg);
+  // 子步骤及状态在图上可见。
+  assert.match(textOf, /原卷提取 · 已完成/);
+  assert.match(textOf, /结构确认 · 已完成/);
+  assert.match(textOf, /题型填充 · 待处理/);
+  assert.match(textOf, /内容审核 · 失败/);
+  // 长描述/备注不再出现。
+  assert.doesNotMatch(textOf, /超长描述不应出现/);
+  assert.doesNotMatch(textOf, /超长备注不应出现/);
 });
 
 test('flow chart omits long explanatory copy and expandable details', () => {
@@ -157,7 +185,10 @@ test('preassembly and type checkpoint share completion without waiting for paral
     const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'preassemble')[0];
     assert.equal(group().status, 'completed');
     assert.equal(context.compactProgress({ items }).done, 1);
-    assert.match(text(node), /批次组装与题型 · 已完成|批次组装与题型 · /);
+    const tip = text(node);
+    assert.match(tip, /批次组装与题型 · 已完成/);
+    assert.match(tip, /前置批次组装 · /);
+    assert.match(tip, /题型填充 · /);
     assert.ok(node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
     for (const id of ['answers', 'audio', 'knowledge']) {
       assert.equal(context.compactFlowStages(items).find((item) => item.id === id).status, 'running');
@@ -182,6 +213,7 @@ test('either preassembly or type checkpoint failure keeps the merged node incomp
     assert.equal(context.compactProgress({ items }).done, 2); // Only audio and knowledge are complete.
     assert.equal(node.props['data-stage-ids'], 'preassemble types');
     assert.match(text(node), /批次组装与题型 · 失败/);
+    assert.match(text(node), new RegExp(failedId === 'preassemble' ? '前置批次组装 · 失败' : '题型填充 · 失败'));
     assert.doesNotMatch(text(node), new RegExp(failed.notes));
     assert.ok(!node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
   }
@@ -198,7 +230,7 @@ test('executed quality findings finish execution without implying quality approv
   const grouped = context.compactFlowStages(items).find((item) => item.id === 'review');
   assert.equal(grouped.status, 'completed_with_findings');
   const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'review')[0];
-  assert.match(text(node), /已执行，有差异/);
+  assert.match(text(node), /内容审核 · 已执行，有差异/);
   assert.doesNotMatch(text(node), /18 项真实差异保留/);
   assert.ok(node.children.some((entry) => entry.type === 'text' && text(entry) === '!'));
   assert.ok(!node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
