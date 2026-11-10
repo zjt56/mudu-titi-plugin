@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-blocker-ledger-issues.md](2026-11-10-blocker-ledger-issues.md) | 新增 ISSUES/ 卡点台账：每次卡点留档并跟踪是否已修复，未修复在 open/、已修复在 fixed/ |
 | 2026-11-10 | [2026-11-10-explanation-omission-contract.md](2026-11-10-explanation-omission-contract.md) | 防遗漏约束进入实际全量/协议/分片提示；直抄、引用与体检统一标题语法并增加入口回归 |
 | 2026-11-10 | [2026-11-10-explanation-icon-label-and-delivery.md](2026-11-10-explanation-icon-label-and-delivery.md) | 修复2024卷图标解析标题遗漏，直抄走绑定导入并同步失配元数据；本地体检19项通过 |
 | 2026-11-10 | [2026-11-10-review-loop-and-status.md](2026-11-10-review-loop-and-status.md) | 审核 JSON 容错、禁止运维重生成上游、差异状态显示待确认 |

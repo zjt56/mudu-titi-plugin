@@ -31,6 +31,30 @@ Python 命令名称依电脑环境也可能是 `python3`。所有命令从当前
 - 文件交接只分享任务包中的四个公开文件，不需要分享本机配置、凭据或内部绑定记录。
 - 导出的文字任务不代表已经看过原图或听过音频。图文、切片和回听未验证时如实留下待核验项。
 
+## 卡点台账（必须记）
+
+批次流程每遇到一次卡点（阶段 `blocked`/`failed`/执行未完成的 `needs_review`、确定性校验反复失败、自愈升级被拒、长时间无进展），**必须在仓库根目录登记一条**，并跟踪它是否已修复：
+
+```bash
+# 未修复：进待修复清单 ISSUES/open/
+PYTHONPATH=app python3 -m workflow.issue_log add \
+  --batch '<批次名>' --stage <阶段> --title '<一句话卡点>' \
+  --check <失败检查码> --symptom '<现象/报错原文>' \
+  --why '<判定口径：为什么判失败>' --how '<修复方向>' \
+  --batch-dir 'workflows/<批次名>'
+
+# 修复并复验后：自动移入 ISSUES/fixed/ 并标注 status: fixed
+PYTHONPATH=app python3 -m workflow.issue_log fix --id <id> \
+  --resolution '<怎么修的>' --commit <提交号> --verify '<复验证据>'
+
+PYTHONPATH=app python3 -m workflow.issue_log list --status open
+```
+
+- 必须写清具体批次、阶段、失败检查与判定口径；只写“按阻断项修复”不算记录。
+- 未复验不得标记已修复；修好后不删除记录，留档避免同类问题重复排查。
+- 审核差异（`review_gate=needs_review + execution_completed`）与限流等瞬时错误**不算卡点**，不登记。
+- 台账只写 `ISSUES/`，不改批次数据、manifest、收据或上传边界。详见 `ISSUES/README.md` 与根 `AGENTS.md` 硬规则 24。
+
 ## 自动 CLI 接入（可选）
 
 如果所在电脑有可非交互调用的 Agent，可按 `docs/agent-interface.md` 配置 `provider=command`，通过 stdin/stdout 或提示文件/结果文件对接。DSH、Codex 是附带的便捷适配器，通用协议不依赖它们。没有本机配置时，工作流默认导出任务等待接单，不会擅自启动某个厂商的 Agent。

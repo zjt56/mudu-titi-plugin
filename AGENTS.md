@@ -20,6 +20,7 @@
 | `lib/` | 宿主插件与前端（`client.js`、`index.js`） |
 | `config/` | `model-router.json`（模型/子 Agent 路由）、策略配置 |
 | `CHANGELOG/` | **项目变更记录**（见第三节，强制维护） |
+| `ISSUES/` | **卡点台账**：`open/` 未修复待办清单，`fixed/` 已修复留档（见硬规则 24） |
 | `workflows/` | 实际试卷批次产物（**用户数据，非代码**） |
 
 改代码前先读对应 `app/docs/*.md`；`app/workflow/contracts.py` 是阶段与产物的唯一真相，改动前先对齐它。
@@ -62,6 +63,8 @@
 22. **内容来源优先级（Word > PDF > 空占位）**：答案、解析、文章大意一律以 Word 原卷/答案材料为准；Word 确实没有该题/该篇内容时才用随附 PDF/OCR 提取原文兜底，并记录来源；两者都没有时解析/大意填「无」、答案记缺失。任何情况下不得用 PDF 覆盖已有 Word 内容，也不得生成、改写或跨材料借用。落地：`explanations_direct._pdf_sources`、`upload_content` 的 attachment 兜底；提示词 `content_rules.RULES`、`RULES["answers"]`、`app/prompts/roles/explanations.md`、`roles/answers.md`。**防遗漏交付约束**：`【解析】`、`[解析]`、`[IMG ...]解析[IMG ...]` 及对应文章大意标题使用同源代码规则识别，装饰图片不得作为缺失理由；裸图片不证明解析含义。大意按来源坐标与完整题号集合绑定，禁止按列表顺序分配。直抄、source_ref、模型字符串共用来源/归属/遗漏校验，说明文字不能豁免；`ORIGINAL_EXPLANATION_OMITTED` / `ORIGINAL_SUMMARY_OMITTED` 必须定位原文局部修复复验，禁止改完成状态、改无关标签或跳检查。组装及后续元数据/画线/最终产物须同步已接受内容；正文与展示消费链路都要验证。落地：`content_labels.py`、`content_fragments.py`、`content_rules.py`、`unit_tasks.py`、`handoff.py`、`manifest.py`；全量任务、文件协议、并行分片和局部修复提示词都须包含该约束，回归必须验证实际构建出的任务提示。书面表达仍按规则23。
 
 23. **书面表达不按客观题校验**：书面表达是作文，没有确定答案；范文/写作指导可有可无。只要题目存在即可，不要求答案、解析或文章大意逐字绑定原文，缺失填「无」属正常；禁止自行撰写范文或讲解充当原文。若原卷确有【参考范文】/【思路点拨】则逐字保留，无法逐字定位只提示、不阻断。落地：`upload_content` 对 `书面表达` 只告警不报错、`agent_tasks` 答案覆盖豁免、`check_answers`/`check_explanations`/`publish_check` 书面表达豁免；提示词 `content_rules.RULES`、`RULES["answers"]`、`roles/explanations.md`、`roles/answers.md`。
+
+24. **卡点必须落台账（`ISSUES/`）**：插件试卷流程每遇到一次卡点，必须用 `PYTHONPATH=app python3 -m workflow.issue_log add` 登记到 `ISSUES/open/`，写明**具体批次、阶段、失败检查、现象与判定口径、修复方向**（不得只写“按阻断项修复”）；修复并复验后用 `PYTHONPATH=app python3 -m workflow.issue_log fix --id <id> --resolution … --commit … --verify …` 移入 `ISSUES/fixed/`，自动标注 `status: fixed` 与修复提交/复验证据。禁止只把卡点留在对话里、修完不留档；未复验不得标记已修复；同一「批次+阶段+检查」重复出现由命令累加 `occurrences` 并更新 `last_seen`，不得重复建单；修好后不删除记录，留档供同类问题复用。审核差异（`review_gate=needs_review + execution_completed + continue_unqualified`）与限流/额度等瞬时错误**不算卡点**，不登记。台账只写 `ISSUES/`，不得改批次数据、manifest、收据或上传边界。落地：`ISSUES/README.md`、`app/workflow/issue_log.py`；回归 `app/workflow/test_issue_log.py`。
 
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 
