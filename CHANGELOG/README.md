@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-skip-sent-papers-dedupe.md](2026-11-10-skip-sent-papers-dedupe.md) | 上传不再校验/复用已发过的试卷；删除批次彻底清除 |
 | 2026-11-10 | [2026-11-10-duplicate-upload-visible.md](2026-11-10-duplicate-upload-visible.md) | 重复上传已上传试卷不再“任务消失”：明确提示已复用批次 |
 | 2026-11-10 | [2026-11-10-review-card-time-and-duration.md](2026-11-10-review-card-time-and-duration.md) | 试卷审核页卡片显示完成时间（月-日 时:分）与流程耗时（分钟） |
 | 2026-11-09 | [2026-11-09-plugin-review-retry-prevention.md](2026-11-09-plugin-review-retry-prevention.md) | 插件端审核防空转：安装真实进展、派发前预算、自动续跑保留计数、当前诊断与运维接手；保留独立轮次与本地零模型恢复 |

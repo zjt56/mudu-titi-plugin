@@ -1,5 +1,12 @@
 # RULES — 规则与强调台账
 
+## 2026-11-10 上传不校验已发过的试卷、删除必须干净（用户明确）
+
+- 原话要点：“不去校验之前已经发过的试卷，也不留存对应的记录，只要删除批次了，就删除干净”。
+- 规则：上传去重不得比对或复用已提交云端（上传阶段 completed/approved，含待确认）的试卷；重新上传应作为新任务出现。仅对仍在处理中（未发）的同内容批次复用，避免重复跑模型。
+- 删除批次仍走 `purge`，永久清除 `workflows/<批次>`、`inbox/<批次>`、回收归档、音频状态/全局镜像、调度与内容缓存，不留残余；自动流程不得自行删除用户试卷。
+- 落地：`app/workbench/server.py::_batch_already_sent`/`_existing_upload_batch`/`purge_batch`；回归 `workbench.test_upload_status`；记录 `CHANGELOG/2026-11-10-skip-sent-papers-dedupe.md`、`CHANGELOG/2026-11-10-duplicate-upload-visible.md`。
+
 ## 2026-11-09 AI 运维必须能真正接手（用户质疑“从来没有工作过”）
 
 - 触发：用户反馈 AI 运维从未工作。核查：服务 `available=true, enabled=true`，但 `incidentCount=0`，所有批次 `operations.json` 的 `incident=null`。

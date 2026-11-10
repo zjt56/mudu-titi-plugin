@@ -935,6 +935,18 @@ def _upload_part_sha(part):
     return hashlib.sha256(part.get("data") or b"").hexdigest() if isinstance(part, dict) else ""
 
 
+def _batch_already_sent(state):
+    """True once a batch reached the cloud upload stage (confirmed or pending)."""
+    if not isinstance(state, dict):
+        return False
+    stages = state.get("stages")
+    if not isinstance(stages, dict):
+        return False
+    upload = stages.get("upload")
+    status = str((upload or {}).get("status") or "") if isinstance(upload, dict) else ""
+    return status in ("completed", "approved")
+
+
 def _existing_upload_batch(source, answer, audio, extra_docs, extra_audio):
     """Find an existing batch with the exact same uploaded content.
 
@@ -965,6 +977,11 @@ def _existing_upload_batch(source, answer, audio, extra_docs, extra_audio):
         state = load(manifest_path, {})
         inputs = state.get("inputs") if isinstance(state, dict) else None
         if not isinstance(inputs, dict):
+            continue
+        # 已经发过（已提交云端，含待人工确认）的试卷不再参与去重比对或复用：
+        # 用户明确要求不校验已发试卷，重新上传应当作为新任务出现，而不是复用
+        # 一个在列表里被隐藏的批次（否则看起来“批次任务不见了”）。
+        if _batch_already_sent(state):
             continue
         source_record = inputs.get("source")
         if not isinstance(source_record, dict) or source_record.get("sha256") != expected["source"][0]:

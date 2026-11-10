@@ -25,6 +25,29 @@ class UploadStatusTests(unittest.TestCase):
         self.jobs.start()
         self.addCleanup(self.jobs.stop)
 
+    def test_dedupe_skips_already_sent_batches(self):
+        import hashlib
+        folder = self.root / "sentbatch"
+        (folder / "workflow").mkdir(parents=True)
+        (folder / "attachments").mkdir()
+        data = b"source-bytes"
+        (folder / "attachments" / "source.docx").write_bytes(data)
+        sha = hashlib.sha256(data).hexdigest()
+        manifest = {"inputs": {"source": {"path": "attachments/source.docx", "sha256": sha}},
+                    "stages": {"upload": {"status": "completed"}}}
+        (folder / "workflow" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        part = {"filename": "source.docx", "data": data}
+        ledger = patch.object(server, "wf_manifest", SimpleNamespace(load=lambda f: {}))
+        ledger.start(); self.addCleanup(ledger.stop)
+        # Already sent to cloud (completed) -> never reused/compared.
+        self.assertIsNone(server._existing_upload_batch(part, None, None, [], []))
+        # Still in progress (not sent) -> reuse so duplicate work is avoided.
+        manifest["stages"] = {"upload": {"status": "pending"}}
+        (folder / "workflow" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        reused = server._existing_upload_batch(part, None, None, [], [])
+        self.assertIsNotNone(reused)
+        self.assertEqual(reused.name, "sentbatch")
+
     def test_duplicate_upload_reports_reused_batch_and_uploaded_state(self):
         fake_files = [{"filename": "原卷.docx", "data": b"source-bytes"}]
         with patch.object(server, "auto_flow", object()), \
