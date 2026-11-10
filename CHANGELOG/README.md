@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-review-card-time-and-duration.md](2026-11-10-review-card-time-and-duration.md) | 试卷审核页卡片显示完成时间（月-日 时:分）与流程耗时（分钟） |
 | 2026-11-09 | [2026-11-09-plugin-review-retry-prevention.md](2026-11-09-plugin-review-retry-prevention.md) | 插件端审核防空转：安装真实进展、派发前预算、自动续跑保留计数、当前诊断与运维接手；保留独立轮次与本地零模型恢复 |
 | 2026-11-09 | [2026-11-09-review-source-canonicalization.md](2026-11-09-review-source-canonicalization.md) | 修复证据路径纠正后与留存响应不一致导致末片反复重跑；统一轮次提示契约，恢复 17 年卷两轮完整审核 |
 | 2026-11-09 | [2026-11-09-review-leaf-markers-and-stall-budget.md](2026-11-09-review-leaf-markers-and-stall-budget.md) | 审核目录标注叶子边界、同错重试预算止住空转；保留按题局部补审 |

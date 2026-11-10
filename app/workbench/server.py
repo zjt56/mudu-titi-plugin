@@ -1495,6 +1495,46 @@ def overview(name):
     return value
 
 
+def _parse_iso(value):
+    """Parse a manifest ISO timestamp; return None instead of raising."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.astimezone()
+
+
+def _flow_timing(manifest):
+    """Flow start/finish and elapsed minutes from real stage timestamps.
+
+    The completion time is the moment the automated flow finished (the final
+    format check, or the latest finished stage), not the manifest's re-export
+    mtime. Elapsed is rounded to whole minutes from the earliest start.
+    """
+    stages = (manifest or {}).get("stages") or {}
+    started, finished = [], []
+    for record in stages.values():
+        if not isinstance(record, dict):
+            continue
+        s = _parse_iso(record.get("started_at"))
+        f = _parse_iso(record.get("finished_at"))
+        if s:
+            started.append(s)
+        if f:
+            finished.append(f)
+    if not finished:
+        return None, None, None
+    finish = _parse_iso((stages.get("format_gate") or {}).get("finished_at")) or max(finished)
+    start = min(started) if started else _parse_iso((manifest or {}).get("created_at"))
+    minutes = None
+    if start is not None and finish is not None and finish >= start:
+        minutes = int(round((finish - start).total_seconds() / 60.0))
+    return (start.isoformat(timespec="seconds") if start else None,
+            finish.isoformat(timespec="seconds"), minutes)
+
+
 def _overview_uncached(name, folder):
     report, manifest, queue = report_for(folder)
     base = question_rows(folder, report)
@@ -1543,6 +1583,7 @@ def _overview_uncached(name, folder):
                           or receipt.get("stage") == "pending_confirmation"))
     uploaded = bool(upload_stage_done and not upload_pending)
     stage_info = stage_cards(manifest, bool(rows), bool(advance.get("running")), diagnostics)
+    flow_started_at, flow_finished_at, flow_minutes = _flow_timing(manifest)
     # 审核已真实执行、只剩人工决定时，卡点提示要指向“去处理差异”，不能写成“等待执行”。
     if (stage_info.get("current") or {}).get("id") == "review_gate" and label_open:
         stage_info["hint"] = f"审核已执行；{len(label_open)} 项标签差异待人工决定"
@@ -1565,6 +1606,9 @@ def _overview_uncached(name, folder):
             "stages": stages, "rows": rows, "has_audio": has_audio,
             # 自动流程是否结束（审核后最终格式检查通过）；上传页排队区按此移除。
             "flow_done": flow_done,
+            # 流程开始/完成绝对时间与总耗时（分钟）；审核页卡片展示完成时间与耗时。
+            "flow_started_at": flow_started_at, "flow_finished_at": flow_finished_at,
+            "flow_minutes": flow_minutes,
             # 已写入云端上传暂存的批次视为完成，试卷审核列表不再展示。
             "uploaded": uploaded, "upload_pending_confirmation": upload_pending,
             "upload_status": upload}

@@ -25,6 +25,20 @@ class UploadStatusTests(unittest.TestCase):
         self.jobs.start()
         self.addCleanup(self.jobs.stop)
 
+    def test_flow_timing_uses_real_stage_timestamps_in_minutes(self):
+        manifest = {"created_at": "2026-11-09T22:18:45+08:00", "stages": {
+            "extract": {"started_at": "2026-11-09T22:18:45+08:00", "finished_at": "2026-11-09T22:18:53+08:00"},
+            "review": {"started_at": "2026-11-09T23:27:49+08:00", "finished_at": "2026-11-09T23:39:14+08:00"},
+            "format_gate": {"started_at": "2026-11-09T23:39:28+08:00", "finished_at": "2026-11-09T23:39:28+08:00"}}}
+        start, finish, minutes = server._flow_timing(manifest)
+        self.assertEqual(start, "2026-11-09T22:18:45+08:00")
+        self.assertEqual(finish, "2026-11-09T23:39:28+08:00")
+        self.assertEqual(minutes, 81)
+        # Missing timestamps and malformed values never crash or invent a duration.
+        self.assertEqual(server._flow_timing({"stages": {}}), (None, None, None))
+        self.assertEqual(server._flow_timing({"stages": {"extract": {"started_at": "bad", "finished_at": "bad"}}}),
+                         (None, None, None))
+
     def record(self, path, value):
         target = self.folder / "07_upload" / path
         target.parent.mkdir(parents=True, exist_ok=True)
