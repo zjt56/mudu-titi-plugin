@@ -62,3 +62,16 @@ test('harness default resolves to a servable model without entering any API key'
   assert.ok(declared.some((m) => m.provider === found.provider && m.model === found.model),
     `${found.provider}/${found.model} must be declared by its profile`);
 });
+
+test('AI operations route prefers explicit role, then default, then Harness model', () => {
+  const harness = { provider: 'h', model: 'hm' };
+  assert.deepEqual(plugin.operationsRouteFor({ roles: { operations: { provider: 'q', model: 'ops' } } }, harness), { provider: 'q', model: 'ops' });
+  assert.deepEqual(plugin.operationsRouteFor({ default: { provider: 'p', model: 'd' } }, harness), { provider: 'p', model: 'd' });
+  assert.deepEqual(plugin.operationsRouteFor({ default: {} }, harness), { provider: 'h', model: 'hm' });
+  assert.throws(() => plugin.operationsRouteFor({ default: {} }, null));
+});
+
+test('model settings expose a dedicated AI operations row', () => {
+  const client = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'lib', 'client.js'), 'utf8');
+  assert.match(client, /\['operations', 'AI运维'\]/);
+});
