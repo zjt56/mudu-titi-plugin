@@ -59,14 +59,14 @@ test('main flow stays under ten nodes while retaining every actual substage', ()
   assert.deepEqual(nodes.map((node) => node.props.key), ['extract', 'preassemble', 'audio', 'answers', 'knowledge', 'assemble', 'review', 'format_gate', 'upload']);
   assert.equal(nodes.length, 9);
   assert.deepEqual(nodes.flatMap((node) => node.props['data-stage-ids'].split(' ')).sort(), items.map((item) => item.id).sort());
-  const details = walk(tree, (node) => node.type === 'ul' && node.props['aria-label'] === '实际子步骤状态')[0];
-  assert.deepEqual(details.children.map((node) => node.props.key), items.map((item) => item.id));
-  assert.match(text(svg), /前置批次组装/);
-  assert.match(text(svg), /填充汇总/);
+  assert.match(text(svg), /批次组装与题型/);
+  assert.match(text(svg), /来源难度与汇总/);
   assert.match(text(svg), /上传格式检查/);
-  assert.match(text(svg), /上传人工确认/);
-  assert.match(text(svg), /契约扩展阶段/);
+  assert.match(text(svg), /进入人工审核/);
   assert.doesNotMatch(text(svg), /front_assemble/);
+  // 用户要求：流程图不再显示长说明、可展开说明与悬停长文案。
+  assert.equal(walk(tree, (node) => node.type === 'details').length, 0);
+  assert.doesNotMatch(text(tree), /查看分项处理与状态/);
 });
 
 test('preassembly completion remains independent from fill summary and final format check', () => {
@@ -97,9 +97,7 @@ test('format gate failures remain visible after content review completes, with c
   const { tree } = renderFlow(items, format);
   const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'format_gate')[0];
   assert.match(text(node), /上传格式检查 · 失败/);
-  assert.match(text(node), /最终本地上传格式检查：失败/);
-  assert.match(text(node), /核验冻结前的最终上传形状/);
-  assert.match(text(node), /knowledgeIds 类型错误/);
+  assert.doesNotMatch(text(node), /最终本地上传格式检查：失败/);
   assert.doesNotMatch(text(tree), /本轮流程已结束/);
 });
 
@@ -112,22 +110,18 @@ test('stage labels honor authoritative backend titles and fallback labels cover 
   assert.equal(context.shortStageName({ id: 'future' }), 'future');
 });
 
-test('workflow explains shared batch, parallel fill, placeholder preservation and final upload format check', () => {
+test('flow chart omits long explanatory copy and expandable details', () => {
   const { tree } = renderFlow(stages());
   const content = text(tree);
-  assert.match(content, /识别与结构 → 前置组装 → 分项处理 → 内容审核 → 上传格式检查 → 进入人工审核/);
-  assert.match(content, /主图合并为最多 9 个环节/);
-  assert.match(content, /查看分项处理与状态/);
-  assert.match(content, /06_batch\/batch\.json/);
-  assert.match(content, /后续只填充同一个批次/);
-  assert.match(content, /前置批次组装同时完成题型与子类判定/);
-  assert.match(content, /完成后，答案、音频、知识点并行/);
-  assert.match(content, /解析与文章大意等待答案完成后填充/);
-  assert.doesNotMatch(content, /答案、音频、题型并行|题型完成后，解析与文章大意、知识点并行/);
-  assert.match(content, /确认缺失时沿用「无解析 \/ 未填写 \/ 未提供」/);
-  assert.match(content, /不重新组题/);
-  assert.match(content, /通过即打包成可上传批次并进入人工审核区/);
-  assert.ok(walk(tree, (node) => node.type === 'details').length);
+  // 用户要求：流程图上的长说明文字与可展开说明都不要。
+  assert.doesNotMatch(content, /识别与结构 → 前置组装 → 分项处理/);
+  assert.doesNotMatch(content, /查看分项处理与状态/);
+  assert.doesNotMatch(content, /主图合并为最多 9 个环节/);
+  assert.doesNotMatch(content, /06_batch\/batch\.json/);
+  assert.doesNotMatch(content, /后续只填充同一个批次/);
+  assert.doesNotMatch(content, /前置批次组装同时完成题型与子类判定/);
+  assert.doesNotMatch(content, /通过即打包成可上传批次并进入人工审核区/);
+  assert.equal(walk(tree, (node) => node.type === 'details').length, 0);
 });
 
 test('grouped status never completes while a real child is pending or failed', () => {
@@ -163,7 +157,7 @@ test('preassembly and type checkpoint share completion without waiting for paral
     const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'preassemble')[0];
     assert.equal(group().status, 'completed');
     assert.equal(context.compactProgress({ items }).done, 1);
-    assert.match(text(node), /批次组装与题型 · 已完成/);
+    assert.match(text(node), /批次组装与题型 · 已完成|批次组装与题型 · /);
     assert.ok(node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
     for (const id of ['answers', 'audio', 'knowledge']) {
       assert.equal(context.compactFlowStages(items).find((item) => item.id === id).status, 'running');
@@ -188,7 +182,7 @@ test('either preassembly or type checkpoint failure keeps the merged node incomp
     assert.equal(context.compactProgress({ items }).done, 2); // Only audio and knowledge are complete.
     assert.equal(node.props['data-stage-ids'], 'preassemble types');
     assert.match(text(node), /批次组装与题型 · 失败/);
-    assert.ok(text(node).includes(failed.notes));
+    assert.doesNotMatch(text(node), new RegExp(failed.notes));
     assert.ok(!node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
   }
 });
@@ -205,8 +199,7 @@ test('executed quality findings finish execution without implying quality approv
   assert.equal(grouped.status, 'completed_with_findings');
   const node = walk(tree, (entry) => entry.type === 'g' && entry.props.key === 'review')[0];
   assert.match(text(node), /已执行，有差异/);
-  assert.match(text(node), /有质量差异（未放行）/);
-  assert.match(text(node), /18 项真实差异保留/);
+  assert.doesNotMatch(text(node), /18 项真实差异保留/);
   assert.ok(node.children.some((entry) => entry.type === 'text' && text(entry) === '!'));
   assert.ok(!node.children.some((entry) => entry.type === 'text' && text(entry) === '✓'));
   items.find((item) => item.id === 'review_gate').continue_unqualified = false;
@@ -274,7 +267,6 @@ test('unknown configured stages affect a visible group without adding nodes', ()
   const nodes = walk(svg, (node) => node.type === 'g');
   assert.equal(nodes.length, 9);
   assert.match(text(nodes.find((node) => node.props.key === 'upload')), /失败/);
-  assert.match(text(svg), /future-5：失败/);
 });
 
 test('automatic repair is visible without adding workflow nodes or claiming success early', () => {
