@@ -29,7 +29,7 @@ class ListProjectionTest(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(2))
                 self.assertTrue(server._dispatch_supervised('batch')['started'])
-                start.assert_called_once_with('batch')
+                start.assert_called_once_with('batch', reset_budget=False)
             finally:
                 release.set()
                 thread.join(3)

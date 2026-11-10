@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-runtime-efficiency.md](2026-11-10-runtime-efficiency.md) | 共用零模型快路、单次诊断验收复用、审核来源读取复用、运行态缓存与只读巡检提示优化 |
 | 2026-11-10 | [2026-11-10-operations-toolbar-and-scan-lifecycle.md](2026-11-10-operations-toolbar-and-scan-lifecycle.md) | AI 运维标题与按钮同排、状态另起一行；启停文案简化，修复重启定时器与无界工作状态读取 |
 | 2026-11-10 | [2026-11-10-flow-tooltip-substeps.md](2026-11-10-flow-tooltip-substeps.md) | 流程节点悬停浮层显示各环节子流程短状态，长描述仍不显示 |
 | 2026-11-10 | [2026-11-10-ops-transient-poll-error.md](2026-11-10-ops-transient-poll-error.md) | 运维扫描偶发网络错误不再常驻显示：成功即清、瞬时错误自动消退 |

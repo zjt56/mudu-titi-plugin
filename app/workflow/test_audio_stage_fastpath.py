@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from workflow import agent, contracts, local_agent, manifest as mf
+from workflow import agent, agent_protocol, contracts, local_agent, manifest as mf
 
 
 def _batch(root: Path) -> Path:
@@ -68,13 +68,19 @@ class AudioFastPathTest(unittest.TestCase):
         self.assertFalse(agent._audio_evidence_ready(self.batch))
 
     def test_audio_stage_skips_model_when_evidence_ready(self):
+        evidence = json.loads((self.batch / '02_audio/segment-evidence.json').read_text())
+        mapping = {'unit_binding': evidence['unit_binding'], 'items': [
+            {k: row[k] for k in ('unit_id', 'file', 'start', 'end')} for row in evidence['items']]}
+        (self.batch / '02_audio/audio_map.json').write_text(json.dumps(mapping), encoding='utf-8')
+        # This fixture isolates the audio contract; upstream delivery validation
+        # is covered separately and must not be silently bypassed in production.
         with patch.object(agent, "configured", return_value=True), \
              patch.object(local_agent, "main") as invoke, \
-             patch.object(agent, "_mark_stage_completed") as mark:
+             patch.object(agent_protocol, '_preconditions', return_value=[]):
             code = agent.main(["run", "--stage", "audio", "--batch-dir", str(self.batch)])
         self.assertEqual(code, 0)
         invoke.assert_not_called()
-        mark.assert_called_once()
+        self.assertEqual(mf.load(self.batch)['stages']['audio']['status'], mf.COMPLETED)
 
 
 class SkippedStageRevivalTest(unittest.TestCase):

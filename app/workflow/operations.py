@@ -409,6 +409,19 @@ def _discover(folder):
     return state
 
 
+def pending_incident(folder):
+    """Read-only admission hint; terminal history never keeps scanning alive.
+
+    Discovery/expiry/reconciliation remain owned by the ordinary incidents path.
+    In particular this hint never saves a ledger just to check if work exists.
+    """
+    incident = (_load(Path(folder)) or {}).get('incident') or {}
+    return incident.get('status') in {
+        'queued', 'claimed', 'awaiting_execution', 'investigating',
+        'repairing', 'verifying', 'waiting_external',
+    }
+
+
 def view(root, folder, *, discover=True):
     folder = Path(folder)
     try:

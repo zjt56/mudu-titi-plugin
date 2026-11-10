@@ -477,6 +477,17 @@ def diagnose(batch_dir) -> dict:
                 "items": [], "summary": f"无法读取批次台账：{exc}"}
     stages = manifest.get("stages") or {}
     inputs = manifest.get("inputs") or {}
+    # One read-only observation shares each dependency's full acceptance result.
+    # Keep only immutable booleans here (including failures), never reports or a
+    # cache on the manifest: another diagnose or any write boundary must recheck.
+    dependency_results: dict[str, bool] = {}
+
+    def dependency_satisfied(stage_id: str) -> bool:
+        if stage_id not in dependency_results:
+            dependency_results[stage_id] = mf.dependency_satisfied(
+                manifest, stage_id, allow_unqualified=True)
+        return dependency_results[stage_id]
+
     items = []
     quality_notes = []
     first_blocked = None
@@ -509,8 +520,7 @@ def diagnose(batch_dir) -> dict:
         # 而在“质量备注/卡点”两种展示间摇摆。
         # 只把「真正卡住当前推进」的阶段列为卡点：已失败/待复核/阻断，或第一个未完成的。
         note = str(record.get("notes") or "")
-        unmet = [d for d in stage.depends_on
-                 if not mf.dependency_satisfied(manifest, d, allow_unqualified=True)]
+        unmet = [d for d in stage.depends_on if not dependency_satisfied(d)]
         missing_inputs = [k for k in stage.requires
                           if not (inputs.get(k) or {}).get("exists")]
 

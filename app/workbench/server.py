@@ -1610,9 +1610,9 @@ def _overview_key(folder):
                      "07_review/manual-review-queue.json", "07_review/review-rounds.json",
                      "07_review/content-review.json", "07_review/metadata-review.json",
                      "07_review/unchecked.json", "06_batch/batch_meta.json", "06_batch/batch.json",
-                     "01_source/structure.confirmed.json", "workflow/self-heal-status.json",
-                     "workflow/supervisor.json", "07_review/upload-format.json", "07_review/review-gate.json",
-                     "receipt.json", "07_upload/receipt.json", "workflow/activity.json"):
+                     "01_source/structure.confirmed.json",
+                     "07_review/upload-format.json", "07_review/review-gate.json",
+                     "receipt.json", "07_upload/receipt.json"):
         path = folder / relative
         try:
             stat = path.stat()
@@ -1795,6 +1795,38 @@ def list_batches():
                 except ValueError:
                     pass
     return result
+
+
+def operations_work_state():
+    """Cheap read-only admission: current local work or a live incident.
+
+    Do not run incident discovery (which can write ledgers) during this hint.
+    Terminal history and stopped batches must not keep idle polling active.
+    """
+    from workflow import operations
+    active = []
+    if WORKFLOWS.is_symlink() or not WORKFLOWS.is_dir():
+        return {"has_work": False, "batches": []}
+    for folder in WORKFLOWS.iterdir():
+        if (folder.is_symlink() or not folder.is_dir()
+                or not (folder / "workflow/manifest.json").is_file()):
+            continue
+        try:
+            manifest = wf_manifest.load(folder) if wf_manifest else {}
+            if manifest.get('status') in {'stopped', 'cancelled', 'archived', 'published', 'staged'}:
+                continue
+            stages = manifest.get('stages') or {}
+            local_pending = bool(wf_execution_state) and any(
+                not wf_execution_state.executed(stages.get(sid), allow_unqualified=True)
+                for sid in wf_execution_state.LOCAL_STAGES)
+            # Only hash the final artifact when the local records appear done.
+            if not local_pending and wf_execution_state:
+                local_pending = not wf_execution_state.local_complete(folder, manifest)
+            if local_pending or operations.pending_incident(folder):
+                active.append(folder.name)
+        except (OSError, ValueError, TypeError):
+            continue
+    return {"has_work": bool(active), "batches": active[:40]}
 
 
 def cached_list_batches():
@@ -2854,23 +2886,7 @@ class Handler(BaseHTTPRequestHandler):
                 operations.recover_resumes(WORKFLOWS, _launch_advance)
                 return self.send_json(operations.incidents(WORKFLOWS))
             if decoded_path == "/api/operations/work-state":
-                from workflow import operations
-                active = []
-                if WORKFLOWS.is_dir():
-                    for folder in WORKFLOWS.iterdir():
-                        if not folder.is_dir() or not (folder / "workflow/manifest.json").is_file():
-                            continue
-                        try:
-                            manifest = wf_manifest.load(folder) if wf_manifest else {}
-                            stages = manifest.get("stages") or {}
-                            local_done = bool(wf_execution_state and wf_execution_state.local_complete(folder, manifest))
-                            active_stage = any((row or {}).get("status") in {"running", "blocked", "failed"}
-                                               for row in stages.values())
-                            if (not local_done and active_stage) or operations.view(WORKFLOWS, folder).get("incident"):
-                                active.append(folder.name)
-                        except (OSError, ValueError, TypeError):
-                            continue
-                return self.send_json({"has_work": bool(active), "batches": active[:40]})
+                return self.send_json(operations_work_state())
             if decoded_path == "/api/batches":
                 return self.send_json({"batches": cached_list_batches()})
             if decoded_path == "/api/taxonomy":

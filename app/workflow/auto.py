@@ -264,7 +264,7 @@ def _bridge_stage(stage: contracts.Stage, command: list) -> contracts.Stage:
 
 def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
     """Export and import serially; only read-only model calls overlap."""
-    from . import agent_protocol, agent_tasks, local_agent
+    from . import agent_protocol, agent_tasks, local_agent, stage_preflight
     from .agent_prepare import prepare_answers
 
     state = mf.load(batch_dir)
@@ -278,9 +278,15 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
 
     attempts = batch_dir / "workflow" / "agent-runs"
     attempts.mkdir(parents=True, exist_ok=True)
-    prepared, outcomes = {}, {}
+    prepared, outcomes, deterministic = {}, {}, set()
     for stage in stages:
         try:
+            preflight = stage_preflight.run(batch_dir, stage.id)
+            if preflight is not None:
+                code, report = preflight
+                outcomes[stage.id] = (code, json.dumps(report, ensure_ascii=False))
+                deterministic.add(stage.id)
+                continue
             if stage.id == "answers":
                 prepare_answers(batch_dir)
             # 解析/大意与知识点需要整卷题干、材料和答案附录做题号匹配。
@@ -329,6 +335,10 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
     def import_outcome(stage):
         code, value = outcomes[stage.id]
         imported = False
+        if code == 0 and stage.id in deterministic:
+            # The shared preflight already validated and recorded delivery.
+            outcomes[stage.id] = 0
+            return
         if code == 0:
             try:
                 exported, task, _ = prepared[stage.id]

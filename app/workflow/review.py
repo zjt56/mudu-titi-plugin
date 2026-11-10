@@ -15,6 +15,8 @@ import hashlib
 import json
 import re
 import time
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 
 # 人工审核范围（产品规则，2026-11）：
@@ -98,6 +100,48 @@ def _mark_leaf(point, all_points):
 
 
 _LOAD_CACHE = {}
+# Only one read-only evaluation shares bytes/parsed units. No verdict or source
+# bytes survive into a later request, and concurrent threads have separate scopes.
+_EVALUATION_READS = ContextVar('review_evaluation_reads', default=None)
+
+
+def _evaluation_reads(function):
+    @wraps(function)
+    def observed(*args, **kwargs):
+        token = _EVALUATION_READS.set({})
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _EVALUATION_READS.reset(token)
+    return observed
+
+
+def _read_bound_bytes(path):
+    path = Path(path)
+    scope = _EVALUATION_READS.get()
+    if scope is None:
+        return path.read_bytes()
+    stat = path.stat()
+    revision = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    key = ('bytes', str(path.resolve()), revision)
+    if key not in scope:
+        scope[key] = path.read_bytes()
+    return scope[key]
+
+
+def _confirmed_review_units(batch):
+    from .agent_tasks import confirmed_units
+    scope = _EVALUATION_READS.get()
+    if scope is None:
+        return confirmed_units(batch)
+    source = Path(batch) / '01_source/structure.confirmed.json'
+    stat = source.stat()
+    revision = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    key = ('units', str(Path(batch).resolve()), revision)
+    if key not in scope:
+        scope[key] = confirmed_units(batch)
+    import copy
+    return copy.deepcopy(scope[key])
 
 
 def _load(path: Path):
@@ -329,7 +373,7 @@ def _bound_source_texts(batch, plan):
         path = (root / key[len("rules:"):]) if key.startswith("rules:") else (Path(batch) / key)
         try:
             if path.is_file():
-                texts[key] = path.read_text(encoding="utf-8-sig")
+                texts[key] = _read_bound_bytes(path).decode('utf-8-sig')
         except (OSError, UnicodeError):
             continue
     return texts
@@ -403,7 +447,7 @@ def semantic_review_value(value):
 def _unit_bindings(batch, units, hashes):
     """Bind whole review units; unprovable source scopes remain global."""
     from .review_rounds import _source_excerpts, _transcript_excerpt, CONTEXT_VERSION, PROMPT_VERSION
-    source = (batch / "01_source/正文.txt").read_text(encoding="utf-8-sig")
+    source = _read_bound_bytes(batch / "01_source/正文.txt").decode('utf-8-sig')
     rows = {name: _load(batch / name) for name in (
         "03_types/types.json", "04_knowledge/knowledge.json", "04_knowledge/explanations.json",
         "06_batch/batch.json", "06_batch/batch_meta.json", "02_audio/audio_map.json",
@@ -460,7 +504,7 @@ _PLAN_CACHE = {}
 def _file_digest(path):
     import hashlib
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return hashlib.sha256(_read_bound_bytes(path)).hexdigest()
     except OSError:
         return "missing"
 
@@ -524,9 +568,8 @@ def prepare_round_plan(batch_dir) -> dict:
     function of the bound files and confirmed units, so it is memoized by that
     fingerprint (and would be recomputed for any change) instead of per request.
     """
-    from .agent_tasks import confirmed_units
     batch = Path(batch_dir)
-    units = confirmed_units(batch)
+    units = _confirmed_review_units(batch)
     cache_key = (str(batch), _plan_input_key(batch, units))
     cached = _PLAN_CACHE.get(cache_key)
     if cached is not None:
@@ -561,13 +604,13 @@ def prepare_round_plan(batch_dir) -> dict:
             if path.is_symlink():
                 raise ValueError("Round inputs cannot be symlinks: " + relative)
             if path.is_file():
-                hashes[prefix + relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+                hashes[prefix + relative] = hashlib.sha256(_read_bound_bytes(path)).hexdigest()
     observations = _load(batch / "workflow/media-observations.json") or {}
     from .agent_tasks import _safe_path
     for item in observations.get("observations", []):
         relative = item["path"]
         path = _safe_path(batch, relative)
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        digest = hashlib.sha256(_read_bound_bytes(path)).hexdigest()
         if digest != item["sha256"]:
             raise ValueError("Media observation is stale: " + relative)
         hashes[relative] = digest
@@ -596,11 +639,10 @@ def prepare_round_plan(batch_dir) -> dict:
 
 def round_sample_pool(batch_dir, units=None):
     """Actual sampling targets, shared by current and retained-plan validation."""
-    from .agent_tasks import confirmed_units
     from workbench import taxonomy
     batch = Path(batch_dir)
     if units is None:
-        units = confirmed_units(batch)
+        units = _confirmed_review_units(batch)
         if (batch / "02_audio/SKIP_LISTENING").is_file():
             units = [u for u in units if not str(u.get("type", "")).startswith("听力")]
     loaded = _load(batch / "03_types/types.json") or {}
@@ -877,19 +919,18 @@ def _knowledge_changes(old, assessment):
 
 def _sample_source_binding(batch, plan, check):
     """Derive target-level source attribution without changing model output."""
-    from .agent_tasks import confirmed_units
     from .review_child_source import (prove_child, quote_belongs_to_child,
                                       quote_belongs_to_child_loose,
                                       quote_belongs_to_unit_material)
     source_path = Path(batch) / '01_source/正文.txt'
-    raw = source_path.read_bytes()
+    raw = _read_bound_bytes(source_path)
     digest = hashlib.sha256(raw).hexdigest()
     expected = plan.get('input_hashes', {}).get('01_source/正文.txt')
     if not expected or digest != expected:
         return {'status': 'uncertain', 'reason': '正文摘要与审核计划不一致',
                 'source_path': '01_source/正文.txt', 'source_sha256': digest}
     text = raw.decode('utf-8-sig')
-    unit = next((u for u in confirmed_units(batch) if u['unit_id'] == check.get('unit_id')), {})
+    unit = next((u for u in _confirmed_review_units(batch) if u['unit_id'] == check.get('unit_id')), {})
     number = check.get('number')
 
     def _stem_proof(method):
@@ -1129,7 +1170,7 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
     covered = set()
     bound_texts = _bound_source_texts(batch, plan)
     from .agent_tasks import confirmed_units
-    units = {u["unit_id"]: u for u in confirmed_units(batch)}
+    units = {u["unit_id"]: u for u in _confirmed_review_units(batch)}
     for check in checks:
         if not isinstance(check, dict):
             raise ValueError("Every target needs a review judgment")
@@ -1587,6 +1628,7 @@ def _review_dir_key(batch, payload):
     return _digest(parts)
 
 
+@_evaluation_reads
 def evaluate_rounds(batch_dir, payload=None) -> dict:
     """Fail closed on missing/stale/invalid rounds; emit no invented review data.
 

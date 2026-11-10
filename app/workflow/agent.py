@@ -304,45 +304,9 @@ def _run_review_rounds(batch_dir, config_path=None):
 
 
 def _audio_evidence_ready(batch_dir) -> bool:
-    """切段产物已存在且通过 audio 阶段校验时，直接判定该阶段完成。
-
-    听力切段由插件内置切段器（ffmpeg + WhisperX）确定性地产出
-    `02_audio/segment-evidence.json`，再让模型"重新生成"一遍既慢又会重写产物、
-    把已经算好的审核输入指纹改掉（审核随即作废、必须重跑）。所以只要产物能通过
-    同一套契约校验，就走确定性快路，不调用模型、不重写文件。
-    """
-    from . import agent_tasks
-    batch = Path(batch_dir)
-    path = batch / "02_audio" / "segment-evidence.json"
-    if not path.is_file():
-        return False
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-        items = document.get("items") if isinstance(document, dict) else None
-        if not isinstance(items, list) or not items:
-            return False
-        if document.get("generator") == "audio.segment/v1":
-            # Legacy auto-verification treated every non-micro/interpolated cut
-            # as verified; regenerate evidence under the corrected contract.
-            return False
-        if any(item.get("quality") in ("micro", "interpolated", "coarse")
-               or item.get("review_reasons") for item in items if isinstance(item, dict)):
-            return False
-        keys = ("unit_id", "file", "start", "end", "evidence")
-        payload = {"items": [{key: item[key] for key in keys} for item in items
-                             if isinstance(item, dict) and all(key in item for key in keys)]}
-        if len(payload["items"]) != len(items):
-            return False
-        context, _, missing, units = agent_tasks._collect(batch, "audio")
-        # 上下文里的 evidence 已做过脱敏（绝对路径→[host-path-redacted]），
-        # 直接和磁盘原文件比较会永远不相等，导致切段快路永远被判“证据不足”。
-        # 比较前对原文件做同样脱敏，确保比较的是同一口径。
-        if missing or context.get('02_audio/segment-evidence.json') != agent_tasks._sanitized(document):
-            return False
-        agent_tasks._validate(batch, "audio", payload, context, units)
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
-    return True
+    """Compatibility wrapper for the shared deterministic stage validator."""
+    from .stage_preflight import audio_evidence_ready
+    return audio_evidence_ready(batch_dir)
 
 
 def _mark_stage_completed(batch_dir, stage_id):
@@ -402,8 +366,7 @@ def main(argv=None):
     parser.add_argument('--config', type=Path)
     parser.add_argument('--dry-run', action='store_true')
     values = parser.parse_args(args)
-    from . import scoped_regeneration
-    scoped = (not values.dry_run and scoped_regeneration.requested(values.batch_dir, values.stage))
+    from . import stage_preflight
     if values.stage == 'assemble' and not values.dry_run:
         from . import batch_fill, assemble_local
         if (values.batch_dir / batch_fill.STATE).is_file():
@@ -413,39 +376,11 @@ def main(argv=None):
             if code == 0:
                 _mark_stage_completed(values.batch_dir, 'assemble')
             return code if code is not None else 3
-    if values.stage == 'explanations' and not values.dry_run:
-        # 正文/答案材料已确定时，解析与大意按题号直接取原文，不调用模型。
-        # 局部修复（scoped）也先走这条路径：解析/大意未逐字绑定原题属于来源问题，
-        # 靠模型重试无法可靠修好，直抄既保真又零模型开销；只有原文不可唯一
-        # 绑定时才回到模型路径，按受影响题号带反馈重试。
-        from . import explanations_direct
-        if explanations_direct.build_payload(values.batch_dir) is not None:
-            try:
-                installed = explanations_direct.install(values.batch_dir)
-            except ValueError:
-                if not scoped:
-                    raise
-                # 局部修复时直抄不可用不是卡点：交回模型路径按其反馈重试。
-                installed = None
-            if installed is not None:
-                print(json.dumps({'stage': 'explanations', 'status': 'completed',
-                                  'deterministic': True, 'model_calls': 0,
-                                  'detail': '原文直抄已通过来源绑定校验并经通用协议导入'},
-                                 ensure_ascii=False))
-                return 0
-    if values.stage == 'audio' and not values.dry_run and not scoped and _audio_evidence_ready(values.batch_dir):
-        # 切段器已产出并通过契约校验：不再调用模型，避免慢调用与无谓改写。
-        _mark_stage_completed(values.batch_dir, 'audio')
-        print(json.dumps({"stage": "audio", "status": "completed",
-                          "detail": "切段产物已通过校验，未调用模型"}, ensure_ascii=False))
-        return 0
-    if values.stage == 'audio' and not values.dry_run and not scoped:
-        evidence_path = values.batch_dir / '02_audio' / 'segment-evidence.json'
-        if evidence_path.is_file():
-            print(json.dumps({"stage": "audio", "status": "needs_review", "completed": False,
-                              "detail": "现有切片边界证据不足；候选已保留。重新切段或核对边界，不再让模型重写证据。"},
-                             ensure_ascii=False))
-            return 3
+    preflight = stage_preflight.run(values.batch_dir, values.stage, dry_run=values.dry_run)
+    if preflight is not None:
+        code, report = preflight
+        print(json.dumps(report, ensure_ascii=False))
+        return code
     if values.config is not None or configured():
         from . import local_agent
         local_args = ['--stage', values.stage, '--batch-dir', str(values.batch_dir)]
