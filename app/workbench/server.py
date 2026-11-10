@@ -881,6 +881,26 @@ def _ensure_advance_worker():
     threading.Thread(target=_advance_worker_loop, daemon=True, name="workbench-advance-worker").start()
 
 
+def work_in_flight() -> bool:
+    """是否还有真正在跑的工作；插件重启后端前用它判断能否安全回收进程树。
+
+    只统计“杀掉就会丢失真实工作”的状态：正在执行的 advance、排队中的批次、切段
+    任务。探测不到状态时保守返回 True（宁可晚一点重启，也不整树杀掉在途 agent）。
+    """
+    try:
+        with _lock:
+            if any(isinstance(row, dict) and row.get("running")
+                   for row in _advance_state.values()):
+                return True
+        with _advance_queue_lock:
+            if _advance_queue:
+                return True
+    except (RuntimeError, TypeError):
+        return True
+    with _audio_job["lock"]:
+        return bool(_audio_job.get("running"))
+
+
 def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expectation=None,
                     reset_budget=False, **details) -> dict:
     """Enqueue one batch; only an explicit user action resets retry accounting."""
@@ -2760,6 +2780,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if decoded_path == "/api/health":
                 return self.send_json({"ok": True, "instance_id": os.environ.get("WF_BACKEND_INSTANCE_ID", ""),
+                                       "busy": work_in_flight(),
                                        "workflow_runtime_version": wf_execution_state.RUNTIME_VERSION if wf_execution_state else None,
                                        "self_heal_supervisor": _workflow_supervisor.health() if _workflow_supervisor else {"running": False}})
             if decoded_path == "/api/audio/config":
