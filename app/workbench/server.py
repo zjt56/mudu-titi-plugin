@@ -581,6 +581,55 @@ _advance_queue_lock = threading.Lock()
 _advance_worker_running = False
 
 
+def _queue_batch_order() -> list[str]:
+    """Batches still in 排队区 (not uploaded, not flow_done), earliest first.
+
+    Serial execution must follow this order: a later batch may not start until
+    every earlier queued batch is fully complete and has left the queue. Without
+    this, a batch that stalls on a blocker still lets the next one run.
+    """
+    order = []
+    if WORKFLOWS.is_symlink() or not WORKFLOWS.is_dir():
+        return order
+    for folder in WORKFLOWS.iterdir():
+        try:
+            if folder.is_symlink() or not folder.is_dir() or folder.name.startswith('.'):
+                continue
+            manifest_path = folder / 'workflow' / 'manifest.json'
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                continue
+        except OSError:
+            continue
+        manifest = load(manifest_path, {}) or {}
+        if not isinstance(manifest, dict):
+            continue
+        upload = (manifest.get('stages') or {}).get('upload') or {}
+        receipt = load(folder / 'receipt.json', {}) or {}
+        pending = bool(isinstance(receipt, dict) and (receipt.get('remote_confirmation_required')
+                       or receipt.get('stage') == 'pending_confirmation'))
+        if str(upload.get('status')) == 'completed' and not pending:
+            continue  # uploaded to cloud → left the queue
+        try:
+            if wf_execution_state is not None and wf_execution_state.local_complete(folder, manifest):
+                continue  # automated flow finished → removed from 排队区
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        order.append((str(manifest.get('created_at') or ''), folder.name))
+    order.sort()
+    return [name for _, name in order]
+
+
+def _queue_head():
+    order = _queue_batch_order()
+    return order[0] if order else None
+
+
+def _waiting_for_predecessor(name):
+    """Return the blocking head name when `name` must wait, else None."""
+    head = _queue_head()
+    return head if (head is not None and head != name) else None
+
+
 def finding_current(finding: dict, labels: dict, subs: list[dict], numbers: list) -> str:
     """把这条意见指向的字段当前值捞出来，让人不用翻页也知道在说什么。"""
     key = str(finding.get("field") or "").lower()
@@ -797,11 +846,21 @@ def _advance_worker_loop():
                 entry = _advance_queue.pop(0)
                 name = entry["name"] if isinstance(entry, dict) else entry
                 expectation = entry.get("operations_expectation") if isinstance(entry, dict) else None
-            try:
-                folder = batch_dir(name)
-            except (ValueError, OSError):
+        try:
+            folder = batch_dir(name)
+        except (ValueError, OSError):
+            with _lock:
                 _advance_state.pop(name, None)
-                continue
+            continue
+        # Even if a later batch was queued, it must not run ahead of an earlier
+        # unfinished batch still in 排队区.
+        predecessor = _waiting_for_predecessor(name)
+        if predecessor is not None:
+            with _lock:
+                _advance_state[name] = {"running": False, "waiting": True,
+                                        "waiting_for": predecessor, "finished_at": now()}
+            continue
+        with _lock:
             _advance_state[name] = {"running": True, "started_at": now()}
         try:
             if expectation is None:
@@ -831,6 +890,15 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
         if (operations_expectation.get("identity") != operations._identity(folder)
                 or operations_expectation.get("incident_id") != (operations._load(folder).get("incident") or {}).get("incident_id")):
             return {"started": False, "error": "stale_operations_identity"}
+    # Strict queue serialization: only the earliest unfinished batch may start.
+    # A later batch waits until every earlier one is complete and out of 排队区.
+    predecessor = _waiting_for_predecessor(name)
+    if predecessor is not None:
+        with _lock:
+            _advance_state[name] = {"running": False, "waiting": True,
+                                    "waiting_for": predecessor, "updated_at": now()}
+        return {"started": False, "waiting": True, "waiting_for": predecessor,
+                "reason": f"需等待前一份试卷「{predecessor}」全部完成并移出排队区后再开始"}
     if (_advance_state.get(name) or {}).get("running"):
         return {"started": False, "running": True}
     with _advance_queue_lock:

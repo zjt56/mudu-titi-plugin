@@ -25,6 +25,45 @@ class UploadStatusTests(unittest.TestCase):
         self.jobs.start()
         self.addCleanup(self.jobs.stop)
 
+    def _mk_batch(self, name, created):
+        d = self.root / name / "workflow"
+        d.mkdir(parents=True)
+        (d / "manifest.json").write_text(json.dumps(
+            {"created_at": created, "stages": {"upload": {"status": "pending"}}}), encoding="utf-8")
+        return self.root / name
+
+    def test_queue_serialization_only_head_batch_may_start(self):
+        # Two unfinished batches: the later one must wait for the earlier one to
+        # finish and leave 排队区 before it can start.
+        self._mk_batch("b20", "2026-01-01T00:00:00+08:00")
+        later = self._mk_batch("b21", "2026-01-02T00:00:00+08:00")
+        server._advance_queue[:] = []
+        with patch.object(server, "wf_execution_state",
+                          SimpleNamespace(local_complete=lambda folder, manifest: False)):
+            self.assertEqual(server._queue_batch_order(), ["b20", "b21"])
+            self.assertEqual(server._queue_head(), "b20")
+            res = server._launch_advance("b21", later)
+            self.assertFalse(res.get("started"))
+            self.assertTrue(res.get("waiting"))
+            self.assertEqual(res.get("waiting_for"), "b20")
+            self.assertEqual(server._advance_queue, [])
+        # Once the earlier batch finishes its automated flow, it leaves the queue
+        # and the next batch becomes the head that may run.
+        with patch.object(server, "wf_execution_state",
+                          SimpleNamespace(local_complete=lambda folder, manifest: folder.name == "b20")):
+            self.assertEqual(server._queue_batch_order(), ["b21"])
+            self.assertEqual(server._queue_head(), "b21")
+
+    def test_uploaded_or_flow_done_batches_leave_the_queue(self):
+        self._mk_batch("b20", "2026-01-01T00:00:00+08:00")
+        done = self._mk_batch("b21", "2026-01-02T00:00:00+08:00")
+        (done / "workflow" / "manifest.json").write_text(json.dumps(
+            {"created_at": "2026-01-02T00:00:00+08:00",
+             "stages": {"upload": {"status": "completed"}}}), encoding="utf-8")
+        with patch.object(server, "wf_execution_state",
+                          SimpleNamespace(local_complete=lambda folder, manifest: False)):
+            self.assertEqual(server._queue_batch_order(), ["b20"])
+
     def test_advance_state_hides_stale_self_heal_after_stage_completes(self):
         (self.folder / "workflow").mkdir(parents=True, exist_ok=True)
         (self.folder / "workflow" / "manifest.json").write_text(json.dumps(

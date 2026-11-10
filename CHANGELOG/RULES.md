@@ -1,5 +1,11 @@
 # RULES — 规则与强调台账
 
+## 2026-11-10 排队区严格串行：前一份未完成不得启动后一份（用户明确）
+
+- 原话要点：“前一个试卷遇到卡点或者问题时，排队区的其他试卷就自动开始任务了，这是错误的逻辑，必须等到上分任务全部完成且从排队区移除后才可以启动”。
+- 规则：同一时刻只允许「排队区」里最靠前的一个未完成批次运行；其余批次必须等待，直到前面的批次 `flow_done`（或已上传）并移出排队区。前一份卡住/需要人工时，后续批次保持等待，不自动开始、不因此消耗模型。
+- 落地：`app/workbench/server.py::_queue_batch_order`/`_queue_head`/`_waiting_for_predecessor`（`_launch_advance` 与 `_advance_worker_loop` 双重闸门）；前端 `lib/client.js` 显示“等待前一份…”。回归 `workbench.test_upload_status`；记录 `CHANGELOG/2026-11-10-strict-queue-serialization.md`。
+
 ## 2026-11-10 原解析溯源与模型 JSON 结构必须稳健（用户要求彻底修复并加强提示词）
 
 - 原话要点：“彻底修复此类 bug，并加强提示词的说明”。

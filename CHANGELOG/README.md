@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-strict-queue-serialization.md](2026-11-10-strict-queue-serialization.md) | 修复排队区串行：前一份未完成并移出前，后面的批次不得启动 |
 | 2026-11-10 | [2026-11-10-thorough-fix-explanation-and-json.md](2026-11-10-thorough-fix-explanation-and-json.md) | 系统加固解析溯源与 JSON 结构类问题，并强化各阶段提示词 |
 | 2026-11-10 | [2026-11-10-explanation-writing-hint-and-overclosed-json.md](2026-11-10-explanation-writing-hint-and-overclosed-json.md) | 修复书面表达思路点拨解析被拒、知识点 JSON 多写花括号两个卡点 |
 | 2026-11-10 | [2026-11-10-knowledge-blockers-selfheal-fix.md](2026-11-10-knowledge-blockers-selfheal-fix.md) | 修复知识点标签两个卡点：自愈误读 batch_meta 崩溃、陈旧卡点、必带维度提示 |
