@@ -9,17 +9,20 @@ import hashlib
 from pathlib import Path
 import re
 
+from .content_labels import (REFERENCE_EXPLANATION_LABEL, REFERENCE_SUMMARY_LABEL,
+                             REFERENCE_FIELD_LABEL)
+
 FORMAT = 'source-fragment/v1'
 _REQUIRED = frozenset(('path', 'sha256', 'start_line', 'end_line'))
 _OPTIONAL = frozenset(('start_column', 'end_column'))
-_EXPL_LABEL = re.compile(r'^\s*【\s*(?:解析|答案|分析|详解|思路点拨)\s*】\s*[:：]?\s*')
-_SUMMARY_LABEL = re.compile(r'^\s*【\s*文章大意\s*】\s*[:：]?\s*')
+_EXPL_LABEL = re.compile(rf'^\s*{REFERENCE_EXPLANATION_LABEL}\s*[:：]?\s*')
+_SUMMARY_LABEL = re.compile(rf'^\s*{REFERENCE_SUMMARY_LABEL}\s*[:：]?\s*')
 _ANSWER_PREFIX = re.compile(
-    r'^\s*\d{1,3}\s*[.．、]\s*[A-H]?\s*(?=【\s*(?:解析|分析|详解)\s*】)')
+    rf'^\s*\d{{1,3}}\s*[.．、]\s*[A-H]?\s*(?={REFERENCE_EXPLANATION_LABEL})')
 # A field label such as 【解析】/【答案】/【文章大意】. Models sometimes set
 # start_column a character or two into this label, slicing off part of it
 # (e.g. "析】"). Snap such a start to the body text right after the closing 】.
-_FIELD_LABEL = re.compile(r'【\s*(?:解析|答案|分析|详解|文章大意)\s*】\s*[:：]?\s*')
+_FIELD_LABEL = re.compile(REFERENCE_FIELD_LABEL)
 
 
 def _snap_label_start(first, left):

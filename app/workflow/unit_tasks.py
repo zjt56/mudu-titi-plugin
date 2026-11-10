@@ -124,7 +124,11 @@ def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=Non
                 subset.pop(key, None)
             extra = ("按所选 unit_id、确认题号及 source_bindings 定位正文，答案 evidence 仅为来源定位线索；"
                      "它们不证明解析或大意归属。原解析/文章大意仍须结合完整来源的章节与材料边界核实，"
-                     "不得仅凭重复的 A/B 篇号匹配。未证明归属的原始来源完整保留，引用其原始行号。\n")
+                     "不得仅凭重复的 A/B 篇号匹配。未证明归属的原始来源完整保留，引用其原始行号。"
+                     "标题可为【解析】、[解析]、[IMG ...]解析[IMG ...]，文章大意同理；"
+                     "装饰图片不能作为缺失理由。按完整题号集合绑定大意，不按顺序分配。"
+                     "发现 ORIGINAL_EXPLANATION_OMITTED / ORIGINAL_SUMMARY_OMITTED 时，只修本分片中定位到的原文字段；"
+                     "不得改答案、题型、知识点或用完成状态/直抄声明跳过同一来源检查。\n")
         if stage == "answers":
             extra = ("答案产物仍使用 answers/evidence/missing 等题号映射，不能输出 items；"
                      "只返回所选单元内的题号，缺失须给来源证据，题组内全部子题必须覆盖。\n")

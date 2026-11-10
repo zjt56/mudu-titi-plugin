@@ -24,6 +24,22 @@ class DirectExplanationDeliveryTest(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             return agent.main(['run', '--stage', 'explanations', '--batch-dir', str(self.batch)])
 
+    def test_omission_constraints_reach_full_portable_and_partition_prompts(self):
+        from workflow import agent_protocol, unit_tasks
+        from pathlib import Path
+        task = agent_tasks.build_task(self.batch, 'explanations', max_input_chars=1000000)
+        exported = agent_protocol.export_task(self.batch, 'explanations', max_input_chars=1000000)
+        portable = json.loads((Path(exported['package_dir']) / 'task.json').read_text())
+        _, parts = unit_tasks.build_parts(self.batch, 'explanations', 1000000, max_units=1)
+        self.assertTrue(parts)
+        for prompt in [task['prompt'], portable['prompt'], *[part['prompt'] for part in parts]]:
+            head = prompt.split('BEGIN SUPPLIED CONTENT')[0]
+            for constraint in ('防遗漏交付硬约束', '[IMG ...]解析[IMG ...]',
+                               'ORIGINAL_EXPLANATION_OMITTED', 'ORIGINAL_SUMMARY_OMITTED',
+                               '完整题号集合', '同一来源/归属/遗漏校验'):
+                self.assertIn(constraint, head)
+        self.assertIn('不得改答案、题型、知识点', parts[0]['prompt'])
+
     def test_icon_heading_runs_through_bound_import_without_model(self):
         with patch('workflow.local_agent.invoke', side_effect=AssertionError('must not call model')):
             self.assertEqual(self.run_direct(), 0)

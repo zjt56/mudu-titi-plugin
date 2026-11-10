@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-explanation-omission-contract.md](2026-11-10-explanation-omission-contract.md) | 防遗漏约束进入实际全量/协议/分片提示；直抄、引用与体检统一标题语法并增加入口回归 |
 | 2026-11-10 | [2026-11-10-explanation-icon-label-and-delivery.md](2026-11-10-explanation-icon-label-and-delivery.md) | 修复2024卷图标解析标题遗漏，直抄走绑定导入并同步失配元数据；本地体检19项通过 |
 | 2026-11-10 | [2026-11-10-review-loop-and-status.md](2026-11-10-review-loop-and-status.md) | 审核 JSON 容错、禁止运维重生成上游、差异状态显示待确认 |
 | 2026-11-10 | [2026-11-10-review-difference-audit-prompts.md](2026-11-10-review-difference-audit-prompts.md) | 复审修复误报执行完成和旧报告覆盖；审核/两轮角色/自愈/运维统一差异保护提示，生产者定位不消费差异码 |

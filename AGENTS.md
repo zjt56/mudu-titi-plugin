@@ -59,7 +59,7 @@
 
 21. **删除批次必须彻底删除，不留本地痕迹**：用户明确删除某批次时，必须删除 `workflows/<批次>`、`inbox/<批次>` 以及同批次的 `.workbench-trash`/`.trash`/`archives` 归档和内存调度状态；不得以“可恢复归档”冒充删除，不得留下回执、日志、缓存副本。该动作只由用户显式删除触发，自动流程仍不得自行删除用户试卷。落地：`app/workbench/server.py::purge_batch`、`lib/client.js` 删除入口。
 
-22. **内容来源优先级（Word > PDF > 空占位）**：答案、解析、文章大意一律以 Word 原卷/答案材料为准；Word 确实没有该题/该篇内容时才用随附 PDF/OCR 提取原文兜底，并记录来源；两者都没有时解析/大意填「无」、答案记缺失。任何情况下不得用 PDF 覆盖已有 Word 内容，也不得生成、改写或跨材料借用。落地：`explanations_direct._pdf_sources`、`upload_content` 的 attachment 兜底；提示词 `content_rules.RULES`、`RULES["answers"]`、`app/prompts/roles/explanations.md`、`roles/answers.md`。
+22. **内容来源优先级（Word > PDF > 空占位）**：答案、解析、文章大意一律以 Word 原卷/答案材料为准；Word 确实没有该题/该篇内容时才用随附 PDF/OCR 提取原文兜底，并记录来源；两者都没有时解析/大意填「无」、答案记缺失。任何情况下不得用 PDF 覆盖已有 Word 内容，也不得生成、改写或跨材料借用。落地：`explanations_direct._pdf_sources`、`upload_content` 的 attachment 兜底；提示词 `content_rules.RULES`、`RULES["answers"]`、`app/prompts/roles/explanations.md`、`roles/answers.md`。**防遗漏交付约束**：`【解析】`、`[解析]`、`[IMG ...]解析[IMG ...]` 及对应文章大意标题使用同源代码规则识别，装饰图片不得作为缺失理由；裸图片不证明解析含义。大意按来源坐标与完整题号集合绑定，禁止按列表顺序分配。直抄、source_ref、模型字符串共用来源/归属/遗漏校验，说明文字不能豁免；`ORIGINAL_EXPLANATION_OMITTED` / `ORIGINAL_SUMMARY_OMITTED` 必须定位原文局部修复复验，禁止改完成状态、改无关标签或跳检查。组装及后续元数据/画线/最终产物须同步已接受内容；正文与展示消费链路都要验证。落地：`content_labels.py`、`content_fragments.py`、`content_rules.py`、`unit_tasks.py`、`handoff.py`、`manifest.py`；全量任务、文件协议、并行分片和局部修复提示词都须包含该约束，回归必须验证实际构建出的任务提示。书面表达仍按规则23。
 
 23. **书面表达不按客观题校验**：书面表达是作文，没有确定答案；范文/写作指导可有可无。只要题目存在即可，不要求答案、解析或文章大意逐字绑定原文，缺失填「无」属正常；禁止自行撰写范文或讲解充当原文。若原卷确有【参考范文】/【思路点拨】则逐字保留，无法逐字定位只提示、不阻断。落地：`upload_content` 对 `书面表达` 只告警不报错、`agent_tasks` 答案覆盖豁免、`check_answers`/`check_explanations`/`publish_check` 书面表达豁免；提示词 `content_rules.RULES`、`RULES["answers"]`、`roles/explanations.md`、`roles/answers.md`。
 

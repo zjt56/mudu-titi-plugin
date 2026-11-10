@@ -8,13 +8,11 @@ import re
 import unicodedata
 
 from .agent_tasks import _safe_path
+from .content_labels import IMG, EXPLANATION_LABEL, SUMMARY_LABEL
 
 SOURCES = ('01_source/附录.txt', '01_source_ans/正文.txt', '01_source/正文.txt')
 AI_MARK = '（AI生成，待校对）'
-# IMG identifies a DOCX relationship, never the meaning of an image. Only the
-# explicit text between two well-formed markers supplies the label.
-IMG = r'\[IMG [^\]\[\r\n]+\]'
-EXPLANATION_LABEL = rf'(?:【解析】|\[解析\]|{IMG}\s*解析\s*{IMG})'
+# Source-title patterns are shared with deterministic extraction and source_ref.
 QUESTION_PREFIX = r'^\s*(?:[（(]\s*[）)]\s*)?(\d{1,3})[.．、]'
 QUESTION = re.compile(rf'{QUESTION_PREFIX}.*?{EXPLANATION_LABEL}')
 QUESTION_BOUNDARY = re.compile(QUESTION_PREFIX)
@@ -22,7 +20,7 @@ BODY_QUESTION = QUESTION_BOUNDARY
 # An explanation paragraph printed without its own question number; it binds to
 # the preceding numbered answer line (see the stray-explanation pass below).
 STRAY_EXPLANATION = re.compile(rf'^\s*{EXPLANATION_LABEL}')
-SUMMARY = re.compile(rf'(?:【文章大意】|\[文章大意\]|{IMG}\s*文章大意\s*{IMG})\s*(.*)')
+SUMMARY = re.compile(rf'{SUMMARY_LABEL}\s*(.*)')
 # 附录在逐题解析后常跟独立附注小标题（如【熟词生义】【点拨】【思路】【拓展】【考点】）
 # 及其说明行；这些不属于解析正文，解析提取必须在此处截断，否则会把附注吞进
 # 解析文本，令模型逐字解析无法与原文解析行全等绑定。

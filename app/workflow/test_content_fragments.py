@@ -45,6 +45,26 @@ class ContentFragmentsTest(unittest.TestCase):
         self.assertTrue(any('source_ref 01_source/附录.txt:2:8-2:14 sha256=' in e for e in row['evidence']))
         self.assertNotIn('source_ref', json.dumps(row['explanation']))
 
+    def test_icon_and_square_labels_share_reference_and_consumer_grammar(self):
+        for expl, summary in (
+            ('[IMG expl-left.jpeg]解析[IMG expl-right.jpeg]',
+             '[IMG summary-left.jpeg]文章大意[IMG summary-right.jpeg]'),
+            ('[解析]', '[文章大意]'),
+        ):
+            with self.subTest(label=expl):
+                self.source.write_text(f'{summary}原文大意。\n1.A {expl}第一题解析。\n'
+                                       f'2.B {expl}第二题解析。\n', encoding='utf-8')
+                row = self.check(self.payload(self.ref(start_column=0), self.ref(1, start_column=0)))
+                self.assertEqual(row['explanation'], '第一题解析。')
+                self.assertEqual(row['articleSummary'], '原文大意。')
+                # References landing inside decorative titles snap to text,
+                # never store a broken IMG marker as explanation content.
+                row = self.check(self.payload(self.ref(start_column=7), self.ref(1, start_column=2)))
+                self.assertEqual(row['explanation'], '第一题解析。')
+                self.assertEqual(row['articleSummary'], '原文大意。')
+                with self.assertRaisesRegex(ValueError, 'EXPLANATION_SOURCE_UNVERIFIED'):
+                    self.check(self.payload(self.ref(3, start_column=0), self.ref(1, start_column=0)))
+
     def test_legacy_strings_are_unchanged(self):
         row = self.check(self.payload('第一题解析。', '原文大意。'))
         self.assertEqual(row['evidence'], ['附录原文'])

@@ -38,6 +38,13 @@ RULES = """Artifact: {items:[{unit_id,explanation:string|source_ref,articleSumma
 书面表达：其原解析就是附录的【思路点拨】（写作指导）；用 source_ref 指向该【思路点拨】行（可含标题，程序会剥掉），逐字保留，不要改写或改写成范文。
 来源优先级（用户规则，必须遵守）：以 Word 原卷/答案材料（01_source/正文.txt、01_source/materials/source.txt、01_source_ans/正文.txt、附录）为准；Word 确实没有该题解析或该篇文章大意时，才在随附 PDF/OCR 提取文本（01_source/materials/attachment_*.txt）中定位同一题/同一篇并逐字保留，evidence 注明来自 PDF；PDF 也没有时按上面规则填「无」。有 Word 时绝不用 PDF 覆盖或改写，也不得跨材料借用。
 书面表达（作文）不是客观题：没有确定答案，范文/写作指导可有可无，只要题目存在即可；不要求答案、解析或文章大意逐字绑定原文，缺失填「无」完全正常，绝不自行撰写范文或讲解。若原卷确有【参考范文】/【思路点拨】，逐字保留；无法逐字定位只会提示，不会阻断交付。
+防遗漏交付硬约束（所有入口相同，包括全量、自动并行和局部分片）：
+- 标题识别：`【解析】`、`[解析]`、`[IMG ...]解析[IMG ...]` 都是明确的文字解析标题；文章大意的对应形式同理。装饰图片不代表内容缺失或图片能力受限，不能据此填「无」。裸图片本身不提供解析含义。
+- 返回「无」之前必须核对所提供 Word 正文、附录与答案材料的本题/本篇，再按同字段查 PDF/OCR；不能只检查一种标题写法、当前页或当前切片就宣称原卷没有。已有原文即逐字保留，多行续文不得截断；重复来源副本不作为竞争者，权威原文内部冲突则如实定位，禁止选第一条、拼接或生成调和。
+- articleSummary 以来源坐标、章节/材料边界及完整题号集合绑定同篇；不得按列表位置 zip 分配，缺一篇也不能把后一篇大意前移，Word 大意缺失时只用同篇 PDF 兜底。
+- 不改变现有 JSON 键集；evidence 指向真实来源文件和行号/题号，不能自称“确定性直抄”取得豁免。直抄、source_ref 和字符串结果均须通过同一来源/归属/遗漏校验，ORIGINAL_EXPLANATION_OMITTED / ORIGINAL_SUMMARY_OMITTED 是交付失败，不能用 status=completed、空 findings 或证据说明绕过。
+- 收到上述遗漏错误时，仅修报错题号/题组的解析/大意并保留已验证内容，完成相同检查再交回；不能改答案、题型、知识点或靠重试/取消检查消化错误。无法唯一绑定时如实给出定位证据，不能把冲突改成“原文没有”。
+- 生产者完成不等于整条链路已同步：后续组装、元数据、画线及最终 payload 必须保留已接受的解析/大意；不得沿用旧「无」或要求直接改完成状态。书面表达仍按前述例外处理。
 JSON 输出：只返回一个根 JSON 对象，根键恰为 status、artifacts、notes、findings；不要在对象后追加第二个对象、说明文字或多余的花括号/方括号，多一个 `}` 或 `]` 会导致整份产物被判协议失败。"""
 
 
@@ -113,7 +120,7 @@ def validate(payload, units, typed, batch):
     """校验子智能体1的产物；返回按 unit_id 索引的行，供下游搬运与比对。"""
     rows = _coverage(payload, units)
     from .content_fragments import expand_references
-    has_references = expand_references(rows.values(), batch)
+    expand_references(rows.values(), batch)
     for row in rows.values():
         normalize_optional_content(row)
     prepared = []
