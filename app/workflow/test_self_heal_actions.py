@@ -623,5 +623,40 @@ class FormatEquivalenceTest(unittest.TestCase):
             result['before_sha256'][rel], '0' * 64))
 
 
+import tempfile
+
+
+class KnowledgeRepairTargetsFallbackTest(unittest.TestCase):
+    """Knowledge runs before assemble; the repair must not require batch_meta.json."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        # Resolve away platform symlinks (/var -> /private/var) so format_gate._safe accepts it.
+        self.root = Path(self.tmp.name).resolve()
+
+    def _write(self, relative, value):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+    def test_fallback_validates_knowledge_artifact_without_final_batch(self):
+        self._write('01_source/structure.confirmed.json', {'units': [
+            {'unit_id': 'group-1-2', 'unit_kind': 'group', 'numbers': [1, 2], 'stem': 'x'}]})
+        self._write('03_types/types.json', {'items': [
+            {'unit_id': 'group-1-2', 'type': '阅读理解', 'subtypes': ['阅读判断']}]})
+        # Missing the mandatory 主题/语篇体裁 dimensions.
+        self._write('04_knowledge/knowledge.json', {'items': [
+            {'unit_id': 'group-1-2', 'knowledge': ['设题角度/阅读/细节理解'], 'subquestions': []}]})
+        targets = actions.knowledge_repair_targets(self.root)
+        self.assertIn('group-1-2', targets)
+        self.assertTrue(any('主题' in problem for problem in targets['group-1-2']), targets)
+
+    def test_returns_empty_without_final_or_knowledge_artifact(self):
+        self._write('01_source/structure.confirmed.json', {'units': [
+            {'unit_id': 'q-1', 'unit_kind': 'standalone', 'numbers': [1], 'stem': 'x'}]})
+        self.assertEqual(actions.knowledge_repair_targets(self.root), {})
+
+
 if __name__ == '__main__':
     unittest.main()

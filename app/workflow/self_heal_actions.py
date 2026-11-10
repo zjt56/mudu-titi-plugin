@@ -452,11 +452,39 @@ def _prepare_options(root):
 
 
 def knowledge_repair_targets(batch_dir):
-    """Find current illegal knowledge owners; never choose replacement labels."""
-    from .agent_tasks import confirmed_units
+    """Find current illegal knowledge owners; never choose replacement labels.
+
+    The knowledge stage runs before ``assemble``, so ``06_batch/batch_meta.json``
+    does not exist yet when its output first fails validation. Requiring the final
+    artifact here made every knowledge-stage self-heal crash with
+    ``KNOWLEDGE_REPAIR_FAILED: batch_meta.json missing``. When the final batch is
+    absent we validate the current knowledge artifact instead; with neither we
+    return no targets (the normal stage retry still runs with its error feedback)
+    rather than raising.
+    """
+    from .agent_tasks import ARTIFACTS, confirmed_units
     from workbench import taxonomy
     root = format_gate._safe(batch_dir)
-    payload = format_gate._load(_path(root, format_gate.FINAL_PATH).read_bytes())
+    final = _path(root, format_gate.FINAL_PATH)
+    knowledge_path = _path(root, "04_knowledge/knowledge.json")
+    if not final.is_file():
+        if not knowledge_path.is_file():
+            return {}
+        payload = format_gate._load(knowledge_path.read_bytes())
+        types = {row.get("unit_id"): row for row in
+                 (format_gate._load(_path(root, ARTIFACTS["types"]).read_bytes()).get("items") or [])}
+        units = {unit["unit_id"]: unit for unit in confirmed_units(root)}
+        targets = {}
+        for item in payload.get("items") or []:
+            unit_id = item.get("unit_id")
+            meta, unit = types.get(unit_id) or {}, units.get(unit_id) or {}
+            problems = taxonomy.check_question_labels(dict(
+                item, type=meta.get("type"), subtypes=meta.get("subtypes"),
+                unit_kind=unit.get("unit_kind")))
+            if problems:
+                targets[unit_id] = list(dict.fromkeys(problems))
+        return targets
+    payload = format_gate._load(final.read_bytes())
     audit = question_content.audit_batch_source(root, payload)
     if not audit.get("passed"):
         raise ValueError("Knowledge rerun requires a complete source-proven batch")

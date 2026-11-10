@@ -25,6 +25,20 @@ class UploadStatusTests(unittest.TestCase):
         self.jobs.start()
         self.addCleanup(self.jobs.stop)
 
+    def test_advance_state_hides_stale_self_heal_after_stage_completes(self):
+        (self.folder / "workflow").mkdir(parents=True, exist_ok=True)
+        (self.folder / "workflow" / "manifest.json").write_text(json.dumps(
+            {"stages": {"knowledge": {"status": "completed"}}}), encoding="utf-8")
+        (self.folder / "workflow" / "self-heal-status.json").write_text(json.dumps(
+            {"status": "refused", "stage": "knowledge", "reason": "old crash"}), encoding="utf-8")
+        state = server.advance_state(self.folder.name)
+        self.assertNotIn("self_heal", state)
+        # Still-failing stage keeps the heal card visible.
+        (self.folder / "workflow" / "manifest.json").write_text(json.dumps(
+            {"stages": {"knowledge": {"status": "failed"}}}), encoding="utf-8")
+        state = server.advance_state(self.folder.name)
+        self.assertEqual((state.get("self_heal") or {}).get("stage"), "knowledge")
+
     def test_dedupe_skips_already_sent_batches(self):
         import hashlib
         folder = self.root / "sentbatch"

@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-knowledge-blockers-selfheal-fix.md](2026-11-10-knowledge-blockers-selfheal-fix.md) | 修复知识点标签两个卡点：自愈误读 batch_meta 崩溃、陈旧卡点、必带维度提示 |
 | 2026-11-10 | [2026-11-10-delete-oneclick-fill.md](2026-11-10-delete-oneclick-fill.md) | 彻底删除确认弹层增加“一键填入”批次名按钮 |
 | 2026-11-10 | [2026-11-10-delete-dialog-no-prompt.md](2026-11-10-delete-dialog-no-prompt.md) | 修复“彻底删除”点击无反应：Electron 不支持 window.prompt，改为页面内确认弹层 |
 | 2026-11-10 | [2026-11-10-skip-sent-papers-dedupe.md](2026-11-10-skip-sent-papers-dedupe.md) | 上传不再校验/复用已发过的试卷；删除批次彻底清除 |

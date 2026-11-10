@@ -881,8 +881,14 @@ def advance_state(name: str) -> dict:
         path = folder / "workflow/self-heal-status.json"
         healing = load(path, {}) if not path.is_symlink() and not path.parent.is_symlink() else {}
         if isinstance(healing, dict) and healing:
-            state["self_heal"] = {key: healing[key] for key in
-                ("status", "stage", "next_retry_at", "attempt", "verified", "action", "reason", "error_code", "has_feedback") if key in healing}
+            # Do not surface a stale "refused/failed" heal card after the failing
+            # stage has since completed on a later retry — it is not an active 卡点.
+            healed_stage = healing.get("stage")
+            manifest = load(folder / "workflow/manifest.json", {})
+            stage_status = str(((manifest.get("stages") or {}).get(healed_stage) or {}).get("status") or "")
+            if stage_status not in ("completed", "approved", "skipped"):
+                state["self_heal"] = {key: healing[key] for key in
+                    ("status", "stage", "next_retry_at", "attempt", "verified", "action", "reason", "error_code", "has_feedback") if key in healing}
     except ValueError:
         pass
     return state
