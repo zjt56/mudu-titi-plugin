@@ -149,15 +149,10 @@ def validate(payload, units, typed, batch):
         if qtype in SUMMARY_TYPES and not is_placeholder(summary):
             _check_generated(summary, "articleSummary", 1)
         prepared.append(dict(row, question_type=qtype, numbers=unit["numbers"]))
-    # 确定性直抄的解析（按题号从原文抄录）不再做“逐字绑定原题”的严格溯源：
-    # 用户明确要求答案/解析形式多样，不做繁复格式校验，抄原文即可。
-    from .explanations_direct import DIRECT_COPY_EVIDENCE
-    # Model-supplied references always require the original ownership audit;
-    # a caller-provided direct-copy evidence string cannot authorize a bypass.
-    if not has_references and all(DIRECT_COPY_EVIDENCE in (row.get("evidence") or []) for row in prepared):
-        report = {"passed": True, "errors": [], "warnings": [], "restorations": []}
-    else:
-        report = audit_ownership(batch, prepared)
+    # Direct extraction and model output share the consumer's ownership check.
+    # A descriptive evidence string cannot prove that existing source content
+    # was copied, nor authorize placeholders where original explanations exist.
+    report = audit_ownership(batch, prepared)
     for row in prepared:
         original = rows[row['unit_id']]
         for field in ('explanation', 'articleSummary'):

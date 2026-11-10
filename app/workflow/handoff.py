@@ -46,11 +46,36 @@ def _context(root):
     return result
 
 
+class ExplanationProjectionMismatch(ValueError):
+    """A known accepted field differs; malformed/missing inputs stay separate."""
+
+
+def require_explanation_projection(root, stage, payload=None):
+    """Cheap consumer-content check shared by delivery and stale scheduling."""
+    from . import agent_tasks, content_rules
+    root = Path(root)
+    explanation_path = agent_tasks.ARTIFACTS['explanations']
+    if not (root / explanation_path).is_file():
+        return  # Legacy batches without a producer remain subject to validation.
+    units = _units(root)
+    if payload is None:
+        payload = _json(root, BATCH_ARTIFACTS[stage])
+    rows = agent_tasks._coverage(payload, units)
+    expected = agent_tasks._coverage(_json(root, explanation_path), units)
+    for uid, row in rows.items():
+        try:
+            content_rules.preserve(row, expected[uid])
+        except ValueError as exc:
+            raise ExplanationProjectionMismatch(f'{uid}: {exc}') from exc
+
+
 def _batch(root, stage, payload):
     from . import agent_tasks, format_gate, label_audit
     from .runner import source_audit_for_batch
     units = _units(root)
     rows = agent_tasks._coverage(payload, units)
+    # A correct wire shape alone cannot prove newly accepted content was copied.
+    require_explanation_projection(root, stage, payload)
     problems = format_gate._shape(payload)
     if problems:
         raise ValueError('Downstream wire schema: ' + str(problems[:8]))

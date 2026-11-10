@@ -728,6 +728,22 @@ def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, s
             for rel, digest in saved_outputs.items():
                 if sha256_file(Path(batch_dir) / rel) != digest:
                     return True, f"产物已变化 {rel}"
+    upstream_stable = all(
+        (manifest['stages'].get(dep) or {}).get('status') in TERMINAL_OK
+        and not (manifest['stages'].get(dep) or {}).get('rebuild_required')
+        for dep in contracts.upstream_of(stage.id))
+    if (stage.id in ('assemble', 'meta', 'underlines')
+            and record.get('status') != SKIPPED and upstream_stable):
+        from .handoff import require_explanation_projection, ExplanationProjectionMismatch
+        try:
+            require_explanation_projection(batch_dir, stage.id)
+        except ExplanationProjectionMismatch as exc:
+            return True, '解析/大意交付未同步：' + str(exc)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            # Missing/malformed source context cannot prove a content change.
+            # Dispatch still rejects it via the full strict handoff validator;
+            # preserve the original producer/validation failure for diagnosis.
+            pass
     return False, ""
 
 

@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-10 | [2026-11-10-explanation-icon-label-and-delivery.md](2026-11-10-explanation-icon-label-and-delivery.md) | 修复2024卷图标解析标题遗漏，直抄走绑定导入并同步失配元数据；本地体检19项通过 |
 | 2026-11-10 | [2026-11-10-review-loop-and-status.md](2026-11-10-review-loop-and-status.md) | 审核 JSON 容错、禁止运维重生成上游、差异状态显示待确认 |
 | 2026-11-10 | [2026-11-10-review-difference-audit-prompts.md](2026-11-10-review-difference-audit-prompts.md) | 复审修复误报执行完成和旧报告覆盖；审核/两轮角色/自愈/运维统一差异保护提示，生产者定位不消费差异码 |
 | 2026-11-10 | [2026-11-10-review-differences-not-a-blocker.md](2026-11-10-review-differences-not-a-blocker.md) | 审核差异不再算卡点：诊断改 quality_differences，运维禁止用局部重生成消除差异 |

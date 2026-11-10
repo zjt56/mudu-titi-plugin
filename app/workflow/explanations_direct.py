@@ -1,14 +1,8 @@
-"""确定性解析/大意抽取：按题号从用户提供的 Word 原文直接抄录。
+"""Evidence-bound, model-free copying of original explanations and summaries.
 
-用户明确要求：上传的文件本身就把「试卷 + 答案 + 解析（+ 文章大意）」放在一起，
-Word 提取出的文本就是权威原文；确定正文与题号后，**按题号把对应原文抄进去即可**。
-有就抄、没有就留空；答案/解析书写形式多样，不做繁复格式校验，也不与 PDF 比对、
-不为抄写差异反复重跑模型。
-
-本模块独立实现轻量抽取，不依赖严格“逐字绑定原题”的来源校验：
-- 权威来源：Word 提取文本 `01_source/materials/source.txt`（若缺失退回 `01_source/正文.txt`）；
-- 题号行：`58. ...【解析】...` / `74. ...` 后的孤立 `【解析】` 段；
-- 文章大意：`【文章大意】...`，按其后首个题号（或上一个大题题号范围）归属。
+Word excerpts are authoritative; PDF/OCR may fill only the same missing field.
+Ambiguous ownership or competing original prose declines the fast path so the
+normal task/import protocol can report the source problem. Nothing is invented.
 """
 from __future__ import annotations
 
@@ -16,75 +10,94 @@ import json
 import re
 from pathlib import Path
 
+from . import upload_content as source
+
 PLACEHOLDER = "无"
 DIRECT_COPY_EVIDENCE = "按题号从 Word 原文直接抄录。"
 
-_NUM_PREFIX = re.compile(r"^\s*(?:\*\*\s*)?(\d{1,3})\s*(?:\*\*)?\s*[.．、]")
-_EXPL_LABEL = re.compile(r"(?:【\s*解析\s*】|【\s*答案\s*】)")
-_SUMMARY_LABEL = re.compile(r"【\s*文章大意\s*】(.*)$")
-
-
-def _summary_key(text):
-    from .upload_content import _norm
-    return _norm(text or "")
-
-
-def _clean(line):
-    """去 OCR 星号与行内空白，保留实词标点。"""
-    return re.sub(r"\*{1,3}", "", line).strip()
-
 
 def _word_sources(batch):
-    """按优先级返回 Word 提取文本路径列表（不含 PDF OCR 附件）。"""
     batch = Path(batch)
-    candidates = [batch / "01_source/materials/source.txt", batch / "01_source/正文.txt"]
-    return [p for p in candidates if p.is_file()]
+    paths = [batch / name for name in source.SOURCES if (batch / name).is_file()]
+    # source.txt is the full extraction, often a duplicate of body + appendix.
+    # Never let that projection compete with the canonical excerpts.
+    if not paths:
+        path = batch / "01_source/materials/source.txt"
+        if path.is_file():
+            paths.append(path)
+    return paths
 
 
 def _pdf_sources(batch):
-    """PDF/OCR 提取文本，仅在 Word 缺少该题解析或该篇文章大意时兜底。"""
-    batch = Path(batch)
-    material_dir = batch / "01_source/materials"
-    if not material_dir.is_dir():
-        return []
-    import re as _re
+    material_dir = Path(batch) / "01_source/materials"
     return [p for p in sorted(material_dir.glob("attachment_*.txt"))
-            if _re.fullmatch(r"attachment_\d{3,}\.txt", p.name) and p.is_file()]
+            if re.fullmatch(r"attachment_\d{3,}\.txt", p.name) and p.is_file()]
 
 
-def _parse(lines):
-    """从 Word 文本行抽取 {题号: 解析原文} 与文章大意列表。"""
-    expl = {}
-    summaries = []
-    pending_expl_owner = None
-    for raw in lines:
-        line = _clean(raw)
-        if not line:
+def _boundary(line):
+    return (source._section(line) or source.ICON_HEADING.match(line)
+            or source.ANNOTATION.match(line) or source.PASSAGE_HEADING.match(line)
+            or source.PART_HEADING.match(line) or source.PASSAGE_INSTRUCTION.match(line)
+            or re.fullmatch(r"\[/?TABLE[^\]]*\]", line))
+
+
+def _parse(lines, path="01_source/materials/source.txt"):
+    """Parse a full extraction using the consumer's explicit label boundaries.
+
+    Return located rows, not a first-wins dictionary. Keeping every occurrence
+    allows callers to reject competing originals and unbound passage summaries.
+    """
+    lines = [source._source_line(line) for line in lines]
+    questions, summaries = [], []
+    owner = None
+    prior = []
+    for index, line in enumerate(lines):
+        summary = source.SUMMARY.search(line)
+        question = source._question(line)
+        numbered = source.QUESTION_BOUNDARY.match(line)
+        stray = source.STRAY_EXPLANATION.match(line)
+        if numbered and re.search(source.EXPLANATION_LABEL, line) and not question:
+            raise ValueError("multiple question anchors on an explanation line")
+        if summary:
+            parts = [summary.group(1)]
+            members = []
+            for later in lines[index + 1:]:
+                if source.SUMMARY.search(later) or _boundary(later):
+                    break
+                number = source.QUESTION_BOUNDARY.match(later)
+                if number:
+                    members.append(int(number.group(1)))
+                elif not members:
+                    parts.append(later)
+            # A trailing summary belongs to the bounded passage before it;
+            # a leading summary belongs to the bounded following question set.
+            members = members or prior[:]
+            summaries.append({"source_text": "\n".join(parts).strip(),
+                              "members": members, "owner": members[0] if members else None,
+                              "path": path, "line": index + 1})
+            owner, prior = None, []
             continue
-        # 文章大意
-        m = _SUMMARY_LABEL.search(line)
-        if m:
-            summaries.append(m.group(1).strip())
+        if numbered:
+            owner = int(numbered.group(1))
+            prior.append(owner)
+        elif not stray and _boundary(line):
+            owner, prior = None, []
             continue
-        num = _NUM_PREFIX.match(line)
-        if num:
-            number = int(num.group(1))
-            if _EXPL_LABEL.search(line):
-                body = _EXPL_LABEL.split(line, 1)[1].strip()
-                if body and number not in expl:
-                    expl[number] = body
-                pending_expl_owner = number
-            else:
-                # 有题号但无解析：可能是“答案独立成行”，随后可能是孤立【解析】。
-                pending_expl_owner = number
-            continue
-        if _EXPL_LABEL.search(line):
-            # 孤立【解析】行：归属上一条有题号的答案行。
-            body = _EXPL_LABEL.split(line, 1)[1].strip()
-            if body and pending_expl_owner is not None and pending_expl_owner not in expl:
-                expl[pending_expl_owner] = body
-            continue
-    return expl, summaries
+        if question or stray:
+            if owner is None:
+                continue
+            match = question or stray
+            parts = [line[match.end():]]
+            for later in lines[index + 1:]:
+                if (source.QUESTION_BOUNDARY.match(later) or source.SUMMARY.search(later)
+                        or source.STRAY_EXPLANATION.match(later) or _boundary(later)):
+                    break
+                parts.append(later)
+            text = "\n".join(parts).strip()
+            if text:
+                questions.append({"number": owner, "source_text": text,
+                                  "path": path, "line": index + 1})
+    return questions, summaries
 
 
 def _units(batch_dir):
@@ -92,78 +105,122 @@ def _units(batch_dir):
     return confirmed_units(Path(batch_dir))
 
 
+def _unique(rows):
+    """Equivalent extraction copies do not conflict; different prose does."""
+    values = {source._verbatim(row["source_text"]) for row in rows}
+    if len(values) > 1:
+        raise ValueError("conflicting original content")
+    return rows[0] if rows else None
+
+
 def _assign_summaries(units, summaries):
-    """把文章大意按顺序分配给有整组阅读/完形的单元（无题号锚点时按出现顺序）。"""
-    by_uid = {}
-    summary_units = [u for u in units
-                     if u["unit_kind"] == "group"
-                     and str(u.get("type", "") or "").strip() in
-                     ("阅读理解", "任务型阅读", "完形填空", "读写综合", "语法选择")]
-    for unit, text in zip(summary_units, summaries):
-        by_uid[unit["unit_id"]] = text
-    return by_uid
+    """Bind only a complete, uniquely owned question set; never zip passages."""
+    candidates = {}
+    for row in summaries:
+        if not row.get("source_text"):
+            continue
+        members = set(row.get("members") or [])
+        matches = [unit for unit in units if unit["unit_kind"] == "group"
+                   and members and members == {int(n) for n in unit["numbers"]}]
+        if len(matches) != 1:
+            raise ValueError("summary has no unique complete passage ownership")
+        candidates.setdefault(matches[0]["unit_id"], []).append(row)
+    return {uid: _unique(rows) for uid, rows in candidates.items()}
 
 
 def build_payload(batch_dir):
     batch = Path(batch_dir)
-    paths = _word_sources(batch)
-    pdf_paths = _pdf_sources(batch)
+    paths, pdf_paths = _word_sources(batch), _pdf_sources(batch)
     if not paths and not pdf_paths:
         return None
-    lines = []
-    for path in paths:
-        lines.extend(path.read_text(encoding="utf-8-sig", errors="ignore").splitlines())
-    expl, summaries = _parse(lines)
-    used_pdf = []
-    # 用户规则：Word 为准；Word 确实没有该题解析/该篇文章大意时，优先取 PDF，
-    # 再没有才留空占位。PDF 只补充 Word 缺失的字段，绝不覆盖 Word 原文。
-    if pdf_paths:
-        seen = {_summary_key(item) for item in summaries}
-        for path in pdf_paths:
-            try:
-                label = str(path.relative_to(batch))
-            except ValueError:
-                label = path.name
-            extra_expl, extra_summaries = _parse(
-                path.read_text(encoding="utf-8-sig", errors="ignore").splitlines())
-            for number, text in extra_expl.items():
-                if number not in expl:
-                    expl[number] = text
-                    used_pdf.append(label)
-            for text in extra_summaries:
-                key = _summary_key(text)
-                if key and key not in seen:
-                    summaries.append(text)
-                    seen.add(key)
-                    used_pdf.append(label + "（文章大意）")
+    # Canonical excerpts use precisely the extraction consumed by upload_content.
+    # Full extraction fallback is needed for older batches without those excerpts.
+    report = source.inspect_content(batch, {"items": []})
+    word_questions = [r for r in report["all_questions"] if r["path"] in source.SOURCES]
+    word_summaries = [r for r in report["all_summaries"] if r["path"] in source.SOURCES]
+    try:
+        if paths and paths[0].name == "source.txt":
+            word_questions, word_summaries = _parse(
+                paths[0].read_text(encoding="utf-8-sig").splitlines())
+        else:
+            # The consumer deliberately ignores a second stray label after an
+            # already-explained answer. The fast path must still reject two
+            # different explicitly labelled originals instead of choosing one.
+            for path in paths:
+                rows, _ = _parse(path.read_text(encoding="utf-8-sig").splitlines(),
+                                 path.relative_to(batch).as_posix())
+                for number in {r["number"] for r in rows}:
+                    _unique([r for r in rows if r["number"] == number])
+    except ValueError:
+        return None
+    pdf_questions = [r for r in report["all_questions"] if r["path"] not in source.SOURCES]
+    pdf_summaries = [r for r in report["all_summaries"] if r["path"] not in source.SOURCES]
     units = _units(batch)
-    summary_by_uid = _assign_summaries(units, summaries)
+    try:
+        word_by_uid = _assign_summaries(units, word_summaries)
+        # PDF fallback is decided by the same unit, before inspecting conflicts
+        # in fields already supplied by Word.
+        pdf_needed = []
+        for row in pdf_summaries:
+            members = set(row.get("members") or [])
+            if any(members == {int(n) for n in u["numbers"]}
+                   for u in units if u["unit_id"] in word_by_uid):
+                continue
+            pdf_needed.append(row)
+        summary_by_uid = {**_assign_summaries(units, pdf_needed), **word_by_uid}
+        explanations = {}
+        for number in {int(n) for u in units for n in u["numbers"]}:
+            rows = [r for r in word_questions if r["number"] == number]
+            if not rows:
+                rows = [r for r in pdf_questions if r["number"] == number]
+            explanations[number] = _unique(rows)
+    except ValueError:
+        return None
     items = []
     for unit in units:
         numbers = [int(n) for n in unit["numbers"]]
         uid = unit["unit_id"]
-        if unit["unit_kind"] == "group":
-            children = [{"number": n, "explanation": expl.get(n, PLACEHOLDER)} for n in numbers]
-            group_expl = PLACEHOLDER
-        else:
-            children = []
-            group_expl = expl.get(numbers[0], PLACEHOLDER)
-        items.append({
-            "unit_id": uid,
-            "explanation": group_expl,
-            "articleSummary": summary_by_uid.get(uid, PLACEHOLDER),
-            "subquestions": children,
-            "evidence": [DIRECT_COPY_EVIDENCE] + (
-                ["PDF OCR 兜底：" + "、".join(sorted(set(used_pdf)))] if used_pdf else []),
-        })
+        summary = summary_by_uid.get(uid)
+        used = [explanations[n] for n in numbers if explanations[n]]
+        if summary:
+            used.append(summary)
+        evidence = [DIRECT_COPY_EVIDENCE]
+        for row in used:
+            prefix = "PDF OCR 兜底：" if row["path"] not in source.SOURCES and "attachment_" in row["path"] else "原文："
+            location = f"{prefix}{row['path']}:{row['line']}"
+            if location not in evidence:
+                evidence.append(location)
+        def text(number):
+            row = explanations[number]
+            return row["source_text"] if row else PLACEHOLDER
+        grouped = unit["unit_kind"] == "group"
+        items.append({"unit_id": uid,
+                      "explanation": PLACEHOLDER if grouped else text(numbers[0]),
+                      "articleSummary": summary["source_text"] if summary else PLACEHOLDER,
+                      "subquestions": [{"number": n, "explanation": text(n)} for n in numbers] if grouped else [],
+                      "evidence": evidence})
     return {"items": items}
 
 
 def install(batch_dir):
-    payload = build_payload(batch_dir)
+    """Install only through the normal source-bound protocol and stage validator."""
+    import sys
+    from . import agent_protocol
+    batch = Path(batch_dir)
+    exported = agent_protocol.export_task(batch, 'explanations', max_input_chars=sys.maxsize)
+    if exported.get('status') != 'ready':
+        raise ValueError('解析直抄前置交付未满足：' + json.dumps(exported, ensure_ascii=False))
+    payload = build_payload(batch)
     if payload is None:
         return None
-    path = Path(batch_dir) / "04_knowledge/explanations.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return path
+    response = {'protocol': agent_protocol.PROTOCOL, 'task_id': exported['task_id'],
+                'result': {'status': 'completed',
+                           'artifacts': {'04_knowledge/explanations.json': payload},
+                           'notes': ['按来源坐标直接抄录原解析与文章大意，未调用模型'],
+                           'findings': []}}
+    response_path = Path(exported['package_dir']) / 'direct-result.json'
+    agent_protocol._atomic(response_path, agent_protocol._encoded(response))
+    report = agent_protocol.import_result(batch, exported['task_id'], response_path)
+    if report.get('completed') is not True:
+        raise ValueError('解析直抄候选未通过交付校验：' + json.dumps(report, ensure_ascii=False))
+    return batch / '04_knowledge/explanations.json'

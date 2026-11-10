@@ -416,10 +416,14 @@ def main(argv=None):
     if values.stage == 'explanations' and not values.dry_run and not scoped:
         # 正文/答案材料已确定时，解析与大意按题号直接取原文，不调用模型。
         from . import explanations_direct
-        if explanations_direct.install(values.batch_dir) is not None:
-            _mark_stage_completed(values.batch_dir, 'explanations')
-            print(json.dumps({"stage": "explanations", "status": "completed",
-                              "detail": "按题号从已确定正文/答案材料直接取解析，未调用模型"},
+        if explanations_direct.build_payload(values.batch_dir) is not None:
+            # install freezes inputs, validates ownership and imports through
+            # the ordinary protocol; only its receipt may mark completion.
+            if explanations_direct.install(values.batch_dir) is None:
+                raise ValueError('解析来源在任务绑定后不可唯一提取；未写入正式产物')
+            print(json.dumps({'stage': 'explanations', 'status': 'completed',
+                              'deterministic': True, 'model_calls': 0,
+                              'detail': '原文直抄已通过来源绑定校验并经通用协议导入'},
                              ensure_ascii=False))
             return 0
     if values.stage == 'audio' and not values.dry_run and not scoped and _audio_evidence_ready(values.batch_dir):
