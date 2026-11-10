@@ -584,3 +584,38 @@ test('install awaits host restart and cannot be reported as a fix in the same at
   assert.match(released.body.input.reason, /host restart/);
   await f.manager.dispose();
 });
+
+test('transient poll errors are recognised and never pinned as a standing failure', async () => {
+  const mod = await moduleReady;
+  assert.equal(typeof mod.isTransientPollError, 'function');
+  const socket = Object.assign(new Error('fetch failed'), {
+    name: 'TypeError',
+    cause: Object.assign(new Error('other side closed'), { name: 'SocketError', code: 'UND_ERR_SOCKET' }),
+  });
+  assert.equal(mod.isTransientPollError(socket), true);
+  assert.equal(mod.isTransientPollError(Object.assign(new Error('aborted'), { code: 'ABORT_ERR' })), true);
+  assert.equal(mod.isTransientPollError(Object.assign(new Error('boom'), { code: 'INVALID_INCIDENT_LIST' })), false);
+
+  // A dropped socket is retried; a later successful scan clears the banner.
+  const { createOperationsAgentManager } = mod;
+  const scripts = [
+    () => { throw socket; },
+    () => ({ incidents: [] }),
+  ];
+  let call = 0;
+  const manager = createOperationsAgentManager({ effect: () => {} }, {
+    backendRequest: async () => {
+      const script = scripts[Math.min(call++, scripts.length - 1)];
+      return script();
+    },
+    resolveRoute: () => ({ provider: 'p', model: 'm' }),
+    cwd: '/tmp/ops-prompt',
+    enabled: () => true,
+    hasWork: () => ({ has_work: true, batches: [] }),
+  });
+  await manager.tick();
+  assert.equal(manager.status().lastPollError, '');
+  await manager.tick();
+  assert.equal(manager.status().lastPollError, '');
+  await manager.dispose();
+});
