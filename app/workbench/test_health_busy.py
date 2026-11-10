@@ -17,6 +17,7 @@ class HealthBusyTests(unittest.TestCase):
         self.state = patch.object(server, "_advance_state", {}).start()
         self.queue = patch.object(server, "_advance_queue", []).start()
         self.audio = patch.object(server, "_audio_job", {"running": False, "lock": threading.Lock()}).start()
+        self.upload = patch.object(server, "_upload_jobs", {}).start()
         self.addCleanup(patch.stopall)
 
     def test_idle_backend_is_not_busy(self):
@@ -34,6 +35,16 @@ class HealthBusyTests(unittest.TestCase):
     def test_audio_job_is_busy(self):
         self.audio["running"] = True
         self.assertTrue(server.work_in_flight())
+
+    def test_upload_job_is_busy(self):
+        # Killing an upload mid-flight leaves an unknown remote receipt behind,
+        # which costs more than rerunning a local stage.
+        self.upload["paper"] = {"running": True, "ok": None, "step": "开始"}
+        self.assertTrue(server.work_in_flight())
+
+    def test_finished_upload_is_not_busy(self):
+        self.upload["paper"] = {"running": False, "ok": True, "step": "完成"}
+        self.assertFalse(server.work_in_flight())
 
     def test_finished_advance_is_not_busy(self):
         self.state["paper"] = {"running": False, "result": {"action": "waiting"}}

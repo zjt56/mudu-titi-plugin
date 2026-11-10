@@ -145,3 +145,4 @@
 | 2026-11-10 | [2026-11-10-atomic-replace-windows-share-violation.md](2026-11-10-atomic-replace-windows-share-violation.md) | Windows 上替换审核报告遇共享冲突（WinError 5）中断审核；改为有界重试后仍抛真实错误 |
 | 2026-11-10 | [2026-11-10-operations-discovery-blocker-outcomes.md](2026-11-10-operations-discovery-blocker-outcomes.md) | 运维建单只认两种 outcome，「预算耗尽」类卡点永远不接手；改为接管 self_heal 全部 BLOCKER_OUTCOMES |
 | 2026-11-10 | [2026-11-10-no-restart-mid-flight.md](2026-11-10-no-restart-mid-flight.md) | 后端在途模型调用被热重启整树杀掉，自愈诊断停在 diagnosing；改为空闲再重启 + 探测失败再给长窗口 |
+| 2026-11-10 | [2026-11-10-interrupted-diagnosis-and-upload-busy.md](2026-11-10-interrupted-diagnosis-and-upload-busy.md) | 重启中断的诊断不再冒充内容失败、不吃重试预算；上传任务计入在途工作 |

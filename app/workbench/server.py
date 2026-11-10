@@ -885,12 +885,16 @@ def work_in_flight() -> bool:
     """是否还有真正在跑的工作；插件重启后端前用它判断能否安全回收进程树。
 
     只统计“杀掉就会丢失真实工作”的状态：正在执行的 advance、排队中的批次、切段
-    任务。探测不到状态时保守返回 True（宁可晚一点重启，也不整树杀掉在途 agent）。
+    任务、上传任务。上传中断会让远端回执变成 unknown（只能人工核实），比阶段重跑
+    代价更高，所以同样不能在被回收时进行。探测不到状态时保守返回 True。
     """
     try:
         with _lock:
             if any(isinstance(row, dict) and row.get("running")
                    for row in _advance_state.values()):
+                return True
+            if any(isinstance(job, dict) and job.get("running")
+                   for job in _upload_jobs.values()):
                 return True
         with _advance_queue_lock:
             if _advance_queue:

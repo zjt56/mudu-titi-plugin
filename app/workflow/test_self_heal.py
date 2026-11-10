@@ -142,6 +142,56 @@ class SelfHealTest(unittest.TestCase):
         self.assertEqual([result["event"]["attempt"] for result in results], [1, 1, 1])
         self.assertTrue(all(result["status"] != "cooldown" for result in results))
 
+    def test_interrupted_diagnosis_is_closed_without_consuming_the_budget(self):
+        response = {"response": {"status": "completed", "artifacts": {
+            "self_heal": {"action": "retry_stage", "stage": "extract", "reason": "重新解析"}},
+            "notes": [], "findings": []}}
+        with patch("workflow.local_agent.load_config", return_value={}), \
+             patch("workflow.local_agent.invoke", return_value=response):
+            self_heal.recover(self.batch)
+        ledger = json.loads((self.batch / self_heal.LEDGER).read_text(encoding="utf-8"))
+        key = ledger["active_signature"]
+        # Replay what an externally killed diagnosis leaves behind: the claim is
+        # persisted, the result never arrives, and the cooldown is still armed.
+        interrupted = ledger["events"][-1]
+        interrupted.update(outcome="diagnosing", at="2020-01-01T00:00:00+08:00")
+        interrupted.pop("plan", None)
+        interrupted.pop("finished_at", None)
+        ledger["attempts"][key] = 1
+        ledger["next_retry_at"] = 0
+        (self.batch / self_heal.LEDGER).write_text(json.dumps(ledger), encoding="utf-8")
+        manifest = mf.load(self.batch)
+        manifest["stages"]["extract"]["status"] = mf.FAILED
+        manifest["stages"]["extract"]["notes"] = "解析失败：结构输出缺失"
+        mf.save(self.batch, manifest)
+        with patch("workflow.local_agent.load_config", return_value={}), \
+             patch("workflow.local_agent.invoke", return_value=response):
+            result = self_heal.recover(self.batch)
+        self.assertNotEqual(result["status"], "cooldown")
+        ledger = json.loads((self.batch / self_heal.LEDGER).read_text(encoding="utf-8"))
+        closed = [event for event in ledger["events"]
+                  if event.get("outcome") == "diagnostic_interrupted"]
+        self.assertEqual(len(closed), 1)
+        self.assertTrue(closed[0].get("finished_at"))
+        self.assertNotIn("diagnostic_interrupted", self_heal.BLOCKER_OUTCOMES)
+        # The interruption was not billed as a content failure: the retry reuses
+        # the budget slot it had taken instead of advancing to attempt two.
+        self.assertEqual(ledger["events"][-1]["attempt"], 1)
+
+    def test_recent_claim_and_finished_diagnosis_are_left_alone(self):
+        recent = {"attempts": {"extract:abc": 1}, "events": [
+            {"at": mf.now_iso(), "stage": "extract", "signature": "abc",
+             "outcome": "diagnosing"}]}
+        self.assertFalse(self_heal._close_interrupted_diagnosis(
+            recent, "extract:abc", "extract", "abc"))
+        self.assertEqual(recent["attempts"]["extract:abc"], 1)
+        settled = {"attempts": {"extract:abc": 2}, "events": [
+            {"at": "2020-01-01T00:00:00+08:00", "stage": "extract", "signature": "abc",
+             "outcome": "repair_failed", "finished_at": "2020-01-01T00:01:00+08:00"}]}
+        self.assertFalse(self_heal._close_interrupted_diagnosis(
+            settled, "extract:abc", "extract", "abc"))
+        self.assertEqual(settled["attempts"]["extract:abc"], 2)
+
     def test_human_gate_is_not_sent_to_model(self):
         manifest = mf.load(self.batch)
         for stage in contracts.STAGES:
