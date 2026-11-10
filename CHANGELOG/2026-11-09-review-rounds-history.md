@@ -79,3 +79,15 @@ python -m unittest workflow.test_review_rounds workflow.test_review_rounds_recov
 `git revert <commit>`；或删除 `07_review/rounds-history.jsonl` 并还原
 `review_rounds.write_summary` / `ingest.build_review_files` 两处调用即可，队列与闸门
 数据均由既有文件重算，无需迁移。
+
+## 2026-11-10 补正：只跑部分轮次且无差异的中间态不记账
+
+19 年批次首次跑新代码时，`write_summary` 在一条审核里被调用两次（先 `labels`、后 `labels+sample`），
+结果 `rounds-history.jsonl` 落下两行：一行 `checked_rounds=["labels"]`、`findings=0`，一行完整 14 条差异。
+前者是审核途中态，读历史的人会误以为「这一轮没有差异」。
+
+改法：`review_rounds.record_rounds_history` 在「已检查轮次是 `review.ROUND_IDS` 的真子集」且「本条快照没有任何差异」时直接返回 `None`；
+带差异的部分轮次仍照常留证（真实中途结论不能丢）。
+
+验证：`workflow.test_review_rounds` **Ran 85 tests, OK**（新增 `test_partial_round_snapshot_only_counts_when_it_carries_differences`：
+部分轮次空快照不写文件、部分轮次带差异要写入并保留 `checked_rounds`）。

@@ -1165,7 +1165,12 @@ def record_rounds_history(batch_dir, evaluated=None):
     # 没有真正完成的轮次（记录缺失/过期）不是一次审核，不写空快照冒充历史。
     if not (isinstance(evaluated, dict) and evaluated.get("checked_rounds")):
         return None
+    checked = {str(round_id) for round_id in evaluated.get("checked_rounds") or []}
     rows = _rounds_history_rows(evaluated)
+    # 只跑完一部分轮次、且这条快照没有任何差异：那是审核途中的中间态，
+    # 写进历史会被读成「这一轮没有差异」。有差异的部分轮次仍要留证。
+    if not rows and checked < {str(round_id) for round_id in review.ROUND_IDS}:
+        return None
     digest = hashlib.sha256(json.dumps(
         {"binding": plan.get("input_binding"), "protocol": review.ROUND_PROTOCOL, "rows": rows},
         sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
