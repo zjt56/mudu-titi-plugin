@@ -496,6 +496,34 @@ test('idle work-state skips incident inspection and model takeover', async () =>
   await f.manager.dispose();
 });
 
+test('batches still advancing show healing instead of standby, without inventing incidents', async () => {
+  const calls = [];
+  const f = await fixture({
+    backend: async (path) => { calls.push(path); return path === '/api/operations/incidents' ? { incidents: [] } : undefined; },
+    managerOptions: { hasWork: async () => ({ has_work: true,
+      batches: ['23年安徽中考英语', '22年'] }) },
+  });
+  await f.run();
+  assert.deepEqual(calls, ['/api/operations/incidents']);
+  const status = f.manager.status();
+  assert.equal(status.incidentCount, 0);
+  assert.equal(status.healingCount, 2);
+  assert.deepEqual(status.healingBatches, ['23年安徽中考英语', '22年']);
+  await f.manager.dispose();
+});
+
+test('idle batch list clears healing so the panel can say standby again', async () => {
+  let work = { has_work: true, batches: [{ batch_name: 'a' }] };
+  const f = await fixture({ backend: async () => ({ incidents: [] }),
+    managerOptions: { hasWork: async () => work } });
+  await f.run();
+  assert.equal(f.manager.status().healingCount, 1);
+  work = { has_work: false, batches: [] };
+  await f.manager.tick();
+  assert.equal(f.manager.status().healingCount, 0);
+  await f.manager.dispose();
+});
+
 test('temporary list failure is retried on later tick without disabling manager', async () => {
   let offline = true;
   const f = await fixture({ backend: path => { if (path === '/api/operations/incidents' && offline) throw new Error('404 backend starting'); } });

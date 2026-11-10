@@ -142,3 +142,9 @@
 | 2026-11-07 | [2026-11-07-never-park.md](2026-11-07-never-park.md) | 任何单点失败不得停住流程：上游重推/延后并继续 |
 | 2026-11-07 | [2026-11-07-fix-stem-table-queue.md](2026-11-07-fix-stem-table-queue.md) | 修复装配改写题干、信息转换表格空档、排队区进度分母 |
 | 2026-11-10 | [2026-11-10-windows-shared-agent-lock-probe.md](2026-11-10-windows-shared-agent-lock-probe.md) | Windows 并行模型调用（共享锁槽）不被 supervisor 看见，可能重复派发；探活改为独占整个锁区间 |
+| 2026-11-10 | [2026-11-10-atomic-replace-windows-share-violation.md](2026-11-10-atomic-replace-windows-share-violation.md) | Windows 上替换审核报告遇共享冲突（WinError 5）中断审核；改为有界重试后仍抛真实错误 |
+| 2026-11-10 | [2026-11-10-operations-discovery-blocker-outcomes.md](2026-11-10-operations-discovery-blocker-outcomes.md) | 运维建单只认两种 outcome，「预算耗尽」类卡点永远不接手；改为接管 self_heal 全部 BLOCKER_OUTCOMES |
+| 2026-11-10 | [2026-11-10-no-restart-mid-flight.md](2026-11-10-no-restart-mid-flight.md) | 后端在途模型调用被热重启整树杀掉，自愈诊断停在 diagnosing；改为空闲再重启 + 探测失败再给长窗口 |
+| 2026-11-10 | [2026-11-10-interrupted-diagnosis-and-upload-busy.md](2026-11-10-interrupted-diagnosis-and-upload-busy.md) | 重启中断的诊断不再冒充内容失败、不吃重试预算；上传任务计入在途工作 |
+| 2026-11-10 | [2026-11-10-scoped-direct-copy-and-healing-state.md](2026-11-10-scoped-direct-copy-and-healing-state.md) | 局部修复绕过直抄导致连烧模型；运维面板在自愈进行中仍显示待命 |
+| 2026-11-10 | [2026-11-10-label-dialog-knowledge-duplicates.md](2026-11-10-label-dialog-knowledge-duplicates.md) | 修改标签弹窗把预览短名当标签来源，同一知识点显示两遍并误报目录外路径 |

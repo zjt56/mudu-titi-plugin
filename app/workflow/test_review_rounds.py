@@ -921,6 +921,22 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(lines[-1]['findings'][0]['unit_id'], 'group-1-6')
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
+    def test_partial_round_snapshot_only_counts_when_it_carries_differences(self):
+        self.write('07_review/review-rounds.json', self.payload())
+        path = self.batch / '07_review/rounds-history.jsonl'
+        # 只跑完 labels、且没有差异：审核途中态，不得记成「这一轮没差异」。
+        partial = {'plan': self.plan, 'checked_rounds': ['labels'], 'passed': False, 'findings': []}
+        self.assertIsNone(review_rounds.record_rounds_history(self.batch, partial))
+        self.assertFalse(path.exists())
+        # 同样的部分轮次但确有差异：必须留证，哪怕是中途快照。
+        partial['findings'] = [{'unit_id': 'q-1', 'field': 'knowledge', 'severity': 'major',
+                                'reason': '标签与原标注不一致', 'round_sources': [{'round_id': 'labels'}]}]
+        self.assertIsNotNone(review_rounds.record_rounds_history(self.batch, partial))
+        rows = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+        self.assertEqual(rows[-1]['checked_rounds'], ['labels'])
+        self.assertEqual(rows[-1]['findings'][0]['unit_id'], 'q-1')
+
+    @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_write_summary_publishes_rounds_history_pointer(self):
         self.write('07_review/review-rounds.json', self.payload())
         review_rounds.write_summary(self.batch)

@@ -55,6 +55,31 @@ class CatalogTest(unittest.TestCase):
                 {"knowledge": ["主题/人与自我"]}, [{"knowledge": ["主题/人与自我"]}], folder, "FX-001")
             self.assertEqual(values["knowledge"], [])
 
+    def test_preview_projection_does_not_duplicate_knowledge(self):
+        """预览行给的是「二级/末级」短名，不能和批次全路径并排显示成两条。"""
+        for marker in ("source_projection", "knowledge_projection"):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as tmp:
+                values = server.label_payload(
+                    {"unit_id": "FX-001", marker: True, "knowledge": ["阅读/细节理解"]},
+                    {"knowledge": ["设题角度/阅读/细节理解"]}, [], Path(tmp))
+                self.assertEqual(values["knowledge"], ["设题角度/阅读/细节理解"])
+                self.assertFalse(any("阅读/细节理解" in str(w) for w in values["warnings"]))
+
+    def test_short_leaf_path_copy_is_dropped_when_full_path_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            values = server.label_payload(
+                {"unit_id": "FX-001", "knowledge": ["阅读/细节理解", "说明文/介绍类短文"]},
+                {"knowledge": ["设题角度/阅读/细节理解", "语篇体裁/说明文/介绍类短文"]}, [], Path(tmp))
+            self.assertEqual(values["knowledge"],
+                             ["设题角度/阅读/细节理解", "语篇体裁/说明文/介绍类短文"])
+
+    def test_drop_short_knowledge_copies_keeps_unrelated_leaves(self):
+        self.assertEqual(
+            server.drop_short_knowledge_copies([
+                "主题/人与社会/历史、社会与文化/文化习俗", "人与社会/文化习俗",
+                "设题角度/阅读/细节理解", "阅读/细节理解", "主题/人与自我"]),
+            ["主题/人与社会/历史、社会与文化/文化习俗", "设题角度/阅读/细节理解", "主题/人与自我"])
+
     def test_question_type_and_numeric_filter_difficulty_are_mapped(self):
         with tempfile.TemporaryDirectory() as tmp:
             values = server.label_payload({}, {"question_type": "阅读理解", "filterMetadata": {

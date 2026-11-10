@@ -380,10 +380,15 @@ def _discover(folder):
     # recompute a hash: self_heal's signature includes retry evidence (input/code
     # hashes), so a locally derived stage+detail hash can never equal it. Use the
     # failed event's own signature as the incident identity instead.
+    # self_heal.BLOCKER_OUTCOMES 是「自愈已判定卡住」的完整集合（修复不可用、修复失败、
+    # 预算耗尽）。运维只接管这些，不接管仍在推进的 retry_scheduled/upstream_escalated；
+    # 旧实现只认 repair_failed/retry_failed，导致 retry_budget_exhausted 这类真正的卡点
+    # 永远建不出运维单（面板只显示“待命”）。
+    blocker_outcomes = set(self_heal.BLOCKER_OUTCOMES) | {"retry_failed"}
     failed = []
     for event in self_heal._load(folder).get("events", []):
         if (event.get("stage") != stage or event.get("detail") != detail
-                or event.get("outcome") not in {"repair_failed", "retry_failed"}
+                or event.get("outcome") not in blocker_outcomes
                 or event.get("error_code") in {"rate_limited", "rate_limit", "model_cooldown"}
                 or not str(event.get("signature") or "")):
             continue

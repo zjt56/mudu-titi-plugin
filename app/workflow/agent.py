@@ -413,19 +413,26 @@ def main(argv=None):
             if code == 0:
                 _mark_stage_completed(values.batch_dir, 'assemble')
             return code if code is not None else 3
-    if values.stage == 'explanations' and not values.dry_run and not scoped:
+    if values.stage == 'explanations' and not values.dry_run:
         # 正文/答案材料已确定时，解析与大意按题号直接取原文，不调用模型。
+        # 局部修复（scoped）也先走这条路径：解析/大意未逐字绑定原题属于来源问题，
+        # 靠模型重试无法可靠修好，直抄既保真又零模型开销；只有原文不可唯一
+        # 绑定时才回到模型路径，按受影响题号带反馈重试。
         from . import explanations_direct
         if explanations_direct.build_payload(values.batch_dir) is not None:
-            # install freezes inputs, validates ownership and imports through
-            # the ordinary protocol; only its receipt may mark completion.
-            if explanations_direct.install(values.batch_dir) is None:
-                raise ValueError('解析来源在任务绑定后不可唯一提取；未写入正式产物')
-            print(json.dumps({'stage': 'explanations', 'status': 'completed',
-                              'deterministic': True, 'model_calls': 0,
-                              'detail': '原文直抄已通过来源绑定校验并经通用协议导入'},
-                             ensure_ascii=False))
-            return 0
+            try:
+                installed = explanations_direct.install(values.batch_dir)
+            except ValueError:
+                if not scoped:
+                    raise
+                # 局部修复时直抄不可用不是卡点：交回模型路径按其反馈重试。
+                installed = None
+            if installed is not None:
+                print(json.dumps({'stage': 'explanations', 'status': 'completed',
+                                  'deterministic': True, 'model_calls': 0,
+                                  'detail': '原文直抄已通过来源绑定校验并经通用协议导入'},
+                                 ensure_ascii=False))
+                return 0
     if values.stage == 'audio' and not values.dry_run and not scoped and _audio_evidence_ready(values.batch_dir):
         # 切段器已产出并通过契约校验：不再调用模型，避免慢调用与无谓改写。
         _mark_stage_completed(values.batch_dir, 'audio')

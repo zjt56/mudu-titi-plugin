@@ -20,6 +20,9 @@ from . import contracts, diagnose, manifest as mf
 LEDGER = "workflow/self-heal.json"
 DEFAULT_STALE_SECONDS = 300.0
 MAX_ATTEMPTS_PER_STAGE = 3
+# A diagnosis claim younger than this may still belong to a live executor; only
+# older claims can be closed as interruptions left behind by a killed process.
+INTERRUPTED_GRACE_SECONDS = 60.0
 BOUNDARIES = frozenset(("upload", "upload_gate", "publish_gate"))
 ACTIONS = frozenset(("repair_upload_format", "repair_source_tables", "repair_source_options", "rejudge_knowledge", "rebuild_assemble", "refresh_preassemble",
                      "retry_stage", "retry_stage_with_fresh_context", "refresh_inputs", "record_only",
@@ -143,6 +146,45 @@ def _stage_age(record: dict) -> float:
         return max(0.0, time.time() - datetime.fromisoformat(str(record["started_at"])).timestamp())
     except (KeyError, TypeError, ValueError, OverflowError):
         return 0.0
+
+
+def _close_interrupted_diagnosis(ledger: dict, attempt_key: str, stage_id: str,
+                                 signature: str) -> bool:
+    """Close a diagnosis that an external process kill left behind.
+
+    The attempt is claimed and persisted before the model call so a restart cannot
+    replay it or silently reset the budget. When the whole process tree is killed
+    mid-call the event never gets a result, so it would sit at ``diagnosing``
+    forever and the environment interruption would be billed as one content
+    failure. An interruption is not evidence that the stage's output is wrong, so
+    it is recorded as such and its budget slot is returned.
+    """
+    events = ledger.get("events") or []
+    if not events:
+        return False
+    latest = events[-1]
+    if (latest.get("outcome") != "diagnosing" or latest.get("finished_at")
+            or latest.get("stage") != stage_id or latest.get("signature") != signature):
+        return False
+    try:
+        from datetime import datetime
+        started = datetime.fromisoformat(str(latest.get("at"))).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if time.time() - started < INTERRUPTED_GRACE_SECONDS:
+        # A claim written a moment ago may belong to a live executor in another
+        # process; closing it would corrupt the accounting instead of repairing it.
+        return False
+    latest.update(outcome="diagnostic_interrupted", error_code="diagnostic_interrupted",
+                  finished_at=mf.now_iso(),
+                  escalation="自愈诊断调用期间进程被外部终止（后端/插件重启），不是该阶段内容失败；"
+                             "本次不占用重试预算")
+    # 状态文件同样不能再显示“正在诊断”，否则面板会一直停在判断卡点的文案上。
+    ledger["last_status"], ledger["last_stage"] = "diagnostic_interrupted", stage_id
+    attempts = ledger.get("attempts") or {}
+    if int(attempts.get(attempt_key, 0) or 0) > 0:
+        attempts[attempt_key] = int(attempts[attempt_key]) - 1
+    return True
 
 
 def _archived(batch: Path) -> bool:
@@ -882,6 +924,11 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
     evidence = json.dumps(_retry_evidence(batch, manifest, stage_id), sort_keys=True)
     signature = hashlib.sha256((stage_id + "\n" + detail + "\n" + evidence).encode("utf-8")).hexdigest()[:16]
     attempt_key = stage_id + ":" + signature
+    if _close_interrupted_diagnosis(ledger, attempt_key, stage_id, signature):
+        # The interrupted claim may have left a cooldown behind; the stage still
+        # holds the same failure, so re-judge it now with the returned budget.
+        ledger["next_retry_at"] = 0
+        _save(batch, ledger)
     if ledger.get("active_signature") != attempt_key:
         ledger["active_signature"], ledger["next_retry_at"] = attempt_key, 0
     next_retry = float(ledger.get("next_retry_at") or 0)
