@@ -191,6 +191,54 @@ class StructureGateTest(unittest.TestCase):
         self.assertTrue((batch / "01_source" / "structure.confirmed.json").is_file())
         self.assertTrue((batch / "07_review" / "structure-gate.json").is_file())
 
+    def test_unnumbered_group_window_without_image_keeps_section_unit(self):
+        # 同步练习：题组大题（如字母歌补全）既无印刷题号也无图片时，
+        # 仍须保留一个绑定原文的来源单元，不能判成 SOURCE_SECTION_UNCOVERED。
+        from workflow import structure_gate as sg
+        lines = [
+            "七上 · 人教版 · 课时A计划",
+            "Starter Unit 1　Hello!",
+            "第二课时　Pronunciation",
+            "Ⅰ.将下列字母按照其所含音素进行正确归类",
+            "1./eɪ/",
+            "[TABLE 1]",
+            "[/TABLE]",
+            "Ⅱ.按照字母表顺序,写出下面英文字母歌中所缺的大写字母",
+            "A,B,<u>　　　　</u>,D,E,F,<u>　　　　</u>,",
+            "H,<u>　　　　</u>,J,K,<u>　　　　</u>,M,",
+            "Ⅳ.单项填空",
+            "( )1. A. a  B. b",
+        ]
+        sections = [
+            {"type": "语音题", "title": "Ⅰ.将下列字母按照其所含音素进行正确归类",
+             "source_line": 4, "source_end_line": 7, "sync_occurrence": 1},
+            {"type": "语音题", "title": "Ⅱ.按照字母表顺序,写出下面英文字母歌中所缺的大写字母",
+             "source_line": 8, "source_end_line": 10, "sync_occurrence": 2},
+            {"type": "单项填空", "title": "Ⅳ.单项填空",
+             "source_line": 11, "source_end_line": 12, "sync_occurrence": 3},
+        ]
+        units = sg._build_units(sections, [], lines)
+        spans = [(u.get("source_span") or {}).get("start_line") for u in units]
+        # 第Ⅱ大题的来源窗口必须有一个来源单元，不能被静默跳过。
+        self.assertTrue(any(8 < s <= 10 for s in spans), spans)
+        errors = sg._scoped_source_errors(units, sections, lines)
+        self.assertNotIn("SOURCE_SECTION_UNCOVERED", [e["code"] for e in errors])
+
+    def test_blank_group_window_still_reports_uncovered(self):
+        # 纯空白题组窗口没有可绑定原文，保留跳空，避免造出空单元掩盖真实漏题。
+        from workflow import structure_gate as sg
+        lines = [
+            "Ⅰ.语音", "1./eɪ/", "[TABLE 1]", "[/TABLE]",
+            "Ⅱ.空题", "", "", "Ⅳ.单项填空", "( )1. A. a",
+        ]
+        sections = [
+            {"type": "语音题", "title": "Ⅰ.语音", "source_line": 1, "source_end_line": 4},
+            {"type": "语音题", "title": "Ⅱ.空题", "source_line": 5, "source_end_line": 7},
+            {"type": "单项填空", "title": "Ⅳ.单项填空", "source_line": 8, "source_end_line": 9},
+        ]
+        units = sg._build_units(sections, [], lines)
+        self.assertFalse(any(u.get("source_span") and u["source_span"]["start_line"] == 5 for u in units))
+
 
 if __name__ == "__main__":
     unittest.main()

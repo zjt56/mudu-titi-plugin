@@ -246,8 +246,15 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
             for lo, hi in windows:
                 chunk = source_lines[lo - 1:hi]
                 members = sorted(_source_members(chunk).intersection(numbers))
-                unnumbered = not members and not _source_members(chunk) and any("[IMG " in line or "[TABLE" in line for line in chunk)
+                has_body = any(_plain(line).strip() for line in chunk)
+                image_only = any("[IMG " in line or "[TABLE" in line for line in chunk)
+                # 整节既无印刷题号也无图片时（如字母歌补全），仍须保留一个
+                # 绑定原文的来源单元；否则该大题窗口未产生单元而被误判为漏题。
+                unnumbered = not members and (not _source_members(chunk))
                 if not members and not unnumbered:
+                    continue
+                if not members and not has_body:
+                    # 纯空白/空行窗口没有可绑定原文，跳过以免造出空单元。
                     continue
                 unit = _make_unit("group", type_name, members or [1], chunk)
                 unit["stem"] = "\n".join(chunk).strip()

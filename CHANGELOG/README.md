@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-11 | [2026-11-11-unnumbered-group-window-coverage.md](2026-11-11-unnumbered-group-window-coverage.md) | 无题号无图片的题组大题保留来源单元，不再误判 SOURCE_SECTION_UNCOVERED |
 | 2026-11-11 | [2026-11-11-review-binding-equivalence-restore.md](2026-11-11-review-binding-equivalence-restore.md) | 来源占位清理不再触发重审；绑定升级后内容等价的旧未裁决差异回到活动队列 |
 | 2026-11-11 | [2026-11-11-review-question-source-projection.md](2026-11-11-review-question-source-projection.md) | 审核语义绑定排除题目来源元数据，严格兼容既有等价观察 |
 | 2026-11-11 | [2026-11-11-sync-source-mark-ownership.md](2026-11-11-sync-source-mark-ownership.md) | 对照远端课时配方补完整原卷标记与实际单元/子题归属校验、提示词 |
