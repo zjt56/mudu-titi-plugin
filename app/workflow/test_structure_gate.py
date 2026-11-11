@@ -225,7 +225,6 @@ class StructureGateTest(unittest.TestCase):
         self.assertNotIn("SOURCE_SECTION_UNCOVERED", [e["code"] for e in errors])
 
     def test_blank_group_window_still_reports_uncovered(self):
-        # 纯空白题组窗口没有可绑定原文，保留跳空，避免造出空单元掩盖真实漏题。
         from workflow import structure_gate as sg
         lines = [
             "Ⅰ.语音", "1./eɪ/", "[TABLE 1]", "[/TABLE]",
@@ -238,6 +237,45 @@ class StructureGateTest(unittest.TestCase):
         ]
         units = sg._build_units(sections, [], lines)
         self.assertFalse(any(u.get("source_span") and u["source_span"]["start_line"] == 5 for u in units))
+
+    def test_cloze_blank_markers_are_not_printed_anchors(self):
+        # 完形/短文填空材料行内的 <u>　n　</u> 是编号空格（即子题号），不是印刷题号锚点；
+        # 不能被当成与下方 ( )n. 选项并列的重复锚点，否则报 SOURCE_DUPLICATE_NUMBERS / QUESTION_NOT_FOUND。
+        lines = [
+            "Ⅱ.完形填空",
+            "Good <u>　1　</u>.Let’s <u>　2　</u> now to <u>　9　</u>.After this <u>　10　</u> done.",
+            "(　)1.A.bell\tB.section",
+            "C.name\tD.unit",
+            "(　)2.A.room\tB.water",
+            "C.class\tD.time",
+            "(　)9.A.me\tB.you",
+            "C.it\tD.her",
+            "(　)10.A.farm\tB.conversation",
+            "C.door\tD.photo",
+        ]
+        from workflow import structure_gate as sg
+        anchors = sg._scope_anchors(lines)
+        numbers = [n for _, n in anchors]
+        # 材料行的 1/2/9/10 空格只应作为 weak（题号本体）出现一次，不与选项行重复计数。
+        self.assertEqual(sorted(numbers), [1, 2, 9, 10], numbers)
+        self.assertEqual(len(numbers), len(set(numbers)), numbers)
+
+    def test_cloze_group_with_inline_blank_numbers_passes_scoped_gate(self):
+        lines = [
+            "Ⅱ.完形填空",
+            "Good <u>　1　</u>.Let’s <u>　2　</u> now.Then <u>　9　</u>.After <u>　10　</u> done.",
+            "(　)1.A.bell\tB.section",
+            "(　)2.A.room\tB.water",
+            "(　)9.A.me\tB.you",
+            "(　)10.A.farm\tB.conversation",
+        ]
+        sections = [{"type": "完形填空", "title": "Ⅱ.完形填空", "source_line": 1,
+                     "source_end_line": len(lines), "sync_occurrence": 1, "candidate_unit_kind": "group"}]
+        from workflow import structure_gate as sg
+        units = sg._build_units(sections, [], lines)
+        codes = [e["code"] for e in sg._scoped_source_errors(units, sections, lines)]
+        self.assertNotIn("SOURCE_DUPLICATE_NUMBERS", codes)
+        self.assertNotIn("QUESTION_NOT_FOUND", codes)
 
 
 if __name__ == "__main__":
