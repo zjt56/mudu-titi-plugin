@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const client = fs.readFileSync(path.resolve(__dirname, '..', 'lib/client.js'), 'utf8');
+// Windows 检出（core.autocrlf）下是 CRLF：统一成 LF 再按 "\n    }\n" 切片，避免切片为空。
+const client = fs.readFileSync(path.resolve(__dirname, '..', 'lib/client.js'), 'utf8').replace(/\r\n/g, '\n');
 
 function loadInject() {
   const start = client.indexOf('function injectStyles()');

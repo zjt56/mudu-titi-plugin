@@ -148,3 +148,23 @@ test('panel is isolated beside diagnostics and has no repair or invented session
   assert.match(panel, /clipboard\.writeText\(view\.sessionId\)/);
   assert.match(panel, /generation\.current\+\+; controller\.abort\(\); clearTimeout\(timer\)/);
 });
+
+test('operations messages stay in a fixed bottom log instead of pushing the page up', () => {
+  const panel = client.slice(start, end);
+  // 消息必须收进独立滚动容器：容器限高 + 内部滚动，面板自身固定高度。
+  const logStart = client.indexOf("className: 'wf-operations-log wf-scroll'", start);
+  assert.ok(logStart > start && logStart < end, 'AI运维消息应渲染在独立的消息容器里');
+  const log = client.slice(logStart, logStart + 900);
+  assert.match(log, /flex: '0 0 132px', height: 132, minHeight: 132, maxHeight: 132/);
+  assert.match(log, /overflowY: 'auto'/);
+  assert.match(log, /overscrollBehavior: 'contain'/);
+  assert.match(log, /role: 'log'/);
+  assert.match(log, /aria-live': 'polite'/);
+  assert.match(panel, /flexShrink: 0, display: 'flex', flexDirection: 'column'/);
+  // 同一批次的重复接手只保留最新一条，最多 5 条，避免释放/过期循环把版面顶高。
+  assert.match(panel, /rows\.length < 5/);
+  assert.match(panel, /seen\.has\(key\)/);
+  // 新消息贴底；用户手动上滑后不被轮询拽回底部。
+  assert.match(panel, /scrollTop = node\.scrollHeight/);
+  assert.match(panel, /stickToBottom\.current = node\.scrollHeight - node\.scrollTop - node\.clientHeight < 24/);
+});

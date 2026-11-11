@@ -955,6 +955,20 @@ def run(batch_dir: Path) -> dict:
                 result["error"] = f"答案卷准备失败：{exc}"
     except Exception as exc:  # noqa: BLE001 - 分类失败不影响提取/结构
         result["material_roles"] = {"error": str(exc)}
+    # 来源优先级证据（用户 2026-11-11 确认）：Word > 带文字层 PDF > 扫描件。
+    # 只记录本次实际用了哪份原文、PDF 哪些页走 OCR，不改变提取结果。
+    try:
+        from workflow import source_policy
+        inputs = manifest.get("inputs") or {}
+        supporting = [str((inputs.get(key) or {}).get("path") or "")
+                      for key in sorted(inputs)
+                      if key == "answers" or re.fullmatch(r"attachment_\d{3,}", key)]
+        policy = source_policy.build_report(source_path, [path for path in supporting if path],
+                                            pages=result.get("pages"))
+        result["source_policy"] = policy
+        _write(batch_dir / "01_source" / "source-policy.json", policy)
+    except Exception as exc:  # noqa: BLE001 - 证据记录失败不阻断提取
+        result["source_policy"] = {"error": str(exc)}
     _write(batch_dir / "07_review" / "extraction-report.json", result)
     return result
 

@@ -308,6 +308,10 @@ class UploadTest(unittest.TestCase):
         self.assertEqual(pathlib.Path(state['inputs']['source']['path']).read_bytes(), word['data'])
         self.assertEqual(pathlib.Path(state['inputs']['attachment_001']['path']).read_bytes(), pdf['data'])
         self.assertNotIn('answers', state['inputs'])
+        # 来源优先级（用户 2026-11-11）：Word 主源、PDF 只作版面核对，并回传到前端提示。
+        self.assertEqual(result['source_kind'], 'word')
+        self.assertIn('Word 原卷作为提取主源', result['source_notice'])
+        self.assertIn('不覆盖 Word 原文', result['source_notice'])
 
     def test_unsupported_attachment_does_not_create_batch(self):
         with self.assertRaisesRegex(ValueError, '不支持的附件'):

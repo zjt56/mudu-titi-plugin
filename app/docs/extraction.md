@@ -15,6 +15,30 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 - PNG/JPEG/WebP/BMP/TIFF：调用当前配置的 OCR（飞桨 jobs API 或兼容的本地 CLI）。
 - 旧 DOC 不直接支持，应先转为 DOCX。当前网页上传入口仍接收 DOCX/PDF，图片路径可通过批次 source 或 Python API 使用。
 
+## 来源优先级（Word > 带文字层 PDF > 扫描件）
+
+用户 2026-11-11 确认的口径，代码入口 `workflow/source_policy.py`（`select_primary` /
+`build_report` / `upload_notice`），三处共用同一实现，不得各写一套判断：
+
+1. **同一批上传同时含 `.docx` 与 `.pdf`**：`.docx` 一定是提取主源（`source`），PDF 只作附件
+   供版面/层级核对；`01_source/material-roles.json` 中它的 `role=structure_reference`、
+   `content_authority=false`，不参与唯一绑定竞争。
+2. **只有 PDF**：文字层可用的页直接原生解析，只有质量不足的页转 OCR；不因“是 PDF”就整卷 OCR。
+3. **扫描件/纯图片 Word**：只能走 OCR，属于最后手段，结果需核对题号、音标、画线、表格顺序。
+4. 旧版 `.doc` 需先转 `.docx`；转换可能丢图，提示用户另存后重传。
+
+为什么 Word 优先：`.docx` 由标准库直接解析 OOXML，段落、表格网格、合并跨度、画线、图片关系
+都是结构化数据，逐字位置可信且不需要 OCR 环境；文字层 PDF 依赖运行环境提供 PyMuPDF，页质量
+只能靠启发式路由；OCR 文字没有逐字坐标与可信度。
+
+落地与证据：
+
+- `app/workbench/server.py::handle_upload` 用 `select_primary` 选主源，并在上传响应里返回
+  `source_kind` 与 `source_notice`，前端在「原卷文件」区显示该提示；
+- `app/workflow/extract.py::run` 把本次实际来源、PDF 逐页用法（`pdf_usage`）写进
+  `01_source/source-policy.json`，同内容并进 `07_review/extraction-report.json` 的
+  `source_policy` 字段；记录失败不阻断提取。
+
 ## 本机 OCR 配置
 
 复制 `workflow/ocr-config.example.json` 为 `workflow/ocr-config.json`，填写：
@@ -59,7 +83,8 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 | `01_source/extraction.json` | 方法、源文件 SHA256、原生块、表格、媒体、PDF 页及 OCR 原始结果和日志路径 |
 | `01_source/structure.json` | 分区、题号、题组候选、定位和 `unresolved` |
 | `01_source/media/` | 供现有预览器读取的 Word 媒体；原始证据另存于独立执行目录 |
-| `07_review/extraction-report.json` | 本次提取状态、候选统计和待核验项 |
+| `07_review/extraction-report.json` | 本次提取状态、候选统计、待核验项和 `source_policy`（来源优先级记录） |
+| `01_source/source-policy.json` | 本次实际使用的提取主源、PDF 文字层/OCR 页数与推荐说明 |
 | `workflow/logs/extract.log` | 调度执行日志 |
 
 重复执行会为稳定名称的产物留 `.bak`，独立证据目录不覆盖。提取前后校验原件哈希。配置错误、识别超时、空结果或子进程失败会让 extract 阶段失败，不自动重复提交、不制造成功产物。

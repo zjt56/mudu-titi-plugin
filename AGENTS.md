@@ -72,6 +72,10 @@
 
 27. **同课时重号按来源身份关联，保留原卷顺序**：同步练习新批次采用 `scoped-v1`；保留 `Ⅰ、Ⅱ、Ⅲ`、标题、基础/提升的出现序次及原小题号，不重编号。`section_id/unit_id/question_ids` 分别绑定大题、单元及子题，答案/缺失/证据用 question ID，解析/知识点/审核/预览/保存以 unit ID 加本单元原号定位；禁止全局数字同号兜底。A/B 同号须材料窗口唯一，无号图片题只用内部兼容别名且不伪装印刷题号。漏题、同窗重复、跨材料、来源不明仍阻断；原答案附录缺少大题对应证据不猜、不借、不伪记缺失。旧批次维持原协议且不改历史数据。落地：`app/workflow/question_identity.py`、结构/答案/解析/组装/审核/预览链路，说明见 `app/docs/sync-practice.md`。
 
+28. **提取来源优先级固定为 Word > 可用文字层 PDF > 扫描/OCR**：同批原卷同时有 Word/PDF 时选 Word 为主源；PDF 逐页优先使用合格文字层，质量不足才转 OCR，不覆盖已有 Word 原文；缺失答案/解析/大意仍遵守规则22的有证据兜底。实际来源及 PDF 页级提取方式记录到 `01_source/source-policy.json` 与提取报告，不改历史批次。落地：`app/workflow/source_policy.py`、`extract.py`、`app/workbench/server.py`。
+
+29. **AI运维消息固定在下方区域、内部上下滚动**：消息数量不得撑高面板或上推流程图；工具栏与状态保持可见，重复提示合并，用户上滑查看时不得被轮询拉回底部。落地：`lib/client.js::OperationsPanel`、`backend/operations-ui.test.cjs`。
+
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 
 ## 三、变更记录制度（强制）
