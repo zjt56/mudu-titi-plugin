@@ -1589,10 +1589,16 @@ def review_snapshot(folder):
             revision.append(f"{rel}:{info.st_mtime_ns}:{info.st_size}")
         except OSError:
             revision.append(rel + ":missing")
+    queue_open = 0
+    for item in (load(folder / "07_review/manual-review-queue.json", {}) or {}).get("items") or []:
+        if isinstance(item, dict) and str(item.get("status")) == "open":
+            queue_open += 1
     return {"execution_completed": bool(evaluated.get("execution_completed")),
             "quality_passed": bool(evaluated.get("passed")), "rounds": rounds,
             "question_total": len(plan.get("questions", [])),
-            "open_findings": len(evaluated.get("findings", [])),
+            # 人工要判断的是活动队列里的全部未裁决差异：历史轮次恢复回来的差异
+            # 不在当前两轮 plan 里，只看 evaluated.findings 会少算，卡片数字就对不上。
+            "open_findings": queue_open or len(evaluated.get("findings", [])),
             "revision": "|".join(revision)}, records
 
 

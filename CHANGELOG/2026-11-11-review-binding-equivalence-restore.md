@@ -1,4 +1,4 @@
-# 2026-11-11 来源占位清理不再触发重审，旧未裁决差异回到活动队列
+﻿# 2026-11-11 来源占位清理不再触发重审，旧未裁决差异回到活动队列
 
 ## 背景
 
@@ -15,7 +15,7 @@
   - 内容真变、证明不了、人工已裁决、其他退休原因（旧快照与正式标签不一致等）依旧归档，不恢复；
   - 按 `(finding_id, round_sources)` 与 `(unit_id, field, reason)` 双重去重，重复导入幂等；
   - 恢复项不复用仍活跃的 `finding_id`（真实批次里恢复的 `u73 knowledge` 与活跃的 `u30 knowledge` 都叫 `WF-0015`，撞号会让人工队列两条差异看起来是同一条），改为续 `WF-0021`。
-- 新回归 `app/workflow/test_ingest_binding_equivalence.py`（10 例）：等价保留、摘要变化归档、缺历史不假定等价、单元不在计划、旧计划缺该单元、证明抛错回退归档、真实队列保留、恢复 ID 不撞号、恢复两次只留一条。
+- `app/workbench/server.py::review_snapshot`：卡片的“待人工审核差异”改为统计活动队列里的 open 条目（队列缺失才回退 evaluated findings）。恢复回来的历史差异不在当前两轮 plan 里，只看 evaluated 会显示 12 而队列实际 13 条，数字对不上。新回归 `app/workbench/test_review_snapshot_open_count.py`（2 例）。`n- 新回归 `app/workflow/test_ingest_binding_equivalence.py`（10 例）：等价保留、摘要变化归档、缺历史不假定等价、单元不在计划、旧计划缺该单元、证明抛错回退归档、真实队列保留、恢复 ID 不撞号、恢复两次只留一条。
 
 ## 没改什么 / 边界
 
