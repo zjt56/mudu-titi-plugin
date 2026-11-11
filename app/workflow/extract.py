@@ -772,9 +772,10 @@ def extract_source(source: Path, destination: Path, config=None, ocr_result=None
         from workflow.docx_extract import extract_docx
         result = extract_docx(source, evidence)
         result.setdefault("pages", [])
-        # 正常 Word 保留原生文字/格式。以下情况按 OCR 模式决定是否复核：
-        #  - 图片型（文字层极少）：补识别图中文字；
-        #  - 浮动对象/符号字体：XML 顺序/字形可能不一致，逐图 OCR 作为图文位置与符号证据。
+        # 正常 Word 保留原生文字/格式。用户 2026-11-11 策略：纯 Word 直接文字提取、
+        # 不跑本地 OCR；图片（含符号字体/浮动对象/图片型）语义交给 extract 之后的
+        # 视觉理解复核（visual_review → image_semantics.json，可读图内文字），不再
+        # 对每张嵌入图串行跑本地 paddle OCR（慢：13 张可达 4 分钟）。仅保留触发提示。
         low_text = len(re.sub(r"\[IMG[^\]]*\]|\s", "", result["text"])) < 80
         warning_text = " ".join(result.get("warnings", []))
         triggers = []
@@ -784,37 +785,10 @@ def extract_source(source: Path, destination: Path, config=None, ocr_result=None
             triggers.append("floating_object")
         if "Symbol font" in warning_text:
             triggers.append("symbol_font")
-        from workflow import ocr_backend
-        need_ocr = ocr_backend.ocr_needed(config, triggers)
-        has_image_media = any(
-            Path(item["name"]).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
-            for item in result.get("media", []))
-        if triggers and need_ocr and has_image_media:
-            result["ocr_auto"] = {"mode": ocr_backend.assist_mode(config), "triggers": triggers}
-            supplements = []
-            for item in result["media"]:
-                image = evidence / "media" / item["name"]
-                if image.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
-                    if low_text:
-                        result.setdefault("warnings", []).append(f"无法 OCR 的嵌入图片：{image.name}")
-                    continue
-                try:
-                    ocr = ocr_backend.recognize(image, evidence / "ocr", config=config)
-                except Exception as exc:  # noqa: BLE001 - 复核失败不阻断，留提示
-                    result.setdefault("warnings", []).append(f"OCR 复核图片失败：{item['name']}：{exc}")
-                    continue
-                supplements.append({"image": item["name"], "pages": ocr["pages"], "artifacts": ocr.get("artifacts")})
-                if low_text:
-                    # 图片型 Word：把识别文字并回正文，紧跟原图引用。
-                    result["text"] = result["text"].replace(
-                        f"[IMG {item['name']}]",
-                        f"[IMG {item['name']}]\n" + "\n".join(p.get("text", "") for p in ocr["pages"]))
-                result.setdefault("warnings", []).extend(ocr.get("warnings", []))
-            if supplements:
-                result["image_ocr"] = supplements
-        elif low_text and result.get("media") and not need_ocr:
-            result.setdefault("warnings", []).append(
-                "OCR 辅助已关闭：图片型 Word 未补充识别图中文字，仅保留图片引用")
+        if triggers and result.get("media"):
+            # 只记录“本应复核但改由视觉理解补”的触发，绝不本地 OCR、不阻断，也不提示。
+            result["ocr_auto"] = {"mode": "word_visual_only", "triggers": triggers,
+                                  "skipped": "word_embedded_images_deferred_to_visual_review"}
         # 给既有预览器兼容的稳定媒体位置，旧同名图片先备份。
         for item in result.get("media", []):
             name = item["name"]
