@@ -91,7 +91,7 @@ async function fixture(options = {}) {
   const manager = createOperationsAgentManager(ctx, {
     cwd: '/mock/plugin', backendRequest,
     resolveRoute: options.resolveRoute || (() => ({ provider: 'chosen-provider', model: 'chosen/model' })),
-    intervalMs: 60000, heartbeatMs: 60000, requestTimeoutMs: 5000,
+    intervalMs: 60000, heartbeatMs: 60000, requestTimeoutMs: 5000, maxIdleContinuations: 0,
     onProgress: e => events.push(e), ...options.managerOptions,
   });
   const run = async () => { manager.start(); await manager.tick(); await manager.drain(); };

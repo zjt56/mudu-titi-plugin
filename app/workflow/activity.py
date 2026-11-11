@@ -11,6 +11,23 @@ import uuid
 from datetime import datetime, timezone
 
 FILE = "workflow/activity.json"
+_IS_WINDOWS = os.name == "nt"
+
+
+def _process_alive(pid):
+    """Display-only liveness, never a signal or permission to schedule work."""
+    if _IS_WINDOWS:
+        # On Windows os.kill(pid, 0) sends CTRL_C_EVENT, potentially interrupting
+        # this console and unrelated workers. A zero-time wait only queries the
+        # process handle; it cannot terminate, signal or mutate the process.
+        import _winapi
+        handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE, False, pid)
+        try:
+            return _winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_TIMEOUT
+        finally:
+            _winapi.CloseHandle(handle)
+    os.kill(pid, 0)
+    return True
 
 
 def read(batch):
@@ -22,8 +39,7 @@ def read(batch):
         pid = value.get("pid")
         if type(pid) is not int or pid <= 0:
             return {}
-        os.kill(pid, 0)
-        return value if value.get("stage") and value.get("token") else {}
+        return value if _process_alive(pid) and value.get("stage") and value.get("token") else {}
     except (OSError, ValueError, TypeError, AttributeError):
         return {}
 

@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from workflow.docx_extract import extract_docx
+from workflow.docx_extract import extract_docx, blocking_warnings
 from workflow.extract import infer_structure
 
 MARK = re.compile(r"<u>(.*?)</u>", re.S)
@@ -25,6 +25,17 @@ TAG = re.compile(r"<[^>]*>|\*\*")
 # Keep a token for the blank (never delete it), so an absent/moved blank still
 # fails the complete-context comparison. No words or punctuation are folded.
 LAYOUT = re.compile(r"<u>[^\S\r\n]+</u>|_{2,}|<[^>]*>|\*\*")
+
+
+def extraction_gate(warnings, auto_ocr: bool) -> dict:
+    """原生 DOCX 提取告警是否阻断画线恢复。
+
+    「原码位保留、仅缺字体映射」的私用区字形不构成字面改动，不阻断；
+    Symbol 字体/符号字形可能改写字面，仍阻断，除非 OCR 自动复核已留下补充证据。
+    """
+    blocking = blocking_warnings(warnings)
+    return {"code": "DOCX_EXTRACTION_UNCERTAIN", "message": list(warnings or []),
+            "blocking": bool(blocking) and not auto_ocr}
 
 
 def visible(text, *, normalize_blanks=False):
@@ -260,9 +271,9 @@ def main(argv=None):
         except (OSError, ValueError):
             auto_ocr = False
         if source.get("warnings"):
-            report["issues"].append({"code": "DOCX_EXTRACTION_UNCERTAIN", "message": source["warnings"],
-                                     "blocking": not auto_ocr})
-            if not auto_ocr:
+            issue = extraction_gate(source["warnings"], auto_ocr)
+            report["issues"].append(issue)
+            if issue["blocking"]:
                 report["passed"] = False
         if report["passed"] and args.apply and (report["changes"] or args.out):
             target_path = args.out or args.batch

@@ -176,8 +176,8 @@ test('manager tools round-trip real Python receipts, preserve failure truth and 
           repro: 'Read 07_review/upload-format.json', expected: 'format_gate passes genuine checks',
           actual: 'fixture_format failed', paths: ['01_source/正文.txt', '07_review/upload-format.json'],
         });
-        const finished = await call('operations_finish', { outcome: 'needs_deep_repair', summary: 'paper: fixture_format remains unresolved; original evidence retained' });
-        assert.equal(finished.outcome, 'needs_deep_repair');
+        const finished = await call('operations_finish', { outcome: 'recovery_queued', summary: 'paper: fixture_format remains unresolved; original evidence retained' });
+        assert.equal(finished.outcome, 'recovery_queued');
         assert.equal(finished.verified, false);
       },
     };
@@ -220,12 +220,13 @@ test('manager tools round-trip real Python receipts, preserve failure truth and 
   const findingSchema = agent.definitions.get('operations_record_finding').parameters;
   assert.equal(findingSchema.properties.paths.type, 'array');
   assert.equal(findingSchema.properties.paths.items.type, 'string');
-  assert.deepEqual(agent.definitions.get('operations_finish').parameters.properties.outcome.enum, ['resolved', 'needs_deep_repair', 'needs_human']);
+  assert.deepEqual(agent.definitions.get('operations_finish').parameters.properties.outcome.enum, ['resolved', 'recovery_queued']);
   const state = await f.ledger();
-  assert.equal(state.incident.status, 'needs_deep_repair');
+  assert.equal(state.incident.status, 'queued');
   assert.equal(state.incident.session_id, 'manager-http-session');
   assert.equal(state.incident.attempt_id, null);
-  assert.equal(state.incident.eligible, false);
+  assert.equal(state.incident.eligible, true);
+  assert.equal(state.incident.recovery.requires_human, false);
   assert.equal(state.incident.lease_expires_at, 0);
   assert.match(state.incident.findings[0].summary, /fixture_format/);
   assert.equal(state.incident.findings[0].actual, 'fixture_format failed');
@@ -241,8 +242,8 @@ test('manager tools round-trip real Python receipts, preserve failure truth and 
     assert.equal(row.result.status, 'completed');
     assert.ok(row.result.evidence && typeof row.result.evidence === 'object');
   }
-  assert.deepEqual(state.incident.events.map(event => event.action), ['claim', ...actionCalls.map(row => row.body.action)]);
-  assert.ok(events.some(event => event.state === 'needs_deep_repair'));
+  assert.deepEqual(state.incident.events.map(event => event.action), ['claim', ...actionCalls.slice(0, -1).map(row => row.body.action), 'recovery', 'finish']);
+  assert.ok(events.some(event => event.state === 'recovery_queued'));
   assert.ok(!events.some(event => ['resolved', 'session_failed', 'lease_uncertain', 'idle_incomplete'].includes(event.state)), JSON.stringify(events));
   assert.ok(f.calls.every(row => row.path === '/api/operations/incidents' || row.path.startsWith(base)));
   const manifest = JSON.parse(await readFile(join(f.folder, 'workflow/manifest.json'), 'utf8'));

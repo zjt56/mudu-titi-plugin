@@ -236,6 +236,9 @@ class OperationsTests(unittest.TestCase):
 
     def test_escalation_reconciles_only_with_current_stage_verification(self):
         self.claim()
+        manifest = op.mf.load(self.folder)
+        manifest['stages']['validate']['status'] = op.mf.COMPLETED
+        op.mf.save(self.folder, manifest)
         original = op._load(self.folder)
         original["incident"].update(status="needs_deep_repair", verification={"verified": True},
                                     findings=[{"summary": "retain historical finding"}])
@@ -243,7 +246,7 @@ class OperationsTests(unittest.TestCase):
             op._save(self.folder, json.loads(json.dumps(original)))
             with patch.object(op, "_verify", return_value={"verified": passed, "stage": "validate"}):
                 result = op._discover(self.folder)
-            self.assertEqual(result["incident"]["status"], "resolved" if passed else "needs_deep_repair")
+            self.assertEqual(result["incident"]["status"], "resolved" if passed else "queued")
             self.assertEqual(result["incident"]["findings"], original["incident"]["findings"])
             if passed:
                 self.assertEqual(result["incident"]["prior_disposition"], "needs_deep_repair")
@@ -572,22 +575,23 @@ class OperationsTests(unittest.TestCase):
         self.request(claim, "record_finding", {"repro": "fixture", "expected": "good", "actual": "bad"}, request="finding")
         self.request(claim, "finish", {"outcome": "needs_deep_repair", "summary": "code defect"})
         incident = op.view(self.root, self.folder)["incident"]
-        self.assertEqual(incident["status"], "needs_deep_repair")
+        self.assertEqual(incident["status"], "queued")
+        self.assertEqual(incident["prior_disposition"], "needs_deep_repair")
         self.assertEqual(incident["findings"][0]["actual"], "bad")
         self.assertTrue(all(set(("timestamp", "action", "outcome", "detail", "verification")) <= e.keys() for e in incident["events"]))
 
 
-    def test_finish_can_hand_incident_to_a_person(self):
+    def test_legacy_human_disposition_schedules_autonomous_recovery(self):
         claim = self.claim()
-        receipt = self.request(claim, "finish", {"outcome": "needs_human", "summary": "预算用尽，需人工决定"}, request="human")
+        receipt = self.request(claim, "finish", {"outcome": "needs_human", "summary": "旧客户端交回未修复事件"}, request="human")
         self.assertEqual(receipt["status"], "completed", receipt)
         incident = op.view(self.root, self.folder)["incident"]
-        self.assertEqual(incident["status"], "needs_human")
-        self.assertEqual(incident["escalation"]["kind"], "human")
-        self.assertFalse(incident["eligible"])
+        self.assertEqual(incident["status"], "queued")
+        self.assertEqual(incident["prior_disposition"], "needs_human")
+        self.assertEqual(incident["escalation"]["kind"], "code_repair")
+        self.assertFalse(incident["recovery"]["requires_human"])
         self.assertEqual(incident["attempt_id"], None)
-        # A human hand-off cannot be reported as a successful repair.
-        self.assertEqual(receipt["evidence"]["outcome"], "needs_human")
+        self.assertEqual(receipt["evidence"]["outcome"], "recovery_queued")
         self.assertFalse(receipt["evidence"]["verified"])
 
 
@@ -627,11 +631,13 @@ class RealOperationsRepairTests(unittest.TestCase):
         state = op._load(folder)
         state["incident"]["not_before"] = 0
         op._save(folder, state)
-        claim = op.claim(folder.parent, folder, {"incident_id": "real-incident", "session_id": "real-session"})
-        verified = action("verify")
-        self.assertTrue(verified["evidence"]["verified"], verified)
-        finished = action("finish", {"outcome": "resolved", "summary": "source-proven transaction and consumer recheck"})
-        self.assertTrue(finished["evidence"]["verified"], finished)
+        # Discovery consumes the same real verifier and retires the old queued
+        # incident without starting another model session after pipeline success.
+        resolved = op.view(folder.parent, folder)['incident']
+        self.assertEqual(resolved['status'], 'resolved')
+        self.assertTrue(resolved['verification']['verified'], resolved)
+        with self.assertRaisesRegex(ValueError, 'incident_not_claimable'):
+            op.claim(folder.parent, folder, {'incident_id': 'real-incident', 'session_id': 'real-session'})
 
 
 class FastRepairOperationsTests(unittest.TestCase):
@@ -839,7 +845,7 @@ class FastRepairOperationsTests(unittest.TestCase):
         incident = {"attempts": rows(op.BUDGET_ATTEMPTS, "repair", "failed")}
         with self.assertRaisesRegex(ValueError, "attempt_budget_exhausted"):
             op._check_budget(incident, "repair")
-        self.assertEqual(incident["escalation"]["kind"], "human")
+        self.assertEqual(incident["escalation"]["kind"], "code_repair")
         incident = {"attempts": rows(op.BUDGET_INSTALLS, "install", "installed")}
         with self.assertRaisesRegex(ValueError, "install_budget_exhausted"):
             op._check_budget(incident, "install")
@@ -860,7 +866,7 @@ class FastRepairOperationsTests(unittest.TestCase):
         self.assertEqual(packet["budgets"]["installs"], 0)
         self.assertEqual(packet["budgets"]["installs_limit"], op.BUDGET_INSTALLS)
 
-    def test_finish_settles_repair_record(self):
+    def test_unresolved_finish_preserves_installed_repair_until_restart_verification(self):
         claim = self.claim()
         self.request(claim, "request_code_repair", {"summary": "程序缺陷"}, request="repair")
         record = op._code_record(self.folder)
@@ -870,10 +876,11 @@ class FastRepairOperationsTests(unittest.TestCase):
                                request="human")
         self.assertEqual(receipt["status"], "completed", receipt)
         record = op._code_record(self.folder)
-        self.assertEqual(record["status"], "needs_human")
-        self.assertTrue(record.get("settled_at"))
+        self.assertEqual(record["status"], "installed_pending_restart")
+        self.assertFalse(record.get("settled_at"))
         incident = op.view(self.root, self.folder)["incident"]
-        self.assertEqual(incident["code_repair"]["status"], "needs_human")
+        self.assertEqual(incident["code_repair"]["status"], "workspace_ready")
+        self.assertEqual(incident["recovery"]["next_actions"], ["restart_backend_then_claim_verify"])
 
     def test_restart_reclaim_failed_verify_creates_fresh_second_repair(self):
         claim = self.claim()
@@ -911,7 +918,21 @@ class FastRepairOperationsTests(unittest.TestCase):
                                                          "snapshot": "snapshot1", "evidence_id": "real-failure"}):
                 verified = self.request(restarted, "verify", request="failed-verify")
             self.assertFalse(verified["evidence"]["verified"])
+            self.assertEqual(op._code_record(self.folder)["status"], "restarted_pending_verify")
+            # A pre-run check cannot reject newly installed code. Only actual
+            # execution followed by the original consumer check can settle it.
+            state = op._load(self.folder)
+            state["incident"]["status"] = "awaiting_execution"
+            op._save(self.folder, state)
+            with patch.object(op, "_verify", return_value={"verified": False, "stage": "validate",
+                                                         "snapshot": "snapshot1", "evidence_id": "real-failure"}):
+                op.observe_execution(self.folder)
             self.assertEqual(op._code_record(self.folder)["status"], "failed")
+            state = op._load(self.folder)
+            state["incident"]["not_before"] = 0
+            op._save(self.folder, state)
+            restarted = op.claim(self.root, self.folder, {
+                "incident_id": claim["incident_id"], "session_id": "session"})
             fresh = self.request(restarted, "request_code_repair", request="second-repair")
             self.assertEqual(fresh["status"], "completed", fresh)
             second = op._code_record(self.folder)

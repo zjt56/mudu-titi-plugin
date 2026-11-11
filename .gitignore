@@ -35,3 +35,6 @@ app/audio/vendor/ffmpeg/
 # 听力切段运行时数据根（venv/模型/状态，体积大，每台机器自建，绝不进仓库）
 /audio/
 .port-backup/
+
+# 每台设备明确授权的本地运维安装能力，不随源码或隔离副本分发
+/.operations-autonomy.json

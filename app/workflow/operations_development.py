@@ -6,8 +6,10 @@
 * 本模块只操作**临时副本**。``create`` 复制当前运行源码（含未提交改动）到
   独立目录；模型在其中读写、补测试、跑指定 unittest。
 * 默认**不安装**到运行目录。``prepare_install`` 只生成带哈希的安装计划；
-  ``install`` 需要显式 ``allow=True``，并且所有改动文件在计划生成后仍与基线
-  逐字节相同（CAS），否则拒绝。安装前写 journal、备份原文件，失败自动回滚。
+  ``install`` 需要显式 ``allow=True`` 或本源码根已持久启用本地自治授权；授权
+  不改变测试、保护文件与逐字节 CAS 约束。安装前写 journal、备份原文件，失败回滚。
+* ``set_autonomy`` 是受控宿主的显式本地授权 API，不能暴露给修复模型；配置仅
+  绑定一个源码根，不随隔离副本复制，不授权上传、发布或直接修改用户批次。
 * 这不是操作系统级沙箱。模型写的 Python 测试本身就是可执行代码，只能在
   “信任该补丁来源/另有外部隔离”的前提下运行；本模块不声称提供进程、网络或
   凭据隔离。宿主若要安装，必须先暂停源码监听、排空执行队列并在安装后单次
@@ -46,6 +48,71 @@ UNIT_TEST = re.compile(r"workflow\.[a-z][a-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){0
 SKIP_DIRS = frozenset(("__pycache__", ".git", ".mypy_cache", ".pytest_cache",
                        "node_modules", "workflows", ".venv", "venv", ".learnings"))
 SECRET_MARKERS = ("secret", "credential", ".pem", ".key", "id_rsa", "password", "token")
+AUTONOMY_CONFIG = ".operations-autonomy.json"
+AUTONOMY_SCHEMA = "md-operations-autonomy/v1"
+
+
+def autonomy_config(source_root):
+    """Read local, checkout-bound authorization. Missing means disabled.
+
+    Invalid or foreign configuration fails closed, even when the legacy switch
+    is present. This file is local state, never a model-editable repair file.
+    """
+    root = _real(source_root)
+    path = _safe(root, AUTONOMY_CONFIG)
+    disabled = {"schema": AUTONOMY_SCHEMA, "source_root": str(root),
+                "enabled": False, "config_path": str(path)}
+    if not path.exists():
+        return disabled
+    if not path.is_file() or path.stat().st_size > 16000:
+        raise ValueError("autonomy_config_invalid")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError("autonomy_config_invalid") from exc
+    if (not isinstance(value, dict) or value.get("schema") != AUTONOMY_SCHEMA
+            or type(value.get("enabled")) is not bool
+            or not isinstance(value.get("source_root"), str)
+            or _real(value["source_root"]) != root
+            or not isinstance(value.get("authorization"), str)
+            or not value["authorization"].strip()):
+        raise ValueError("autonomy_config_invalid")
+    return {**value, "config_path": str(path)}
+
+
+def set_autonomy(source_root, *, enabled, authorization):
+    """Persist explicit user authorization from a trusted local Host/settings API.
+
+    Do not expose this method as an Operations model tool. Calling it requires
+    an actual user decision; repair requests cannot enable their own installer.
+    """
+    if type(enabled) is not bool:
+        raise ValueError("autonomy_enabled_must_be_boolean")
+    if not isinstance(authorization, str) or not authorization.strip() or len(authorization) > 2000:
+        raise ValueError("autonomy_authorization_required")
+    root = _real(source_root)
+    if not (root / "app" / "workflow").is_dir():
+        raise ValueError("source_root_invalid")
+    path = _safe(root, AUTONOMY_CONFIG)
+    value = {"schema": AUTONOMY_SCHEMA, "source_root": str(root),
+             "enabled": enabled, "authorization": authorization.strip(), "updated_at": _now()}
+    _replace_bytes(path, json.dumps(value, ensure_ascii=False, indent=1).encode("utf-8"), suffix=".autonomy")
+    return {**value, "config_path": str(path)}
+
+
+def install_authorization(source_root, *, confirm=False):
+    """Authorize automatic local install or the compatible manual legacy mode.
+
+    Autonomy removes repeated confirmation and environment prerequisites only.
+    The Host still holds the execution lock and handles restart plus reverify.
+    """
+    config = autonomy_config(source_root)
+    autonomous = config["enabled"] is True
+    legacy = confirm is True and os.environ.get("MD_OPERATIONS_INSTALL") == "1"
+    return {"allowed": autonomous or legacy, "autonomous": autonomous,
+            "mode": "local_autonomy" if autonomous else "legacy_confirmed" if legacy else "disabled",
+            "config_path": config["config_path"],
+            "authorization": config.get("authorization") if autonomous else None}
 
 
 def _sha(raw):
@@ -324,7 +391,7 @@ def _clean_env(home, app_dir):
     for key, value in os.environ.items():
         upper = key.upper()
         if any(marker in upper for marker in ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "API_KEY", "AUTH")) \
-                or upper.startswith("DSH_"):
+                or upper.startswith("DSH_") or upper == "MD_OPERATIONS_INSTALL":
             continue
         environment[key] = value
     environment.update({"PYTHONPATH": str(app_dir), "PYTHONDONTWRITEBYTECODE": "1",
@@ -435,14 +502,31 @@ def _release_marker(root, state, **extra):
 
 
 def install(job, *, backup_dir, allow=False):
-    """Journaled transaction. ``allow`` is deliberate friction: the Host must
-    have quiesced the batch, paused its watcher and be ready for one restart."""
+    """Journaled install under explicit authorization or local autonomy.
+
+    ``allow=True`` remains the trusted Host's legacy API. Autonomous calls leave
+    it false so the local switch is read again at the point of installation.
+    The Host must hold the execution lock and handle one restart and reverify.
+    """
+    root = Path(job["source_root"])
+    authorization = {"allowed": True, "autonomous": False, "mode": "explicit_host"}
     if allow is not True:
-        raise ValueError("install_disabled")
+        authorization = install_authorization(root)
+        if not authorization["allowed"]:
+            raise ValueError("install_disabled")
     plan = job.get("plan")
     if not plan or plan.get("code_fingerprint") != fingerprint(job):
         raise ValueError("current_install_plan_required")
-    root = Path(job["source_root"])
+    if authorization["autonomous"]:
+        # Authorization never substitutes for test evidence. Re-check strict
+        # preparation even if a caller prepared with optional checks disabled.
+        frozen = dict(plan)
+        try:
+            checked = prepare_install(job, require_tests=True, require_regression=True)
+        finally:
+            job["plan"] = plan
+        if checked["changes"] != frozen.get("changes"):
+            raise ValueError("current_install_plan_required")
     candidates = {}
     for change in plan["changes"]:
         relative = change["path"]
@@ -459,7 +543,8 @@ def install(job, *, backup_dir, allow=False):
     backups, journal_path = {}, _journal(backup_dir, plan)
     installed = []
     journal = {"plan_id": plan["plan_id"], "status": "prepared", "source_root": str(root),
-               "changes": plan["changes"], "at": _now(), "backups": backups}
+               "changes": plan["changes"], "at": _now(), "backups": backups,
+               "authorization": authorization}
     journal_path.write_text(json.dumps(journal, ensure_ascii=False, indent=1), encoding="utf-8")
     _release_marker(root, "prepared", plan_id=plan["plan_id"], files=[c["path"] for c in plan["changes"]])
     try:
@@ -522,7 +607,9 @@ def install(job, *, backup_dir, allow=False):
                         plan_id=plan["plan_id"], error=str(exc)[:1000])
         job["install"] = {"status": rollback_status, "journal": str(journal_path), "error": str(exc)[:1000]}
         raise
-    job["install"] = {"status": "installed", "journal": str(journal_path), "changes": [c["path"] for c in plan["changes"]]}
+    job["install"] = {"status": "installed", "journal": str(journal_path),
+                      "changes": [c["path"] for c in plan["changes"]],
+                      "authorization": authorization, "restart_required": True}
     return dict(job["install"])
 
 

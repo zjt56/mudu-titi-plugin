@@ -31,6 +31,16 @@ MAX_PART = 64 * 1024 * 1024
 MAX_XML = 16 * 1024 * 1024
 MAX_GRID = 100000
 
+# 私用区（PUA）字形按原码位保留：文本没有被替换或丢弃，只是缺少字体映射。
+# 消费者（画线恢复/体检）可把这一类降级为提示；Symbol 字体映射与 w:sym 字形
+# 仍可能改写字面，必须继续阻断并要求视觉核验。
+RAW_PRESERVED_GLYPH_WARNING = "Private-use glyph encountered; raw character preserved without font mapping"
+
+
+def blocking_warnings(warnings) -> list:
+    """过滤掉「原码位保留、仅缺字体映射」的告警，只留下可能改写字面的项。"""
+    return [w for w in (warnings or []) if w != RAW_PRESERVED_GLYPH_WARNING]
+
 
 def _w(name):
     return "{" + W + "}" + name

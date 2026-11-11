@@ -218,6 +218,8 @@ def _packet(folder, incident):
         "blocked_downstream_stages": sorted(downstream),
         "attempts": attempts,
         "budgets": _budgets(incident),
+        "recovery": incident.get("recovery"),
+        "authorization": _install_authorization(),
         "escalation": incident.get("escalation"),
         "code_fingerprint": _code_fingerprint(),
         "repairs": sorted(REPAIRS),
@@ -239,6 +241,10 @@ def _evidence(folder, incident):
 
 
 def _attempt(incident, kind, name, evidence, outcome, error=""):
+    budgets = _budgets(incident)
+    incident["attempt_count"] = budgets["attempts_total"] + (outcome != "refused")
+    incident["install_count"] = budgets["installs_total"] + (kind == "install" and outcome == "installed")
+    incident["regeneration_count"] = budgets["regenerations_total"] + (kind == "regenerate" and outcome == "scheduled")
     incident.setdefault("attempts", []).append({
         "kind": kind, "name": name, "evidence": evidence,
         "outcome": outcome, "transient": bool(TRANSIENT.search(str(error))),
@@ -277,13 +283,21 @@ BUDGET_REGENERATIONS = 6
 
 def _budgets(incident):
     rows = incident.get("attempts") or []
+    total_attempts = incident.get("attempt_count", sum(1 for row in rows if row.get("outcome") != "refused"))
+    installs = incident.get("install_count", sum(1 for row in rows
+                            if row.get("kind") == "install" and row.get("outcome") == "installed"))
+    regenerations = incident.get("regeneration_count", sum(1 for row in rows
+                                 if row.get("kind") == "regenerate"
+                                 and (row.get("scheduled_at") or row.get("outcome") == "scheduled")))
     return {
-        "attempts": sum(1 for row in rows if row.get("outcome") != "refused"),
+        "attempts": total_attempts - incident.get("budget_baseline", 0),
+        "attempts_total": total_attempts,
         "attempts_limit": BUDGET_ATTEMPTS,
-        "installs": sum(1 for row in rows if row.get("kind") == "install" and row.get("outcome") == "installed"),
+        "installs": installs - incident.get("install_baseline", 0),
+        "installs_total": installs,
         "installs_limit": BUDGET_INSTALLS,
-        "regenerations": sum(1 for row in rows if row.get("kind") == "regenerate"
-                             and (row.get("scheduled_at") or row.get("outcome") == "scheduled")),
+        "regenerations": regenerations - incident.get("regeneration_baseline", 0),
+        "regenerations_total": regenerations,
         "regenerations_limit": BUDGET_REGENERATIONS,
     }
 
@@ -291,13 +305,13 @@ def _budgets(incident):
 def _check_budget(incident, kind):
     budgets = _budgets(incident)
     if budgets["attempts"] >= budgets["attempts_limit"]:
-        incident["escalation"] = {"kind": "human", "at": mf.now_iso(),
-                                  "reason": f"该故障已尝试 {budgets['attempts']} 次，超过上限 {budgets['attempts_limit']}"}
-        raise ValueError(f"attempt_budget_exhausted: 本次故障累计 {budgets['attempts']} 次尝试，"
-                         "超过跨轮次上限；请记录证据并交人工处理，不要继续重试")
+        incident["escalation"] = {"kind": "code_repair", "at": mf.now_iso(),
+                                  "reason": f"该证据已尝试 {budgets['attempts']} 次，超过上限 {budgets['attempts_limit']}"}
+        raise ValueError(f"attempt_budget_exhausted: 当前输入与代码累计 {budgets['attempts']} 次尝试，"
+                         "超过跨轮次上限；记录证据并进入自治恢复队列，等待真实输入或代码变化")
     if kind == "install" and budgets["installs"] >= budgets["installs_limit"]:
         raise ValueError(f"install_budget_exhausted: 本次故障已安装 {budgets['installs']} 次，"
-                         "同一故障最多安装两次；请记录证据并交人工处理")
+                         "同一故障最多安装两次；记录证据并等待新的受验证修复方案")
     if kind == "regenerate" and budgets["regenerations"] >= budgets["regenerations_limit"]:
         raise ValueError(f"regenerate_budget_exhausted: 本次故障已局部重生成 {budgets['regenerations']} 次，"
                          "超过上限；请检查范围是否过窄或证据是否有误")
@@ -307,14 +321,87 @@ def lease_active(folder):
     """Read-only guard, called under auto lock BEFORE reconciliation or writes."""
     state = _load(Path(folder))
     incident = state.get("incident") or {}
-    return incident.get("status") == "claimed" and incident.get("lease_expires_at", 0) > time.time()
+    return (incident.get("status") == "claimed" and incident.get("lease_expires_at", 0) > time.time()
+            and incident.get("execution_process") in (None, _process_identity()))
 
 
 def _expire(incident):
-    if incident.get("status") == "claimed" and incident.get("lease_expires_at", 0) <= time.time():
+    restarted = (incident.get("execution_process")
+                 and incident["execution_process"] != _process_identity())
+    if incident.get("status") == "claimed" and (restarted or incident.get("lease_expires_at", 0) <= time.time()):
         incident.update(status="queued", eligible=True, attempt_id=None, lease_expires_at=0,
-                        queue_generation=incident.get("queue_generation", 0) + 1)
-        _event(incident, "lease", "expired", "租约超时，允许重新认领")
+                        not_before=0, queue_generation=incident.get("queue_generation", 0) + 1)
+        _event(incident, "lease", "process_replaced" if restarted else "expired",
+               "执行进程已更换，旧尝试失效；重新认领后仍须原检查复验" if restarted else "租约超时，允许重新认领")
+
+
+def _recovery_plan(folder, incident):
+    """Offer bounded, unspent strategies; a disposition is never a human queue."""
+    evidence = _evidence(folder, incident)
+    budgets = _budgets(incident)
+    record = _code_record(folder) or {}
+    actions = []
+    if budgets["attempts"] < budgets["attempts_limit"]:
+        if record.get("status") == "installed_pending_restart":
+            actions = ["restart_backend_then_claim_verify"]
+        elif record.get("status") == "restarted_pending_verify":
+            actions = ["resume:retry_stage_with_fresh_context", "verify"]
+        elif record.get("status") == "prepared":
+            if budgets["installs"] < budgets["installs_limit"]:
+                actions = ["install_code_repair"]
+        elif record.get("status") in {"workspace_ready", "tests_passed", "tests_failed"}:
+            actions = ["code_repair"]
+        else:
+            actions = ["request_code_repair"]
+    # Findings, heartbeats and a new session are deliberately not progress.
+    progress = _hash({"evidence": evidence, "attempts": incident.get("attempts", []),
+                      "repair": {key: record.get(key) for key in
+                                 ("job_id", "status", "plan_id", "installed_at", "settled_at", "workspace_fingerprint")}})
+    return {"evidence": evidence, "progress": progress, "next_actions": actions,
+            "mode": "isolated_code_repair", "requires_human": False}
+
+
+def _queue_recovery(folder, incident, disposition, summary):
+    plan = _recovery_plan(folder, incident)
+    prior = incident.get("recovery") or {}
+    # An idle model must execute the offered strategy rather than converting
+    # untouched work into a permanent wait or another paid investigation.
+    same_progress = prior.get("progress") == plan["progress"]
+    attempted = any(row.get("outcome") not in {"refused", "applied", "installed", "scheduled"}
+                    for row in incident.get("attempts", []))
+    if same_progress and plan["next_actions"] and not attempted:
+        incident["recovery"] = {**plan, "state": "action_required", "requires_human": False}
+        raise ValueError("autonomous_action_required: 尚未执行可用自治修复步骤；"
+                         + ", ".join(plan["next_actions"]))
+    waiting = not plan["next_actions"] or same_progress
+    incident.update(status="waiting_evidence" if waiting else "queued", eligible=not waiting,
+                    attempt_id=None, lease_expires_at=0,
+                    queue_generation=incident.get("queue_generation", 0) + 1,
+                    not_before=0 if waiting else time.time() + 60,
+                    prior_disposition=disposition)
+    incident["recovery"] = {**plan, "summary": _redact(summary)[:2000],
+                            "state": "waiting_evidence" if waiting else "scheduled",
+                            "reason": "等待输入、代码或实际修复证据变化，拒绝相同调查空转" if waiting
+                                      else "未修复事件自动升级隔离修复，复验后续跑",
+                            "at": mf.now_iso()}
+    incident["escalation"] = {"kind": "code_repair", "at": mf.now_iso(),
+                              "reason": incident["recovery"]["reason"]}
+    _event(incident, "recovery", incident["status"], summary)
+
+
+def _review_differences(folder, incident):
+    if incident.get("stage") not in {"review", "review_gate"}:
+        return False
+    from . import review
+    try:
+        result = review.evaluate_rounds(folder)
+        gate = (mf.load(folder).get("stages", {}).get("review_gate") or {})
+        return (result.get("execution_completed") is True
+                and gate.get("status") == mf.NEEDS_REVIEW
+                and gate.get("execution_completed") is True
+                and gate.get("continue_unqualified") is True and not gate.get("release_ready"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def _reconcile_stage_refusal(state):
@@ -351,17 +438,46 @@ def _discover(folder):
     incident = state.get("incident")
     if incident:
         _expire(incident)
-        # A model's escalation cannot override current consumer verification of
-        # this incident's stage. Retain its finding and original disposition.
-        if (incident.get("status") == "needs_deep_repair"
-                and (incident.get("verification") or {}).get("verified") is True
-                and not any(r.get("status") == "unknown" for r in state.get("receipts", []))):
-            checked = _verify(folder, incident)
-            if checked["verified"]:
-                incident.update(status="resolved", eligible=False, verification=checked,
-                                prior_disposition="needs_deep_repair")
-                _event(incident, "reconcile", "resolved",
-                       "历史事件阶段已通过当前消费者复验；保留模型发现，审核差异不视为通过", checked)
+        if incident.get("status") not in {"resolved", "cancelled", "quality_differences"} and _review_differences(folder, incident):
+            incident.update(status="quality_differences", eligible=False, attempt_id=None, lease_expires_at=0,
+                            failure_class="quality_differences")
+            _event(incident, "reconcile", "quality_differences", "当前审核已执行且仅有差异，保留审核产出，不触发修复")
+            return state
+        # The original pipeline may have completed while an old incident was
+        # queued or parked. Reconcile consumers before spending another model
+        # round; status alone, historical findings and unknown writes are not proof.
+        if (incident.get("status") in {"queued", "waiting_evidence", "needs_human",
+                                       "needs_deep_repair", "awaiting_execution"}
+                and not any(row.get("status") == "unknown" for row in state["receipts"])):
+            stage_record = (mf.load(folder).get("stages", {}).get(incident.get("stage")) or {})
+            if stage_record.get("status") in {mf.COMPLETED, mf.APPROVED}:
+                checked = _verify(folder, incident)
+                incident["verification"] = checked
+                if checked["verified"]:
+                    prior = incident["status"]
+                    incident.update(status="resolved", eligible=False, attempt_id=None,
+                                    lease_expires_at=0, not_before=0, prior_disposition=prior)
+                    _settle_code_repair(folder, incident, "resolved")
+                    _event(incident, "reconcile", "resolved",
+                           "原阶段已由当前消费者复验通过；保留历史发现，不再调查旧卡点", checked)
+                    return state
+        if incident.get("status") == "needs_human":
+            _queue_recovery(folder, incident, "needs_human", "迁移历史人工终态，自动升级隔离修复")
+        if incident.get("status") == "waiting_evidence":
+            plan = _recovery_plan(folder, incident)
+            if plan["evidence"] != (incident.get("recovery") or {}).get("evidence"):
+                budgets = _budgets(incident)
+                incident.update(budget_baseline=budgets["attempts_total"],
+                                install_baseline=budgets["installs_total"],
+                                regeneration_baseline=budgets["regenerations_total"])
+                plan = _recovery_plan(folder, incident)
+                incident.update(status="queued", eligible=True, not_before=0,
+                                queue_generation=incident.get("queue_generation", 0) + 1)
+                incident["recovery"] = {**plan, "state": "scheduled", "at": mf.now_iso()}
+                _event(incident, "recovery", "queued", "真实输入或代码已变化，恢复自动调查；原检查仍须通过")
+            return state
+        if incident.get("status") == "needs_deep_repair":
+            _queue_recovery(folder, incident, "needs_deep_repair", "尚未通过真实复验，自动升级隔离修复")
         if incident.get("status") in {"claimed", "queued"}:
             return state
         if incident.get("status") == "awaiting_execution":
@@ -451,7 +567,7 @@ def handoff_if_available(folder):
     folder = Path(folder)
     state = _discover(folder)
     incident = state.get('incident') or {}
-    if not incident or incident.get('status') not in {'queued', 'claimed', 'needs_deep_repair', 'needs_human'}:
+    if not incident or incident.get('status') not in {'queued', 'claimed', 'waiting_evidence'}:
         return None
     stage, _ = self_heal._candidate(folder, mf.load(folder))
     if stage != incident.get('stage'):
@@ -471,7 +587,8 @@ def pending_incident(folder):
     incident = (_load(Path(folder)) or {}).get('incident') or {}
     return incident.get('status') in {
         'queued', 'claimed', 'awaiting_execution', 'investigating',
-        'repairing', 'verifying', 'waiting_external',
+        'repairing', 'verifying', 'waiting_external', 'waiting_evidence',
+        'needs_human', 'needs_deep_repair',
     }
 
 
@@ -503,7 +620,8 @@ def incidents(root):
         try:
             incident = view(root, folder)["incident"]
             if (incident and incident.get("status") == "queued"
-                    and incident.get("not_before", 0) <= time.time()):
+                    and incident.get("not_before", 0) <= time.time()
+                    and not any(row.get("status") == "unknown" for row in _load(folder).get("receipts", []))):
                 with supervisor._try_file_lock(folder / "workflow/.run.lock") as available:
                     if available:
                         found.append(incident)
@@ -788,8 +906,13 @@ def _code_repair(folder, incident, data):
     elif operation == "write":
         result = dev.write(job, data.get("path"), data.get("content"), expected_sha=data.get("expected_sha"))
     elif operation == "test":
+        evidence = _hash({"code": dev.fingerprint(job), "tests": data.get("tests")})
+        _block_repeat(incident, "code_test", "isolated_tests", evidence)
+        _check_budget(incident, "repair")
         result = dev.run_tests(job, data.get("tests"))
         result["output"] = result["output"][-8000:]
+        _attempt(incident, "code_test", "isolated_tests", evidence,
+                 "succeeded" if result["passed"] else "failed", result["output"])
         record["status"] = "tests_passed" if result["passed"] else "tests_failed"
     elif operation == "diff":
         result = dev.diff(job)
@@ -805,18 +928,29 @@ def _code_repair(folder, incident, data):
     if operation in {"write", "test", "prepare"}:
         record["status"] = {"write": "workspace_ready", "test": record.get("status"),
                             "prepare": "prepared"}[operation]
+    record["workspace_fingerprint"] = dev.fingerprint(job)
     _save_code_record(folder, record)
     dev.save(job, record["path"])
     result["status"] = record["status"]
     return result
 
 
+def _install_authorization(confirm=False):
+    from . import operations_development as dev
+    authorize = getattr(dev, "install_authorization", None)
+    if authorize is not None:
+        return authorize(_source_root(), confirm=confirm)
+    return {"allowed": confirm is True and os.environ.get("MD_OPERATIONS_INSTALL") == "1",
+            "mode": "legacy" if os.environ.get("MD_OPERATIONS_INSTALL") == "1" else "disabled"}
+
+
 def _install_code_repair(folder, incident, data):
     from . import operations_development as dev
-    if data.get("confirm") is not True:
-        raise ValueError("install_confirmation_required")
-    if os.environ.get("MD_OPERATIONS_INSTALL") != "1":
-        raise ValueError("install_disabled: 宿主须暂停源码监听并设置 MD_OPERATIONS_INSTALL=1")
+    authorization = _install_authorization(confirm=data.get("confirm") is True)
+    if not authorization.get("allowed"):
+        if data.get("confirm") is not True:
+            raise ValueError("install_confirmation_required")
+        raise ValueError("install_disabled: 缺少受控宿主安装授权")
     _check_budget(incident, "install")
     record, job = _code_job(folder)
     if record.get("status") != "prepared":
@@ -827,7 +961,8 @@ def _install_code_repair(folder, incident, data):
     incident["_install_started"] = True
     installed = dev.install(job, backup_dir=_code_root(folder), allow=True)
     record.update(status="installed_pending_restart", installed_at=mf.now_iso(), plan_id=plan["plan_id"],
-                  install_process=_process_identity(), install_attempt_id=incident["attempt_id"])
+                  install_process=_process_identity(), install_attempt_id=incident["attempt_id"],
+                  authorization_mode=authorization.get("mode"))
     _save_code_record(folder, record)
     dev.save(job, record["path"])
     incident["code_repair"] = {**(incident.get("code_repair") or {}), "status": "installed_pending_restart",
@@ -837,7 +972,7 @@ def _install_code_repair(folder, incident, data):
     incident.pop("_install_started", None)
     return {"status": "installed_pending_restart", "plan_id": plan["plan_id"],
             "changes": [change["path"] for change in plan["changes"]], "journal": installed.get("journal"),
-            "restart_required": True, "rolled_back": False,
+            "restart_required": True, "rolled_back": False, "authorization": authorization,
             "next": "宿主单次重启后端，重新 claim 后 verify 并 resume"}
 
 
@@ -941,11 +1076,13 @@ def action(root, folder, payload, *, enqueue=None):
                     raise ValueError("code_repair_installed_pending_restart: 必须真实重启并重新认领")
                 result = _verify(folder, incident)
                 incident["verification"] = result
-                if record and record.get("status") == "restarted_pending_verify":
-                    _settle_code_repair(folder, incident, "resolved" if result["verified"] else "needs_deep_repair")
+                if record and record.get("status") == "restarted_pending_verify" and result["verified"]:
+                    _settle_code_repair(folder, incident, "resolved")
+                elif record and record.get("status") == "restarted_pending_verify":
+                    incident["recovery"] = {**_recovery_plan(folder, incident), "state": "original_check_required"}
             elif name == "finish":
                 outcome = data.get("outcome")
-                if outcome not in {"resolved", "needs_deep_repair", "needs_human"} or not isinstance(data.get("summary"), str) or not data["summary"].strip():
+                if outcome not in {"resolved", "needs_deep_repair", "needs_human", "recovery_queued"} or not isinstance(data.get("summary"), str) or not data["summary"].strip():
                     raise ValueError("invalid_finish")
                 previous = incident.get("verification") or {}
                 repair_record = _code_record(folder) or {}
@@ -954,15 +1091,20 @@ def action(root, folder, payload, *, enqueue=None):
                 if outcome == "resolved" and not (previous.get("verified") is True and previous.get("evidence_id")
                         and previous.get("snapshot") == incident["snapshot"] and _verify(folder, incident)["verified"]):
                     raise ValueError("verification_required")
-                incident.update(status=outcome, eligible=False, attempt_id=None, lease_expires_at=0)
-                _settle_code_repair(folder, incident, outcome)
-                if outcome == "needs_human":
-                    # Budget exhaustion or a decision only a person can make: keep
-                    # the evidence, stop automatic retries, never pretend resolved.
-                    incident["escalation"] = {"kind": "human", "at": mf.now_iso(),
-                                              "reason": _redact(data["summary"])[:1000]}
-                    incident["not_before"] = 0
-                result = {"outcome": outcome, "summary": _redact(data["summary"])[:2000], "verification": previous,
+                if outcome == "resolved":
+                    incident.update(status=outcome, eligible=False, attempt_id=None, lease_expires_at=0)
+                    _settle_code_repair(folder, incident, outcome)
+                else:
+                    plan = _recovery_plan(folder, incident)
+                    if plan["next_actions"] == ["request_code_repair"]:
+                        # Deterministic isolated setup makes the first escalation
+                        # concrete; it never edits production or batch content.
+                        _request_code_repair(folder, incident, {"summary": data["summary"]})
+                    _queue_recovery(folder, incident, outcome, data["summary"])
+                result = {"outcome": "resolved" if outcome == "resolved" else "recovery_queued",
+                          "requested_outcome": outcome, "status": incident["status"],
+                          "recovery": incident.get("recovery"),
+                          "summary": _redact(data["summary"])[:2000], "verification": previous,
                           "verified": outcome == "resolved", "evidence_id": previous.get("evidence_id")}
             elif name == "regenerate_units":
                 result = _regenerate_units(folder, incident, data)
@@ -1128,9 +1270,22 @@ def observe_execution(folder):
             _save(folder, state)
         return
     changed = incident.get("snapshot") != _snapshot(folder, incident["stage"])
-    incident.update(status="queued", eligible=True,
-                    queue_generation=incident.get("queue_generation", 0) + 1,
-                    not_before=0 if changed else time.time() + 60)
+    checked = _verify(folder, incident)
+    incident["verification"] = checked
+    if checked["verified"]:
+        incident.update(status="resolved", eligible=False, attempt_id=None, lease_expires_at=0, not_before=0)
+        _settle_code_repair(folder, incident, "resolved")
+    elif _review_differences(folder, incident):
+        incident.update(status="quality_differences", failure_class="quality_differences", eligible=False,
+                        attempt_id=None, lease_expires_at=0)
+    else:
+        record = _code_record(folder) or {}
+        if record.get("status") == "restarted_pending_verify":
+            _settle_code_repair(folder, incident, "needs_deep_repair")
+        incident.update(status="queued", eligible=True,
+                        queue_generation=incident.get("queue_generation", 0) + 1,
+                        not_before=0 if changed else time.time() + 60)
+        incident["recovery"] = {**_recovery_plan(folder, incident), "state": "original_check_failed"}
     outbox = state.pop("resume_outbox", None)
     if outbox:
         for receipt in state.get("receipts", []):

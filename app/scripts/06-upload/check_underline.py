@@ -19,9 +19,11 @@ import tempfile
 import json
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _common import arg_parser, load_batch, report, units
+from workflow.docx_extract import blocking_warnings
 
 U3000 = "\u3000"
 
@@ -147,7 +149,7 @@ def _check_source_underlines(batch, source, batch_path=None):
             auto_ocr = bool(data.get("ocr_auto") and data.get("image_ocr"))
         except (OSError, ValueError, TypeError):
             auto_ocr = False
-        if not auto_ocr:
+        if not auto_ocr and blocking_warnings(warnings):
             problems.append(f"[E16] 原文提取有不确定项：{warnings}")
     return problems
 

@@ -35,7 +35,8 @@ test('backend incident shapes require recorded evidence before resolved means re
   assert.match(ctx.operationsView(incident).outcome, /真实闸门已通过/);
   assert.equal(ctx.operationsView({ ...incident, verification: { verified: true } }).label, '复验待确认');
   assert.equal(ctx.operationsView({ ...incident, verification: { verified: 'true', evidence_id: 'r' } }).label, '复验待确认');
-  assert.equal(ctx.operationsView({ ...incident, status: 'needs_deep_repair' }).label, '需深入修复');
+  assert.equal(ctx.operationsView({ ...incident, status: 'needs_deep_repair' }).label, '自动升级修复');
+  assert.equal(ctx.operationsView({ status: 'waiting_evidence' }).label, '等待新证据');
   assert.equal(ctx.operationsView({ ...incident, status: 'claimed', events: [{ action: 'apply_repair' }] }).label, '修复');
   assert.equal(ctx.operationsView({ ...incident, status: 'claimed', events: [{ action: 'verify' }] }).label, '复验');
 });
@@ -129,11 +130,11 @@ test('operations toolbar keeps title and controls together with status on the ne
   assert.match(client.slice(statusStart, statusStart + 750), /OperationsStatus/);
 });
 
-test('panel presents analysis advice and never labels ordinary progress as active self healing', () => {
+test('panel omits analysis advice and shows automatic repair progress', () => {
   const panel = client.slice(start, end);
-  assert.match(panel, /分析与建议/);
-  assert.match(panel, /current\.incident\.findings\[current\.incident\.findings\.length - 1\]\.summary/);
-  assert.match(panel, /首个阻断异常在执行锁释放后接手分析/);
+  assert.doesNotMatch(panel, /分析与建议|current\.incident\.findings/);
+  assert.match(panel, /首个阻断异常在安全检查点接手/);
+  assert.match(panel, /卡点自动接管、修复、复验并续跑/);
   assert.doesNotMatch(panel, /仅在普通自愈失败后接手|个批次，自愈进行中/);
 });
 
