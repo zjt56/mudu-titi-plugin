@@ -21,6 +21,8 @@
 
 12年另有解析来源未唯一绑定的业务阻断，以及模型 `Insufficient Balance / code=QUOTA`。11:27:46 现场已成功 claim、progress、heartbeat，11:27:53 成功 release；事件仍 queued，verification 为空，不能称解析故障已修好。模型余额问题不登记为代码卡点，也不换模型兜底。
 
+11:38 用户切换模型后复核：插件 default 与 Harness default 均为 `opencode-go / deepseek-v4.1-flash`；同一运维会话的持久 `modelSelection.lastUsed` 为该路由，pending为空，现场当前尝试已执行到 read_evidence 且error为空。此前QUOTA为历史尝试，不能继续当成当前阻断。
+
 Python 后端由原热重启机制加载；宿主 JS 源码更改不等于当前进程已加载新版本。本轮以受控真实 HTTP 和宿主回归验证锁协议，不人为制造真实试卷故障；若无加载证据，不能宣称现场等待分支已触发。
 
 ## 如何验证
