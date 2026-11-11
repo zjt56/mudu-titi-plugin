@@ -189,6 +189,16 @@ def knowledge_search(query: str = "", limit: int = 40):
     return result
 
 
+def _closest_leaf(path, limit=1):
+    """目录里与给定路径最接近的叶子，仅用于把笔误报得可定位（不自动纠正）。"""
+    try:
+        _by_path, leaves = knowledge_index()
+    except Exception:  # noqa: BLE001 - 目录不可用时不阻断报错
+        return []
+    import difflib
+    return difflib.get_close_matches((path or "").strip().strip("/"), list(leaves), n=limit, cutoff=0.78)
+
+
 def resolve_knowledge(paths):
     """解析完整目录路径；保留名称中的斜线，用目录路径前缀判定叶子。"""
     by_path, leaves = knowledge_index()
@@ -306,7 +316,13 @@ def _check_labels(values, prefixes=None):
     paths = _string_list(values["knowledge"], "knowledge", problems) if "knowledge" in values else []
     resolved = resolve_knowledge(paths)
     if resolved["unknown"]:
-        problems.append(f"知识点路径不在目录里：{resolved['unknown']}")
+        # 路径笔误（尤其主题里的「沟通/际沟通」「与/于」之类）很常见：报出最接近的
+        # 目录叶子，方便模型/运维一次改对；只提示、不自动替换、不放宽校验。
+        hinted = []
+        for bad in resolved["unknown"]:
+            guess = _closest_leaf(bad)
+            hinted.append(f"{bad}（相近叶子：{guess[0]}）" if guess else str(bad))
+        problems.append(f"知识点路径不在目录里：{hinted}")
     if resolved["non_leaf"]:
         problems.append(f"知识点必须是叶子，这些是中间层：{resolved['non_leaf']}")
     if main_type in types():

@@ -545,6 +545,32 @@ class AgentTasksTest(unittest.TestCase):
         self.write(tasks.ARTIFACTS["explanations"], explanations_of(knowledge))
         return knowledge
 
+    def phonetic_group_fixture(self):
+        """语音题整组：材料带号、子题空壳、组级标签只有「语音」维度。"""
+        units = _build_units([{"type": "语音题", "questions": [[1, 2]]}],
+                             [{"questions": [[1, 2]]}], ["1. ca__ 2. tha__"])
+        self.write("01_source/structure.confirmed.json", {"version": "1.0", "units": units})
+        uid = "group-1-2"
+        self.write("01_source/正文.txt", "1. ca__\n2. tha__")
+        self.write("01_source/附录.txt", "答案: 1. t 2. n")
+        self.write(tasks.ARTIFACTS["types"], {"items": [
+            {"unit_id": uid, "type": "语音题", "subtypes": [], "words": 0,
+             "contentComplete": True, "evidence": ["正文 L1–2"]}]})
+        self.write(tasks.ARTIFACTS["answers"], {"answers": {"1": "t", "2": "n"},
+                                                 "evidence": {"1": ["附录"], "2": ["附录"]},
+                                                 "missing": {}, "difficulty": {"1": "容易", "2": "容易"}})
+        knowledge = {"items": [{"unit_id": uid,
+            "knowledge": ["语音/基本读音/26个字母的读音"],
+            "evidence": ["正文 L1–2"],
+            "subquestions": [{"number": 1, "knowledge": []}, {"number": 2, "knowledge": []}]}]}
+        self.write(tasks.ARTIFACTS["explanations"], explanations_of(knowledge))
+        return knowledge
+
+    def test_phonetic_group_accepts_empty_child_knowledge(self):
+        """语音题整组的子题 knowledge 留空必须被接受（此前被误判为 knowledge 非空失败）。"""
+        valid = self.phonetic_group_fixture()
+        self.assertTrue(self.accept("knowledge", valid)["completed"])
+
     def test_knowledge_keeps_only_labels_and_assembly_owns_source_content(self):
         valid = self.group_fixture()
         valid['items'][0]['articleSummary'] = '本文讲述校园生活中的一段经历，并说明了同学之间的互助。（AI生成，待校对）'

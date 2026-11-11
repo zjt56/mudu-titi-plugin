@@ -376,12 +376,23 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
         # That footer is pagination residue, not required question content: a
         # candidate that legitimately trims it must not be judged "题干改写".
         parts[numbers[0]] = {"stem": _required_stem(unit.get("stem") or ""), "options": [], "found": True}
+    # 组内小题类型可混排（任务型阅读/阅读综合常见：填空/问答小题本就无选项，
+    # 只有个别小题是图片选择题）。此时不能拿组内最大选项数对每个小题一刀切
+    # 要求 ABCD，否则合法的无选项小题被误判 SOURCE_OPTIONS_INCOMPLETE，连带让
+    # 结构闸门的 NUMBERING_RESTART 无法按分区消解。choice_group（完形/语法选择）
+    # 与 standalone 仍是"每题都必须有完整选项"，保持原样。
+    mixed_group = unit.get("unit_kind") == "group" and not choice_group
     for n, part in parts.items():
         if not part["found"] and not (len(numbers) == 1 and unit.get("source_span", {}).get("number_binding") == "single_writing_section"):
             issues.append({"code": "QUESTION_NOT_FOUND", "number": n,
                            "message": f"源头单元缺少第 {n} 题的实际题号/空位"})
         labels = [o["label"] for o in part["options"]]
         expected = list("ABCDEFGH"[:max_options])
+        # 混排 group 里没有任何选项的小题：本就不该有选项，不判缺选项。
+        # 有选项时仍按本组应有选项数校验齐全与内容非空，避免漏掉真实缺项。
+        lacks_own_options = mixed_group and not labels
+        if lacks_own_options:
+            continue
         if (choice_group and not labels) or (max_options and (labels != expected or any(not _canonical(o["text"]) for o in part["options"]))):
             issues.append({"code": "SOURCE_OPTIONS_INCOMPLETE", "number": n,
                            "message": f"第 {n} 题源头选项 {labels}，本组应完整包含 {expected} 且内容非空"})
@@ -524,6 +535,23 @@ def apply_required_writing_stem(batch_dir: str | Path, batch: dict) -> int:
     return changed
 
 
+_BLANK_NUMBER = re.compile(r"(?:__(\d+)__|(?<!\d)(\d+)\s*[.．]\s*_+|[\u3000\s](\d+)[\u3000\s]*_+)")
+
+
+def _material_blank_numbers(material) -> set:
+    """材料里作为「空位题号」出现的数字集合（`__N__`、`N.______`、`　N　____`）。"""
+    found = set()
+    for match in _BLANK_NUMBER.finditer(str(material or "")):
+        for group in match.groups():
+            if group:
+                try:
+                    found.add(int(group))
+                except ValueError:
+                    pass
+                break
+    return found
+
+
 def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
     """按原卷解析结果回填题干与选项，避免模型把相邻题内容复制错。
 
@@ -584,7 +612,19 @@ def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
         if unit.get("unit_kind") == "standalone":
             fill(row, lookup(parsed, unit["numbers"][0]))
         else:
+            # 共享选项/对话类组题（补全对话等）材料里已带齐每个空位题号时，
+            # 子题题干只能是空壳 `______`（D3/D25）：解析出的「后一行对白」
+            # 属于 material，不能抄进子题题干，否则与材料重复、且会被 D7 拦。
+            shared_blank_numbers = _material_blank_numbers(row.get("material") or "")
+            row_numbers = {int(n) for n in unit.get("numbers") or [] if str(n).isdigit()}
+            shell_group = bool(row_numbers) and row_numbers.issubset(shared_blank_numbers)
             for child in row.get("subquestions") or []:
+                if shell_group:
+                    entry = child
+                    if entry.get("stem") != "______":
+                        entry["stem"] = "______"
+                        changed += 1
+                    continue
                 fill(child, lookup(parsed, child.get("number")))
     return changed
 

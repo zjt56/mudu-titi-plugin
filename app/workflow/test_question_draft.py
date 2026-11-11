@@ -103,6 +103,20 @@ class QuestionDraftTest(unittest.TestCase):
         self.assertFalse((self.root / "06_batch/batch.json").exists())
         self.assertFalse((self.root / "workflow/manifest.json").exists())
 
+    def test_shared_blank_dialogue_children_keep_shell_stem(self):
+        """补全对话：材料带齐 1.–5. 空位时，子题题干只能是 ______，不回填后一行对白。"""
+        from workflow import question_content
+        text = ("A&B:Good morning,Ms Gao!\nC:1.______ What's your name?\nA:2.______\n"
+                "C:Nice to meet you.\nA:3.______\nC:4.______\nB:My name is Peter.\n"
+                "C:5.______\nB:Hi,Emma.\nA:Hi,Peter.")
+        self.source(text, [([1, 2, 3, 4, 5], "group", "补全对话", 1, len(text.splitlines()))])
+        payload = {"items": question_draft.build(self.root)["items"]}
+        before = [c["stem"] for c in payload["items"][0]["subquestions"]]
+        self.assertEqual(before, ["______"] * 5)  # 源草稿已正确
+        question_content.restore_source_stems(self.root, payload)
+        after = [c["stem"] for c in payload["items"][0]["subquestions"]]
+        self.assertEqual(after, ["______"] * 5, "restore 不得把材料里的后一行对白抄进子题题干")
+
     def test_assembly_source_restore_cannot_erase_preassembled_leading_blank(self):
         from workflow import question_content
         self.source('(　　)43.<u>　　　　</u>,Chinese <u>traditions</u>. A. Yes B. No',

@@ -30,6 +30,34 @@ class LabelAuditTest(unittest.TestCase):
         self.assertTrue(any("子题[1]" in p
                             for p in taxonomy.check_question_labels(item)))
 
+    def test_phonetic_group_child_knowledge_may_be_empty(self):
+        """语音题是整组题、只有「语音」组级维度：子题 knowledge 可空，组级必须有标签。"""
+        from workbench import taxonomy
+        item = {"question_type": "语音题", "unit_kind": "group", "subtypes": [],
+                "knowledge": ["语音/基本读音/26个字母的读音"],
+                "subquestions": [{"number": 1, "knowledge": []},
+                                 {"number": 2, "knowledge": []}]}
+        self.assertEqual(taxonomy.check_question_labels(item), [])
+
+    def test_completing_sentence_rejects_pragmatic_dimension(self):
+        """完成句子只允许 词汇/语法，挂 语用/情景交际 必须被判越界（模型常见错）。"""
+        from workbench import taxonomy
+        problems = taxonomy.check_question_labels(
+            {"question_type": "完成句子", "knowledge": ["语用/情景交际"]})
+        self.assertTrue(any("超出允许维度" in p and "完成句子" in p for p in problems))
+
+    def test_unknown_theme_path_reports_closest_leaf_typo_hint(self):
+        """主题路径笔误（人沟通 vs 人际沟通）要报出最接近的目录叶子，方便一次改对。"""
+        from workbench import taxonomy
+        problems = taxonomy.check_labels(
+            {"type": "阅读理解",
+             "knowledge": ["语篇体裁/记叙文/故事",
+                           "主题/人与社会/社会服务与人沟通/人际交往",
+                           "设题角度/阅读/细节理解"]})
+        joined = " ".join(problems)
+        self.assertIn("不在目录里", joined)
+        self.assertIn("社会服务与人际沟通/人际交往", joined)  # 相近叶子提示
+
     def test_empty_or_malformed_batch_never_passes(self):
         for payload in (None, [], {}, {"items": []}, {"items": [None]}):
             with self.subTest(payload=payload):
