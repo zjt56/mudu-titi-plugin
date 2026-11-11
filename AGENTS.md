@@ -68,6 +68,8 @@
 
 25. **同步练习类的题型与组题判定必须走统一口径**：按课时编排的同步练习册/课时同步材料（每课时常分基础段与提升段、提升段题号从 Ⅰ 重新开始），题型、子类、组题/单独题三者一起判定，`unit_kind` 在结构确认阶段定死。口径以 `app/references/sync-practice-rules.json` 为唯一来源（来自 26秋《课时A计划》英语 RJ 七上·八上·九上 854 处大题实测 + 用户逐条确认），代码入口 `app/workflow/sync_practice.py`（`classify` / `classify_with_body` / `audit_units` / `prompt_block`）。规则要点：完形/阅读/任务型/选词/短文填空/教材语篇填空/补全对话/语音题整大题/看图题/四线三格/填词游戏 → group；单项填空/完成句子/单词拼写一句一空/翻译/改错/书面表达 → standalone；`☆拓展设问` 并入所属组题且不计入空数；`综合阅读提升`、`单元话题写作` 只是版块容器不计数。**仅适用于同步练习类材料**，单元卷/期中期末/月考/中考卷不得套用。结构确认阶段识别到同步练习特征时把口径追加进提示词，并用 `audit_units` 与原卷比对，差异只写 `01_source/structure.ai.classified.json` 的 `sync_audit` 留痕，**不得据此自动改题型/组单或放行闸门**。新增表述先在 JSON 加规则（顺序即优先级）再跑 `PYTHONPATH=app python3 -m workflow.sync_practice` 自检并补 `app/workflow/test_sync_practice.py` 用例。说明见 `app/docs/sync-practice.md`。
 
+26. **课时同步来源按单课时识别**：后续按一个课时一批次录入，来源由原件证据识别年级册次、教材版本、系列、单元和课时，例如「七上人教版课时A计划 Unit 1 课时1」。`uint` 规范为 `Unit`，Starter Unit 与普通 Unit 区分；整册多课时只记册级来源，不用首课冒充整册。原件文件名与真实路径可取证，禁止从批次名猜测；证据不足留空、既有有效非空值保留。落地：`app/workflow/metadata_ai.py`、`app/workflow/test_metadata_ai.py`，说明见 `app/docs/sync-practice.md`。
+
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 
 ## 三、变更记录制度（强制）

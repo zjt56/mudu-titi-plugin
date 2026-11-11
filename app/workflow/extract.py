@@ -295,6 +295,10 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
     题号统计，正文循环也会跳过，最后统一并入附录。
     """
     lines = text.splitlines()
+    from workflow import sync_practice
+    is_sync = sync_practice.looks_like_sync_practice(text)
+    sync_headings = sync_practice.heading_candidates(text) if is_sync else []
+    sync_by_line = {row['start_line']: row for row in sync_headings}
     skip = {int(n) for n in (skip_lines or []) if str(n).strip().isdigit()}
     sections, unresolved, groups, image_questions = [], [], [], []
     active = None
@@ -325,12 +329,16 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
             break
         heading = HEADING.match(line)
         kind = next((name for hint, name in TYPE_HINTS if hint in heading.group(2)), None) if heading else None
-        if heading and kind:
+        sync_heading = sync_by_line.get(index + 1)
+        if sync_heading:
+            kind = sync_heading['type']
+        if (heading and kind) or sync_heading:
             # 书面表达里的“1.词数… 2.请不要逐句翻译…”是写作要求，不是新大题。
-            if active is not None and active.get("type") == "书面表达" and heading.group(1).isdigit():
+            if active is not None and active.get("type") == "书面表达" and heading and heading.group(1).isdigit():
                 continue
-            key = (heading.group(1), kind)
-            if key in seen_headings:
+            key = (heading.group(1) if heading else '', kind)
+            # 同步练习每段重新编号，重复的是标题出现位置，不是答案附录证据。
+            if key in seen_headings and not is_sync:
                 # 重复大题标题可能是答案附录，也可能是另一份试卷，不能静默并入。
                 # 解析版常把答案插在大题之间（听力答案后紧接“第二部分 笔试”）：
                 # 若后面还有没出现过的新大题，且新大题带真实题干与选项，当前这段
@@ -357,7 +365,13 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
                       "questions": [], "question_locations": [],
                       "declared_count": int(count.group(1)) if count else None,
                       "material_boundaries": []}
+            if sync_heading:
+                active['sync_occurrence'] = sync_heading['occurrence']
+                active['source_context'] = sync_heading['context']
+                active['candidate_unit_kind'] = sync_heading['kind']
             sections.append(active)
+            if is_sync:
+                scan_numbers.clear()
             continue
         if active is None:
             continue
@@ -366,14 +380,14 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
             boundary_index = material_start(lines, index) if material_label(line) else index
             active["material_boundaries"].append({"label": line, "line": boundary_index + 1,
                                                    "references": references})
-        if _is_answer_explanation_line(line):
+        if _is_answer_explanation_line(line) and not is_sync:
             # 解析版逐题答案行（31.B 【解析】…）不是新题，也不该制造重复题号。
             continue
         # 单词拼写等题型把答案紧跟在题目下一行（91.题目 / 91.nature）：
         # 同题号短答案同样不能算第二个题目，否则会制造重复题号。
-        if index and _is_inline_answer_after_question(line, _plain(lines[index - 1]).strip()):
+        if not is_sync and index and _is_inline_answer_after_question(line, _plain(lines[index - 1]).strip()):
             continue
-        if _is_numbered_letter_answer(line, scan_numbers):
+        if not is_sync and _is_numbered_letter_answer(line, scan_numbers):
             continue
         match = QUESTION.match(line)
         if active["type"] == "书面表达":
@@ -484,12 +498,17 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
                  "image_questions": sorted(set(image_questions)), "unresolved": unresolved,
                  "requires_visual_review": "[IMG " in text or "[TABLE" in text,
                  "coverage_verified": False}
+    if is_sync:
+        structure['sync_practice'] = {'headings': sync_headings,
+                                      'numbering_scope': 'section_occurrence',
+                                      'confirmed': False}
     body_lines = []
     moved_answer_lines = []
     # 解析版常把书面表达的【参考范文】附在正文末尾：范文是答案，不是题目，
     # 移入附录既能保持正文干净，也让答案校验能在答案文本里找到它。
-    essay_start = next((i for i in range(min(appendix_start, len(lines)))
-                        if re.match(r"^\s*【\s*(?:参考范文|范文|参考作文|作文范文)\s*】", _plain(lines[i]))), None)
+    essay_start = (next((i for i in range(min(appendix_start, len(lines)))
+                         if re.match(r"^\s*【\s*(?:参考范文|范文|参考作文|作文范文)\s*】", _plain(lines[i]))), None)
+                   if not is_sync else None)
     body_end = essay_start if essay_start is not None else appendix_start
     current_heading = None      # 当前所属大题标题行（用于在附录补回被移走答案的章节）
     last_answer_heading = None
@@ -506,8 +525,8 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
         # HEADING 误匹配成 (31,"B…")，不能当标题，否则答案行会被重复写入附录。
         if heading and next((n for hint, n in TYPE_HINTS if hint in heading.group(2)), None):
             current_heading = lines[i]
-        is_answer = _is_answer_line_for_body(plain)
-        if not is_answer:
+        is_answer = _is_answer_line_for_body(plain) if not is_sync else False
+        if not is_answer and not is_sync:
             # 单词拼写等题型会把答案紧跟在题目下一行：91.题目 / 91.nature。
             # 同题号、紧邻上一行、内容很短且不含问句/选项/空格的，是答案不是重复题。
             match = QUESTION.match(plain)

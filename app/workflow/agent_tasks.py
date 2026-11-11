@@ -662,6 +662,16 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
     if _speculative and stage not in ("types", "answers", "explanations", "knowledge"):
         raise ValueError("Unsupported speculative stage")
     context, hashes, missing, units = _collect(batch_dir, stage, speculative=_speculative)
+    if stage == 'types':
+        # preassemble、兼容 types 和局部修正共同消费同一课时口径；整卷正文判身份，
+        # 再由后续分片投影，不能因为某片没有课时标题而丢规则。
+        from . import sync_practice
+        body = context.get('01_source/正文.txt', '')
+        if isinstance(body, str) and sync_practice.looks_like_sync_practice(body):
+            context['sync_practice_rules'] = sync_practice.prompt_block()
+            context['sync_practice_heading_candidates'] = sync_practice.heading_candidates(body)
+            for rule_path in (sync_practice.RULES_PATH, Path(sync_practice.__file__)):
+                hashes[str(rule_path.resolve())] = hashlib.sha256(rule_path.read_bytes()).hexdigest()
     if _speculative:
         # Candidate identity is bound to the prompt's metadata and source bytes;
         # the progress ledger is never part of it.

@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -30,9 +31,15 @@ _NUMBER_PREFIX = re.compile(r"^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+|[�
 _BRACKET = re.compile(r"[\[【][^\]】]*[\]】]")
 
 
+def plain_text(text: str) -> str:
+    """只为识别去掉原生提取的字符格式；不改源文件或来源坐标。"""
+    value = re.sub(r"\[IMG\s+[^\]]*\]", "", str(text or ""))
+    return re.sub(r"</?(?:u|sup|sub|b|strong|i|em)\b[^>]*>", "", value).replace("**", "")
+
+
 def normalize(title: str) -> str:
     """去掉题号前缀、方括号标签与空白，得到用于匹配的标题。"""
-    text = _BRACKET.sub("", str(title or ""))
+    text = _BRACKET.sub("", plain_text(title))
     text = _NUMBER_PREFIX.sub("", text)
     text = text.replace("，", ",").replace("（", "(").replace("）", ")")
     return re.sub(r"\s+", "", text)
@@ -107,7 +114,7 @@ def refine(hit: dict | None, body: str) -> dict | None:
     """
     if not hit or hit.get("subtype"):
         return hit
-    text = str(body or "")
+    text = plain_text(body)
     # ☆拓展设问 是附在最后一小题后的开放性追问，不是第 N 空/第 N 小题
     text = re.split(r"[☆★]?\s*拓展设问", text)[0]
     hit = dict(hit)
@@ -125,13 +132,11 @@ def refine(hit: dict | None, body: str) -> dict | None:
     elif name == "任务型阅读":
         if any(word in text for word in _MIXED) or re.search(r"[（(]\s*[)）]\s*\d{1,2}[.．]\s*[A-D][.．]", text):
             hit["subtype"] = "阅读综合"
-        else:
-            # 同步练习册的任务型阅读以“根据短文内容回答问题/不超过N个词”为主，
-            # 没有混排标记时按 阅读问答 处理（与已上传同系列批次一致）。
+        elif re.search(r"根据短文内容回答|回答(?:下列|以下)?问题", text):
             hit["subtype"] = "阅读问答"
     elif name == "补全对话":
-        if re.search(r"[A-G][.．]\s*\S", text) and sum(
-                1 for letter in "ABCDEFG" if re.search(rf"(?<![A-Za-z]){letter}[.．]\s*\S", text)) >= 5:
+        letters = set(re.findall(r"(?:^|[\t　])\s*([A-G])[.．]\s*\S", text, re.M))
+        if letters == set("ABCDEFG"):
             hit["subtype"] = "7选5"
         elif "特殊疑问词" in hit.get("title", ""):
             hit["subtype"] = "填写单词"
@@ -145,14 +150,92 @@ def classify_with_body(title: str, body: str, path: str | Path | None = None) ->
 _UNIT_HINTS = ("单元卷", "单元测试", "期中", "期末", "月考", "模拟", "中考")
 
 
+_LESSON = re.compile(r"^\s*第\s*[一二三四五六七八九十百\d]+\s*课时(?:\s|$)")
+_UNIT = re.compile(r"^\s*(?:Starter\s+)?Unit\s+\d+\b", re.I)
+_ROMAN_HEADING = re.compile(r"^\s*[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+\s*[.．、]", re.I)
+_ITEM_LINE = re.compile(r"^\s*(?:[（(]\s*[）)]\s*)?\d+\s*[.．、)]")
+
+
 def looks_like_sync_practice(text: str) -> bool:
-    """粗判材料是否为同步练习册（按课时编排），用于决定是否下发本口径。"""
-    body = str(text or "")
-    if not body:
+    """按卷头/课时结构判断，题内来源标签不参与整卷身份投票。"""
+    lines = [plain_text(line).strip() for line in str(text or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
         return False
-    hints = sum(1 for hint in _SYNC_HINTS if hint in body)
-    units = sum(1 for hint in _UNIT_HINTS if hint in body)
-    return hints >= 2 and hints > units
+    # 试卷卷头优先；题内 [2025·期末] 不能否定真实课时标题。
+    head = []
+    for line in lines[:6]:
+        if _ROMAN_HEADING.match(line) or _ITEM_LINE.match(line):
+            break
+        head.append(_BRACKET.sub("", line))
+    if any(re.search(r"(?:单元(?:测试|检测|卷)|期[中末]|月考|中考|模拟).*(?:试题|试卷|测试|检测|卷)$", line)
+           for line in head):
+        return False
+    if any(_LESSON.match(line) for line in lines):
+        return True
+    heading = "\n".join(head)
+    if re.search(r"同步练习|课时\s*A\s*计划|课时同步", heading, re.I):
+        return True
+    return bool(any(_UNIT.match(line) for line in head)
+                and re.search(r"Section\s+[AB]|Grammar\s+Focus|Pronunciation", heading, re.I))
+
+
+def heading_hit(line: str, path: str | Path | None = None) -> dict | None:
+    """只接受标题形态，不把题干/文章里提及的关键词当成大题。"""
+    plain = plain_text(line).strip()
+    if not plain or _ITEM_LINE.match(plain) or plain.startswith(("[TABLE", "[/TABLE")):
+        return None
+    text = normalize(plain)
+    if text in ("综合阅读提升", "单元话题写作", "☆拓展设问", "拓展设问"):
+        return None
+    hit = classify(plain, path)
+    if not hit:
+        return None
+    if _ROMAN_HEADING.match(plain):
+        return hit
+    # 无序号指令标题；不匹配“这篇阅读理解…”等普通叙述。
+    if hit["type"] == "书面表达":
+        return hit if (text == '书面表达' or re.search(r"(?:请|假如|假设).{0,160}写一[篇封段份]", text)) else None
+    if len(text) <= 100 and re.match(
+            r"(?:阅读理解|任务型阅读|完形填空|补全对话|单项填空|单项选择|教材语篇回顾|短文填空|选词填空|"
+            r"根据|用|填入|按照|将|选出|找出|在下列|写出|按要求|翻译|汉译英|☆?佳句仿写)", text):
+        return hit
+    return None
+
+
+def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[dict]:
+    """原文坐标上的大题 occurrence 候选；不生成/改写正式题号或确认单元。"""
+    lines = str(raw_text or "").splitlines()
+    rows, context, table_depth = [], "", 0
+    for index, raw in enumerate(lines, 1):
+        plain = plain_text(raw).strip()
+        if plain.startswith("[TABLE"):
+            table_depth += 1
+        if table_depth:
+            if plain.startswith("[/TABLE"):
+                table_depth -= 1
+            continue
+        if _LESSON.match(plain) or _UNIT.match(plain) or plain in ("综合阅读提升", "单元话题写作", "Pronunciation"):
+            context = plain
+        hit = heading_hit(raw, path)
+        if hit:
+            rows.append({"occurrence": len(rows) + 1, "start_line": index,
+                         "title": raw, "context": context, **{k: hit[k] for k in ("type", "subtype", "kind", "rule")}})
+    for pos, row in enumerate(rows):
+        end = rows[pos + 1]["start_line"] - 1 if pos + 1 < len(rows) else len(lines)
+        # 课时/容器边界不能附在上一大题的材料里。
+        for cursor in range(row["start_line"], end):
+            plain = plain_text(lines[cursor]).strip()
+            if _LESSON.match(plain) or _UNIT.match(plain) or plain in ("综合阅读提升", "单元话题写作", "Pronunciation"):
+                end = cursor
+                break
+        row["end_line"] = max(row["start_line"], end)
+    return rows
+
+
+def policy_fingerprint() -> str:
+    """规则或识别实现变化后，不能复用旧结构 AI 缓存。"""
+    return hashlib.sha256(RULES_PATH.read_bytes() + Path(__file__).read_bytes()).hexdigest()
 
 
 def prompt_block(path: str | Path | None = None, limit: int = 0) -> str:
@@ -164,12 +247,17 @@ def prompt_block(path: str | Path | None = None, limit: int = 0) -> str:
     if limit and limit > 0:
         chosen = chosen[:limit]
     for rule in chosen:
-        words = "/".join((rule.get("any") or [])[:2])
+        words = "/".join(rule.get("any") or [])
         target = rule.get("type") or ""
         if rule.get("subtype"):
             target += "/" + str(rule["subtype"])
         kind = rule.get("kind") or ""
-        lines.append(f"- 含 {words} → {target}（{kind}）")
+        conditions = ""
+        if rule.get("none"):
+            conditions += "；排除 " + "/".join(rule["none"])
+        if rule.get("subtype_any"):
+            conditions += "；同时含 " + "/".join(rule["subtype_any"])
+        lines.append(f"- 含 {words}{conditions} → {target}（{kind}）")
     for item in data.get("containers") or []:
         lines.append(f"- {item.get('name')}：{item.get('note')}")
     return "\n".join(lines)
@@ -178,32 +266,44 @@ def prompt_block(path: str | Path | None = None, limit: int = 0) -> str:
 def audit_units(units, raw_text: str = "", path: str | Path | None = None) -> list[dict]:
     """把结构单元和本口径对一遍，只报差异，不改任何认定。
 
-    结构单元（structure_ai 产出）带 type/unit_kind/source_span；用 span 里第一条能
-    命中规则的行（通常是大题标题）反查应记的题型与组/单，不一致时给出可定位的差异。
+    结构单元（structure_ai 产出）带 type/unit_kind/source_span；按窗口起点所属的
+    大题标题反查题型与组/单，并提示越界和题前材料缺口，差异保留原文坐标。
     仅供留痕与提示，结构闸门仍以原卷证据为准。
     """
+    if not looks_like_sync_practice(raw_text):
+        return []
     lines = str(raw_text or "").splitlines()
+    headings = heading_candidates(raw_text, path)
     findings: list[dict] = []
     for unit in units or []:
         if not isinstance(unit, dict):
             continue
         span = unit.get("source_span") or {}
         start, end = span.get("start_line"), span.get("end_line")
-        chunk = lines[start - 1:end] if isinstance(start, int) and isinstance(end, int) and start >= 1 else []
-        hit = None
-        for line in chunk:
-            hit = classify(line, path)
-            if hit:
-                break
+        if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
+            continue
+        owners = [row for row in headings if row['start_line'] <= start <= row['end_line']]
+        if not owners:
+            continue
+        owner = owners[-1]
+        hit = classify(owner['title'], path)
         if not hit:
             continue
         problems = []
+        if end > owner['end_line']:
+            problems.append('来源窗口越过本大题边界，可能串入下一大题')
+        if unit.get('unit_kind') == 'group' and start > owner['start_line']:
+            prefix = lines[owner['start_line']:start - 1]
+            # 只提示已知大题标题与题组起点间的原文缺口，不伪称已核验材料。
+            if any(plain_text(line).strip() or '[IMG ' in line for line in prefix):
+                problems.append('来源窗口起点之前存在同大题原文，需核对共享材料/表格/导语是否遗漏')
         if hit["type"] and unit.get("type") and hit["type"] != unit["type"]:
             problems.append(f"题型 应为 {hit['type']}，实为 {unit['type']}")
         if hit["kind"] and unit.get("unit_kind") and hit["kind"] != unit["unit_kind"]:
             problems.append(f"组/单 应为 {hit['kind']}，实为 {unit['unit_kind']}")
         if problems:
             findings.append({"numbers": unit.get("numbers") or [], "title": hit["title"],
+                             "heading_line": owner['start_line'], 'source_span': dict(span),
                              "rule": hit["rule"], "problems": problems})
     return findings
 
