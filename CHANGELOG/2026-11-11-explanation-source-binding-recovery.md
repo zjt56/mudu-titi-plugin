@@ -33,6 +33,18 @@
 - `node --check lib/index.js`、`lib/client.js`、`lib/operations-agent.js`通过。
 - 真实批次只读复验：第31题原候选指附录第15行可通过；第96行归属不符仍拒绝。范围边界修复后直抄候选覆盖52个单元，整批内容消费者通过；正式交付和下游复验结果在完成后追加。
 
+## 现场复验（2026-11-11 13:30）
+
+- 生产批次【木牍教育】12年安徽中考英语：`python -m workflow.agent run --stage explanations` 走确定性直抄
+  → `{"status":"completed","completed":true,"deterministic":true,"model_calls":0}`，
+  `04_knowledge/explanations.json` 52 单元、无空解析；`manifest.stages.explanations.notes`
+  记录「按来源坐标直接抄录原解析与文章大意，未调用模型」。
+- 下游：`workflow.runner run` 依次完成 assemble、meta、underlines、validate（19 项体检阻断 0、提示 0）、
+  review（两轮完成）、format_gate；`review_gate=needs_review`（17 项标签/内容差异按设计留待人工），
+  `upload_gate/upload/publish_gate` 仍 pending，未上传。
+- 回归：受影响 15 个模块 **262 项全部通过**；宿主运维三模块 **67 项全部通过**；
+  `workflow.test_changelog_policy` 5 项通过。提交 `3480b1b` 已推送 `origin/master`。
+
 ## 回退方式
 
 按本次Git提交回退代码与配套测试/提示词，不恢复旧批次数据或伪改状态。已写私有候选和诊断不代表正式交付，旧版本不得把它们当成通过；远端提交仍需用户明确授权。

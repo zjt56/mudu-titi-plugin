@@ -1,13 +1,16 @@
 # 卡点：运维租约被并行后端互毁，每轮 claim 后被 process_replaced 打回
 
 - id: 2026-11-11-运维租约被并行后端互毁,每轮-claim-后被-process_replaced-打回
-- status: open
+- status: fixed
 - batch: 【木牍教育】12年安徽中考英语
 - stage: operations
 - check: OPERATIONS_LEASE_PROCESS_REPLACED
 - created: 2026-11-11T13:05:41+08:00
 - last_seen: 2026-11-11T13:05:41+08:00
 - occurrences: 1
+- fixed_at: 2026-11-11T13:27:40+08:00
+- fix_commit: 3480b1b
+- verification: workflow.test_operations+workbench.test_health_busy 84项通过；宿主 operations-agent/ui/http 67项通过；现场 op.leased=false 且不再出现新的 process_replaced
 - title: 运维租约被并行后端互毁，每轮 claim 后被 process_replaced 打回
 
 ## 现象（卡点）
@@ -22,4 +25,8 @@ AI运维面板反复出现 worker_busy: 批次执行锁已占用; name=Error。o
 
 ## 修复记录
 
-（未修复）
+- 修复方式：租约只在到期或原进程消失时释放；并行后端命中持租约抛 worker_busy 走 409 等待；health.busy 计入在途运维租约以延后热重启
+- 修复提交：3480b1b
+- 复验证据：workflow.test_operations+workbench.test_health_busy 84项通过；宿主 operations-agent/ui/http 67项通过；现场 op.leased=false 且不再出现新的 process_replaced
+- 标记时间：2026-11-11T13:27:40+08:00
+
