@@ -134,7 +134,7 @@ test('panel omits analysis advice and shows automatic repair progress', () => {
   const panel = client.slice(start, end);
   assert.doesNotMatch(panel, /分析与建议|current\.incident\.findings/);
   assert.match(panel, /首个阻断异常在安全检查点接手/);
-  assert.match(panel, /卡点自动接管、修复、复验并续跑/);
+  assert.doesNotMatch(panel, /卡点自动接管、修复、复验并续跑/);
   assert.doesNotMatch(panel, /仅在普通自愈失败后接手|个批次，自愈进行中/);
 });
 
@@ -144,7 +144,7 @@ test('panel is isolated beside diagnostics and has no repair or invented session
   assert.match(panel, /jget\('\/batches\/' \+ encodeURIComponent\(batchName\) \+ '\/operations'/);
   assert.doesNotMatch(panel, /\/repair|jpost\(|window\.open|href:|location\./);
   assert.match(panel, /enabled: true, available: false, loaded: false/);
-  assert.match(panel, /原有自愈不受影响/);
+  assert.doesNotMatch(panel, /原有自愈不受影响/);
   assert.match(panel, /clipboard\.writeText\(view\.sessionId\)/);
   assert.match(panel, /generation\.current\+\+; controller\.abort\(\); clearTimeout\(timer\)/);
 });
