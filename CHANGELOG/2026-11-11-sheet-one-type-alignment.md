@@ -15,7 +15,9 @@
   - 新增 `sentence-picture`（看图补全句子：图片提示完成下列句子、家谱、地图方位介词、图示方位介词、
     图片信息完成句子）→ `完成句子/补全句子` group；排在 `spell-picture` **之前**。
   - `task-reading-mindmap`（短文后完成思维导图）`任务型阅读/信息摘录` → `任务型阅读/阅读综合`。
-  - 规则总数 32 → 33。
+  - 新增 `dialogue-word`（「填入恰当的特殊疑问词或词组，完成对话」）→ `补全对话/填写单词` group，排在 `dialogue` 之前
+    （原先把子类留给正文推断，标题本身已能判定时不该空着）。
+  - 规则总数 32 → 34。
 - `app/references/filter-framework.json`：`完成句子` 子类本地补入 `补全句子`（平台 1.0 框架原无此子类）。
 - `app/workflow/test_sync_practice.py`：CASES 第 47/48/49 行随表一更新；新增
   `TestWorkbookSheetOneAlignment`（15 行改判 + 2 行保持看图填词 + `完成句子` 目录含 `补全句子`）。
@@ -33,10 +35,13 @@
 
 ## 如何验证
 
-- `PYTHONPATH=app python3 -m workflow.sync_practice` → `规则自检: 通过` / `主类数: 27 规则数: 33`。
+- `PYTHONPATH=app python3 -m workflow.sync_practice` → `规则自检: 通过` / `主类数: 27 规则数: 34`。
 - `python -m unittest workflow.test_sync_practice` → 28 tests OK（含新 `TestWorkbookSheetOneAlignment` 3 项）。
+- 逐行比对表一 78 个标题（`.tmp/verify_sheet1_rules.py`）：标题即可判定者 **76/78** 完全一致；剩下
+  `完形填空`（10空）与 `补全对话`（7选5）依赖正文（空数 / A–G 选项），`classify_with_body` 复验分别为
+  `10空`、`7选5`，无真实偏差。
 - 同步类与结构类回归：`test_sync_practice + test_sync_practice_integration + test_sync_lesson_extraction +
-  test_sync_lesson_shape`、`test_extract + test_structure_gate + test_agent_tasks`（数字见提交说明）。
+  test_sync_lesson_shape + test_extract + test_structure_gate + test_agent_tasks` → 158 tests OK。
 
 ## 回退方式
 
