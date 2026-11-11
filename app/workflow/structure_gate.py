@@ -1026,8 +1026,40 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     _write_json(confirmed_path, confirmed)
     report["confirmed_sha256"] = mf.sha256_file(confirmed_path)
     report["input_hashes"]["01_source/structure.confirmed.json"] = report["confirmed_sha256"]
+    # 视觉佐证（只读、informational）：不参与 passed/blockers 判定，仅把每个
+    # 含图单元的原图语义作为证据带出，供人工/预览参考。缺失或异常一律忽略。
+    report["visual_evidence"] = _visual_evidence(batch_dir)
     _write_json(output_root / "07_review" / "structure-gate.json", report)
     return report
+
+
+def _visual_evidence(batch_dir: Path) -> dict:
+    """读取 Word×视觉交叉印证产物，按单元汇总图片语义；只作证据，不影响闸门。"""
+    import json as _json
+    for base in (batch_dir, Path(batch_dir)):
+        path = base / "01_source" / "source_crosscheck.json"
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        by_unit: dict[str, list] = {}
+        for row in data.get("rows") or []:
+            uid = row.get("unit_id")
+            if not uid:
+                continue
+            by_unit.setdefault(uid, []).append({
+                "img": row.get("img"),
+                "visual_kind": row.get("visual_kind"),
+                "visual_title": row.get("visual_title"),
+                "line_has_text": row.get("line_has_text"),
+                "verdict": row.get("verdict"),
+            })
+        return {"note": "图片语义候选证据，仅供核对；不影响结构放行",
+                "by_unit": by_unit,
+                "unreferenced_images": data.get("unreferenced_images") or []}
+    return {}
 
 
 def _write_json(path: Path, payload) -> None:

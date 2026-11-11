@@ -338,14 +338,26 @@ def _prepare_tables(root):
     return result
 
 
-def _unique_source_part(source, number, expected):
-    """Bind a real printed question, independent of inherited group instructions."""
+def _unique_source_part(source, number, expected, unit=None):
+    """Bind a real printed question, independent of inherited group instructions.
+
+    同步练习/课时材料每个大题题号都从 1 重排（Ⅰ.1 与 Ⅱ.1 都是 1），全卷按题号
+    找“唯一”必然失败。唯一性只在单元证明的来源窗口（source_span）内成立，
+    与硬规则 27 的 unit_id / 题号作用域一致；无 span 时退回全卷口径。
+    """
     from .extract import _plain
     from .preview import _strong_number
     lines = source.splitlines()
-    if sum(_strong_number(_plain(line).strip()) == number for line in lines) != 1:
+    span = (unit or {}).get("source_span") or {}
+    start_line, end_line = span.get("start_line"), span.get("end_line")
+    if (type(start_line) is int and type(end_line) is int
+            and 1 <= start_line <= end_line <= len(lines)):
+        scoped_lines = lines[start_line - 1:end_line]
+    else:
+        scoped_lines = lines
+    if sum(_strong_number(_plain(line).strip()) == number for line in scoped_lines) != 1:
         raise ValueError("Option/source question number is not unique in current text")
-    actual = question_content.question_parts(lines, number)
+    actual = question_content.question_parts(scoped_lines, number)
     if (not actual["found"] or legacy_format._flat(actual["stem"]) != legacy_format._flat(expected["stem"])
             or [(o["label"], legacy_format._flat(o["text"])) for o in actual["options"]] !=
                [(o["label"], legacy_format._flat(o["text"])) for o in expected["options"]]):
@@ -376,7 +388,7 @@ def _restore_options(original, by_key, rebuilt, source):
             if [(o["label"], legacy_format._flat(o["text"])) for o in actual] == [
                     (o["label"], legacy_format._flat(o["text"])) for o in expected]:
                 continue
-            _unique_source_part(source, number, audit["questions"][number])
+            _unique_source_part(source, number, audit["questions"][number], unit)
             # Do not bless incomplete sources merely because their own count agrees.
             labels = list("ABC" if str(unit["type"]).startswith("听力") else "ABCD")
             if ([o["label"] for o in expected] != labels

@@ -34,6 +34,20 @@ def _key(row):
     return tuple(numbers)
 
 
+def _identity_key(obj):
+    """跨大题重号时的唯一身份键：题号作用域 + 题号数组。
+
+    同步练习/课时材料每个大写罗马数字大题题号都从 1 重新开始（如 Ⅰ.1 与 Ⅱ.1
+    都是 (1,)），只按题号做键会把不同大题的同一题号误判为「来源单元题号重复」。
+    section_id 由 sync_practice 依来源位置确定性生成（不是印刷题号），候选行、
+    确认单元与原文重建单元三侧都携带，可作题号作用域。缺失 section_id 时退回
+    纯题号键，保持旧行为与来源可证明边界。
+    """
+    section = obj.get("section_id")
+    scope = section if isinstance(section, str) and section else None
+    return (scope, _key(obj))
+
+
 def _source_units(confirmed, structure, source):
     """Require the edited units to match deterministic reconstruction exactly.
 
@@ -49,15 +63,15 @@ def _source_units(confirmed, structure, source):
     by_key, rebuilt = {}, {}
     for units, target in ((confirmed_units, by_key), (fresh, rebuilt)):
         for unit in units:
-            key = _key(unit)
+            key = _identity_key(unit)
             if key in target:
-                raise ValueError(f"来源单元题号重复：{key}")
+                raise ValueError(f"来源单元题号重复：{key[1]}（section {key[0]}）")
             target[key] = unit
     return by_key, rebuilt, cleaned
 
 
 def _bound_unit(row, confirmed, rebuilt):
-    key = _key(row)
+    key = _identity_key(row)
     unit, fresh = confirmed.get(key), rebuilt.get(key)
     if not unit or not fresh:
         raise ValueError("确认结构与原文重建不能唯一绑定本单元")

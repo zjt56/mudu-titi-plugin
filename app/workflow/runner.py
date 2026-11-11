@@ -262,6 +262,28 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
                 metadata_ai.auto_identify(batch_dir)
         except (OSError, ValueError, RuntimeError, TypeError) as exc:
             print(f"  · 元信息识别跳过：{str(exc)[:160]}")
+    if code == 0 and stage.id == "extract":
+        # 原卷图片视觉语义复核：候选证据，仅供后续结构/题型参考。网关不可用
+        # 或任何异常都只打日志、绝不阻断主流程（硬规则 2/18）。
+        try:
+            from . import visual_review
+            with activity.track(batch_dir, "extract", "正在做原卷图片视觉复核"):
+                outcome = visual_review.build(batch_dir)
+            if outcome.get("status") == "built":
+                print(f"  · 视觉复核：识别 {outcome.get('image_count', 0)} 张原卷图片语义（候选证据）")
+            elif outcome.get("status") == "unavailable":
+                print(f"  · 视觉复核跳过：{outcome.get('reason', '网关不可用')}")
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
+            print(f"  · 视觉复核跳过：{str(exc)[:160]}")
+        # Word × 视觉交叉印证：把 [IMG] 占位与视觉语义关联留痕（只报告、不改原文）。
+        try:
+            from . import visual_crosscheck
+            crossed = visual_crosscheck.build(batch_dir)
+            if crossed.get("status") == "built":
+                print(f"  · Word×视觉交叉印证：{crossed.get('image_refs', 0)} 处图片引用已留痕"
+                      f"（{crossed.get('verdicts', {})}）")
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
+            print(f"  · 交叉印证跳过：{str(exc)[:160]}")
     with _agent_lock(timeout):
         current = mf.load(batch_dir)
         # Another actor may have completed this stage while the command ran.
