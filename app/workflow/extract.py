@@ -564,6 +564,7 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
     if is_sync:
         structure['sync_practice'] = {'headings': sync_headings,
                                       'numbering_scope': 'section_occurrence',
+                                      'lesson_audit': sync_practice.audit_lesson_shape(text),
                                       'confirmed': False}
     body_lines = []
     moved_answer_lines = []

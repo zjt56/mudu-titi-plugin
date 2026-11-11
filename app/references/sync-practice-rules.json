@@ -300,6 +300,20 @@
     {"name": "单元话题写作", "note": "版块容器；内部通常含 1 道译写小题 + 2 篇书面表达（第一篇带范文导写，第二篇为练习）。"},
     {"name": "☆拓展设问", "note": "附在阅读/任务型最后一小题之后的开放性追问，并入所属组题的第 N 小题，不另立题型、不计入空数。"}
   ],
+  "lesson_constraints": [
+    {"id": "lesson-unit-name", "check": "lesson_unit_missing",
+     "text": "每个课时标题必须能找到它所属的单元名；找不到就报「课时缺少单元名」，不得沿用上一个单元或从批次名猜。"},
+    {"id": "lesson-has-question", "check": "lesson_empty",
+     "text": "每个课时标题后面至少有一个大题；课时为空（标题紧跟下一个课时/版块/答案区）必须报出来，不得静默丢掉这一课时。"},
+    {"id": "lesson-numbering", "check": "lesson_number_gap",
+     "text": "同一单元内的课时序号连续（第一~第六课时）；跳号说明有课时没被切出来，必须报出具体课时名与行号。"},
+    {"id": "section-level", "check": "section_inside_lesson",
+     "text": "综合阅读提升、单元话题写作、Reading Plus、Project、Reflecting、Pronunciation 与课时平级，不属于上一个课时的大题窗口。"},
+    {"id": "material-numbered", "check": "material_numbered",
+     "text": "材料里已经带齐每个小题的题号（1. / __1__ / 【1】/（1）/　1　）时，组题只保留材料，不再重复生成同号子题题干；子题只作答案位。"},
+    {"id": "writing-blocks", "check": "writing_blocks",
+     "text": "单元话题写作里的第1步词汇积累/思维导图不是题目；第2步句型训练/仿写记 翻译/汉翻英，第4步实战演练记 书面表达，两篇作文分别成题。"}
+  ],
   "notes": [
     "同一课时若分基础段与提升段，提升段题号从 Ⅰ 重新开始；两段各自独立成题，不合并。",
     "原卷标题进表时去掉来源方括号（[20XX·XX]）、命题标签（[情境题]/[跨学科]/[原创]）与罗马题号，只留题型表述。",

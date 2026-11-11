@@ -184,6 +184,40 @@ def is_section_title(line: str) -> bool:
     return any(folded == name.casefold() for name in _SECTION_TITLES)
 
 
+_CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _section_number(value: str) -> int | None:
+    """中文/阿拉伯课时序号：一二三…十、十二、二十一、1、01 都能转成整数。"""
+    text = plain_text(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if "十" in text:
+        head, _, tail = text.partition("十")
+        if head and head not in _CN_DIGITS:
+            return None
+        tens = _CN_DIGITS[head] if head else 1
+        if tail and tail not in _CN_DIGITS:
+            return None
+        return tens * 10 + (_CN_DIGITS[tail] if tail else 0)
+    return _CN_DIGITS.get(text)
+
+
+def _lesson_number(line: str) -> int | None:
+    """课时标题里的序号；不是课时标题返回 None。"""
+    plain = plain_text(line).strip()
+    match = re.match(r"^第\s*([一二三四五六七八九十百零〇两\d]+)\s*(?:课时|节课)", plain)
+    if not match:
+        match = re.match(r"^课时\s*([一二三四五六七八九十百零〇两\d]+)", plain)
+    if match:
+        return _section_number(match.group(1))
+    match = re.match(r"^(?:Period|Lesson)\s*(\d+)", plain, re.I)
+    return int(match.group(1)) if match else None
+
+
 def looks_like_sync_practice(text: str) -> bool:
     """按卷头/课时结构判断，题内来源标签不参与整卷身份投票。"""
     lines = [plain_text(line).strip() for line in str(text or "").splitlines()]
@@ -292,6 +326,61 @@ def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[di
     return rows
 
 
+def lesson_constraints(path: str | Path | None = None) -> list[dict]:
+    """课时录入约束（来自 Mudu-English-Upload 的课时口径）；提示词与自检共用一份数据。"""
+    return [dict(item) for item in load(path).get("lesson_constraints") or []
+            if isinstance(item, dict) and str(item.get("text") or "").strip()]
+
+
+def audit_lesson_shape(raw_text: str, path: str | Path | None = None) -> list[dict]:
+    """课时编排自检：课时缺单元名、空课时、课时跳号。
+
+    只看原卷坐标，不改结构、不改题型，也不阻断闸门；供提取报告与提示词对照。
+    """
+    if not looks_like_sync_practice(raw_text):
+        return []
+    lines = str(raw_text or "").splitlines()
+    rows = heading_candidates(raw_text, path)
+    starts = [row["start_line"] for row in rows]
+    appendix = answer_key_start(raw_text) or len(lines) + 1
+    lessons: list[dict] = []
+    unit, unit_line = "", 0
+    for index, raw in enumerate(lines, 1):
+        if index >= appendix:
+            break
+        plain = plain_text(raw).strip()
+        if not plain or plain.startswith(("[TABLE", "[/TABLE")):
+            continue
+        if _UNIT.match(plain):
+            unit, unit_line = plain, index
+            continue
+        number = _lesson_number(plain)
+        if number is None:
+            continue
+        lessons.append({"line": index, "number": number, "title": plain,
+                        "unit": unit, "unit_line": unit_line})
+    findings: list[dict] = []
+    for pos, lesson in enumerate(lessons):
+        stop = lessons[pos + 1]["line"] if pos + 1 < len(lessons) else min(appendix, len(lines) + 1)
+        if not lesson["unit"]:
+            findings.append({"code": "LESSON_UNIT_MISSING", "line": lesson["line"], "title": lesson["title"],
+                             "problems": [f"课时「{lesson['title']}」之前没有单元标题，无法确定所属单元"]})
+        if not any(lesson["line"] < start < stop for start in starts):
+            findings.append({"code": "LESSON_EMPTY", "line": lesson["line"], "title": lesson["title"],
+                             "problems": [f"课时「{lesson['title']}」与下一课时之间没有任何大题标题"]})
+    grouped: dict[str, list[dict]] = {}
+    for lesson in lessons:
+        grouped.setdefault(lesson["unit"] or "", []).append(lesson)
+    for group in grouped.values():
+        for pos, lesson in enumerate(group):
+            if lesson["number"] != pos + 1:
+                findings.append({"code": "LESSON_NUMBER_GAP", "line": lesson["line"], "title": lesson["title"],
+                                 "problems": [f"课时序号不连续：第 {pos + 1} 个课时位置是「{lesson['title']}」"]})
+                break
+    findings.sort(key=lambda row: row["line"])
+    return findings
+
+
 def policy_fingerprint() -> str:
     """规则或识别实现变化后，不能复用旧结构 AI 缓存。"""
     return hashlib.sha256(RULES_PATH.read_bytes() + Path(__file__).read_bytes()).hexdigest()
@@ -330,6 +419,10 @@ def prompt_block(path: str | Path | None = None, limit: int = 0) -> str:
         lines.append(f"- 含 {words}{conditions} → {target}（{kind}）")
     for item in data.get("containers") or []:
         lines.append(f"- {item.get('name')}：{item.get('note')}")
+    for item in data.get("lesson_constraints") or []:
+        text = str(item.get("text") or "").strip()
+        if text:
+            lines.append("- " + text)
     return "\n".join(lines)
 
 

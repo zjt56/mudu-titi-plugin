@@ -179,3 +179,4 @@
 | 2026-11-11 | [2026-11-11-sync-lesson-answer-appendix-and-type-display.md](2026-11-11-sync-lesson-answer-appendix-and-type-display.md) | 课时卷末节答案区被并入最后大题导致 20 条闸门阻断；并排小题/说话人前缀/图片题补认；审核页改为直接显示题型+子类 |
 | 2026-11-11 | [2026-11-11-metadata-source-name.md](2026-11-11-metadata-source-name.md) | 试卷名/来源不再显示「未提供」：正文没卷头时按已识别元数据 → 原卷 Word 文件名补齐，占位不写进题目字段 |
 | 2026-11-11 | [2026-11-11-sync-lesson-extraction-rules.md](2026-11-11-sync-lesson-extraction-rules.md) | 课时拆分件提取口径：课时标题变体、Reading Plus/Project 版块边界、原卷提示标记保真留痕、27 主类齐备 |
+| 2026-11-11 | [2026-11-11-sync-lesson-shape-audit.md](2026-11-11-sync-lesson-shape-audit.md) | 课时编排自检：缺单元名/空课时/课时跳号写入提取报告；课时录入约束统一进提示词 |

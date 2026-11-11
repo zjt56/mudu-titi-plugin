@@ -373,3 +373,7 @@
 ## 2026-11-11：技术性绑定变化不得让真实未裁决差异消失
 
 用户原话（m11332 要点）：「审核出来的 11 条差异我还没裁决，不能因为清理元数据占位就把它清掉」。旧实现按「全局 input binding 变了」把未裁决发现一律归档出活动队列，一次来源占位清理就让 11 条真实差异从人工队列蒸发，还白烧一遍模型。规则：来源/年份等**题目来源元数据**不参与审核语义绑定（`evidence.source` 等真实来源证据仍参与）；历史摘要只要精确等于当前投影、旧投影当前值或仅回放已知「未提供」子题来源这三种之一，就算内容等价，可复用既有两轮结论，不重跑模型。因绑定过期退休、内容证明等价且仍未裁决的差异必须放回活动队列，保留原 `round_sources` 与理由、换新 `finding_id` 防撞号并幂等去重；内容真变、证明不了、已裁决、其他退休原因一律仍归档。落地：`app/workflow/review.py::acceptable_unit_bindings/_unit_binding_matches`、`app/workflow/ingest.py::_restore_equivalent_retired/build_review_files`、`app/workflow/test_ingest_binding_equivalence.py`；根规则 6/9；验证见 `2026-11-11-review-binding-equivalence-restore.md`。
+
+## 2026-11-11：课时编排自检（缺单元名 / 空课时 / 课时跳号）
+
+用户原话（m04567 要点）：「查看该技能对于课时录入规则的补充和约束，运用到该该插件，补强代码约束和提示词增强」。规则：课时级错误必须报出具体课时名与行号，不得静默丢课时——①课时标题之前没有 `Unit N` 记 `LESSON_UNIT_MISSING`，不得沿用上一单元或从批次名猜；②课时与下一课时/答案区之间没有任何大题标题记 `LESSON_EMPTY`；③同一单元课时序号不连续记 `LESSON_NUMBER_GAP`。课时序号认 `第一课时`/`第1节课`/`课时3`/`Period 2`/`Lesson 4`（中文数字含十二、二十一）。结果写入 `structure.sync_practice.lesson_audit` 只作留痕，不改题型/组单、不放宽闸门。课时录入约束文字唯一来源是 `sync-practice-rules.json` 的 `lesson_constraints`，`prompt_block()` 直接消费（每课时必须有单元名与至少一个大题、序号连续；版块与课时平级；材料带齐题号时不重复生成同号子题；单元话题写作第1步词汇积累/思维导图不是题）。落地：`app/workflow/sync_practice.py::_section_number/_lesson_number/lesson_constraints/audit_lesson_shape`、`app/workflow/extract.py::infer_structure`、`app/references/sync-practice-rules.json`、`app/workflow/test_sync_lesson_shape.py`、`app/docs/sync-practice.md`（第九节）；根 `AGENTS.md` 硬规则 25；验证见 `2026-11-11-sync-lesson-shape-audit.md`。
