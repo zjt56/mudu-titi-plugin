@@ -99,6 +99,48 @@ class DiagnoseTest(unittest.TestCase):
         self.assertEqual(diagnose._review_failure_detail(
             self.batch, {"task_id": "round-" + "a" * 32}), "")
 
+    def test_stale_blocked_structure_gate_with_passed_report_is_convergent(self):
+        # 结构闸门曾 blocked，但按当前输入已跑通、报告 passed=true；
+        # 不能继续把它当真实卡点报历史阻断，而应提示“重跑即收敛”。
+        manifest = self._load_manifest()
+        manifest["stages"]["structure_gate"].update(
+            status=mf.BLOCKED, notes="3 条未解决")
+        for sid in ("preassemble", "types", "answers", "audio", "explanations",
+                    "knowledge", "assemble", "meta", "underlines", "validate",
+                    "review", "review_gate", "upload_gate", "upload", "publish_gate"):
+            manifest["stages"][sid]["status"] = mf.PENDING
+        mf.save(self.batch, manifest)
+        _write(self.batch, "07_review/structure-gate.json",
+               {"passed": True, "blockers": [], "checks": []})
+        _write(self.batch, "01_source/structure.json", {"unresolved": []})
+        item = diagnose.explain(self.batch, "structure_gate")
+        self.assertIn("陈旧", item["reason"])
+        self.assertIn("重跑", item["reason"])
+        self.assertIn("passed=true", item["detail"])
+        self.assertTrue(item["command"].endswith("--stage structure_gate"))
+
+    def test_blocked_structure_gate_with_real_blockers_lists_concrete_checks(self):
+        # 真实阻断时，卡片必须给出具体检查代码和原因，而不是只有“N 条未解决”。
+        manifest = self._load_manifest()
+        manifest["stages"]["structure_gate"].update(
+            status=mf.BLOCKED,
+            notes="NUMBERING_RESTART：题号跨大题重置（正文第20行）；SOURCE_DUPLICATE_NUMBERS：原文题号重复")
+        for sid in ("preassemble", "types", "answers", "audio", "explanations",
+                    "knowledge", "assemble", "meta", "underlines", "validate",
+                    "review", "review_gate", "upload_gate", "upload", "publish_gate"):
+            manifest["stages"][sid]["status"] = mf.PENDING
+        mf.save(self.batch, manifest)
+        _write(self.batch, "07_review/structure-gate.json", {
+            "passed": False,
+            "blockers": [
+                {"code": "NUMBERING_RESTART", "message": "题号跨大题重置", "source_line": 20},
+                {"code": "SOURCE_DUPLICATE_NUMBERS", "message": "原文题号重复"},
+            ]})
+        _write(self.batch, "01_source/structure.json", {"unresolved": []})
+        item = diagnose.explain(self.batch, "structure_gate")
+        self.assertIn("NUMBERING_RESTART", item["detail"])
+        self.assertIn("SOURCE_DUPLICATE_NUMBERS", item["detail"])
+
     def test_quality_gate_reports_quality_findings_class(self):
         manifest = self._load_manifest()
         manifest["stages"]["review_gate"].update(status=mf.BLOCKED, notes="13 条未解决")

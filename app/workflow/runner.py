@@ -761,8 +761,23 @@ def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
                     f"（独立{counts.get('standalone', 0)}/组合{counts.get('group', 0)}）")
             else:
                 _record_structure_findings(batch_dir, report)
-                mf.touch_stage(current, "structure_gate", mf.BLOCKED,
-                               notes=f"{len(report.get('blockers', []))} 条未解决")
+                # 卡片与台账必须写明具体未解决检查（代码+原因+行号），
+                # 不能只留“N 条未解决”让用户自己去翻报告（硬规则2）。
+                details = []
+                for blocker in report.get("blockers") or []:
+                    if not isinstance(blocker, dict):
+                        continue
+                    code = str(blocker.get("code") or "")
+                    message = str(blocker.get("message") or "").strip()
+                    line = blocker.get("source_line")
+                    piece = f"{code}：{message}" if message else code
+                    if line:
+                        piece += f"（正文第{line}行）"
+                    if piece:
+                        details.append(piece)
+                notes = ("；".join(details[:6]) if details
+                         else f"{len(report.get('blockers', []))} 条未解决")
+                mf.touch_stage(current, "structure_gate", mf.BLOCKED, notes=notes)
             mf.save(batch_dir, current)
             manifest.clear()
             manifest.update(current)

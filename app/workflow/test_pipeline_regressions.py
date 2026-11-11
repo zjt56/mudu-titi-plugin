@@ -169,7 +169,11 @@ class PipelineRegressions(unittest.TestCase):
         saved = json.loads((self.root / '07_review/structure-gate.json').read_text())
         self.assertFalse(saved['passed'])
         self.assertEqual(saved['layout_fallback']['dispatch_state'], 'requires_render')
-        self.assertEqual(mf.load(self.root)['stages']['structure_gate']['status'], mf.BLOCKED)
+        blocked_stage = mf.load(self.root)['stages']['structure_gate']
+        self.assertEqual(blocked_stage['status'], mf.BLOCKED)
+        # 阻断时 notes 必须写明具体检查代码与原因，而不是只留“N 条未解决”。
+        self.assertIn('LAYOUT_UNCERTAIN', blocked_stage['notes'])
+        self.assertIn('栏目边界不明确', blocked_stage['notes'])
 
     def test_original_change_invalidates_bound_structure_evidence(self):
         self.original.write_bytes(b'changed original')

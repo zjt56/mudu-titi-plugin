@@ -260,6 +260,26 @@ class StructureGateTest(unittest.TestCase):
         self.assertEqual(sorted(numbers), [1, 2, 9, 10], numbers)
         self.assertEqual(len(numbers), len(set(numbers)), numbers)
 
+    def test_table_image_coordinates_are_not_printed_anchors(self):
+        # OCR/Word 表格里 img_in_image_box_<x>_<y>_<w>_<h>.jpg 的坐标数字和温度数字
+        # 是版面数据，不是小题号。实际批次因此把 563/566/…/995 误当问答题号，
+        # 导致该组 numbers 膨胀、题号覆盖报错。锚点扫描必须先剥掉表格/图片标记。
+        from workflow import structure_gate as sg
+        lines = [
+            "Here is the weather report.",
+            "<table border=1><tr><td>10 Jan.</td><td>11 Jan.</td></tr>"
+            "<tr><td><img src=\"imgs/img_in_image_box_566_714_638_765.jpg\" />19°C~27°C</td>"
+            "<td><img src=\"imgs/img_in_image_box_647_717_726_766.jpg\" />20°C~27°C</td></tr></table>",
+            "( ) 1. How long will Cathy stay?",
+            "A. Five. B. Six. C. Seven. D. Eight.",
+            "( ) 2. What will the weather be like?",
+            "A. Sunny. B. Snowy. C. Cloudy. D. Rainy.",
+            "( ) 3. Which way is mentioned?",
+            "A. Hotline. B. Internet. C. TV. D. Radio.",
+        ]
+        numbers = sorted(n for _, n in sg._scope_anchors(lines))
+        self.assertEqual(numbers, [1, 2, 3], numbers)
+
     def test_cloze_group_with_inline_blank_numbers_passes_scoped_gate(self):
         lines = [
             "Ⅱ.完形填空",

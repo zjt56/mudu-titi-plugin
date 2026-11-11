@@ -32,6 +32,8 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-12 | [2026-11-12-stale-gate-blocked-notes.md](2026-11-12-stale-gate-blocked-notes.md) | 闸门阻断 notes 写明具体检查；陈旧 blocked 态提示重跑收敛 |
+| 2026-11-11 | [2026-11-11-pdf-ocr-layout-evidence.md](2026-11-11-pdf-ocr-layout-evidence.md) | 保留官方JSONL与29块版面证据，修Markdown课时与拒收诊断；遵用户要求撤销单页重排，核查官方版面参数 |
 | 2026-11-11 | [2026-11-11-anchor-single-source.md](2026-11-11-anchor-single-source.md) | 空位号/题号识别收敛单一实现，结构/题型提示词强化约束 |
 | 2026-11-11 | [2026-11-11-blank-slot-anchor-fix.md](2026-11-11-blank-slot-anchor-fix.md) | 完形编号空格/补全对话空位号不再被误判重复题号或漏题 |
 | 2026-11-11 | [2026-11-11-review-candidate-envelope-recovery.md](2026-11-11-review-candidate-envelope-recovery.md) | 原审核候选只修协议层级/原引文，9条判断原样交回，两轮完成且3项差异保留 |

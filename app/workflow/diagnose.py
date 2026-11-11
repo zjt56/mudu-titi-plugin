@@ -261,6 +261,30 @@ def _agent_error(batch: Path, stage_id: str, record: dict | None = None) -> str:
     return ""
 
 
+def _structure_report_passed(batch: Path) -> bool:
+    gate = _read(batch / "07_review" / "structure-gate.json")
+    return isinstance(gate, dict) and gate.get("passed") is True
+
+
+def _validation_report_passed(batch: Path) -> bool:
+    report = _read(batch / "07_review" / "validation-report.json")
+    return isinstance(report, dict) and report.get("passed") is True
+
+
+def _stale_gate_pass(batch: Path, stage_id: str) -> bool:
+    """阶段标记 blocked，但当前检查报告已是 passed：状态陈旧，重跑即收敛。
+
+    这类陈旧态不能当成真实卡点反复报旧检查（例如结构闸门曾 blocked、后按
+    当前输入跑通却没回写 completed）。它不是“绕过检查”，而是让用户知道
+    直接重跑该闸门即可收敛，无需排查已解决的历史阻断。
+    """
+    if stage_id == "structure_gate":
+        return _structure_report_passed(batch)
+    if stage_id == "validate":
+        return _validation_report_passed(batch)
+    return False
+
+
 def _validation_blockers(batch: Path) -> list[str]:
     report = _read(batch / "07_review" / "validation-report.json")
     if not isinstance(report, dict):
@@ -549,6 +573,10 @@ def diagnose(batch_dir) -> dict:
                 reason = "代理产出未通过校验：需定位具体检查并自动修正复验"
             elif status == mf.BLOCKED:
                 reason = "阶段被阻断"
+                if _stale_gate_pass(batch, stage.id):
+                    # 检查报告已通过、只是状态陈旧：直接重跑即收敛，不是真实卡点。
+                    reason = "阶段状态陈旧：当前检查已通过，重跑该闸门即收敛"
+                    detail = "最近一次检查报告 passed=true，manifest 仍是旧的 blocked；直接重跑本阶段即可回写完成，无需排查已解决的历史阻断。"
             else:
                 reason = "阶段失败"
             # 逐层找最具体的原因

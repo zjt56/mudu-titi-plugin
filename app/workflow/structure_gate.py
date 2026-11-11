@@ -124,7 +124,7 @@ def _scope_anchors(lines: list[str]) -> list[tuple[int, int]]:
     from .wire_format import normalize_blank_text
     strong, weak = [], []
     for index, line in enumerate(lines):
-        normalized = normalize_blank_text(line)
+        normalized = _anchor_text(normalize_blank_text(line))
         plain = _plain(normalized)
         nums = [int(m.group(1)) for m in re.finditer(r"(?:^|[\s:：])([1-9]\d{0,2})\s*[.．](?!\d)", plain)]
         first = _strong_number(normalized)
@@ -134,6 +134,19 @@ def _scope_anchors(lines: list[str]) -> list[tuple[int, int]]:
         weak.extend((index, number) for number in _weak_numbers(normalized))
     printed = {number for _, number in strong}
     return strong + [row for row in weak if row[1] not in printed]
+
+
+# 表格/图片 HTML（`<table>…`、`img_in_image_box_566_714_638_765.jpg`）里的坐标数字、
+# 温度/日期数字是版面数据，不是印刷题号。题号锚点在扫描前先剥掉这些标记与文件名，
+# 避免 `.jpg` 前的坐标被“数字+句点”误识别成小题号，或温度数字被当成空位号。
+_HTML_MARKUP = re.compile(r"<[^>]*>")
+_IMAGE_NAME = re.compile(r"img_in_image_box[\w.]*\.(?:jpe?g|png|gif|bmp|webp|tiff?)", re.I)
+
+
+def _anchor_text(line: str) -> str:
+    if "<table" not in line and "<img" not in line and "img_in_image_box" not in line:
+        return line
+    return _IMAGE_NAME.sub(" ", _HTML_MARKUP.sub(" ", line))
 
 
 def _source_members(lines: list[str]) -> set[int]:
