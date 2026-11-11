@@ -38,3 +38,6 @@ app/audio/vendor/ffmpeg/
 
 # 每台设备明确授权的本地运维安装能力，不随源码或隔离副本分发
 /.operations-autonomy.json
+
+# DSH office 预览/渲染临时目录（每次运行随机后缀，属本机产物）
+/.dsh-office-*/
