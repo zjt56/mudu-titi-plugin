@@ -91,6 +91,19 @@ test('左侧题目列表：每题有独立边框分隔，选中态加深并带�
   assert.doesNotMatch(client, /\.wf-paper\.wf-active:hover\{filter:brightness/);
 });
 
+test('左侧题号列表只显示主题型，不显示子类/子题型/题干', () => {
+  // 题号列只放原卷印刷题号；无号题组显示「—」，不把大题标题（像题干）塞进题号列。
+  assert.match(client, /Array\.isArray\(r\.printed_numbers\) && r\.printed_numbers\.length === 0\s*\? '—'/);
+  // 题型列只用主题型；子类、子题型与题干一律不进列表。
+  assert.match(client, /String\(r\.type \|\| ''\)\.trim\(\) \|\| '未判定'/);
+  assert.doesNotMatch(client, /\[String\(r\.type \|\| ''\), \(Array\.isArray\(r\.subtypes\)/);
+  const listCol = client.slice(client.indexOf('const listCol = h('),
+    client.indexOf('// ---- 右栏：工作区 ----'));
+  assert.ok(listCol.length > 0, '找不到左侧题目列表代码');
+  assert.doesNotMatch(listCol, /r\.stem/);
+  assert.doesNotMatch(listCol, /subtypes/);
+});
+
 test('插件图标同步改为中性灰', () => {
   const icon = fs.readFileSync(path.resolve(__dirname, '..', 'icon.svg'), 'utf8');
   assert.doesNotMatch(icon, /#4f46e5/);
