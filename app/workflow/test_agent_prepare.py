@@ -30,6 +30,21 @@ class AgentPrepareTest(unittest.TestCase):
             self.assertIn('2. C', (batch / '01_source_ans' / '正文.txt').read_text())
             self.assertEqual(source.read_bytes(), b'docx')
 
+    def test_explicit_answer_text_prepares_readonly_shared_source_without_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            source = batch / 'answer.txt'
+            source.write_text('1.A 【解析】保留原文解析。', encoding='utf-8')
+            original = source.read_bytes()
+            mf.save(batch, mf.new_manifest('x', batch, {'answers': {'path': str(source)}}, {}))
+            with patch.object(extract, 'extract_source') as call:
+                self.assertTrue(agent_prepare.prepare_answers(batch)['prepared'])
+                self.assertTrue(agent_prepare.prepare_answers(batch)['cached'])
+            call.assert_not_called()
+            self.assertEqual((batch / '01_source_ans/正文.txt').read_bytes(), original)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertFalse((batch / '01_source_ans/answers.json').exists())
+
     def test_no_separate_answer_retains_appendix_route(self):
         with tempfile.TemporaryDirectory() as tmp:
             batch = Path(tmp); mf.save(batch, mf.new_manifest('x', batch, {}, {}))

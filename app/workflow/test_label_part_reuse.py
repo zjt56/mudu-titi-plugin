@@ -124,7 +124,9 @@ class LabelPartReuseTest(unittest.TestCase):
         self.assertEqual(value["partition_source_scope"]["selected_spans"], [
             {"unit_id": "group-2-3", "path": "01_source/正文.txt", "start_line": 3, "end_line": 5}])
         self.assertEqual([r["unit_id"] for r in value[agent_tasks.ARTIFACTS["types"]]["items"]], ["group-2-3"])
-        self.assertEqual(value[agent_tasks.ARTIFACTS["answers"]]["answers"], {"2": "A", "3": "B"})
+        # Explanations run beside answer filling and consume original material,
+        # never the independently arriving answer worker's artifact.
+        self.assertNotIn(agent_tasks.ARTIFACTS["answers"], value)
 
     def test_changed_type_invalidates_only_its_unit_group(self):
         before = self.keys()

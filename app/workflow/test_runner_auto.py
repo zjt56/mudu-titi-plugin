@@ -176,11 +176,11 @@ class RunnerAutoTest(unittest.TestCase):
         for stage in imports:
             self.assertEqual(mf.load(self.batch)["stages"][stage]["status"], mf.COMPLETED)
 
-    def test_parallel_wave_starts_only_dependency_ready_first_wave_workers(self):
+    def test_three_label_workers_start_together_without_answer_delivery(self):
         from workflow import agent_protocol, agent_tasks, local_agent
         self._ready_parallel_labels()
         stages = [contracts.STAGE_BY_ID[stage] for stage in ("answers", "knowledge", "explanations")]
-        barrier = threading.Barrier(2, timeout=5)
+        barrier = threading.Barrier(3, timeout=5)
         entered = set()
         lock = threading.Lock()
 
@@ -198,10 +198,11 @@ class RunnerAutoTest(unittest.TestCase):
             return {"response": {"status": "completed"}}
 
         def import_result(batch, task_id, path):
-            self.assertEqual(len(entered), 2)
+            self.assertEqual(len(entered), 3)
             return {"completed": True}
 
-        with patch("workflow.agent_prepare.prepare_answers"), \
+        with patch("workflow.stage_preflight.run", return_value=None), \
+             patch("workflow.agent_prepare.prepare_answers"), \
              patch.object(agent_protocol, "export_task", side_effect=export), \
              patch.object(agent_tasks, "build_task", side_effect=lambda batch, stage, **kw: {"status": "ready", "prompt": stage}), \
              patch.object(agent_tasks, "accept_result"), \
@@ -209,9 +210,10 @@ class RunnerAutoTest(unittest.TestCase):
              patch("workflow.label_execution.run", side_effect=lambda b, s, c, r, **kw: invoke(s, r, c, permit_parallel=True)), \
              patch.object(agent_protocol, "import_result", side_effect=import_result):
             outcomes = auto._parallel_ready_agents(self.batch, stages, {"max_input_chars": 10000, "retries": 0})
-        self.assertEqual(outcomes, {"answers": 0, "knowledge": 0})
-        self.assertEqual(entered, {"answers", "knowledge"})
-        self.assertEqual(mf.load(self.batch)["stages"]["explanations"]["status"], mf.PENDING)
+        self.assertEqual(outcomes, {"answers": 0, "knowledge": 0, "explanations": 0})
+        self.assertEqual(entered, {"answers", "knowledge", "explanations"})
+        # No answer result was installed by this fixture before workers started.
+        self.assertFalse((self.batch / '01_source_ans/answers.json').exists())
 
     def test_ready_stage_is_imported_before_slow_peer_finishes(self):
         from workflow import agent_protocol, agent_tasks, local_agent
@@ -239,6 +241,48 @@ class RunnerAutoTest(unittest.TestCase):
              patch.object(agent_protocol, 'import_result', side_effect=install):
             self.assertEqual(auto._parallel_ready_agents(self.batch, stages, {'max_input_chars': 10000, 'retries': 0}),
                              {'answers': 0, 'knowledge': 0})
+
+    def test_slow_audio_preparation_allows_text_chain_through_validate(self):
+        self._ready_after_structure()
+        started, validated = threading.Event(), threading.Event()
+        calls = []
+        self.manifest['inputs']['audio'] = {'exists': True, 'path': str(self.batch / 'audio.mp3')}
+        mf.save(self.batch, self.manifest)
+        def cutter(batch, state):
+            started.set()
+            self.assertTrue(validated.wait(5), 'Cutter blocked text validation')
+            return {'status': 'ready'}
+        execute = self._execute_offline({}, calls)
+        def command(batch, state, stage):
+            if stage.id in ('answers', 'explanations', 'knowledge', 'assemble', 'meta', 'underlines'):
+                self.assertTrue(started.wait(2))
+            if stage.id == 'assemble':
+                target = batch / '06_batch/batch.json'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('{}')
+            return execute(batch, state, stage)
+        def validate(batch, state):
+            self.assertNotIn('audio', calls)
+            calls.append('validate')
+            mf.touch_stage(state, 'validate', mf.COMPLETED)
+            mf.save(batch, state)
+            validated.set()
+            return 0
+        with patch.object(auto, '_auto_prepare_audio', side_effect=cutter) as prepare, \
+             patch.object(runner, '_execute_command', side_effect=command), \
+             patch.object(runner, 'do_validate', side_effect=validate):
+            auto.advance(self.batch, {s.id: ['offline'] for s in contracts.STAGES}, stop_at='review')
+        prepare.assert_called_once()
+        self.assertLess(calls.index('validate'), calls.index('audio'))
+        self.assertEqual(mf.load(self.batch)['stages']['review']['status'], mf.PENDING)
+
+    def test_parallel_rejects_workers_without_validated_types_delivery(self):
+        self._ready_after_structure()
+        with patch('workflow.agent_protocol.export_task') as export:
+            result = auto._parallel_ready_agents(self.batch,
+                [contracts.STAGE_BY_ID[s] for s in ('answers', 'knowledge', 'explanations')], {})
+        self.assertEqual(result, {})
+        export.assert_not_called()
 
     def test_rate_limit_wrapper_code_is_authoritative(self):
         self.assertTrue(auto._is_rate_limited(
@@ -310,7 +354,7 @@ class RunnerAutoTest(unittest.TestCase):
     def test_auto_serializes_two_schedulers_for_same_batch(self):
         first_entered, release, second_entered = threading.Event(), threading.Event(), threading.Event()
         calls = []
-        def advance_locked(batch, bridge, stop_at):
+        def advance_locked(batch, bridge, stop_at, **kwargs):
             calls.append(1)
             if len(calls) == 1:
                 first_entered.set()
@@ -413,16 +457,16 @@ class RunnerAutoTest(unittest.TestCase):
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                 {"answers": (mf.FAILED, 1)}, calls)):
             outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
-        self.assertEqual(calls, ["answers", "types", "audio", "knowledge"])
+        self.assertEqual(calls, ["types", "answers", "audio", "explanations", "knowledge"])
         self.assertEqual((outcome["stopped_at"], outcome["action"]), ("answers", "failed"))
         self.assertEqual([s["stage"] for s in outcome["failed_stages"]], ["answers"])
         pending = {row["stage"]: row for row in outcome["pending_stages"]}
-        self.assertEqual(pending["assemble"]["unmet_dependencies"], ["answers", "explanations"])
+        self.assertEqual(pending["assemble"]["unmet_dependencies"], ["answers"])
         manifest = mf.load(self.batch)
         self.assertEqual(manifest["stages"]["assemble"]["status"], mf.PENDING)
         for stage_id in ("audio", "types", "knowledge"):
             self.assertEqual(manifest["stages"][stage_id]["status"], mf.COMPLETED)
-        self.assertEqual(manifest["stages"]["explanations"]["status"], mf.PENDING)
+        self.assertEqual(manifest["stages"]["explanations"]["status"], mf.COMPLETED)
         self.assertEqual(manifest["stages"]["upload"]["status"], mf.PENDING)
 
     def test_zero_touch_does_not_promote_missing_agent_artifact(self):
@@ -479,7 +523,7 @@ class RunnerAutoTest(unittest.TestCase):
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                 {"answers": (mf.FAILED, 1), "audio": (mf.FAILED, 2)}, calls)):
             outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
-        self.assertEqual(calls, ["answers", "types", "audio", "knowledge"])
+        self.assertEqual(calls, ["types", "answers", "audio", "explanations", "knowledge"])
         self.assertEqual([s["stage"] for s in outcome["failed_stages"]], ["answers", "audio"])
         self.assertEqual(outcome["stopped_at"], "answers")
 
@@ -499,11 +543,11 @@ class RunnerAutoTest(unittest.TestCase):
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                 {"answers": (mf.FAILED, 1)}, calls)):
             outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES},
-                                   stop_at="types")
-        self.assertEqual(calls, ["answers"])
+                                   stop_at="audio")
+        self.assertEqual(calls, ["types", "answers"])
         self.assertEqual(outcome["stopped_at"], "answers")
         self.assertEqual(outcome["pending_stages"], [])
-        self.assertEqual(mf.load(self.batch)["stages"]["types"]["status"], mf.PENDING)
+        self.assertEqual(mf.load(self.batch)["stages"]["audio"]["status"], mf.PENDING)
 
     def test_structure_gate_block_preserves_provisional_without_authorizing_downstream(self):
         self._isolate_scheduler()
@@ -633,6 +677,28 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(saved["child_marker"], {"receipt": "retained"})
         self.assertEqual(saved["stages"]["audio"]["notes"], "child result")
         self.assertEqual(self.manifest["child_marker"], saved["child_marker"])
+
+    def test_extract_metadata_finishes_before_delivery_hashes(self):
+        spec = contracts.STAGE_BY_ID['extract']
+        for relative in spec.produces:
+            path = self.batch / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('Question' if relative.endswith('.txt') else '{}')
+        seen = []
+        def identify(batch):
+            self.assertEqual(mf.load(batch)['stages']['extract']['status'], mf.RUNNING)
+            (batch / '01_source/metadata.json').write_text('{"source":"identified"}')
+            seen.append('identified')
+            return {'ran': True}
+        with patch.object(runner.subprocess, 'run', return_value=argparse.Namespace(returncode=0, stdout='', stderr='')), \
+             patch('workflow.structure_ai.auto_review', return_value={}), \
+             patch('workflow.metadata_ai.auto_identify', side_effect=identify):
+            self.assertEqual(runner._execute_command(self.batch, self.manifest, spec), 0)
+        self.assertEqual(seen, ['identified'])
+        state = mf.load(self.batch)
+        self.assertEqual(state['stages']['extract']['output_hashes']['01_source/metadata.json'],
+                         mf.sha256_file(self.batch / '01_source/metadata.json'))
+        self.assertFalse(mf.is_stale(self.batch, state, spec)[0])
 
     def test_late_command_failure_does_not_erase_concurrent_completion(self):
         stage = contracts.Stage(id="extract", title="test", kind=contracts.COMMAND,

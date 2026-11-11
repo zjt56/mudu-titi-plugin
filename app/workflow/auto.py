@@ -597,6 +597,13 @@ def _refresh_completed_review(batch_dir, manifest):
 
 
 def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -> dict:
+    # Web calls this lock-owned entry directly. Every entry therefore owns the
+    # same bounded worker lifetime; no caller can accidentally use sync cuts.
+    with ThreadPoolExecutor(max_workers=1) as audio_worker:
+        return _advance_impl(batch_dir, bridge, stop_at, audio_worker=audio_worker)
+
+
+def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, audio_worker) -> dict:
     from . import operations
     if operations.lease_active(batch_dir):
         return {"action": "operations_leased", "status": "waiting", "reason": "Harness 运维修复租约生效中"}
@@ -650,17 +657,48 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
 
     # 契约已按拓扑排列：每阶段只尝试一次，阻断只影响真正依赖它的阶段。
     audio_prep = {"status": "waiting"}
+    audio_future = None
+    deferred_audio = False
     audio_allowed = (stop_at is None or stop_at in contracts.STAGE_ORDER
                      and contracts.STAGE_ORDER.index(stop_at) > contracts.STAGE_ORDER.index("audio"))
-    for stage in contracts.STAGES:
-        # 结构闸门一确认就先切听力：赶在并行代理批把 audio 当成“缺证据”之前，
-        # 让上传后的流程真正自动完成切段，而不是等用户点按钮。
-        if audio_allowed and audio_prep.get("status") == "waiting":
+    stages = list(contracts.STAGES)
+    for stage in stages:
+        # Defer only the audio stage, preserving the existing consumer/import
+        # checks. A slow cutter joins immediately before review, after validate.
+        if stage.id == 'audio' and deferred_audio:
+            audio_prep = audio_future.result()
+            deferred_audio = False
+        if audio_allowed and audio_future is None and audio_prep.get("status") == "waiting":
             deps = contracts.STAGE_BY_ID["audio"].depends_on
             if all(dep_ready(d) for d in deps):
-                audio_prep = _auto_prepare_audio(batch_dir, manifest)
+                if audio_worker is None:
+                    audio_prep = _auto_prepare_audio(batch_dir, manifest)
+                else:
+                    snapshot = json.loads(json.dumps(manifest))
+                    audio_future = audio_worker.submit(_auto_prepare_audio, batch_dir, snapshot)
+        if audio_future is not None and audio_future.done():
+            audio_prep = audio_future.result()
+        elif audio_future is not None:
+            audio_prep = {'status': 'running', 'message': '听力切段运行中；文字流程继续'}
+        if stage.id == 'audio' and audio_future is not None and not audio_future.done():
+            # A second visit occurs before review; neither old files nor merely
+            # scheduling a worker count as an accepted audio delivery.
+            review_index = stages.index(contracts.STAGE_BY_ID['review'])
+            stages.insert(review_index, stage)
+            deferred_audio = True
+            continue
         if stop_at and stage.id == stop_at:
             break
+        if (stage.id == 'review' and manifest['stages'].get('validate', {}).get('audio_projection_refresh')
+                and manifest['stages']['validate'].get('status') not in mf.TERMINAL_OK):
+            # Audio-only view projection preserves existing metadata/underlines,
+            # but the changed final bytes require a fresh real local validation.
+            if all(dep_ready(dep) for dep in contracts.STAGE_BY_ID['validate'].depends_on):
+                rn.do_validate(batch_dir, manifest)
+                manifest = mf.load(batch_dir)
+                if mf.dependency_satisfied(manifest, 'validate', allow_unqualified=False):
+                    manifest['stages']['validate'].pop('audio_projection_refresh', None)
+                    mf.save(batch_dir, manifest)
         if stage.id in recovery_wait:
             # 听力切段能力缺失（未安装/未启用）属于能力受限，不是内容错误：
             # 不能被自愈冷却长期挂住，按既有规则跳过并继续，其它阶段照常推进。
@@ -833,7 +871,7 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                         continue
                     if stop_at and contracts.STAGE_ORDER.index(candidate.id) >= contracts.STAGE_ORDER.index(stop_at):
                         continue
-                    if candidate.id == "audio" and audio_prep.get("status") == "multiple_audio":
+                    if candidate.id == "audio" and audio_prep.get("status") not in {"ready", "evidence", "done"}:
                         continue
                     default = ["{python}", "-m", "workflow.agent", "run", "--stage", candidate.id,
                                "--batch-dir", "{batch_dir}"]
@@ -932,18 +970,6 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
             code = rn._execute_command(batch_dir, manifest, executable)
             if code != 0:
                 blocked(stage.id, "脚本执行失败", "failed")
-            elif stage.id == "extract":
-                # 上传后自动识别题源分类/卷名/地区/年份；失败只记录原因，不阻断流程。
-                try:
-                    from . import metadata_ai
-                    from .activity import track
-                    with track(batch_dir, "extract", "正在识别卷头与试卷元信息"):
-                        identified = metadata_ai.auto_identify(batch_dir)
-                except (OSError, ValueError, TypeError) as exc:
-                    identified = {"ran": False, "reason": str(exc)}
-                if identified.get("ran"):
-                    print("  · 已自动识别试卷元信息：" + "、".join(identified.get("applied") or []))
-                manifest = mf.load(batch_dir)
             continue
 
         if stage.kind == contracts.GATE:
@@ -955,6 +981,9 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
             else:
                 code = rn.do_review_gate(batch_dir, manifest)
             manifest = mf.load(batch_dir)
+            if stage.id == 'validate' and code == 0:
+                manifest['stages']['validate'].pop('audio_projection_refresh', None)
+                mf.save(batch_dir, manifest)
             if code != 0:
                 blocked(stage.id, "闸门未通过", "gate")
                 if stage.id == "structure_gate":

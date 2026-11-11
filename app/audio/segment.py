@@ -775,8 +775,12 @@ def _slice_multiple_audio_locked(batch: Path, analysis: dict, progress=None) -> 
     if not manifest_path.is_file():
         manifest_path = batch / 'manifest.json'
     try:
-        manifest_bytes = manifest_path.read_bytes()
-        inputs = json.loads(manifest_bytes.decode('utf-8-sig'))['inputs']
+        manifest_data = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
+        inputs = manifest_data['inputs']
+        # Progress/other label deliveries legitimately change while cuts run.
+        # Preserve the full original input records and batch identity instead.
+        manifest_identity = {key: manifest_data.get(key) for key in ('workflow_id', 'created_at', 'inputs')}
+        batch_identity = (batch.stat().st_dev, batch.stat().st_ino)
         recorded = {key: value for key, value in inputs.items()
                     if key == 'audio' or re.fullmatch(r'audio_\d{3,}', key)}
         if set(recorded) != set(sources):
@@ -864,8 +868,11 @@ def _slice_multiple_audio_locked(batch: Path, analysis: dict, progress=None) -> 
                 progress('cut', 75 + int(20 * len(items) / len(units)), row['unit_id'])
     if len(items) != len(units) or {item['unit_id'] for item in items} != {unit['unit_id'] for unit in units}:
         raise RuntimeError('多音频切片覆盖不完整')
-    if manifest_path.read_bytes() != manifest_bytes:
-        raise RuntimeError('切片期间批次来源清单已改变')
+    current_manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
+    if ({key: current_manifest.get(key) for key in manifest_identity} != manifest_identity
+            or (batch.stat().st_dev, batch.stat().st_ino) != batch_identity
+            or current_manifest.get('status') in ('stopped', 'cancelled', 'archived')):
+        raise RuntimeError('切片期间批次来源清单或身份已改变')
     for key, path in paths.items():
         if (_file_digest(path) != sources[key]['sha256'] or
                 _file_digest(batch / sources[key]['transcript']) != transcript_digests[key]):

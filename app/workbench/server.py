@@ -506,7 +506,8 @@ def manifest_dependency_satisfied(manifest, dep_id):
     return False
 
 
-def stage_cards(manifest, has_output: bool = False, advance_running: bool = False, diagnostics=None) -> dict:
+def stage_cards(manifest, has_output: bool = False, advance_running: bool = False, diagnostics=None,
+                batch_folder=None, runtime_activity=None, audio_state=None) -> dict:
     stages = (manifest or {}).get("stages") or {}
     recorded_running = (manifest or {}).get("status") == "running" or any(
         record.get("status") == "running" for record in stages.values() if isinstance(record, dict))
@@ -517,6 +518,8 @@ def stage_cards(manifest, has_output: bool = False, advance_running: bool = Fals
         for item in diagnostics.get("items") or []:
             if isinstance(item, dict) and item.get("stage"):
                 diag_by_stage[item["stage"]] = item
+    from workflow.substeps import project as project_substeps
+    substeps = project_substeps(manifest, batch_folder, runtime_activity, audio_state)
     cards = []
     for sid in (STAGE_ORDER or list(stages)):
         record = stages.get(sid) or {}
@@ -529,7 +532,8 @@ def stage_cards(manifest, has_output: bool = False, advance_running: bool = Fals
                 "release_ready": bool(record.get("release_ready")),
                 "description": (wf_contracts.STAGE_BY_ID[sid].description if wf_contracts and sid in wf_contracts.STAGE_BY_ID else ""),
                 "depends_on": list(wf_contracts.STAGE_BY_ID[sid].depends_on) if wf_contracts and sid in wf_contracts.STAGE_BY_ID else [],
-                "notes": record.get("notes") or ""}
+                "notes": record.get("notes") or "",
+                "substeps": substeps.get(sid, [])}
         if record.get("rebuild_required") and card["status"] in TERMINAL_OK:
             # A retained old result is not the result of the requested rebuild.
             card["status"] = "invalidated"
@@ -1646,10 +1650,29 @@ def _live_overview(value, name, folder):
     value["advance"] = advance
     value["upload_status"] = upload_state(name)
     manifest = load(folder / "workflow/manifest.json", {})
-    stage = (stage_cards(manifest, bool(value.get("rows")), bool(advance.get("running")), value.get("diagnostics"))
+    work = activity.read(folder)
+    audio = {}
+    if ((manifest.get("inputs") or {}).get("audio") or {}).get("path"):
+        try:
+            if _audio_has_live_worker(name):
+                audio = audio_status(name)  # A leftover heartbeat alone is not live work.
+        except (OSError, ValueError, TypeError, ImportError):
+            audio = {}
+    # Always re-read the small outcome reports here. These substeps must not
+    # inherit the cached document projection's older report contents.
+    stage = (stage_cards(manifest, bool(value.get("rows")), bool(advance.get("running")), value.get("diagnostics"),
+                         batch_folder=folder, runtime_activity=work, audio_state=audio)
              if manifest.get("stages") else dict(value.get("stage") or {}))
     stage["items"] = [dict(card) for card in stage.get("items") or []]
-    work = activity.read(folder)
+    if not manifest.get("stages"):
+        from workflow.substeps import project as project_substeps
+        projected = project_substeps(manifest, folder, work, audio)
+        for card in stage["items"]:
+            card["substeps"] = projected.get(card.get("id"), [])
+    if audio.get("running") and not audio.get("stale"):
+        for card in stage["items"]:
+            if card.get("id") == "audio":
+                card["active"] = True
     if work:
         for card in stage["items"]:
             if card.get("id") == work["stage"]:
@@ -2972,6 +2995,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("请求内容必须是对象")
+            if parts == ["api", "operations", "service"]:
+                from workflow import operations
+                return self.send_json(operations.service_heartbeat(payload.get('available')))
             if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "operations":
                 from workflow import operations
                 folder = batch_dir(parts[2])
@@ -2995,9 +3021,6 @@ class Handler(BaseHTTPRequestHandler):
                 name = str(payload.get("name") or "").strip()
                 if not name:
                     raise ValueError("请指定批次名称")
-            if parts == ["api", "operations", "service"]:
-                from workflow import operations
-                return self.send_json(operations.service_heartbeat(payload.get('available')))
                 folder = batch_dir(name)
                 return self.send_json({"ok": True, **start_audio_job(
                     "segment", {"folder": str(folder), "audio": payload.get("audio")})})

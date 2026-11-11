@@ -86,6 +86,178 @@ class PreassemblyTest(unittest.TestCase):
             self.assertTrue(preassembly.check(self.root)["passed"])
         self.assertEqual(mf.load(self.root)["stages"]["preassemble"]["status"], mf.COMPLETED)
 
+    def test_fresh_scheduler_delivers_types_before_three_label_workers(self):
+        from workflow import auto, runner
+        self.assertTrue(self.import_response(self.export())['completed'])
+        self.put('01_source/附录.txt', '参考答案\n1.A 【解析】原卷解析。')
+        dispatched = []
+        def execute(batch, state, spec):
+            self.assertEqual(spec.id, 'types')
+            self.assertTrue(preassembly.check(batch)['passed'])
+            runner._record_success(batch, state, spec)
+            mf.save(batch, state)
+            return 0
+        def labels(batch, stages, config):
+            self.assertTrue(mf.dependency_satisfied(mf.load(batch), 'types'))
+            dispatched.extend(s.id for s in stages)
+            return {s.id: 3 for s in stages}
+        with patch('workflow.self_heal.recover', return_value={}), \
+             patch.object(agent, 'configured', return_value=True), \
+             patch.object(local_agent, 'load_config', return_value={}), \
+             patch.object(runner, '_execute_command', side_effect=execute), \
+             patch.object(auto, '_parallel_ready_agents', side_effect=labels):
+            auto._advance_locked(self.root, auto.load_bridge(), stop_at='assemble')
+        self.assertCountEqual(dispatched, ['answers', 'explanations', 'knowledge'])
+        self.assertEqual(mf.load(self.root)['stages']['types']['status'], mf.COMPLETED)
+
+    def test_explanation_task_accepts_original_material_after_answer_peer_delivers(self):
+        from workflow import runner
+        self.assertTrue(self.import_response(self.export())['completed'])
+        state = mf.load(self.root)
+        self.assertTrue(preassembly.check(self.root)['passed'])
+        runner._record_success(self.root, state, contracts.STAGE_BY_ID['types'])
+        mf.save(self.root, state)
+        self.put('01_source_ans/正文.txt', '1.A 【解析】原答案材料解析。')
+        package = agent_protocol.export_task(self.root, 'explanations')
+        self.assertEqual(package['status'], 'ready')
+        # A concurrent answer worker may now install output and progress. Neither
+        # is a consumed explanation input; all original source bytes stay bound.
+        self.put('01_source_ans/answers.json', {'answers': {'1': 'A'}, 'evidence': {'1': ['原文']}, 'missing': {}})
+        state = mf.load(self.root)
+        mf.touch_stage(state, 'answers', mf.COMPLETED)
+        mf.save(self.root, state)
+        result = {'status': 'completed', 'artifacts': {'04_knowledge/explanations.json': {'items': [{
+            'unit_id': 'q-1', 'explanation': '原答案材料解析。', 'articleSummary': '无',
+            'subquestions': [], 'evidence': ['01_source_ans/正文.txt L1']}] }}, 'notes': [], 'findings': []}
+        self.assertTrue(self.import_response(package, result)['completed'])
+        self.assertTrue(mf.dependency_satisfied(mf.load(self.root), 'explanations'))
+
+    def test_late_audio_delivery_preserves_views_and_requires_real_revalidation(self):
+        self._late_audio_delivery('fastpath')
+
+    def test_portable_audio_import_projects_views_and_revalidates(self):
+        self._late_audio_delivery('portable')
+
+    def test_scoped_audio_import_projects_views_and_revalidates(self):
+        self._late_audio_delivery('scoped')
+
+    def _late_audio_delivery(self, mode):
+        import hashlib
+        from workflow import runner, assemble_local, stage_preflight
+        from audio.binding import listening_context
+        # Retain the real source/structure delivery; only its catalog type differs.
+        from workflow import structure_gate
+        raw = 'Ⅰ.关键词语选择\n1. She reads a book. A. Yes B. No C. Good D. Bad'
+        self.put('original.txt', raw)
+        self.put('01_source/正文.txt', raw)
+        self.put('01_source/metadata.json', {'original_sha256': mf.sha256_file(self.root / 'original.txt')})
+        sections = [{'type': '听力关键词语选择', 'questions': [1]}]
+        self.put('01_source/structure.json', {'sections': sections, 'groups': []})
+        structure = {'units': structure_gate._build_units(sections, [], raw.splitlines())}
+        self.put('01_source/structure.confirmed.json', structure)
+        gate = json.loads((self.root / '07_review/structure-gate.json').read_text())
+        gate['input_hashes'] = {rel: mf.sha256_file(self.root / rel) for rel in ('01_source/正文.txt', '01_source/structure.json', '01_source/structure.confirmed.json')}
+        gate['original_sha256'] = mf.sha256_file(self.root / 'original.txt')
+        self.put('07_review/structure-gate.json', gate)
+        state = mf.load(self.root)
+        for sid in ('extract', 'structure_gate'):
+            state['stages'][sid]['output_hashes'] = mf.output_hashes(self.root, contracts.STAGE_BY_ID[sid])
+        mf.save(self.root, state)
+        self.payload['items'][0].update(type='听力关键词语选择', subtypes=[])
+        self.assertTrue(self.import_response(self.export())['completed'])
+        state = mf.load(self.root)
+        runner._record_success(self.root, state, contracts.STAGE_BY_ID['types'])
+        self.put('01_source_ans/正文.txt', '1.A')
+        mf.save(self.root, state)
+        values = {
+            'answers': {'answers': {'1': 'A'}, 'evidence': {'1': ['答案原文']}, 'missing': {}},
+            'explanations': {'items': [{'unit_id': 'q-1', 'explanation': '无', 'articleSummary': '无', 'subquestions': [], 'evidence': ['未提供解析']}]},
+            'knowledge': {'items': [{'unit_id': 'q-1', 'knowledge': ['词汇/词汇辨析/动词辨析'], 'subquestions': [], 'evidence': ['原文']}]}}
+        for sid, value in values.items():
+            self.put(agent_tasks.ARTIFACTS[sid], value)
+            batch_fill.sync(self.root, sid)
+            runner._record_success(self.root, state, contracts.STAGE_BY_ID[sid])
+        mf.save(self.root, state)
+        self.assertEqual(assemble_local.try_assemble(self.root), 0)
+        runner._record_success(self.root, state, contracts.STAGE_BY_ID['assemble'])
+        mf.save(self.root, state)
+        self.assertEqual(runner._execute_command(self.root, state, contracts.STAGE_BY_ID['meta']), 0)
+        self.assertEqual(runner._execute_command(self.root, state, contracts.STAGE_BY_ID['underlines']), 0)
+        # Final-only markup/metadata is a legitimate existing view; media
+        # projection must not regenerate this file from the intermediate batch.
+        final = json.loads((self.root / '06_batch/batch_meta.json').read_text())
+        final['items'][0]['stem'] = '<u>' + final['items'][0]['stem'] + '</u>'
+        final['items'][0]['localExtension'] = {'preserve': 'exactly'}
+        self.put('06_batch/batch_meta.json', final)
+        runner._record_success(self.root, state, contracts.STAGE_BY_ID['underlines'])
+        mf.save(self.root, state)
+        self.assertEqual(runner.do_validate(self.root, state), 0)
+        views = {rel: json.loads((self.root / rel).read_text()) for rel in ('06_batch/batch.json', '06_batch/batch_meta.base.json', '06_batch/batch_meta.json')}
+        clip = self.put('02_audio/seg-q-1.mp3', 'ID3cut')
+        binding, _ = listening_context(self.root)
+        item = {'unit_id': 'q-1', 'file': '02_audio/seg-q-1.mp3', 'start': 0.0, 'end': 1.0, 'evidence': ['real fixture cut'], 'verified': True, 'file_sha256': hashlib.sha256(clip.read_bytes()).hexdigest()}
+        self.put('02_audio/segment-evidence.json', {'generator': 'audio.segment/v2', 'unit_binding': binding, 'items': [item]})
+        self.put('02_audio/audio_map.json', {'unit_binding': binding, 'items': [{k: item[k] for k in ('unit_id', 'file', 'start', 'end')}]})
+        protected = (batch_fill.BATCH, batch_fill.BATCH_BASE, batch_fill.STATE,
+                     '06_batch/batch_meta.base.json', '06_batch/batch_meta.json')
+        previous = {rel: (self.root / rel).read_bytes() for rel in protected}
+        inspect = handoff.inspect_stage
+        def reject_view(batch, current, sid, **kwargs):
+            if sid == 'underlines':
+                return {'passed': False, 'errors': ['test consumer rejection']}
+            return inspect(batch, current, sid, **kwargs)
+        if mode == 'fastpath':
+            with patch.object(handoff, 'inspect_stage', side_effect=reject_view):
+                self.assertEqual(stage_preflight.run(self.root, 'audio')[0], 3)
+            self.assertEqual(previous, {rel: (self.root / rel).read_bytes() for rel in protected})
+            audio_result = stage_preflight.run(self.root, 'audio')
+            self.assertEqual(audio_result[0], 0, audio_result)
+        else:
+            if mode == 'scoped':
+                from workflow import self_heal
+                self_heal._feedback(self.root, 'audio', '局部修复', 'q-1 切片复验', 1, unit_ids=['q-1'])
+            package = agent_protocol.export_task(self.root, 'audio')
+            self.assertEqual(package['status'], 'ready', package)
+            payload = {'items': [{k: item[k] for k in ('unit_id', 'file', 'start', 'end', 'evidence')}]}
+            if mode != 'scoped':
+                payload['unit_binding'] = binding
+            response = {'status': 'completed', 'artifacts': {'02_audio/audio_map.json': payload}, 'notes': [], 'findings': []}
+            agent_tasks.accept_result(self.root, 'audio', response, validate_only=True)
+            self.assertEqual(previous, {rel: (self.root / rel).read_bytes() for rel in protected})
+            # The real importer installs output, records delivery once, projects
+            # media and invalidates validation. No fastpath or sync is mocked.
+            with patch.object(batch_fill, 'sync', wraps=batch_fill.sync) as sync:
+                self.assertTrue(self.import_response(package, response)['completed'])
+            audio_syncs = [call for call in sync.call_args_list if call.args[1] == 'audio']
+            self.assertEqual(len(audio_syncs), 1)
+        state = mf.load(self.root)
+        self.assertEqual(state['stages']['validate']['status'], mf.INVALIDATED)
+        self.assertTrue(agent_protocol._preconditions(state, contracts.STAGE_BY_ID['review']))
+        for rel, before in views.items():
+            after = json.loads((self.root / rel).read_text())
+            self.assertEqual(after['items'][0]['attachments'][-1]['url'], '02_audio/seg-q-1.mp3')
+            if 'attachments' in before['items'][0]:
+                after['items'][0]['attachments'] = before['items'][0]['attachments']
+            else:
+                after['items'][0].pop('attachments')
+            self.assertEqual(after, before)
+        for sid in ('assemble', 'meta', 'underlines'):
+            self.assertFalse(mf.is_stale(self.root, state, contracts.STAGE_BY_ID[sid])[0], sid)
+        from workflow import auto
+        with patch('workflow.self_heal.recover', return_value={}), \
+             patch.object(runner, 'do_validate', wraps=runner.do_validate) as validate:
+            auto._advance_locked(self.root, {}, stop_at='review_gate')
+        validate.assert_called_once()
+        state = mf.load(self.root)
+        self.assertEqual(agent_protocol._preconditions(state, contracts.STAGE_BY_ID['review']), [])
+        saved = mf.sha256_file(self.root / '06_batch/batch_meta.json')
+        if mode == 'fastpath':
+            self.assertEqual(stage_preflight.run(self.root, 'audio')[0], 0)
+        else:
+            self.assertTrue(self.import_response(package, response)['completed'])
+        self.assertEqual(mf.load(self.root)['stages']['validate']['status'], mf.COMPLETED)
+        self.assertEqual(saved, mf.sha256_file(self.root / '06_batch/batch_meta.json'))
+
     def test_invalid_labels_never_complete_or_unlock_downstream(self):
         package = self.export()
         invalid = copy.deepcopy(self.response)

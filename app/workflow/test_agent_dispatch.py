@@ -52,7 +52,9 @@ class AgentDispatchTest(unittest.TestCase):
         # next run must offer the same agent stage rather than move downstream.
         stage = mf.load(self.folder)['stages']['answers']
         self.assertIn(stage['status'], (mf.NEEDS_REVIEW, mf.PENDING))
-        self.assertEqual(result['stopped_at'], 'answers')
+        # This source-only fixture has no accepted type handoff. Its earliest
+        # blocker must stay at types; answers cannot start before that delivery.
+        self.assertEqual(result['stopped_at'], 'types')
 
     def test_cli_stage_uses_same_bridge(self):
         args = argparse.Namespace(batch_dir=str(self.folder), stage='answers', until=None, force=False, dry_run=False)

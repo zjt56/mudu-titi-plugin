@@ -51,6 +51,28 @@ class ContentLabelingTest(unittest.TestCase):
         return {'items': [{'unit_id': 'q-1', 'knowledge': ['词汇/词汇辨析/动词辨析'],
             'subquestions': [], 'evidence': ['正文 L1']}]}
 
+    def test_explanations_collect_and_validate_without_answer_output(self):
+        from workflow import manifest as mf
+        answers = self.batch / tasks.ARTIFACTS['answers']
+        self.assertEqual(answers.resolve(), (self.batch / '01_source_ans/answers.json').resolve())
+        answers.unlink()
+        self.write('01_source_ans/正文.txt', f'1.A 【解析】{ORIGINAL}')
+        before = (self.batch / '01_source_ans/正文.txt').read_bytes()
+        context, hashes, missing, units = tasks._collect(self.batch, 'explanations')
+        self.assertEqual(missing, [])
+        self.assertNotIn(tasks.ARTIFACTS['answers'], hashes)
+        payload = self.explanation(explanation=ORIGINAL)
+        tasks._validate(self.batch, 'explanations', payload, context, units)
+        self.assertFalse(answers.exists())
+        self.assertEqual((self.batch / '01_source_ans/正文.txt').read_bytes(), before)
+        state = mf.new_manifest('x', self.batch, {}, {})
+        raw_before = mf.input_hashes(self.batch, state, contracts.STAGE_BY_ID['explanations'])
+        self.write(tasks.ARTIFACTS['answers'], {'answers': {'1': 'B'}})
+        self.assertEqual(tasks._collect(self.batch, 'explanations')[1], hashes)
+        self.assertEqual(mf.input_hashes(self.batch, state, contracts.STAGE_BY_ID['explanations']), raw_before)
+        with self.assertRaisesRegex(ValueError, 'Content source/ownership'):
+            tasks._validate(self.batch, 'explanations', self.explanation(explanation='捏造的解析'), context, units)
+
     def test_missing_optional_content_is_normalized_without_generating(self):
         row = {'unit_id': 'g', 'subquestions': [{'number': 1}, {'number': 2, 'explanation': ORIGINAL}]}
         content_rules.normalize_optional_content(row)

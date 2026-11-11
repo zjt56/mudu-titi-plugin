@@ -143,6 +143,32 @@ class MultiAudioSlicingTest(unittest.TestCase):
                 self.assertFalse(row['semantic_verified'])
             self.assertTrue(all(path.is_file() for path in first_paths))
 
+    def test_text_progress_can_change_during_cuts_but_inputs_and_identity_cannot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = _batch(Path(tmp), numbers=(1, 2))
+            analysis = self._analysis(batch)
+            path = batch / 'workflow/manifest.json'
+            def progress_cut(audio, out_dir, item):
+                data = json.loads(path.read_text())
+                data['stages'] = {'answers': {'status': 'completed'}}
+                data['updated_at'] = 'new progress'
+                path.write_text(json.dumps(data))
+                return self._cut(audio, out_dir, item)
+            with mock.patch.object(segment, 'cut', side_effect=progress_cut):
+                self.assertTrue(segment.slice_multiple_audio(batch, analysis)['ok'])
+            for key, value in [('inputs', {}), ('workflow_id', 'replacement'), ('status', 'stopped')]:
+                original = path.read_bytes()
+                def changed_cut(audio, out_dir, item):
+                    result = self._cut(audio, out_dir, item)
+                    data = json.loads(path.read_text())
+                    data[key] = value
+                    path.write_text(json.dumps(data))
+                    return result
+                with self.subTest(key=key), mock.patch.object(segment, 'cut', side_effect=changed_cut):
+                    with self.assertRaisesRegex(RuntimeError, '来源清单或身份'):
+                        segment.slice_multiple_audio(batch, analysis)
+                path.write_bytes(original)
+
     def test_failure_or_ambiguity_preserves_existing_aggregates(self):
         with tempfile.TemporaryDirectory() as tmp:
             batch = _batch(Path(tmp), numbers=(1, 2))
@@ -184,8 +210,11 @@ class MultiAudioSlicingTest(unittest.TestCase):
             self.assertFalse(agent._audio_evidence_ready(batch))
             with self.assertRaisesRegex(ValueError, 'generation mismatch'):
                 agent_tasks._collect(batch, 'audio')
+            # Text assembly has no audio dependency; a partial audio publication
+            # cannot prevent collecting its text inputs. Review/audio still fail.
+            agent_tasks._collect(batch, 'assemble')
             with self.assertRaisesRegex(ValueError, 'generation mismatch'):
-                agent_tasks._collect(batch, 'assemble')
+                agent_tasks._collect(batch, 'review')
             self.assertEqual(server.audio_map(batch), {})
 
     def test_manifest_and_transcript_provenance_are_required(self):

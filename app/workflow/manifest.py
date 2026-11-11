@@ -297,7 +297,10 @@ def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use
                     hashes[f"source:01_source/media/{media.name}"] = _fp(media)
     if stage.id in ("explanations", "assemble"):
         # 解析/装配需要答案来源；knowledge 只需题型/结构（答案在装配合并）。
-        for rel in ("01_source_ans/正文.txt", "01_source_ans/answers.json"):
+        sources = ("01_source_ans/正文.txt", "01_source/附录.txt")
+        if stage.id == "assemble":
+            sources += ("01_source_ans/answers.json",)
+        for rel in sources:
             full = Path(batch_dir) / rel
             if full.is_file():
                 hashes[f"source:{rel}"] = _fp(full)
@@ -531,7 +534,43 @@ def record_delivery(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
     if stage.id in ("answers", "audio", "types", "explanations", "knowledge"):
         from . import batch_fill
         if (Path(batch_dir) / batch_fill.STATE).is_file() and (Path(batch_dir) / batch_fill.ARTIFACTS[stage.id]).is_file():
-            batch_fill.sync(batch_dir, stage.id)
+            late_audio = stage.id == 'audio' and checked.get('passed') is True
+            from . import stage_semantics
+            before = batch_fill._read(Path(batch_dir), batch_fill.BATCH) if late_audio else None
+            current_views = [target for target in ('assemble', 'meta', 'underlines')
+                             if late_audio and manifest['stages'].get(target, {}).get('status') in (COMPLETED, APPROVED)
+                             and not is_stale(batch_dir, manifest, contracts.STAGE_BY_ID[target])[0]]
+            protected = (batch_fill.BATCH, batch_fill.BATCH_BASE, batch_fill.STATE,
+                         '06_batch/batch_meta.base.json', '06_batch/batch_meta.json')
+            backups = {rel: (Path(batch_dir) / rel).read_bytes() for rel in protected
+                       if late_audio and (Path(batch_dir) / rel).is_file()}
+            try:
+                batch_fill.sync(batch_dir, stage.id)
+                if late_audio and before != batch_fill._read(Path(batch_dir), batch_fill.BATCH):
+                    batch_fill.project_audio_views(batch_dir, before)
+                    for target in current_views:
+                        inspection = inspect_stage(batch_dir, manifest, target)
+                        if inspection.get('passed') is not True:
+                            raise ValueError('Audio view consumer rejected ' + target + ': ' + str(inspection))
+            except Exception:
+                # The import lock excludes other workflow writers. Restore exact
+                # prior bytes if any view rejects the audio-only transaction.
+                for rel, raw in backups.items():
+                    path = Path(batch_dir) / rel
+                    temporary = path.with_name('.' + path.name + '.audio-rollback')
+                    temporary.write_bytes(raw)
+                    temporary.replace(path)
+                raise
+            if late_audio and before != batch_fill._read(Path(batch_dir), batch_fill.BATCH):
+                # Exact audio-only projection is proven above. Preserve only
+                # previously current view baselines; never bless unrelated edits.
+                for target in current_views:
+                    spec = contracts.STAGE_BY_ID[target]
+                    manifest['stages'][target]['output_hashes'] = output_hashes(batch_dir, spec)
+                    record_semantics(batch_dir, manifest, spec)
+                if manifest['stages'].get('validate', {}).get('status') in TERMINAL_OK:
+                    invalidate_stage(batch_dir, manifest, 'validate', '已验收音频改变附件，重新执行本地体检')
+                    manifest['stages']['validate']['audio_projection_refresh'] = True
     record_semantics(batch_dir, manifest, stage)
     invalidate_changed_consumers(batch_dir, manifest, stage.id)
     if stage.id != "review":

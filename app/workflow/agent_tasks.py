@@ -321,7 +321,7 @@ def _collect(batch, stage, speculative=False):
     stage = "types" if stage == "preassemble" else stage
     batch = Path(batch).resolve()
     contexts, hashes, missing = {}, {}, []
-    if stage in ('audio', 'assemble', 'review'):
+    if stage in ('audio', 'review'):
         from audio.consistency import pair_is_consistent, read_pair
         audio_pair = read_pair(batch)
         if not pair_is_consistent(batch, audio_pair):
@@ -495,7 +495,9 @@ def _collect(batch, stage, speculative=False):
         if not speculative:
             add(ARTIFACTS["types"])
         if stage in ("explanations", "assemble", "review"):
-            if not speculative:
+            # Matching explanations consumes original material, never the answer
+            # worker's output (which may arrive while this task is in flight).
+            if not speculative and stage != "explanations":
                 add(ARTIFACTS["answers"], False)
             # Optional: answers may live only in the appendix. A changed answer
             # transcript is caught by the strict answer-stage handoff instead.
@@ -1653,7 +1655,10 @@ def _fill_batch_fields(batch_dir, stage, payload):
     from . import batch_fill
     if not (Path(batch_dir) / batch_fill.STATE).is_file():
         return  # Legacy/unmanaged batches keep their established assembly path.
-    if stage in ("answers", "audio", "types", "explanations", "knowledge"):
+    # Audio is projected by manifest.record_delivery only. Import acceptance
+    # installs its artifact first; syncing here would hide the old batch from
+    # the delivery transaction and skip late-media views/validation invalidation.
+    if stage in ("answers", "types", "explanations", "knowledge"):
         batch_fill.sync(batch_dir, stage, payload)
     elif stage == "assemble":
         batch_fill.mark_finalized(batch_dir)

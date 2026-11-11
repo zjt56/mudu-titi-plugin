@@ -708,6 +708,51 @@ def sync(batch_dir, stage, payload=None) -> dict:
                    ignored=ignored, notes=["Ignored source numbers without confirmed unit ownership"] if ignored else [])
 
 
+def project_audio_views(batch_dir, before):
+    """Project accepted media only; retain every existing non-audio view field."""
+    root = _root(batch_dir)
+    after = _read(root, BATCH)
+    def without_audio(value):
+        if isinstance(value, dict):
+            return {key: ([without_audio(a) for a in child if a.get('kind') != 'audio']
+                          if key == 'attachments' and isinstance(child, list) else without_audio(child))
+                    for key, child in value.items() if key not in ('audio', 'audioFile')
+                    and not (key == 'attachments' and isinstance(child, list)
+                             and not any(a.get('kind') != 'audio' for a in child))}
+        if isinstance(value, list):
+            return [without_audio(child) for child in value]
+        return value
+    if without_audio(before) != without_audio(after):
+        left, right = without_audio(before), without_audio(after)
+        changed = [key for key in set(left) | set(right) if left.get(key) != right.get(key)]
+        if changed == ['items']:
+            changed = sorted({key for a, b in zip(left['items'], right['items'])
+                              for key in set(a) | set(b) if a.get(key) != b.get(key)})
+        raise ValueError('Audio delivery changed non-audio batch fields: ' + ', '.join(changed))
+    source = _rows(after)
+    candidates = []
+    for relative in ('06_batch/batch_meta.base.json', '06_batch/batch_meta.json'):
+        view = _read(root, relative)
+        if view is None:
+            continue
+        original = copy.deepcopy(view)
+        rows = _rows(view)
+        if set(rows) != set(source):
+            raise ValueError('Audio projection requires exact derived unit coverage')
+        for uid, row in rows.items():
+            for key in ('number', 'numbers', 'unit_kind'):
+                if row.get(key) != source[uid].get(key):
+                    raise ValueError('Audio projection unit identity differs: ' + uid)
+            audio = [copy.deepcopy(a) for a in source[uid].get('attachments', []) if a.get('kind') == 'audio']
+            row['attachments'] = [a for a in row.get('attachments', []) if a.get('kind') != 'audio'] + audio
+        if without_audio(view) != without_audio(original):
+            raise ValueError('Audio projection changed non-audio view fields')
+        candidates.append((relative, view))
+    for relative, view in candidates:
+        _atomic(root, relative, view)
+    return after
+
+
 def is_filling(batch_dir) -> bool:
     """Read-only ownership check. Conflicts are errors, never an implicit fallback."""
     state, _ = _managed(_root(batch_dir))

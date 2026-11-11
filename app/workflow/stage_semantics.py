@@ -22,7 +22,7 @@ DIRECT_INPUTS = {
     "audio": ("01_source/正文.txt", "01_source/structure.confirmed.json", "03_types/types.json", "02_audio/segment-evidence.json"),
     "answers": ("01_source/正文.txt", "01_source/structure.confirmed.json", "01_source/附录.txt", "01_source_ans/正文.txt"),
     "types": ("01_source/正文.txt", "01_source/structure.confirmed.json"),
-    "explanations": ("01_source/正文.txt", "01_source/structure.confirmed.json", "01_source/structure.json", "01_source/附录.txt", "01_source_ans/正文.txt", "03_types/types.json", "01_source_ans/answers.json"),
+    "explanations": ("01_source/正文.txt", "01_source/structure.confirmed.json", "01_source/structure.json", "01_source/附录.txt", "01_source_ans/正文.txt", "03_types/types.json"),
     "knowledge": ("01_source/正文.txt", "01_source/structure.confirmed.json", "01_source/structure.json", "01_source/metadata.json", "01_source/附录.txt", "01_source_ans/正文.txt", "03_types/types.json"),
     "assemble": ("01_source/正文.txt", "01_source/structure.confirmed.json", "01_source/metadata.json", "01_source/extraction.json", "01_source_ans/answers.json"),
     "validate": ("01_source/正文.txt", "01_source/structure.json", "01_source/structure.confirmed.json", "01_source/extraction.json", "01_source/附录.txt", "01_source_ans/正文.txt", "01_source_ans/附录.txt", "01_source_ans/answers.json", "02_audio/SKIP_LISTENING"),

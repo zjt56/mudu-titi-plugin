@@ -17,8 +17,6 @@ def prepare_answers(batch_dir: Path) -> dict:
     if not source_value:
         return {'prepared': False, 'reason': '没有单独答案卷，使用已提取附录（如有）'}
     source = Path(source_value).expanduser().resolve(strict=True)
-    if source.suffix.lower() == '.txt':
-        return {'prepared': False, 'reason': '答案卷为文本，直接读取'}
     output = batch / '01_source_ans'
     output.mkdir(parents=True, exist_ok=True)
     provenance = output / 'preparation.json'
@@ -32,9 +30,15 @@ def prepare_answers(batch_dir: Path) -> dict:
         if saved.get('source_sha256') == digest and saved.get('text_sha256') == mf.sha256_file(text_path):
             return {'prepared': True, 'cached': True}
     attempt = Path(tempfile.mkdtemp(prefix='source-', dir=output))
-    report = extract.extract_source(source, attempt)
-    # 答案卷本身可能重复大题标题。不得使用被分离附录后的正文漏掉后半答案。
-    raw = attempt / '原始正文.txt'
+    if source.suffix.lower() == '.txt':
+        # Canonicalize the original text during extract, before label tasks bind
+        # their shared source. No answers.json or answer-stage execution needed.
+        raw = source
+        report = {'source': 'original_text'}
+    else:
+        report = extract.extract_source(source, attempt)
+        # 答案卷本身可能重复大题标题。不得使用被分离附录后的正文漏掉后半答案。
+        raw = attempt / '原始正文.txt'
     if text_path.is_file():
         shutil.copy2(text_path, text_path.with_name('正文.txt.bak'))
     shutil.copy2(raw, text_path)

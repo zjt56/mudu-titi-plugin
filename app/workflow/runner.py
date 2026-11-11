@@ -253,6 +253,15 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
                 print(f"  · 结构 AI 复核：已将 {len(reviewed['skipped'])} 行答案/解析移入附录")
         except (OSError, ValueError, RuntimeError, TypeError) as exc:
             print(f"  · 结构 AI 复核跳过：{str(exc)[:160]}")
+    if code == 0 and stage.id == "extract":
+        # Metadata is an extract product: finish enrichment before recording its
+        # hashes, otherwise a fresh extraction immediately invalidates itself.
+        try:
+            from . import metadata_ai
+            with activity.track(batch_dir, "extract", "正在识别卷头与试卷元信息"):
+                metadata_ai.auto_identify(batch_dir)
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
+            print(f"  · 元信息识别跳过：{str(exc)[:160]}")
     with _agent_lock(timeout):
         current = mf.load(batch_dir)
         # Another actor may have completed this stage while the command ran.
