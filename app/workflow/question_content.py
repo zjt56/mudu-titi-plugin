@@ -27,6 +27,46 @@ def _image_names(lines: list[str]) -> list[str]:
     return [match.group(1).strip() for line in lines for match in IMAGE.finditer(line)]
 
 
+def _blank_table_grids(text: str) -> int:
+    """Count [TABLE n] grids whose every cell line is empty (student answer grids)."""
+    blank = 0
+    for match in re.finditer(r"\[TABLE(?:\s+\d+)?\](.*?)\[/TABLE\]", str(text), re.S):
+        body = [re.sub(r"\s+", "", row) for row in match.group(1).splitlines()]
+        if not any(body):  # every non-empty content line missing => empty grid
+            blank += 1
+    return blank
+
+
+def capability_limited_source(unit: dict, appendix_text: str | None = None) -> bool:
+    """True when the unit's incompleteness is a capability/原卷形态 limit, not missing text.
+
+    Two legitimate shapes never block downstream and must not be treated as
+    truncated/missing content:
+    1. 纯图片题: the unit's source contains only image placeholders (e.g. 填词游戏
+       以 image9.jpeg 呈现), so the text layer cannot carry题干/空位；
+    2. 空白作答网格: the source's tables are all empty (student fills them in),
+       and the answers for the unit appear verbatim in the answer appendix.
+    Anything else (real truncation, missing options, mismatched stem) stays a block.
+    """
+    stem = str(unit.get("stem") or "")
+    numbers = [str(n) for n in (unit.get("numbers") or [])]
+    lines = [line for line in stem.splitlines()]
+    non_empty = [line.strip() for line in lines if line.strip()]
+    has_image = any(IMAGE.search(line) for line in lines)
+    non_image = [line for line in non_empty if not IMAGE.search(line) and not re.fullmatch(r"\[/?TABLE[^\]]*\]", line)]
+    # 纯图片题：除图片/表格标记外没有可读文字题干。
+    if has_image and not non_image:
+        return True
+    # 空白作答网格：所有表格都为空，且答案在附录明确给出。
+    table_count = len(re.findall(r"\[TABLE(?:\s+\d+)?\]", stem))
+    if table_count and _blank_table_grids(stem) == table_count and appendix_text and numbers:
+        for number in numbers:
+            if not re.search(r"(?<![\d])" + re.escape(number) + r"\s*[.．、]", appendix_text):
+                return False
+        return True
+    return False
+
+
 def audit_question(source_lines: list[str], number: int, item: dict | None = None,
                    media_dir: str | Path | None = None) -> dict:
     """Check a source slice for obvious scope/structure defects; visual mapping stays human-reviewed."""

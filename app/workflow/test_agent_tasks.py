@@ -852,6 +852,32 @@ class AgentTasksTest(unittest.TestCase):
         self.assertEqual(json.loads((self.batch / "03_types/a.json").read_text()), {"old": 1})
         self.assertEqual(json.loads((self.batch / "03_types/b.json").read_text()), {"old": 2})
 
+    def _types_batch(self, stem, appendix, numbers=(1,)):
+        units = [{"unit_id": "u-1", "unit_kind": "group", "type": "语音题",
+                  "numbers": list(numbers), "stem": stem, "source_span": {"start_line": 1, "end_line": 1}}]
+        self.write("01_source/structure.confirmed.json", {"version": "1.0", "units": units})
+        self.write("01_source/附录.txt", appendix)
+        return {"items": [{"unit_id": "u-1", "type": "语音题", "subtypes": [],
+                           "words": 3, "contentComplete": False, "evidence": ["正文 L1"]}]}
+
+    def test_blank_answer_grid_with_appendix_answer_is_capability_limited(self):
+        blank_tables = "1. /eɪ/\n[TABLE 1]\n\n\n[/TABLE]\n2. /iː/\n[TABLE 2]\n\n\n[/TABLE]"
+        payload = self._types_batch(blank_tables, "参考答案\nⅠ.1.Aa,Hh,Jj,Kk　2.Bb,Cc,Dd,Ee", numbers=(1, 2))
+        report = tasks.accept_result(self.batch, "types", self.result("types", payload), validate_only=True)
+        self.assertTrue(report["completed"], report)
+
+    def test_image_only_unit_is_capability_limited(self):
+        payload = self._types_batch("[IMG image9.jpeg]", "参考答案\nⅠ.1.VR")
+        report = tasks.accept_result(self.batch, "types", self.result("types", payload), validate_only=True)
+        self.assertTrue(report["completed"], report)
+
+    def test_real_truncation_still_blocks_content_incomplete(self):
+        # 有文字题干但表格非空、且答案不在附录：真实缺内容，仍必须阻断。
+        payload = self._types_batch("1. 下列字母组合 A.BIF B.XHS\n[TABLE 1]\n| 有内容 |\n[/TABLE]",
+                                    "参考答案\nⅣ.1 DCABD")
+        with self.assertRaisesRegex(ValueError, "incomplete source content"):
+            tasks.accept_result(self.batch, "types", self.result("types", payload), validate_only=True)
+
 
 if __name__ == "__main__":
     unittest.main()

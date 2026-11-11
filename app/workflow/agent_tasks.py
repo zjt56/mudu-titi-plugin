@@ -1294,6 +1294,17 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
         return
     if stage == "types":
         rows = _types(payload, units)
+        # 图片/音频能力受限与原卷空白作答网格不是内容缺失：只有这类单元
+        # 允许 contentComplete=false，其余仍如实阻断并等待真实修复。
+        from .question_content import capability_limited_source
+        appendix = ""
+        try:
+            appendix_path = _safe_path(batch, "01_source/附录.txt")
+            if appendix_path.is_file():
+                appendix = appendix_path.read_text(encoding="utf-8-sig")
+        except (OSError, ValueError):
+            appendix = ""
+        unit_by_id = {u["unit_id"]: u for u in units}
         for row in rows.values():
             # 子智能体3必须给出词数与内容完整性；旧批次的上游产物回放时不强制。
             for key in ("words", "contentComplete"):
@@ -1302,6 +1313,13 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             if isinstance(row["words"], bool) or not isinstance(row["words"], int) or row["words"] < 0:
                 raise ValueError("words must be a nonnegative integer")
             if row["contentComplete"] is not True:
+                unit = unit_by_id.get(row.get("unit_id")) or {}
+                if capability_limited_source(unit, appendix):
+                    if notes is not None:
+                        notes.append(
+                            "%s：原卷为图片题或空白作答网格（答案在附录），按能力受限记录，不阻断下游"
+                            % row.get("unit_id"))
+                    continue
                 raise ValueError(f"{row['unit_id']}: incomplete source content must be repaired before downstream tasks start")
         return
     if stage == "explanations":
@@ -1787,6 +1805,24 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
     from . import scoped_regeneration
     chosen = scoped_regeneration.selected(stage, context, units)
     _findings(result["findings"], chosen if chosen is not None else units)
+    if stage == "types":
+        # 图片题/空白作答网格属能力受限，不是内容缺失：模型据此提出的
+        # contentComplete 阻塞/重要发现降级为 info，避免把能力边界当成卡点；
+        # 真实截断、缺选项等仍按原严重度阻断。
+        from .question_content import capability_limited_source
+        appendix = ""
+        try:
+            appendix_path = _safe_path(batch_dir, "01_source/附录.txt")
+            if appendix_path.is_file():
+                appendix = appendix_path.read_text(encoding="utf-8-sig")
+        except (OSError, ValueError):
+            appendix = ""
+        unit_by = {u["unit_id"]: u for u in units}
+        for finding in result["findings"]:
+            if (finding.get("severity") in ("blocker", "major")
+                    and capability_limited_source(unit_by.get(finding.get("unit_id")) or {}, appendix)):
+                finding["severity"] = "info"
+                finding["reason"] = "能力受限（图片题/空白作答网格，答案在附录），不阻断：" + finding["reason"]
     report = {"completed": False, "status": result["status"], "artifacts": [],
               "notes": result["notes"], "findings": result["findings"]}
     if stage == "review" and ARTIFACTS[stage] in artifacts:
