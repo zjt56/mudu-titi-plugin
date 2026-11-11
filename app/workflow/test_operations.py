@@ -407,6 +407,121 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(view["incident"]["status"], "queued")
         self.assertEqual(view["receipts"], [])
 
+    def test_batch_lock_refusals_have_no_receipt_or_action_effect(self):
+        claim = self.claim()
+        before = (self.folder / "workflow/operations.json").read_bytes()
+        for lock in (supervisor._auto_lock_path(self.folder), self.folder / "workflow/.run.lock"):
+            with self.subTest(lock=lock.name):
+                with supervisor._try_file_lock(lock) as acquired, patch.object(op, "_verify") as verify:
+                    self.assertTrue(acquired)
+                    with self.assertRaisesRegex(op.OperationsBusy, "worker_busy"):
+                        self.request(claim, "verify", request="not-admitted")
+                    verify.assert_not_called()
+                self.assertEqual((self.folder / "workflow/operations.json").read_bytes(), before)
+                self.assertEqual(op._load(self.folder)["receipts"], [])
+        self.assertEqual(self.request(claim, "verify", request="not-admitted")["status"], "completed")
+
+    def test_admitted_lock_timeout_keeps_original_agent_error_and_releases_locks(self):
+        from workflow import local_agent
+        failure = local_agent.AgentError("action body lock_timeout", "lock_timeout")
+        for execution in (False, True):
+            with self.subTest(execution=execution):
+                with self.assertRaises(local_agent.AgentError) as caught:
+                    with op._locked(self.root, self.folder, execution=execution):
+                        raise failure
+                self.assertIs(caught.exception, failure)
+                self.assertNotIsInstance(caught.exception, op.OperationsBusy)
+                with op._locked(self.root, self.folder, execution=True):
+                    pass
+
+    def test_mutating_action_lock_timeout_remains_unknown_and_is_not_replayed(self):
+        from workflow import local_agent
+        claim = self.claim()
+        with patch("workflow.self_heal_actions._prepare_tables", return_value={"passed": True}), \
+             patch.object(op.self_heal, "_snapshot", return_value={"files": {}}):
+            self.request(claim, "preview_repair", {"repair": "repair_source_tables"}, request="preview")
+            def interrupted(*args, **kwargs):
+                self.put("partial-test-marker.json", {"written": True})
+                raise local_agent.AgentError("action body lock_timeout", "lock_timeout")
+            with patch("workflow.self_heal_actions.apply_source_table_repair", side_effect=interrupted) as apply:
+                result = self.request(claim, "apply_repair", {"repair": "repair_source_tables"})
+                self.assertEqual(result["status"], "unknown")
+                self.assertIn("action body lock_timeout", result["evidence"]["error"])
+                self.assertNotIn("worker_busy", result["evidence"]["error"])
+                before = (self.folder / "workflow/operations.json").read_bytes()
+                with supervisor._try_file_lock(supervisor._auto_lock_path(self.folder)) as acquired:
+                    self.assertTrue(acquired)
+                    with self.assertRaises(op.OperationsBusy):
+                        self.request(claim, "apply_repair", {"repair": "repair_source_tables"})
+                self.assertEqual((self.folder / "workflow/operations.json").read_bytes(), before)
+                self.assertEqual(self.request(claim, "apply_repair", {"repair": "repair_source_tables"}), result)
+                self.assertEqual(apply.call_count, 1)
+        self.assertTrue((self.folder / "partial-test-marker.json").is_file())
+        with self.assertRaisesRegex(ValueError, "unknown_receipt_quarantine"):
+            self.request(claim, "apply_repair", request="new-request")
+
+    def test_heartbeat_receipt_reports_actual_lease_deadline(self):
+        claim = self.claim()
+        now = op.time.time() + 10
+        with patch.object(op.time, "time", return_value=now):
+            result = self.request(claim, "heartbeat")
+        deadline = now + op.LEASE_SECONDS
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["evidence"]["lease_expires_at"], deadline)
+        self.assertEqual(op._load(self.folder)["incident"]["lease_expires_at"], deadline)
+        self.assertEqual(self.request(claim, "heartbeat"), result)
+        self.assertEqual(op._load(self.folder)["incident"]["lease_expires_at"], deadline)
+
+    def test_http_busy_contract_only_marks_admission_refusal(self):
+        from http.server import ThreadingHTTPServer
+        from workbench import server
+        from workflow import local_agent
+        import threading, urllib.error, urllib.request
+        claim = self.claim()
+        payload = {key: claim[key] for key in ("incident_id", "attempt_id", "session_id")}
+        payload.update(request_id="http-busy", action="verify")
+        http = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        worker = threading.Thread(target=http.serve_forever, daemon=True)
+        worker.start()
+        def call(endpoint):
+            request = urllib.request.Request(
+                'http://127.0.0.1:%d/api/batches/paper/operations/%s' % (http.server_port, endpoint),
+                data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+            try:
+                response = urllib.request.urlopen(request, timeout=3)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                return response.status, json.load(response)
+        try:
+            with patch.object(server, "WORKFLOWS", self.root):
+                before = (self.folder / "workflow/operations.json").read_bytes()
+                with supervisor._try_file_lock(supervisor._auto_lock_path(self.folder)) as acquired, \
+                     patch.object(op, "_verify") as verify:
+                    self.assertTrue(acquired)
+                    for endpoint in ("claim", "action", "heartbeat", "progress", "release", "cancel"):
+                        status, body = call(endpoint)
+                        self.assertEqual(status, 409, endpoint)
+                        self.assertEqual(body, {"code": "worker_busy", "admitted": False,
+                            "retryable": True, "retry_after_ms": 500, "batch_name": self.folder.name,
+                            "batch_dir": str(self.folder.resolve()), "error": "worker_busy: 批次执行锁已占用"})
+                    verify.assert_not_called()
+                self.assertEqual((self.folder / "workflow/operations.json").read_bytes(), before)
+                for failure, expected in ((ValueError("worker_busy: action body"), 400),
+                                          (local_agent.AgentError("action body lock_timeout", "lock_timeout"), 500)):
+                    with patch.object(op, "_snapshot", side_effect=failure):
+                        status, body = call("action")
+                    self.assertEqual(status, expected)
+                    self.assertEqual(body, {"error": str(failure)})
+                with patch.object(op, "_verify", return_value={"verified": False}):
+                    status, body = call("action")
+                self.assertEqual(status, 200)
+                self.assertEqual(body["status"], "completed")
+        finally:
+            http.shutdown()
+            http.server_close()
+            worker.join(timeout=3)
+
     def test_http_contract_roundtrip_without_models(self):
         from http.server import ThreadingHTTPServer
         from workbench import server
@@ -447,8 +562,13 @@ class OperationsTests(unittest.TestCase):
             self.assertEqual(process.stdout.readline().strip(), 'ready')
             self.assertEqual(self.request(claim, 'heartbeat')["status"], 'completed')
             self.assertEqual(op.view(self.root, self.folder)["incident"]["status"], 'claimed')
-            with self.assertRaisesRegex(ValueError, 'worker_busy'):
-                self.request(claim, 'apply_repair', {"repair": "repair_source_tables"}, request='apply')
+            before = (self.folder / "workflow/operations.json").read_bytes()
+            with patch("workflow.self_heal_actions.apply_source_table_repair") as apply:
+                with self.assertRaisesRegex(op.OperationsBusy, 'worker_busy'):
+                    self.request(claim, 'apply_repair', {"repair": "repair_source_tables"}, request='apply')
+                apply.assert_not_called()
+            self.assertEqual((self.folder / "workflow/operations.json").read_bytes(), before)
+            self.assertNotIn('apply', [row['request_id'] for row in op._load(self.folder)['receipts']])
         finally:
             process.communicate(timeout=5)
         self.assertEqual(process.returncode, 0)
@@ -461,8 +581,11 @@ class OperationsTests(unittest.TestCase):
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(process.stdout.readline().strip(), "ready")
-            with self.assertRaisesRegex(ValueError, "worker_busy"):
+            before = (self.folder / "workflow/operations.json").read_bytes()
+            with self.assertRaisesRegex(op.OperationsBusy, "worker_busy"):
                 op.claim(self.root, self.folder, {"incident_id": incident["incident_id"], "session_id": "other"})
+            self.assertEqual((self.folder / "workflow/operations.json").read_bytes(), before)
+            self.assertEqual(op._load(self.folder)["receipts"], [])
         finally:
             process.communicate(timeout=5)
         self.assertEqual(process.returncode, 0)

@@ -700,3 +700,83 @@ test('work-state scan timeout releases single flight and stop/start restores the
     assert.equal(f.agents.length, 0);
   } finally { clearTimeout(keepAlive); await f.manager.dispose(); }
 });
+
+test('busy diagnostic request cannot clear an older unknown mutation', async () => {
+  const f = await fixture({ backend: (_path, init) => {
+    if (init.body?.action === 'apply_repair') throw new Error('lost response');
+    if (init.body?.action === 'read_evidence') throw busy();
+  }, managerOptions: { busyWaitMs: 20 }, program: async a => {
+    await assert.rejects(a.call('apply_repair'));
+    const result = await a.call('read_evidence', { path: 'receipt' });
+    assert.equal(result.deferred, true);
+    await assert.rejects(a.call('resume'), { code: 'OUTCOME_UNKNOWN' });
+  } });
+  await f.run();
+  assert.equal(f.calls.filter(c => c.body?.action === 'apply_repair').length, 1);
+  assert.equal(f.calls.filter(c => c.body?.action === 'resume').length, 0);
+  assert.equal(f.calls.filter(c => c.body?.action === 'release').length, 0);
+  assert.ok(f.calls.some(c => c.body?.action === 'progress' && c.body.input.outcome === 'unknown'));
+  await f.manager.dispose();
+});
+test('busy claim waits for next discovery without false error or session creation', async () => {
+  let claims = 0;
+  const f = await fixture({ managerOptions: { intervalMs: 10 }, backend: (path) => {
+    if (path.endsWith('/claim') && ++claims === 1) throw busy();
+  } });
+  await f.run();
+  assert.equal(f.agents.length, 0);
+  assert.equal(f.manager.status().attempts[0].state, 'waiting_worker');
+  assert.equal(f.manager.status().attempts[0].error, '');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await f.manager.tick(); await f.manager.drain();
+  assert.equal(f.agents.length, 1);
+  await f.manager.dispose();
+});
+const busy = () => Object.assign(new Error('worker_busy: 批次执行锁已占用'), {
+  code: 'worker_busy', admitted: false, retryable: true, retry_after_ms: 10,
+});
+test('only structured admission rejection survives HTTP bridge as safely retryable', async () => {
+  const { operationsHttpError, isAdmissionBusy } = await moduleReady;
+  const body = { error: 'worker_busy', code: 'worker_busy', admitted: false, retryable: true,
+    batch_name: 'batch', batch_dir: '/batch', retry_after_ms: 500 };
+  assert.equal(isAdmissionBusy(operationsHttpError(body, 409)), true);
+  for (const value of [operationsHttpError(body, 500), operationsHttpError({ error: 'worker_busy' }, 400), new Error('worker_busy')]) {
+    assert.equal(isAdmissionBusy(value), false);
+  }
+});
+test('temporary admission busy retries same fresh action id and executes once', async () => {
+  let tries = 0;
+  const f = await fixture({ backend: async (_path, init) => {
+    if (init.body?.action === 'record_finding' && ++tries === 1) throw busy();
+  }, program: async a => { await a.call('record_finding', { summary: 'evidence' }); } });
+  await f.run();
+  const calls = f.calls.filter(c => c.body?.action === 'record_finding');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].body.request_id, calls[1].body.request_id);
+  assert.equal(f.state.receipts.filter(r => r.request_id === calls[0].body.request_id).length, 1);
+  assert.ok(f.events.some(e => e.state === 'waiting_worker'));
+  assert.ok(!f.events.some(e => ['backend_disconnected', 'release_unknown'].includes(e.state)));
+  await f.manager.dispose();
+});
+test('heartbeat and release admission waits do not lose lease or report unknown', async () => {
+  const counts = {};
+  const f = await fixture({ backend: async (_path, init) => {
+    const action = init.body?.action;
+    if (['heartbeat', 'release'].includes(action) && (counts[action] = (counts[action] || 0) + 1) === 1) throw busy();
+  }, program: async a => { await a.call('diagnose'); } });
+  await f.run();
+  assert.equal(f.agents.length, 1);
+  assert.equal(counts.heartbeat, 2); assert.equal(counts.release, 2);
+  assert.ok(!f.events.some(e => ['lease_uncertain', 'release_unknown'].includes(e.state)));
+  await f.manager.dispose();
+});
+test('exhausted admission wait defers without mutation receipt or false recovery', async () => {
+  const f = await fixture({ managerOptions: { busyWaitMs: 25 }, backend: async (_path, init) => {
+    if (init.body?.action === 'record_finding') throw busy();
+  }, program: async a => { const result = await a.call('record_finding', { summary: 'evidence' }); assert.equal(result.deferred, true); } });
+  await f.run();
+  assert.equal(f.state.receipts.filter(r => r.evidence?.summary === 'evidence').length, 0);
+  assert.ok(!f.events.some(e => ['backend_disconnected', 'resolved', 'release_unknown', 'model_failed'].includes(e.state)));
+  assert.ok(f.calls.some(c => c.body?.action === 'release'));
+  await f.manager.dispose();
+});

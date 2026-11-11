@@ -5,7 +5,7 @@ operation; an interrupted request remains unknown and must never be replayed.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -69,6 +69,10 @@ def _active(root, folder):
     return manifest
 
 
+class OperationsBusy(ValueError):
+    """Admission was refused before any operations request could execute."""
+
+
 @contextmanager
 def _locked(root, folder, *, execution=False, runner=False):
     root, folder = Path(root), Path(folder)
@@ -76,7 +80,7 @@ def _locked(root, folder, *, execution=False, runner=False):
     identity = _identity(folder)
     with supervisor._try_file_lock(supervisor._auto_lock_path(folder)) as acquired:
         if not acquired:
-            raise ValueError("worker_busy: 批次执行锁已占用")
+            raise OperationsBusy("worker_busy: 批次执行锁已占用")
         _active(root, folder)
         if _identity(folder) != identity:
             raise ValueError("identity_changed: 批次身份已变化")
@@ -86,14 +90,15 @@ def _locked(root, folder, *, execution=False, runner=False):
         run_guard = supervisor._try_file_lock(folder / "workflow/.run.lock") if execution or runner else nullcontext(True)
         with run_guard as run_acquired:
             if not run_acquired:
-                raise ValueError("worker_busy: runner owns batch")
-            try:
-                with (local_agent._agent_lock(0) if execution else nullcontext()):
-                    yield
-            except local_agent.AgentError as exc:
-                if exc.code == "lock_timeout":
-                    raise ValueError("worker_busy: live model/import worker") from exc
-                raise
+                raise OperationsBusy("worker_busy: runner owns batch")
+            with ExitStack() as stack:
+                try:
+                    stack.enter_context(local_agent._agent_lock(0) if execution else nullcontext())
+                except local_agent.AgentError as exc:
+                    if exc.code == "lock_timeout":
+                        raise OperationsBusy("worker_busy: live model/import worker") from exc
+                    raise
+                yield
 
 
 def _load(folder):
@@ -1189,6 +1194,8 @@ def action(root, folder, payload, *, enqueue=None):
                 result = {"detail": _redact("; ".join(dict.fromkeys(parts)))[:2000]}
             if incident.get("status") == "claimed":
                 incident["lease_expires_at"] = time.time() + LEASE_SECONDS
+                if name == "heartbeat":
+                    result["lease_expires_at"] = incident["lease_expires_at"]
             incident["snapshot"] = _snapshot(folder, incident["stage"])
             receipt.update(status="unknown" if resume else "completed", evidence=result)
             _event(incident, name, "completed", result.get("detail") or result.get("summary") or "", result if name == "verify" else None)

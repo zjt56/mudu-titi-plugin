@@ -3047,13 +3047,18 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "operations":
                 from workflow import operations
                 folder = batch_dir(parts[2])
-                if parts[4] == "claim":
-                    return self.send_json(operations.claim(WORKFLOWS, folder, payload))
-                if parts[4] in {"action", "heartbeat", "progress", "release", "cancel"}:
-                    if parts[4] != "action":
-                        payload = {**payload, "action": parts[4]}
-                    return self.send_json(operations.action(WORKFLOWS, folder, payload,
-                        enqueue=lambda expected: _launch_advance(parts[2], folder, operations_expectation=expected)))
+                try:
+                    if parts[4] == "claim":
+                        return self.send_json(operations.claim(WORKFLOWS, folder, payload))
+                    if parts[4] in {"action", "heartbeat", "progress", "release", "cancel"}:
+                        if parts[4] != "action":
+                            payload = {**payload, "action": parts[4]}
+                        return self.send_json(operations.action(WORKFLOWS, folder, payload,
+                            enqueue=lambda expected: _launch_advance(parts[2], folder, operations_expectation=expected)))
+                except operations.OperationsBusy as exc:
+                    return self.send_json({"code": "worker_busy", "admitted": False,
+                        "retryable": True, "retry_after_ms": 500,
+                        "batch_name": folder.name, "batch_dir": str(folder), "error": str(exc)}, 409)
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "upload":
                 return self.send_json({"ok": True, **start_batch_upload(
                     parts[2], allow_unreviewed=payload.get('allow_unreviewed', False),
