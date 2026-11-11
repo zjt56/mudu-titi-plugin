@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-11 | [2026-11-11-review-candidate-envelope-recovery.md](2026-11-11-review-candidate-envelope-recovery.md) | 原审核候选只修协议层级/原引文，9条判断原样交回，两轮完成且3项差异保留 |
 | 2026-11-11 | [2026-11-11-native-unnumbered-assembly.md](2026-11-11-native-unnumbered-assembly.md) | 合法无号字母歌/图片填词按完整当前来源通过装配消费校验，缺画线只提示 |
 | 2026-11-11 | [2026-11-11-scoped-mixed-lesson-answers.md](2026-11-11-scoped-mixed-lesson-answers.md) | 单课时紧凑答案支持无号整节与唯一提升尾节，完整来源证明与原候选坐标复验 |
 | 2026-11-11 | [2026-11-11-legitimate-shape-rule-hardening.md](2026-11-11-legitimate-shape-rule-hardening.md) | 原卷合法空/图形态（纯图片/空白作答网格/无号有正文）统一分类，代码+提示词+规则硬化防同类误判 |

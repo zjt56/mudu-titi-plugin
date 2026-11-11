@@ -24,7 +24,7 @@
 - 受控真实批次：持 `supervisor.advance_claim`，正常 `assemble_local.build -> agent_tasks.accept_result(validate_only=True)` 校验通过；正常 `workflow.agent run --stage assemble` 确定性导入成功（0模型调用）。来源刷新导致旧前置交付字节指纹失效时，停止无必要模型重跑，导出新的 preassemble 任务 `3b6b6c68-6771-464a-a9c2-8e88c5058005`，逐项复验原已接受 types 并经正常协议交付，题型payload完全不变。
 - 正常本地推进执行meta、underlines、validate，`validation-report.json`：19检查、passed=true、blocking_failures=[]、warnings=[]、skipped=[]；当前validate消费者通过。17个原答案在 `batch.json` / `batch_meta.base.json` / `batch_meta.json` 中逐question ID均与已接受原候选完全相等。
 - 数据及展示链：Ⅱ保留完整147字字母歌正文；Ⅲ原第58行导语逐字保留、image9.jpeg原生question附件保留；source_slice、source_blocks、upload_payload三层均保留正文/导语/图片，GROUP_INCOMPLETE/MISSING_STEM为空。没有实际远端上传。
-- 后续内容审核已由原执行器实际启动；出现独立审核响应缺键时由既有运维另行处理，本次装配通过不等于审核放行，不改审核差异。
+- 后续内容审核真实两轮均已执行。labels原响应的notes/findings误嵌入artifacts，且图片题引文漏「中」字；仅移动现有同名元数据至正确层并逐字恢复原第58行引文，9条verdict/assessment/rationale完全不变，原任务绑定仍当前，通用review importer复验接受。`execution_completed=true`、`checked_rounds=[labels,sample]`、unchecked为空；正常review_gate保留3项open差异（另5项历史fixed结构条目仍保留），quality_passed=false。正常format_gate报告passed=true/errors=[]，报告当前绑定与消费者均通过；批次pending_confirmation，未上传发布、无上传receipt。
 
 ## 回退
 
