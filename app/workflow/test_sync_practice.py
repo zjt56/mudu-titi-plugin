@@ -178,6 +178,9 @@ class TestMaterialScope(unittest.TestCase):
         self.assertIn("同步练习", block)
         self.assertIn("group", block)
         self.assertIn("单元话题写作", block)
+        # 编号空格/空位号不是印刷题号的约束必须进入结构确认提示词，防同类误判复发。
+        self.assertIn("空位号", block)
+        self.assertIn("不是印刷题号", block)
         self.assertLess(len(block), 4000)
 
     def test_module_cli_self_check_passes(self):

@@ -115,21 +115,23 @@ def _scope_windows(sections: list[dict], source_lines: list[str]) -> list[dict]:
 def _scope_anchors(lines: list[str]) -> list[tuple[int, int]]:
     """Printed item anchors, including dialogue slots and same-line exercises.
 
-    Cloze/短文填空 材料行内的 `<u>　n　</u>` 是编号空格（子题号本体），既不是印刷题号，
-    也不该与下方 `( )n.` 选项行并列重复计数。先按库侧空档写法规范化再扫锚点，
-    让 `__n__` 不再被“数字+句点”误判成题号。
+    空位号识别统一走 `preview._weak_numbers`，避免各处各写一套正则。
+    Cloze/短文填空 材料行内的 `<u>　n　</u>` 是编号空格（子题号本体），先按库侧
+    空档写法规范化再扫锚点，让 `__n__` 不再被“数字+句点”误判成印刷题号，也不会
+    与下方 `( )n.` 选项行并列重复计数。
     """
     from .preview import _strong_number, _weak_numbers
     from .wire_format import normalize_blank_text
     strong, weak = [], []
     for index, line in enumerate(lines):
-        plain = _plain(normalize_blank_text(line))
+        normalized = normalize_blank_text(line)
+        plain = _plain(normalized)
         nums = [int(m.group(1)) for m in re.finditer(r"(?:^|[\s:：])([1-9]\d{0,2})\s*[.．](?!\d)", plain)]
-        first = _strong_number(line)
+        first = _strong_number(normalized)
         if first is not None and first not in nums:
             nums.insert(0, first)
         strong.extend((index, number) for number in nums)
-        weak.extend((index, number) for number in sorted(set(_weak_numbers(normalize_blank_text(line)))))
+        weak.extend((index, number) for number in _weak_numbers(normalized))
     printed = {number for _, number in strong}
     return strong + [row for row in weak if row[1] not in printed]
 

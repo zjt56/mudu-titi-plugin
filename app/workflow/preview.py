@@ -58,14 +58,19 @@ def _strong_number(line: str) -> int | None:
     return None
 
 
+# 空位号（子题号本体）的两种合法写法，集中在一处，供预览/闸门/身份/审计共用：
+#   ① 空位在题号前：「　31　」「__31__」「____31」
+#   ② 题号在空位前（补全对话/信息转换）：「2.　　」「Tony.1.____」，题号后必须确有
+#      空档标记（全角空格/下划线/__），才不会吞掉普通句号后的数字（如 "No.5"）。
+_BLANK_BEFORE_NUMBER = re.compile(r"(?:\u3000|__|_{1,})\s*(\d{1,3})(?!\d)")
+_NUMBER_BEFORE_BLANK = re.compile(r"(?<!\d)(\d{1,3})\s*[.．]\s*(?=\u3000|__|_)")
+
+
 def _weak_numbers(line: str) -> list[int]:
-    """材料一行里可能有多个空位（31–40 同段），必须全部扫出来。"""
+    """材料一行里所有空位号（子题号），不把普通句号数字误当题号。"""
     plain = _plain(line)
-    found = [int(m.group(1)) for m in re.finditer(r"(?:\u3000|__|_{1,})\s*(\d{1,3})(?!\d)", plain)]
-    # 补全对话/信息转换空位也可写成「2.　　」「Tony.1.____」：题号在空位之前，
-    # 紧跟文本或句号，后面必须跟空档标记才是“空位号”，不能吞掉普通句号数字。
-    for m in re.finditer(r"(?<!\d)(\d{1,3})\s*[.．]\s*(?=\u3000|__|_)", plain):
-        found.append(int(m.group(1)))
+    found = [int(m.group(1)) for m in _BLANK_BEFORE_NUMBER.finditer(plain)]
+    found += [int(m.group(1)) for m in _NUMBER_BEFORE_BLANK.finditer(plain)]
     return sorted(set(found))
 
 
