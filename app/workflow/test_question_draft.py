@@ -468,6 +468,28 @@ class QuestionDraftTest(unittest.TestCase):
             self.assertEqual(task["input_hashes"][question_draft.PATH], hashlib.sha256((self.root / question_draft.PATH).read_bytes()).hexdigest())
 
 
+class ImagePrefixedOptionsTest(unittest.TestCase):
+    """图片前置选项 `[IMG x]A. …` 按顺序把图配到 A/B/C/D，不错位、不丢失。"""
+
+    def test_images_bound_in_order(self):
+        raw = ("( )4.[新考法·图片理解]Jimmy can't use ______ now.\n"
+               "[IMG image14.jpeg]A.\t[IMG image15.jpeg]B.\n"
+               "[IMG image16.jpeg]C.\t[IMG image17.jpeg]D.\n")
+        r = question_draft._image_prefixed_options(raw)
+        self.assertIsNotNone(r)
+        got = {o["key"]: o["text"] for o in r["options"]}
+        self.assertEqual(got, {"A": "[IMG image14.jpeg]", "B": "[IMG image15.jpeg]",
+                               "C": "[IMG image16.jpeg]", "D": "[IMG image17.jpeg]"})
+        self.assertIn("Jimmy", r["stem"])
+
+    def test_non_prefixed_returns_none(self):
+        # 正常 `A.[IMG]` 后置形态与纯文本都不走此分支，返回 None。
+        self.assertIsNone(question_draft._image_prefixed_options(
+            "( )1. Pick one.\nA.[IMG a.jpeg] B.[IMG b.jpeg]\n"))
+        self.assertIsNone(question_draft._image_prefixed_options(
+            "( )1. Q?\nA.One B.Two C.Three D.Four\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

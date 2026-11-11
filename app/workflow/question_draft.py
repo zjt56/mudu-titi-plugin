@@ -90,6 +90,32 @@ def _raw_fragment(raw, needle, after=0):
     return raw[left:right].strip(), end
 
 
+def _image_prefixed_options(raw):
+    """解析 `[IMG x]A. … [IMG y]B.` 前置图片选项排版，按顺序把图配到标签。
+
+    仅在“选项标签组”整体为图片前置形态时生效（≥2 个 `[IMG]X.` 且标签连续），
+    其余返回 None 交给原解析，避免影响普通文本选项、`A.[IMG]` 后置形态。
+    返回 {"stem","options","found"} 或 None。
+    """
+    if not raw:
+        return None
+    # 逐对抓取 `[IMG ...]` 紧贴 `X.` 的形态。
+    pairs = list(re.finditer(r"\[IMG\s+([^\]]+?)\]\s*([A-H])[.．、]", raw))
+    if len(pairs) < 2:
+        return None
+    labels = [m.group(2) for m in pairs]
+    # 标签必须从 A 起连续递增，且是这一段的选项组（不是分散的多题）。
+    expected = list("ABCDEFGH"[:len(labels)])
+    if labels != expected:
+        return None
+    # 同一行/相邻行的连续选项组：首尾跨度不应过大（防止把整卷多处 [IMG]A. 拼一起）。
+    if pairs[-1].start() - pairs[0].start() > 600:
+        return None
+    stem = raw[:pairs[0].start()].strip()
+    options = [{"key": m.group(2), "text": f"[IMG {m.group(1)}]"} for m in pairs]
+    return {"stem": stem, "options": options, "found": True}
+
+
 def _parts(lines, number, *, scoped=False):
     """Use the existing source parser, retaining Word markup rather than OCR."""
     if scoped:
@@ -100,6 +126,12 @@ def _parts(lines, number, *, scoped=False):
     start = _find(lines, int(number))
     # Restrict recovery to this question, not an identical phrase in shared material.
     raw = "\n".join(lines[start:]) if start is not None else ""
+    # 图片选项前置排版 `[IMG x]A. [IMG y]B. …`：label 后的文本切割会错位（A 拿到下一张
+    # 图、末项为空），图属于“紧贴其前的那个选项”。这里按原文顺序把“第 k 个 [IMG] → 第 k
+    # 个选项标签”直接配对（视觉已确认这些是选项图），不走逐标签取文本的易错路径。
+    img_pre = _image_prefixed_options(raw)
+    if img_pre is not None:
+        return img_pre
     stem, cursor = _raw_fragment(raw, parsed["stem"])
     options = []
     for option in parsed["options"]:

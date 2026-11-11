@@ -73,5 +73,19 @@ class WireFormatTest(unittest.TestCase):
         self.assertEqual(out["material"], "M: Hello.")
 
 
+    def test_structured_option_dict_binds_image_by_key(self):
+        # 图片前置选项题：options 为 {key,text:[IMG]}, 附件须按 key 绑到对应选项，
+        # 而不是全部落到 None（旧 bug 导致 A 拿下一张图、D 空、整体错位一格）。
+        item = {"unit_kind": "group", "subquestions": [],
+                "options": [{"key": k, "text": f"[IMG image{n}.jpeg]"}
+                            for k, n in (("A", 14), ("B", 15), ("C", 16), ("D", 17))]}
+        mm = {f"image{n}.jpeg": f"01_source/media/image{n}.jpeg" for n in (14, 15, 16, 17)}
+        out = normalize_item(item, media_map=mm)
+        self.assertEqual(out["options"], ["A.", "B.", "C.", "D."])
+        bound = {a["optionKey"]: a["name"] for a in out["attachments"] if a.get("optionKey")}
+        self.assertEqual(bound, {"A": "image14.jpeg", "B": "image15.jpeg",
+                                 "C": "image16.jpeg", "D": "image17.jpeg"})
+        self.assertNotIn(None, [a.get("optionKey") for a in out["attachments"]])
+
 if __name__ == "__main__":
     unittest.main()

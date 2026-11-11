@@ -210,6 +210,14 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None):
     if isinstance(data.get("options"), list):
         result = []
         for option in data["options"]:
+            # 选项可能是字符串（"A. text"）或结构化 {key,text}（图片前置选项题等）。
+            # 后者以 key 作为 optionKey 绑定图片，再输出为字符串标签，保持既有形态。
+            if isinstance(option, dict):
+                key = str(option.get("key") or option.get("label") or "").strip().rstrip(".．、")
+                text = replace_images(str(option.get("text") or ""), "option", key or None,
+                                      media_map, attachments)
+                result.append(f"{key}. {text}".rstrip() if key else text)
+                continue
             match = OPTION_PREFIX.match(option)
             if match:
                 text = replace_images(option[match.end():], "option", match.group(1),
