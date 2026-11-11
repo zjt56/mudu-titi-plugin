@@ -407,3 +407,11 @@
 `static/docs/index.html`、`static/app.js`（平台侧）；`app/references/filter-framework.json`、
 `app/docs/sync-practice.md`、`app/docs/sync-lesson-types.md`、根 `AGENTS.md` 硬规则 25（插件侧）；
 验证见 `2026-11-11-platform-catalog-sync.md`。
+
+## 2026-11-11：自愈重试预算不得被易变 detail 清零（防整机卡死）
+
+用户原话：「我启动了那个任务，让我电脑卡死了两次」「修复这个bug，让我电脑直接卡死了」。规则：自愈的重试预算 signature 必须只键于**稳定**维度（阶段 + 归一化失败类别 + `_retry_evidence` 的真实输入/代码指纹），**不得拼入易变的原始 detail**（分片集合、被杀子进程 `exit -N`、分片顺序、时间戳、行号、内嵌 evidence JSON）；否则每次整阶段重跑的 detail 微变都会把 `attempts` 清零，令确定性卡点无限整阶段重跑、并发拉起大量 headless 进程打满内存/CPU，直接违反硬规则 2「不得因序列化差异停住/重跑」与硬规则 19「确定性失败不得用重试消化」。落地：`app/workflow/self_heal.py::recover`（signature 用 `_failure_class_key`）、`_failure_class_key`；`app/workflow/local-agent.json` 的 `part_concurrency`/`review_part_parallel` 从 16 降到 3（本机安全并发，别拍 16）；回归 `app/workflow/test_self_heal.py::test_volatile_detail_does_not_reset_retry_budget`。验证见 `2026-11-11-self-heal-retry-budget-loop.md`。
+
+## 2026-11-11：课时录题版面/选项/空壳子题的硬检查（吸收远端课时技能细节）
+
+用户原话：「学习该技能中关于课时这方面的一些录题的一些 Skill，一些提示词，一些约束，怎么提取的，怎么让大模型去做，然后强化到这个插件中，特别是一些细节方面的东西」（对方仓库 Mudu-English-Upload `main@abf7333` v0.3.37）。规则：课时作业「一错就整屏变形」的字段写法必须由**确定性体检**兜住，不能只靠提示词口头约束——①选项字母必须 A→… 连续、不跳号不重复（`A/B/D/D` 这类）；②完形填空单元级 `options` 必须留空、选项挂子题（C11）；③选词/短文/教材语篇填空的子题**不得带选项**（C12）；④组题材料已带齐题号（`__N__`/`　N　`/`（N）`/`N.`）时，子题 `stem` 只能是空壳（纯 `______` 或纯题号），写整句或重复题号即返工（D7/SHELL_SUB）。落地：`app/scripts/06-upload/audit_type_layout.py`（新检查，本地体检阻断项）、回归 `app/workflow/test_audit_type_layout.py`。提示词侧：`app/workflow/sync_practice.py::prompt_block` 下发版面规约段；`app/prompts/roles/knowledge.md` 补按题型维度约束（阅读/任务型/读写综合每题一个设题角度、完形/语法选择只挂体裁+主题、填空拼写类不挂主题）。源参考：`app/skills-reference/workbook-recipes.md`（课时逐题型配方节选）。**不引入远端 F7「缺答案/解析/大意自己补并标 AI」生成规则**（与用户「缺就不生成、填无」口径冲突）。验证见 `2026-11-11-lesson-layout-hardening.md`。

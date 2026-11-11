@@ -21,6 +21,8 @@
 | [structure.md](structure.md) | 逐题内容边界、题组、表格、七项结构判定 | 切题、建单元、做结构确认的人 |
 | [knowledge-tagging.md](knowledge-tagging.md) | 知识点只写叶子、按题型的维度表、组题标签 | 打标签、审标签的人 |
 | [content-labeling.md](content-labeling.md) | 打标签四个子智能体：解析与大意、知识点与教材、题型与词数、答案与难度 |
+| [sync-practice.md](sync-practice.md) | 课时同步练习的题型/组题判定口径、课时编排自检、来源与重号 | 录课时作业的人 |
+| [skills-reference/workbook-recipes.md](../skills-reference/workbook-recipes.md) | 课时作业逐题型配方、版面规约、提示标记、常见返工点（来源摘要） | 录课时作业、查「该建成什么样」的人 |
 | [textbook-catalog.md](textbook-catalog.md) | 课时同步练习用教材目录树（三版本 18 册 128 单元） |
 | [review.md](review.md) | 四路打标（解析/知识点/题型/答案）→ AI 审核 → 一审 → 二审抽样、人工队列、独立复核 | 做审核、处理队列的人 |
 | [media.md](media.md) | 图片 verdict、媒体排除清单、听力切分、PDF 草稿、卷面预览契约 | 处理图片、音频、表格与预览的人 |

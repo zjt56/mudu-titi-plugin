@@ -55,9 +55,11 @@
 | 2026-11-11 | [2026-11-11-explanation-source-binding-recovery.md](2026-11-11-explanation-source-binding-recovery.md) | 重复原文等价验收，确定性拒收留证停止模型空转，内容续跑强制局部范围 |
 | 2026-11-11 | [2026-11-11-operations-worker-busy.md](2026-11-11-operations-worker-busy.md) | 运维锁准入拒绝结构化，明确未执行时有限等待续接；保留租约与未知回执安全 |
 | 2026-11-11 | [2026-11-11-source-policy-operations-log.md](2026-11-11-source-policy-operations-log.md) | Word 优先提取的共享来源策略与证据；AI运维固定消息区内部滚动 |
+| 2026-11-11 | [2026-11-11-lesson-layout-hardening.md](2026-11-11-lesson-layout-hardening.md) | 课时录题强化：选项连续/完形单元选项留空/填空子题无选项/材料带号子题空壳硬检查，提示词版面规约与知识点维度约束，新增课时配方源参考 |
 | 2026-11-11 | [2026-11-11-scoped-question-identity.md](2026-11-11-scoped-question-identity.md) | 同课时跨大题重号的稳定身份、原标题原号保留、全链来源隔离及真实首课回归 |
 | 2026-11-11 | [2026-11-11-operations-autonomous-recovery.md](2026-11-11-operations-autonomous-recovery.md) | AI 运维零人工自治恢复、本地持久授权、安全安装与重启原检查复验；保留自愈及审核/上传边界 |
 | 2026-11-11 | [2026-11-11-sync-source-recognition.md](2026-11-11-sync-source-recognition.md) | 同步课时正文识别、305处原件回归、单课时来源及证据绑定 |
+| 2026-11-11 | [2026-11-11-sync-section-scoped-identity.md](2026-11-11-sync-section-scoped-identity.md) | 同步练习跨大题重号身份键纳入 section_id：修复脚本不再误判「来源单元题号重复」，_prepare_tables 恢复可运行 |
 | 2026-11-10 | [2026-11-10-operations-first-blocker.md](2026-11-10-operations-first-blocker.md) | 运维在线时首个阻断异常安全建单接手，先落账分析建议；不可用时保留原自愈 |
 | 2026-11-10 | [2026-11-10-idle-flow-svg-adaptive.md](2026-11-10-idle-flow-svg-adaptive.md) | 无任务也全量展示流程图；自绘 SVG 节点/连线三态（运行中闪烁）；整图自适应宽度 |
 | 2026-11-10 | [2026-11-10-runtime-efficiency.md](2026-11-10-runtime-efficiency.md) | 共用零模型快路、单次诊断验收复用、审核来源读取复用、运行态缓存与只读巡检提示优化 |

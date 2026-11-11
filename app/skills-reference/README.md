@@ -4,7 +4,18 @@
 
 ## 在线来源与固定版本
 
-本次通过 `gh api repos/mudujiaoyu/Mudu-English-Upload/contents/<path>?ref=78e2cef895a850755422c6d3c97dd73505c49e74` 在线读取；未克隆或下载源仓库。以下链接均固定在该提交，不能用未来 HEAD 内容代替本次证据：
+**初版**通过 `gh api repos/mudujiaoyu/Mudu-English-Upload/contents/<path>?ref=78e2cef895a850755422c6d3c97dd73505c49e74` 在线读取，未克隆或下载源仓库。
+
+**2026-11-11 课时强化轮**：为补齐课时录题的面版/配方/返工点，改为浅克隆源仓库核对 `main@abf73336c7127156843bee082d95096a4608f59f`（`metadata.version` 0.3.37，2026-11-03）。以下链接固定在该提交；不能用未来 HEAD 内容代替本次证据：
+
+- [SKILL.md](https://github.com/mudujiaoyu/Mudu-English-Upload/blob/abf73336c7127156843bee082d95096a4608f59f/SKILL.md)：六步总览、约束总表引用、画线专项、改动方向。
+- [workbook-recipes.md](https://github.com/mudujiaoyu/Mudu-English-Upload/blob/abf73336c7127156843bee082d95096a4608f59f/references/workbook-recipes.md)：课时作业逐题型配方、提示标记（D27）、同题真题（D28）、表格材料、必跑闸门。
+- [layout-matrix.md](https://github.com/mudujiaoyu/Mudu-English-Upload/blob/abf73336c7127156843bee082d95096a4608f59f/references/layout-matrix.md)：各题型「数据怎么写 → 页面才好看」的逐条规约与一错就变形的点。
+- [constraints.md](https://github.com/mudujiaoyu/Mudu-English-Upload/blob/abf73336c7127156843bee082d95096a4608f59f/references/constraints.md)：A–G 全量约束（本目录见 [constraints.md](constraints.md) 摘要）。
+- [stages/01-extract.md](https://github.com/mudujiaoyu/Mudu-English-Upload/blob/abf73336c7127156843bee082d95096a4608f59f/references/stages/01-extract.md)、[04-knowledge.md](https://github.com/mudujiaoyu/Mudu-English-Upload/blob/abf73336c7127156843bee082d95096a4608f59f/references/stages/04-knowledge.md)：文本层体检/表格网格/子题写法、按题型维度。
+- 早期来源项（知识点/目录/维度映射）仍固定在下述初版提交，未在新提交逐一复核。
+
+初版（`78e2cef…`）读过的条目：
 
 - [SKILL.md](https://github.com/mudujiaoyu/Mudu-English-Upload/blob/78e2cef895a850755422c6d3c97dd73505c49e74/SKILL.md)：知识点阶段、全局约定及约束引用。
 - [knowledge-tagging.md](https://github.com/mudujiaoyu/Mudu-English-Upload/blob/78e2cef895a850755422c6d3c97dd73505c49e74/references/knowledge-tagging.md)：题组/子题落点、听力/阅读设题角度、叶子落库。
@@ -16,6 +27,7 @@
 
 | 文档 | 内容 | 对应技能源路径 |
 | --- | --- | --- |
+| [workbook-recipes.md](workbook-recipes.md) | 课时作业逐题型配方、粒度判据、提示标记/同题真题、表格材料与常见返工点 | `references/workbook-recipes.md`、`references/layout-matrix.md`、`references/constraints.md`(D/E/F) |
 | [knowledge-matching-rules.md](knowledge-matching-rules.md) | 七维度匹配提示、修正后的分层模板与边界 | `references/knowledge-matching-rules.md`、`references/knowledge-tagging.md` |
 | [knowledge-catalog.md](knowledge-catalog.md) | 七维度结构摘要；522 节点含父节点，并非叶子数 | `references/knowledge-catalog-1.0.md`、`references/knowledge-catalog.json` |
 | [type-taxonomy.md](type-taxonomy.md) | 27 个主类、子类与判定线索摘要 | `references/type-subtypes.md`、`references/filter-framework.json` |
