@@ -3,7 +3,12 @@ import unittest
 
 import hashlib
 
-from workflow.review_child_source import prove_child, quote_belongs_to_child, quote_belongs_to_unit_material
+from copy import deepcopy
+
+from workflow.question_identity import assign_scoped
+from workflow.review_child_source import (prove_child, quote_belongs_to_child,
+                                         quote_belongs_to_child_loose,
+                                         quote_belongs_to_unit_material)
 
 
 class ChildSourceTest(unittest.TestCase):
@@ -123,6 +128,169 @@ class ChildSourceTest(unittest.TestCase):
         duplicate = '1. Q?\nA. a\nB. b\nC. c\nD. d\n1. Q2?\nA. a\nB. b\nC. c\nD. d'
         self.assertEqual(prove_child(duplicate, {'numbers': [1], 'stem': duplicate},
                                      1)['status'], 'uncertain')
+
+
+class ScopedChildSourceTest(unittest.TestCase):
+    def setUp(self):
+        self.heading = 'Ⅰ.判断下列各组字母的大小写是否一致(一致的在括号内写T,不一致的写F)'
+        self.stem = ('1.U　v (　　　)　　　　2.W　x (　　　)\n'
+                     '3.F　\tf\t(　　　)\t4.C　\tg\t(　　　)\n'
+                     '5.D　\tb\t(　　　)\t6.G　\tj\t(　　　)\n'
+                     '7.T　\tt\t(　　　)\t8.N　\tn\t(　　　)')
+        self.source = self.heading + '\n' + self.stem + '\n\nⅡ.找出下列句子中书写错误的单词并改正\n1.My name is emma.\n'
+        self.unit = self.scoped(self.source, self.stem, 2, 6, list(range(1, 9)))
+
+    @staticmethod
+    def scoped(source, stem, first, last, numbers):
+        return assign_scoped([{'unit_kind': 'group', 'type': '语音题', 'numbers': numbers,
+                               'stem': stem, 'source_span': {'basis': 'cleaned_source',
+                                                           'start_line': first, 'end_line': last}}], source)[0]
+
+    def test_inline_second_child_has_exact_character_span(self):
+        proof = prove_child(self.source, self.unit, 8)
+        self.assertEqual(proof['status'], 'proven', proof)
+        self.assertEqual(proof['method'], 'scoped-numbered-stem-characters/v1')
+        self.assertEqual(proof['text'], '8.N　\tn\t(　　　)')
+        self.assertEqual(self.source[proof['start']:proof['end']], proof['text'])
+        self.assertNotIn('7.T', proof['text'])
+        self.assertTrue(quote_belongs_to_child(self.source, self.unit, 8, proof['text']))
+        self.assertTrue(quote_belongs_to_child_loose(self.source, self.unit, 8, '8.N n ( )'))
+
+    def test_inline_first_child_stops_before_same_line_neighbour(self):
+        proof = prove_child(self.source, self.unit, 7)
+        self.assertEqual(proof['status'], 'proven', proof)
+        self.assertEqual(proof['text'], '7.T　\tt\t(　　　)')
+        self.assertFalse(quote_belongs_to_child(self.source, self.unit, 7, '8.N　\tn'))
+        self.assertFalse(quote_belongs_to_child_loose(self.source, self.unit, 7, '8.N n'))
+
+    def test_neighbour_cannot_return_as_shared_material(self):
+        for quote in ('7.T　\tt\t(　　　)', '1.U　v (　　　)', '8.N　\tn\t(　　　)'):
+            with self.subTest(quote=quote):
+                self.assertFalse(quote_belongs_to_unit_material(self.source, self.unit, quote))
+                if quote.startswith('7.'):
+                    self.assertFalse(quote_belongs_to_child(self.source, self.unit, 8, quote))
+
+    def test_same_quote_and_numbers_in_other_section_are_scope_local(self):
+        source = self.source + '\n' + self.heading + '\n' + self.stem + '\n'
+        unit = self.scoped(source, self.stem, 2, 6, list(range(1, 9)))
+        self.assertEqual(prove_child(source, unit, 8)['status'], 'proven')
+        self.assertTrue(quote_belongs_to_child(source, unit, 8, '8.N　\tn\t(　　　)'))
+        self.assertTrue(quote_belongs_to_child_loose(source, unit, 8, '8.N n ( )'))
+
+    def test_duplicate_target_number_in_scope_rejects_even_narrow_span(self):
+        source = self.source.replace('\n\nⅡ.', '\n8.Other stem\n\nⅡ.')
+        unit = self.scoped(source, self.stem, 2, 5, list(range(1, 9)))
+        self.assertEqual(prove_child(source, unit, 8)['status'], 'uncertain')
+        self.assertFalse(quote_belongs_to_child(source, unit, 8, '8.N　\tn'))
+
+    def test_duplicate_stem_in_scope_rejects(self):
+        source = self.source.replace('\n\nⅡ.', '\n' + self.stem + '\n\nⅡ.')
+        unit = self.scoped(source, self.stem, 2, 5, list(range(1, 9)))
+        self.assertEqual(prove_child(source, unit, 8)['status'], 'uncertain')
+
+    def test_duplicate_quote_in_scope_rejects_exact_and_loose(self):
+        stem = '1.Same text\t2.Same text'
+        source = self.heading + '\n' + stem
+        unit = self.scoped(source, stem, 2, 2, [1, 2])
+        self.assertEqual(prove_child(source, unit, 2)['status'], 'proven')
+        self.assertFalse(quote_belongs_to_child(source, unit, 2, 'Same text'))
+        self.assertFalse(quote_belongs_to_child_loose(source, unit, 2, 'Same text'))
+
+    def test_stale_out_of_bounds_and_cross_section_span_reject(self):
+        for span in ({'start_line': 3, 'end_line': 6},
+                     {'start_line': 2, 'end_line': 999},
+                     {'start_line': 2, 'end_line': 8},
+                     {'start_line': True, 'end_line': 6},
+                     {'start_line': 6, 'end_line': 2}):
+            unit = deepcopy(self.unit)
+            unit['source_span'].update(span)
+            with self.subTest(span=span):
+                self.assertEqual(prove_child(self.source, unit, 8)['status'], 'uncertain')
+                self.assertFalse(quote_belongs_to_child_loose(self.source, unit, 8, '8.N n'))
+
+    def test_forged_section_identity_fields_reject(self):
+        for field, value in (('title', 'Ⅱ.语音题'), ('context', 'forged'),
+                             ('ordinal', 'Ⅱ.'), ('occurrence', 2),
+                             ('start_line', 2), ('end_line', 8)):
+            unit = deepcopy(self.unit)
+            unit['source_section'][field] = value
+            with self.subTest(field=field):
+                self.assertEqual(prove_child(self.source, unit, 8)['status'], 'uncertain')
+                self.assertFalse(quote_belongs_to_unit_material(self.source, unit, '7.T'))
+
+    def test_changed_source_or_stem_rejects(self):
+        self.assertEqual(prove_child(self.source.replace('8.N', '8.M'), self.unit, 8)['status'], 'uncertain')
+        unit = deepcopy(self.unit)
+        unit['stem'] = unit['stem'].replace('8.N', '8.N ')
+        self.assertEqual(prove_child(self.source, unit, 8)['status'], 'uncertain')
+        unit = deepcopy(self.unit)
+        unit['source_span']['text_sha256'] = hashlib.sha256(self.source.encode()).hexdigest()
+        self.assertEqual(prove_child(self.source + '\nchanged', unit, 8)['status'], 'uncertain')
+
+    def test_missing_scope_and_unsafe_source_span_reject(self):
+        for key in ('source_section', 'source_span', 'section_id', 'question_ids'):
+            unit = deepcopy(self.unit)
+            del unit[key]
+            with self.subTest(key=key):
+                self.assertEqual(prove_child(self.source, unit, 8)['status'], 'uncertain')
+        for field, value in (('basis', 'original_pdf'), ('path', 'other.txt'),
+                             ('source_path', 'other.txt'), ('source_sha256', 'stale')):
+            unit = deepcopy(self.unit)
+            unit['source_span'][field] = value
+            with self.subTest(field=field):
+                self.assertEqual(prove_child(self.source, unit, 8)['status'], 'uncertain')
+
+    def test_scoped_shared_prefix_only_and_duplicate_other_scope_allowed(self):
+        heading = 'Ⅰ.阅读理解'
+        stem = 'Shared passage.\n1.First?\nA. one\n2.Second?\nA. two'
+        source = heading + '\n' + stem + '\nⅡ.阅读理解\n' + stem
+        unit = self.scoped(source, stem, 2, 6, [1, 2])
+        self.assertTrue(quote_belongs_to_unit_material(source, unit, 'Shared passage.'))
+        self.assertFalse(quote_belongs_to_unit_material(source, unit, 'First?'))
+        self.assertFalse(quote_belongs_to_unit_material(source, unit, 'A. two'))
+
+    def test_cleaned_to_raw_mapping_preserves_crlf_character_offsets(self):
+        source = '2025年上海市中考\r\n' + self.source.replace('\n', '\r\n')
+        proof = prove_child(source, self.unit, 8)
+        self.assertEqual(proof['status'], 'proven', proof)
+        self.assertEqual(source[proof['start']:proof['end']], '8.N　\tn\t(　　　)')
+
+    def test_scoped_numbered_blanks_retain_local_dialogue_and_table_evidence(self):
+        cases = [('Ⅰ.补全对话', 'Li Lei:I am going home.\nBruce:<u>　66　</u>\n'
+                  'See you.\nBruce:<u>　68　</u>', [66, 68], 66, 'Li Lei:I am going home.', 'See you.'),
+                 ('Ⅰ.补全对话', 'Who | Class Eight,Grade<u>　26　</u>\nWhen | Last<u>　27　</u>',
+                  [26, 27], 26, 'Class Eight', 'Last'),
+                 ('Ⅰ.补全对话', 'Li Lei:I am going home.\nBruce:__66__\nBruce:__68__',
+                  [66, 68], 66, 'Li Lei:I am going home.', 'Bruce:__68__')]
+        for heading, stem, numbers, number, own, neighbour in cases:
+            source = heading + '\n' + stem
+            # Blank-only groups already have explicit confirmed identities;
+            # identity assignment itself requires a printed anchor, so construct
+            # that existing protocol directly rather than inventing a number.
+            unit = {'identity_version': 'scoped-v1', 'unit_id': 'blank-group', 'section_id': 'blank-section',
+                    'numbers': numbers, 'stem': stem,
+                    'question_ids': {str(n): f'blank-q{n}' for n in numbers},
+                    'source_span': {'basis': 'cleaned_source', 'start_line': 2,
+                                    'end_line': len(source.splitlines())},
+                    'source_section': {'title': heading, 'ordinal': 'Ⅰ.', 'context': '',
+                                       'occurrence': 1, 'start_line': 1, 'end_line': len(source.splitlines())}}
+            with self.subTest(heading=heading, stem=stem):
+                proof = prove_child(source, unit, number)
+                self.assertEqual(proof['status'], 'proven', proof)
+                self.assertEqual(proof['method'], 'scoped-numbered-blank-marker/v1')
+                self.assertTrue(quote_belongs_to_child(source, unit, number, own))
+                self.assertFalse(quote_belongs_to_child(source, unit, number, neighbour))
+                self.assertFalse(quote_belongs_to_child_loose(source, unit, number, neighbour))
+                duplicate_source = source + f'\n{number}.Other printed target'
+                duplicate_unit = deepcopy(unit)
+                duplicate_unit['source_section']['end_line'] += 1
+                self.assertEqual(prove_child(duplicate_source, duplicate_unit, number)['status'], 'uncertain')
+                unit['source_section']['end_line'] += 1
+                self.assertEqual(prove_child(source, unit, number)['status'], 'uncertain')
+
+    def test_no_scoped_identity_keeps_legacy_inline_rejection(self):
+        unit = {'numbers': list(range(1, 9)), 'stem': self.stem}
+        self.assertEqual(prove_child(self.source, unit, 8)['status'], 'uncertain')
 
 
 if __name__ == '__main__':
