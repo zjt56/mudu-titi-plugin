@@ -163,5 +163,25 @@ class TestExtractionRecordsPolicy(unittest.TestCase):
         self.assertEqual(report["source_policy"]["authority"], "word")
 
 
+    def test_word_without_pdf_is_text_only_and_records_visual(self):
+        # 用户 2026-11-11：无 PDF 的纯 Word 直接文字提取、不 OCR；配合视觉理解标记。
+        report = sp.build_report("only.docx", [], visual_assist=True)
+        self.assertEqual(report["extraction"], "docx_native")
+        self.assertEqual(report["authority"], "word")
+        self.assertNotIn("pdf", report)
+        self.assertTrue(report["visual_structure_assist"])
+        self.assertIn("无需 OCR", report["recommendation"])
+
+    def test_pdf_text_layer_does_not_ocr_and_marks_visual(self):
+        report = sp.build_report("only.pdf", pages=[{"method": "text"}], visual_assist=True)
+        self.assertEqual(report["extraction"], "pdf_text_layer")
+        self.assertEqual(report["pdf"]["ocr_pages"], 0)
+        self.assertTrue(report["visual_structure_assist"])
+
+    def test_visual_flag_omitted_when_unknown(self):
+        report = sp.build_report("only.docx", [])
+        self.assertNotIn("visual_structure_assist", report)
+
+
 if __name__ == "__main__":
     unittest.main()

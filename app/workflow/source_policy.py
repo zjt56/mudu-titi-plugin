@@ -104,7 +104,7 @@ def pdf_usage(pages) -> dict:
             "ocr_skipped_pages": len(skipped)}
 
 
-def build_report(source, supporting=(), pages=None) -> dict:
+def build_report(source, supporting=(), pages=None, visual_assist: bool | None = None) -> dict:
     """生成 `01_source/source-policy.json` 的内容。
 
     source: 本次提取主源路径；supporting: 其余上传文件路径（附件/答案卷）；
@@ -162,6 +162,10 @@ def build_report(source, supporting=(), pages=None) -> dict:
     if usage is not None:
         report["pdf"] = usage
     report["recommendation"] = recommendation(source_kind, usage, supporting_rows)
+    # 视觉理解参与结构判断的标记（用户 2026-11-11：有 PDF 才 OCR；纯 Word 直接文字提取，
+    # 两种都配合视觉理解补图/判结构）。仅记录事实，不改变任何提取结果。
+    if visual_assist is not None:
+        report["visual_structure_assist"] = bool(visual_assist)
     return report
 
 

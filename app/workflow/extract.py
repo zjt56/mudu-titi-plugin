@@ -1027,8 +1027,19 @@ def run(batch_dir: Path) -> dict:
         supporting = [str((inputs.get(key) or {}).get("path") or "")
                       for key in sorted(inputs)
                       if key == "answers" or re.fullmatch(r"attachment_\d{3,}", key)]
+        # extract_source returns a stage summary, not the page evidence. Read
+        # the actual saved pages so a completed OCR page is never reported as
+        # 'pdf_unknown / 0 pages'.
+        page_evidence = json.loads((batch_dir / "01_source" / "extraction.json").read_text(encoding="utf-8"))
+        # 视觉理解是否可用（决定报告里记录"配合视觉理解判结构"这一维）；判定失败不阻断。
+        try:
+            from workflow import visual_review
+            visual_assist = bool(visual_review._load_key())
+        except Exception:  # noqa: BLE001
+            visual_assist = False
         policy = source_policy.build_report(source_path, [path for path in supporting if path],
-                                            pages=result.get("pages"))
+                                            pages=page_evidence.get("pages"),
+                                            visual_assist=visual_assist)
         result["source_policy"] = policy
         _write(batch_dir / "01_source" / "source-policy.json", policy)
     except Exception as exc:  # noqa: BLE001 - 证据记录失败不阻断提取

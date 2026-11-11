@@ -65,3 +65,19 @@ extract 后的视觉复核钩子即可；视觉产物 `01_source/image_semantics
   `[IMG]` 占位的映射、是否用于补图片选项/表格材料归属）需下一轮设计，本轮先立通道与候选产物。
 - 视觉识别对同一图偶有类别抖动（如两朵云被分判 icon/other），消费时应按稳定字段
   (contains_text/readable_text) 而非单次 kind 做硬判。
+
+## 7. 补充（同日）：提取策略固化——有PDF才OCR，纯Word文字提取+视觉补图
+
+用户 2026-11-11 明确提取策略：有 PDF 才调用 OCR 识别；纯 Word 直接文字提取；两者都配合
+视觉理解模型判断/补充页面结构。现状核对：source_policy 已按
+`word > text_layer_pdf > scan_ocr` 落实（Word 原生解析不 OCR；PDF 文字层优先、质量不足才 OCR），
+OCR 默认 auto 仅在 image_only/floating/symbol_font 触发，纯文字 Word 不触发 OCR。
+
+- source_policy.build_report 新增 `visual_assist` 参数，报告新增
+  `visual_structure_assist` 字段（可用时标记"配合视觉理解判结构"，仅记录事实不改提取结果）。
+- extract.run 调用处传入 `visual_structure_assist`（依据视觉网关是否可用，判定失败不阻断）；
+  同步提交 `page_evidence`（读实际 pages 而非 stage summary，避免已 OCR 页被报 0 页）。
+- 回归 test_source_policy 新增 3 例：纯 Word 不 OCR 且记视觉标记、PDF 文字层不 OCR、
+  未知时不写该字段。`test_extract + test_source_policy` 52 例全过。
+- 验证：02(Word源) extraction=docx_native、visual_structure_assist=True、recommendation
+  "Word 原生解析，无需 OCR"；extraction.json 实测 image_ocr/ocr_auto/pdf_ocr 均无。
