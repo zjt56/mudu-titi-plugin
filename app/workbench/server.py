@@ -1371,6 +1371,8 @@ def _archive_batch_locked(name: str, confirm_name: str) -> dict:
 
 
 _RECYCLE_DIRS = (".workbench-trash", ".trash", "archives", "archive")
+# 「继续处理」区删除：请求批次在阶段边界停下后，最多等待多少秒让 worker 释放执行锁。
+DELETE_STOP_WAIT_SECONDS = 90.0
 
 
 def _purge_archive_targets(root: Path, name: str) -> list[Path]:
@@ -1474,6 +1476,71 @@ def _clear_purged_batch_state(name):
                 cache = getattr(module, attribute, None)
                 if cache is not None:
                     cache.clear()
+
+
+def _cancel_running_batch(name: str, folder: Path, wait_seconds: float = 90.0) -> dict:
+    """Request a clean stop of a running/queued advance before deletion.
+
+    Writes the batch-scoped cancel marker (see ``auto.request_cancel``), removes
+    the batch from the pending advance queue, and — if this batch owns the audio
+    job — stops the audio worker. Then waits a bounded time for the worker to
+    release execution at the next stage boundary. It never interrupts a stage
+    mid-flight; a stage that does not honor the marker keeps the batch protected
+    and the caller gets ``stopped=False`` so nothing is deleted under a live run.
+    """
+    import time as _time
+    from workflow import auto as wf_auto
+    try:
+        wf_auto.request_cancel(folder)
+    except OSError:
+        pass
+    with _advance_queue_lock:
+        _advance_queue[:] = [entry for entry in _advance_queue
+                             if (entry.get("name") if isinstance(entry, dict) else entry) != name]
+    with _lock:
+        state = _advance_state.get(name) or {}
+        was_running = bool(state.get("running"))
+        was_queued = bool(state.get("queued") or state.get("waiting"))
+        # 排队/等待中的批次并未真正执行：移除队列项后直接清状态即可立即删除。
+        if was_queued and not was_running:
+            _advance_state.pop(name, None)
+            return {"stopped": True, "was_running": False, "was_queued": True}
+        if not was_running:
+            return {"stopped": True, "was_running": False}
+    deadline = _time.monotonic() + max(0.0, wait_seconds)
+    while _time.monotonic() < deadline:
+        with _lock:
+            state = _advance_state.get(name) or {}
+        if not state.get("running"):
+            return {"stopped": True, "was_running": True}
+        _time.sleep(0.4)
+    with _lock:
+        still = _advance_state.get(name) or {}
+    return {"stopped": not still.get("running"), "was_running": True}
+
+
+@serialized
+def delete_batch(name: str, confirm_name: str) -> dict:
+    """Stop (if running/queued) and permanently delete one batch and all its traces.
+
+    This is the entry used by the 「继续处理」area delete button: unlike a bare
+    ``purge`` it first asks the running worker to stop at a clean stage boundary,
+    then reuses ``purge_batch`` (which also clears the per-batch caches and shared
+    in-memory projections). If the batch cannot be stopped in time we refuse and
+    keep the data intact rather than deleting under a live run.
+    """
+    if confirm_name != name:
+        raise ValueError("确认批次名不匹配，请重新确认目标")
+    _validate_batch_name(name)
+    try:
+        folder = batch_dir(name)
+    except ValueError:
+        # No live directory (archive-only): nothing to stop, let purge handle it.
+        return purge_batch(name, confirm_name)
+    stop = _cancel_running_batch(name, folder, wait_seconds=DELETE_STOP_WAIT_SECONDS)
+    if not stop.get("stopped"):
+        raise ValueError("批次正在执行且未能在时限内停到阶段边界；为避免删除运行中的批次，已取消删除。请稍后重试或等待当前阶段结束。")
+    return purge_batch(name, confirm_name)
 
 
 @serialized
@@ -3308,6 +3375,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(archive_batch(parts[2], payload.get("confirm_name")))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "purge":
                 return self.send_json(purge_batch(parts[2], payload.get("confirm_name")))
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "delete":
+                return self.send_json(delete_batch(parts[2], payload.get("confirm_name")))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "decisions":
                 folder = batch_dir(parts[2])
                 return self.send_json({"ok": True, "item": apply_decision(folder, payload.get("item", {}), payload.get("actor"))})

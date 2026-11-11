@@ -55,6 +55,7 @@
 | 2026-11-11 | [2026-11-11-explanation-source-binding-recovery.md](2026-11-11-explanation-source-binding-recovery.md) | 重复原文等价验收，确定性拒收留证停止模型空转，内容续跑强制局部范围 |
 | 2026-11-11 | [2026-11-11-operations-worker-busy.md](2026-11-11-operations-worker-busy.md) | 运维锁准入拒绝结构化，明确未执行时有限等待续接；保留租约与未知回执安全 |
 | 2026-11-11 | [2026-11-11-source-policy-operations-log.md](2026-11-11-source-policy-operations-log.md) | Word 优先提取的共享来源策略与证据；AI运维固定消息区内部滚动 |
+| 2026-11-11 | [2026-11-11-continue-area-delete-batch.md](2026-11-11-continue-area-delete-batch.md) | 继续处理区新增「删除」入口：停运行中/排队批次到阶段边界后彻底删除并清缓存，停不稳拒删保数据 |
 | 2026-11-11 | [2026-11-11-lesson-layout-hardening.md](2026-11-11-lesson-layout-hardening.md) | 课时录题强化：选项连续/完形单元选项留空/填空子题无选项/材料带号子题空壳硬检查，提示词版面规约与知识点维度约束，新增课时配方源参考 |
 | 2026-11-11 | [2026-11-11-scoped-question-identity.md](2026-11-11-scoped-question-identity.md) | 同课时跨大题重号的稳定身份、原标题原号保留、全链来源隔离及真实首课回归 |
 | 2026-11-11 | [2026-11-11-operations-autonomous-recovery.md](2026-11-11-operations-autonomous-recovery.md) | AI 运维零人工自治恢复、本地持久授权、安全安装与重启原检查复验；保留自愈及审核/上传边界 |

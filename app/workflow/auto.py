@@ -560,6 +560,36 @@ def _auto_prepare_audio(batch_dir: Path, manifest: dict) -> dict:
     return {"status": "ready" if passed else "needs_review", "pending": pending}
 
 
+def cancel_marker_path(batch_dir: Path) -> Path:
+    """用户删除批次前写入的取消标记文件（批次目录内）。
+
+    运行中的推进会在一阶段一开始检查它并干净退出，随后由删除流程真正清除目录。
+    标记写在 workflow/ 内、随批次目录一起删除，不触碰共享缓存或用户其它数据。
+    """
+    return Path(batch_dir) / "workflow" / ".delete-requested"
+
+
+def cancel_requested(batch_dir: Path) -> bool:
+    try:
+        return cancel_marker_path(batch_dir).is_file()
+    except OSError:
+        return False
+
+
+def request_cancel(batch_dir: Path) -> None:
+    """幂等地写入取消标记；正在跑的 worker 在下一阶段边界读到后停止。"""
+    path = cancel_marker_path(batch_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(int(__import__("time").time())), encoding="utf-8")
+
+
+def clear_cancel(batch_dir: Path) -> None:
+    try:
+        cancel_marker_path(batch_dir).unlink()
+    except OSError:
+        pass
+
+
 def advance(batch_dir: Path, bridge: dict, stop_at: str | None = None) -> dict:
     batch_dir = Path(batch_dir)
     with _batch_auto_lock(batch_dir):
@@ -663,6 +693,11 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                      and contracts.STAGE_ORDER.index(stop_at) > contracts.STAGE_ORDER.index("audio"))
     stages = list(contracts.STAGES)
     for stage in stages:
+        # 用户删除请求：只在阶段边界检查，让本轮干净退出、释放锁，绝不中断
+        # 正在执行的阶段（那样会留下半写产物）。删除流程随后会真正清除目录。
+        if cancel_requested(batch_dir):
+            return _result(batch_dir, manifest, stage.id,
+                           "用户请求删除批次，已在阶段边界停止", "cancelled")
         # Defer only the audio stage, preserving the existing consumer/import
         # checks. A slow cutter joins immediately before review, after validate.
         if stage.id == 'audio' and deferred_audio:
