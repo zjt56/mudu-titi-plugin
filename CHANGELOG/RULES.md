@@ -357,3 +357,7 @@
 ## 2026-11-11：试卷名/来源按已识别元数据与原卷 Word 文件名补齐
 
 用户原话：「还有这个试卷名，它现在来源显示是"未提供"。你正常以 Word 文档的文件名去修改一下，它其实就是这个名字的来源」。课时拆分件正文没有卷头，结构闸门原先把 meta 直接落成「未提供」，还经 runner 覆盖掉已识别值、写进每道题的 `filterMetadata`。规则：试卷名/来源按「已有值 → `01_source/metadata.json` 已识别值 → 原卷 Word/PDF 文件名 → 未提供」补齐，只补空缺不覆盖识别值；「未提供」只是展示占位，不写进题目字段，也不能凭空生成年份/省份/题型。落地：`app/workflow/metadata_policy.py::paper_meta/resolved_paper_meta`、`structure_gate.py`、`runner.py`、`assemble_local.py`、`batch_fill.py`、`app/workbench/server.py::paper_info`、`workflow.test_metadata_source_name`；根 `AGENTS.md` 硬规则 26；验证见 `2026-11-11-metadata-source-name.md`。
+
+## 2026-11-11：课时拆分件的提取口径同源（课时标题变体 / 版块边界 / 提示标记保真）
+
+用户原话（m03765）：「了解该项目中关于课时的注意事项以及分类等条件，完善该插件对应课时的提取规则」（对方仓库 Mudu-English-Upload）。规则：课时标题认 `第一课时`、`第1课时`、`第1节课`、`课时1`、`Period 1`、`Lesson 1`，课时后可直接跟 `Section A`（不要求空格）；`Reading Plus`、`Project`、`Reflecting`、`Pronunciation`、`综合阅读提升`、`单元话题写作` 与课时平级，只能作上下文并结束上一大题窗口，不得当大题或并进共享材料；试卷卷头出现单元测试/期中/期末/月考/模拟时仍不套用同步口径。原卷方括号提示标记（`[2025·六安月考]`、`[2023·安徽]`、`[新考法·…]`、`[情境题]`、`[改编]`）属于原文，必须原样留在题干或材料，`sync_practice.audit_source_marks` 只写 `structure.ai.classified.json` 的 `sync_marks` 留痕（上传前再由 `scripts/06-upload/audit_source_marks.py` 复核），不改题干、不放行闸门；`type_kind` 覆盖目录全部 27 个主类。落地：`app/workflow/sync_practice.py::_LESSON/is_section_title/source_marks/audit_source_marks/prompt_block`、`app/workflow/structure_ai.py::auto_classify`、`app/references/sync-practice-rules.json`、`app/workflow/test_sync_lesson_extraction.py`、`app/docs/sync-practice.md`（第九节）；根 `AGENTS.md` 硬规则 25；验证见 `2026-11-11-sync-lesson-extraction-rules.md`。

@@ -522,8 +522,11 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
         if sync_applicable:
             units = _sanitize_classified({"units": units}, raw, candidate)
         if units:
+            # 复用缓存时按当前口径重算留痕，避免旧 marker 的差异/标记结论过期。
             return {"ran": True, "reused": True, "units": units,
-                    'sync_applicable': sync_applicable, 'sync_audit': marker.get('sync_audit') or []}
+                    'sync_applicable': sync_applicable,
+                    'sync_audit': sync_practice.audit_units(units, raw) if sync_applicable else [],
+                    'sync_marks': sync_practice.audit_source_marks(units, raw) if sync_applicable else []}
     if invoke_fn is None:
         from . import agent as agent_entry, local_agent
         if not agent_entry.configured():
@@ -552,8 +555,13 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
     sync_audit = sync_practice.audit_units(units, raw) if units and sync_applicable else []
     if sync_audit:
         marker_value["sync_audit"] = sync_audit
+    # 原卷方括号提示标记（真题来源/命题特征）必须留在题干或材料里，缺失只留痕。
+    sync_marks = sync_practice.audit_source_marks(units, raw) if units and sync_applicable else []
+    if sync_marks:
+        marker_value["sync_marks"] = sync_marks
     (batch / CLASSIFY_MARKER).write_text(json.dumps(marker_value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    return {"ran": True, "units": units, "sync_audit": sync_audit, 'sync_applicable': sync_applicable,
+    return {"ran": True, "units": units, "sync_audit": sync_audit, 'sync_marks': sync_marks,
+            'sync_applicable': sync_applicable,
             "reason": "AI结构归类已校验" if units else "AI输出未通过结构证据校验"}
 
 

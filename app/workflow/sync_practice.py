@@ -159,10 +159,29 @@ def classify_with_body(title: str, body: str, path: str | Path | None = None) ->
 _UNIT_HINTS = ("单元卷", "单元测试", "期中", "期末", "月考", "模拟", "中考")
 
 
-_LESSON = re.compile(r"^\s*第\s*[一二三四五六七八九十百\d]+\s*课时(?:\s|$)")
+# 课时标题：第一课时 / 第1课时 / 第1节课 / 课时1 / Period 1 / Lesson 1。
+# 课时标题后常直接跟 Section A（可能没有空格）或全角空格，不能要求必须有空白。
+_LESSON = re.compile(
+    r"^\s*(?:第\s*[一二三四五六七八九十百零\d]+\s*(?:课时|节课)"
+    r"|课时\s*[一二三四五六七八九十百零\d]+"
+    r"|(?:Period|Lesson)\s*\d+)"
+    r"(?![一二三四五六七八九十百零\d])",
+    re.I)
+# 与课时平级的版块标题：本身不是大题，也不能被并进上一题组的共享材料。
+_SECTION_TITLES = ("综合阅读提升", "单元话题写作", "Pronunciation",
+                   "Reading Plus", "Project", "Reflecting")
 _UNIT = re.compile(r"^\s*(?:Starter\s+)?Unit\s+\d+\b", re.I)
 _ROMAN_HEADING = re.compile(r"^\s*[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+\s*[.．、]", re.I)
 _ITEM_LINE = re.compile(r"^\s*(?:[（(]\s*[）)]\s*)?\d+\s*[.．、)]")
+
+
+def is_section_title(line: str) -> bool:
+    """与课时平级的版块标题（如 Reading Plus / Project / Reflecting）。"""
+    plain = plain_text(line).strip().rstrip(":：").strip()
+    if not plain:
+        return False
+    folded = plain.casefold()
+    return any(folded == name.casefold() for name in _SECTION_TITLES)
 
 
 def looks_like_sync_practice(text: str) -> bool:
@@ -252,7 +271,7 @@ def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[di
             if plain.startswith("[/TABLE"):
                 table_depth -= 1
             continue
-        if _LESSON.match(plain) or _UNIT.match(plain) or plain in ("综合阅读提升", "单元话题写作", "Pronunciation"):
+        if _LESSON.match(plain) or _UNIT.match(plain) or is_section_title(plain):
             context = plain
         hit = heading_hit(raw, path)
         if hit:
@@ -263,7 +282,7 @@ def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[di
         # 课时/容器边界不能附在上一大题的材料里。
         for cursor in range(row["start_line"], end):
             plain = plain_text(lines[cursor]).strip()
-            if _LESSON.match(plain) or _UNIT.match(plain) or plain in ("综合阅读提升", "单元话题写作", "Pronunciation"):
+            if _LESSON.match(plain) or _UNIT.match(plain) or is_section_title(plain):
                 end = cursor
                 break
         # 文末答案区不属于任何大题：答案里的题号/选项不得进入来源窗口。
@@ -289,6 +308,8 @@ def prompt_block(path: str | Path | None = None, limit: int = 0) -> str:
     lines.append("- 一行内并排的两个小题（`1.U　v (　　　)　　　　2.W　x (　　　)`）都要认出题号；"
                  "`B:1.<u>　　</u>` 这类说话人前缀后的题号也是题号。")
     lines.append("- 小题只存在于图片中（窗口正文只有 `[IMG …]`）按图片能力限制记录，不阻断切题、不进人工队列。")
+    lines.append("- 原卷方括号提示标记（`[2025·六安月考]`、`[新考法·跨学科]`、`[情境题]`、`[改编]` 等）"
+                 "是原文的一部分，必须原样留在题干或材料里（可留在大题标题），不得删除或改写。")
     lines.append("- 共用一段语篇/对话/表格/方框/图片的整题记 group；每小句独立成题的记 standalone。")
     chosen = data.get("rules") or []
     if limit and limit > 0:
@@ -352,6 +373,71 @@ def audit_units(units, raw_text: str = "", path: str | Path | None = None) -> li
             findings.append({"numbers": unit.get("numbers") or [], "title": hit["title"],
                              "heading_line": owner['start_line'], 'source_span': dict(span),
                              "rule": hit["rule"], "problems": problems})
+    return findings
+
+
+# 原卷提示标记：真题来源（[2025·六安月考]、[2023·安徽]）与命题特征（[新考法·…]、[情境题]）。
+# 这些标记是原卷原文的一部分，必须随题干/材料进入成品，不能被清洗掉。
+_MARK_HINT = re.compile(
+    r"20\d{2}|新考法|情境|素养|跨学科|改编|原创|月考|期中|期末|模拟|真题|中考|高考|开学|调研|质检|联考")
+_MARK_SKIP = re.compile(r"^(?:IMG|TABLE|/TABLE|解析|答案|范文|思路点拨|参考范文)\b", re.I)
+
+
+def source_marks(text: str) -> list[str]:
+    """按原文取出方括号提示标记（排除图片/表格/答案解析类标签）。"""
+    raw = str(text or "")
+    found: list[str] = []
+    for match in re.finditer(r"[\[【]([^\[\]【】]{1,80})[\]】]", raw):
+        body = plain_text(match.group(1)).strip()
+        if not body or _MARK_SKIP.match(body) or not _MARK_HINT.search(body):
+            continue
+        found.append(plain_text(match.group(0)).strip())
+    return found
+
+
+def _mark_key(text: str) -> str:
+    return re.sub(r"\s+", "", plain_text(text or ""))
+
+
+def _unit_text(unit: dict) -> str:
+    parts = [str(unit.get("stem") or ""), str(unit.get("material") or "")]
+    parts.extend(str(item) for item in unit.get("options") or [])
+    title = (unit.get("source_section") or {}).get("title") if isinstance(unit.get("source_section"), dict) else ""
+    parts.append(str(title or ""))
+    for child in unit.get("children") or []:
+        if isinstance(child, dict):
+            parts.append(str(child.get("stem") or ""))
+            parts.extend(str(item) for item in child.get("options") or [])
+            parts.append(str(child.get("material") or ""))
+    return _mark_key(" ".join(parts))
+
+
+def audit_source_marks(units, raw_text: str = "", path: str | Path | None = None) -> list[dict]:
+    """检查原卷窗口里的方括号提示标记是否仍留在成品题干/材料里，只留痕。
+
+    真题来源与命题特征标记是原卷原文（如 ``Ⅰ.完形填空[2025·六安月考]``、
+    ``[新考法·跨学科]``），成品不得丢掉；缺失只做提示，不改题干、不改闸门。
+    """
+    if not looks_like_sync_practice(raw_text):
+        return []
+    lines = str(raw_text or "").splitlines()
+    findings: list[dict] = []
+    for unit in units or []:
+        if not isinstance(unit, dict):
+            continue
+        span = unit.get("source_span") or {}
+        start, end = span.get("start_line"), span.get("end_line")
+        if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
+            continue
+        marks = source_marks("\n".join(lines[start - 1:end]))
+        if not marks:
+            continue
+        rendered = _unit_text(unit)
+        missing = [mark for mark in marks if _mark_key(mark) not in rendered]
+        if missing:
+            findings.append({"numbers": unit.get("numbers") or [], "source_span": dict(span),
+                             "marks": missing,
+                             "problems": ["原卷提示标记未进入题干/材料：" + " ".join(missing)]})
     return findings
 
 
