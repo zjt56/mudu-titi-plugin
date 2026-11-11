@@ -62,6 +62,11 @@
 - 最终课时关联回归 **79 tests OK**（0.789s）；正式答案只读复验 **41/41** 通过当前来源校验，确定性重建与已接受答案逐项相同、缺失 0。真实 HTTP 两单元均为 group，题型语音题、子类数组；图片 image2/image3 均保留，分别 200/image/jpeg、29747/28846 bytes。
 - 回顾经验已按 `proactive-self-improving-agent` 记录到 `.learnings/LEARNINGS.md`（LRN-20261111-002），覆盖答案续行与当前来源边界的双向回归。
 
+## 卡点留档与接续状态
+
+- 已复验的结构、题型显示、题图误隐藏、罗马答案绑定和旧输入重试五项台账均通过 `issue_log fix` 移入 `ISSUES/fixed/`，修复提交 `8e4b470`。
+- 15:23:50 知识点阶段出现另一项真实阻断 `TEXTBOOK_PLACEMENT_EVIDENCE_MISSING`：`textbook placement requires nonempty evidence`（exit2/integration），已登记 `ISSUES/open/2026-11-11-课时知识点教材位置缺少非空来源证据.md`。保留候选继续核对任务契约与原件证据，不改教材证据校验，也不把当前批次标记完成。
+
 ## 回退
 
 `git revert` 本次提交即可；`sync_practice.answer_key_start` 与 `same_line_numbers` 都是新增函数，删除调用点即回到旧口径（旧口径会导致课时卷再次在结构闸门被答案区阻断）。
