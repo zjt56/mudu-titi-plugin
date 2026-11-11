@@ -8,7 +8,8 @@
 B11：material 里的空位必须写成 `__N__`（也接受提取阶段的 `<u>　N　</u>`）；
      不得出现裸编号空位（全角空格包纯数字 `　51　`）、`__ 51 __`、
      或裸 `51` 紧跟下划线等不可见写法。
-D11：单词拼写/完成句子/单项填空 的题干必须有 `______`；单元 answer 不得只剩 `; ; ;`。
+W11：单词拼写/完成句子/单项填空 的题干无 `______` 只提示，不改原卷合法问句/图片表达。
+D11：实际作答单元 answer 不得为空或只剩 `; ; ;`。
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _common import arg_parser, load_batch, report, units
 
-# D11 题型：题干必须有 ______
+# W11 题型：题干未见 ______ 只作格式提示；不据此认定原卷缺内容。
 BLANK_STEM_TYPES = ("单词拼写", "完成句子", "单项填空")
 
 # 合法空位：__N__
@@ -86,16 +87,26 @@ def _check_unit(u):
     # B11：材料空位可见性
     problems.extend(_check_material(uid, u.get("material")))
 
-    # D11：单词拼写/完成句子/单项填空 题干必须有 ______
+    # W11 仅检查空档写法：原卷问句或图片填词可没有文本下划线。
+    # 答案内容仍单独按 D11 阻断，不能让格式软化掩盖真实缺失。
     if qt in BLANK_STEM_TYPES:
         stem = str(u.get("stem") or "")
         native_spelling_blank = (qt == "单词拼写" and re.search(
             r"<u>(?:[A-Za-z])?(?:\s|&nbsp;|&#160;|&#xA0;)+</u>", stem, re.I))
         if "______" not in stem and not native_spelling_blank:
-            problems.append(f"[D11] {qt} 题干缺空档: {uid}（stem 应含 ______ 或单词拼写原生空白画线）")
-        answer = str(u.get("answer") or "").strip()
-        if answer and ANSWER_ONLY_SEMI.match(answer):
-            problems.append(f"[D11] {qt} 答案只剩分号: {uid}（answer={answer!r}，应补实际答案）")
+            problems.append(f"[W11] {qt} 题干缺空档: {uid}（未见 ______ 或单词拼写原生空白画线；保留原卷表达）")
+        children = u.get("subquestions") or []
+        # 题组答案在子题上；没有聚合 answer 不等于缺答案。
+        targets = [(f"{uid}/{child.get('number', index)}", child)
+                   for index, child in enumerate(children, 1) if isinstance(child, dict)] if children else [(uid, u)]
+        if children and str(u.get("answer") or "").strip():
+            targets.append((uid, u))  # 已提供的聚合答案仍不能只有分号。
+        for target_id, question in targets:
+            answer = str(question.get("answer") if question.get("answer") is not None else "").strip()
+            if not answer:
+                problems.append(f"[D11] {qt} 答案为空: {target_id}（应补实际答案）")
+            elif ANSWER_ONLY_SEMI.match(answer):
+                problems.append(f"[D11] {qt} 答案只剩分号: {target_id}（answer={answer!r}，应补实际答案）")
 
     return problems
 

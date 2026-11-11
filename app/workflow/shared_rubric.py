@@ -19,8 +19,18 @@ def instruction(line, kind=""):
 
 
 def phonetic_section_rubric(lines, unit):
-    """Use only the verbatim heading at this scoped phonetic unit's source position."""
-    if unit.get("type") != "语音题" or unit.get("identity_version") != "scoped-v1":
+    """Bind a whole scoped phonetic/legitimate unnumbered group's real heading.
+
+    Keep the historical entry point shared by draft creation and source audit.
+    Non-phonetic use requires the central legitimate-source-shape classifier;
+    a type label or an arbitrary empty group is never sufficient.
+    """
+    from .question_content import legitimate_source_shape
+    native_alias = (unit.get('unit_kind') == 'group' and unit.get('numbers') == [1]
+                    and (unit.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
+                    and legitimate_source_shape(unit) in {'image_only', 'unnumbered_no_image'})
+    if (unit.get("identity_version") != "scoped-v1"
+            or unit.get('type') != '语音题' and not native_alias):
         return []
     section, span = unit.get("source_section") or {}, unit.get("source_span") or {}
     heading, first, last = section.get("start_line"), span.get("start_line"), span.get("end_line")
@@ -36,7 +46,8 @@ def phonetic_section_rubric(lines, unit):
     from .sync_practice import heading_candidates
     owners = [row for row in heading_candidates("\n".join(lines))
               if row["start_line"] == heading]
-    if (len(owners) != 1 or owners[0]["type"] != "语音题"
+    if (len(owners) != 1 or owners[0]['type'] != unit.get('type')
+            or owners[0]['kind'] != 'group'
             or owners[0]["title"] != title
             or owners[0]["end_line"] != section["end_line"]
             or last > owners[0]["end_line"]):

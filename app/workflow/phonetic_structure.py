@@ -1,4 +1,4 @@
-"""Source-proven exceptions for scoped phonetic exercise groups, never all groups."""
+"""Current-source proof for phonetic and legitimate unnumbered native groups."""
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -14,7 +14,12 @@ def verified_groups(batch_path):
         return {}
     from .agent_tasks import confirmed_units
     from collections import Counter
-    phonetic = {u["unit_id"] for u in confirmed_units(root) if u.get("type") == "语音题"}
+    from .question_content import legitimate_source_shape
+    eligible = {u['unit_id']: u.get('type') for u in confirmed_units(root)
+                if u.get('type') == '语音题' or (
+                    u.get('unit_kind') == 'group' and u.get('numbers') == [1]
+                    and (u.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
+                    and legitimate_source_shape(u) in {'image_only', 'unnumbered_no_image'})}
     owners = Counter(a.get("name") for item in draft["items"] for a in item.get("attachments") or []
                      if a.get("kind") == "image")
     invalid_media = set()
@@ -29,8 +34,9 @@ def verified_groups(batch_path):
                 invalid_media.add(item["unit_id"])
     invalid = {p.get("unit_id") for p in draft["issues"]
                if p.get("code") not in {"TABLE_LAYOUT_UNVERIFIED"}}
-    return {item["unit_id"]: dict(item, _source_media_batch=root.name) for item in draft["items"]
-            if item.get("unit_id") in phonetic
+    return {item["unit_id"]: dict(item, _source_media_batch=root.name,
+                                   _source_question_type=eligible[item['unit_id']]) for item in draft["items"]
+            if item.get("unit_id") in eligible
             and item.get("unit_id") not in invalid | invalid_media
             and item.get("identity_version") == "scoped-v1"
             and item.get("unit_kind") == "group"
@@ -40,10 +46,12 @@ def verified_groups(batch_path):
 
 def shape(unit, verified=None):
     """Return (material optional, alias stem optional) after current-source comparison."""
-    if unit.get("question_type") != "语音题" or unit.get("unit_kind") != "group":
+    if unit.get('unit_kind') != 'group':
         return False, False
-    expected = (verified or {}).get(unit.get("unit_id"))
-    if not expected or str(expected.get('material') or '').strip():
+    expected = (verified or {}).get(unit.get('unit_id'))
+    if not expected or unit.get('question_type') != expected.get('_source_question_type'):
+        return False, False
+    if unit.get('material') != expected.get('material'):
         return False, False
     if unit.get('materialBlocks') != expected.get('materialBlocks'):
         return False, False
@@ -71,8 +79,9 @@ def shape(unit, verified=None):
                and source_url(a)}
     if not images.issubset(present):
         return False, False
-    alias = (bool(images) and len(subs) == 1 and expected.get("printed_numbers") == []
-             and unit.get("printed_numbers") == [] and unit.get("source_span") == expected.get("source_span")
-             and expected.get("source_span", {}).get("number_binding") == "unnumbered_section")
-    complete = all(str(c.get("stem") or "").strip() for c in subs)
-    return (bool(images) or complete), alias
+    alias = (len(subs) == 1 and expected.get('printed_numbers') == []
+             and unit.get('printed_numbers') == [] and unit.get('source_span') == expected.get('source_span')
+             and expected.get('source_span', {}).get('number_binding') == 'unnumbered_section'
+             and (bool(images) or bool(str(expected.get('material') or '').strip())))
+    complete = all(str(c.get('stem') or '').strip() for c in subs)
+    return (bool(images) or complete or alias), alias
