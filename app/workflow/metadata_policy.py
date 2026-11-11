@@ -1,6 +1,7 @@
 """Local placeholders are absence markers, never evidence or invented labels."""
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -106,6 +107,48 @@ def paper_meta(metadata: dict | None, batch_dir=None) -> dict:
                 if not known(result.get(key)):
                     result[key] = name
     return with_placeholders(result)
+
+
+def project_source_metadata(payload: dict) -> dict:
+    """Project local absence markers into optional upload fields at meta time.
+
+    Reconcile only an absent alias with a supplied value. Two substantive values
+    remain untouched so the upload mapper still rejects genuine conflicts.
+    This does not infer provenance or a year from the batch name or parent.
+    """
+    result = deepcopy(payload)
+
+    def absent(value):
+        return value is None or (isinstance(value, str)
+                                 and value.strip() in ("", MISSING))
+
+    def visit(node):
+        if not isinstance(node, dict):
+            return
+        filters = node.get("filterMetadata")
+        # Invalid structures belong to the hard validator, not this projection.
+        if filters is not None and not isinstance(filters, dict):
+            return
+        filters = filters if isinstance(filters, dict) else {}
+        for key in ("source", "source_type", "year"):
+            for owner in (node, filters):
+                if key in owner and absent(owner[key]):
+                    del owner[key]
+                elif key == "year" and isinstance(owner.get(key), str) and owner[key].strip().isdigit():
+                    owner[key] = int(owner[key].strip())
+            top, nested = key in node, key in filters
+            if top and not nested:
+                filters[key] = deepcopy(node[key])
+            elif nested and not top:
+                node[key] = deepcopy(filters[key])
+        if filters or "filterMetadata" in node:
+            node["filterMetadata"] = filters
+        for child in node.get("subquestions") or []:
+            visit(child)
+
+    for item in result.get("items") or []:
+        visit(item)
+    return result
 
 
 def resolved_paper_meta(metadata: dict | None, batch_dir=None) -> dict:

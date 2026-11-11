@@ -309,7 +309,9 @@ def prompt_block(path: str | Path | None = None, limit: int = 0) -> str:
                  "`B:1.<u>　　</u>` 这类说话人前缀后的题号也是题号。")
     lines.append("- 小题只存在于图片中（窗口正文只有 `[IMG …]`）按图片能力限制记录，不阻断切题、不进人工队列。")
     lines.append("- 原卷方括号提示标记（`[2025·六安月考]`、`[新考法·跨学科]`、`[情境题]`、`[改编]` 等）"
-                 "是原文的一部分，必须原样留在题干或材料里（可留在大题标题），不得删除或改写。")
+                 "及无年份的[传统文化]/[安徽人文]/[榜样人物]/[经典谚语]/[熟词生义]是原文的一部分。"
+                 "逐题标记留在所属题/子题题干，大题标记留在所属题组作答指令；完形/填空句内标记可留原材料。"
+                 "必须完整原样保留，不得只留年份、移到别题、只存source_section元数据或解析，不得删除或改写。")
     lines.append("- 共用一段语篇/对话/表格/方框/图片的整题记 group；每小句独立成题的记 standalone。")
     chosen = data.get("rules") or []
     if limit and limit > 0:
@@ -379,8 +381,10 @@ def audit_units(units, raw_text: str = "", path: str | Path | None = None) -> li
 # 原卷提示标记：真题来源（[2025·六安月考]、[2023·安徽]）与命题特征（[新考法·…]、[情境题]）。
 # 这些标记是原卷原文的一部分，必须随题干/材料进入成品，不能被清洗掉。
 _MARK_HINT = re.compile(
-    r"20\d{2}|新考法|情境|素养|跨学科|改编|原创|月考|期中|期末|模拟|真题|中考|高考|开学|调研|质检|联考")
-_MARK_SKIP = re.compile(r"^(?:IMG|TABLE|/TABLE|解析|答案|范文|思路点拨|参考范文)\b", re.I)
+    r"(?:19|20)\d{2}|新考法|情境|素养|跨学科|改编|原创|月考|期中|期末|模拟|真题|中考|高考|开学|调研|质检|联考"
+    r"|传统文化|安徽人文|榜样人物|经典谚语|熟词生义")
+_MARK_SKIP = re.compile(
+    r"^(?:(?:IMG|TABLE|/TABLE)(?:\s|$)|解析|答案|详解|分析|考点|点睛|点评|范文|思路|参考|文章大意|导语|备注)", re.I)
 
 
 def source_marks(text: str) -> list[str]:
@@ -399,45 +403,181 @@ def _mark_key(text: str) -> str:
     return re.sub(r"\s+", "", plain_text(text or ""))
 
 
-def _unit_text(unit: dict) -> str:
+def _own_text(unit: dict) -> str:
+    # Only delivered question fields count: source_section/answers/explanations do not.
     parts = [str(unit.get("stem") or ""), str(unit.get("material") or "")]
-    parts.extend(str(item) for item in unit.get("options") or [])
-    title = (unit.get("source_section") or {}).get("title") if isinstance(unit.get("source_section"), dict) else ""
-    parts.append(str(title or ""))
-    for child in unit.get("children") or []:
-        if isinstance(child, dict):
-            parts.append(str(child.get("stem") or ""))
-            parts.extend(str(item) for item in child.get("options") or [])
-            parts.append(str(child.get("material") or ""))
-    return _mark_key(" ".join(parts))
+    options = unit.get("options") or []
+    parts.extend(str(item) for item in (options.values() if isinstance(options, dict) else options))
+    # Tables are delivered content too; read only their explicit text/items fields.
+    for block in unit.get("materialBlocks") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("text"):
+            parts.append(str(block["text"]))
+        for row in block.get("rows") or []:
+            cells = row.get("cells") or [] if isinstance(row, dict) else row
+            for cell in cells or []:
+                if isinstance(cell, dict):
+                    parts.append(str(cell.get("text") or ""))
+                    parts.extend(str(item) for item in cell.get("items") or [])
+    return "\n".join(parts)
+
+
+def _children(unit: dict) -> list[dict]:
+    return [c for key in ("children", "subquestions") for c in unit.get(key) or [] if isinstance(c, dict)]
+
+
+def _unit_text(unit: dict) -> str:
+    return "\n".join([_own_text(unit)] + [_own_text(c) for c in _children(unit)])
+
+
+def _keeps(mark: str, text: str) -> bool:
+    # Full bracket and body must survive; a matching year or region is never enough.
+    return _mark_key(mark) in {_mark_key(item) for item in source_marks(text)}
+
+
+def _numbers(unit: dict) -> list:
+    return unit.get("numbers") or ([unit["number"]] if unit.get("number") is not None else
+                                   [c.get("number") for c in _children(unit) if c.get("number") is not None])
+
+
+def _valid_span(span, lines):
+    if not isinstance(span, dict):
+        return False
+    start, end = span.get("start_line"), span.get("end_line")
+    return type(start) is int and type(end) is int and 1 <= start <= end <= len(lines)
+
+
+def _scoped_mark_window(unit, lines, headings):
+    """Resolve from explicit source identity, never by a global printed-number fallback."""
+    if (unit.get("identity_version") != "scoped-v1" or not unit.get("section_id")
+            or not (unit.get("unit_id") or unit.get("id"))):
+        return None
+    section = unit.get("source_section") or {}
+    owners = [h for h in headings if h["start_line"] == section.get("start_line")
+              and _mark_key(h["title"]) == _mark_key(section.get("title") or "")]
+    if len(owners) != 1:
+        return None
+    owner = owners[0]
+    if any(key in section and section[key] != owner.get(key)
+           for key in ("end_line", "context", "occurrence")):
+        return None
+    nums, qids = _numbers(unit), unit.get("question_ids") or {}
+    if not nums or any(not isinstance(qids.get(str(n)), str) or not qids[str(n)] for n in nums):
+        return None
+    span = unit.get("source_span") or {}
+    if span:
+        if (not _valid_span(span, lines)
+                or span.get("basis") not in {"ai_classified", "cleaned_source"}):
+            return None
+        start, end = span["start_line"], span["end_line"]
+        if owner["start_line"] <= start <= end <= owner["end_line"]:
+            return start, end, owner
+        return None
+    # Ordinary final items carry source_section + question_ids, not source_span.
+    # Reconstruct only when every requested printed number occurs once in this section.
+    from .question_identity import printed_anchors
+    local = lines[owner["start_line"] - 1:owner["end_line"]]
+    anchors = printed_anchors(local)
+    if any(sum(n == wanted for _, n in anchors) != 1 for wanted in nums):
+        return None
+    positions = [i for i, n in anchors if n in nums]
+    start = min(positions)
+    end = next((i - 1 for i, n in anchors if i > max(positions) and n not in nums), len(local) - 1)
+    if unit.get("unit_kind") == "group":
+        # A later group may have different printed numbers but an earlier material
+        # boundary. Without its explicit span, do not borrow the whole section.
+        if any(n not in nums for _, n in anchors):
+            return None
+        start = 0
+    return owner["start_line"] + start, owner["start_line"] + end, owner
+
+
+def _mark_requirements(unit, lines, window):
+    start, end, owner = window
+    requirements = [(m, str(unit.get("stem") or ""), "大题作答指令")
+                    for m in source_marks(lines[owner["start_line"] - 1])]
+    from .question_identity import numbered_projection, printed_anchors
+    projected = numbered_projection(lines[start - 1:end])
+    anchors = printed_anchors(projected)
+    children = _children(unit)
+    # Blanks embedded in continuous cloze/dialogue prose belong to the shared material.
+    material_type = (unit.get("question_type") or unit.get("type")) in {
+        "完形填空", "选词填空", "短文填空", "教材语篇填空", "补全对话", "语法选择"}
+    for index, line in enumerate(projected):
+        if start + index == owner["start_line"] and index == 0:
+            continue
+        previous = [(i, n) for i, n in anchors if i <= index]
+        number = previous[-1][1] if previous else None
+        matches = [c for c in children if str(c.get("number")) == str(number)]
+        unique = number is not None and sum(n == number for _, n in anchors) == 1
+        target, label = _own_text(unit), "所属单元题干/材料"
+        # Cloze/dialogue prose contains inline blank numbers; these are material.
+        # Printed answer-option blocks still belong to their own child.
+        option_block = False
+        if previous:
+            anchor_index = previous[-1][0]
+            next_index = next((i for i, _ in anchors if i > anchor_index), len(projected))
+            option_block = any(re.search(r"(?:^|\d[.．、]\s*|\s)A[.．、]", item)
+                               for item in projected[anchor_index:next_index])
+        if material_type and option_block and number is not None:
+            option_anchors = []
+            for ai, (pos, n) in enumerate(anchors):
+                stop = anchors[ai + 1][0] if ai + 1 < len(anchors) else len(projected)
+                if n == number and any(re.search(r"(?:^|\d[.．、]\s*|\s)A[.．、]", item)
+                                       for item in projected[pos:stop]):
+                    option_anchors.append(pos)
+            unique = len(option_anchors) == 1
+        if unique and len(matches) == 1 and (not material_type or option_block):
+            target, label = _own_text(matches[0]), f"所属子题{number}题干"
+        elif material_type:
+            target, label = _own_text(unit), "原材料/作答指令"
+        for mark in source_marks(line):
+            requirements.append((mark, target, label))
+    return requirements
 
 
 def audit_source_marks(units, raw_text: str = "", path: str | Path | None = None) -> list[dict]:
-    """检查原卷窗口里的方括号提示标记是否仍留在成品题干/材料里，只留痕。
-
-    真题来源与命题特征标记是原卷原文（如 ``Ⅰ.完形填空[2025·六安月考]``、
-    ``[新考法·跨学科]``），成品不得丢掉；缺失只做提示，不改题干、不改闸门。
-    """
+    """同步来源窗口留痕；可靠 scoped 身份才验证所属题，不修改题目或闸门。"""
     if not looks_like_sync_practice(raw_text):
         return []
     lines = str(raw_text or "").splitlines()
+    headings = heading_candidates(raw_text, path)
     findings: list[dict] = []
     for unit in units or []:
         if not isinstance(unit, dict):
             continue
         span = unit.get("source_span") or {}
-        start, end = span.get("start_line"), span.get("end_line")
-        if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
+        window = _scoped_mark_window(unit, lines, headings)
+        if window:
+            requirements = _mark_requirements(unit, lines, window)
+        elif unit.get("identity_version") != "scoped-v1" and _valid_span(span, lines):
+            requirements = [(m, _unit_text(unit), "题干/材料")
+                            for m in source_marks("\n".join(lines[span["start_line"] - 1:span["end_line"]]))]
+        else:
             continue
-        marks = source_marks("\n".join(lines[start - 1:end]))
-        if not marks:
-            continue
-        rendered = _unit_text(unit)
-        missing = [mark for mark in marks if _mark_key(mark) not in rendered]
+        missing = [(mark, label) for mark, text, label in requirements if not _keeps(mark, text)]
         if missing:
-            findings.append({"numbers": unit.get("numbers") or [], "source_span": dict(span),
-                             "marks": missing,
-                             "problems": ["原卷提示标记未进入题干/材料：" + " ".join(missing)]})
+            marks = list(dict.fromkeys(mark for mark, _ in missing))
+            findings.append({"unit_id": unit.get("unit_id") or unit.get("id") or "",
+                             "numbers": _numbers(unit), "source_span": dict(span), "marks": marks,
+                             "problems": ["原卷提示标记未进入题干/材料：" + " ".join(marks)] +
+                                         [f"{mark} 应保留于{label}" for mark, label in missing]})
+    return findings
+
+
+def audit_batch_source_marks(units, raw_text: str) -> list[dict]:
+    """Read-only final check. Legacy/unbound batches check exact marks globally only."""
+    rows = [u for u in units or [] if isinstance(u, dict)]
+    findings = audit_source_marks(rows, raw_text)
+    lines = str(raw_text or "").splitlines()
+    headings = heading_candidates(raw_text) if looks_like_sync_practice(raw_text) else []
+    if rows and all(_scoped_mark_window(u, lines, headings) for u in rows):
+        return findings
+    corpus = "\n".join(_unit_text(u) for u in rows)
+    missing = list(dict.fromkeys(m for m in source_marks(raw_text) if not _keeps(m, corpus)))
+    if missing:
+        findings.append({"marks": missing, "problems": ["原卷提示标记未完整保留：" + " ".join(missing)]})
     return findings
 
 

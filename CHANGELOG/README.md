@@ -32,6 +32,10 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-11 | [2026-11-11-review-binding-equivalence-restore.md](2026-11-11-review-binding-equivalence-restore.md) | 来源占位清理不再触发重审；绑定升级后内容等价的旧未裁决差异回到活动队列 |
+| 2026-11-11 | [2026-11-11-review-question-source-projection.md](2026-11-11-review-question-source-projection.md) | 审核语义绑定排除题目来源元数据，严格兼容既有等价观察 |
+| 2026-11-11 | [2026-11-11-sync-source-mark-ownership.md](2026-11-11-sync-source-mark-ownership.md) | 对照远端课时配方补完整原卷标记与实际单元/子题归属校验、提示词 |
+| 2026-11-11 | [2026-11-11-meta-source-placeholder-projection.md](2026-11-11-meta-source-placeholder-projection.md) | meta 最终视图移除来源与年份旧占位，真实冲突仍拒绝 |
 | 2026-11-11 | [2026-11-11-review-inline-child-source.md](2026-11-11-review-inline-child-source.md) | 二审按当前课时来源证明并排小题字符边界，保留原始审核差异 |
 | 2026-11-11 | [2026-11-11-phonetic-group-source-shape.md](2026-11-11-phonetic-group-source-shape.md) | 语音组题逐字保留公共导语，以当前完整来源证明原生图和无共享材料形态，精确校验 A8/A9 |
 | 2026-11-11 | [2026-11-11-skipped-explanations-current-coverage.md](2026-11-11-skipped-explanations-current-coverage.md) | 无原解析的历史跳过产物须按当前子题覆盖重新验收，保护真实内容并原子备份刷新 |

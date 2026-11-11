@@ -1,4 +1,12 @@
-# RULES — 规则与强调台账
+﻿# RULES — 规则与强调台账
+
+## 2026-11-11：远端课时标记规则按本插件边界落地
+
+按用户要求对照 Mudu-English-Upload 的课时配方，来源/新考法与无年份栏目（传统文化、安徽人文、榜样人物、经典谚语、熟词生义等）必须完整保留到实际题干或材料；不能用全批同年/地区 token 或 source_section 元数据假作已交付。可靠 scoped 身份下核对所属单元及子题，旧协议不猜归属。远端自造答案/范文、自动教材挂接及辨音逐题与用户当前规则冲突的做法不引入；只匹配知识点、语音按整节 group、上传需授权的边界不变。落地：sync_practice、audit_source_marks、课时提示词及回归；根规则25。
+
+## 2026-11-11：未知来源字段只在 meta 视图省略，来源不参与内容审核
+
+来源/年份缺证据保持未知，meta 最终视图省略空白与「未提供」，只同步同节点已有实值别名；真冲突和非法实值仍由硬校验拒绝，不从父题或日期猜测。仅来源元数据变化不应触发标签/内容重审；题干、材料、答案、知识点和真实来源证据的绑定继续严格，在途精确哈希不放宽。落地：metadata_policy、assign_meta、review 语义绑定及回归；根规则6/26。
 
 ## 2026-11-11：语音组题的原生图片、公共导语和来源证明
 
@@ -361,3 +369,7 @@
 ## 2026-11-11：课时拆分件的提取口径同源（课时标题变体 / 版块边界 / 提示标记保真）
 
 用户原话（m03765）：「了解该项目中关于课时的注意事项以及分类等条件，完善该插件对应课时的提取规则」（对方仓库 Mudu-English-Upload）。规则：课时标题认 `第一课时`、`第1课时`、`第1节课`、`课时1`、`Period 1`、`Lesson 1`，课时后可直接跟 `Section A`（不要求空格）；`Reading Plus`、`Project`、`Reflecting`、`Pronunciation`、`综合阅读提升`、`单元话题写作` 与课时平级，只能作上下文并结束上一大题窗口，不得当大题或并进共享材料；试卷卷头出现单元测试/期中/期末/月考/模拟时仍不套用同步口径。原卷方括号提示标记（`[2025·六安月考]`、`[2023·安徽]`、`[新考法·…]`、`[情境题]`、`[改编]`）属于原文，必须原样留在题干或材料，`sync_practice.audit_source_marks` 只写 `structure.ai.classified.json` 的 `sync_marks` 留痕（上传前再由 `scripts/06-upload/audit_source_marks.py` 复核），不改题干、不放行闸门；`type_kind` 覆盖目录全部 27 个主类。落地：`app/workflow/sync_practice.py::_LESSON/is_section_title/source_marks/audit_source_marks/prompt_block`、`app/workflow/structure_ai.py::auto_classify`、`app/references/sync-practice-rules.json`、`app/workflow/test_sync_lesson_extraction.py`、`app/docs/sync-practice.md`（第九节）；根 `AGENTS.md` 硬规则 25；验证见 `2026-11-11-sync-lesson-extraction-rules.md`。
+
+## 2026-11-11：技术性绑定变化不得让真实未裁决差异消失
+
+用户原话（m11332 要点）：「审核出来的 11 条差异我还没裁决，不能因为清理元数据占位就把它清掉」。旧实现按「全局 input binding 变了」把未裁决发现一律归档出活动队列，一次来源占位清理就让 11 条真实差异从人工队列蒸发，还白烧一遍模型。规则：来源/年份等**题目来源元数据**不参与审核语义绑定（`evidence.source` 等真实来源证据仍参与）；历史摘要只要精确等于当前投影、旧投影当前值或仅回放已知「未提供」子题来源这三种之一，就算内容等价，可复用既有两轮结论，不重跑模型。因绑定过期退休、内容证明等价且仍未裁决的差异必须放回活动队列，保留原 `round_sources` 与理由、换新 `finding_id` 防撞号并幂等去重；内容真变、证明不了、已裁决、其他退休原因一律仍归档。落地：`app/workflow/review.py::acceptable_unit_bindings/_unit_binding_matches`、`app/workflow/ingest.py::_restore_equivalent_retired/build_review_files`、`app/workflow/test_ingest_binding_equivalence.py`；根规则 6/9；验证见 `2026-11-11-review-binding-equivalence-restore.md`。

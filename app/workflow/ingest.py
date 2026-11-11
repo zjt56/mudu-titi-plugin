@@ -134,6 +134,143 @@ def _next_index(records: list) -> int:
     return top + 1
 
 
+RETIRED_BINDING_REASON = "旧轮次输入绑定已过期；原判据保留，供跨轮比对"
+
+
+def _fresh_finding_id(preferred, used: set) -> str:
+    """恢复的差异不能复用仍活跃的 finding_id，否则界面会把它当成同一条。"""
+    preferred = str(preferred or "")
+    if preferred and preferred not in used:
+        return preferred
+    top = 0
+    for fid in used:
+        fid = str(fid or "")
+        if fid.startswith("WF-") and fid[3:].isdigit():
+            top = max(top, int(fid[3:]))
+    candidate = top + 1
+    while f"WF-{candidate:04d}" in used:
+        candidate += 1
+    return f"WF-{candidate:04d}"
+
+
+def _restore_equivalent_retired(batch_dir: Path, review_dir: Path, queue: list,
+                                existing: dict, accepted: dict) -> list:
+    """把“只因绑定过期退休、内容仍等价、尚未裁决”的差异放回活动队列。
+
+    只认 ingest 自己写的绑定过期理由；旧快照/正式标签不一致等其他退休原因
+    不动，人工已裁决的记录不动。
+    """
+    from . import review
+
+    archive_path = Path(review_dir) / "retired-round-findings.json"
+    archive = _load(archive_path)
+    records = archive.get("records") if isinstance(archive, dict) else None
+    if not isinstance(records, list):
+        return []
+    known = set()
+    active_keys = set()
+    used_ids = set()
+    for item in [*queue, *(row for rows in existing.values() for row in rows)]:
+        if not isinstance(item, dict):
+            continue
+        used_ids.add(str(item.get("finding_id") or ""))
+        known.add((item.get("finding_id"), json.dumps(item.get("round_sources") or [],
+                                                     sort_keys=True, ensure_ascii=False)))
+        if review._is_open(item):
+            # 同一单元同一字段同一理由仍是当前差异时，旧记录只是同一判断的旧来源，
+            # 恢复它只会让人工队列同一条差异算两遍。
+            active_keys.add((str(item.get("unit_id") or ""), str(item.get("field") or ""),
+                             str(item.get("reason") or item.get("question") or "")))
+    restored = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("retired_reason") or "") != RETIRED_BINDING_REASON:
+            continue
+        if not review._is_open(record):
+            continue
+        if not _content_equivalent(batch_dir, record, accepted):
+            continue
+        marker = (record.get("finding_id"),
+                  json.dumps(record.get("round_sources") or [], sort_keys=True, ensure_ascii=False))
+        if marker in known:
+            continue
+        key = (str(record.get("unit_id") or ""), str(record.get("field") or ""),
+               str(record.get("reason") or ""))
+        if key in active_keys:
+            continue
+        item = {
+            "finding_id": _fresh_finding_id(record.get("finding_id"), used_ids),
+            "unit_id": record.get("unit_id"),
+            "field": record.get("field", ""),
+            "severity": record.get("severity", "major"),
+            "status": "open",
+            "question": record.get("reason", ""),
+            "reason": record.get("reason", ""),
+            "evidence": list(record.get("evidence") or []),
+            "round_sources": list(record.get("round_sources") or []),
+            "restored_from": record.get("finding_id"),
+        }
+        used_ids.add(item["finding_id"])
+        queue.append(item)
+        name = str(record.get("retired_from") or "")
+        if name in existing and record not in existing[name]:
+            existing[name].append(record)
+        known.add(marker)
+        active_keys.add(key)
+        restored.append(item)
+    return restored
+
+
+def _historical_unit_bindings(batch_dir: Path, binding: str) -> dict:
+    """旧绑定当时各单元的内容摘要（来自已归档的旧轮次计划）。
+
+    审核差异是真实判断，不是缓存：只有能证明旧观察对应的单元内容没有变化，
+    才允许它在新的全局绑定下继续留在活动队列；证明不了就按原逻辑归档。
+    """
+    if not binding:
+        return {}
+    folder = Path(batch_dir) / "workflow" / "review-history"
+    found = {}
+    for path in sorted(folder.glob("*.json")):
+        if path.is_symlink():
+            continue
+        payload = _load(path)
+        plan = payload.get("plan") if isinstance(payload, dict) else None
+        if not isinstance(plan, dict):
+            continue
+        if str(plan.get("input_binding") or "") != binding:
+            continue
+        rows = plan.get("unit_bindings")
+        if not isinstance(rows, dict):
+            continue
+        for uid, digest in rows.items():
+            found.setdefault(str(uid), set()).add(str(digest))
+    return found
+
+
+def _content_equivalent(batch_dir: Path, record: dict, accepted: dict) -> bool:
+    """旧绑定下的未裁决发现，其单元内容是否仍与当前内容等价。"""
+    uid = str(record.get("unit_id") or "")
+    if not uid or uid not in accepted:
+        return False
+    allowed = accepted.get(uid) or set()
+    if not allowed:
+        return False
+    bindings = {str(src.get("input_binding") or "")
+                for src in record.get("round_sources") or [] if isinstance(src, dict)}
+    bindings.discard("")
+    if not bindings:
+        return False
+    previous = {}
+    for binding in bindings:
+        for unit_id, digests in _historical_unit_bindings(batch_dir, binding).items():
+            previous.setdefault(unit_id, set()).update(digests)
+    seen = previous.get(uid) or set()
+    # 每个旧摘要都必须在当前可接受集合里；缺证据或任一摘要不符即视为内容变化。
+    return bool(seen) and seen <= allowed
+
+
 def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False) -> dict:
     """把工作流返回值落成三份审核文件；已处理过的发现保留原状态。
 
@@ -202,14 +339,25 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
         for name in existing:
             existing[name] = [item for item in existing[name] if item not in stale_existing]
 
+    accepted = {}
     if current_binding:
         # 旧轮次绑定过期不等于“这条观察从未存在”：先归档再丢弃，否则两轮之间
         # 出现又消失的差异会无声蒸发，而用户要的正是这些跨轮差异（看哪类知识点、
         # 哪个模型头容易误判）。归档只追加，重复导入不会重复记账。
+        # 但“全局绑定变了”本身不代表单元内容变了：能证明内容等价的未裁决差异
+        # 必须留在活动队列等人工判断，不能当成过期结论静默退休。
+        plan_payload = rounds_payload.get("plan") if isinstance(rounds_payload, dict) else None
+        if isinstance(plan_payload, dict) and plan_payload.get("unit_bindings"):
+            try:
+                accepted = review.acceptable_unit_bindings(batch_dir, plan_payload)
+            except Exception:  # 证明不了就是证明不了：退回原归档逻辑，不放宽
+                accepted = {}
         superseded = [(item, "manual-review-queue.json") for item in queue
-                      if _superseded(item) and _open(item)]
+                      if _superseded(item) and _open(item)
+                      and not _content_equivalent(batch_dir, item, accepted)]
         superseded += [(row, name) for name in existing for row in existing[name]
-                       if _superseded(row) and _open(row)]
+                       if _superseded(row) and _open(row)
+                       and not _content_equivalent(batch_dir, row, accepted)]
         if superseded:
             archive_path = review_dir / "retired-round-findings.json"
             archive = _load(archive_path) or {"records": []}
@@ -220,9 +368,27 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
                 if retired not in saved:
                     saved.append(retired)
             _write_json(archive_path, archive)
+        retired_rows = {(id(item), name) for item, name in superseded}
         for name in existing:
-            existing[name] = [r for r in existing[name] if not _superseded(r)]
-        queue = [item for item in queue if not (_superseded(item) and _open(item))]
+            existing[name] = [r for r in existing[name]
+                              if (id(r), name) not in retired_rows]
+        queue = [item for item in queue
+                 if (id(item), "manual-review-queue.json") not in retired_rows]
+
+    # 一批绑定变化曾把“单元内容其实没变”的未裁决差异静默退休。它们仍是人工
+    # 要判断的差异，不能因为技术性绑定升级就从活动队列消失：只恢复当时因绑定
+    # 过期而退休、现在内容已证明等价的未裁决记录，已裁决与内容真变的都不动。
+    if accepted:
+        restored = _restore_equivalent_retired(batch_dir, review_dir, queue, existing, accepted)
+        if restored:
+            archive_path = review_dir / "retired-round-findings.json"
+            archive = _load(archive_path) or {"records": []}
+            saved = archive.setdefault("records", [])
+            restored_ids = {item.get("restored_from") or item.get("finding_id") for item in restored}
+            for record in saved:
+                if record.get("finding_id") in restored_ids and not record.get("restored_at"):
+                    record["restored_at"] = mf.now_iso()
+            _write_json(archive_path, archive)
 
     # 完整且绑定有效的两轮可重新投影当前问题队列；已取消的检查不得永久残留。
     # 仅退休派生比较发现，保留人工决定和非轮次发现，并将原记录存档。

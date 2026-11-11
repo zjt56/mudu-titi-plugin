@@ -9,10 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 RULES_PATH = ROOT / "references" / "difficulty-category.json"
 
 
@@ -119,7 +121,8 @@ def main() -> int:
     if not args.batch.is_file():
         print("未找到批次组装文件，等待组装完成")
         return 1
-    data = json.loads(args.batch.read_text(encoding="utf-8"))
+    from workflow.metadata_policy import project_source_metadata
+    data = project_source_metadata(json.loads(args.batch.read_text(encoding="utf-8")))
     items = data.get("items", [])
     pending = []
     for it in items:

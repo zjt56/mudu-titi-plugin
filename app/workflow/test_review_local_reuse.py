@@ -106,6 +106,82 @@ class ReviewLocalReuseTest(unittest.TestCase):
         records = self.load('07_review/review-rounds.json')['rounds']
         self.assertTrue(all(record['reuse'] for record in records))
 
+    def test_question_and_child_source_metadata_preserves_bindings_and_findings(self):
+        final = self.load('06_batch/batch.json')
+        for row in final['items']:
+            row.update(source='未提供', source_type='未提供', year='')
+            row['subquestions'] = [dict(number=1, source='未提供', source_type='未提供', year='', answer='A')]
+        self.write('06_batch/batch_meta.json', final)
+        self.finish()
+        old = review.prepare_round_plan(self.batch)
+        for row in final['items']:
+            row.update(source='当前来源', source_type='同步练习', year=2026, difficulty='适中')
+            child = row['subquestions'][0]
+            for key in ('source', 'source_type', 'year'):
+                child.pop(key)
+            child['difficulty'] = '适中'
+        self.write('06_batch/batch_meta.json', final)
+        current = review.prepare_round_plan(self.batch)
+        self.assertNotEqual(old['input_hashes']['06_batch/batch_meta.json'], current['input_hashes']['06_batch/batch_meta.json'])
+        self.assertEqual(old['unit_bindings'], current['unit_bindings'])
+        self.assertTrue(review.evaluate_rounds(self.batch)['execution_completed'])
+        self.assertEqual(review_rounds.export_task(self.batch)['action'], 'complete')
+        for field, value in [('stem', '真实题干变化'), ('answer', 'B'), ('knowledge', ['真实标签变化'])]:
+            with self.subTest(field=field):
+                changed = copy.deepcopy(final)
+                changed['items'][0]['subquestions'][0][field] = value
+                self.write('06_batch/batch_meta.json', changed)
+                rebound = review.prepare_round_plan(self.batch)
+                self.assertEqual([uid for uid in current['unit_bindings'] if current['unit_bindings'][uid] != rebound['unit_bindings'][uid]], ['q-1'])
+        self.assertNotEqual(review.semantic_review_value({'source': {'text': '来源对象A'}}, question=True),
+                            review.semantic_review_value({'source': {'text': '来源对象B'}}, question=True))
+        self.assertNotEqual(review.semantic_review_value({'source': '真实来源证据A'}),
+                            review.semantic_review_value({'source': '真实来源证据B'}))
+        self.assertNotEqual(review.semantic_review_value({'unit_id': 'q-1', 'content': {'source': 'A'}}, question=True),
+                            review.semantic_review_value({'unit_id': 'q-1', 'content': {'source': 'B'}}, question=True))
+
+    def test_legacy_completed_rounds_migrate_source_projection_without_model(self):
+        final = self.load('06_batch/batch.json')
+        for row in final['items']:
+            row['subquestions'] = [dict(number=1, source='未提供', answer='A')]
+        self.write('06_batch/batch_meta.json', final)
+        current_bindings = review._unit_bindings
+        def legacy(batch, units, hashes, **kwargs):
+            return current_bindings(batch, units, hashes, legacy_source=True)
+        with patch.object(review, '_unit_bindings', side_effect=legacy):
+            self.finish()
+        review._PLAN_CACHE.clear()
+        old = self.load('07_review/review-rounds.json')
+        for row in final['items']:
+            row['subquestions'][0].pop('source')
+        self.write('06_batch/batch_meta.json', final)
+        plan = review.prepare_round_plan(self.batch)
+        accepted = review.acceptable_unit_bindings(self.batch, plan)
+        self.assertTrue(all(digest in accepted[uid] for uid, digest in old['plan']['unit_bindings'].items()))
+        for field, value in [('stem', 'Changed stem'), ('answer', 'B'), ('knowledge', ['Changed label']),
+                             ('content', {'source': 'Changed substantive evidence'})]:
+            with self.subTest(field=field):
+                changed = copy.deepcopy(final)
+                changed['items'][0]['subquestions'][0][field] = value
+                self.write('06_batch/batch_meta.json', changed)
+                self.assertNotIn(old['plan']['unit_bindings']['q-1'], review.acceptable_unit_bindings(self.batch)['q-1'])
+        self.write('06_batch/batch_meta.json', final)
+        with patch.object(review_rounds, 'invoke', side_effect=AssertionError('No model allowed')) as invoke:
+            self.assertEqual(review_rounds.export_task(self.batch)['action'], 'complete')
+            self.assertTrue(review.evaluate_rounds(self.batch)['execution_completed'])
+            invoke.assert_not_called()
+
+    def test_metadata_only_change_still_rejects_inflight_exact_hash(self):
+        final = self.load('06_batch/batch.json')
+        final['items'][0]['source'] = '旧来源'
+        self.write('06_batch/batch_meta.json', final)
+        exported = review_rounds.export_task(self.batch, max_units_per_part=2)
+        response = self.response(exported)
+        final['items'][0]['source'] = '新来源'
+        self.write('06_batch/batch_meta.json', final)
+        with self.assertRaisesRegex((ValueError, RuntimeError), 'changed|stale|binding'):
+            review_rounds.import_result(self.batch, exported['task_id'], response)
+
     def test_final_answer_change_rechecks_only_affected_unit_and_sample(self):
         self.finish()
         old_plan = review.prepare_round_plan(self.batch)

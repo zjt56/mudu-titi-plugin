@@ -410,12 +410,13 @@ _REVIEW_METADATA = frozenset({
 })
 
 
-def semantic_review_value(value):
+def semantic_review_value(value, *, question=False):
     """Project review semantics, excluding provenance/difficulty bookkeeping."""
     if isinstance(value, dict):
         result = {}
         for key, child in value.items():
-            if key in _REVIEW_METADATA or key in {"words", "word_count", "wordCount"} and isinstance(child, (int, float)):
+            if (key in _REVIEW_METADATA or key == "source" and question and isinstance(child, str)
+                    or key in {"words", "word_count", "wordCount"} and isinstance(child, (int, float))):
                 continue
             if key == "filterMetadata" and isinstance(child, dict):
                 child = {label: data for label, data in child.items()
@@ -430,7 +431,12 @@ def semantic_review_value(value):
                          and set(block) <= {"type", "rows", "text", "content"}
                          and block.get("rows") in (None, [])
                          and block.get("text") in (None, "") and block.get("content") in (None, "", []))]
-            result[key] = semantic_review_value(child)
+            # Only identified question rows/subquestions carry display-source metadata.
+            # A nested evidence/content object's source remains substantive.
+            if question and key == "subquestions" and isinstance(child, list):
+                result[key] = [semantic_review_value(row, question=True) for row in child]
+            else:
+                result[key] = semantic_review_value(child)
         if (value.get("question_type", value.get("type")) == "听力关键词语选择"
                 and value.get("unit_kind") == "standalone" and isinstance(value.get("options"), list)
                 and len(value["options"]) >= 3 and isinstance(value.get("stem"), str)
@@ -444,7 +450,7 @@ def semantic_review_value(value):
     return value
 
 
-def _unit_bindings(batch, units, hashes):
+def _unit_bindings(batch, units, hashes, *, legacy_source=False, restore_missing_source=False):
     """Bind whole review units; unprovable source scopes remain global."""
     from .review_rounds import _source_excerpts, _transcript_excerpt, CONTEXT_VERSION, PROMPT_VERSION
     source = _read_bound_bytes(batch / "01_source/正文.txt").decode('utf-8-sig')
@@ -452,6 +458,21 @@ def _unit_bindings(batch, units, hashes):
         "03_types/types.json", "04_knowledge/knowledge.json", "04_knowledge/explanations.json",
         "06_batch/batch.json", "06_batch/batch_meta.json", "02_audio/audio_map.json",
         "02_audio/segment-evidence.json")}
+    if restore_missing_source:
+        import copy
+        rows = copy.deepcopy(rows)
+        meta = rows.get("06_batch/batch_meta.json")
+        def restore(row):
+            if isinstance(row, dict):
+                for child in row.get("subquestions", []):
+                    if isinstance(child, dict):
+                        child.setdefault("source", "未提供")
+                        restore(child)
+        if isinstance(meta, dict):
+            for row in meta.get("items", []):
+                restore(row)
+    def question_value(value):
+        return semantic_review_value(value, question=not legacy_source)
     answers = _load(batch / "01_source_ans/answers.json")
     global_hashes = {k: v for k, v in hashes.items() if k.startswith("rules:") or k in (
         "01_source/附录.txt", "01_source_ans/正文.txt") or k.startswith("01_source/materials/")}
@@ -470,7 +491,7 @@ def _unit_bindings(batch, units, hashes):
         text = _source_excerpts(source, [unit], force=True, adjacent_units=units)
         if isinstance(text, dict):
             text = [span["text"] for span in text["spans"]]
-        payload = {"unit": semantic_review_value(unit), "source": text,
+        payload = {"unit": question_value(unit), "source": text,
                    "contract": [CONTEXT_VERSION, PROMPT_VERSION], "global": global_hashes, "extraction": semantic_review_value(extraction)}
         for name, value in rows.items():
             if name.startswith("02_audio/"):
@@ -479,7 +500,9 @@ def _unit_bindings(batch, units, hashes):
             if isinstance(value, dict) and isinstance(value.get("items"), list):
                 value = [row for row in value["items"] if isinstance(row, dict)
                          and (row.get("unit_id") or row.get("id")) == uid]
-            payload[name] = semantic_review_value(value)
+                payload[name] = [question_value(row) for row in value]
+            else:
+                payload[name] = semantic_review_value(value)
         if isinstance(answers, dict):
             selected = {}
             for key, value in answers.items():
@@ -500,7 +523,45 @@ def _unit_bindings(batch, units, hashes):
     return result
 
 
+def acceptable_unit_bindings(batch_dir, plan=None):
+    """Current digests plus exact pre-source-projection compatibility proofs.
+
+    Only the known removed child display placeholder is replayed. No task,
+    response, original plan, or in-flight byte binding is rewritten.
+    """
+    batch = Path(batch_dir)
+    plan = plan or prepare_round_plan(batch)
+    units = _confirmed_review_units(batch)
+    units = [unit for unit in units if unit['unit_id'] in plan['unit_bindings']]
+    key = (str(batch), _plan_input_key(batch, units), _digest(plan))
+    if key in _COMPAT_BINDINGS_CACHE:
+        return {uid: set(values) for uid, values in _COMPAT_BINDINGS_CACHE[key].items()}
+    accepted = {uid: {digest} for uid, digest in plan['unit_bindings'].items()}
+    for restore in (False, True):
+        legacy = _unit_bindings(batch, units, plan['input_hashes'], legacy_source=True,
+                                restore_missing_source=restore)
+        for uid, digest in legacy.items():
+            accepted[uid].add(digest)
+    if len(_COMPAT_BINDINGS_CACHE) > 64:
+        _COMPAT_BINDINGS_CACHE.clear()
+    _COMPAT_BINDINGS_CACHE[key] = {uid: set(values) for uid, values in accepted.items()}
+    return accepted
+
+
+def _unit_binding_matches(batch, old_plan, plan, uid):
+    previous = old_plan.get('unit_bindings', {}).get(uid)
+    if not previous or not plan.get('unit_bindings', {}).get(uid):
+        return False
+    if previous == plan['unit_bindings'][uid]:
+        return True
+    return previous in acceptable_unit_bindings(batch, plan).get(uid, set())
+
+
 _PLAN_CACHE = {}
+
+# 兼容绑定只在进程内缓存：键含批次、输入摘要和计划摘要，任何输入变化都会换
+# 新键，不会把旧计算结果套到新内容上。
+_COMPAT_BINDINGS_CACHE = {}
 
 
 def _file_digest(path):
@@ -761,8 +822,7 @@ def _reuse_source(batch, ref, round_id, plan):
         raise ValueError("Review reuse original round/input binding mismatch")
     key = _check_key(ref, round_id)
     uid = key[0]
-    if (not plan.get("unit_bindings", {}).get(uid)
-            or old_plan.get("unit_bindings", {}).get(uid) != plan["unit_bindings"][uid]):
+    if not _unit_binding_matches(batch, old_plan, plan, uid):
         raise ValueError("Review reuse unit content changed")
     if key in {_check_key(row, round_id) for row in record.get("reuse", [])}:
         raise ValueError("Reuse must point directly to an original executed target")
@@ -799,7 +859,7 @@ def _payload_reusable_checks(batch_dir, payload, plan, round_id):
             continue
         seen.add(key)
         uid, number = key
-        if old_plan.get("unit_bindings", {}).get(uid) != plan.get("unit_bindings", {}).get(uid):
+        if not _unit_binding_matches(batch, old_plan, plan, uid):
             continue
         ref = references.get(key) or {"unit_id": uid, "number": number, "task_id": original}
         try:
