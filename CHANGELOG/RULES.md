@@ -381,3 +381,15 @@
 ## 2026-11-11：题型/子类以桌面《英语题型汇总.xlsx》表一为最终口径
 
 用户原话（m05969）：「这个对应在表一做了修改，请你也做对应的改动」。规则：表一（`题型汇总`）改了题型/子类/组单，插件规则必须逐行跟上，不能拿逐处明细或旧先例顶替；表一与插件目录冲突时先报冲突再落码，不静默改写。2026-11-11 表一 15 行改判：一句一空语法功能词填空（人称代词、do/does、介词、连词、How/What、if/whether、关系代词）与 can/can't/could/couldn't 的适当形式由 `单词拼写/句意` 改为 `选词填空/多句`（前者仍单独题、后者仍组题）；看图补全句子（图片提示/家谱/地图/图示/图片信息）由 `单词拼写/看图填词` 改为 `完成句子/补全句子`（组题）；短文后完成思维导图由 `任务型阅读/信息摘录` 改为 `阅读综合`。`完成句子` 的 `补全句子` 子类是本地补入 `filter-framework.json` 的目录项（平台 1.0 框架原无），平台拒收时体检 A7 会明确报错，只能由用户裁决退回 `看图填词` 或改投 `情景运用`，不得静默改回别的题型。`sentence-picture` 必须排在 `spell-picture` 之前（规则顺序即优先级）。落地：`app/references/sync-practice-rules.json`、`app/references/filter-framework.json`、`app/workflow/test_sync_practice.py::TestWorkbookSheetOneAlignment`、`app/docs/sync-practice.md`（第三节）、`app/docs/sync-lesson-types.md`（5.1）；根 `AGENTS.md` 硬规则 25；验证见 `2026-11-11-sheet-one-type-alignment.md`。
+
+## 2026-11-11：平台侧题型目录登记「完成句子/补全句子」
+
+用户原话（m06231）：「平台侧也加上这个」。规则：桌面表一新增/改判的子类，本地
+`app/references/filter-framework.json` 与平台服务器 `static/filter-framework.json` 必须**两侧同时登记**；
+只改本地会让平台 `validate_upload_question_types` 与本地 A7 双双拒收（`invalid_question_subtype`）。
+平台改动须先备份到 `/home/ubuntu/mudu-quiz/backups/`、记录改前改后 sha256，并在 `CHANGELOG/` 留下
+回退命令；目录文件每次校验都重新读取，改完无需重启 `mudu-quiz.service`，但 `static/app.js` 的目录
+缓存戳要同步升级，否则后台下拉仍按旧目录渲染。落地：`static/filter-framework.json`、
+`static/docs/index.html`、`static/app.js`（平台侧）；`app/references/filter-framework.json`、
+`app/docs/sync-practice.md`、`app/docs/sync-lesson-types.md`、根 `AGENTS.md` 硬规则 25（插件侧）；
+验证见 `2026-11-11-platform-catalog-sync.md`。

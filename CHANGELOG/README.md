@@ -183,3 +183,4 @@
 | 2026-11-11 | [2026-11-11-sync-lesson-shape-audit.md](2026-11-11-sync-lesson-shape-audit.md) | 课时编排自检：缺单元名/空课时/课时跳号写入提取报告；课时录入约束统一进提示词 |
 | 2026-11-11 | [2026-11-11-sheet-one-type-alignment.md](2026-11-11-sheet-one-type-alignment.md) | 表一改判 15 行落到同步练习规则：语法功能词/can-could 转选词填空·多句、看图补全句子转完成句子·补全句子、思维导图转阅读综合 |
 | 2026-11-11 | [2026-11-11-review-badge-binding-and-snapshot-cache.md](2026-11-11-review-badge-binding-and-snapshot-cache.md) | 待审核标签改按来源身份绑定（同号不同大题不再串标），审核投影按输入指纹缓存：切换题目 0.9s→0.07s |
+| 2026-11-11 | [2026-11-11-platform-catalog-sync.md](2026-11-11-platform-catalog-sync.md) | 平台题库目录补登记 `完成句子/补全句子`（改 static/filter-framework.json、docs/index.html、app.js 缓存戳，含备份与回退），插件本地目录与文档同步说明 |

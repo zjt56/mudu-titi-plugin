@@ -88,8 +88,9 @@
 | 短文后完成思维导图 | 任务型阅读·信息摘录 | 任务型阅读·阅读综合 | `task-reading-mindmap` |
 | 填入恰当的特殊疑问词或词组，完成对话 | 补全对话·（正文推断） | 补全对话·填写单词 | `dialogue-word` |
 
-- `补全句子` 是**本地补入** `app/references/filter-framework.json` 的 `完成句子` 子类（平台 1.0 框架原无）；
-  平台侧若不接受，上传体检 A7 会报「子类不属于完成句子」，届时只能退回 `看图填词` 或改投 `情景运用`。
+- `补全句子` 是**本地补入** `app/references/filter-framework.json` 的 `完成句子` 子类（平台原框架无）；
+  2026-11-11 已同步登记到平台侧 `static/filter-framework.json`，安装体检 A7 与平台
+  `validate_upload_question_types` 均接受该子类。
 - `sentence-picture` 必须排在 `spell-picture` **之前**（顺序即优先级），否则「家谱 / 根据地图 / 图示」先被
   看图填词命中；「根据首字母及图片提示完成单词」「图片中的节日」等仍走 `spell-picture`。
 - `dialogue-word`（特殊疑问词填一格）必须排在 `dialogue` **之前**；表一 78 行里只有「完形填空（10空）」

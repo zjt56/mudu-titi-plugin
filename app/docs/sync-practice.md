@@ -53,8 +53,8 @@
 
 > 2026-11-11 桌面《英语题型汇总.xlsx》**表一（题型汇总）**改判的 15 行已按上表落到
 > `app/references/sync-practice-rules.json`（`spell-grammar-word`、`spell-modal`、`sentence-picture`、
-> `task-reading-mindmap`）。`完成句子` 子类目录为本地补入 `补全句子`（平台 1.0 框架原无此子类，
-> 若平台侧拒收，上传体检 A7 会报「子类不属于完成句子」）。
+> `task-reading-mindmap`）。`完成句子` 子类目录为本地补入 `补全句子`（平台原框架无此子类；2026-11-11 已同步登记到平台
+> 侧 `static/filter-framework.json`，上传体检 A7 与平台 `validate_upload_question_types` 均接受，见 `CHANGELOG/2026-11-11-platform-catalog-sync.md`）。
 
 ## 四、版块容器（不单独计数）
 
