@@ -3,9 +3,52 @@ import unittest
 from pathlib import Path
 
 from workflow.question_content import (
-    audit_question, audit_source_unit, legitimate_source_shape, capability_limited_source)
+    audit_question, audit_source_unit, legitimate_source_shape, capability_limited_source, question_parts)
 from workflow.preview import slice_text
 from workbench.server import detail, source_blocks
+
+
+class LeadingImageOptionTest(unittest.TestCase):
+    """选项图片前置于标签（[IMG a]A.、[IMG b]B.）必须归到各自选项，不能错位。
+
+    复刻任务型阅读图片选项题：错位会把 A 的图塞进题干、整体左移一位且 D 空，
+    导致 SOURCE_OPTIONS_INCOMPLETE / SOURCE_IMAGE_MISSING 误报。
+    """
+
+    def test_leading_image_options_attach_to_their_own_label(self):
+        lines = [
+            "☆拓展设问",
+            "(　)4.[新考法·图片理解]Jimmy can’t use　　　　 to have Chinese food now.",
+            "[IMG image14.jpeg]A.\t[IMG image15.jpeg]B.",
+            "[IMG image16.jpeg]C.\t[IMG image17.jpeg]D.",
+        ]
+        part = question_parts(lines, 4)
+        self.assertEqual(
+            [(o["label"], o["text"]) for o in part["options"]],
+            [("A", "[IMG image14.jpeg]"), ("B", "[IMG image15.jpeg]"),
+             ("C", "[IMG image16.jpeg]"), ("D", "[IMG image17.jpeg]")])
+        # 选项图不得残留到题干里。
+        self.assertNotIn("[IMG", part["stem"])
+        self.assertIn("Jimmy can’t use", part["stem"])
+
+    def test_text_options_unaffected(self):
+        lines = ["(　)1. Question?", "A. one\tB. two", "C. three\tD. four"]
+        part = question_parts(lines, 1)
+        self.assertEqual([(o["label"], o["text"]) for o in part["options"]],
+                         [("A", "one"), ("B", "two"), ("C", "three"), ("D", "four")])
+
+    def test_audit_passes_for_image_option_task_reading(self):
+        stem = (
+            "Hi,I’m Jimmy.\n1. Sort the words.\n(1)　　　　　\n2. Where?\n3. Which side?\n"
+            "☆拓展设问\n(　)4.[新考法·图片理解]Jimmy can’t use　　　　 to have Chinese food now.\n"
+            "[IMG image14.jpeg]A.\t[IMG image15.jpeg]B.\n"
+            "[IMG image16.jpeg]C.\t[IMG image17.jpeg]D."
+        )
+        unit = {"unit_kind": "group", "type": "任务型阅读", "numbers": [1, 2, 3, 4],
+                "stem": stem, "source_span": {"start_line": 1, "end_line": len(stem.splitlines())},
+                "source_expected_options": 4}
+        audit = audit_source_unit(unit)
+        self.assertTrue(audit["passed"], audit["issues"])
 
 
 class LegitimateSourceShapeTest(unittest.TestCase):

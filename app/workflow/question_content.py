@@ -291,10 +291,76 @@ def question_parts(lines: list[str], number: int, *, scoped=False) -> dict:
     text = "\n".join(lines[start:end])
     text = re.sub(r"^\s*(?:[（(]\s*[）)]\s*)?\d{1,3}\s*[.．、)]", "", _plain(text))
     matches = list(OPTION.finditer(text))
+    # Some papers print an option's image *before* its label: "[IMG a.png]A.…".
+    # The segment between label i and label i+1 then holds the *next* image, so a
+    # naive split shifts every image one label left (and empties the last option).
+    # Detect the leading-image layout and attribute each leading image to its own
+    # label; the dangling pre-A image must leave the stem too.
     options = [{"label": m.group(1), "text": text[m.end():matches[i + 1].start() if i + 1 < len(matches) else len(text)].strip()}
                for i, m in enumerate(matches)]
-    return {"stem": text[:matches[0].start()].strip() if matches else text.strip(),
-            "options": options, "found": True}
+    if matches:
+        stem_text = text[:matches[0].start()]
+        leading, filled = _split_leading_option_images(text, matches)
+        if leading is not None:
+            # Pure image-option layout: each option's content is the image(s)
+            # that sit immediately before its own label. The trailing segment is
+            # the *next* option's leading image, so it must not be re-attached
+            # here (only non-image trailing text, if any, is kept as the option's
+            # own caption).
+            shifted = []
+            for i, opt in enumerate(options):
+                lead = leading.get(opt["label"], "")
+                tail_raw = text[matches[i].end():matches[i + 1].start() if i + 1 < len(matches) else len(text)]
+                tail_text = _IMG_REF.sub("", tail_raw).strip()
+                combined = lead if not tail_text else (lead + "\n" + tail_text if lead else tail_text)
+                shifted.append({"label": opt["label"], "text": combined.strip()})
+            options = shifted
+            stem_text = filled
+        return {"stem": stem_text.strip(), "options": options, "found": True}
+    return {"stem": text.strip(), "options": options, "found": True}
+
+
+def _split_leading_option_images(text: str, matches) -> tuple[dict | None, str]:
+    """Return ({label: leading [IMG]}, stem_without_those_images) for `[IMG]X.` layouts.
+
+    The pure image-option form prints each option's image immediately before its
+    label ("[IMG a.png]A.\\t[IMG b.png]B."). We only treat this as the image-option
+    layout when *every* label is directly preceded by at least one image marker
+    with only whitespace between image and label. Otherwise return (None, '').
+    """
+    if len(matches) < 2:
+        return None, ""
+    leading: dict[str, str] = {}
+    removals: list[tuple[int, int]] = []
+    for m in matches:
+        # Look back from the label start over whitespace, expecting image markers.
+        j = m.start()
+        gap_start = j
+        imgs: list[str] = []
+        # Walk backwards consuming whitespace then [IMG ...] tokens, possibly repeated.
+        while True:
+            k = gap_start
+            while k > 0 and text[k - 1] in " \t\u3000\r\n":
+                k -= 1
+            mm = None
+            for cand in _IMG_REF.finditer(text, 0, k):
+                if cand.end() == k:
+                    mm = cand
+                    break
+            if mm is None:
+                break
+            imgs.insert(0, mm.group(0))
+            removals.append((mm.start(), mm.end()))
+            gap_start = mm.start()
+        if not imgs:
+            return None, ""  # a label without an immediately-preceding image
+        leading[m.group(1)] = "\n".join(imgs)
+    # Remove the leading images from the stem region (they are option content now).
+    stem_text = text[:matches[0].start()]
+    for s, e in sorted(removals, reverse=True):
+        if s < matches[0].start():
+            stem_text = stem_text[:s] + stem_text[e:]
+    return leading, stem_text
 
 
 def strip_writing_answer_space(text: str) -> str:
