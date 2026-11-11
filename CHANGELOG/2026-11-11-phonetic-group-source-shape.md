@@ -27,6 +27,7 @@
 
 - 16:34 冻结快照全 workflow：**2462 executions，2359 passed / 20 failed methods / 48 errored methods / 35 skipped**；native unittest 为 21 failure events / 60 error events（含额外 subtest 事件），未宣称全绿。原快照捕获预检接线 `root` 未定义，影响 10 个方法；生产已修为 `batch`，保留原报告。
 - 最终四文件同步后的独立外部副本，`agent_tasks / batch_fill / assemble_local / preassembly / progressive_pipeline / phonetic_structure` **148/148 passed，0 failures/errors/skips**（27.435s）。此补验不覆盖或替换原全量记录；最后 LOCAL_FIELDS 两字段另有上述 80 tests 通过。
+- 变更记录规范最终独立补验 **5/5 passed**（0.026s），已补齐新旧记录的背景与「改了什么」标题。
 - 其余全量失败包括隔离禁模型导致 metadata 预期不满足、空 profile、Windows 缺少 POSIX 目录句柄或 sh，以及尚未对照归因的并行/审核/发布测试。完整精确 ID/trace：外部 `C:\Users\Administrator\AppData\Local\Temp\tiku-phonetic-regression-af021dd81d654161955ec8c55f4bfc65\FINAL-NOTES.md`、`REGRESSION-REPORT.md` 和 `logs/failing-methods.txt`。不将这些结果描述为已证明的旧基线。
 
 ## 边界与回退
