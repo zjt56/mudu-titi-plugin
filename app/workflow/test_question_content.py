@@ -2,9 +2,52 @@
 import unittest
 from pathlib import Path
 
-from workflow.question_content import audit_question, audit_source_unit
+from workflow.question_content import (
+    audit_question, audit_source_unit, legitimate_source_shape, capability_limited_source)
 from workflow.preview import slice_text
 from workbench.server import detail, source_blocks
+
+
+class LegitimateSourceShapeTest(unittest.TestCase):
+    """原卷合法空/图形态与真实缺字必须区分，避免同类误判再次阻断。"""
+
+    def unit(self, stem, numbers=(1,), binding=None):
+        span = {"start_line": 1, "end_line": 1}
+        if binding:
+            span["number_binding"] = binding
+        return {"unit_kind": "group", "type": "语音题", "numbers": list(numbers), "stem": stem, "source_span": span}
+
+    def test_image_only_shape(self):
+        shape = legitimate_source_shape(self.unit("[IMG image9.jpeg]"))
+        self.assertEqual(shape, "image_only")
+        self.assertTrue(capability_limited_source(self.unit("[IMG image9.jpeg]")))
+
+    def test_blank_answer_grid_with_appendix_answer(self):
+        stem = "1. /eɪ/\n[TABLE 1]\n\n\n[/TABLE]\n2. /iː/\n[TABLE 2]\n\n[/TABLE]"
+        appendix = "参考答案\nⅠ.1.Aa,Hh,Jj,Kk　2.Bb,Cc,Dd,Ee"
+        self.assertEqual(legitimate_source_shape(self.unit(stem, (1, 2)), appendix), "blank_answer_grid")
+        self.assertTrue(capability_limited_source(self.unit(stem, (1, 2)), appendix))
+
+    def test_blank_grid_without_appendix_proof_is_not_excused(self):
+        stem = "1. /eɪ/\n[TABLE 1]\n\n\n[/TABLE]"
+        # 附录没有该题号 -> 无法证明是可填答题表，按真实缺失处理。
+        self.assertIsNone(legitimate_source_shape(self.unit(stem, (1,)), "参考答案\nⅣ.1 DCABD"))
+        self.assertFalse(capability_limited_source(self.unit(stem, (1,)), "参考答案\nⅣ.1 DCABD"))
+
+    def test_unnumbered_no_image_shape(self):
+        stem = "A,B,<u>　　　　</u>,D,E,F\nX,Y,Z—now you see,"
+        unit = self.unit(stem, (1,), binding="unnumbered_section")
+        self.assertEqual(legitimate_source_shape(unit), "unnumbered_no_image")
+
+    def test_real_truncation_is_not_excused(self):
+        stem = "1. 下列字母组合 A.BIF B.XHS\n[TABLE 1]\n| 有内容 |\n[/TABLE]"
+        self.assertIsNone(legitimate_source_shape(self.unit(stem, (1,)), "参考答案\nⅣ.1 DCABD"))
+        self.assertFalse(capability_limited_source(self.unit(stem, (1,)), "参考答案\nⅣ.1 DCABD"))
+
+    def test_plain_text_stem_is_not_excused(self):
+        self.assertIsNone(legitimate_source_shape(self.unit("阅读短文并作答", (1,))))
+
+
 
 
 SAMPLE = Path(__file__).resolve().parent.parent / "workflows" / "_real_2025"

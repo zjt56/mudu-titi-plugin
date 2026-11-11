@@ -247,9 +247,9 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                 chunk = source_lines[lo - 1:hi]
                 members = sorted(_source_members(chunk).intersection(numbers))
                 has_body = any(_plain(line).strip() for line in chunk)
-                image_only = any("[IMG " in line or "[TABLE" in line for line in chunk)
                 # 整节既无印刷题号也无图片时（如字母歌补全），仍须保留一个
                 # 绑定原文的来源单元；否则该大题窗口未产生单元而被误判为漏题。
+                # 与前置组装的“合法来源形态”共用同一分类，避免两处口径漂移。
                 unnumbered = not members and (not _source_members(chunk))
                 if not members and not unnumbered:
                     continue

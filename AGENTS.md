@@ -38,6 +38,7 @@
 9. **质量≠执行**："已执行，有差异"不等于通过；`review_gate` 不得因此放行；`release_ready` 只有在真实审核后才可能为真。
     **答案格式容错**：答案填充与下游比对使用同一归一化口径；加粗/画线标记、空白换行、直弯引号、全半角符号、备选分隔旁空格和句末句号不影响答案正确性时，不得造成失败、重跑或人工判断。保留原始答案，不擅改词句；数字、小数点、正负号、否定词、选项和实质内容变化仍校验。
     **格式小问题不阻断流程**：标点、全角空格、连续下划线/答题线占位、`<br>`、首字母与空档间距、表格列数/空档写法等格式表达问题只作 `[W…` 提示，不阻断 validate；只有题目/题干/题号对不上、答案或来源不符、结构错位这类实质错误才阻断。落地：`app/scripts/_common.py::report`、`workflow/checks.py`（画线/空档/表格/完成句子设为 `blocking=False`）。
+    **原卷合法空/图形态不算内容缺失**：结构确认、前置组装（含题型）、体检等任一环节都不得把以下三类当成题目内容缺失而阻断——①纯图片题（除 `[IMG …]`/`[TABLE …]` 外无可读文字题干）；②空白作答网格（表格全空、答案在卷末附录可按题号对上）；③整节无印刷小题号也无图片但有正文（如字母歌补全）。判定缺失前必须先排除这三类，`contentComplete=false` 的数智判定只能基于真实截断/缺选项/题干错配并说明缺了什么文字。统一分类函数 `app/workflow/question_content.py::legitimate_source_shape`（布尔封装 `capability_limited_source`），结构闸门与前置组装共用同一口径，不得各处各写一套。落地：`structure_gate._build_scoped_units`、`agent_tasks._validate(types)` 与 `accept_result` findings 降级、`app/prompts/roles/{preassemble,types}.md`。
 10. **不动用户数据**：不重跑/改写已归档批次；不直接编辑 `workflow/manifest.json` 造完成态；不自动删除用户试卷。
 11. **卡点必须指明批次**：任何卡点、待复核、失败或“继续处理”错误，必须同时显示具体批次名称和可定位的批次目录；收到泛化错误反馈时不得猜测或拉起其他批次。
 12. **原卷预览图片显示**：表格单元格里的图片必须与该单元格文字在同一单元格内显示，不得拆到单独的行尾/额外单元格；表格必须自适应容器宽度并自动断行（`width:100%`、`table-layout:fixed`、`word-break:break-word`），不得因内容撑宽导致左右滑动；原图（尤其表格内图）缩得很小（表格内缩略图约 36×28，正文图 `max-width:200px`）。只影响预览渲染，不改题目数据。落地：`app/workbench/server.py::source_blocks`/`attach_media`、`lib/client.js` 表格样式。

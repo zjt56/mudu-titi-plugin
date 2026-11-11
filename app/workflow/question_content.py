@@ -37,34 +37,50 @@ def _blank_table_grids(text: str) -> int:
     return blank
 
 
-def capability_limited_source(unit: dict, appendix_text: str | None = None) -> bool:
-    """True when the unit's incompleteness is a capability/原卷形态 limit, not missing text.
+# 原卷“合法的空/图形态”统一分类。凡属这里任一形态，都不表示题目内容缺失，
+# 不得阻断结构确认或前置组装；真实截断/缺选项/题干错配仍按原校验阻断。
+LEGITIMATE_SHAPES = ("image_only", "blank_answer_grid", "unnumbered_no_image")
 
-    Two legitimate shapes never block downstream and must not be treated as
-    truncated/missing content:
-    1. 纯图片题: the unit's source contains only image placeholders (e.g. 填词游戏
-       以 image9.jpeg 呈现), so the text layer cannot carry题干/空位；
-    2. 空白作答网格: the source's tables are all empty (student fills them in),
-       and the answers for the unit appear verbatim in the answer appendix.
-    Anything else (real truncation, missing options, mismatched stem) stays a block.
+
+def legitimate_source_shape(unit: dict, appendix_text: str | None = None) -> str | None:
+    """Classify a legitimate source shape that must not be treated as missing content.
+
+    Returns one of LEGITIMATE_SHAPES, or None when the unit is ordinary text (no
+    excuse) / genuinely incomplete. Covers exactly three recurring patterns:
+    1. ``image_only``: only image/table markers, no readable text stem (图片题);
+    2. ``blank_answer_grid``: every table is an empty student answer grid and the
+       unit's numbers appear in the answer appendix (答案见卷末);
+    3. ``unnumbered_no_image``: a whole source section with no printed child
+       number and no image (e.g. 字母歌补全), which still owns real body text.
     """
     stem = str(unit.get("stem") or "")
     numbers = [str(n) for n in (unit.get("numbers") or [])]
     lines = [line for line in stem.splitlines()]
     non_empty = [line.strip() for line in lines if line.strip()]
     has_image = any(IMAGE.search(line) for line in lines)
-    non_image = [line for line in non_empty if not IMAGE.search(line) and not re.fullmatch(r"\[/?TABLE[^\]]*\]", line)]
-    # 纯图片题：除图片/表格标记外没有可读文字题干。
+    non_image = [line for line in non_empty
+                 if not IMAGE.search(line) and not re.fullmatch(r"\[/?TABLE[^\]]*\]", line)]
     if has_image and not non_image:
-        return True
-    # 空白作答网格：所有表格都为空，且答案在附录明确给出。
+        return "image_only"
     table_count = len(re.findall(r"\[TABLE(?:\s+\d+)?\]", stem))
     if table_count and _blank_table_grids(stem) == table_count and appendix_text and numbers:
-        for number in numbers:
-            if not re.search(r"(?<![\d])" + re.escape(number) + r"\s*[.．、]", appendix_text):
-                return False
-        return True
-    return False
+        if all(re.search(r"(?<![\d])" + re.escape(number) + r"\s*[.．、]", appendix_text)
+               for number in numbers):
+            return "blank_answer_grid"
+    if non_image and not table_count and unit.get("numbers") == [1] and \
+            (unit.get("source_span") or {}).get("number_binding") == "unnumbered_section":
+        return "unnumbered_no_image"
+    return None
+
+
+def capability_limited_source(unit: dict, appendix_text: str | None = None) -> bool:
+    """True when the unit's incompleteness is a capability/原卷形态 limit, not missing text.
+
+    Thin boolean wrapper over :func:`legitimate_source_shape` for the preassemble
+    ``contentComplete`` gate: image-only units and blank answer grids (answers in
+    the appendix) are legitimate, everything else stays a real completeness block.
+    """
+    return legitimate_source_shape(unit, appendix_text) in ("image_only", "blank_answer_grid")
 
 
 def audit_question(source_lines: list[str], number: int, item: dict | None = None,

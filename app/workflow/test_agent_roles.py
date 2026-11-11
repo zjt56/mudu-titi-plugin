@@ -110,3 +110,23 @@ if __name__ == "__main__":
         self.assertIn("重看一遍证据", text)
         self.assertIn("重跑", text)
         self.assertIn("继续推进", text)
+
+    def test_preassemble_and_types_roles_warn_about_legitimate_blank_or_image_shapes(self):
+        # 代码口径（question_content.legitimate_source_shape）必须与提示词同步：
+        # 前置组装/题型提示词都要提醒“原卷合法空/图形态不算内容缺失”。
+        from workflow.question_content import LEGITIMATE_SHAPES
+        self.assertEqual(set(LEGITIMATE_SHAPES), {"image_only", "blank_answer_grid", "unnumbered_no_image"})
+        for stage in ("preassemble", "types"):
+            text = agent_roles.section(stage, agent_tasks.ARTIFACTS[stage])
+            self.assertIn("图片", text, stage)
+            self.assertIn("空白作答网格", text, stage)
+            self.assertIn("不算内容缺失", text, stage)
+            self.assertIn("contentComplete", text, stage)
+
+    def test_preassemble_instruction_warns_about_capability_shapes(self):
+        instruction = agent_tasks.RULES["types"]
+        self.assertIn("contentComplete", instruction)
+        # 内置英文指令也必须点出“合法空/图形态不算缺失”，避免与提示词漂移。
+        self.assertIn("pure image", instruction)
+        self.assertIn("blank student answer grids", instruction)
+        self.assertIn("NOT missing content", instruction)

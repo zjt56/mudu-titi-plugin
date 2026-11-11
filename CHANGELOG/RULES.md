@@ -1,5 +1,12 @@
 ﻿# RULES — 规则与强调台账
 
+## 2026-11-11 原卷合法空/图形态不算内容缺失（用户要求沉淀为约束）
+
+- 用户原话：“将以上出现的问题，以代码规则和提示词增强为约束，避免下次继续犯同类错误以及类似错误。”
+- 背景：两次同类卡点——结构闸门把“无题号无图片的题组大题”误判 SOURCE_SECTION_UNCOVERED；前置组装把“空白作答网格（答案在附录）/纯图片题”的 contentComplete=false 当硬阻断。
+- 规则：结构确认、前置组装（含题型）、体检等任一环节，都不得把①纯图片题（除图片/表格标记外无文字题干）②空白作答网格（表格全空、答案在卷末附录可按题号对上）③整节无印刷小题号也无图片但有正文 当成内容缺失而阻断。判定缺失前必须先排除这三类；contentComplete=false 只能基于真实截断/缺选项/题干错配，并说明缺了什么文字。
+- 统一口径：`app/workflow/question_content.py::legitimate_source_shape`（布尔封装 `capability_limited_source`），结构闸门 `structure_gate._build_scoped_units` 与前置组装 `agent_tasks._validate(types)`、`accept_result` findings 降级共用同一分类，不得各处各写一套；提示词 `app/prompts/roles/preassemble.md`、`types.md` 同步要求先排除三类再判 false。
+
 ## 2026-11-11：远端课时标记规则按本插件边界落地
 
 按用户要求对照 Mudu-English-Upload 的课时配方，来源/新考法与无年份栏目（传统文化、安徽人文、榜样人物、经典谚语、熟词生义等）必须完整保留到实际题干或材料；不能用全批同年/地区 token 或 source_section 元数据假作已交付。可靠 scoped 身份下核对所属单元及子题，旧协议不猜归属。远端自造答案/范文、自动教材挂接及辨音逐题与用户当前规则冲突的做法不引入；只匹配知识点、语音按整节 group、上传需授权的边界不变。落地：sync_practice、audit_source_marks、课时提示词及回归；根规则25。
