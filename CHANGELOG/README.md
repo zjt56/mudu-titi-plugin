@@ -37,6 +37,7 @@
 | 2026-11-11 | [2026-11-11-sync-source-mark-ownership.md](2026-11-11-sync-source-mark-ownership.md) | 对照远端课时配方补完整原卷标记与实际单元/子题归属校验、提示词 |
 | 2026-11-11 | [2026-11-11-meta-source-placeholder-projection.md](2026-11-11-meta-source-placeholder-projection.md) | meta 最终视图移除来源与年份旧占位，真实冲突仍拒绝 |
 | 2026-11-11 | [2026-11-11-review-inline-child-source.md](2026-11-11-review-inline-child-source.md) | 二审按当前课时来源证明并排小题字符边界，保留原始审核差异 |
+| 2026-11-11 | [2026-11-11-batch-list-load-time.md](2026-11-11-batch-list-load-time.md) | 批次列表冷投影 68s→3.4s：审核绑定去重哈希、进程外快照、摘录缓存 |
 | 2026-11-11 | [2026-11-11-phonetic-group-source-shape.md](2026-11-11-phonetic-group-source-shape.md) | 语音组题逐字保留公共导语，以当前完整来源证明原生图和无共享材料形态，精确校验 A8/A9 |
 | 2026-11-11 | [2026-11-11-skipped-explanations-current-coverage.md](2026-11-11-skipped-explanations-current-coverage.md) | 无原解析的历史跳过产物须按当前子题覆盖重新验收，保护真实内容并原子备份刷新 |
 | 2026-11-11 | [2026-11-11-pause-textbook-matching.md](2026-11-11-pause-textbook-matching.md) | 当前仅匹配知识点标签，教材任务、验收与组装传播同步暂停 |
@@ -180,3 +181,4 @@
 | 2026-11-11 | [2026-11-11-metadata-source-name.md](2026-11-11-metadata-source-name.md) | 试卷名/来源不再显示「未提供」：正文没卷头时按已识别元数据 → 原卷 Word 文件名补齐，占位不写进题目字段 |
 | 2026-11-11 | [2026-11-11-sync-lesson-extraction-rules.md](2026-11-11-sync-lesson-extraction-rules.md) | 课时拆分件提取口径：课时标题变体、Reading Plus/Project 版块边界、原卷提示标记保真留痕、27 主类齐备 |
 | 2026-11-11 | [2026-11-11-sync-lesson-shape-audit.md](2026-11-11-sync-lesson-shape-audit.md) | 课时编排自检：缺单元名/空课时/课时跳号写入提取报告；课时录入约束统一进提示词 |
+| 2026-11-11 | [2026-11-11-sheet-one-type-alignment.md](2026-11-11-sheet-one-type-alignment.md) | 表一改判 15 行落到同步练习规则：语法功能词/can-could 转选词填空·多句、看图补全句子转完成句子·补全句子、思维导图转阅读综合 |

@@ -129,18 +129,40 @@ def _read_bound_bytes(path):
     return scope[key]
 
 
-def _confirmed_review_units(batch):
+_UNITS_CACHE = {}
+
+
+def _units_revision(batch):
+    source = Path(batch) / '01_source/structure.confirmed.json'
+    try:
+        stat = source.stat()
+    except OSError:
+        return ('missing', str(source))
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, str(source))
+
+
+def _units_cached(batch):
+    """Parsed confirmed units for internal key computation (never handed out)."""
+    key = _units_revision(batch)
+    hit = _UNITS_CACHE.get(key)
+    if hit is not None:
+        return hit
     from .agent_tasks import confirmed_units
+    value = confirmed_units(batch)
+    if len(_UNITS_CACHE) > 64:
+        _UNITS_CACHE.clear()
+    _UNITS_CACHE[key] = value
+    return value
+
+
+def _confirmed_review_units(batch):
+    import copy
     scope = _EVALUATION_READS.get()
     if scope is None:
-        return confirmed_units(batch)
-    source = Path(batch) / '01_source/structure.confirmed.json'
-    stat = source.stat()
-    revision = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-    key = ('units', str(Path(batch).resolve()), revision)
+        return copy.deepcopy(_units_cached(batch))
+    key = ('units', _units_revision(batch))
     if key not in scope:
-        scope[key] = confirmed_units(batch)
-    import copy
+        scope[key] = _units_cached(batch)
     return copy.deepcopy(scope[key])
 
 
@@ -531,9 +553,8 @@ def acceptable_unit_bindings(batch_dir, plan=None):
     """
     batch = Path(batch_dir)
     plan = plan or prepare_round_plan(batch)
-    units = _confirmed_review_units(batch)
-    units = [unit for unit in units if unit['unit_id'] in plan['unit_bindings']]
-    key = (str(batch), _plan_input_key(batch, units), _digest(plan))
+    units = [unit for unit in _units_cached(batch) if unit['unit_id'] in plan['unit_bindings']]
+    key = (str(batch), _digest(plan))
     if key in _COMPAT_BINDINGS_CACHE:
         return {uid: set(values) for uid, values in _COMPAT_BINDINGS_CACHE[key].items()}
     accepted = {uid: {digest} for uid, digest in plan['unit_bindings'].items()}
@@ -548,16 +569,19 @@ def acceptable_unit_bindings(batch_dir, plan=None):
     return accepted
 
 
-def _unit_binding_matches(batch, old_plan, plan, uid):
+def _unit_binding_matches(batch, old_plan, plan, uid, accepted=None):
     previous = old_plan.get('unit_bindings', {}).get(uid)
     if not previous or not plan.get('unit_bindings', {}).get(uid):
         return False
     if previous == plan['unit_bindings'][uid]:
         return True
-    return previous in acceptable_unit_bindings(batch, plan).get(uid, set())
+    if accepted is None:
+        accepted = acceptable_unit_bindings(batch, plan)
+    return previous in accepted.get(uid, set())
 
 
 _PLAN_CACHE = {}
+
 
 # 兼容绑定只在进程内缓存：键含批次、输入摘要和计划摘要，任何输入变化都会换
 # 新键，不会把旧计算结果套到新内容上。
@@ -590,7 +614,9 @@ def _plan_input_key(batch, units):
 
     mtime is not a safe staleness signal (same-tick writes collide), and the plan
     digests are the review proof, so a wrong cache hit would hide changed inputs.
-    Files here are small (source/rules/reports), so hashing is affordable.
+    These files are small (source/rules/reports), so hashing is affordable; it runs
+    once per plan build, never per unit binding check — the workbench list used to
+    re-hash every round input for every unit on every batch.
     """
     parts = []
     for relative in (*ROUND_INPUTS, *ROUND_RULES):
@@ -853,14 +879,24 @@ def _payload_reusable_checks(batch_dir, payload, plan, round_id):
     ids = [p["execution_id"] for p in record.get("parts", [])] or [record.get("execution_id")]
     original = ids[-1]
     checks, refs, seen = [], [], set()
+    # 每个 target 都调一次 acceptable_unit_bindings 会把整份计划反复摘要（大卷
+    # 上千次）；这里只在该记录第一次出现「不同摘要」时才求一次接受集合。
+    accepted = None
     for check in record.get("checks", []):
         key = _check_key(check, round_id)
         if key not in expected or key in seen:
             continue
         seen.add(key)
         uid, number = key
-        if not _unit_binding_matches(batch, old_plan, plan, uid):
+        previous = old_plan.get('unit_bindings', {}).get(uid)
+        current = plan.get('unit_bindings', {}).get(uid)
+        if not previous or not current:
             continue
+        if previous != current:
+            if accepted is None:
+                accepted = acceptable_unit_bindings(batch, plan)
+            if previous not in accepted.get(uid, set()):
+                continue
         ref = references.get(key) or {"unit_id": uid, "number": number, "task_id": original}
         try:
             saved, _ = _reuse_source(batch, ref, round_id, plan)

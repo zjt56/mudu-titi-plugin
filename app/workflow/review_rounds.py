@@ -189,7 +189,43 @@ def _round_prompt(round_id, targets, context):
     )
 
 
+_EXCERPT_CACHE = {}
+
+
+def _excerpt_cache_key(source, selected, force, adjacent_units):
+    """Identity of one excerpt request: source bytes + the units it must locate."""
+    import hashlib
+    parts = [hashlib.sha256(source.encode('utf-8')).hexdigest(), bool(force)]
+    for unit in selected:
+        parts.append((unit.get('unit_id'), unit.get('unit_kind'), unit.get('stem'),
+                      repr(unit.get('source_span'))))
+    for unit in adjacent_units or ():
+        parts.append((unit.get('unit_id'), unit.get('stem')))
+    return tuple(parts)
+
+
 def _source_excerpts(source, selected, force=False, adjacent_units=()):
+    """Exact, located unit spans, or the whole source when proof fails.
+
+    This runs for every unit in every round of every binding variant while the
+    workbench projects a batch list, and it scans the whole source per unit; the
+    result is a pure function of the source text and the selected units, so it is
+    memoized by source identity (the source string is held alive in the value).
+    """
+    if not isinstance(source, str) or not selected:
+        return source
+    key = _excerpt_cache_key(source, selected, force, adjacent_units)
+    hit = _EXCERPT_CACHE.get(key)
+    if hit is not None:
+        return hit[1]
+    value = _source_excerpts_uncached(source, selected, force, adjacent_units)
+    if len(_EXCERPT_CACHE) > 512:
+        _EXCERPT_CACHE.clear()
+    _EXCERPT_CACHE[key] = (source, value)
+    return value
+
+
+def _source_excerpts_uncached(source, selected, force=False, adjacent_units=()):
     """Return exact, located unit spans, or the whole source when proof fails."""
     if not isinstance(source, str) or not selected:
         return source

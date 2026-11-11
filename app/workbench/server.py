@@ -338,14 +338,26 @@ def as_number(value):
     return str(int(groups[-1])) if groups else ""
 
 
-def findings_for(queue, numbers, number_map):
+def findings_for(queue, numbers, number_map, unit_id="", scoped=False):
+    """挑出属于这一行的差异。
+
+    scoped-v1 批次里同一题号会在每个大题重号（Ⅰ/Ⅱ/Ⅲ 都从 1 开始），只能按单元
+    身份绑定；按数字绑定会把别的大题的差异算到本行，或者让本行真实差异漏掉，
+    列表上就出现「队列里有待审差异、行上却没有待审核标签」。
+    """
     wanted = {as_number(n) for n in numbers if as_number(n)}
+    key = str(unit_id or "").strip()
     result = []
     items = queue.get("items", []) if isinstance(queue, dict) else []
     for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict):
             continue
-        unit = str(item.get("unit_id") or "")
+        unit = str(item.get("unit_id") or "").strip()
+        if scoped:
+            # 单元级差异只归属本单元；批次级差异（无 unit_id）不标到具体题行。
+            if unit and unit == key:
+                result.append(item)
+            continue
         number = as_number(number_map.get(unit) or unit)
         if number in wanted:
             result.append(item)
@@ -1557,8 +1569,64 @@ def parse_multipart(handler) -> tuple[dict, list[dict]]:
     return fields, files
 
 
+_REVIEW_SNAPSHOT_CACHE = {}
+
+
+def _review_inputs_key(folder):
+    """Fingerprint every file the round evaluation reads.
+
+    逐字绑定复验要读来源正文、确认结构、候选与轮次记录；只要这些没变，
+    同一份审核结论就可以复用。切换题目时每行都要重新算一遍会慢到 1-2 秒。
+    """
+    import hashlib
+    parts = []
+    for relative in ("07_review/review-rounds.json", "07_review/manual-review-queue.json",
+                     "07_review/review-gate.json", "07_review/report.json",
+                     "07_review/content-review.json", "07_review/metadata-review.json",
+                     "workflow/manifest.json", "01_source/structure.confirmed.json",
+                     "06_batch/batch.json", "06_batch/batch_meta.json"):
+        path = folder / relative
+        try:
+            stat = path.stat()
+            parts.append((relative, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            parts.append((relative, "missing"))
+    source = folder / "01_source"
+    for path in sorted(source.glob("*.txt")) if source.is_dir() else []:
+        try:
+            stat = path.stat()
+            parts.append((path.name, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            pass
+    candidates = folder / "candidates"
+    if candidates.is_dir():
+        metas = []
+        for path in sorted(candidates.glob("*.json")):
+            try:
+                stat = path.stat()
+                metas.append((path.name, stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                pass
+        parts.append(("candidates", tuple(metas)))
+    return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()
+
+
 def review_snapshot(folder):
     """只读投影真实分轮记录；不以旧 report.json 或流程状态冒充审核证据。"""
+    key = (str(folder), _review_inputs_key(folder))
+    hit = _REVIEW_SNAPSHOT_CACHE.get(key)
+    if hit is not None:
+        import copy
+        return copy.deepcopy(hit)
+    value = _review_snapshot_uncached(folder)
+    if len(_REVIEW_SNAPSHOT_CACHE) > 64:
+        _REVIEW_SNAPSHOT_CACHE.clear()
+    _REVIEW_SNAPSHOT_CACHE[key] = value
+    import copy
+    return copy.deepcopy(value)
+
+
+def _review_snapshot_uncached(folder):
     from workflow import review
     payload = load(folder / "07_review/review-rounds.json", {}) or {}
     evaluated = review.evaluate_rounds(folder, payload)
@@ -1681,6 +1749,63 @@ def final_format_complete(folder, manifest):
 
 _OVERVIEW_CACHE = {}
 
+# 冷投影一个批次要 0.5-1s（来源正文、审核轮次、逐单元摘要），13 个批次就是
+# 8-9s，逼近前端 15s 的请求上限；而列表内容只在批次文件变化时才变。把按内容
+# 指纹校验的投影快照存到进程外，重启后首屏直接复用，指纹不符的批次照常重算。
+_OVERVIEW_SNAPSHOT = None
+
+
+def _overview_snapshot_path():
+    base = os.environ.get("WF_CACHE_DIR")
+    if base:
+        root = Path(base)
+    else:
+        local = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CACHE_HOME")
+        root = (Path(local) if local else Path.home() / ".cache") / "md-upload-tiku"
+    return root / "overview-snapshot.json"
+
+
+def _load_overview_snapshot():
+    global _OVERVIEW_SNAPSHOT
+    if _OVERVIEW_SNAPSHOT is not None:
+        return _OVERVIEW_SNAPSHOT
+    items = {}
+    try:
+        raw = json.loads(_overview_snapshot_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = None
+    if isinstance(raw, dict) and raw.get("version") == 1 and isinstance(raw.get("batches"), dict):
+        items = raw["batches"]
+    _OVERVIEW_SNAPSHOT = items
+    return _OVERVIEW_SNAPSHOT
+
+
+def _save_overview_snapshot():
+    """Persist only this workflows dir's projections; best effort, never fatal."""
+    items = {}
+    for (folder, key), value in list(_OVERVIEW_CACHE.items()):
+        try:
+            path = Path(folder)
+            if path.parent != WORKFLOWS:
+                continue
+        except (OSError, TypeError):
+            continue
+        items[path.name] = {"folder": str(path), "key": key, "value": value}
+    if not items:
+        return
+    path = _overview_snapshot_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({"version": 1, "batches": items}, ensure_ascii=False)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        return
+    global _OVERVIEW_SNAPSHOT
+    _OVERVIEW_SNAPSHOT = items
+
+
 
 def _overview_key(folder):
     """Fingerprint the files overview reads so a cached projection is never stale."""
@@ -1699,6 +1824,13 @@ def _overview_key(folder):
             parts.append((relative, stat.st_mtime_ns, stat.st_size))
         except OSError:
             parts.append((relative, "missing"))
+    # 投影代码本身变了（例如标签归属、题型反查修正）就必须重算：
+    # 落盘快照只按批次文件指纹复用，否则升级后仍读到旧行的差别归属。
+    try:
+        code = Path(__file__).stat()
+        parts.append(("server-code", code.st_mtime_ns, code.st_size))
+    except OSError:
+        parts.append(("server-code", "unknown"))
     audio = folder / "02_audio" / "SKIP_LISTENING"
     parts.append(("skip_listening", audio.is_file()))
     raw = repr(parts).encode("utf-8")
@@ -1711,6 +1843,12 @@ def overview(name):
     hit = _OVERVIEW_CACHE.get(key)
     if hit is not None:
         return _live_overview(hit, name, folder)
+    saved = _load_overview_snapshot().get(name)
+    if (isinstance(saved, dict) and saved.get("folder") == str(folder)
+            and saved.get("key") == key[1] and isinstance(saved.get("value"), dict)):
+        # Same content fingerprint as when the snapshot was written: reuse it.
+        _OVERVIEW_CACHE[key] = saved["value"]
+        return _live_overview(saved["value"], name, folder)
     value = _overview_uncached(name, folder)
     if len(_OVERVIEW_CACHE) > 64:
         _OVERVIEW_CACHE.clear()
@@ -1809,8 +1947,11 @@ def _overview_uncached(name, folder):
     report, manifest, queue = report_for(folder)
     base = question_rows(folder, report)
     number_map = number_of_unit(base)
-    rows = [mark_row(row, findings_for(queue, row.get("numbers") or [row.get("number")], number_map))
-            for row in merged_rows(folder, report)]
+    merged = merged_rows(folder, report)
+    scoped_rows = any(str(r.get("identity_version") or "") == "scoped-v1" for r in merged)
+    rows = [mark_row(row, findings_for(queue, row.get("numbers") or [row.get("number")], number_map,
+                                       unit_id=row.get("unit_id"), scoped=scoped_rows))
+            for row in merged]
     review_status = decorate_review_rows(folder, rows)
     skip_listening = (folder / "02_audio" / "SKIP_LISTENING").is_file()
     counts = {s: sum(1 for r in rows if r.get("state") == s)
@@ -1893,7 +2034,23 @@ def list_batches():
                     result.append(overview(folder.name))
                 except ValueError:
                     pass
+    _save_overview_snapshot()
     return result
+
+
+def warm_batch_list():
+    """Warm the first page load in the background.
+
+    A cold projection of every batch costs several seconds (source text + review
+    rounds + digests per batch). Building it once at startup keeps the review
+    page's first list request well inside the client's 15s request budget, and
+    later polls hit the per-batch cache. Read-only; any failure just leaves the
+    cache cold.
+    """
+    try:
+        cached_list_batches()
+    except (OSError, ValueError, TypeError, KeyError, ImportError):
+        pass
 
 
 def operations_work_state():
@@ -3377,6 +3534,9 @@ def main():
         except Exception:  # noqa: BLE001 - 启动预热失败不影响本地工作台
             pass
     threading.Thread(target=_warm_tunnel, daemon=True).start()
+    # 页面第一次拉 /api/batches 时不要再现算 13 批投影（冷启约 9s，接近客户端 15s
+    # 上限）；启动后在后台预热一次，首屏直接命中缓存。
+    threading.Thread(target=warm_batch_list, daemon=True, name="warm-batches").start()
     serve(ThreadingHTTPServer((args.host, args.port), Handler))
 
 
