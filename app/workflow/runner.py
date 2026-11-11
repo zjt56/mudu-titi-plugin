@@ -1131,7 +1131,26 @@ def _skip_agent_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
         reason = mf.skip_reason(current, stage)
         if not reason:
             return False
-        if current["stages"].get(stage.id, {}).get("status") not in mf.TERMINAL_OK:
+        if stage.id == "explanations":
+            # A historical skip is not proof that its placeholder covers the
+            # current confirmed structure. Reuse only a consumer-qualified file.
+            from .handoff import inspect_stage
+            qualified = inspect_stage(batch_dir, current, stage.id).get("passed")
+            if not qualified:
+                from .optional_inputs import write_empty_explanations
+                try:
+                    write_empty_explanations(batch_dir)
+                except (OSError, ValueError, TypeError):
+                    # No usable structure/types, or real content to preserve:
+                    # leave the producer waiting instead of claiming delivery.
+                    return False
+                from . import batch_fill
+                if (batch_dir / batch_fill.STATE).is_file():
+                    batch_fill.sync(batch_dir, "explanations")
+            if not qualified or current["stages"].get(stage.id, {}).get("status") != mf.SKIPPED:
+                mf.touch_stage(current, stage.id, mf.SKIPPED, notes=reason)
+                mf.save(batch_dir, current)
+        elif current["stages"].get(stage.id, {}).get("status") not in mf.TERMINAL_OK:
             if stage.id == "answers":
                 # An empty-answer decision requires confirmed question coverage.
                 # Without structure, leave this producer waiting for its real prerequisite.
@@ -1153,19 +1172,6 @@ def _skip_agent_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
                     manifest.update(current)
                 print(f"  · {stage.id} 已登记确定性无答案决定（{reason}）")
                 return True
-            if stage.id == "explanations":
-                # 跳过解析提取时必须留下确定性空产物，装配仍可继续。
-                from .optional_inputs import write_empty_explanations
-                # 结构尚未产出时只记录跳过；正式结构完成后才生成逐题空解析产物。
-                if (batch_dir / "01_source/structure.confirmed.json").is_file():
-                    try:
-                        write_empty_explanations(batch_dir)
-                    except (OSError, ValueError, TypeError):
-                        # Structure unusable: keep waiting, do not mark skipped.
-                        return False
-                    from . import batch_fill
-                    if (batch_dir / batch_fill.STATE).is_file():
-                        batch_fill.sync(batch_dir, "explanations")
             mf.touch_stage(current, stage.id, mf.SKIPPED, notes=reason)
             mf.save(batch_dir, current)
         if current is not manifest:
@@ -1209,8 +1215,12 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
             # 这时不能一直沿用历史 skipped，否则该阶段永远跑不起来。
             still = mf.skip_reason(manifest, stage)
             if still:
-                print(f"· {stage_id} 跳过（{still}）")
-                continue
+                if stage_id != "explanations" or _skip_agent_stage(
+                        batch_dir, manifest, stage, dry_run=args.dry_run):
+                    print(f"· {stage_id} 跳过（{still}）")
+                    continue
+                print(f"⏸ {stage_id} 等待合格的当前缺失占位；保留既有内容")
+                return 1
             if args.dry_run:
                 print(f"· {stage_id} 跳过条件已消失，将恢复执行")
                 continue

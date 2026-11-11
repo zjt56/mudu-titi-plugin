@@ -69,6 +69,23 @@ def has_explanation_source(batch_dir) -> bool:
 def write_empty_explanations(batch_dir) -> Path:
     """Write a deterministic all-「无」 explanations artifact for batches without source."""
     root = Path(batch_dir)
+    if has_explanation_source(root):
+        raise ValueError("Original explanation source exists; cannot install empty placeholders")
+    path = root / "04_knowledge/explanations.json"
+    if path.is_file():
+        from .content_rules import is_placeholder
+        previous = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(previous, dict) or not isinstance(previous.get("items"), list):
+            raise ValueError("Existing explanation artifact cannot be safely replaced")
+        for row in previous["items"]:
+            if not isinstance(row, dict) or not isinstance(row.get("subquestions", []), list):
+                raise ValueError("Existing explanation row cannot be safely replaced")
+            for item in [row, *row.get("subquestions", [])]:
+                if not isinstance(item, dict):
+                    raise ValueError("Existing explanation child cannot be safely replaced")
+                if any(not is_placeholder(item.get(field))
+                       for field in ("explanation", "articleSummary")):
+                    raise ValueError("Existing original explanation content must be preserved")
     units = agent_tasks.confirmed_units(root)
     items = []
     for unit in units:
@@ -82,7 +99,9 @@ def write_empty_explanations(batch_dir) -> Path:
             "subquestions": children,
             "evidence": ["未提供原解析/原大意，按空值记录（可选字段）"],
         })
-    path = root / "04_knowledge/explanations.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    payload = {"items": items}
+    typed_path = root / agent_tasks.ARTIFACTS["types"]
+    context = {agent_tasks.ARTIFACTS["types"]: json.loads(typed_path.read_text(encoding="utf-8-sig"))}
+    agent_tasks._validate(root, "explanations", payload, context, units)
+    agent_tasks._install(root, {agent_tasks.ARTIFACTS["explanations"]: payload})
     return path
