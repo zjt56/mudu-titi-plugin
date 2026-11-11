@@ -179,5 +179,87 @@ class CompactLessonAnswersTest(unittest.TestCase):
             self.assert_unbound()
 
 
+class TestPointBannerAnswersTest(unittest.TestCase):
+    """重要考点集训 / 创新阅读专练 banners + multi-line task-reading key.
+
+    Mirrors the real Starter Unit 1 课时4 Project appendix: foundation container
+    banner 重要考点集训, reading container banner 创新阅读专练, a (n)-subblank
+    task-reading key spanning several lines, and a ☆拓展设问 sub-heading that must
+    not split or poison the trailing block.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.batch = Path(self.tmp.name)
+        (self.batch / '01_source').mkdir()
+        self.body = (
+            '第四课时　Project\n'
+            'Ⅰ.根据句意用所给词的适当形式填空\n'
+            '1.—______ you Lily?\n2.Nice ______(meet) you.\n3.—How are you?\n'
+            'Ⅱ.单项填空\n'
+            '(　)1.First?\n(　)2.Second?\n'
+            '任务型阅读\n'
+            'Read.\n'
+            '1. Sort the words.\n2. Where is Jimmy from?\n'
+            '3. Which side?\n☆拓展设问\n'
+            '(　)4. Jimmy can’t use ______ .\n'
+        )
+        self.appendix = (
+            '参考答案\n'
+            '[IMG image158.jpeg]重要考点集训[IMG image159.jpeg]\n'
+            'Ⅰ.1.Are;am　2.to meet　3.thanks\n'
+            'Ⅱ.1~2 AB\n'
+            '[IMG image158.jpeg]创新阅读专练[IMG image159.jpeg]\n'
+            '1.(1)British英国的　(2)chopsticks筷子\n'
+            '(3)different不同的\n'
+            '2.He is from the UK.\n3.The right side.\n☆拓展设问\n4.A\n'
+        )
+        (self.batch / '01_source/正文.txt').write_text(self.body, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(self.appendix, encoding='utf-8')
+        # Unit identities derived from the real body coordinates.
+        from workflow.question_identity import assign_scoped
+        lines = self.body.splitlines()
+
+        def line(text):
+            return lines.index(text) + 1
+
+        raw = []
+        for n in (1, 2):  # Ⅰ items 1-2 (item 2 spans two body lines; keep single-line for test)
+            pass
+        raw.append({'numbers': [1, 2, 3], 'unit_kind': 'group', 'type': '单词拼写',
+                    'source_span': {'start_line': line('1.—______ you Lily?'),
+                                    'end_line': line('Ⅱ.单项填空') - 1}})
+        raw.append({'numbers': [1, 2], 'unit_kind': 'group', 'type': '单项填空',
+                    'source_span': {'start_line': line('(　)1.First?'),
+                                    'end_line': line('任务型阅读') - 1}})
+        raw.append({'numbers': [1, 2, 3, 4], 'unit_kind': 'group', 'type': '任务型阅读',
+                    'source_span': {'start_line': line('Read.'), 'end_line': len(lines)}})
+        self.units = assign_scoped(raw, self.body)
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': self.units}), encoding='utf-8')
+
+    def test_point_and_reading_banners_bind_every_answer(self):
+        from workflow import answers_direct
+        # Ⅰ.1-2 (unit 0), Ⅱ.1-2 (unit 1), 任务型阅读 1-4 (unit 2)
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[0], 1)['answer'], 'Are;am')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[0], 2)['answer'], 'to meet')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[1], 1)['answer'], 'A')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[1], 2)['answer'], 'B')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[2], 2)['answer'], 'He is from the UK.')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[2], 3)['answer'], 'The right side.')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[2], 4)['answer'], 'A')
+        payload = answers_direct.build_payload(self.batch)
+        self.assertIsNotNone(payload)
+        self.assertEqual(len(payload["answers"]), 9)
+
+    def test_duplicate_point_banner_stays_unbound(self):
+        self.appendix = self.appendix.replace(
+            '[IMG image158.jpeg]重要考点集训[IMG image159.jpeg]',
+            '[IMG image158.jpeg]重要考点集训[IMG image159.jpeg]\n[IMG image158.jpeg]重要考点集训[IMG image159.jpeg]')
+        (self.batch / '01_source/附录.txt').write_text(self.appendix, encoding='utf-8')
+        self.assertIsNone(resolve_scoped_answer(self.batch, self.units[0], 1, 'Are;am'))
+
+
 if __name__ == '__main__':
     unittest.main()

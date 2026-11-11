@@ -115,6 +115,18 @@ def _source_line(value):
     return re.sub(r'\*+|<[^>]+>', '', value).strip()
 
 
+def _printed_item_anchors(lines):
+    """Printed per-item anchors for a bounded section.
+
+    Unified with ``structure_gate._scope_anchors`` so a cloze/short-answer
+    material line whose inline ``<u>　n　</u>`` blank markers restate the same
+    numbers as the ``( )n.`` option lines below is not double-counted as two
+    printed anchors. Literal duplicates on one line remain duplicates.
+    """
+    from .structure_gate import _scope_anchors
+    return _scope_anchors(lines)
+
+
 def _strip_answer_marker(value):
     """Drop a leading answer letter / 【解析】 marker from an appendix line."""
     text = re.sub(r"^\s*(?:[A-H]\s*[.、)）]?\s*)?", "", value or "")
@@ -195,15 +207,14 @@ def scoped_source_matches(unit, number, path, line, source_lines):
               and signature(row) == signature(section)]
     if len(owners) != 1 or not owners[0]['start_line'] <= start <= end <= owners[0]['end_line']:
         return False
-    from .question_identity import printed_anchors
-    local_anchors = printed_anchors(body[start - 1:end])
+    local_anchors = _printed_item_anchors(body[start - 1:end])
     body_hits = [start + index for index, n in local_anchors if n == int(number)]
     if not body_hits:
         # An explicit single-task alias is allowed only for a wholly unnumbered
         # section. It cannot convert an arbitrary missing number into a match.
         if (span.get('number_binding') not in {'unnumbered_section', 'single_writing_section'}
                 or number != 1 or unit.get('numbers') != [1] or local_anchors
-                or printed_anchors(body[owners[0]['start_line'] - 1:owners[0]['end_line']])
+                or _printed_item_anchors(body[owners[0]['start_line'] - 1:owners[0]['end_line']])
                 or any(row.strip() for row in (body[owners[0]['start_line']:start - 1]
                                                + body[end:owners[0]['end_line']]))):
             return False
@@ -212,7 +223,7 @@ def scoped_source_matches(unit, number, path, line, source_lines):
     else:
         # The companion's single printed 1 cannot choose between A:1 and B:1
         # in the body. Section metadata alone does not prove passage identity.
-        section_anchors = printed_anchors(body[owners[0]['start_line'] - 1:owners[0]['end_line']])
+        section_anchors = _printed_item_anchors(body[owners[0]['start_line'] - 1:owners[0]['end_line']])
         if body_hits and sum(n == int(number) for _, n in section_anchors) != 1:
             return False
         matches = [row for row in heading_candidates('\n'.join(lines))
@@ -222,7 +233,7 @@ def scoped_source_matches(unit, number, path, line, source_lines):
         left, right = matches[0]['start_line'], matches[0]['end_line']
     if not left <= line <= right:
         return False
-    anchors = [left + index for index, n in printed_anchors(lines[left - 1:right]) if n == int(number)]
+    anchors = [left + index for index, n in _printed_item_anchors(lines[left - 1:right]) if n == int(number)]
     if not body_hits and path == body_path:
         return not anchors  # Explicit singleton alias; no printed number is asserted.
     return len(anchors) == 1
@@ -231,17 +242,40 @@ def scoped_source_matches(unit, number, path, line, source_lines):
 # Compact lesson keys retain the printed Roman section, but omit its instruction.
 # Keep this grammar answer-only: it must not weaken explanation/source_ref ownership.
 _ROMAN_ANSWER = re.compile(r'^\s*([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+)[.．、]\s*')
-_LESSON_BAND = re.compile(rf'^\s*(?:{IMG}\s*)?(基础巩固|能力提升)\s*(?:{IMG}\s*)?$')
+# A printed lesson band banner. 基础巩固/能力提升 are the canonical pair; the
+# sync-practice lesson books also print 重要考点集训 (foundation/考点 block) and
+# 创新阅读专练 (reading extension block) as the same kind of band container.
+_LESSON_BAND = re.compile(rf'^\s*(?:{IMG}\s*)?(基础巩固|能力提升|重要考点集训|创新阅读专练)\s*(?:{IMG}\s*)?$')
+# Bands that introduce the extension (trailing) block of an otherwise-Roman key.
+_EXTENSION_BANDS = ('能力提升', '创新阅读专练')
 _LETTER_SEQUENCE = re.compile(r'[A-Za-z](?:\s*[;；]\s*[A-Za-z])+\s*')
+# A parenthesized (1)/(2) sub-blank marker that continues the preceding numbered
+# answer item's material (multi-line task-reading / cloze keys).
+_SUBITEM_CONT = re.compile(r'^[(（]\s*\d{1,3}\s*[)）]')
 _ROMAN_TITLE = re.compile(r'^\s*([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+)[.．、]')
 _ANSWER_ITEM = re.compile(r'(?:^|(?<=\s))(\d{1,3})[.．、](?!\d)')
 _COMPACT_RANGE = re.compile(r'^\s*(\d{1,3})\s*[~～—–-]\s*(\d{1,3})\s+([A-HFTa-hft]+)\s*$')
+# One compact-key token: either a whole-task range ``1~5 ABC`` or a single
+# numbered item ``6.D``. Used to parse Roman lines mixing both forms.
+_ANSWER_TOKEN = re.compile(
+    r'(?P<first>\d{1,3})\s*[~～—–-]\s*(?P<last>\d{1,3})(?:\s+(?P<letters>[A-HFTa-hft]+))?'
+    r'|(?P<num>\d{1,3})[.．、](?P<val>[^\s\u3000]*)')
 
 
 def _answer_items(text):
-    """Return only explicitly numbered answers, including inline items/ranges."""
+    """Return only explicitly numbered answers, including inline items/ranges.
+
+    A compact lesson key may combine whole-task ranges and single numbered items
+    on one Roman line: ``1~5 BDBCA　6.D`` or ``1~5 ACABD　6~10 DDBAB``. Each
+    whitespace-separated segment must be either a ``first~last LETTERS`` range
+    or a ``N.value`` item, and together they must cover the whole line. Range
+    length, ordering and uniqueness are still enforced so a malformed or
+    duplicated range never silently proves an answer.
+    """
     text = re.split(EXPLANATION_LABEL, text, maxsplit=1)[0].strip()
     text = re.sub(r'^[(（]\s*[)）]\s*', '', text)
+    if not text:
+        return []
     interval = _COMPACT_RANGE.fullmatch(text)
     if interval:
         first, last = int(interval[1]), int(interval[2])
@@ -249,15 +283,42 @@ def _answer_items(text):
         if first <= last and len(values) == last - first + 1:
             return list(zip(range(first, last + 1), values))
         return []
+    # Plain numbered items (values may contain spaces) take precedence so a
+    # multi-word answer such as ``4.do you spell`` is not truncated.
     matches = list(_ANSWER_ITEM.finditer(text))
-    if not matches or matches[0].start() != 0:
+    if matches and matches[0].start() == 0:
+        numbers = [int(match[1]) for match in matches]
+        if len(matches) == 1 and '~' in text and not _ANSWER_TOKEN.fullmatch(text.strip()):
+            return []
+        if numbers == sorted(set(numbers)):
+            return [(int(match[1]), re.sub(r'^【答案】\s*', '', text[match.end():
+                     matches[pos + 1].start() if pos + 1 < len(matches) else len(text)]).strip())
+                    for pos, match in enumerate(matches)]
         return []
-    numbers = [int(match[1]) for match in matches]
-    if numbers != sorted(set(numbers)):
+    if '~' not in text and not re.search(r'[~～—–-]', text):
         return []
-    return [(int(match[1]), re.sub(r'^【答案】\s*', '', text[match.end():
-             matches[pos + 1].start() if pos + 1 < len(matches) else len(text)]).strip())
-            for pos, match in enumerate(matches)]
+    # A line drawing only on range forms (``1~5 BDBCA　6.D``): every whitespace
+    # segment must be a full range or a bare item covering the whole line.
+    items, pos = [], 0
+    for match in _ANSWER_TOKEN.finditer(text):
+        if text[pos:match.start()].strip(' \t\u3000'):
+            return []  # A non-space gap means this is prose, not a compact key.
+        first = match.group('first')
+        if first is not None:
+            lo, hi = int(first), int(match.group('last'))
+            letters = match.group('letters')
+            if letters is None or lo > hi or len(letters) != hi - lo + 1:
+                return []
+            items.extend((n, letter) for n, letter in zip(range(lo, hi + 1), letters))
+        else:
+            items.append((int(match.group('num')), match.group('val').strip()))
+        pos = match.end()
+    if text[pos:].strip(' \t\u3000'):
+        return []
+    numbers = [n for n, _ in items]
+    if not items or numbers != sorted(set(numbers)):
+        return []
+    return items
 
 
 def _compact_answer_blocks(lines):
@@ -266,6 +327,11 @@ def _compact_answer_blocks(lines):
         marker = _LESSON_BAND.fullmatch(text)
         if marker:
             band, active = marker[1], None
+            continue
+        # ☆拓展设问 / 拓展设问 is a sub-heading that belongs to the preceding group
+        # task (rule: it is not a new numbered question). It must not poison or
+        # split the current answer block.
+        if re.fullmatch(r'[☆★]?\s*拓展设问\s*', text.strip()):
             continue
         heading = _ROMAN_ANSWER.match(text)
         if heading:
@@ -288,6 +354,14 @@ def _compact_answer_blocks(lines):
         items = _answer_items(text)
         if items and not active['literal']:
             active['rows'].extend((n, line, value) for n, value in items)
+            active['raw'].append((line, text.strip()))
+        elif _SUBITEM_CONT.match(text.strip()) and active['raw']:
+            # A parenthesized (n) sub-blank continues the current numbered item's
+            # material (e.g. task-reading 1.(1)…(4) / (5)… / (6)…(8)). It is not a
+            # new top-level answer and must not poison the block.
+            if active['rows']:
+                n0, l0, v0 = active['rows'][-1]
+                active['rows'][-1] = (n0, l0, v0 + '\n' + text.strip())
             active['raw'].append((line, text.strip()))
         elif (heading or not active['raw']) and _LETTER_SEQUENCE.fullmatch(text.strip()):
             # A printed Roman section may give one whole-task letter sequence.
@@ -338,9 +412,8 @@ def _compact_scoped_candidates(unit, number, source_lines):
     if len(positions) != 1 or not scoped_source_matches(unit, number, body_path, start, source_lines):
         return []
     # A companion row cannot disambiguate repeated passage numbers in one section.
-    from .question_identity import printed_anchors
     section = sections[positions[0]]
-    anchors = printed_anchors(body[section['start_line'] - 1:section['end_line']])
+    anchors = _printed_item_anchors(body[section['start_line'] - 1:section['end_line']])
     if sum(n == int(number) for _, n in anchors) > 1:
         return []
     skeleton = [_norm(match[1]) if match else None for match in ordinals]
@@ -371,18 +444,25 @@ def _compact_scoped_candidates(unit, number, source_lines):
         if trailing:
             markers = [(i, _LESSON_BAND.fullmatch(text)) for i, text in enumerate(lines, 1)
                        if _LESSON_BAND.fullmatch(text)]
-            extension = [i for i, marker in markers if marker[1] == '能力提升']
+            extension = [i for i, marker in markers if marker[1] in _EXTENSION_BANDS]
             bands = [marker[1] for _, marker in markers]
+            # Exactly one extension band must precede the tail block. The prefix
+            # may be empty or a single foundation banner (基础巩固 / 重要考点集训);
+            # duplicate or misplaced banners stay unbound.
+            prefix = bands[:-1]
+            prefix_ok = len(prefix) <= 1 and all(b not in _EXTENSION_BANDS for b in prefix)
             if (len(lesson_markers) != 1 or len(extension) != 1
-                    or bands not in (['能力提升'], ['基础巩固', '能力提升'])
-                    or (bands[0] == '基础巩固' and markers[0][0] >= blocks[0]['line'])
+                    or not bands or bands[-1] not in _EXTENSION_BANDS
+                    or any(b in _EXTENSION_BANDS for b in bands[:-1])
+                    or not prefix_ok
+                    or (markers[0][0] >= blocks[0]['line'])
                     or not blocks[-2]['line'] < extension[0] < blocks[-1]['line']):
                 continue
             # Residual ownership is only complete if every preceding printed
             # section has its entire unique number sequence in its own key.
             prefix_complete = True
             for owner_section, peer in zip(sections[:-1], blocks[:-1]):
-                printed = [n for _, n in printed_anchors(
+                printed = [n for _, n in _printed_item_anchors(
                     body[owner_section['start_line'] - 1:owner_section['end_line']])]
                 keyed = [n for n, _, _ in peer['rows']]
                 if (printed and (len(printed) != len(set(printed)) or keyed != printed)
@@ -393,12 +473,12 @@ def _compact_scoped_candidates(unit, number, source_lines):
                 continue
             tail = blocks[-1]
             last = sections[-1]
-            expected = [n for _, n in printed_anchors(body[last['start_line'] - 1:last['end_line']])]
+            expected = [n for _, n in _printed_item_anchors(body[last['start_line'] - 1:last['end_line']])]
             actual = [n for n, _, _ in tail['rows']]
             # Printed extension banner + exact unique tail numbers + full Roman
             # prefix is the proof. Body banner images are not treated as OCR.
-            if (tail['band'] != '能力提升' or not expected or len(expected) != len(set(expected))
-                    or actual != expected or any(b['band'] == '能力提升' for b in blocks[:-1])):
+            if (tail['band'] not in _EXTENSION_BANDS or not expected or len(expected) != len(set(expected))
+                    or actual != expected or any(b['band'] in _EXTENSION_BANDS for b in blocks[:-1])):
                 continue
         block = blocks[positions[0]]
         if whole:
