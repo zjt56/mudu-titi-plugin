@@ -13,6 +13,15 @@ test('operations prompt keeps review differences outside content repair authorit
   }
 });
 
+test('operations prompt diagnoses rejected candidates before scoped content repair', async () => {
+  const { OPERATIONS_PROMPT } = await moduleReady;
+  for (const text of ['候选 response、验收错误', '正式产物缺失不证明模型没有产出',
+    'retryable=false、failure_class=source_binding', '相同来源身份中逐字相同的重复位置',
+    '不得借 resume retry_stage_with_fresh_context/upstream_rederive', '保留已验证基线']) {
+    assert.ok(OPERATIONS_PROMPT.includes(text), text);
+  }
+});
+
 const incident = (extra = {}) => ({ incident_id: 'inc-1', batch_name: 'test batch/一', batch_dir: '/mock/batches/test', status: 'queued', eligible: true, ...extra });
 
 async function fixture(options = {}) {

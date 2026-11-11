@@ -36,7 +36,9 @@ class DirectExplanationDeliveryTest(unittest.TestCase):
             head = prompt.split('BEGIN SUPPLIED CONTENT')[0]
             for constraint in ('防遗漏交付硬约束', '[IMG ...]解析[IMG ...]',
                                'ORIGINAL_EXPLANATION_OMITTED', 'ORIGINAL_SUMMARY_OMITTED',
-                               '完整题号集合', '同一来源/归属/遗漏校验'):
+                               '完整题号集合', '同一来源/归属/遗漏校验',
+                               'retryable=false', 'failure_class=source_binding',
+                               '正式 explanations.json 缺失', '逐字相同而仅出现位置不同'):
                 self.assertIn(constraint, head)
         self.assertIn('不得改答案、题型、知识点', parts[0]['prompt'])
 

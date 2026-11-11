@@ -1,17 +1,74 @@
 """Bounded answers/explanations calls; retry only independently failed units.
 
-Only private verified checkpoints are written here. The ordinary whole-stage
-importer remains responsible for canonical artifacts and delivery.
+Private verified checkpoints and unaccepted failure evidence are written here.
+The ordinary whole-stage importer owns canonical artifacts and delivery.
 """
 import copy
+import hashlib
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import agent_tasks, local_agent, unit_tasks
+from . import agent_tasks, local_agent, private_label_baseline, unit_tasks
 from .question_identity import question_key
 
 STAGES = ("answers", "explanations")
+_OWNERSHIP_FAILURE = "Content source/ownership check failed: "
+
+
+def _deterministic_diagnostics(exc):
+    """Only validator-owned structured diagnoses can stop model repair.
+
+    The code alone (including EXPLANATION_SOURCE_UNVERIFIED) also covers
+    model-correctable text/coordinate errors. Never infer determinism from it,
+    repeated messages, or model-authored findings. Mixed diagnoses still permit
+    the candidate errors to be corrected before confirming a source blocker.
+    """
+    message = str(exc)
+    if not isinstance(exc, ValueError) or not message.startswith(_OWNERSHIP_FAILURE):
+        return None
+    try:
+        rows = json.loads(message[len(_OWNERSHIP_FAILURE):])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(rows, list) or not rows or not all(
+            isinstance(row, dict) and row.get("retryable") is False
+            and row.get("failure_class") in ("source_binding", "validator_fault")
+            for row in rows):
+        return None
+    return rows
+
+
+def _failure_path(batch, stage, uid):
+    # Keyed on batch source truth only: feedback is a repair instruction, not
+    # changed evidence, and repository rules change with a code fix, whose
+    # recovery must revalidate the saved candidate before buying a model call.
+    binding = private_label_baseline.source_binding(batch)
+    key = hashlib.sha256(json.dumps(
+        {"version": 1, "stage": stage, "unit_id": uid, "inputs": binding},
+        ensure_ascii=False, sort_keys=True, allow_nan=False).encode("utf-8")).hexdigest()
+    return local_agent._part_snapshot_dir(batch, stage) / (key + ".failure.json")
+
+
+def _load_failure(path):
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if (isinstance(record, dict) and record.get("version") == 1
+                and isinstance(record.get("payload"), dict)
+                and isinstance(record.get("response"), dict)):
+            return record
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _store_failure(path, record):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2,
+                                    allow_nan=False), encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def check_inputs(batch, stage, expected):
@@ -90,8 +147,27 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
         raise ValueError("Label stage context changed during preparation")
     by_id = {u["unit_id"]: u for u in units}
     singleton = {p["unit_ids"][0]: p for p in singles}
-    accepted, errors = {}, {}
+    accepted, errors, deterministic = {}, {}, {}
     path = agent_tasks.ARTIFACTS[stage]
+    failure_paths = {uid: _failure_path(batch, stage, uid) for uid in singleton}
+
+    def retain_failure(uid, payload, response, exc, original_response=None):
+        diagnostics = _deterministic_diagnostics(exc)
+        if diagnostics is None or not isinstance(payload, dict):
+            return False
+        unit_response = copy.deepcopy(response)
+        unit_response["status"] = "completed"
+        unit_response["artifacts"] = {path: copy.deepcopy(payload)}
+        unit_response["findings"] = [f for f in response["findings"] if f["unit_id"] == uid]
+        record = {"version": 1, "stage": stage, "unit_id": uid,
+                  "input_hashes": {**private_label_baseline.source_binding(batch), **private_label_baseline._external(strict_hashes)},
+                  "payload": copy.deepcopy(payload), "response": unit_response,
+                  "original_response": copy.deepcopy(original_response or response),
+                  "validation_error": str(exc), "diagnostics": diagnostics}
+        _store_failure(failure_paths[uid], record)
+        deterministic[uid] = record
+        errors[uid] = str(exc)
+        return True
 
     def validate(uid, payload):
         candidate = copy.deepcopy(payload)
@@ -109,19 +185,43 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
         local_agent._check_input_hashes(batch, strict_hashes)
         saved = local_agent._load_part_snapshot(batch, stage, part, hashes, config)
         if saved is not None:
+            payload = None
             try:
                 payload = _envelope(stage, saved, [by_id[uid]])
                 if (saved["status"] != "completed"
                         or any(f["severity"] in ("blocker", "major") for f in saved["findings"])):
                     raise ValueError("Checkpoint is not a completed unit")
                 accepted[uid] = validate(uid, payload)
-            except (ValueError, TypeError, KeyError):
-                pass  # Corrupt/invalid checkpoints never bypass source validation.
+                private_label_baseline.store(batch, stage, uid, accepted[uid], strict_hashes)
+            except (ValueError, TypeError, KeyError) as exc:
+                # A formerly valid checkpoint may now expose a validator fault.
+                retain_failure(uid, payload, saved, exc)
+        if uid in accepted or uid in deterministic:
+            continue
+        failed = _load_failure(failure_paths[uid])
+        if failed is not None:
+            try:
+                payload = _envelope(stage, failed["response"], [by_id[uid]])
+                if (failed["response"]["status"] != "completed" or any(
+                        f["severity"] in ("blocker", "major") for f in failed["response"]["findings"])):
+                    continue
+                # Always retry the saved candidate locally: repaired validators
+                # can recover without generating content or bypassing acceptance.
+                candidate = validate(uid, payload)
+            except (ValueError, TypeError, KeyError) as exc:
+                retain_failure(uid, failed["payload"], failed["response"], exc,
+                               failed.get("original_response"))
+            else:
+                candidate["notes"] = list(failed["response"]["notes"])
+                candidate["findings"] = list(failed["response"]["findings"])
+                accepted[uid] = candidate
+                local_agent._store_part_snapshot(batch, stage, singleton[uid], hashes, config, candidate)
+                private_label_baseline.store(batch, stage, uid, candidate, strict_hashes)
 
     rounds = []
     concurrency = local_agent._part_concurrency(config)
     for attempt in range(int(config.get("retries", 0)) + 1):
-        pending = set(singleton) - set(accepted)
+        pending = set(singleton) - set(accepted) - set(deterministic)
         if not pending:
             break
         _, parts = unit_tasks.build_parts(batch, stage, prompt_budget,
@@ -174,26 +274,41 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
                     if blocked:
                         errors[uid] = json.dumps(blocked, ensure_ascii=False)
                         continue
+                    unit_payload = _unit_payload(stage, payload, by_id[uid])
                     try:
-                        candidate = validate(uid, _unit_payload(stage, payload, by_id[uid]))
+                        candidate = validate(uid, unit_payload)
                         candidate["findings"] = problems
                         candidate["notes"] = list(response["notes"])
                     except (ValueError, TypeError, KeyError) as exc:
                         errors[uid] = str(exc)
+                        retain_failure(uid, unit_payload, response, exc)
                         continue
                     accepted[uid] = candidate
                     local_agent._store_part_snapshot(batch, stage, singleton[uid], hashes, config, candidate)
+                    private_label_baseline.store(batch, stage, uid, candidate, strict_hashes)
         local_agent._json_write(run_dir / ("repair-progress-%02d.json" % attempt), {
             "stage": stage, "validated_units": sorted(accepted),
-            "failed_units": {uid: errors.get(uid) for uid in singleton if uid not in accepted}, "calls": rounds})
+            "failed_units": {uid: errors.get(uid) for uid in singleton if uid not in accepted},
+            "deterministic_failures": {uid: {"diagnostics": r["diagnostics"],
+                                              "evidence_path": str(failure_paths[uid])}
+                                       for uid, r in deterministic.items()}, "calls": rounds})
         if fatal is not None:
             raise fatal
     pending = set(singleton) - set(accepted)
+    local_agent._json_write(run_dir / "repair-progress.json", {
+        "stage": stage, "validated_units": sorted(accepted),
+        "failed_units": {uid: errors.get(uid) for uid in sorted(pending)},
+        "deterministic_failures": {uid: {"diagnostics": r["diagnostics"],
+                                          "evidence_path": str(failure_paths[uid])}
+                                   for uid, r in deterministic.items()}, "calls": rounds})
     if pending:
         local_agent._check_input_hashes(batch, strict_hashes)
         unresolved = {"status": "needs_review", "artifacts": {}, "findings": [],
-                      "notes": ["Label repair exhausted for units: " + json.dumps(
+                      "notes": ["Label repair incomplete for units: " + json.dumps(
                           {uid: errors.get(uid) for uid in sorted(pending)}, ensure_ascii=False)]}
+        if deterministic:
+            unresolved["notes"].append("Confirmed deterministic source/validator failures; model retry stopped: "
+                                       + json.dumps(sorted(deterministic), ensure_ascii=False))
         local_agent._json_write(run_dir / "response.json", unresolved)
         return {"response": unresolved, "input_hashes": strict_hashes, "collected_hashes": current_hashes,
                 "artifacts": {"response": str(run_dir / "response.json")}}

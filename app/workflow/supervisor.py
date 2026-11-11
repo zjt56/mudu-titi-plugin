@@ -257,12 +257,26 @@ def advance_claim(folder):
                    and not execution_busy(folder, include_auto=False))
 
 
+def _redirected(path):
+    """A symlink or Windows junction can point outside the batch it is listed in."""
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
 def _regular_file(folder, relative):
-    path = folder
+    root = Path(folder)
+    path = root
     for part in Path(relative).parts:
         path = path / part
-        if path.is_symlink():
+        if _redirected(path):
             return None
+    try:
+        resolved, anchor = path.resolve(), root.resolve()
+    except (OSError, RuntimeError):
+        return None
+    # Reparse points and absolute/`..` components must not escape the batch that
+    # owns the evidence; resolving both sides keeps a junctioned batch root valid.
+    if not resolved.is_relative_to(anchor):
+        return None
     return path if path.is_file() else None
 
 

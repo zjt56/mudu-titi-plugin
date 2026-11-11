@@ -35,7 +35,8 @@ def _pdf_sources(batch):
 
 
 def _boundary(line):
-    return (source._section(line) or source.ICON_HEADING.match(line)
+    return (source._section(line) or source._answer_range_boundary(line)
+            or source.ICON_HEADING.match(line)
             or source.ANNOTATION.match(line) or source.PASSAGE_HEADING.match(line)
             or source.PART_HEADING.match(line) or source.PASSAGE_INSTRUCTION.match(line)
             or re.fullmatch(r"\[/?TABLE[^\]]*\]", line))

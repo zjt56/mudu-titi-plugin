@@ -44,6 +44,13 @@ def _inline_numbers(text):
     return re.finditer(r'(?<!\d)\d{1,3}[.．、](?!\d)', text)
 
 
+def _answer_range_boundary(line):
+    # A compact answer range ends the preceding explanation; it is never a
+    # single-question owner. Share the existing answer-source grammar.
+    from .optional_inputs import ANSWER_RANGE
+    return ANSWER_RANGE.fullmatch(line) is not None
+
+
 def _question(line):
     match = QUESTION.match(line)
     if not match:
@@ -312,7 +319,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
     errors, warnings, hashes, summaries, questions, anchors = [], [], {}, [], [], []
     restorations = []
     body_anchors = []
-    source_lines = {}
+    source_lines, raw_source_lines = {}, {}
     material_dir = batch / '01_source/materials'
     reference_only = reference_only_sources(batch)
     extra_sources = [p.relative_to(batch).as_posix() for p in sorted(material_dir.glob('attachment_*.txt'))
@@ -324,8 +331,12 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
         if path.is_symlink() or any(p.is_symlink() for p in path.parents if p != batch.parent):
             raise ValueError('内容来源不允许软链接')
         raw = path.read_bytes(); hashes[relative] = hashlib.sha256(raw).hexdigest()
-        text = raw.decode('utf-8-sig'); lines = [_source_line(line) for line in text.splitlines()]
+        text = raw.decode('utf-8-sig')
+        raw_source_lines[relative] = text.splitlines()
+        lines = [_source_line(line) for line in raw_source_lines[relative]]
         source_lines[relative] = lines
+        if relative in reference_only:
+            continue  # Corroborating copies never supply or compete for content.
         section = None
         for index, line in enumerate(lines):
             heading = _section(line)
@@ -351,7 +362,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             # and must never be stripped as though it were an answer letter.
             parts = [head]
             for later in lines[index + 1:]:
-                if (QUESTION_BOUNDARY.match(later) or SUMMARY.search(later)
+                if (QUESTION_BOUNDARY.match(later) or _answer_range_boundary(later) or SUMMARY.search(later)
                         or _section(later) or ICON_HEADING.match(later)
                         or ANNOTATION.match(later)
                         or PASSAGE_HEADING.match(later)
@@ -360,7 +371,8 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 parts.append(later)
             questions.append({'number': int(match.group(1)), 'text': _norm(''.join(parts)),
                               'verbatim': _verbatim(''.join(parts)), 'source_text': '\n'.join(parts).strip(),
-                              'path': relative, 'line': index + 1, 'end_line': index + len(parts)})
+                              'path': relative, 'line': index + 1, 'end_line': index + len(parts),
+                              'anchor_line': index + 1})
         # Some answer keys print the answer on its own numbered line and the
         # 【解析】 in a following paragraph without a number (e.g. "74. It wasn't
         # easy." then "【解析】根据…"). Bind such a stray explanation to the most
@@ -373,7 +385,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             owner = None
             for back in range(index - 1, -1, -1):
                 previous = lines[back]
-                if (SUMMARY.search(previous) or _section(previous)
+                if (SUMMARY.search(previous) or _answer_range_boundary(previous) or _section(previous)
                         or PASSAGE_HEADING.match(previous) or ICON_HEADING.match(previous)
                         or ANNOTATION.match(previous) or STRAY_EXPLANATION.match(previous)):
                     break
@@ -389,7 +401,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             head = line[match.end():]
             parts = [head]
             for later in lines[index + 1:]:
-                if (QUESTION_BOUNDARY.match(later) or SUMMARY.search(later)
+                if (QUESTION_BOUNDARY.match(later) or _answer_range_boundary(later) or SUMMARY.search(later)
                         or _section(later) or ICON_HEADING.match(later)
                         or ANNOTATION.match(later) or PASSAGE_HEADING.match(later)
                         or STRAY_EXPLANATION.match(later)
@@ -398,7 +410,8 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 parts.append(later)
             questions.append({'number': owner, 'text': _norm(''.join(parts)),
                               'verbatim': _verbatim(''.join(parts)), 'source_text': '\n'.join(parts).strip(),
-                              'path': relative, 'line': index + 1, 'end_line': index + len(parts)})
+                              'path': relative, 'line': index + 1, 'end_line': index + len(parts),
+                              'anchor_line': back + 1})
         for index, line in enumerate(lines):
             match = SUMMARY.search(line)
             if not match:
@@ -409,7 +422,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 question = _question(later)
                 if question:
                     owner = int(question.group(1)); break
-                if (SUMMARY.search(later) or _section(later)
+                if (SUMMARY.search(later) or _answer_range_boundary(later) or _section(later)
                         or QUESTION_BOUNDARY.match(later) or ICON_HEADING.match(later)
                         or ANNOTATION.match(later)
                         or PASSAGE_HEADING.match(later) or PART_HEADING.match(later)
@@ -424,7 +437,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 _exp = re.compile(r'^\s*【\s*(?:解析|详解|分析)\s*】')
                 for j in range(index + 1, len(lines)):
                     later = lines[j]
-                    if (SUMMARY.search(later) or _section(later) or ICON_HEADING.match(later)
+                    if (SUMMARY.search(later) or _answer_range_boundary(later) or _section(later) or ICON_HEADING.match(later)
                             or PASSAGE_HEADING.match(later) or PART_HEADING.match(later)
                             or PASSAGE_INSTRUCTION.match(later)
                             or re.fullmatch(r'\[/?TABLE[^\]]*\]', later)):
@@ -468,7 +481,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
     # A PDF supplied alongside Word is layout evidence, not a competing text
     # authority. Prefer the primary/answer Word excerpts per question or passage;
     # retain attachment-only content when the primary has no corresponding field.
-    # Repeated anchors within the authoritative file still fail unique_anchor.
+    # Repeated anchors are equivalent only with complete, identical content proof.
     all_questions = list(questions)
     all_summaries = list(summaries)
     attachment_questions = [row for row in questions if row['path'] not in SOURCES]
@@ -535,48 +548,117 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
 
     active_unit = {}
 
-    def unique_anchor(number, path, line, *, allow_answer_source=False, expected=None):
+    def anchor_problem(number, path, line, *, allow_answer_source=False, expected=None):
+        """Return a source failure reason, or None after actual ownership proof.
+
+        Legacy appendix duplicates are equivalent only if every physical anchor
+        owns one complete explanation with the same verbatim content. Bare answer
+        lines, inline repeated numbers and different sections remain ambiguous.
+        Scoped identities retain their exact window/section rules.
+        """
+        if path in reference_only:
+            return 'reference_only_source'
+        if type(number) is not int:
+            return 'invalid_question_number'
         if active_unit.get('identity_version') == 'scoped-v1':
             if not scoped_source_matches(active_unit, number, path, line, source_lines):
-                return False
-            # Distinct originals inside this scope still conflict. Equivalent
-            # extraction copies do not create another question identity.
-            competing = [row for row in questions if row['number'] == number
-                         and row['path'] not in reference_only
-                         and scoped_source_matches(active_unit, number, row['path'], row['line'], source_lines)
-                         and (expected is None or row['text'] != _norm(expected))]
-            return allow_answer_source or not competing
-        if not isinstance(number, int):
-            return False
+                return 'source_scope_mismatch'
+            local = [row for row in questions if row['number'] == number
+                     and scoped_source_matches(active_unit, number, row['path'], row['line'], source_lines)]
+            if not allow_answer_source and len({row['verbatim'] for row in local}) > 1:
+                return 'conflicting_original_content'
+            return None
         candidates = body_anchors if path == '01_source/正文.txt' else anchors
         hits = [entry for entry in candidates if entry[0] == number and entry[1] == path]
-        if len(hits) != 1:
-            return False
-        # A separate answer-only file may repeat a number without supplying a
-        # competing explanation. A second labelled explanation is ambiguous.
+        local = [row for row in all_questions if row['number'] == number and row['path'] == path]
+        if not hits:
+            return 'missing_source_anchor'
+        if len(hits) > 1:
+            if len({row['verbatim'] for row in local}) > 1:
+                return 'conflicting_original_content'
+            if (len(local) != len(hits) or not local or not local[0]['verbatim']
+                    or any(sum(row['anchor_line'] == hit[2] for row in local) != 1 for hit in hits)):
+                return 'ambiguous_repeated_anchors'
+        if not allow_answer_source and not any(row['line'] == line for row in local):
+            return 'explanation_coordinate_mismatch'
+        # Separate originals still compete; only existing verbatim equivalence
+        # is accepted. NFKC punctuation folding cannot hide different prose.
         if not allow_answer_source:
-            competing = [row for row in questions
-                         if row['number'] == number and row['path'] != path
-                         and row['path'] != '01_source/正文.txt'
-                         and row['path'] not in reference_only]
-            if expected is not None:
-                # 同一份卷被重复提取（PDF 附件 / OCR 副本 / materials/*.txt）时，
-                # 同文解析的副本不是竞争者；只有措辞不同的解析才算冲突。
-                # 副本间常有全/半角标点差异，这里按规范化文本比较（_norm 做 NFKC），
-                # 不放松对“措辞被改写”的判定（那仍会因 text 不同而冲突）。
-                wanted = _norm(expected)
-                competing = [row for row in competing if row['text'] != wanted]
+            wanted = _verbatim(expected) if expected is not None else next(
+                (row['verbatim'] for row in local if row['line'] == line), None)
+            competing = [row for row in questions if row['number'] == number
+                         and row['path'] != path and row['path'] != '01_source/正文.txt'
+                         and (wanted is None or row['verbatim'] != wanted)]
             if competing:
-                return False
-        # When a separate body is available, the same number must also have a
-        # unique body anchor. Repeated numbers need human section verification.
+                return 'conflicting_original_content'
         if path != '01_source/正文.txt':
             body_hits = [entry for entry in body_anchors if entry[0] == number]
             if len(body_hits) != 1:
-                return False
-            if not _same_section(hits[0][3], body_hits[0][3]):
-                return False
-        return True
+                return 'body_anchor_not_unique'
+            # Bind this physical candidate's own section, never use an equal
+            # copy under a different heading to prove its coordinates. Other
+            # identical copies do not veto an independently valid candidate.
+            current = next((row for row in local if row['line'] == line), None)
+            current_line = current['anchor_line'] if current else line
+            current_hits = [hit for hit in hits if hit[2] == current_line]
+            if allow_answer_source:
+                current_hits = hits  # Summary membership has separate proof.
+            if not any(_same_section(hit[3], body_hits[0][3]) for hit in current_hits):
+                return 'source_section_mismatch'
+        elif any(not _same_section(hit[3], hits[0][3]) for hit in hits):
+            return 'source_section_mismatch'
+        return None
+
+    def unique_anchor(number, path, line, *, allow_answer_source=False, expected=None):
+        return anchor_problem(number, path, line, allow_answer_source=allow_answer_source,
+                              expected=expected) is None
+
+    def unique_summary(row):
+        peers = [other for other in summaries if other['owner'] == row['owner']
+                 and other['path'] == row['path']]
+        return all(other['verbatim'] == row['verbatim']
+                   and set(other['members']) == set(row['members']) for other in peers)
+
+    def binding_evidence(numbers, value, field):
+        pool = all_questions if field == 'explanation' else all_summaries
+        wanted = _verbatim(value)
+        rows = [row for row in pool if (row.get('number', row.get('owner')) in numbers
+                                       or row['verbatim'] == wanted)]
+        candidates = []
+        for row in rows:
+            number = row.get('number', row.get('owner'))
+            problem = anchor_problem(number, row['path'], row['line'],
+                                     allow_answer_source=field != 'explanation', expected=value)
+            if number not in numbers:
+                problem = 'question_number_mismatch'
+            elif row['verbatim'] != wanted:
+                problem = problem or 'content_mismatch'
+            elif field != 'explanation' and (set(row['members']) != set(numbers) or not unique_summary(row)):
+                problem = 'summary_ownership_conflict'
+            candidates.append({'path': row['path'], 'line': row['line'], 'end_line': row['end_line'],
+                               'number': number, 'content_match': row['verbatim'] == wanted,
+                               'anchor_count': sum(n == number and p == row['path'] for n, p, _, _ in anchors + body_anchors),
+                               'source_sha256': hashes[row['path']], 'reason': problem or 'candidate_bound'})
+        reasons = sorted({row['reason'] for row in candidates if row['reason'] != 'candidate_bound'})
+        return [{'reason': 'source_binding_unverified', 'numbers': numbers,
+                 'candidate_count': len(candidates), 'reasons': reasons or ['no_matching_source_content'],
+                 'candidates': candidates}]
+
+    def unverified(code, message, uid, field, numbers, value, item, *, warn=False):
+        evidence = binding_evidence(numbers, value, field)
+        ref_problem = reference_problem(item, numbers, field, value)
+        if ref_problem:
+            evidence[0]['reasons'].append(ref_problem)
+            evidence[0]['references'] = [entry for entry in item.get('evidence', [])
+                                          if isinstance(entry, str) and entry.startswith('source_ref ')]
+        (warning if warn or not strict else error)(code, message, uid, field, evidence)
+        # Source conflicts cannot be repaired by asking a model to re-copy prose.
+        # A wrong model string/coordinate is deliberately still retryable.
+        if not warn and strict and not ref_problem and any(
+                row['content_match'] and row['reason'] in {'conflicting_original_content',
+                                                          'ambiguous_repeated_anchors', 'body_anchor_not_unique'}
+                for row in evidence[0]['candidates']):
+            errors[-1].update(retryable=False, failure_class='source_binding')
 
     def writing_source():
         # Only an already-passed, input-bound structure gate can supply the
@@ -712,6 +794,53 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     return _norm(match.group(1))
         return None
 
+    def reference_problem(item, numbers, field, value):
+        # Expansion records the actual SHA/coordinates. Content equality alone
+        # must never let a reference to another question borrow a valid row.
+        from .content_fragments import _ANSWER_PREFIX, _EXPL_LABEL, _SUMMARY_LABEL
+        for evidence in item.get('evidence') or []:
+            if not isinstance(evidence, str):
+                continue
+            match = re.fullmatch(r'source_ref (.+):(\d+):(\d+)-(\d+):(\d+) sha256=([0-9a-f]{64})', evidence)
+            if not match:
+                continue
+            path, start, left, end, right, digest = match.groups()
+            start, left, end, right = map(int, (start, left, end, right))
+            # source_ref columns address the original file, before style/space
+            # cleanup. Replaying them against parser lines can silently shift a
+            # cross-question reference out of the matching-field ownership check.
+            lines = raw_source_lines.get(path, [])
+            if not 1 <= start <= end <= len(lines):
+                return 'source_ref_coordinate_mismatch'
+            text = (lines[start - 1][left:right] if start == end else
+                    '\n'.join([lines[start - 1][left:], *lines[start:end - 1], lines[end - 1][:right]]))
+            text = (_EXPL_LABEL.sub('', _ANSWER_PREFIX.sub('', text, count=1), count=1)
+                    if field == 'explanation' else _SUMMARY_LABEL.sub('', text, count=1))
+            if _verbatim(text) != _verbatim(value):
+                continue  # This evidence may belong to the other parent field.
+            if hashes.get(path) != digest or path in reference_only:
+                return 'source_ref_source_mismatch'
+            pool = all_questions if field == 'explanation' else all_summaries
+            rows = [row for row in pool if row['path'] == path and row['line'] <= start <= end <= row['end_line']
+                    and row['verbatim'] == _verbatim(value)
+                    and (row['number'] in numbers if field == 'explanation' else
+                         row['owner'] in numbers and all(n in row['members'] for n in numbers))
+                    and (active_unit.get('identity_version') != 'scoped-v1' or all(
+                        scoped_source_matches(active_unit, n, path, start, source_lines)
+                        and scoped_source_matches(active_unit, n, path, end, source_lines) for n in numbers))]
+            if field == 'explanation' and active_unit.get('identity_version') != 'scoped-v1':
+                rows = [row for row in rows if path == '01_source/正文.txt' or any(
+                    _same_section(anchor[3], body[3]) for anchor in anchors for body in body_anchors
+                    if anchor[0] == body[0] == row['number'] and anchor[1] == path
+                    and anchor[2] == row['anchor_line'])]
+            rows = [row for row in rows if anchor_problem(
+                row.get('number', row.get('owner')), path, row['line'],
+                allow_answer_source=field != 'explanation', expected=value)
+                in {None, 'conflicting_original_content', 'ambiguous_repeated_anchors', 'body_anchor_not_unique'}]
+            if not rows:
+                return 'source_ref_ownership_mismatch'
+        return None
+
     def restore_field(item, uid, numbers, field):
         value = item.get(field)
         if not restore or not isinstance(value, str) or AI_MARK in value:
@@ -734,8 +863,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                           and row['owner'] in numbers and _norm(value) == row['text']
                           and all(n in row['members'] and unique_anchor(
                               n, row['path'], row['line'], allow_answer_source=True) for n in numbers)
-                          and sum(other['owner'] == row['owner'] and other['path'] == row['path']
-                                  for other in summaries) == 1]
+                          and unique_summary(row)]
             attachment_proofs = [row for row in attachment_summaries
                                  if row['owner'] in numbers and row['text'] == _norm(value)
                                  and row['verbatim'] == _verbatim(value)
@@ -781,8 +909,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             uniq = [row for row in summaries if row['path'] in SOURCES and row['owner'] in numbers
                     and all(n in row['members'] and unique_anchor(
                         n, row['path'], row['line'], allow_answer_source=True) for n in numbers)
-                    and sum(other['owner'] == row['owner'] and other['path'] == row['path']
-                            for other in summaries) == 1
+                    and unique_summary(row)
                     and row.get('source_text')]
             if len(uniq) == 1 and _minor_edit(uniq[0]['source_text'], value):
                 source = uniq[0]
@@ -842,17 +969,14 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                                 number, row['path'], row['line'], allow_answer_source=True,
                                 expected=row['verbatim'])
                             for number in numbers)
-                        and sum(other['owner'] == row['owner'] and other['path'] == row['path']
-                                for other in summaries) == 1 for row in matches)
+                        and unique_summary(row) for row in matches)
             # 允许两种：可逐字溯源到该题组材料，或明确标注为 AI 生成待校对（F3/F5）。
+            owned = owned and reference_problem(item, numbers, 'articleSummary', summary) is None
             if not marked and not owned:
-                detail = [f"{row['path']}:{row['line']} -> 题 {row['owner']}" for row in matches]
-                if writing_unit:
-                    # 书面表达不是客观题：不要求答案/大意逐字绑定，只提示便于核对。
-                    warning('SUMMARY_SOURCE_UNVERIFIED', '书面表达的文章大意未逐字绑定原文（不阻断）', uid, 'articleSummary', detail)
-                else:
-                    (error if strict else warning)('SUMMARY_SOURCE_UNVERIFIED', '文章大意未能唯一逐字绑定原材料；严格校验拒绝交付', uid, 'articleSummary',
-                          detail)
+                unverified('SUMMARY_SOURCE_UNVERIFIED',
+                           '书面表达的文章大意未逐字绑定原文（不阻断）' if writing_unit else
+                           '文章大意未能唯一逐字绑定原材料；严格校验拒绝交付',
+                           uid, 'articleSummary', numbers, summary, item, warn=writing_unit)
         if isinstance(explanation, str) and explanation.strip():
             value = _norm(explanation)
             marked = AI_MARK in explanation
@@ -882,12 +1006,12 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 hint = writing_hint()
                 if hint and value == hint:
                     traceable = True
+            traceable = traceable and reference_problem(item, numbers, 'explanation', explanation) is None
             if not marked and not traceable:
-                if writing_unit:
-                    # 书面表达：范文/写作指导可有可无；有内容但不逐字绑定只提示，不阻断。
-                    warning('EXPLANATION_SOURCE_UNVERIFIED', '书面表达的解析/指导未逐字绑定原文（不阻断）', uid, 'explanation')
-                else:
-                    (error if strict else warning)('EXPLANATION_SOURCE_UNVERIFIED', '解析未能唯一逐字绑定原题；严格校验拒绝交付', uid, 'explanation')
+                unverified('EXPLANATION_SOURCE_UNVERIFIED',
+                           '书面表达的解析/指导未逐字绑定原文（不阻断）' if writing_unit else
+                           '解析未能唯一逐字绑定原题；严格校验拒绝交付',
+                           uid, 'explanation', numbers, explanation, item, warn=writing_unit)
             for row in summaries:
                 if (row['owner'] is not None and row['owner'] not in numbers
                         and row['text'] in value):
@@ -903,6 +1027,11 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 check(sub, f'{uid}/{number if number is not None else index}', [number], True,
                       listening, has_any_expl)
 
+    bound_questions = [row for row in questions if unique_anchor(
+        row['number'], row['path'], row['line'], expected=row['verbatim'])]
+    bound_summaries = [row for row in summaries if unique_summary(row) and all(
+        unique_anchor(n, row['path'], row['line'], allow_answer_source=True)
+        for n in row['members'])]
     question_pool, summary_pool = list(all_questions), list(all_summaries)
     legacy_questions, legacy_summaries = list(questions), list(summaries)
     legacy_attachment_questions, legacy_attachment_summaries = list(attachment_questions), list(attachment_summaries)
@@ -960,6 +1089,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             'restorations': restorations, 'source_sha256': hashes,
             'questions': questions, 'summaries': summaries,
             'all_questions': all_questions, 'all_summaries': all_summaries,
+            'bound_questions': bound_questions, 'bound_summaries': bound_summaries,
             'check': 'upload-content-source-v1',
             'scope': '解析/大意来源和明确材料归属；不替代逐题语义、视觉、听力和独立审核'}
 
@@ -1004,11 +1134,11 @@ def collect_source_index(batch_dir):
         return index, summaries
     index = {}
     conflicted = set()
-    for row in report.get('questions', []):
+    for row in report.get('bound_questions', []):
         if not row.get('source_text'):
             continue
         n = row['number']
-        if n in index and _norm(index[n]) != _norm(row['source_text']):
+        if n in index and _verbatim(index[n]) != _verbatim(row['source_text']):
             conflicted.add(n)
         else:
             index[n] = row['source_text']
@@ -1016,7 +1146,7 @@ def collect_source_index(batch_dir):
         index.pop(n, None)
     summaries = [{'owner': row.get('owner'), 'members': row.get('members') or [],
                   'source_text': row['source_text']}
-                 for row in report.get('summaries', []) if row.get('source_text')]
+                 for row in report.get('bound_summaries', []) if row.get('source_text')]
     return index, summaries
 
 
@@ -1030,6 +1160,6 @@ def restore_source_content(batch_dir, payload):
 
     全半角/排版等值仅用于寻找同题原片段，不放宽最终逐字校验。
     report.restorations 保留每处恢复的文件、行号和来源指纹。
-    无来源、同源重复、跨题或实质改写均不能恢复，也不能通过严格核验。
+    无来源、同源异文、跨题或实质改写均不能恢复，也不能通过严格核验。
     """
     return _inspect_content(batch_dir, payload, strict=True, restore=True)

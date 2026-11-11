@@ -222,6 +222,148 @@ class LabelExecutionTest(unittest.TestCase):
                 self.assertNotIn('01_source/附录.txt', context)
                 self.assertIn('第二题原解析', json.dumps(context['source_fragment_index'], ensure_ascii=False))
 
+    def explanations(self, units, bad=False):
+        rows = [{'unit_id': u['unit_id'],
+                 'explanation': '第一题原解析。' if u['numbers'][0] == 1 else '第二题原解析。',
+                 'articleSummary': '无', 'subquestions': [], 'evidence': ['附录原文']}
+                for u in units]
+        if bad:
+            for row in rows:
+                if row['unit_id'] == 'q-2':
+                    row['explanation'] = '模型自行改写'
+        return {'status': 'completed', 'artifacts': {agent_tasks.ARTIFACTS['explanations']: {'items': rows}},
+                'notes': [], 'findings': []}
+
+    def source_failure(self, **overrides):
+        row = {'code': 'EXPLANATION_SOURCE_UNVERIFIED', 'unit_id': 'q-1',
+               'retryable': False, 'failure_class': 'source_binding',
+               'evidence': [{'reason': 'conflicting_source_content', 'candidate_count': 2,
+                             'anchor_count': 2, 'candidates': [{'path': '01_source/附录.txt', 'line': 1},
+                                                           {'path': '01_source/附录.txt', 'line': 3}]}]}
+        row.update(overrides)
+        return ValueError(label_execution._OWNERSHIP_FAILURE + json.dumps([row], ensure_ascii=False))
+
+    def test_confirmed_source_fault_stops_first_retry_but_other_candidate_is_repaired(self):
+        original = agent_tasks._validate
+        calls = []
+        def validate(batch, stage, payload, context, units):
+            if stage == 'explanations' and [u['unit_id'] for u in units] == ['q-1']:
+                # Expansion may mutate the working copy before the error.
+                payload['items'][0]['explanation'] = 'mutated validator working copy'
+                raise self.source_failure()
+            return original(batch, stage, payload, context, units)
+        def invoke(prompt, *a, **kw):
+            units = self.selected(prompt); calls.append([u['unit_id'] for u in units])
+            return {'response': self.explanations(units, bad=len(calls) == 1)}
+        config = dict(self.config, retries=7)
+        with patch.object(agent_tasks, '_validate', side_effect=validate):
+            failed = label_execution.run(self.batch, 'explanations', config, self.batch / 'run', invoke=invoke)
+            self.assertEqual(calls, [['q-1', 'q-2'], ['q-2']])
+            calls.clear()
+            # Different repair feedback and run directory cannot restart the model.
+            self.put('workflow/repair-feedback/explanations.json', {
+                'version': 1, 'stage': 'explanations', 'reason': 'retry again', 'error': 'same source fault',
+                'all_units': False, 'unit_ids': ['q-1'],
+                'feedback_by_unit': {'q-1': {'reason': 'retry again', 'error': 'same source fault'}}, 'attempt': 2})
+            resumed = label_execution.run(self.batch, 'explanations', config, self.batch / 'run2', invoke=invoke)
+            self.assertEqual(calls, [])
+        self.assertEqual(failed['response']['status'], 'needs_review')
+        self.assertEqual(resumed['response']['artifacts'], {})
+        progress = json.loads((self.batch / 'run2/repair-progress.json').read_text())
+        self.assertEqual(progress['validated_units'], ['q-2'])
+        self.assertEqual(progress['calls'], [])
+        evidence = json.loads(Path(progress['deterministic_failures']['q-1']['evidence_path']).read_text())
+        self.assertEqual(evidence['payload']['items'][0]['explanation'], '第一题原解析。')
+        self.assertEqual(len(evidence['original_response']['artifacts'][agent_tasks.ARTIFACTS['explanations']]['items']), 2)
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', evidence['validation_error'])
+        self.assertFalse((self.batch / agent_tasks.ARTIFACTS['explanations']).exists())
+        # A fixed validator accepts the same saved candidate with zero model calls.
+        with patch.object(local_agent, 'invoke', side_effect=AssertionError('unexpected model call')):
+            recovered = label_execution.run(self.batch, 'explanations', config, self.batch / 'run3')
+        self.assertEqual(recovered['response']['status'], 'completed')
+        self.assertTrue(agent_tasks.accept_result(self.batch, 'explanations', recovered['response'])['completed'])
+
+    def test_real_conflicting_source_diagnostic_stops_repeated_stage_calls(self):
+        self.put('01_source/附录.txt', '1. A 【解析】第一题原解析。\n1. A 【解析】同题不同解析。\n2. B 【解析】第二题原解析。')
+        calls = []
+        def invoke(prompt, *a, **kw):
+            units = self.selected(prompt); calls.append([u['unit_id'] for u in units])
+            return {'response': self.explanations(units)}
+        config = dict(self.config, retries=7)
+        for index in range(3):
+            result = label_execution.run(self.batch, 'explanations', config,
+                                         self.batch / ('run-' + str(index)), invoke=invoke)
+            self.assertEqual(result['response']['status'], 'needs_review')
+            self.assertEqual(result['response']['artifacts'], {})
+        self.assertEqual(calls, [['q-1', 'q-2']])
+        progress = json.loads((self.batch / 'run-2/repair-progress.json').read_text())
+        self.assertEqual(progress['validated_units'], ['q-2'])
+        diagnostic = progress['deterministic_failures']['q-1']['diagnostics'][0]
+        self.assertFalse(diagnostic['retryable'])
+        self.assertEqual(diagnostic['failure_class'], 'source_binding')
+        self.assertGreaterEqual(diagnostic['evidence'][0]['candidate_count'], 2)
+        self.assertFalse(agent_tasks.accept_result(self.batch, 'explanations', result['response'])['completed'])
+        self.assertFalse((self.batch / agent_tasks.ARTIFACTS['explanations']).exists())
+
+    def test_unverified_candidate_text_is_still_model_correctable(self):
+        calls = []
+        def invoke(prompt, *a, **kw):
+            units = self.selected(prompt); calls.append([u['unit_id'] for u in units])
+            return {'response': self.explanations(units, bad=len(calls) == 1)}
+        result = label_execution.run(self.batch, 'explanations', self.config, self.batch / 'run', invoke=invoke)
+        self.assertEqual(calls, [['q-1', 'q-2'], ['q-2']])
+        self.assertEqual(result['response']['status'], 'completed')
+        self.assertEqual(list((self.batch / 'workflow').rglob('*.failure.json')), [])
+
+    def test_only_explicit_validator_diagnostics_stop_retry(self):
+        for exc in (ValueError('ordinary failure'),
+                    ValueError('EXPLANATION_SOURCE_UNVERIFIED'),
+                    self.source_failure(retryable=True), self.source_failure(retryable=0),
+                    self.source_failure(failure_class='candidate'),
+                    ValueError(label_execution._OWNERSHIP_FAILURE + 'invalid JSON'),
+                    ValueError(label_execution._OWNERSHIP_FAILURE + '[]')):
+            with self.subTest(error=str(exc)):
+                self.assertIsNone(label_execution._deterministic_diagnostics(exc))
+        self.assertIsNotNone(label_execution._deterministic_diagnostics(self.source_failure()))
+        self.assertIsNotNone(label_execution._deterministic_diagnostics(self.source_failure(failure_class='validator_fault')))
+        rows = json.loads(str(self.source_failure()).split(label_execution._OWNERSHIP_FAILURE)[1])
+        mixed = ValueError(label_execution._OWNERSHIP_FAILURE + json.dumps(rows + [{'code': 'candidate_error'}]))
+        self.assertIsNone(label_execution._deterministic_diagnostics(mixed))
+
+    def test_failure_binding_ignores_repair_feedback_and_code_but_not_source(self):
+        key = label_execution._failure_path(self.batch, 'explanations', 'q-1')
+        # Repair feedback and repository rules are instructions, not evidence: a
+        # changed code fix must be able to revalidate the saved candidate.
+        self.put('workflow/repair-feedback/explanations.json', {'reason': 'changed feedback'})
+        self.put('plugin/rules.py', 'print("code fix")\n')
+        self.assertEqual(key, label_execution._failure_path(self.batch, 'explanations', 'q-1'))
+        self.put('01_source/附录.txt', '1. A 【解析】changed source.\n2. B 【解析】x')
+        self.assertNotEqual(key, label_execution._failure_path(self.batch, 'explanations', 'q-1'))
+
+    def test_source_evidence_change_releases_failed_candidate_for_new_model_call(self):
+        calls = []
+        original = agent_tasks._validate
+        def validate(batch, stage, payload, context, units):
+            if [u['unit_id'] for u in units] == ['q-1']:
+                raise self.source_failure()
+            return original(batch, stage, payload, context, units)
+        def invoke(prompt, *a, **kw):
+            units = self.selected(prompt); calls.append([u['unit_id'] for u in units])
+            return {'response': self.explanations(units)}
+        with patch.object(agent_tasks, '_validate', side_effect=validate):
+            label_execution.run(self.batch, 'explanations', self.config, self.batch / 'run', invoke=invoke)
+        self.put('01_source/附录.txt', '1. A 【解析】第一题新解析。\n2. B 【解析】第二题原解析。')
+        calls.clear()
+        def changed(prompt, *a, **kw):
+            response = invoke(prompt, *a, **kw)
+            for row in response['response']['artifacts'][agent_tasks.ARTIFACTS['explanations']]['items']:
+                if row['unit_id'] == 'q-1':
+                    row['explanation'] = '第一题新解析。'
+            return response
+        result = label_execution.run(self.batch, 'explanations', self.config, self.batch / 'run2', invoke=changed)
+        self.assertEqual(calls, [['q-1', 'q-2']])
+        self.assertEqual(result['response']['status'], 'completed')
+
     def test_timeout_is_not_content_retry(self):
         with patch.object(local_agent, 'invoke', side_effect=local_agent.AgentError('timeout', 'timeout')) as call:
             with self.assertRaises(local_agent.AgentError):

@@ -99,6 +99,24 @@ class UnderlineLayoutTest(unittest.TestCase):
         self.assertTrue(again['passed'], again)
         self.assertEqual(again['changes'], [])
 
+    def test_whole_line_label_inside_merged_passage_is_restored(self):
+        # A table cell such as "Testing Dates:" is its own paragraph in the
+        # source, so context == marked text. The assembled material merges
+        # those cells into one passage field; the label must still be found.
+        batch = {'items': [{'material': 'School Policy Testing Dates: June 18 Homework: every day'}]}
+        candidate, report = underline.restore(batch, 'School Policy\n<u>Testing Dates:</u>\nJune 18\n<u>Homework:</u>\nevery day')
+        self.assertTrue(report['passed'], report)
+        self.assertEqual(candidate['items'][0]['material'],
+                         'School Policy <u>Testing Dates:</u> June 18 <u>Homework:</u> every day')
+
+    def test_whole_line_label_must_stay_unique_across_units(self):
+        batch = {'items': [{'material': 'Notice <u>Homework:</u> first'},
+                           {'material': 'Notice Homework: second'}]}
+        candidate, report = underline.restore(batch, '<u>Homework:</u>')
+        self.assertFalse(report['passed'], report)
+        self.assertEqual(report['issues'][0]['code'], 'UNDERLINE_MAPPING_AMBIGUOUS')
+        self.assertEqual(candidate, batch)
+
     def test_bare_marked_field_with_rule_cannot_match_embedded_prose(self):
         batch = {'items': [{'stem': 'Before Read ______ After'}]}
         candidate, report = underline.restore(batch, '<u>Read __</u>')

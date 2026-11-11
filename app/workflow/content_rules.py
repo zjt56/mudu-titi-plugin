@@ -45,6 +45,8 @@ RULES = """Artifact: {items:[{unit_id,explanation:string|source_ref,articleSumma
 - articleSummary 以来源坐标、章节/材料边界及完整题号集合绑定同篇；不得按列表位置 zip 分配，缺一篇也不能把后一篇大意前移，Word 大意缺失时只用同篇 PDF 兜底。
 - 不改变现有 JSON 键集；evidence 指向真实来源文件和行号/题号，不能自称“确定性直抄”取得豁免。直抄、source_ref 和字符串结果均须通过同一来源/归属/遗漏校验，ORIGINAL_EXPLANATION_OMITTED / ORIGINAL_SUMMARY_OMITTED 是交付失败，不能用 status=completed、空 findings 或证据说明绕过。
 - 收到上述遗漏错误时，仅修报错题号/题组的解析/大意并保留已验证内容，完成相同检查再交回；不能改答案、题型、知识点或靠重试/取消检查消化错误。无法唯一绑定时如实给出定位证据，不能把冲突改成“原文没有”。
+- 同题、同来源身份内的原文逐字相同而仅出现位置不同，不等于两份不同解析；保留真实 source_ref 坐标，由程序核对内容等价与归属，不改写、不拼接，也不能借同文跨大题绑定。真正不同的权威解析仍属来源冲突。
+- 验收报错先检查候选 response、具体字段、source_ref 文件摘要/行列与原题归属，再判断是模型引用错误还是来源/校验器错误。正式 explanations.json 缺失只说明尚未验收交付，不能据此断言模型没有产出。retryable=false、failure_class=source_binding 的结构化来源错误须交由来源/代码修复，不能换上下文反复生成同一候选；模型错号、错坐标或改写仅修对应单元并复验。
 - 生产者完成不等于整条链路已同步：后续组装、元数据、画线及最终 payload 必须保留已接受的解析/大意；不得沿用旧「无」或要求直接改完成状态。书面表达仍按前述例外处理。
 JSON 输出：只返回一个根 JSON 对象，根键恰为 status、artifacts、notes、findings；不要在对象后追加第二个对象、说明文字或多余的花括号/方括号，多一个 `}` 或 `]` 会导致整份产物被判协议失败。"""
 

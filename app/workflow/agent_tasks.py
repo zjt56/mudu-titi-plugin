@@ -599,10 +599,42 @@ def _collect(batch, stage, speculative=False):
         base_path = _safe_path(batch, ARTIFACTS[stage])
         eligible = [u for u in units if stage != 'audio' or str(u.get('type', '')).startswith('听力')]
         if len(chosen) < len(eligible) and not base_path.is_file():
-            missing.append('Scoped repair needs a baseline for untouched units: ' + ARTIFACTS[stage])
+            from . import private_label_baseline
+            if stage in private_label_baseline.STAGES:
+                untouched = [u for u in eligible if u['unit_id'] not in {v['unit_id'] for v in chosen}]
+                try:
+                    _, receipts = private_label_baseline.load(batch, stage, untouched, contexts)
+                    contexts[private_label_baseline.CONTEXT_KEY] = {'receipts': receipts}
+                    hashes.update(receipts)
+                except ValueError as exc:
+                    _widen_repair_scope(contexts, eligible, exc)
+            else:
+                _widen_repair_scope(
+                    contexts, eligible,
+                    'Scoped repair has no verified baseline for untouched units: ' + ARTIFACTS[stage])
         hashes[ARTIFACTS[stage]] = (hashlib.sha256(base_path.read_bytes()).hexdigest()
                                    if base_path.is_file() else MISSING_INPUT)
     return contexts, hashes, missing, units
+
+
+def _widen_repair_scope(contexts, eligible, reason):
+    """No verified unit can be reused: deliver every unit instead of blocking.
+
+    A scoped repair narrows model work to the affected units and reuses the rest
+    from a verified baseline. When that baseline does not exist (first delivery
+    of this stage), nothing can be reused, so the only honest option is to build
+    the full artifact once. Blocking here would park a real batch forever.
+    """
+    repair = contexts.get('repair_feedback')
+    if not isinstance(repair, dict) or not repair.get('scoped_units'):
+        contexts['private_scope_note'] = str(reason)
+        return
+    widened = dict(repair)
+    widened['unit_ids'] = [u['unit_id'] for u in eligible]
+    widened['all_units'] = True
+    widened['reason'] = (str(repair.get('reason') or '').strip()
+                         + '（无可复用已验收单元，改为整阶段交付：' + str(reason)[:200] + '）').strip()
+    contexts['repair_feedback'] = widened
 
 
 def compact_label_context(context):

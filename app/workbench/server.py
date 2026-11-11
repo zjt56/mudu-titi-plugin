@@ -889,12 +889,22 @@ def _ensure_advance_worker():
     threading.Thread(target=_advance_worker_loop, daemon=True, name="workbench-advance-worker").start()
 
 
+def _operations_leased() -> bool:
+    """An in-flight operations turn holds a lease: restarting voids that attempt."""
+    try:
+        from workflow import operations
+        return operations.leased(WORKFLOWS)
+    except (ImportError, OSError, ValueError, RuntimeError):
+        return False
+
+
 def work_in_flight() -> bool:
     """是否还有真正在跑的工作；插件重启后端前用它判断能否安全回收进程树。
 
     只统计“杀掉就会丢失真实工作”的状态：正在执行的 advance、排队中的批次、切段
-    任务、上传任务。上传中断会让远端回执变成 unknown（只能人工核实），比阶段重跑
-    代价更高，所以同样不能在被回收时进行。探测不到状态时保守返回 True。
+    任务、上传任务、在途运维租约。上传中断会让远端回执变成 unknown（只能人工
+    核实），比阶段重跑代价更高，所以同样不能在被回收时进行。探测不到状态时保守
+    返回 True。
     """
     try:
         with _lock:
@@ -910,7 +920,9 @@ def work_in_flight() -> bool:
     except (RuntimeError, TypeError):
         return True
     with _audio_job["lock"]:
-        return bool(_audio_job.get("running"))
+        if _audio_job.get("running"):
+            return True
+    return _operations_leased()
 
 
 def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expectation=None,

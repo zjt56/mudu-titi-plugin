@@ -563,7 +563,7 @@ def schedule_knowledge_repair(batch_dir, *, expected_inputs=None, reason="目录
         reason = str(reason).strip()[:500] or "目录值非法，按原文局部重新判定"
         feedback = {"version": 1, "stage": "knowledge", "reason": reason,
             "error": "目录检查发现非法知识点；只重新判断列出的单元，不能猜值或重写题文。",
-            "unit_ids": list(targets), "all_units": False, "attempt": attempt,
+            "unit_ids": list(targets), "all_units": False, "scoped_units": True, "attempt": attempt,
             "feedback_by_unit": {uid: {"reason": reason, "error": "; ".join(errors)[:6000]}
                                  for uid, errors in targets.items()}}
         invalidated = []

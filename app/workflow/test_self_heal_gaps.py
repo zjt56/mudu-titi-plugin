@@ -18,7 +18,9 @@ class SourceOptionRepairTest(unittest.TestCase):
     put = transaction_fixture.SelfHealActionsTest.put
     fixture = transaction_fixture.SelfHealActionsTest.fixture
     load = transaction_fixture.SelfHealActionsTest.load
-    raw_files = transaction_fixture.SelfHealActionsTest.raw_files
+    def raw_files(self):
+        return {path.replace('\\', '/'): raw for path, raw in
+                transaction_fixture.SelfHealActionsTest.raw_files(self).items()}
     add_manifest = transaction_fixture.SelfHealActionsTest.add_manifest
 
     def truncated(self, *, objects=False, terminal=False, listening=False):
@@ -371,7 +373,7 @@ class KnowledgeRejudgmentTest(unittest.TestCase):
             self.write(rel, payload)
 
     def raw(self):
-        return {str(p.relative_to(self.batch)): p.read_bytes() for p in self.batch.rglob('*')
+        return {p.relative_to(self.batch).as_posix(): p.read_bytes() for p in self.batch.rglob('*')
                 if p.is_file() and actions.MIGRATIONS not in p.relative_to(self.batch).as_posix()
                 and p.name != '.source-format-repair.lock'}
 
@@ -650,18 +652,26 @@ class NeverParkTest(unittest.TestCase):
                 self.assertNotIn("待人工", result["reason"])
                 escalate.assert_not_called()
 
-    def test_record_only_on_any_agent_stage_never_returns_waiting_external(self):
+    def test_record_only_content_without_scope_refuses_instead_of_full_retry(self):
         from workflow import self_heal as _heal
-        for stage in ("answers", "types", "explanations", "knowledge", "assemble"):
-            batch, state = self.make("np-" + stage)
-            result = _heal._apply(batch, state, stage, "某处校验失败",
-                                  {"action": "record_only", "reason": "证据里没有可改写的内容"}, 1,
-                                  {"files": {}})
-            self.assertTrue(result["changed"], stage)
-            self.assertNotEqual(result["status"], "waiting_external", stage)
-            self.assertIn(result["outcome"],
-                          {"upstream_escalated", "content_retry_with_feedback", "deferred_and_continuing"},
-                          stage)
+        for stage in ("answers", "types", "explanations", "knowledge", "audio"):
+            with self.subTest(stage=stage):
+                batch, state = self.make("np-" + stage)
+                before = (batch / "workflow/manifest.json").read_bytes()
+                with self.assertRaisesRegex(ValueError, "content_retry_requires_scope"):
+                    _heal._apply(batch, state, stage, "某处校验失败",
+                        {"action": "record_only", "reason": "证据里没有可改写的内容"}, 1,
+                        {"files": {}})
+                self.assertEqual((batch / "workflow/manifest.json").read_bytes(), before)
+                self.assertFalse((batch / "workflow/repair-feedback" / (stage + ".json")).exists())
+
+    def test_record_only_noncontent_stage_never_returns_waiting_external(self):
+        from workflow import self_heal as _heal
+        batch, state = self.make("np-assemble")
+        result = _heal._apply(batch, state, "assemble", "某处校验失败",
+            {"action": "record_only", "reason": "证据里没有可改写的内容"}, 1, {"files": {}})
+        self.assertTrue(result["changed"])
+        self.assertNotEqual(result["status"], "waiting_external")
 
     def test_defer_keeps_other_stages_moving(self):
         from workflow import self_heal as _heal, manifest as _mf

@@ -4,7 +4,7 @@
 
 用户要求把「Word > 带文字层 PDF > 扫描件」写入插件代码，并要求AI运维提示固定在下方区域、内部上下滚动，不能因消息堆叠上推流程图。
 
-## 改动
+## 改了什么
 
 - `app/workflow/source_policy.py`：共享主源选择与来源报告，Word 优先、同级保序；统计 PDF 原生文字/OCR 页数。
 - 上传入口已有对该共享策略的调用；补充上传集成断言。`app/workflow/extract.py` 将实际来源写入 `01_source/source-policy.json` 与提取报告，不二次重写 extraction.json。

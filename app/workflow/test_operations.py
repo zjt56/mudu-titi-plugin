@@ -189,6 +189,56 @@ class OperationsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stale_lease"):
             self.request(old, "progress")
 
+    def test_live_foreign_driver_keeps_its_lease(self):
+        """A second backend is a co-driver, not a restart; never cancel its attempt."""
+        claimed = self.claim()
+        foreign = {"pid": 4242, "generation": "second-backend"}
+        state = op._load(self.folder)
+        state["incident"].update(execution_process=foreign, lease_expires_at=op.time.time() + 60)
+        op._save(self.folder, state)
+        with patch.object(op, "_pid_alive", return_value=True):
+            with self.assertRaisesRegex(op.OperationsBusy, "worker_busy: 另一后端实例"):
+                op.claim(self.root, self.folder, {"incident_id": claimed["incident_id"], "session_id": "second"})
+        incident = op._load(self.folder)["incident"]
+        self.assertEqual(incident["status"], "claimed")
+        self.assertEqual(incident["attempt_id"], claimed["attempt_id"])
+        self.assertEqual(incident["execution_process"], foreign)
+        self.assertEqual(incident["queue_generation"], claimed["queue_generation"])
+        self.assertNotIn("process_replaced", [row.get("outcome") for row in incident["events"]])
+
+    def test_dead_foreign_process_releases_the_lease(self):
+        claimed = self.claim()
+        state = op._load(self.folder)
+        state["incident"].update(execution_process={"pid": 4242, "generation": "restarted"},
+                                 lease_expires_at=op.time.time() + 60)
+        op._save(self.folder, state)
+        with patch.object(op, "_pid_alive", return_value=False):
+            new = op.claim(self.root, self.folder, {"incident_id": claimed["incident_id"], "session_id": "second"})
+        self.assertNotEqual(new["attempt_id"], claimed["attempt_id"])
+        self.assertEqual(new["session_id"], "second")
+        self.assertEqual(new["queue_generation"], claimed["queue_generation"] + 1)
+        self.assertIn("process_replaced", [row.get("outcome") for row in new["events"]])
+
+    def test_pid_liveness_never_signals_the_process(self):
+        self.assertTrue(op._pid_alive(os.getpid()))
+        self.assertFalse(op._pid_alive(0))
+        self.assertFalse(op._pid_alive(None))
+        self.assertFalse(op._pid_alive("not-a-pid"))
+        self.assertFalse(op._pid_alive(2 ** 31 - 1))
+
+    def test_leased_tracks_unexpired_claims_only(self):
+        self.assertFalse(op.leased(self.root))
+        self.claim()
+        self.assertTrue(op.leased(self.root))
+        state = op._load(self.folder)
+        state["incident"]["lease_expires_at"] = 1
+        op._save(self.folder, state)
+        self.assertFalse(op.leased(self.root))
+        state = op._load(self.folder)
+        state["incident"].update(status="awaiting_execution", lease_expires_at=op.time.time() + 60)
+        op._save(self.folder, state)
+        self.assertFalse(op.leased(self.root))
+
     def test_duplicate_receipt_never_reapplies(self):
         claim = self.claim()
         with patch("workflow.self_heal_actions.apply_source_table_repair", return_value={"installed": True}) as repair, \
@@ -936,6 +986,47 @@ class FastRepairOperationsTests(unittest.TestCase):
             self.assertEqual(len([row for row in op._load(self.folder)["incident"]["attempts"]
                                   if row["kind"] == "regenerate"]), 1)
 
+    def test_content_resume_refusal_is_failed_without_enqueuing_or_mutation(self):
+        from workflow import agent_tasks
+        detail = 'official explanations.json missing'
+        self.put('workflow/self-heal.json', {'events': [{'stage': 'explanations', 'detail': detail,
+            'signature': 'content-failure', 'outcome': 'repair_failed'}]})
+        with patch.object(op.self_heal, '_candidate', return_value=('explanations', detail)):
+            claim = self.claim()
+        for strategy in ('retry_stage_with_fresh_context', 'upstream_rederive'):
+            with self.subTest(strategy=strategy), patch.object(op.self_heal, '_candidate',
+                    return_value=('explanations', detail)):
+                before = (self.folder / 'workflow/manifest.json').read_bytes()
+                with patch.object(agent_tasks, 'confirmed_units', return_value=[{'unit_id': 'q-1'}]), \
+                     patch.object(op.self_heal, '_apply') as apply:
+                    enqueue = __import__('unittest.mock', fromlist=['Mock']).Mock()
+                    result = self.request(claim, 'resume', {'strategy': strategy, 'reason': 'retry'},
+                        request='no-scope-' + strategy, enqueue=enqueue)
+                self.assertEqual(result['status'], 'failed', result)
+                self.assertIn('content_retry_requires_scope', result['evidence']['error'])
+                enqueue.assert_not_called()
+                apply.assert_not_called()
+                self.assertEqual((self.folder / 'workflow/manifest.json').read_bytes(), before)
+                self.assertFalse((self.folder / 'workflow/repair-feedback/explanations.json').exists())
+                self.assertNotIn('resume_outbox', op._load(self.folder))
+
+    def test_explicit_regeneration_cannot_bypass_structured_source_conflict(self):
+        from workflow import agent_tasks
+        detail = json.dumps({'unit_id': 'q-1', 'code': 'EXPLANATION_SOURCE_UNVERIFIED',
+            'retryable': False, 'failure_class': 'source_binding', 'message': 'source conflict'})
+        self.put('workflow/self-heal.json', {'events': [{'stage': 'explanations', 'detail': detail,
+            'signature': 'source-failure', 'outcome': 'repair_failed'}]})
+        with patch.object(op.self_heal, '_candidate', return_value=('explanations', detail)), \
+             patch.object(agent_tasks, 'confirmed_units', return_value=[{'unit_id': 'q-1'}]):
+            claim = self.claim()
+            before = (self.folder / 'workflow/manifest.json').read_bytes()
+            result = self.request(claim, 'regenerate_units', {'target_stage': 'explanations',
+                'unit_ids': ['q-1']}, request='source-conflict')
+        self.assertEqual(result['status'], 'failed', result)
+        self.assertIn('content_source_binding_requires_code_repair', result['evidence']['error'])
+        self.assertEqual((self.folder / 'workflow/manifest.json').read_bytes(), before)
+        self.assertFalse((self.folder / 'workflow/repair-feedback/explanations.json').exists())
+
     def test_regenerate_units_refuses_review_differences_as_blocker(self):
         # 审核差异是产出，不是内容故障；不允许用局部重生成把差异“改没”。
         incident = {"stage": "review", "detail": "REVIEW_ROUND_FINDING q-1", "attempts": []}
@@ -1027,8 +1118,10 @@ class FastRepairOperationsTests(unittest.TestCase):
         op._save(self.folder, state)
         same_process = self.claim()
         self.assertEqual(op._code_record(self.folder)["status"], "installed_pending_restart")
-        with patch.object(op, "_process_identity", return_value={"pid": 99999, "generation": "new-interpreter"}):
-            # The old process lease cannot authorize actions in a new process.
+        with patch.object(op, "_process_identity", return_value={"pid": 99999, "generation": "new-interpreter"}), \
+             patch.object(op, "_pid_alive", return_value=False):
+            # The old process lease cannot authorize actions in a new process; a
+            # restarted interpreter is gone, so its lease is released at claim.
             with self.assertRaisesRegex(ValueError, "stale_lease"):
                 self.request(same_process, "verify", request="stale-after-restart")
             restarted = op.claim(self.root, self.folder, {

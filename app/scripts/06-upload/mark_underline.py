@@ -184,8 +184,15 @@ def restore(batch, source_text):
                 if plain_context == marked_value:
                     if len(marked_value) == 1:
                         continue
+                    # A whole-line label (e.g. a table cell "Testing Dates:") is
+                    # equal to its own context, so the equality above always
+                    # holds. It may still live inside one merged passage field;
+                    # uniqueness and mirror checks below decide whether that is
+                    # safe. Embedded labels carrying an answer rule stay
+                    # refused: they would match arbitrary prose blanks, while an
+                    # exact field match is a genuine standalone label.
                     unlabelled = re.sub(r"^[A-H][.．、]", "", value)
-                    if unlabelled != plain_context:
+                    if unlabelled != plain_context and ("__" in marked_value or len(marked_value) < 3):
                         continue
                 # Options may carry their own label, which is outside context.
                 for found in re.finditer(re.escape(plain_context), value):

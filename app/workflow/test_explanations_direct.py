@@ -125,6 +125,15 @@ class ExplanationsDirectTest(unittest.TestCase):
                 item = explanations_direct.build_payload(self.batch)["items"][0]
                 self.assertEqual(item["subquestions"][0]["explanation"], "原解析。")
 
+    def test_answer_ranges_end_explanations_without_becoming_owners(self):
+        for separator in ('~', '～', '—', '-'):
+            with self.subTest(separator=separator):
+                self.write_word('56.A 【解析】原解析。\n57' + separator + '58 BC\n【解析】无逐题归属。\n')
+                item = explanations_direct.build_payload(self.batch)['items'][0]
+                self.assertEqual([r['explanation'] for r in item['subquestions']], ['原解析。', '无', '无'])
+        self.write_word('56.A 【解析】原解析。\n57~58 BC\n56.A 【解析】真实异文。\n')
+        self.assertIsNone(explanations_direct.build_payload(self.batch))
+
     def test_distinct_duplicate_explanations_decline_fast_path(self):
         for text in ("56.A 【解析】第一份。\n56.A 【解析】另一份。\n",
                      "56.A 【解析】第一份。\n【解析】另一份。\n"):

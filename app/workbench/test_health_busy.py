@@ -18,9 +18,20 @@ class HealthBusyTests(unittest.TestCase):
         self.queue = patch.object(server, "_advance_queue", []).start()
         self.audio = patch.object(server, "_audio_job", {"running": False, "lock": threading.Lock()}).start()
         self.upload = patch.object(server, "_upload_jobs", {}).start()
+        self.leased = patch.object(server, "_operations_leased", return_value=False).start()
         self.addCleanup(patch.stopall)
 
     def test_idle_backend_is_not_busy(self):
+        self.assertFalse(server.work_in_flight())
+
+    def test_operations_lease_is_busy(self):
+        # Restarting the backend replaces the execution process, which voids an
+        # in-flight operations attempt; the host must wait for the lease instead.
+        self.leased.return_value = True
+        self.assertTrue(server.work_in_flight())
+
+    def test_expired_operations_lease_is_not_busy(self):
+        self.leased.return_value = False
         self.assertFalse(server.work_in_flight())
 
     def test_running_advance_is_busy(self):

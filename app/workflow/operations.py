@@ -144,6 +144,68 @@ def _process_identity():
     return dict(identity)
 
 
+def _pid_alive(pid):
+    """Whether a recorded execution process is still running.
+
+    A second backend on the same data root is a live co-driver, not a restart:
+    only a dead pid (or a lapsed lease) may invalidate an in-flight attempt.
+    Windows must never use os.kill(pid, 0) here — that maps to TerminateProcess.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # HANDLE is pointer sized; the default c_int restype truncates it.
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.OpenProcess(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _foreign_owner(incident, process=None):
+    """Another live driver still inside its lease, if any.
+
+    A different generation of *this* pid is our own earlier start, not a second
+    backend: that lease is reclaimed so a restarted plugin resumes its recovery.
+    """
+    owner = incident.get("execution_process") or {}
+    if not owner or owner == (process or _process_identity()):
+        return None
+    if incident.get("lease_expires_at", 0) <= time.time():
+        return None
+    try:
+        pid = int(owner.get("pid"))
+    except (TypeError, ValueError):
+        return None
+    if pid == os.getpid():
+        return None
+    return owner if _pid_alive(pid) else None
+
+
 def _source_root():
     """Running plugin checkout. Patched in tests; never a user batch path."""
     return Path(__file__).resolve().parents[2]
@@ -185,6 +247,47 @@ def _report_files(stage):
             "review_gate": {"07_review/review-gate.json"}}.get(stage, set())
 
 
+def _candidate_evidence(folder, stage):
+    """Expose bounded local candidates, never treat their presence as acceptance."""
+    if stage not in {"answers", "explanations", "knowledge", "types", "audio"}:
+        return []
+    def directory(path):
+        # Symlinks and junctions can redirect a listing into another batch.
+        return path.is_dir() and not supervisor._redirected(path)
+
+    base = Path(folder) / "workflow" / "agent-runs"
+    if not directory(base):
+        return []
+    rows = []
+    try:
+        runs = sorted((p for p in base.glob(stage + "-*")
+                       if directory(p) and p.name != stage + "-parts"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)[:2]
+        paths = []
+        for run in runs:
+            paths.append(run / "response.json")
+            progress = sorted((p for p in run.glob("repair-progress*.json")
+                               if p.is_file() and not supervisor._redirected(p)),
+                              key=lambda p: p.stat().st_mtime, reverse=True)[:1]
+            paths.extend(progress)
+            parts = sorted((p for p in run.glob("round-*-part-*") if directory(p)),
+                           reverse=True)[:40]
+            paths.extend(part / "response.json" for part in parts)
+        failures = base / (stage + "-parts")
+        if directory(failures):
+            paths.extend(sorted(failures.glob("*.failure.json"),
+                                key=lambda p: p.stat().st_mtime, reverse=True)[:20])
+        for path in paths:
+            relative = path.relative_to(folder).as_posix()
+            checked = supervisor._regular_file(Path(folder), relative)
+            if checked is not None:
+                rows.append({"path": relative, "bytes": checked.stat().st_size,
+                             "accepted": False})
+    except OSError:
+        pass
+    return rows[:104]
+
+
 def _packet(folder, incident):
     """Self-contained failure packet: what failed, where, what changed, what is
     still independent. Bounded so a receipt never becomes a data dump."""
@@ -211,6 +314,8 @@ def _packet(folder, incident):
                            "check": issue.get("check"), "unit_id": issue.get("unit_id"),
                            "number": issue.get("number"), "message": str(issue.get("message") or "")[:600]}
                           for issue in issues[:12]],
+        "candidate_evidence": _candidate_evidence(folder, stage),
+        "candidate_evidence_note": "候选存在不代表已验收；正式产物缺失不证明模型未产出。先读候选、repair-progress 验收错误和来源坐标，再决定局部修复或隔离代码修复。",
         "affected_unit_ids": list(unit_ids)[:40],
         "affected_units": [{"unit_id": unit["unit_id"], "numbers": unit.get("numbers"),
                             "stem_chars": len(str(unit.get("stem") or ""))} for unit in units[:12]],
@@ -322,6 +427,31 @@ def _check_budget(incident, kind):
                          "超过上限；请检查范围是否过窄或证据是否有误")
 
 
+def leased(root):
+    """True while any batch holds an unexpired operations lease.
+
+    The host defers backend restarts while this is true: a restart replaces the
+    execution process and voids the in-flight attempt mid-turn.
+    """
+    root = Path(root)
+    if not root.exists():
+        return False
+    now = time.time()
+    for folder in sorted(root.iterdir()):
+        try:
+            incident = _load(folder).get("incident") or {}
+        except (ValueError, OSError):
+            continue
+        if incident.get("status") != "claimed":
+            continue
+        if incident.get("lease_expires_at", 0) <= now:
+            continue
+        owner = incident.get("execution_process") or {}
+        if not owner or _pid_alive(owner.get("pid")):
+            return True
+    return False
+
+
 def lease_active(folder):
     """Read-only guard, called under auto lock BEFORE reconciliation or writes."""
     state = _load(Path(folder))
@@ -331,9 +461,16 @@ def lease_active(folder):
 
 
 def _expire(incident):
-    restarted = (incident.get("execution_process")
-                 and incident["execution_process"] != _process_identity())
-    if incident.get("status") == "claimed" and (restarted or incident.get("lease_expires_at", 0) <= time.time()):
+    if incident.get("status") != "claimed":
+        return
+    process = _process_identity()
+    restarted = bool(incident.get("execution_process")) and incident["execution_process"] != process
+    expired = incident.get("lease_expires_at", 0) <= time.time()
+    # A live foreign driver keeps its lease until it lapses: two backends on one
+    # data root used to cancel each other's attempt on every poll.
+    if restarted and not expired and _foreign_owner(incident, process):
+        return
+    if restarted or expired:
         incident.update(status="queued", eligible=True, attempt_id=None, lease_expires_at=0,
                         not_before=0, queue_generation=incident.get("queue_generation", 0) + 1)
         _event(incident, "lease", "process_replaced" if restarted else "expired",
@@ -652,6 +789,8 @@ def claim(root, folder, payload):
         process = _process_identity()
         if (incident.get("status") == "claimed" and incident.get("execution_process")
                 and incident["execution_process"] != process):
+            if _foreign_owner(incident, process):
+                raise OperationsBusy("worker_busy: 另一后端实例正在处理该批次")
             incident.update(status="queued", attempt_id=None, lease_expires_at=0, not_before=0,
                             queue_generation=incident.get("queue_generation", 0) + 1)
         if incident.get("status") == "claimed" and incident.get("session_id") == session:
@@ -685,14 +824,18 @@ def _read_evidence(folder, data):
     relative = data.get("path")
     if not isinstance(relative, str) or "\\" in relative or any(p in {"", ".", ".."} for p in relative.split("/")):
         raise ValueError("unsafe_evidence_path")
-    # Exact evidence filenames plus stage logs; no arbitrary config/agent-run files.
+    # Exact evidence filenames plus indexed candidates for the active stage only.
+    # Do not expose arbitrary inputs, prompts, another stage or another batch.
     allowed = set(self_heal.SOURCE_FILES) | set(self_heal.REPORTS)
     if data.get("scope") == "plugin":
         if not re.fullmatch(r"app/workflow/[a-z_]+\.py", relative):
             raise ValueError("source_not_allowlisted")
         path = supervisor._regular_file(Path(__file__).resolve().parents[2], relative)
     else:
-        if relative not in allowed and relative not in {"workflow/logs/" + s.id + ".log" for s in contracts.STAGES}:
+        current = _load(folder).get("incident") or {}
+        candidate_paths = {row["path"] for row in _candidate_evidence(folder, current.get("stage"))}
+        if (relative not in allowed and relative not in candidate_paths
+                and relative not in {"workflow/logs/" + s.id + ".log" for s in contracts.STAGES}):
             raise ValueError("evidence_not_allowlisted")
         path = supervisor._regular_file(folder, relative)
     if path is None:
@@ -838,6 +981,8 @@ def _regenerate_units(folder, incident, data):
     if not unit_ids:
         raise ValueError("regenerate_units_requires_scope: 证据未定位到受影响题目；"
                          "请从 packet.affected_unit_ids 指定，或改用 resume 策略")
+    unit_ids = self_heal._content_retry_scope(folder, target, detail,
+        origin_stage=incident['stage'], unit_ids=unit_ids)
     evidence = _evidence(folder, incident)
     name = target + ":" + ",".join(sorted(unit_ids))
     for row in incident.get("attempts", []):
@@ -1136,6 +1281,9 @@ def action(root, folder, payload, *, enqueue=None):
                         raise ValueError(
                             "review_failure_requires_stage_retry: 审核失败应重跑审核阶段，"
                             "不得重派生上游内容；请用 retry_stage_with_fresh_context")
+                    # Pure refusal must precede the uncertain-write boundary:
+                    # no scope/source conflict may enqueue work or create unknown receipts.
+                    self_heal._retry_admission(folder, incident['stage'], incident['detail'], strategy)
                     manifest = mf.load(folder)
                     evidence = _evidence(folder, incident)
                     _block_repeat(incident, "resume", strategy, evidence)
@@ -1149,7 +1297,10 @@ def action(root, folder, payload, *, enqueue=None):
                         _attempt(incident, "resume", strategy, evidence, "failed", str(exc))
                         raise
                     _attempt(incident, "resume", strategy, evidence,
-                             "applied" if result.get("passed") or result.get("installed") else "refused")
+                             "applied" if result.get("changed") or result.get("passed") or result.get("installed") else "refused")
+                    if not (result.get('changed') or result.get('passed') or result.get('installed')):
+                        mutating = False
+                        raise ValueError('resume_strategy_refused: ' + str(result.get('reason') or result.get('status')))
                 incident.update(status={"cancel": "cancelled", "resume": "awaiting_execution", "release": "queued"}[name],
                                 eligible=name == "release", attempt_id=None, lease_expires_at=0)
                 if name == "release":

@@ -32,6 +32,10 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-11 | [2026-11-11-underline-whole-line-label.md](2026-11-11-underline-whole-line-label.md) | 整行表格标签（如 `Testing Dates:`）允许在合并后的材料里恢复画线，唯一性仍拦截歧义 |
+| 2026-11-11 | [2026-11-11-misc.md](2026-11-11-misc.md) | 精简上传区 Word/PDF 解析说明与运维自动接管说明，只删静态文案 |
+| 2026-11-11 | [2026-11-11-operations-lease-co-driver.md](2026-11-11-operations-lease-co-driver.md) | 运维租约只在到期或原进程消失时释放，并行后端返回 409 等待；健康检查纳入租约以延后热重启 |
+| 2026-11-11 | [2026-11-11-explanation-source-binding-recovery.md](2026-11-11-explanation-source-binding-recovery.md) | 重复原文等价验收，确定性拒收留证停止模型空转，内容续跑强制局部范围 |
 | 2026-11-11 | [2026-11-11-operations-worker-busy.md](2026-11-11-operations-worker-busy.md) | 运维锁准入拒绝结构化，明确未执行时有限等待续接；保留租约与未知回执安全 |
 | 2026-11-11 | [2026-11-11-source-policy-operations-log.md](2026-11-11-source-policy-operations-log.md) | Word 优先提取的共享来源策略与证据；AI运维固定消息区内部滚动 |
 | 2026-11-11 | [2026-11-11-scoped-question-identity.md](2026-11-11-scoped-question-identity.md) | 同课时跨大题重号的稳定身份、原标题原号保留、全链来源隔离及真实首课回归 |

@@ -1,5 +1,31 @@
 # RULES — 规则与强调台账
 
+## 2026-11-11 运维租约共存：并行后端不再互毁
+
+- 用户报「worker_busy: 批次执行锁已占用; name=Error，AI运维无法正常处理」。取证：7 分钟内 22 次 `lease/process_replaced` + 21 次 claim、0 次完成。
+- 同一数据根跑多个后端实例时，运维租约只因「到期」或「原执行进程已消失」释放；活着的并行实例持有效租约期间，本实例认领返回 409 `worker_busy` 等待，不得重置 `attempt_id/execution_process/queue_generation`，也不得写 `process_replaced`。
+- 进程存活判定：Windows 用 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)+GetExitCodeProcess`；**禁用 `os.kill(pid, 0)`**（在 Windows 上等于 TerminateProcess）。
+- `/api/health.busy` 纳入未过期运维租约，插件据此延后 .py 热重启（上限 30 分钟），避免保存代码打断在途运维。
+- 宿主插件 JS 只有整进程重启才生效：看到裸 `name=Error`（无 `code=`）先核对运行中宿主进程的启动时间与修复提交时间，不要只改仓库。
+- 落地：`app/workflow/operations.py`（`_pid_alive`/`_foreign_owner`/`leased`）、`app/workbench/server.py`（`_operations_leased`）、`app/docs/harness-operations.md`；验证见 `2026-11-11-operations-lease-co-driver.md`。
+
+## 2026-11-11 整行标签不是孤立字段：画线恢复必须能进合并材料
+
+- 用户要求把 12 年卷真正跑完（m03369 之后的续跑）。
+- 原卷里「整段只有一条画线」的表格标签（`Testing Dates:`、`Homework:` 等）在组装后嵌进很长的 material，画线脚本原有的「整体相等即跳过」保护把这类标签一律丢掉，报 `UNDERLINE_MAPPING_MISSING` 并整阶段失败。
+- 规则：整行纯文字标签（≥3 字符、无答题线）允许在合并段落中定位并恢复画线；含答题线的标签与单字标签仍拒绝嵌入匹配；多处命中仍判 `UNDERLINE_MAPPING_AMBIGUOUS` 并保持候选不变。判定口径 = 唯一性 + 同单元镜像，不靠「字段长度等于标签」。
+- 落地：`app/scripts/06-upload/mark_underline.py`、`app/workflow/test_underline_layout.py`；验证见 `2026-11-11-underline-whole-line-label.md`。
+
+
+## 2026-11-11 重复原文等价验收与确定性拒收停止模型空转
+
+- 用户要求修复解析填充此类 bug，并加强代码和提示词约束。
+- 同题、同来源身份中逐字相同而位置不同的原文按内容等价核验；source_ref 仍须命中真实坐标，异文冲突、跨大题借用与归属不明仍阻断，不按锚点数直接判冲突。
+- 仅来源/校验器结构化确认 `retryable=false`、`failure_class=source_binding/validator_fault` 时停止对应单元重复模型，保存原候选与诊断；换上下文、反馈和执行轮次不得绕过。真实来源变化后重新绑定，代码修复先本地复验原候选。
+- 正式产物缺失不证明模型没有产出；运维先查候选、验收错误和源坐标。所有内容续跑别名须限定受影响单元、保留已验证基线；不能通过动作名绕过局部修复。
+- 唯一例外须同时成立：该阶段当前能由确定性直抄从原文整卷交付（有真实内容、不是占位「无」），才允许整阶段重跑一次——不调用模型、不能编造，所以不属于"整卷模型重跑"；占位或直抄失败时仍按无定位拒绝。
+- 落地：根 AGENTS 规则4/19、`upload_content.py`、`label_execution.py`、`self_heal.py::_deterministic_delivery`、`private_label_baseline.py`、`operations.py`、解析角色与运维提示词；验证见 `2026-11-11-explanation-source-binding-recovery.md`。
+
 ## 2026-11-11 提取来源优先级与运维消息滚动
 
 - 用户要求把 Word > 带文字层 PDF > 扫描件的提取规则加入插件代码；同时要求 AI运维消息固定下方、可以上下滑动，不能向上顶流程图。

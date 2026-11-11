@@ -124,7 +124,15 @@ def merge(batch, stage, payload, context, units, *, notes=None):
         return candidate
     path = agent_tasks._safe_path(batch, agent_tasks.ARTIFACTS[stage])
     try:
-        prior = agent_tasks._json(path)
+        if not path.is_file():
+            from . import private_label_baseline
+            binding = context.get(private_label_baseline.CONTEXT_KEY)
+            if not isinstance(binding, dict) or not isinstance(binding.get('receipts'), dict):
+                raise ValueError('No bound private baseline for untouched units')
+            prior, _ = private_label_baseline.load(
+                batch, stage, untouched, context, expected=binding['receipts'])
+        else:
+            prior = agent_tasks._json(path)
         # Reject malformed/foreign baseline rows, including duplicate targets.
         if stage == 'answers':
             agent_tasks._fields(prior, ('answers', 'evidence', 'missing', 'difficulty', 'difficultyEvidence'),
