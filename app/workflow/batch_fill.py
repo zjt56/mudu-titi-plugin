@@ -219,7 +219,9 @@ def _source_meta(root):
     meta = confirmed.get("meta") or {}
     if not isinstance(meta, dict):
         raise ValueError("Invalid source metadata")
-    return meta
+    from .metadata_policy import resolved_paper_meta
+    # 结构确认里的 meta 只来自正文卷头；缺卷头时补回已识别来源与原卷文件名。
+    return resolved_paper_meta(meta, root)
 
 
 def _set_batch_title(payload, artifact):

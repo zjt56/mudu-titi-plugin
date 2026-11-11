@@ -345,3 +345,7 @@
 ## 2026-11-11：模型重试前重新核验在途输入
 
 验收动作可能刷新派生输入；每次调用模型前必须重新检查初始精确绑定。发生变化立即返回 `context_changed` 并保留候选，不得沿用旧提示词再烧一轮模型，也不放宽哈希校验。落地：`app/workflow/local_agent.py`、`workflow.test_local_agent::test_validation_refreshing_draft_stops_retry_before_model_call`，延续硬规则 2/19。
+
+## 2026-11-11：试卷名/来源按已识别元数据与原卷 Word 文件名补齐
+
+用户原话：「还有这个试卷名，它现在来源显示是"未提供"。你正常以 Word 文档的文件名去修改一下，它其实就是这个名字的来源」。课时拆分件正文没有卷头，结构闸门原先把 meta 直接落成「未提供」，还经 runner 覆盖掉已识别值、写进每道题的 `filterMetadata`。规则：试卷名/来源按「已有值 → `01_source/metadata.json` 已识别值 → 原卷 Word/PDF 文件名 → 未提供」补齐，只补空缺不覆盖识别值；「未提供」只是展示占位，不写进题目字段，也不能凭空生成年份/省份/题型。落地：`app/workflow/metadata_policy.py::paper_meta/resolved_paper_meta`、`structure_gate.py`、`runner.py`、`assemble_local.py`、`batch_fill.py`、`app/workbench/server.py::paper_info`、`workflow.test_metadata_source_name`；根 `AGENTS.md` 硬规则 26；验证见 `2026-11-11-metadata-source-name.md`。

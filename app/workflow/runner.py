@@ -695,10 +695,13 @@ def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
                     return 1
                 detected = json.loads(confirmed.read_text(encoding="utf-8")).get("meta", {})
                 if isinstance(detected, dict):
+                    from .metadata_policy import MISSING
                     old_meta = current.get("meta", {})
                     current.setdefault("submitted_meta", dict(old_meta))
+                    # 「未提供」是缺失标记而不是证据：正文没有卷头时不能让它
+                    # 覆盖此前按原卷文件名/证据识别出的试卷名与来源。
                     current["meta"] = {**old_meta, **{k: v for k, v in detected.items()
-                                                        if v not in (None, "", [], {})}}
+                                                      if v not in (None, "", [], {}, MISSING)}}
             if confirmed.is_file():
                 target = batch_dir / "01_source/structure.confirmed.json"
                 target.parent.mkdir(parents=True, exist_ok=True)

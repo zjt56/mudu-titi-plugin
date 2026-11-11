@@ -436,8 +436,8 @@ def mark_row(row, findings):
 
 
 def paper_info(folder: Path, report, manifest) -> dict:
-    """试卷名取自入库批次；旧批次缺来源时从原卷卷头识别，绝不退回目录名。"""
-    from workflow.metadata_policy import MISSING
+    """试卷名取自入库批次；旧批次缺来源时依次用已识别元数据、原卷 Word 文件名。"""
+    from workflow.metadata_policy import MISSING, paper_meta
 
     def known(*values):
         return next((value for value in values if value and str(value).strip() != MISSING), None)
@@ -455,11 +455,17 @@ def paper_info(folder: Path, report, manifest) -> dict:
                 detected = {}
     descriptor = (load(folder / "attachments" / "batch.json", {})
                   or load(INBOX / folder.name / "batch.json", {}) or {})
-    title = known(batch.get("source"), meta.get("source"), meta.get("title"), meta.get("paper_title"),
-                  detected.get("source"), descriptor.get("title"))
-    return {"title": str(title or MISSING), "batch": str(batch.get("batch") or folder.name),
-            "source": str(known(batch.get("source"), meta.get("source"), detected.get("source")) or MISSING),
-            "source_type": str(known(batch.get("source_type"), meta.get("source_type"), detected.get("source_type")) or MISSING),
+    # 课时拆分件正文没有卷头：来源仍要按证据还原，最后一档才是原卷文件名。
+    resolved = paper_meta({
+        "paper_title": known(batch.get("source"), meta.get("source"), meta.get("title"),
+                             meta.get("paper_title"), detected.get("source"), descriptor.get("title")),
+        "source": known(batch.get("source"), meta.get("source"), detected.get("source")),
+        "source_type": known(batch.get("source_type"), meta.get("source_type"), detected.get("source_type")),
+    }, folder)
+    return {"title": str(resolved.get("paper_title") or MISSING),
+            "batch": str(batch.get("batch") or folder.name),
+            "source": str(resolved.get("source") or MISSING),
+            "source_type": str(resolved.get("source_type") or MISSING),
             "folder": folder.name, "year": batch.get("year") or meta.get("year") or detected.get("year"),
             "region": batch.get("region") or meta.get("region") or detected.get("region"),
             "subject": batch.get("subject") or meta.get("subject") or "english"}

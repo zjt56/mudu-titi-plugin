@@ -84,8 +84,10 @@ class MetadataPlaceholderTests(unittest.TestCase):
                 self.assertEqual(runner.main(['run', '--batch-dir', str(batch), '--until', 'structure_gate']), 0)
             state = manifest.load(batch)
             self.assertEqual(state['stages']['structure_gate']['status'], 'completed')
-            metadata = json.loads((batch / '01_source/metadata.json').read_text())
-            self.assertEqual(metadata['source'], '未提供')
+            # 正文没有卷头时，试卷名就是原卷 Word 文件名，不再退成占位。
+            confirmed = json.loads((batch / '01_source/structure.confirmed.json').read_text())
+            self.assertEqual(confirmed['meta']['source'], '未命名试卷')
+            self.assertEqual(state['meta']['source'], '未命名试卷')
             task = agent_tasks.build_task(batch, 'types')
             self.assertEqual(task['preconditions'], [])
             self.assertIn('未提供', task['prompt'])

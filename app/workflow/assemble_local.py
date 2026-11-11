@@ -102,6 +102,8 @@ def _initial_payload(batch_dir):
     if any(not bindings.get(_unit_id(row), {}).get("start_line") for row in rows):
         raise ValueError("前置题目对象缺少逐单元来源绑定")
     meta = _load(batch / STRUCTURE).get("meta") or {}
+    from .metadata_policy import resolved_paper_meta
+    meta = resolved_paper_meta(meta, batch)
     from .wire_format import _year
     for row in rows:
         filters = row.setdefault("filterMetadata", {})
@@ -227,6 +229,8 @@ def build(batch_dir) -> dict:
     from .question_identity import question_key, fields as identity_fields
     units = {u["unit_id"]: u for u in confirmed_units(batch)}
     meta = _load(batch / STRUCTURE).get("meta") or {}
+    from .metadata_policy import resolved_paper_meta
+    meta = resolved_paper_meta(meta, batch)
     from .wire_format import _year
 
     def _meta_value(key, value):

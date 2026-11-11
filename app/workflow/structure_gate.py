@@ -896,9 +896,11 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
 
     for conflict in meta.get("conflicts") or []:
         blockers.append({"code": "SOURCE_METADATA_CONFLICT", "message": str(conflict)})
-    from .metadata_policy import missing_source_fields, with_placeholders
+    from .metadata_policy import missing_source_fields, paper_meta
+    # 正文卷头只是证据之一：课时拆分件没有卷头，已识别来源和原卷文件名必须补回，
+    # 不能因为正文没写就把试卷名/来源整体变成占位。
+    meta = paper_meta(meta, batch_dir)
     metadata_missing = missing_source_fields(meta)
-    meta = with_placeholders(meta)
     checks["source_metadata"] = "placeholder" if metadata_missing else "passed"
     if metadata_missing:
         warnings.append({"code": "SOURCE_METADATA_MISSING", "blocking": False,
