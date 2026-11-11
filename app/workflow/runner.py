@@ -652,6 +652,25 @@ def _structure_inputs(batch_dir: Path, manifest: dict) -> tuple:
             mf.sha256_file(original) if original else "")
 
 
+def _ensure_visual_evidence(batch_dir: Path) -> None:
+    """结构判断前确保视觉理解产物就绪；缺失则补跑，任何失败只跳过不阻断。
+
+    用户策略：提取完文字后做一遍视觉理解，为后续批次组装/结构化判断做铺垫。
+    extract 钩子已触发；此处兜底存量批次或非 extract 路径。只写候选产物，不阻断。
+    """
+    try:
+        sem = batch_dir / "01_source" / "image_semantics.json"
+        if not sem.is_file():
+            from . import visual_review
+            visual_review.build(batch_dir)
+        cross = batch_dir / "01_source" / "source_crosscheck.json"
+        if not cross.is_file():
+            from . import visual_crosscheck
+            visual_crosscheck.build(batch_dir)
+    except Exception:  # noqa: BLE001 - 视觉铺垫失败不影响结构判断
+        pass
+
+
 @activity.observed("structure_gate", "正在确认题目结构与来源边界")
 def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
     """Check the immutable extraction delivery and publish only a gate result."""
@@ -1411,6 +1430,10 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
                 print("  将运行确定性检查")
                 continue
             if stage.id == "structure_gate":
+                # 结构化判断前确保视觉理解已就绪（用户 2026-11-11：提取后做视觉理解、
+                # 为后续结构判断做铺垫）。存量批次或非 extract 路径未生成 image_semantics
+                # 时补跑一次；网关不可用/任何异常只跳过、不阻断。
+                _ensure_visual_evidence(batch_dir)
                 code = do_structure_gate(batch_dir, manifest)
             elif stage.id == "validate":
                 code = do_validate(batch_dir, manifest)

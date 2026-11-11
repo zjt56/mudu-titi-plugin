@@ -146,5 +146,44 @@ class OptionBoundaryTest(unittest.TestCase):
             self.assertIn(changed, (0, 1))
 
 
+class ImageOptionEvidenceTest(unittest.TestCase):
+    """图片选项题用视觉/原文佐证判“选项是图、图都在”，替代正则硬啃排版。"""
+
+    def _sem(self, kinds):
+        return {"items": [
+            {"path": f"01_source/media/{n}", "kind": k, "title": "", "contains_text": False}
+            for n, k in kinds.items()]}
+
+    def test_image_option_detected_when_images_match_options(self):
+        from workflow import question_content as qc
+        local = [
+            "( ) 4. Jimmy can't use ____ to have Chinese food now.",
+            "[IMG image14.jpeg]A.\t[IMG image15.jpeg]B.",
+            "[IMG image16.jpeg]C.\t[IMG image17.jpeg]D.",
+        ]
+        unit = {"unit_kind": "group", "type": "任务型阅读", "numbers": [1, 2, 3, 4],
+                "source_expected_options": 4}
+        sem = self._sem({"image14.jpeg": "illustration", "image15.jpeg": "illustration",
+                         "image16.jpeg": "illustration", "image17.jpeg": "illustration"})
+        ev = qc.image_option_evidence(unit, local, sem)
+        self.assertIsNotNone(ev)
+        self.assertTrue(ev["is_image_option"])
+        self.assertEqual(ev["image_count"], 4)
+
+    def test_not_image_option_for_plain_text(self):
+        from workflow import question_content as qc
+        local = ["( ) 1. Q?", "A.One B.Two C.Three D.Four"]
+        unit = {"unit_kind": "standalone", "type": "单项填空", "numbers": [1], "source_expected_options": 4}
+        self.assertIsNone(qc.image_option_evidence(unit, local, None))
+
+    def test_decorative_icons_do_not_exempt(self):
+        from workflow import question_content as qc
+        local = ["[IMG i1.png]A. [IMG i2.png]B."]
+        unit = {"unit_kind": "group", "type": "阅读", "numbers": [1], "source_expected_options": 4}
+        sem = self._sem({"i1.png": "icon", "i2.png": "icon"})
+        # 全是装饰图标且图数<期望：不豁免。
+        self.assertIsNone(qc.image_option_evidence(unit, local, sem))
+
+
 if __name__ == "__main__":
     unittest.main()

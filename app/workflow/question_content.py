@@ -83,6 +83,42 @@ def capability_limited_source(unit: dict, appendix_text: str | None = None) -> b
     return legitimate_source_shape(unit, appendix_text) in ("image_only", "blank_answer_grid")
 
 
+_IMG_REF = re.compile(r"\[IMG\s+[^\]]+?\]")
+_OPTION_LABEL_CHARS = "ABCDEFGH"
+
+
+def image_option_evidence(unit: dict, local_lines: list[str], image_semantics: dict | None = None) -> dict | None:
+    """图片选项题的视觉/原文佐证：证明“缺的选项其实是图、且图都在”。
+
+    用于修正正则对图片选项前置排版（`[IMG x]A.`）切割错位导致的
+    SOURCE_OPTIONS_INCOMPLETE 误报。判定非常保守：
+    - 只有该单元是“选项都是图”的题（窗口内出现 `[IMG]` 且紧邻选项标签 `X.`）才生效；
+    - 窗口内 `[IMG]` 引用数必须 ≥ 该题应有选项数（source_expected_options 或看到的标签数）；
+    - 若提供 image_semantics，这些图不能是纯装饰（icon），否则不豁免。
+    返回 {is_image_option, image_count, option_labels, visual_kinds} 或 None（不适用）。
+    """
+    text = "\n".join(local_lines)
+    imgs = _IMG_REF.findall(text)
+    # 必须有“图紧贴选项标签”的形态，才认定为图片选项题（避免把普通带图题干当选项图）。
+    if not imgs or not re.search(r"\[IMG\s+[^\]]+?\]\s*[A-H][.．、]", text):
+        return None
+    labels = sorted(set(re.findall(r"(?m)(?:^|\s)\s*([A-H])[.．、]", OPTION.sub(r"\1.", text))))
+    # 期望选项数：优先 source_expected_options，否则用窗口里出现的选项标签数。
+    expected = int(unit.get("source_expected_options") or 0) or len(labels)
+    names = [re.sub(r"^\[IMG\s+|\]$", "", m).split("/")[-1] for m in imgs]
+    kinds = {}
+    if isinstance(image_semantics, dict):
+        sem = {str(it.get("path") or "").split("/")[-1]: it for it in image_semantics.get("items") or []}
+        kinds = {n: (sem.get(n) or {}).get("kind") for n in names}
+        if kinds and all(k == "icon" for k in kinds.values() if k):
+            return None  # 全是装饰图标，不当作选项图豁免
+    if len(imgs) < max(expected, 2):
+        return None  # 图不足以覆盖选项数，不豁免（真实缺项照报）
+    return {"is_image_option": True, "image_count": len(imgs),
+            "option_labels": labels, "expected": expected, "visual_kinds": kinds}
+
+
+
 def audit_question(source_lines: list[str], number: int, item: dict | None = None,
                    media_dir: str | Path | None = None) -> dict:
     """Check a source slice for obvious scope/structure defects; visual mapping stays human-reviewed."""

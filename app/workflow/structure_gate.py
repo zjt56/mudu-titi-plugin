@@ -624,6 +624,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     # candidate is accepted; the mere presence of a listening section must not
     # weaken checks for unrelated written sections.
     model_structure_only = False
+    visual_notes: list[dict] = []
     from . import sync_practice
     scoped = sync_practice.looks_like_sync_practice(cleaned_text)
 
@@ -743,11 +744,13 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     declared = sorted({n for section in sections for n in _section_numbers(section)})
     from .preview import _strong_number
     if scoped:
+        from . import question_content
         from .question_content import audit_source_unit
         scoped_problems = _scoped_source_errors(units, sections, source_lines)
         blockers.extend(scoped_problems)
         checks["coverage"] = checks["source_number_coverage"] = checks["grouping"] = "failed" if scoped_problems else "passed"
         content_problems = []
+        _visual_sem = _load_image_semantics(batch_dir)
         for unit in units:
             span = unit.get("source_span") or {}
             lo, hi = span.get("start_line", 0), span.get("end_line", 0)
@@ -756,7 +759,23 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                 continue
             local = source_lines[lo - 1:hi]
             local_unit = {**unit, "source_span": {**span, "start_line": 1, "end_line": len(local)}}
-            content_problems.extend(audit_source_unit(local_unit, local)["issues"])
+            unit_issues = audit_source_unit(local_unit, local)["issues"]
+            # 图片选项题：正则对 `[IMG x]A.` 前置排版切割错位会误报缺选项；用原文
+            # `[IMG]` 计数 + 视觉语义佐证证明“选项是图、图都在”时降级为留痕，不阻断。
+            if _visual_sem is not None:
+                kept = []
+                for issue in unit_issues:
+                    if issue.get("code") == "SOURCE_OPTIONS_INCOMPLETE":
+                        ev = question_content.image_option_evidence(local_unit, local, _visual_sem)
+                        if ev and ev.get("is_image_option"):
+                            visual_notes.append({
+                                "unit_id": unit.get("unit_id"), "number": issue.get("number"),
+                                "resolution": "图片选项题：窗口内图片数与选项匹配（视觉佐证），非缺项",
+                                "image_count": ev["image_count"], "expected": ev["expected"]})
+                            continue
+                    kept.append(issue)
+                unit_issues = kept
+            content_problems.extend(unit_issues)
         blockers.extend(content_problems)
         checks["source_content"] = "failed" if content_problems else "passed"
         checks["group_guides"] = "failed" if any(p["code"] == "GUIDE_GROUP_MISMATCH" for p in scoped_problems) else "passed"
@@ -1029,8 +1048,25 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     # 视觉佐证（只读、informational）：不参与 passed/blockers 判定，仅把每个
     # 含图单元的原图语义作为证据带出，供人工/预览参考。缺失或异常一律忽略。
     report["visual_evidence"] = _visual_evidence(batch_dir)
+    # 图片选项题经视觉佐证降级的留痕（不阻断，仅记录判定依据）。
+    if visual_notes:
+        report["visual_option_resolutions"] = visual_notes
     _write_json(output_root / "07_review" / "structure-gate.json", report)
     return report
+
+
+def _load_image_semantics(batch_dir: Path) -> dict | None:
+    """读取视觉复核产物 01_source/image_semantics.json；缺失/异常返回 None（不阻断）。"""
+    import json as _json
+    for base in (batch_dir, Path(batch_dir)):
+        path = base / "01_source" / "image_semantics.json"
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("items"):
+            return data
+    return None
 
 
 def _visual_evidence(batch_dir: Path) -> dict:
