@@ -55,6 +55,8 @@ def main(argv=None):
         print(f"无法读取批次：{exc}")
         return 1
 
+    from workflow.phonetic_structure import verified_groups, shape
+    verified = verified_groups(args.batch)
     problems = []
     for unit in units(batch):
         if not isinstance(unit, dict):
@@ -82,9 +84,11 @@ def main(argv=None):
         has_subs = isinstance(subs, list) and len(subs) > 0
 
         if kind == "group":
+            phonetic_material, phonetic_alias = shape(unit, verified)
             # A8：题组必须有 material 与 subquestions
             # 听力组题的材料是音频，跳过听力时允许 material 为空（不伪造文本）。
-            if _is_blank(unit.get("material")) and not str(qt or "").startswith("听力"):
+            if (_is_blank(unit.get("material")) and not str(qt or "").startswith("听力")
+                    and not phonetic_material):
                 problems.append(f"{uid}: 题组缺少 material（A8）")
             if not has_subs:
                 problems.append(f"{uid}: 题组缺少 subquestions（A8）")
@@ -94,7 +98,7 @@ def main(argv=None):
                     problems.append(f"{uid}: 存在非对象子题（A9）")
                     continue
                 num = sub.get("number")
-                if _is_blank(sub.get("stem")):
+                if _is_blank(sub.get("stem")) and not phonetic_alias:
                     problems.append(f"{uid} 第{num}题: 子题 stem 为空（A9）")
                 if _is_blank(sub.get("answer")):
                     problems.append(f"{uid} 第{num}题: 子题 answer 为空（A9）")

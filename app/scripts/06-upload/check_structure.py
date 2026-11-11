@@ -38,7 +38,7 @@ def _has_prefix(knowledge, prefix):
     return False
 
 
-def _check_unit(u):
+def _check_unit(u, verified=None):
     problems = []
     uid = u.get("unit_id") or u.get("id") or "?"
     qt = (u.get("question_type") or "").strip()
@@ -47,10 +47,13 @@ def _check_unit(u):
     subs = u.get("subquestions") or []
     opts = u.get("options") or []
 
+    from workflow.phonetic_structure import shape
+    phonetic_material, phonetic_alias = shape(u, verified)
+
     # A8：group 必须 material 非空 且 subquestions 非空
     # 例外：听力组题的材料是音频，没有文字 material；跳过听力时允许为空，不伪造文本。
     if kind == "group":
-        if not material and not str(qt).startswith("听力"):
+        if not material and not str(qt).startswith("听力") and not phonetic_material:
             problems.append(f"[A8] {uid} ({qt}): 题组 unit_kind=group 但 material 为空")
         if not subs:
             problems.append(f"[A8] {uid} ({qt}): 题组 unit_kind=group 但 subquestions 为空")
@@ -59,7 +62,7 @@ def _check_unit(u):
     if kind == "group":
         for c in subs:
             n = c.get("number")
-            if not plain(c.get("stem") or "").strip():
+            if not plain(c.get("stem") or "").strip() and not phonetic_alias:
                 problems.append(f"[A9] {uid} 子题 {n}: stem 为空")
             if not str(c.get("answer") or "").strip():
                 problems.append(f"[A9] {uid} 子题 {n}: answer 为空")
@@ -123,20 +126,25 @@ def _check_unit(u):
 
 
 def main(argv=None):
-    args = arg_parser("结构体检 A8/A9/C11/C12/C15/D3/D8/A11").parse_args(argv)
+    parser = arg_parser("结构体检 A8/A9/C11/C12/C15/D3/D8/A11")
+    parser.add_argument("--source-batch-dir", help="当前候选的显式来源批次目录（不从候选字段读取）")
+    args = parser.parse_args(argv)
     try:
         batch = load_batch(args.batch)
     except Exception as exc:  # 容错：读不到批次也要给出可读信息，不崩
         print(f"[ERROR] 无法读取批次文件 {args.batch}: {exc}")
         return 2
 
+    from workflow.phonetic_structure import verified_groups
+    source_path = Path(args.source_batch_dir) / "06_batch/batch.json" if args.source_batch_dir else args.batch
+    verified = verified_groups(source_path)
     problems = []
     for u in units(batch):
         if not isinstance(u, dict):
             problems.append(f"[格式] 非对象单元被忽略：{type(u).__name__}")
             continue
         try:
-            problems.extend(_check_unit(u))
+            problems.extend(_check_unit(u, verified))
         except Exception as exc:  # 单个单元异常不中断整批
             uid = u.get("unit_id") or u.get("id") or "?"
             problems.append(f"[ERROR] 单元 {uid} 体检异常：{exc}")

@@ -1587,7 +1587,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             # 把文本/空档/表格/结构/版面五项体检前移到导入处：问题直接回到
             # 执行者并触发一次带反馈的重试，不再等 validate 才发现。
             from . import assemble_precheck
-            pre = assemble_precheck.precheck(payload)
+            pre = assemble_precheck.precheck(payload, batch_dir=batch)
             if not pre["passed"]:
                 raise ValueError("Assemble format precheck failed: " + "；".join(pre["problems"][:10]))
             # 本地批次必须与题库线上格式一致：来源字段提到顶层、选项转字符串数组、

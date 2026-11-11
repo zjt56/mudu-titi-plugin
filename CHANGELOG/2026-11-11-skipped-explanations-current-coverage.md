@@ -4,7 +4,7 @@
 
 课时批次 `01七上人教版课时A计划StarterUnit1Hello!第一课时Sectio` 的 `explanations` 已为 `skipped`，但组题 `sec-2fd9dfe1dc666eda-u111` 当前只有子题 1–3，旧 `explanations.json` 仍保留 1–8。runner 对已有 skipped 且仍无解析来源的阶段直接跳过；skip helper 调用又被终态条件挡住，导致 assemble 的消费者校验正确拒收：`Subquestions must have exact confirmed child number coverage`。
 
-## 修改
+## 改了什么
 
 - `app/workflow/runner.py`：历史解析 skip 先用正常 `handoff.inspect_stage` 验收；不合格时通过实际 skip helper 重建当前 confirmed units 的缺失占位。已合格的 skipped 产物不重写 manifest。不能合格交付时保留既有内容并返回等待，不能将旧 skipped 当作当前交付。
 - `app/workflow/optional_inputs.py`：拒绝在已识别来源存在时安装空占位，拒绝覆盖旧产物中的任何非占位解析/大意；按当前 units 构造所有组题子题，调用原有 explanations 校验器后用现有 `_install` 原子安装并备份旧产物。
@@ -26,7 +26,7 @@
 
 `git diff --check`（仅本次三个实现/测试文件）通过。
 
-真实批次于 2026-11-11 16:14 正常 runner 续跑：explanations 保持 skipped，当前 `handoff.inspect_stage` 为 passed、errors=[]，组装已越过原先子题覆盖阻断。组装随后发现独立 A8/A9（语音题组图片/公共导语未进入内容字段），另建 `A8_A9_SCOPED_GROUP_CONTENT_MISSING` 台账继续修复，不将整批误报为完成。
+真实批次于 2026-11-11 16:14 正常 runner 续跑：explanations 保持 skipped，当前 `handoff.inspect_stage` 为 passed、errors=[]，组装已越过原先子题覆盖阻断。组装随后发现独立 A8/A9（语音组题漏入原卷作答导语，且结构校验未识别已保留原生附件的合法纯图形态），另建 `A8_A9_SCOPED_GROUP_CONTENT_MISSING` 台账继续修复，不将整批误报为完成。
 
 ## 回退
 

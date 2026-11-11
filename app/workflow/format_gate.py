@@ -14,7 +14,7 @@ from pathlib import Path
 import tempfile
 from urllib.parse import urlsplit
 
-from . import metadata_policy, upload_payload, wire_format
+from . import metadata_policy, upload_payload, wire_format, phonetic_structure, shared_rubric
 from .label_audit import RULE_FILES as LABEL_RULE_FILES
 
 RULE_VERSION = "final-upload-format-v1"
@@ -23,7 +23,8 @@ REPORT_PATH = "07_review/upload-format.json"
 RULE_FILES = (Path(__file__), Path(upload_payload.__file__),
               Path(upload_payload.label_audit.__file__),
               Path(upload_payload.taxonomy.__file__), Path(wire_format.__file__),
-              Path(metadata_policy.__file__), *LABEL_RULE_FILES)
+              Path(metadata_policy.__file__), Path(phonetic_structure.__file__),
+              Path(shared_rubric.__file__), *LABEL_RULE_FILES)
 DEFERRED_CODES = frozenset({"CATALOG_REQUIRED", "TEXTBOOK_CATALOG_UNSUPPORTED",
                             "TEXTBOOK_KNOWLEDGE_INVALID"})
 
@@ -281,7 +282,7 @@ def run(batch_dir) -> dict:
         report["dry_run_options"] = options
         owners, local_files = _local_attachments(root, batch, report)
         # This is the real, read-only mapping API. No client/prepare imports.
-        built = upload_payload.build_payload(batch, catalog=None, **options)
+        built = upload_payload.build_payload(batch, catalog=None, batch_dir=root, **options)
         deferred_owners = _defer_local_urls(owners, built["errors"])
         for issue in built["errors"]:
             if (issue.get("code") == "ATTACHMENT_URL_INVALID"

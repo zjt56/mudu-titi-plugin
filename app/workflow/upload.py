@@ -66,8 +66,8 @@ def _config(config=None):
     return upload_client.load_config() if config is None else config
 
 
-def _mapping(source, catalog, options=None):
-    return upload_payload.build_payload(source, catalog, **(options or {}))
+def _mapping(source, catalog, options=None, batch_dir=None):
+    return upload_payload.build_payload(source, catalog, batch_dir=batch_dir, **(options or {}))
 
 
 # 本地装配产物的题目 ID 只有单卷内唯一（q-1、group-16-17）。题库的题目 ID 是
@@ -309,7 +309,7 @@ def prepare(batch_dir, *, catalog=None, config=None, check_media=True, **options
             if (isinstance(title, str) and title.strip() and metadata.get('source_sha256')
                     and metadata['source_sha256'] == mf.sha256_file(batch / '01_source' / '正文.txt')):
                 options['name'] = title
-        report = _mapping(source, snapshot, options)
+        report = _mapping(source, snapshot, options, batch_dir=batch)
         from .upload_content import inspect_content
         content = inspect_content(batch, source, strict=True)
         report['content_source'] = content
@@ -401,7 +401,7 @@ def verify(batch_dir, *, config=None):
     if (preflight.get('passed') is not True or preflight.get('payload_sha256') != digest
             or preflight.get('plan_sha256') != _sha(plan_raw)):
         raise ValueError('最近一次上传预检失败或与冻结计划不一致，须重新准备')
-    mapped = _mapping(source, _read(_path(batch, plan['catalog_file'])), plan.get('mapping_options'))
+    mapped = _mapping(source, _read(_path(batch, plan['catalog_file'])), plan.get('mapping_options'), batch_dir=batch)
     if not mapped['passed'] or _bytes(mapped['payload']) != raw:
         raise ValueError('冻结件不再满足当前映射校验，必须重新准备、审核和批准')
     from .upload_content import inspect_content

@@ -23,7 +23,7 @@ SCRIPTS = (
 )
 
 
-def precheck(payload: dict, timeout: int = 120) -> dict:
+def precheck(payload: dict, timeout: int = 120, batch_dir: str | Path | None = None) -> dict:
     """Return {"passed": bool, "problems": [str]} for an assemble payload."""
     if not isinstance(payload, dict):
         return {"passed": False, "problems": ["装配结果必须是对象"]}
@@ -33,9 +33,12 @@ def precheck(payload: dict, timeout: int = 120) -> dict:
         problems: list[str] = []
         for name in SCRIPTS:
             script = ROOT / "scripts" / "06-upload" / name
+            command = [sys.executable, str(script), "--batch", str(path)]
+            if name == "check_structure.py" and batch_dir is not None:
+                command.extend(["--source-batch-dir", str(Path(batch_dir).resolve())])
             try:
                 proc = subprocess.run(
-                    [sys.executable, str(script), "--batch", str(path)],
+                    command,
                     cwd=str(ROOT), capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=timeout,
                 )

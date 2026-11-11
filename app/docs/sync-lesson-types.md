@@ -32,7 +32,17 @@
 - `app/workbench/server.py::decorate_review_rows`——仅对课时同步卷、且字段确实缺失的行，用本行大题标题 `sync_practice.classify()` 回填 `type`/`subtype`/`subtypes`。
 - `app/workflow/structure_ai.py::sync_subtype`——结构归类时按包含该窗口的大题标题回填子类，题型不一致不回填。
 
-## 三、真实课时标题 → 目录题型（回归基线）
+## 三、语音组题的原生内容与 A8/A9（2026-11-11）
+
+语音整大题保持 `group`。原卷 `[IMG image2.jpeg]` / `[IMG image3.jpeg]` 经规范化进入 `attachments(kind=image, placement=question)` 后，`material` 为空是原生表示；不得重插图片标记、编造「见附图」或改为单独题。大题作答导语逐字进入组级 `stem`，从当前正文的唯一大题坐标读取，不能借用另一节标题。
+
+`phonetic_structure.verified_groups/shape` 只为当前来源完整复建的 scoped-v1 语音组提供证明：大题标题/结束坐标由 `heading_candidates` 独立重建；窗口须覆盖整节非空正文及全部原号；组、子题、原生图片和来源身份必须精确对应；图片须在本批媒体目录真实存在且归属唯一。只有共享图片、或确无共享材料而子题题干完整的语音组可免文字材料要求；无印刷号纯图组的单个内部兼容别名可空 child stem，答案仍必填。无来源上下文、跨节/漏题、伪图片/异批 URL、缺图、空图、子题改写仍拒绝；不是所有 group 的豁免。
+
+生成、原文审计、原卷预览、assemble 临时候选预检、发布检查和 payload 共用此口径；payload 证明上下文由调用方显式提供，不采信候选自报路径。本地 `source_span/printed_numbers` 证明字段明确排除出远端请求，其他未知字段仍严格检查。并排小题的最终题干恢复沿用 scoped 解析，防止把左侧小题重新拼到右侧。来源刷新沿用既有内容哈希协议，保留已验证答案/知识点，不以新增坐标字段造成历史状态哈希冲突。
+
+回归：`workflow.test_phonetic_structure` 覆盖来源切片 → draft → assembly → 原生 payload / `source_blocks`，以及临时候选显式来源、边界/漏题/图片负例；实际课时副本验证 27 单元、41 答案、27 知识点单元、教材字段 0。
+
+## 四、真实课时标题 → 目录题型（回归基线）
 
 以下 9 条来自 `01七上人教版课时A计划StarterUnit1Hello!第一课时` 真实原卷标题，`app/workflow/test_sync_practice.py::TestLessonHeadingsMatchesRulesDocument` 逐条断言：
 

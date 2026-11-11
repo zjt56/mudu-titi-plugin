@@ -51,7 +51,7 @@ def _hashes(root, media=()):
         path = _safe(root, relative)
         result[relative] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
     # Parser changes also invalidate a persisted draft, without mtime dependence.
-    for name in ("question_draft.py", "question_content.py", "wire_format.py", "denoise.py", "question_identity.py"):
+    for name in ("question_draft.py", "question_content.py", "wire_format.py", "denoise.py", "question_identity.py", "shared_rubric.py", "phonetic_structure.py"):
         path = Path(__file__).with_name(name)
         result["parser:" + name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
@@ -485,7 +485,7 @@ def build(batch_dir, *, units=None):
             issues.append({"unit_id": uid, "code": "SOURCE_SCOPE_UNPROVEN", "reason": proof["reason"]})
         else:
             lines = text.splitlines()
-            audit = question_content.audit_source_unit(dict(unit, stem=text))
+            audit = question_content.audit_source_unit(dict(unit, stem=text, numbers=[int(n) for n in unit["numbers"]]))
             issues.extend(dict(problem, unit_id=uid) for problem in audit["issues"])
             if unit["unit_kind"] == "standalone":
                 if (unit.get("source_span") or {}).get("number_binding") == "single_writing_section":
@@ -515,10 +515,11 @@ def build(batch_dir, *, units=None):
                     # 完形 A/B、阅读各篇共用同一大题题干：后一篇的绑定窗口只含
                     # 自己的文章，必须补回同大题的原文导语，不能留空。
                     # 补入的导语不属于本组切片，绝不能据此截断材料正文。
-                    from .shared_rubric import section_rubric
+                    from .shared_rubric import section_rubric, phonetic_section_rubric
                     rubric_source = (source.splitlines() if proof.get("line_basis") == "01_source/正文.txt"
                                      else cleaned_lines)
-                    rubric = section_rubric(rubric_source, proof.get("start_line"), unit.get("type") or "")
+                    rubric = (phonetic_section_rubric(rubric_source, unit)
+                              or section_rubric(rubric_source, proof.get("start_line"), unit.get("type") or ""))
                     if rubric:
                         proof["shared_rubric"] = rubric
                 if rubric:
@@ -596,6 +597,8 @@ def build(batch_dir, *, units=None):
             row["subquestions"] = [_empty(n) for n in unit["numbers"]]
         from .question_identity import fields, question_key, VERSION as IDENTITY_VERSION
         row.update(fields(unit))
+        if unit.get('type') == '语音题' and unit.get('identity_version') == 'scoped-v1':
+            row['source_span'] = dict(unit.get('source_span') or {})
         if (unit.get('source_span') or {}).get('printed_numbers') == []:
             row['printed_numbers'] = []
             row['source_span'] = dict(unit['source_span'])

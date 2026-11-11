@@ -8,6 +8,7 @@ client after fetching the active general version and all its points.
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 import hashlib
 from html import unescape
 import json
@@ -38,7 +39,7 @@ LOCAL_FIELDS = {"unit_id", "number", "numbers", "status", "warnings", "knowledge
                 "optionColumns", "subquestionOptionColumns", "paperId", "paperOrder", "paperSection", "paperInstruction",
                 "numberStart", "numberEnd", "subtypes", "categories", "audio", "images", "image", "audio_map", "image_map",
                  "identity_version", "section_id", "source_section", "question_ids", "question_id",
-                 "original_number", "printed_number"}
+                 "original_number", "printed_number", "printed_numbers", "source_span"}
 
 
 def _path(value):
@@ -251,7 +252,8 @@ def _media_path(url):
 
 
 class _Builder:
-    def __init__(self, media_map=None):
+    def __init__(self, media_map=None, verified=None):
+        self.verified_phonetic = verified or {}
         self.media_map = media_map if isinstance(media_map, dict) else None
         self.media_sources = {}
         self.errors = []
@@ -617,11 +619,13 @@ class _Builder:
             for child in value:
                 self.scan_media(child, uid)
 
-    def item(self, raw, uid, child=False, parent_type=None):
+    def item(self, raw, uid, child=False, parent_type=None, phonetic_alias=False):
         if not isinstance(raw, dict):
             self.error("ITEM_INVALID", "题目/子题必须是结构化对象", uid)
             return {}
         self.unknown(raw, WIRE_FIELDS | set(ALIASES) | LOCAL_FIELDS | {"textbookMappings"}, uid, "子题." if child else "题目.")
+        from .phonetic_structure import shape
+        phonetic_material, alias_children = shape(raw, self.verified_phonetic) if not child else (False, False)
         data = self.canonical(raw, uid)
         # 服务端接受旧称/简称；本地在映射入口就归一，后续标签校验与落库都用正式名。
         if isinstance(data.get("type"), str):
@@ -656,7 +660,8 @@ class _Builder:
                           and (_nonempty(data.get('material')) or bool(data.get('materialBlocks'))))
         for key in ("stem", "answer"):
             if not _nonempty(data.get(key)) and not (
-                    key == "answer" and deferred_group_answer or key == 'stem' and material_group):
+                    key == "answer" and deferred_group_answer
+                    or key == 'stem' and (material_group or child and phonetic_alias)):
                 self.error("MISSING_" + key.upper(), f"缺少 {key} 正文", uid)
         for key, prefix in (("answer", r"(?:参考答案|答案|answer)"), ("explanation", r"(?:解析|explanation)")):
             text = data.get(key)
@@ -807,7 +812,7 @@ class _Builder:
                 # a written transcript to satisfy a reading-material rule.
                 listening_group = (isinstance(main_type, str) and main_type.startswith('听力')
                                    and _nonempty(data.get('stem')))
-                if not children or not (_nonempty(data.get("material")) or data.get("materialBlocks") or listening_group):
+                if not children or not (_nonempty(data.get("material")) or data.get("materialBlocks") or listening_group or phonetic_material):
                     self.error("GROUP_INCOMPLETE", "题组必须有结构化子题及共享材料；听力题组可保留原卷听力说明", uid)
                 expected_numbers = raw.get("numbers")
                 child_numbers = [c.get("number") for c in children if isinstance(c, dict)]
@@ -851,7 +856,7 @@ class _Builder:
             numbers = [c.get("number") for c in children if isinstance(c, dict) and _positive(c.get("number"))]
             if len(numbers) != len(set(numbers)):
                 self.error("SUBQUESTION_NUMBER_DUPLICATE", "题组内子题号重复", uid)
-            output["subquestions"] = [self.item(c, f"{uid}/{c.get('number', i) if isinstance(c, dict) else i}", True, main_type) for i, c in enumerate(children, 1)]
+            output["subquestions"] = [self.item(c, f"{uid}/{c.get('number', i) if isinstance(c, dict) else i}", True, main_type, alias_children) for i, c in enumerate(children, 1)]
             # Aggregate names and IDs only on the wire, after the local audit.
             paths = output.get("knowledge", []) + [path for c in output["subquestions"] for path in c.get("knowledge", [])]
             output["knowledge"] = list(dict.fromkeys(paths))
@@ -880,7 +885,7 @@ class _Builder:
 
 def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, name=None,
                   upload_mode=None, upload_target=None, media_map=None,
-                  id_prefix=None) -> dict:
+                  id_prefix=None, batch_dir=None) -> dict:
     """Return validation evidence and an allowlisted staging batch; never mutate input.
 
     ``catalog_sha256`` binds canonical version/points JSON (full metadata), excluding
@@ -890,7 +895,9 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
     ``id_prefix`` prefixes every top-level wire ``id`` so question IDs from
     different papers cannot collide in the server's global question table.
     """
-    builder = _Builder(media_map)
+    from .phonetic_structure import verified_groups
+    verified = verified_groups(Path(batch_dir) / '06_batch/batch_meta.json') if batch_dir is not None else {}
+    builder = _Builder(media_map, verified)
     if id_prefix is not None:
         if not isinstance(id_prefix, str) or (id_prefix and not re.fullmatch(
                 r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}", id_prefix)):

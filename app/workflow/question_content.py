@@ -515,7 +515,8 @@ def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
         from .question_draft import _parts
         from .wire_format import normalize_blank_text
         for number in unit.get('numbers') or []:
-            original = _parts(str(unit.get('stem') or '').splitlines(), number)
+            original = _parts(str(unit.get('stem') or '').splitlines(), int(number),
+                              scoped=unit.get('identity_version') == 'scoped-v1')
             entry = lookup(parsed, number)
             if isinstance(entry, dict) and original.get('found'):
                 if original.get('stem'):
@@ -856,11 +857,12 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
         if unit["unit_kind"] == "group":
             candidate_text = _canonical_image_text(candidate_material)
             from .question_draft import _bound_source, _rubric_lines
-            from .shared_rubric import section_rubric
+            from .shared_rubric import section_rubric, phonetic_section_rubric
             confirmed_unit = next((u for u in expected_units if source_key(u) == key), unit)
             bound, proof = _bound_source(confirmed_unit, source, cleaned, fresh)
             rubric_lines = source.splitlines() if proof.get("line_basis") == "01_source/正文.txt" else cleaned.splitlines()
             shared_rubric = (_rubric_lines(bound.splitlines(), unit.get("type") or "")
+                             or (phonetic_section_rubric(rubric_lines, confirmed_unit) if bound else [])
                              or section_rubric(rubric_lines, proof.get("start_line"), unit.get("type") or ""))
             for required in shared_rubric:
                 if _canonical_image_text(required) not in candidate_text:

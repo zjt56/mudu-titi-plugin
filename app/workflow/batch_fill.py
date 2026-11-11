@@ -359,6 +359,9 @@ def _sync_media_attachments(kept, fresh, batch_name=None):
     def one(dst, src):
         if not isinstance(dst, dict) or not isinstance(src, dict):
             return
+        if (src.get('identity_version') == 'scoped-v1' and src.get('source_span')
+                and dst.get('question_type') == '语音题'):
+            dst['source_span'] = copy.deepcopy(src['source_span'])
         # 先把旧对象里已有的本地相对 url 附件规范成 /source-media/...（历史遗留）。
         if base and isinstance(dst.get("attachments"), list):
             dst["attachments"] = [_norm_url(a) if isinstance(a, dict) else a
@@ -383,7 +386,7 @@ def _sync_media_attachments(kept, fresh, batch_name=None):
 def _refresh_row(current, fresh, *, preserve_fill=False):
     row = copy.deepcopy(current)
     old_children = _children(row)
-    for key in (BODY if preserve_fill else (*BODY, *RESET)):
+    for key in ((*BODY, "source_span") if preserve_fill else (*BODY, *RESET, "source_span")):
         row.pop(key, None)
         if key in fresh:
             row[key] = copy.deepcopy(fresh[key])

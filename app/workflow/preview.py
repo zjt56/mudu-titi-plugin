@@ -296,7 +296,8 @@ def _scoped_source_slice(unit: dict, lines: list[str]) -> list[str]:
     if not wanted or compact.count(wanted) != 1:
         return []
     if unit.get("unit_kind") == "group":
-        selected = window
+        from .shared_rubric import phonetic_section_rubric
+        selected = phonetic_section_rubric(lines, unit) + window
     else:
         offset = compact.index(wanted)
         selected = window[owners[offset]:owners[offset + len(wanted) - 1] + 1]

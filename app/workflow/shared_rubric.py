@@ -18,6 +18,41 @@ def instruction(line, kind=""):
                 or re.match(r"(?:将答案填写|答案写在|从每小题所给)", text))
 
 
+def phonetic_section_rubric(lines, unit):
+    """Use only the verbatim heading at this scoped phonetic unit's source position."""
+    if unit.get("type") != "语音题" or unit.get("identity_version") != "scoped-v1":
+        return []
+    section, span = unit.get("source_section") or {}, unit.get("source_span") or {}
+    heading, first, last = section.get("start_line"), span.get("start_line"), span.get("end_line")
+    if (span.get("basis") not in {"cleaned_source", "ai_classified"}
+            or not all(type(n) is int for n in (heading, first, last, section.get("end_line")))
+            or not 1 <= heading < first <= last <= section["end_line"] <= len(lines)):
+        return []
+    title = str(section.get("title") or "")
+    if not title or lines[heading - 1].strip() != title.strip():
+        return []
+    # Reconstruct the owner independently: persisted section end/span cannot
+    # extend this instruction into the next exercise or answer appendix.
+    from .sync_practice import heading_candidates
+    owners = [row for row in heading_candidates("\n".join(lines))
+              if row["start_line"] == heading]
+    if (len(owners) != 1 or owners[0]["type"] != "语音题"
+            or owners[0]["title"] != title
+            or owners[0]["end_line"] != section["end_line"]
+            or last > owners[0]["end_line"]):
+        return []
+    # A phonetic exercise is the whole section, not a partial group selected
+    # from its children. Empty margins are harmless; substantive omitted lines
+    # and repeated/missing printed numbers cannot authorize an exception.
+    if any(line.strip() for line in lines[heading:first - 1] + lines[last:section["end_line"]]):
+        return []
+    from .question_identity import printed_anchors
+    printed = [number for _, number in printed_anchors(lines[heading:section["end_line"]])]
+    if printed and sorted(printed) != sorted(int(n) for n in unit.get("numbers") or []):
+        return []
+    return [lines[heading - 1]]
+
+
 def section_rubric(lines, start_line, kind=""):
     """Return a complete instruction block before the first article in a section.
 

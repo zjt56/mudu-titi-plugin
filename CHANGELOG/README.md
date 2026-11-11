@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-11 | [2026-11-11-phonetic-group-source-shape.md](2026-11-11-phonetic-group-source-shape.md) | 语音组题逐字保留公共导语，以当前完整来源证明原生图和无共享材料形态，精确校验 A8/A9 |
 | 2026-11-11 | [2026-11-11-skipped-explanations-current-coverage.md](2026-11-11-skipped-explanations-current-coverage.md) | 无原解析的历史跳过产物须按当前子题覆盖重新验收，保护真实内容并原子备份刷新 |
 | 2026-11-11 | [2026-11-11-pause-textbook-matching.md](2026-11-11-pause-textbook-matching.md) | 当前仅匹配知识点标签，教材任务、验收与组装传播同步暂停 |
 | 2026-11-11 | [2026-11-11-underline-whole-line-label.md](2026-11-11-underline-whole-line-label.md) | 整行表格标签（如 `Testing Dates:`）允许在合并后的材料里恢复画线，唯一性仍拦截歧义 |
