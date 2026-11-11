@@ -150,6 +150,6 @@ python -m workflow.runner run --stage types --batch-dir workflows/<批次>
 
 ## 与已有阶段的关系
 
-通用接口覆盖 `answers`、`audio`、`types`、`explanations`、`knowledge`、`assemble`、`review`。打标签按设计图拆成四个子智能体：`explanations`（解析与文章大意）、`knowledge`（知识点与教材匹配，逐字沿用解析）、`types`（题型/词数/内容完整）、`answers`（答案/解析整理/难度）；每个阶段各自一次调用，互不代劳。Word/PDF/OCR 原卷提取仍是内置执行器。音频实际切分、结构疑问核对、外部脚本缺失和发布限制不会因换了接口而消失；接口会如实返回缺项或等待条件。
+通用接口覆盖 `answers`、`audio`、`types`、`explanations`、`knowledge`、`assemble`、`review`。打标签按设计图拆成四个子智能体：`explanations`（解析与文章大意）、`knowledge`（仅知识点标签匹配，教材匹配暂停）、`types`（题型/词数/内容完整）、`answers`（答案/解析整理/难度）；每个阶段各自一次调用，互不代劳。Word/PDF/OCR 原卷提取仍是内置执行器。音频实际切分、结构疑问核对、外部脚本缺失和发布限制不会因换了接口而消失；接口会如实返回缺项或等待条件。
 
 自动 CLI 调用细节、日志和平台限制另见 `docs/local-agent.md`。

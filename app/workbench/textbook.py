@@ -67,10 +67,12 @@ def resolve(version: str, book_name: str, unit_name: str, section: str | None = 
 
 
 def validate_placement(value) -> dict:
-    """校验知识点产物里的教材位置候选，返回规范化结果。"""
+    """独立教材候选校验工具；自动知识点流程当前不调用。"""
     if not isinstance(value, dict):
         raise ValueError("textbook placement must be an object")
-    allowed = {"version", "book", "unit", "section", "topic", "evidence"}
+    # resolve() includes catalog-derived grade; accept our normalized output
+    # again, but never trust a caller-supplied grade over the exact catalog.
+    allowed = {"version", "book", "unit", "section", "topic", "grade", "evidence"}
     if set(value) - allowed:
         raise ValueError(f"textbook placement has unknown fields: {sorted(set(value) - allowed)}")
     for key in ("version", "book", "unit"):
@@ -81,6 +83,8 @@ def validate_placement(value) -> dict:
             not isinstance(x, str) or not x.strip() for x in evidence):
         raise ValueError("textbook placement requires nonempty evidence")
     placement = resolve(value["version"], value["book"], value["unit"], value.get("section"))
+    if "grade" in value and value["grade"] != placement["grade"]:
+        raise ValueError("textbook placement grade differs from the catalog")
     if value.get("topic") and value["topic"] != placement["topic"]:
         raise ValueError("textbook placement topic differs from the catalog")
     placement["evidence"] = list(evidence)

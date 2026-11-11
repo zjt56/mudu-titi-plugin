@@ -3,10 +3,10 @@ stage: knowledge
 artifact: 04_knowledge/knowledge.json
 
 ## 职责
-按目录为单元/子题标注知识点叶子路径与对应 ID，必要时给出教材定位。
+仅按知识点目录为单元/子题标注叶子路径与对应 ID。教材匹配暂停，不做教材定位。
 
 ## 权限边界
-- 只写 `knowledge`、`knowledgeIds`、`textbook`、`subquestions`、`evidence`。
+- 只写 `unit_id`、`knowledge`、`knowledgeIds`、`subquestions`、`evidence`；不输出 `textbook`。
 - 不写答案、解析、大意（由上游产物逐字注入，写了也会被覆盖）。
 - 不改题型、不改题号、不改单元边界。
 
@@ -17,7 +17,7 @@ artifact: 04_knowledge/knowledge.json
 - [ ] 需要逐题打标的题型，每个子题号都覆盖且只覆盖一次。
 - [ ] 组级（整组题型）必须包含该题型的必带维度：`references/type-knowledge-map.json` 中该题型 `dims` 列出的「主题」「语篇体裁」等维度，各给一个取自目录的合法叶子（例如「听力长对话理解」必须含「主题」）。缺必带维度会被判为非法并整组重跑。
 - [ ] 只有在该题型不要求、且目录里确实没有合法叶子时，才留空对应维度，没有硬凑。
-- [ ] 教材定位只出现在同步练习/单元测验且有原卷证据时。
+- [ ] 未做教材定位、未输出 `textbook`，无论原卷是否为同步练习或单元测验。
 
 ## 常见错误
 自造叶子、把"语用/情景交际"扩写成不存在的子类、给阅读组每个小题单独打标。

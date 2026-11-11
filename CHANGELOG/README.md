@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-11 | [2026-11-11-pause-textbook-matching.md](2026-11-11-pause-textbook-matching.md) | 当前仅匹配知识点标签，教材任务、验收与组装传播同步暂停 |
 | 2026-11-11 | [2026-11-11-underline-whole-line-label.md](2026-11-11-underline-whole-line-label.md) | 整行表格标签（如 `Testing Dates:`）允许在合并后的材料里恢复画线，唯一性仍拦截歧义 |
 | 2026-11-11 | [2026-11-11-misc.md](2026-11-11-misc.md) | 精简上传区 Word/PDF 解析说明与运维自动接管说明，只删静态文案 |
 | 2026-11-11 | [2026-11-11-operations-lease-co-driver.md](2026-11-11-operations-lease-co-driver.md) | 运维租约只在到期或原进程消失时释放，并行后端返回 409 等待；健康检查纳入租约以延后热重启 |

@@ -64,6 +64,16 @@ class TextbookCatalogTest(unittest.TestCase):
             with self.subTest(broken=broken), self.assertRaises(ValueError):
                 textbook.validate_placement(broken)
 
+    def test_normalized_placement_can_be_validated_again(self):
+        good = {"version": "人教版", "book": "人教版七年级上册", "unit": "Unit 2 We're Family!",
+                "section": "Section A", "evidence": ["正文 L1：Unit 2 We're Family! Section A"]}
+        normalized = textbook.validate_placement(good)
+        self.assertEqual(normalized["grade"], "七年级")
+        self.assertEqual(textbook.validate_placement(normalized), normalized)
+        for grade in ("八年级", "", None, 7):
+            with self.subTest(grade=grade), self.assertRaisesRegex(ValueError, "grade differs"):
+                textbook.validate_placement(dict(normalized, grade=grade))
+
     def test_sync_sources_only(self):
         self.assertTrue(textbook.needs_matching("同步练习"))
         self.assertTrue(textbook.needs_matching("单元测验"))
@@ -110,18 +120,19 @@ class KnowledgeTextbookWiringTest(unittest.TestCase):
             "status": "completed", "artifacts": {tasks.ARTIFACTS["knowledge"]: payload},
             "notes": [], "findings": []})
 
-    def test_sync_paper_task_carries_textbook_index(self):
+    def test_sync_paper_task_does_not_match_textbook_while_paused(self):
         self.write("01_source/metadata.json", {"source_type": "同步练习", "paper_title": "Unit 2 同步练习"})
         task = tasks.build_task(self.batch, "knowledge")
         self.assertEqual(task["status"], "ready")
-        self.assertIn("textbook_index", task["prompt"])
-        self.assertIn("Unit 2 We're Family!", task["prompt"])
+        self.assertNotIn('"textbook_index":', task["prompt"])
+        self.assertNotIn(str(textbook.CATALOG_PATH.resolve()), task["input_hashes"])
+        self.assertIn('textbook matching is paused', task["prompt"])
 
-    def test_submitted_source_type_controls_textbook_index(self):
+    def test_submitted_source_type_cannot_enable_paused_textbook_matching(self):
         self.write('01_source/metadata.json', {'source_type': '未提供'})
         self.write('workflow/manifest.json', {'inputs': {}, 'meta': {'source_type': '同步练习', 'grade': '七年级'}})
         task = tasks.build_task(self.batch, 'knowledge')
-        self.assertIn('"textbook_index":', task['prompt'])
+        self.assertNotIn('"textbook_index":', task['prompt'])
         self.assertIn('七年级', task['prompt'])
         self.write('workflow/manifest.json', {'inputs': {}, 'meta': {'source_type': '中考真题'}})
         self.write('01_source/metadata.json', {'source_type': '同步练习'})
@@ -152,16 +163,27 @@ class KnowledgeTextbookWiringTest(unittest.TestCase):
         self.assertNotIn('"textbook_index":', task["prompt"])
         self.assertNotIn(str(textbook.CATALOG_PATH.resolve()), task["input_hashes"])
 
-    def test_valid_placement_is_accepted_and_invalid_rejected(self):
-        placement = {"version": "人教版", "book": "人教版七年级上册", "unit": "Unit 2 We're Family!",
-                     "section": "Section A", "evidence": ["正文第1行：Unit 2 We're Family! Section A"]}
-        self.assertTrue(self.accept(self.knowledge(textbook=placement))["completed"])
-        saved = json.loads((self.batch / tasks.ARTIFACTS["knowledge"]).read_text())
-        self.assertEqual(saved["items"][0]["textbook"]["unit"], "Unit 2 We're Family!")
-        for broken in (dict(placement, unit="Unit 2"),
-                       dict(placement, evidence=[])):
-            with self.subTest(broken=broken), self.assertRaises(ValueError):
-                self.accept(self.knowledge(textbook=broken))
+    def test_old_placement_is_omitted_without_weakening_knowledge_checks(self):
+        for placement in ({"unit": "错误旧教材", "evidence": "旧格式"}, None, []):
+            with self.subTest(placement=placement):
+                report = self.accept(self.knowledge(textbook=placement))
+                self.assertTrue(report["completed"])
+                saved = json.loads((self.batch / tasks.ARTIFACTS["knowledge"]).read_text())
+                self.assertNotIn("textbook", saved["items"][0])
+                self.assertEqual(saved["items"][0]["knowledge"], ["词汇/词汇辨析/动词辨析"])
+        with self.assertRaises(ValueError):
+            self.accept(self.knowledge(knowledge=["不存在的知识点"], textbook={}))
+
+    def test_assembly_overlays_drop_old_local_textbook_only(self):
+        from workflow import assemble_local, batch_fill
+        for overlay in (assemble_local._overlay_labels,
+                        lambda target, source: batch_fill._overlay(target, source, "knowledge")):
+            target = {"textbook": {"unit": "旧自动候选"}, "stem": "原题",
+                      "textbookMappings": [{"textbookId": "existing"}]}
+            overlay(target, {"knowledge": ["词汇/词汇辨析/动词辨析"], "textbook": {"unit": "不再匹配"}})
+            self.assertNotIn("textbook", target)
+            self.assertEqual(target["stem"], "原题")
+            self.assertEqual(target["textbookMappings"], [{"textbookId": "existing"}])
 
 
 if __name__ == "__main__":

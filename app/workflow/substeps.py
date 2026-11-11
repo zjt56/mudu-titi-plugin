@@ -27,7 +27,7 @@ STEPS = {
     "answers": (("matching", "原答案匹配"), ("format", "格式"), ("missing", "缺失"), ("delivery", "交付")),
     "explanations": (("copy", "解析直抄"), ("summary", "大意"), ("source", "来源"),
                      ("missing", "缺失"), ("delivery", "交付")),
-    "knowledge": (("knowledge", "知识点"), ("textbook", "教材"), ("catalog", "目录"),
+    "knowledge": (("knowledge", "知识点"), ("catalog", "知识点目录"),
                   ("coverage", "覆盖"), ("delivery", "交付")),
     "assemble": (("merge", "合并"), ("fidelity", "保真")),
     "meta": (("metadata", "元数据整理"),),

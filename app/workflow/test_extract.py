@@ -250,14 +250,23 @@ class StructureCandidateTest(unittest.TestCase):
         self.assertEqual(extract.same_line_numbers('1.U v  2.W x', 1), [])
 
     def test_dialogue_slot_prefixed_by_speaker_is_numbered(self):
-        """补全对话的小题号常写成 `C:1.<u>`，必须认得出题号。"""
+        """同步课时补全对话的小题号常写成 `C:1.<u>`，必须认得出题号。"""
         structure, _, _ = extract.infer_structure(
+            '2026年某同步练习\n'
             'Ⅰ.补全对话(共2小题)\n'
             'A:Hi,Ann.\n'
             'B:1.<u>　　　</u>\n'
             'A:2.<u>　　　</u>\n')
         self.assertEqual(structure['sections'][0]['questions'], [1, 2])
         self.assertNotIn('QUESTION_BOUNDARY_MISSING', {x['code'] for x in structure['unresolved']})
+
+    def test_speaker_question_extension_does_not_apply_to_non_sync_material(self):
+        structure, _, _ = extract.infer_structure(
+            '2026年某期末试卷\n'
+            'Ⅰ.单项填空(共1小题)\n'
+            '1. Read the label A:2. and choose a reply.\n'
+            'B:3.<u>　　　</u>\n')
+        self.assertEqual(structure['sections'][0]['questions'], [1])
 
     def test_image_only_section_is_informational_not_a_boundary_error(self):
         """小题只在图片里（字母书写）时按图片能力限制记录，不报题号缺失。"""

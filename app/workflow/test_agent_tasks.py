@@ -350,6 +350,36 @@ class AgentTasksTest(unittest.TestCase):
             self.assertIn(field, example)
         self.assertFalse(set(example["answers"]) & set(example["missing"]))
 
+    def test_knowledge_task_pauses_textbook_for_lesson_sources(self):
+        self.write("01_source/metadata.json", {"source_type": "同步练习"})
+        task = tasks.build_task(self.batch, "knowledge")
+        prompt = task["prompt"]
+        self.assertIn("textbook matching is paused for all sources", prompt)
+        self.assertNotIn('"textbook_index":', prompt)
+        self.assertFalse(any("textbook-catalog" in key for key in task["input_hashes"]))
+        tail = prompt.split("Complete valid JSON syntax example", 1)[1]
+        result = json.loads(tail.split("\n", 1)[1].split("\nPreconditions:", 1)[0])
+        payload = result["artifacts"][tasks.ARTIFACTS["knowledge"]]
+        self.assertFalse({"answer", "explanation", "articleSummary", "textbook"} & set(payload["items"][0]))
+        for legacy in ({"evidence": "old invalid candidate"}, None, []):
+            with self.subTest(legacy=legacy):
+                candidate = copy.deepcopy(payload)
+                candidate["items"][0]["textbook"] = legacy
+                report = self.accept("knowledge", candidate)
+                self.assertTrue(report["completed"])
+                self.assertTrue(any("教材匹配暂停" in note for note in report["notes"]))
+                saved = json.loads((self.batch / tasks.ARTIFACTS["knowledge"]).read_text(encoding="utf-8"))
+                self.assertNotIn("textbook", saved["items"][0])
+                self.assertEqual(saved["items"][0]["knowledge"], payload["items"][0]["knowledge"])
+
+    def test_knowledge_prompt_without_textbook_index_omits_placement_example(self):
+        task = tasks.build_task(self.batch, "knowledge")
+        tail = task["prompt"].split("Complete valid JSON syntax example", 1)[1]
+        result = json.loads(tail.split("\n", 1)[1].split("\nPreconditions:", 1)[0])
+        payload = result["artifacts"][tasks.ARTIFACTS["knowledge"]]
+        self.assertNotIn("textbook", payload["items"][0])
+        self.assertTrue(self.accept("knowledge", payload)["completed"])
+
     def test_every_stage_example_satisfies_its_declared_contract(self):
         # 覆盖所有内容阶段：任何一个阶段示例回退成缺键都会被这里挡住，不必再等真实批次空转。
         unit = {"unit_id": "q-1", "numbers": [1], "unit_kind": "standalone"}

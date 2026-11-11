@@ -189,6 +189,8 @@ def available(batch_dir) -> bool:
 
 
 def _overlay_labels(target: dict, source: dict) -> None:
+    # 教材匹配暂停：刷新知识点时不沿用历史自动匹配的教材候选。
+    target.pop("textbook", None)
     if "knowledge" not in source:
         return
     target["knowledge"] = list(source.get("knowledge") or [])

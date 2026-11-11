@@ -102,7 +102,7 @@ class ContentLabelingTest(unittest.TestCase):
 
     def test_prompts_carry_each_subagent_scope(self):
         self.write(tasks.ARTIFACTS['explanations'], self.explanation())
-        for stage, needle in (('explanations', '解析匹配'), ('knowledge', 'textbook_index'),
+        for stage, needle in (('explanations', '解析匹配'), ('knowledge', 'knowledge points'),
                               ('types', 'contentComplete'), ('answers', 'difficulty')):
             with self.subTest(stage=stage):
                 task = tasks.build_task(self.batch, stage)

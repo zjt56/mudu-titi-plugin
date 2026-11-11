@@ -102,12 +102,12 @@ STAGES: tuple[Stage, ...] = (
     ),
     Stage(
         id="knowledge",
-        title="打标签：知识点与教材匹配",
+        title="打标签：知识点标签匹配",
         kind=AGENT,
         depends_on=("structure_gate", "preassemble", "types"),
         produces=("04_knowledge/knowledge.json",),
         docs=("docs/knowledge-tagging.md",),
-        description="知识点只交目录标签与教材匹配信息；阶段验证独立于答案/解析，下游仅在汇总时合并。",
+        description="仅交知识点目录标签，教材匹配暂停；阶段验证独立于答案/解析，下游仅在汇总时合并。",
     ),
     Stage(
         id="assemble",

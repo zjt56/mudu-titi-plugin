@@ -530,8 +530,6 @@ def _overlay(target, source, stage):
             target.setdefault("filterMetadata", {})["subtypes"] = copy.deepcopy(source["subtypes"])
     elif stage == "knowledge":
         _overlay_labels(target, source)
-        if "textbook" in source:
-            target["textbook"] = copy.deepcopy(source["textbook"])
     elif stage == "explanations":
         for key in ("explanation", "articleSummary"):
             _overlay_text(target, source, {}, key)

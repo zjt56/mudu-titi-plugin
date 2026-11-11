@@ -65,7 +65,11 @@
 ## 卡点留档与接续状态
 
 - 已复验的结构、题型显示、题图误隐藏、罗马答案绑定和旧输入重试五项台账均通过 `issue_log fix` 移入 `ISSUES/fixed/`，修复提交 `8e4b470`。
-- 15:23:50 知识点阶段出现另一项真实阻断 `TEXTBOOK_PLACEMENT_EVIDENCE_MISSING`：`textbook placement requires nonempty evidence`（exit2/integration），已登记 `ISSUES/open/2026-11-11-课时知识点教材位置缺少非空来源证据.md`。保留候选继续核对任务契约与原件证据，不改教材证据校验，也不把当前批次标记完成。
+- 15:23:50 知识点阶段出现另一项真实阻断 `TEXTBOOK_PLACEMENT_EVIDENCE_MISSING`：`textbook placement requires nonempty evidence`（exit2/integration），已登记 `ISSUES/open/2026-11-11-课时知识点教材位置缺少非空来源证据.md`。实际候选不是缺键，而是把 `textbook.evidence` 写成单个字符串；任务伪 schema 未声明数组，知识点示例还残留答案/解析旧字段。同步任务规则、示例、实际构建提示回归和两份正文文档，保留非空字符串数组校验，不自动包装真实候选，也不把当前批次标记完成。
+- 教材契约定向复验：`workflow.test_agent_tasks` **58/58**、`workflow.test_textbook` **13/13**；主线程合并 changelog_policy 再跑 **76 tests OK**（4.756s）。实际 build_task 示例可通过原导入校验，字符串、空数组与空字符串项仍拒收；无教材索引时不示例教材位置。
+- 旧正式知识点产物只读检查 **27/27** 因额外 `grade` 字段被当前教材校验拒收，不直接复用、不自动删键。插件运维于 **15:31:41** 对实际受影响的全部 27 个单元启动知识点修复；新 attempt `knowledge-f82x7uce/input.txt` 已核实包含修正后的数组规则。此范围实际覆盖本卷全部单元，不将其掩饰为少数题修复；结构、答案、题型与其它阶段不重跑。教材卡点尚待真实验收，台账保持 open。
+- 15:35 发现第二项确定性缺陷：`knowledge-f82x7uce/response.json` 的 27 行原始教材位置均不含 `grade`，但 `validate_placement → resolve` 规范化后补入 `grade`，再次验收又以 unknown fields 拒绝自己的输出。已登记 `TEXTBOOK_NORMALIZATION_NOT_IDEMPOTENT`；允许目录派生 `grade` 且逐字检查其等于目录值，错误年级/未知字段/证据错误仍拒绝。补规范化幂等及正式知识点产物再次导入回归；教材、任务契约和 changelog 合计 **77 tests OK**（5.063s）。不改候选标签，不靠模型重试消化校验器错误。
+- Git 推送遇到 TLS 握手失败，尚未验证远端接收。台账提交使用显式 `--only` 文件集合，避免共享暂存区带入并行元数据改动；设备路由配置保持本地。
 
 ## 回退
 

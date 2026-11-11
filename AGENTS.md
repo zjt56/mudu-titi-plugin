@@ -78,6 +78,8 @@
 
 30. **审核页必须直接显示目录题型，不许拿题干充题型**：列表行与详情标题栏一律展示题型（+子类），不得把大题标题/题干/答题指令当题型让人自己对应；题型缺失时只能按确定性规则从本行大题标题反查一次（`type_from=section_rule`），已判定（批次 `question_type`、人工标签）绝不覆盖，子类判不出留空不猜。同步课时的课时化识别、题号每大题重排、并排小题、说话人前缀、图片小题、卷末答案区等口径以 `app/docs/sync-lesson-types.md` 为准，新增表述必须走「规则 JSON → 测试表 → 文档 → 三个测试 → `--force` 真实批次复验」流程。落地：`app/references/sync-practice-rules.json`、`app/workflow/sync_practice.py`、`app/workbench/server.py::decorate_review_rows`、`lib/client.js`、`app/docs/sync-lesson-types.md`。
 
+31. **当前只匹配知识点标签，教材匹配暂停**：用户 2026-11-11 明确教材尚未就绪；所有来源（含同步练习、单元测验）均不提供 `textbook_index`、不生成教材位置。旧候选的本地 `textbook` 在正常导入时省略并留说明，组装不再传播；原始候选留证。知识点路径/ID/维度/题号覆盖/行级证据仍严格校验，不因教材停用而放宽。教材目录与独立工具保留，恢复自动匹配须另行明确要求；远端 `textbookMappings` 与上传边界不变。落地：`app/workflow/agent_tasks.py`、`assemble_local.py`、`batch_fill.py`、`substeps.py`，说明见 `app/docs/content-labeling.md`。
+
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 
 ## 三、变更记录制度（强制）
