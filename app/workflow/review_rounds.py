@@ -16,12 +16,13 @@ import threading
 import uuid
 
 from . import agent_tasks, ingest, review
+from .question_identity import question_key
 from .agent_protocol import _atomic, _encoded, _load
 from .local_agent import _agent_lock, _check_input_hashes, invoke, load_config
 
 # Bumped whenever the prompt builder or blind context changes, so stale
 # partition states and bindings are never reused silently.
-CONTEXT_VERSION = "blind-context-v11"
+CONTEXT_VERSION = "blind-context-v12"
 PROMPT_VERSION = "review-prompt-v12"
 
 
@@ -195,6 +196,7 @@ def _source_excerpts(source, selected, force=False, adjacent_units=()):
     from .extract import material_label
     from .preview import SECTION, _strong_number
     lines = source.splitlines(keepends=True)
+    normalized_source = "\n".join(source.splitlines())
     offsets, cursor = [], 0
     for line in lines:
         offsets.append(cursor)
@@ -235,7 +237,8 @@ def _source_excerpts(source, selected, force=False, adjacent_units=()):
             following = next((line for line in lines[last + 1:] if line.strip()), None)
             next_unit = any(other.get('unit_id') != unit.get('unit_id')
                             and isinstance(other.get('stem'), str) and other['stem'].strip()
-                            and other['stem'] in source and source.count(other['stem']) == 1
+                            and "\n".join(other['stem'].splitlines()) in normalized_source
+                             and normalized_source.count("\n".join(other['stem'].splitlines())) == 1
                             and following is not None
                             and other['stem'].splitlines()[0].strip() == following.strip()
                             for other in adjacent_units)
@@ -333,6 +336,7 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
     units = context.get('confirmed_units_with_stable_ids', [])
     if not units:
         raise ValueError('Cannot partition review without confirmed units')
+    known_answer_keys = {question_key(u, n) for u in units for n in u['numbers']}
     if target_unit_ids is not None:
         wanted = set(target_unit_ids)
         units = [unit for unit in units if unit['unit_id'] in wanted]
@@ -340,7 +344,7 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
             raise ValueError('Review targets do not match confirmed units')
     def make(selected):
         chosen = {u['unit_id'] for u in selected}
-        numbers = {str(n) for u in selected for n in u['numbers']}
+        numbers = {question_key(u, n) for u in selected for n in u['numbers']}
         subset = copy.deepcopy(context)
         subset['confirmed_units_with_stable_ids'] = selected
         source_key = '01_source/正文.txt'
@@ -432,10 +436,10 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
                             item.pop('filterMetadata', None)
         value = subset.get(agent_tasks.ARTIFACTS['answers'])
         if isinstance(value, dict):
-            for key in ('answers', 'evidence', 'difficulty', 'difficultyEvidence'):
+            for key in ('answers', 'evidence', 'missing', 'difficulty', 'difficultyEvidence'):
                 if isinstance(value.get(key), dict):
                     value[key] = {k: v for k, v in value[key].items()
-                                  if not str(k).isdigit() or str(k) in numbers}
+                                  if k in numbers or k not in known_answer_keys}
         # Drop extraction bookkeeping that duplicates the bound source text and
         # layout noise; tables, media and warnings (evidence) stay.
         extraction_key = '01_source/extraction.json'

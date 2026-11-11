@@ -113,6 +113,13 @@ class ReviewLegacyTest(unittest.TestCase):
         self.assertFalse(info['accepted'], info)
         self.assertIn('contract', info['reason'])
 
+    def test_scoped_identities_cannot_reuse_legacy_whole_plan(self):
+        current = self.legacy()
+        with patch('workflow.agent_tasks.confirmed_units', return_value=[{'identity_version': 'scoped-v1'}]):
+            info = review_legacy.compatible_plan(self.batch, current, self.payload)
+        self.assertFalse(info['accepted'], info)
+        self.assertIn('Scoped question identities', info['reason'])
+
     def test_real_old_rule_change_denied(self):
         current = self.legacy()
         original = review_legacy._sha
@@ -149,7 +156,7 @@ class ReviewLegacyTest(unittest.TestCase):
         path = self.batch / f'workflow/review-bindings/{task_id}.json'
         original = path.read_bytes()
         binding = self.load(path.relative_to(self.batch).as_posix())
-        key = next(k for k in binding['input_hashes'] if k.endswith('/docs/content-labeling.md'))
+        key = next(k for k in binding['input_hashes'] if k.replace('\\', '/').endswith('/docs/content-labeling.md'))
         binding['input_hashes'][key] = 'f' * 64
         self.write(path.relative_to(self.batch).as_posix(), binding)
         info = review_legacy.compatible_plan(self.batch, current, self.payload)

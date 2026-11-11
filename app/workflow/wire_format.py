@@ -179,7 +179,7 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None):
     if (data.get("unit_kind") == "group" and not str(data.get("material") or "").strip()
             and isinstance(materials, dict)):
         source = materials.get(data.get("unit_id") or data.get("id"))
-        if source is None:
+        if source is None and data.get('identity_version') != 'scoped-v1':
             numbers = data.get("numbers")
             if isinstance(numbers, list):
                 try:

@@ -367,6 +367,7 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict) -> list[dict]:
     if not isinstance(reply, dict) or not isinstance(reply.get("units"), list):
         return []
     lines = raw_text.splitlines()
+    scoped = sync_practice.looks_like_sync_practice(raw_text)
     units, seen, occupied = [], set(), set()
     for raw in reply["units"]:
         if not isinstance(raw, dict):
@@ -378,7 +379,7 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict) -> list[dict]:
             nums = sorted({int(n) for n in numbers})
         except (TypeError, ValueError):
             continue
-        if any(n < 1 for n in nums) or seen.intersection(nums):
+        if any(n < 1 for n in nums) or len(nums) != len(numbers) or (not scoped and seen.intersection(nums)):
             continue
         kind = raw.get("unit_kind")
         if kind not in ("standalone", "group") or (kind == "standalone" and len(nums) != 1):
@@ -407,13 +408,19 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict) -> list[dict]:
         if match_at < 0 or compact.find(compact_stem, match_at + 1) >= 0:
             continue
         stem = source_chunk[char_positions[match_at]:char_positions[match_at + len(compact_stem) - 1] + 1]
+        if scoped and kind == "group":
+            stem = source_chunk.strip()
         # When the paper visibly numbers a unit, its numbers must occur in that
         # unit's source span. Unnumbered listening material stays a candidate.
         visible_numbers = {int(m.group(1)) for line in lines
                            if (m := NUMBER.match(_plain(line)))}
         span_numbers = {int(m.group(1)) for line in lines[start - 1:end]
                         if (m := NUMBER.match(_plain(line)))}
-        if any(n in visible_numbers and n not in span_numbers for n in nums):
+        if scoped:
+            from .structure_gate import _source_members
+            span_numbers = _source_members(lines[start - 1:end])
+        unnumbered = scoped and span.get("number_binding") == "unnumbered_section"
+        if not unnumbered and any(n in visible_numbers and n not in span_numbers for n in nums):
             return []
         parts = raw.get('source_parts', [])
         valid_kinds = {'question_number', 'stem', 'material', 'option', 'answer', 'explanation', 'heading'}
@@ -428,14 +435,36 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict) -> list[dict]:
                 return []
             normalized_parts.append({'kind': part['kind'], 'start_line': lo, 'end_line': hi})
         occupied.update(positions)
+        binding = {}
+        if scoped and raw.get("source_span", {}).get("number_binding") == "unnumbered_section":
+            from .structure_gate import _source_members
+            if _source_members(lines[start - 1:end]) or not any("[IMG " in line or "[TABLE" in line for line in lines[start - 1:end]):
+                return []
+            binding = {"number_binding": "unnumbered_section", "printed_numbers": []}
+        elif scoped and span.get("number_binding") == "single_writing_section" and "书面表达" in qtype and len(nums) == 1:
+            binding = {"number_binding": "single_writing_section"}
         units.append({"unit_kind": kind, "type": qtype, "numbers": nums,
+                      **({"original_number": None, "printed_number": False} if binding else {}),
                       "label": str(raw.get("label") or ""), "stem": stem,
                       "source_span": {"start_line": start, "end_line": end,
-                                      "basis": "ai_classified"},
+                                      "basis": "ai_classified", **binding},
                       "source_parts": normalized_parts,
                       "source_expected_options": int(raw.get("source_expected_options") or 0)})
+        if scoped and raw.get("identity_version") == "scoped-v1":
+            units[-1].update({key: raw[key] for key in ("identity_version", "section_id", "unit_id", "question_ids") if key in raw})
         seen.update(nums)
-    return units if len(units) == len(reply["units"]) else []
+    if len(units) != len(reply["units"]):
+        return []
+    if scoped:
+        from .question_identity import assign_scoped
+        from .structure_gate import _scoped_source_errors
+        try:
+            units = assign_scoped(units, lines, sections=candidate.get("sections"))
+            if _scoped_source_errors(units, candidate.get("sections") or [], lines):
+                return []
+        except ValueError:
+            return []
+    return units
 
 
 def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False) -> dict:
@@ -466,8 +495,11 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
             and marker.get("candidate_sha256") == candidate_sha and marker.get('pdf_ocr_sha256', '') == pdf_sha
             and marker.get('sync_policy_sha256') == policy_sha):
         units = marker.get("units") or []
-        return {"ran": bool(units), "reused": True, "units": units,
-                'sync_applicable': sync_applicable, 'sync_audit': marker.get('sync_audit') or []}
+        if sync_applicable:
+            units = _sanitize_classified({"units": units}, raw, candidate)
+        if units:
+            return {"ran": True, "reused": True, "units": units,
+                    'sync_applicable': sync_applicable, 'sync_audit': marker.get('sync_audit') or []}
     if invoke_fn is None:
         from . import agent as agent_entry, local_agent
         if not agent_entry.configured():

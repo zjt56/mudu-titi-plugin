@@ -12,9 +12,10 @@ import json
 from pathlib import Path
 
 from . import agent_tasks
+from .question_identity import question_key
 
 STAGES = ("answers", "types", "explanations", "knowledge")
-VERSION = "label-unit-context/v3"
+VERSION = "label-unit-context/v4"
 DRAFT = "06_batch/question-draft.json"
 _SOURCE = "01_source/正文.txt"
 _CONFIRMED = "01_source/structure.confirmed.json"
@@ -74,6 +75,14 @@ def project_indexed(context, selected):
     known_ids = {u["unit_id"] for u in units}
     known_numbers = {str(n) for u in units for n in u["numbers"]}
     value["confirmed_units_with_stable_ids"] = copy.deepcopy(selected)
+    answer_keys = {question_key(u, n) for u in selected for n in u["numbers"]}
+    known_answer_keys = {question_key(u, n) for u in units for n in u["numbers"]}
+    answers = value.get(agent_tasks.ARTIFACTS["answers"])
+    if isinstance(answers, dict):
+        for key in ("answers", "evidence", "missing", "difficulty", "difficultyEvidence"):
+            if isinstance(answers.get(key), dict):
+                answers[key] = {k: v for k, v in answers[key].items()
+                                if k in answer_keys or k not in known_answer_keys}
     for path in (_CONFIRMED, _STRUCTURE):
         if path in value:
             value[path] = _structure(value[path], ids, numbers, known_ids, known_numbers)

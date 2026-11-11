@@ -5,7 +5,9 @@ JSON supports a numeric answer map, {answers: map/list}, or explicit
 {number,answer} rows (including grouped subquestions). An answer array is a
 multi-part answer, not evidence for alternative acceptable answers. TXT/DOCX
 must provide explicit numbered answers: 40.D, 40: D, or 81. followed by writing
-text. Ambiguous duplicate numbers, range tables and unnumbered keys fail.
+text. Scoped batches use question-ID maps or explicitly scoped rows; repeated
+printed numbers without source identity fail rather than bind by order.
+Ambiguous duplicate numbers, range tables and unnumbered keys fail.
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from workflow.docx_extract import extract_docx
+from workflow.question_identity import VERSION as IDENTITY_VERSION, question_key
 
 
 class AnswerError(ValueError):
@@ -53,28 +56,37 @@ def normalize(value):
     return text
 
 
-def collect_json(data):
+def collect_json(data, *, scoped=False):
     answers = {}
 
     def put(n, answer):
-        key = number(n)
+        key = str(n) if scoped else number(n)
+        if scoped and not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+            raise AnswerError(f"非法 question ID：{key!r}")
         normalized = normalize(answer)
         if key in answers:
+            if scoped and key.isdigit():
+                raise AnswerError(f"ANSWER_SOURCE_SCOPE_UNBOUND：原小题号 {key} 重复且缺少来源身份，不按顺序猜测")
             raise AnswerError(f"答案题号重复或冲突：{key}")
         answers[key] = {"value": answer, "normalized": normalized}
 
-    def visit(value):
+    def visit(value, owner=None):
         if isinstance(value, dict):
+            if scoped and value.get("identity_version") == IDENTITY_VERSION:
+                owner = value
             children = value.get("subquestions")
             if children:
-                visit(children)
+                visit(children, owner)
+            elif scoped and "question_id" in value and "answer" in value:
+                put(value["question_id"], value["answer"])
             elif "number" in value and "answer" in value:
-                put(value["number"], value["answer"])
+                key = question_key(owner, number(value["number"])) if owner is not None else value["number"]
+                put(key, value["answer"])
             elif "answers" in value:
                 visit(value["answers"])
             elif "items" in value:
                 visit(value["items"])
-            elif value and all(re.fullmatch(r"\d+", str(key)) for key in value):
+            elif value and all(re.fullmatch(r"[A-Za-z0-9_-]+" if scoped else r"\d+", str(key)) for key in value):
                 for key, answer in value.items():
                     put(key, answer)
             else:
@@ -82,7 +94,7 @@ def collect_json(data):
         elif isinstance(value, list) and value:
             if all(isinstance(row, dict) for row in value):
                 for row in value:
-                    visit(row)
+                    visit(row, owner)
             else:
                 # A flat source array is an explicit one-based answer sequence.
                 for index, answer in enumerate(value, 1):
@@ -96,7 +108,7 @@ def collect_json(data):
     return answers
 
 
-def parse_text(text):
+def parse_text(text, *, scoped=False):
     text = re.sub(r"<[^>]*>|\*\*", "", text).replace("\r\n", "\n")
     # Each token starts at line/space boundaries. Numbered prose in a writing
     # answer remains ambiguous and is deliberately rejected via coverage.
@@ -112,10 +124,10 @@ def parse_text(text):
         if re.match(r"(?:答案|解析|参考答案)\s*[:：]?\s*$", answer):
             raise AnswerError(f"第{match.group(1)}题只有栏目名，缺少独立答案")
         rows.append({"number": match.group(1), "answer": answer})
-    return collect_json(rows)
+    return collect_json(rows, scoped=scoped)
 
 
-def load_answers(path):
+def load_answers(path, *, scoped=False):
     if path.suffix.lower() == ".json":
         def unique(pairs):
             result = {}
@@ -124,7 +136,7 @@ def load_answers(path):
                     raise AnswerError(f"JSON键重复：{key}")
                 result[key] = value
             return result
-        return collect_json(json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=unique))
+        return collect_json(json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=unique), scoped=scoped)
     if path.suffix.lower() == ".docx":
         with tempfile.TemporaryDirectory(prefix="answer-docx-") as folder:
             result = extract_docx(path, Path(folder))
@@ -132,9 +144,9 @@ def load_answers(path):
             raise AnswerError("DOCX答案提取存在未核对警告：" + "; ".join(result["warnings"]))
         if "[TABLE" in result["text"] or "[IMG " in result["text"]:
             raise AnswerError("DOCX答案含表格/图片，须先核对并提供明确题号的答案JSON")
-        return parse_text(result["text"])
+        return parse_text(result["text"], scoped=scoped)
     if path.suffix.lower() == ".txt":
-        return parse_text(path.read_text(encoding="utf-8-sig"))
+        return parse_text(path.read_text(encoding="utf-8-sig"), scoped=scoped)
     raise AnswerError("独立答案仅支持 JSON、带明确题号的 TXT 或原生 DOCX")
 
 
@@ -155,7 +167,81 @@ def _writing_numbers(batch):
     return result
 
 
+def _scoped(batch):
+    return batch.get("identity_version") == IDENTITY_VERSION or any(
+        isinstance(item, dict) and item.get("identity_version") == IDENTITY_VERSION
+        for item in batch.get("items") or [])
+
+
+def _inspect_scoped(batch, answers):
+    actual, owners, writing = {}, {}, set()
+    for item in batch.get("items") or []:
+        if not isinstance(item, dict) or item.get("identity_version") != IDENTITY_VERSION:
+            raise AnswerError("scoped 批次含缺少身份的题目，不能回退全局题号")
+        nums = item.get("numbers") or ([item.get("number")] if item.get("number") is not None else [])
+        children = item.get("subquestions") or []
+        rows = {number(child.get("number")): child for child in children}
+        expected = {number(n) for n in nums}
+        if len(expected) != len(nums) or len(rows) != len(children):
+            raise AnswerError("scoped 单元内小题号重复")
+        if set(item.get("question_ids") or {}) != expected or (children and set(rows) != expected):
+            raise AnswerError("scoped 单元题号、子题与 question ID 映射不一致")
+        for n in nums:
+            printed = number(n)
+            qid = question_key(item, printed)
+            if qid in actual:
+                raise AnswerError(f"question ID 重复：{qid}")
+            row = rows.get(printed) if children else item
+            if row is None:
+                raise AnswerError(f"{qid}：缺少本单元原号 {printed} 的小题")
+            if row.get("question_id") not in (None, qid):
+                raise AnswerError(f"{qid}：子题身份与单元映射不一致")
+            actual[qid] = {"value": row.get("answer"), "normalized": normalize(row.get("answer"))}
+            owners[qid] = {"unit_id": item.get("unit_id") or item.get("id"),
+                           "question_id": qid, "number": int(printed)}
+            if str(item.get("question_type") or item.get("type") or "").strip() == "书面表达":
+                writing.add(qid)
+    if not actual:
+        raise AnswerError("scoped 批次未找到题目")
+    numeric_owners = {}
+    for qid, owner in owners.items():
+        numeric_owners.setdefault(str(owner["number"]), []).append(qid)
+    source, issues, unbound = {}, [], set()
+    for key, entry in answers.items():
+        if key in actual:
+            if key in source:
+                raise AnswerError(f"独立答案对同一 question ID 重复绑定：{key}")
+            source[key] = entry
+        elif str(key).isdigit() and str(int(key)) in numeric_owners:
+            matches = numeric_owners[str(int(key))]
+            if len(matches) != 1:
+                unbound.update(matches)
+                issues.append({"code": "ANSWER_SOURCE_SCOPE_UNBOUND", "number": int(key),
+                               "message": "独立答案仅有原小题号，跨大题同号缺少来源身份；不能猜测对应关系"})
+            elif matches[0] in source:
+                raise AnswerError(f"独立答案对同一 question ID 重复绑定：{matches[0]}")
+            else:
+                source[matches[0]] = entry
+        else:
+            issues.append({"code": "ANSWER_EXTRA_NUMBERS", "question_id": str(key),
+                           "message": "独立答案含批次外身份，须确认是否匹配原卷"})
+    for qid, entry in actual.items():
+        if qid in writing or qid in unbound:
+            continue
+        if entry["normalized"] is None or str(entry["value"] or "").strip() in {"无答案", "无解析"}:
+            continue
+        if qid not in source:
+            issues.append(dict(owners[qid], code="ANSWER_SOURCE_MISSING", message="独立答案未覆盖此题身份"))
+        elif entry["normalized"] != source[qid]["normalized"]:
+            issues.append(dict(owners[qid], code="ANSWER_MISMATCH", message="正式答案与独立答案不一致",
+                               candidate=entry["value"], source=source[qid]["value"]))
+    return {"passed": not issues, "issues": issues, "checked_numbers": [o["number"] for o in owners.values()],
+            "checked_question_ids": list(actual), "independent_source_required": True, "solved_questions": False}
+
+
 def inspect(batch, answers):
+    if _scoped(batch):
+        return _inspect_scoped(batch, answers)
     actual = collect_json({"items": batch.get("items")})
     issues = []
     writing = _writing_numbers(batch)
@@ -193,11 +279,12 @@ def main(argv=None):
         if args.batch.resolve(strict=True) == args.answers.resolve(strict=True):
             raise AnswerError("不能把待检查批次本身作为独立答案")
         batch = json.loads(args.batch.read_text(encoding="utf-8-sig"))
-        report = inspect(batch, load_answers(args.answers))
+        report = inspect(batch, load_answers(args.answers, scoped=_scoped(batch)))
         print(json.dumps(report, ensure_ascii=False))
         return 0 if report["passed"] else 1
     except (OSError, ValueError, TypeError, AttributeError) as exc:
-        print(json.dumps({"passed": False, "issues": [{"code": "ANSWER_INPUT_ERROR", "message": str(exc)}]}, ensure_ascii=False))
+        code = "ANSWER_SOURCE_SCOPE_UNBOUND" if str(exc).startswith("ANSWER_SOURCE_SCOPE_UNBOUND") else "ANSWER_INPUT_ERROR"
+        print(json.dumps({"passed": False, "issues": [{"code": code, "message": str(exc)}]}, ensure_ascii=False))
         return 1
 
 

@@ -41,6 +41,15 @@ class ProvisionalTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(value if isinstance(value, str) else json.dumps(value), encoding='utf-8')
 
+    def test_scoped_units_do_not_enter_legacy_number_candidates(self):
+        self.put('01_source/structure.confirmed.json', {'identity_version': 'scoped-v1', 'units': []})
+        with patch('workflow.provisional.local_agent.invoke', side_effect=AssertionError('No model calls')):
+            outcome = provisional.run(self.batch)
+        self.assertEqual(outcome['code'], 'unsupported_scoped_identity')
+        self.assertEqual(outcome['attempted'], 0)
+        self.assertFalse((self.batch / 'workflow/provisional').exists())
+        self.assert_formal_stages_untouched()
+
     def test_executes_only_unaffected_candidate_without_formal_outputs(self):
         result = {'status': 'completed', 'findings': [], 'notes': [], 'artifacts': {
             '03_types/types.json': {'items': [{'unit_id': 'q-2', 'type': '单项填空',

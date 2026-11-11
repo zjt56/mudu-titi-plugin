@@ -14,6 +14,7 @@ from pathlib import Path
 # Compatibility is an explicit migration for these known prompt contracts, not
 # an exemption for future instructions whose semantics have not been checked.
 SUPPORTED_CURRENT_CONTRACT = ("blind-context-v11", "review-prompt-v9")
+SUPPORTED_CURRENT_CONTRACTS = (SUPPORTED_CURRENT_CONTRACT, ("blind-context-v12", "review-prompt-v9"))
 
 
 def verify_format_equivalence(batch, relative, old_sha256, current_sha256):
@@ -159,8 +160,11 @@ def compatible_plan(batch_dir, current, payload):
     batch = Path(batch_dir)
     info = {"accepted": False, "mode": "whole-plan-read-only/v1"}
     try:
-        if (review_rounds.CONTEXT_VERSION, review_rounds.PROMPT_VERSION) != SUPPORTED_CURRENT_CONTRACT:
+        if (review_rounds.CONTEXT_VERSION, review_rounds.PROMPT_VERSION) not in SUPPORTED_CURRENT_CONTRACTS:
             raise ValueError("New prompt/context contract requires fresh review")
+        from .agent_tasks import confirmed_units
+        if any(unit.get("identity_version") == "scoped-v1" for unit in confirmed_units(batch)):
+            raise ValueError("Scoped question identities require fresh scoped review; legacy whole-plan reuse is forbidden")
         if not isinstance(payload, dict) or set(payload) != {"plan", "rounds"}:
             raise ValueError("Legacy payload must contain exactly plan and rounds")
         old, records = payload["plan"], payload["rounds"]
@@ -211,7 +215,7 @@ def compatible_plan(batch_dir, current, payload):
             path = _file(root, name[6:])
             if _sha(path) != current["input_hashes"][name]:
                 raise ValueError("Current newly registered rule hash is stale")
-            rules[name] = (path, path.read_text(encoding="utf-8-sig"))
+            rules[name] = (path, path.read_bytes().decode("utf-8-sig"))
         executions, task_ids = set(), []
         for record in records:
             if record.get("reuse"):

@@ -71,7 +71,7 @@ class ReviewRecoveryTest(unittest.TestCase):
                 'notes': [], 'findings': []}
 
     def snapshot(self, prefixes):
-        return {str(p.relative_to(self.batch)): p.read_bytes()
+        return {p.relative_to(self.batch).as_posix(): p.read_bytes()
                 for prefix in prefixes for p in (self.batch / prefix).rglob('*') if p.is_file()}
 
     def test_attempt_names_are_validated_before_creating_any_directory(self):

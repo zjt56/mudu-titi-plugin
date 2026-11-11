@@ -40,8 +40,10 @@ try:
     from workflow import contracts as wf_contracts
     from workflow import manifest as wf_manifest
     from workflow import execution_state as wf_execution_state
+    from workflow import source_policy as wf_source_policy
 except ImportError:  # 看台可以脱离流水线单独跑
     auto_flow = wf_contracts = wf_manifest = wf_execution_state = None
+    wf_source_policy = None
 
 ROOT = Path(__file__).resolve().parents[1]
 # 插件版：宿主编译生效配置后，让本进程拉起的 runner/auto 子进程也走插件模型路由。
@@ -176,12 +178,14 @@ def number_of_unit(rows):
     return mapping
 
 
-def candidates_by_number(folder):
+def candidates_by_number(folder, *, unit_id=None):
     mapping = {}
     directory = folder / "candidates"
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
         item = load(path, {}) or {}
         number = str(item.get("number") or "").strip()
+        if unit_id is not None and str(item.get("unit_id") or "") != str(unit_id):
+            continue
         if number.isdigit():
             mapping[number] = (item, path)
     return mapping
@@ -1169,10 +1173,12 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
     answer_candidates = [f for f in docs if re.search(r"答案|answer|解析", Path(f["filename"]).stem, re.I)]
     answer = answer_candidates[0] if answer_candidates else None
     main_candidates = [f for f in docs if f is not answer]
-    # When the same upload includes Word and PDF, retain Word as the native
-    # source and classify the PDF as supporting material, not an answer key.
-    source = next((f for f in main_candidates if Path(f['filename']).suffix.lower() == '.docx'),
-                  main_candidates[0] if main_candidates else docs[0])
+    # 来源优先级（用户 2026-11-11 确认）：Word 原卷 > 带文字层 PDF > 扫描件。
+    # 同一批上传同时含 Word 与 PDF 时，Word 一定是提取主源，PDF 只作版面核对。
+    source = (wf_source_policy.select_primary(main_candidates)
+              if wf_source_policy is not None else
+              next((f for f in main_candidates if Path(f['filename']).suffix.lower() == '.docx'),
+                   main_candidates[0] if main_candidates else docs[0]))
     if answer is source:
         answer = None
     if answer is None:
@@ -1251,9 +1257,13 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
         inbox_rel = str(folder.relative_to(ROOT))
     except ValueError:
         inbox_rel = str(folder)
+    source_notice = (wf_source_policy.upload_notice(source, [f for f in docs if f is not source])
+                     if wf_source_policy is not None else "")
     return {"name": batch_folder.name, "inbox": inbox_rel,
             "paper": paper_info(batch_folder, {}, manifest),
             "stage": stage_cards(manifest),
+            "source_notice": source_notice,
+            "source_kind": wf_source_policy.kind(source) if wf_source_policy is not None else None,
             "files": [path.name for path in (saved_source, saved_answer, saved_audio) if path]
                      + [path.name for path in saved_extras + saved_extra_audio]}
 
@@ -2727,16 +2737,38 @@ def detail(name, unit_id):
     base = question_rows(folder, report)
     number_map = number_of_unit(base)
     rows = merged_rows(folder, report)
+    confirmed = load(folder / "01_source/structure.confirmed.json", {}) or {}
+    scoped_units = [u for u in confirmed.get("units", []) if isinstance(u, dict)
+                    and u.get("identity_version") == "scoped-v1"]
+    has_scoped = bool(scoped_units) or any(r.get("identity_version") == "scoped-v1" for r in rows)
     row = next((r for r in rows if str(r.get("unit_id")) == str(unit_id)), None)
     if row is None:
         # Previously bookmarked merged group opens its first current partition.
         row = next((r for r in rows if r.get("source_parent_id") == str(unit_id)), None)
-    if row is None:
+    if row is None and not has_scoped:
         alias = re.sub(r"\D", "", str(unit_id))
         if alias:
             row = next((r for r in rows if int(alias) in (r.get("numbers") or [])), None)
     if row is None:
-        row = next((r for r in rows if str(r.get("number")) == str(unit_id)), {})
+        row = {} if has_scoped else next((r for r in rows if str(r.get("number")) == str(unit_id)), {})
+    bound_units = [u for u in scoped_units if str(u.get("unit_id")) == str(row.get("unit_id") or unit_id)]
+    bound_unit = bound_units[0] if len(bound_units) == 1 else {}
+    scoped = has_scoped or row.get("identity_version") == "scoped-v1" or bool(bound_unit)
+    selected_uid = str(row.get("unit_id") or unit_id)
+    if scoped:
+        row = dict(row)
+        for key in ("identity_version", "section_id", "source_section", "question_ids", "printed_numbers"):
+            if key in bound_unit:
+                row[key] = bound_unit[key]
+        printed_numbers = bound_unit.get("printed_numbers", (bound_unit.get("source_span") or {}).get("printed_numbers"))
+        if printed_numbers is not None:
+            row["printed_numbers"] = printed_numbers
+        if row.get("printed_numbers") == []:
+            row["label"] = str((row.get("source_section") or {}).get("title") or "无印刷题号")
+        # Numeric-only findings have no unique owner in a scoped batch.
+        queue = dict(queue, items=[f for f in queue.get("items", [])
+                                  if isinstance(f, dict) and str(f.get("unit_id") or "") == selected_uid])
+        base = [r for r in base if str(r.get("unit_id") or "") == selected_uid]
     try:
         decorate_review_rows(folder, [row])
     except (ImportError, OSError, ValueError, TypeError, KeyError):
@@ -2746,12 +2778,23 @@ def detail(name, unit_id):
         fallback = number_map.get(str(row.get("unit_id") or unit_id))
         if str(fallback or "").strip().isdigit():
             numbers = [int(fallback)]
+    def detail_findings(wanted_numbers):
+        if not scoped:
+            return findings_for(queue, wanted_numbers, number_map)
+        wanted = {str(n) for n in wanted_numbers}
+        return [f for f in queue.get("items", [])
+                if not str(f.get("number") or "").strip() or str(f.get("number")) in wanted]
+
     lines = source_lines(folder)
     if source_slice is not None and lines and numbers:
-        chunk = source_slice(folder, numbers, lines)
+        chunk = source_slice(folder, numbers, lines, unit_id=selected_uid)
+        if scoped and chunk:
+            title = str((row.get("source_section") or {}).get("title") or "")
+            if title and chunk[0] != title:
+                chunk = [title, *chunk]
         # 独立题预览补上所属大题的标题+作答导语（「Ⅱ.短对话理解…」「你将听到十段对话…」），
         # 题组自己带材料/导语，无需重复。只影响预览，不改切题结果。
-        if len(numbers) == 1 and str(row.get("unit_kind") or "") != "group" and section_leadin is not None:
+        if not scoped and len(numbers) == 1 and str(row.get("unit_kind") or "") != "group" and section_leadin is not None:
             try:
                 lead = section_leadin(lines, numbers, chunk[0] if chunk else None)
                 if lead:
@@ -2776,8 +2819,9 @@ def detail(name, unit_id):
     if not blocks and text:
         blocks = [{"type": "text", "text": text}]
 
-    by_number = candidates_by_number(folder)
-    batch_item, _ = candidate(folder, row.get("unit_id") or unit_id)
+    by_number = candidates_by_number(folder, unit_id=selected_uid if scoped else None)
+    valid_identity = not scoped or bool(row.get("unit_id") or bound_unit)
+    batch_item, _ = candidate(folder, row.get("unit_id") or unit_id) if valid_identity else ({}, None)
     subs = []
     for number in numbers:
         cand, path = by_number.get(str(number), ({}, None))
@@ -2799,14 +2843,14 @@ def detail(name, unit_id):
             "state": state,
             "candidate_path": str(path.relative_to(folder)) if path else None,
         }
-        item["finding_count"] = len(findings_for(queue, [number], number_map))
-        label_items, fmt_items, _ = split_findings(findings_for(queue, [number], number_map))
+        item["finding_count"] = len(detail_findings([number]))
+        label_items, fmt_items, _ = split_findings(detail_findings([number]))
         item["label_count"] = len([f for f in label_items if is_open(f)])
         item["format_count"] = len([f for f in fmt_items if is_open(f)])
         item["needs_human"] = bool(item["label_count"])
         subs.append(item)
 
-    if not subs:
+    if not subs and valid_identity:
         fallback_cand, fallback_path = candidate(folder, row.get("unit_id") or unit_id)
         if fallback_cand:
             fallback_number = fallback_cand.get("number")
@@ -2820,11 +2864,11 @@ def detail(name, unit_id):
                 "subtype": fallback_cand.get("subtype") or "", "knowledge": fallback_cand.get("knowledge") or [],
                 "difficulty": fallback_cand.get("difficulty") or "", "state": state,
                 "candidate_path": str(fallback_path.relative_to(folder)) if fallback_path else None,
-                "finding_count": len(findings_for(queue, numbers, number_map)),
+                "finding_count": len(detail_findings(numbers)),
                 "needs_human": False,
             })
 
-    findings = findings_for(queue, numbers, number_map)
+    findings = detail_findings(numbers)
     label_findings, format_findings, other_findings = split_findings(findings)
     whole_unit = taxonomy.whole_unit_type(row.get("type") or batch_item.get("type") or "")
     label_open = group_duplicate_findings(label_findings, whole_unit=whole_unit)
@@ -2852,6 +2896,8 @@ def detail(name, unit_id):
             if item["verdict"] in ("header", "banner", "unused", "excluded")}
     if drop:
         blocks = [block for block in blocks if not (block.get("type") == "image" and block.get("name") in drop)]
+    if scoped and row.get("printed_numbers") == []:
+        subs = [dict(sub, display_number=None, internal_number=sub.get("number")) for sub in subs]
     return {"batch": name, "meta": report.get("meta", manifest.get("meta", {})),
             "paper": paper_info(folder, report, manifest),
             "stage": stage_cards(manifest, bool(numbers), bool(advance_state(name).get("running"))),
@@ -3090,12 +3136,29 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("批次不存在或已归档，请刷新列表")
         if labels is not None and "knowledge" in labels:
             labels = {**labels, "knowledge": taxonomy.require_knowledge(labels["knowledge"])}
-        by_number = candidates_by_number(folder)
         rows = merged_rows(folder, report_for(folder))
+        confirmed = load(folder / "01_source/structure.confirmed.json", {}) or {}
+        scoped_units = [u for u in confirmed.get("units", []) if isinstance(u, dict)
+                        and u.get("identity_version") == "scoped-v1"]
+        scoped = bool(scoped_units) or any(r.get("identity_version") == "scoped-v1" for r in rows)
+        selected = next((u for u in scoped_units if str(u.get("unit_id")) == str(unit_id)), None)
+        if scoped and selected is None:
+            selected = next((r for r in rows if r.get("identity_version") == "scoped-v1"
+                             and str(r.get("unit_id")) == str(unit_id)), None)
+        if scoped and selected is None:
+            raise ValueError("分节重号批次必须指定有效 unit_id，不能按小题号保存")
+        by_number = candidates_by_number(folder, unit_id=unit_id if scoped else None)
         owner = {}
-        for row in rows:
+        for row in ([selected] if scoped else rows):
             for number in row.get("numbers") or []:
                 owner[str(number)] = row.get("unit_id")
+        if scoped:
+            for item in items:
+                number = str(item.get("number") or "").strip()
+                if number not in owner:
+                    raise ValueError("小题号不属于指定 unit_id，拒绝跨大题保存")
+                if number not in by_number and not (selected.get("question_ids") or {}).get(number):
+                    raise ValueError("指定 unit_id 缺少小题身份，拒绝按全局题号建草稿")
         saved = []
         warnings = []
         with _lock:
@@ -3165,7 +3228,11 @@ class Handler(BaseHTTPRequestHandler):
                 existing, path = by_number.get(number, ({}, None))
                 if path is None:
                     # 新建草稿用题号命名，绝不复用 candidates 里已有的 LOCAL-NN（那是序号，不是题号）
-                    stem_name = f"LOCAL-Q{int(number):02d}"
+                    stem_name = (str((selected.get("question_ids") or {}).get(number) or "")
+                                 if scoped else f"LOCAL-Q{int(number):02d}")
+                    if not stem_name:
+                        raise ValueError("指定 unit_id 缺少小题身份，拒绝按全局题号建草稿")
+                    stem_name = stem_name.replace("/", "_").replace("\\", "_")
                     path = folder / "candidates" / f"{stem_name}.json"
                     index = 2
                     while path.exists():

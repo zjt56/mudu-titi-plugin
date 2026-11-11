@@ -130,6 +130,11 @@ def _assign_summaries(units, summaries):
 
 def build_payload(batch_dir):
     batch = Path(batch_dir)
+    units = _units(batch)
+    # The legacy extractor indexes by printed number. Scoped units deliberately
+    # use the normal model/source_ref path until direct extraction is scope-aware.
+    if any(unit.get('identity_version') == 'scoped-v1' for unit in units):
+        return None
     paths, pdf_paths = _word_sources(batch), _pdf_sources(batch)
     if not paths and not pdf_paths:
         return None

@@ -464,7 +464,9 @@ def _unit_bindings(batch, units, hashes):
                                      "structure_status", "characters", "char_count", "ocr_assist_enabled"}}
     result = {}
     for unit in units:
-        uid, numbers = unit["unit_id"], {str(n) for n in unit["numbers"]}
+        from .question_identity import question_key
+        uid, numbers = unit["unit_id"], {question_key(unit, n) for n in unit["numbers"]}
+        known_answer_keys = {question_key(u, n) for u in units for n in u['numbers']}
         text = _source_excerpts(source, [unit], force=True, adjacent_units=units)
         if isinstance(text, dict):
             text = [span["text"] for span in text["spans"]]
@@ -482,7 +484,7 @@ def _unit_bindings(batch, units, hashes):
             selected = {}
             for key, value in answers.items():
                 if isinstance(value, dict):
-                    value = {k: v for k, v in value.items() if not str(k).isdigit() or str(k) in numbers}
+                    value = {k: v for k, v in value.items() if k in numbers or k not in known_answer_keys}
                 selected[key] = value
             payload["answers"] = semantic_review_value(selected)
         payload["observations"] = semantic_review_value(_load(batch / "workflow/media-observations.json"))
@@ -704,7 +706,7 @@ def _completed_part_source(batch, task_id, binding):
             or binding.get("input_hashes") != state.get("input_hashes")
             or binding.get("prior_rounds") != state.get("prior_rounds")
             or binding.get("state_digest") != expected_digest
-            or binding.get("context_version") not in ("blind-context-v10", "blind-context-v11")
+            or binding.get("context_version") not in ("blind-context-v10", "blind-context-v11", "blind-context-v12")
             or task.get("protocol") != ROUND_PROTOCOL or task.get("task_id") != task_id
             or task.get("input_binding") != state["plan"]["input_binding"]
             or task.get("round_id") != state.get("round_id")
@@ -1445,7 +1447,7 @@ def _verify_round_sources(batch, plan, record, verify_reuse=True):
                 or binding.get("plan") != plan or binding.get("input_hashes") != state.get("input_hashes")
                 or binding.get("prior_rounds") != state.get("prior_rounds")
                 or binding.get("state_digest") != expected_state_digest
-                or binding.get("context_version") not in ("blind-context-v8", "blind-context-v9", "blind-context-v10", "blind-context-v11")
+                or binding.get("context_version") not in ("blind-context-v8", "blind-context-v9", "blind-context-v10", "blind-context-v11", "blind-context-v12")
                 or task.get("protocol") != ROUND_PROTOCOL or task.get("task_id") != task_id
                 or task.get("round_id") != record["round_id"] or task.get("input_binding") != plan["input_binding"]
                 or task.get("prompt") != state_parts[index].get("prompt")

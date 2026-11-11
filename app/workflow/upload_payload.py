@@ -36,7 +36,9 @@ LOCAL_FIELDS = {"unit_id", "number", "numbers", "status", "warnings", "knowledge
                 "evidence", "source_slice", "source_parent_id", "source_numbers", "review", "review_status",
                 "checked", "notes", "wordCount", "word_count", "materialBlocksLocked", "filterMetadataStored",
                 "optionColumns", "subquestionOptionColumns", "paperId", "paperOrder", "paperSection", "paperInstruction",
-                "numberStart", "numberEnd", "subtypes", "categories", "audio", "images", "image", "audio_map", "image_map"}
+                "numberStart", "numberEnd", "subtypes", "categories", "audio", "images", "image", "audio_map", "image_map",
+                 "identity_version", "section_id", "source_section", "question_ids", "question_id",
+                 "original_number", "printed_number"}
 
 
 def _path(value):
@@ -50,6 +52,110 @@ def _nonempty(value):
 
 def _positive(value):
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def identity_errors(items, *, legacy_numbers=False):
+    """Validate final local identities before transport strips bookkeeping fields.
+
+    A scoped batch is all-or-nothing. Child IDs must agree with their parent's
+    original-number map; neither a printed number nor a wire ID can repair it.
+    """
+    if not isinstance(items, list):
+        return []
+    fields = {"identity_version", "section_id", "source_section", "question_ids", "question_id"}
+    errors, seen_numbers, seen_units, seen_questions, sections = [], {}, {}, {}, {}
+
+    def error(code, message, path, unit):
+        errors.append({"code": code, "message": message, "path": path,
+                       "unit_id": str(unit.get("unit_id") or unit.get("id") or "")})
+
+    def has_identity(item):
+        if not isinstance(item, dict):
+            return False
+        children = item.get("subquestions", [])
+        return bool(fields.intersection(item)) or (isinstance(children, list)
+            and any(has_identity(c) for c in children))
+
+    scoped = any(has_identity(item) for item in items)
+    for index, unit in enumerate(items):
+        if not isinstance(unit, dict):
+            continue
+        path = f"items[{index}]"
+        children = unit.get("subquestions", [])
+        children = children if isinstance(children, list) else []
+        kind = unit.get("unit_kind", "group" if children else "standalone")
+        leaves = children if kind == "group" else [unit]
+        if not scoped:
+            if not legacy_numbers:
+                continue
+            for child_index, leaf in enumerate(leaves):
+                if not isinstance(leaf, dict) or not _positive(leaf.get("number")):
+                    continue
+                number = leaf["number"]
+                location = f"{path}.subquestions[{child_index}]" if kind == "group" else path
+                if number in seen_numbers:
+                    error("QUESTION_NUMBER_DUPLICATE", f"重复题号 {number}（首次位于 {seen_numbers[number]}）", location, unit)
+                else:
+                    seen_numbers[number] = location
+            continue
+        if unit.get("identity_version") != "scoped-v1":
+            error("SCOPED_IDENTITY_REQUIRED", "含来源身份的批次必须全部采用 scoped-v1，不能混用或回退数字题号", path, unit)
+            continue
+        uid, sid = unit.get("unit_id"), unit.get("section_id")
+        section, mapping, ns = unit.get("source_section"), unit.get("question_ids"), unit.get("numbers")
+        safe = lambda value: isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value) is not None
+        if not safe(uid) or not safe(sid):
+            error("SCOPED_IDENTITY_INVALID", "unit_id/section_id 必须为安全的非空字符串", path, unit)
+        elif uid in seen_units:
+            error("UNIT_ID_DUPLICATE", f"重复单元身份 {uid}", path, unit)
+        else:
+            seen_units[uid] = path
+        valid_section = (isinstance(section, dict) and _nonempty(section.get("title"))
+            and isinstance(section.get("ordinal"), str) and isinstance(section.get("context"), str)
+            and _positive(section.get("occurrence")))
+        if not valid_section:
+            error("SOURCE_SECTION_INVALID", "source_section 必须保留原标题、原序号、上下文及正整数 occurrence", path, unit)
+        elif safe(sid):
+            if sid in sections and sections[sid] != section:
+                error("SOURCE_SECTION_CONFLICT", "同一 section_id 的来源大题信息不一致", path, unit)
+            sections[sid] = section
+        valid_numbers = (isinstance(ns, list) and bool(ns) and all(_positive(n) for n in ns)
+                         and len(ns) == len(set(ns)))
+        if valid_numbers:
+            child_numbers = [leaf.get("number") for leaf in children if isinstance(leaf, dict)]
+            if (kind == "standalone" and ns != [unit.get("number")]
+                    or kind == "group" and (len(child_numbers) != len(children)
+                        or any(not _positive(n) for n in child_numbers)
+                        or len(child_numbers) != len(set(child_numbers))
+                        or set(child_numbers) != set(ns))):
+                error("QUESTION_ID_COVERAGE", "来源身份必须与独立题或全部唯一子题的原号完整一致", path, unit)
+        valid_map = (valid_numbers and isinstance(mapping, dict)
+                     and set(mapping) == {str(n) for n in ns}
+                     and all(safe(qid) for qid in mapping.values()))
+        if not valid_map:
+            error("QUESTION_ID_MAP_INVALID", "question_ids 必须逐一完整对应本单元原题号并包含安全唯一 qid", path, unit)
+            continue
+        for qid in mapping.values():
+            if qid in seen_questions:
+                error("QUESTION_ID_DUPLICATE", f"重复子题身份 {qid}（首次位于 {seen_questions[qid]}）", path, unit)
+            else:
+                seen_questions[qid] = path
+        for child_index, leaf in enumerate(leaves):
+            location = f"{path}.subquestions[{child_index}]" if kind == "group" else path
+            if not isinstance(leaf, dict):
+                continue
+            expected = mapping.get(str(leaf.get("number")))
+            if not expected or leaf.get("question_id") != expected:
+                error("QUESTION_ID_MISMATCH", "question_id 必须等于所属单元 question_ids[原题号]", location, unit)
+            if leaf is not unit:
+                for key, value in (("identity_version", "scoped-v1"), ("unit_id", uid), ("section_id", sid)):
+                    if key in leaf and leaf[key] != value:
+                        error("CHILD_IDENTITY_CONFLICT", f"子题 {key} 与所属单元不一致", location, unit)
+                if fields.intersection(leaf) - {"question_id", "identity_version", "section_id"}:
+                    error("CHILD_IDENTITY_CONFLICT", "子题只持有所属单元的 question_id，不得携带另一套来源映射", location, unit)
+        if kind == "group" and unit.get("question_id") not in (None, ""):
+            error("GROUP_QUESTION_ID_INVALID", "题组不能冒用某个子题 question_id", path, unit)
+    return errors
 
 
 def _difficulty(value):
@@ -800,6 +906,7 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
     if not isinstance(items, list) or not items:
         builder.error("BATCH_ITEMS_INVALID", "batch.items 必须是非空数组")
         items = []
+    builder.errors.extend(identity_errors(items))
     # Audit the local labels before any remote ID replacement or group union.
     audit = label_audit.inspect_batch(_local_audit_view(batch))
     builder.errors.extend({"unit_id": "", **error} for error in audit["errors"])

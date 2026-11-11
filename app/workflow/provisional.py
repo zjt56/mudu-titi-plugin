@@ -225,8 +225,8 @@ def _answer_sources(batch, manifest):
             cleaned_body, _, removed = denoise.clean_body(original_body)
             if (not any(issue.get("code") == "ANSWER_APPENDIX_DETECTED"
                         for issue in structure.get("unresolved", []))
-                    or removed or not body or cleaned_body.strip() != body
-                    or not appendix or original_appendix.strip() != appendix):
+                    or removed or not body or cleaned_body.strip().splitlines() != body.splitlines()
+                    or not appendix or original_appendix.strip().splitlines() != appendix.splitlines()):
                 return []
         except (OSError, ValueError, KeyError, TypeError, ElementTree.ParseError, zipfile.BadZipFile):
             return []
@@ -367,6 +367,12 @@ def configured():
 
 def run(batch_dir):
     batch = Path(batch_dir).resolve()
+    confirmed = agent_tasks._json(agent_tasks._safe_path(batch, "01_source/structure.confirmed.json"))
+    if (confirmed.get("identity_version") == "scoped-v1"
+            or any(unit.get("identity_version") == "scoped-v1" for unit in confirmed.get("units", [])
+                   if isinstance(unit, dict))):
+        return {"status": "needs_review", "code": "unsupported_scoped_identity", "attempted": 0,
+                "reason": "旧隔离候选路径仅支持全局唯一数字题号；scoped 单元须使用正式按 unit_id 绑定的局部流程"}
     manifest = mf.load(batch)
     report = agent_tasks._json(agent_tasks._safe_path(batch, "07_review/structure-gate.json"))
     if not isinstance(report, dict) or report.get("passed") is not False or not report.get("blockers"):

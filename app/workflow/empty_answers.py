@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .agent_tasks import confirmed_units
+from .question_identity import question_key
 
 
 def write_empty_answers(batch_dir):
@@ -14,7 +15,7 @@ def write_empty_answers(batch_dir):
     missing = {}
     for unit in confirmed_units(root):
         for number in unit["numbers"]:
-            missing[str(number)] = ["未提供答案原文；按无答案占位继续"]
+            missing[question_key(unit, number)] = ["未提供答案原文；按无答案占位继续"]
     value = {"answers": {}, "evidence": {}, "missing": missing}
     path = root / "01_source_ans/answers.json"
     path.parent.mkdir(parents=True, exist_ok=True)

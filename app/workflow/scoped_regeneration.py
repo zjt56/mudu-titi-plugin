@@ -5,6 +5,7 @@ canonical artifact, are validated, and cannot be rewritten by the model.
 """
 import copy
 from pathlib import Path
+from .question_identity import question_key
 
 STAGES = frozenset(('answers', 'explanations', 'types', 'knowledge', 'audio'))
 
@@ -53,7 +54,7 @@ def project(stage, context, units):
 def _subset(stage, payload, units):
     ids = {u['unit_id'] for u in units}
     if stage == 'answers':
-        nums = {str(n) for u in units for n in u['numbers']}
+        nums = {question_key(u, n) for u in units for n in u['numbers']}
         return {key: {n: copy.deepcopy(v) for n, v in mapping.items() if n in nums}
                 for key, mapping in payload.items()}
     result = {'items': [copy.deepcopy(r) for r in payload['items'] if r.get('unit_id') in ids]}
@@ -100,7 +101,7 @@ def merge(batch, stage, payload, context, units, *, notes=None):
     untouched = [u for u in eligible if u['unit_id'] not in ids]
     candidate = copy.deepcopy(payload)
     if stage == 'answers':
-        allowed = {str(n) for u in chosen for n in u['numbers']}
+        allowed = {question_key(u, n) for u in chosen for n in u['numbers']}
         agent_tasks._fields(candidate, ('answers', 'evidence', 'missing', 'difficulty', 'difficultyEvidence'),
                             ('answers', 'evidence', 'missing'))
         if any(not isinstance(v, dict) or not set(v) <= allowed for v in candidate.values()):

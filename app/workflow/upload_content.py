@@ -158,6 +158,154 @@ def _minor_edit(source, value, limit=2):
     return edits <= limit
 
 
+def scoped_source_matches(unit, number, path, line, source_lines):
+    """Prove a printed number belongs to this unit at actual source coordinates.
+
+    A title/type alone is never evidence. Companion excerpts need the complete
+    section occurrence/context identity, independently found in both sources.
+    """
+    from .question_identity import VERSION
+    from .sync_practice import heading_candidates
+    if unit.get('identity_version') != VERSION:
+        return True
+    if number not in (unit.get('numbers') or []):
+        return False
+    body_path = '01_source/正文.txt'
+    body = source_lines.get(body_path, [])
+    lines = source_lines.get(path, [])
+    span, section = unit.get('source_span') or {}, unit.get('source_section') or {}
+    start, end = span.get('start_line'), span.get('end_line')
+    if (type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(body)
+            or type(line) is not int or not 1 <= line <= len(lines)):
+        return False
+    def signature(row):
+        return (_norm(str(row.get('title') or '')), _norm(str(row.get('context') or '')),
+                row.get('occurrence'))
+    body_sections = heading_candidates('\n'.join(body))
+    owners = [row for row in body_sections
+              if row['start_line'] == section.get('start_line')
+              and row['end_line'] == section.get('end_line')
+              and signature(row) == signature(section)]
+    if len(owners) != 1 or not owners[0]['start_line'] <= start <= end <= owners[0]['end_line']:
+        return False
+    from .question_identity import printed_anchors
+    local_anchors = printed_anchors(body[start - 1:end])
+    body_hits = [start + index for index, n in local_anchors if n == int(number)]
+    if not body_hits:
+        # An explicit single-task alias is allowed only for a wholly unnumbered
+        # section. It cannot convert an arbitrary missing number into a match.
+        if (span.get('number_binding') not in {'unnumbered_section', 'single_writing_section'}
+                or number != 1 or unit.get('numbers') != [1] or local_anchors
+                or printed_anchors(body[owners[0]['start_line'] - 1:owners[0]['end_line']])
+                or any(row.strip() for row in (body[owners[0]['start_line']:start - 1]
+                                               + body[end:owners[0]['end_line']]))):
+            return False
+    if path == body_path:
+        left, right = start, end
+    else:
+        # The companion's single printed 1 cannot choose between A:1 and B:1
+        # in the body. Section metadata alone does not prove passage identity.
+        section_anchors = printed_anchors(body[owners[0]['start_line'] - 1:owners[0]['end_line']])
+        if body_hits and sum(n == int(number) for _, n in section_anchors) != 1:
+            return False
+        matches = [row for row in heading_candidates('\n'.join(lines))
+                   if signature(row) == signature(section)]
+        if len(matches) != 1:
+            return False
+        left, right = matches[0]['start_line'], matches[0]['end_line']
+    if not left <= line <= right:
+        return False
+    anchors = [left + index for index, n in printed_anchors(lines[left - 1:right]) if n == int(number)]
+    if not body_hits and path == body_path:
+        return not anchors  # Explicit singleton alias; no printed number is asserted.
+    return len(anchors) == 1
+
+
+def validate_scoped_answer(batch_dir, unit, number, answer, evidence):
+    """Raise on unbound scoped answers; legacy callers keep their existing checks.
+
+    Evidence must locate an actual answer row, e.g. 01_source/附录.txt:12 or
+    附录 L12. Numeric-only appendices cannot establish a section identity.
+    """
+    from .question_identity import VERSION
+    if unit.get('identity_version') != VERSION or unit.get('type') == '书面表达':
+        return
+    from .agent_tasks import _answer_comparison_text as normalize_answer
+    batch = Path(batch_dir)
+    paths = list(SOURCES)
+    paths.extend(p.relative_to(batch).as_posix() for p in sorted((batch / '01_source/materials').glob('attachment_*.txt'))
+                 if re.fullmatch(r'attachment_\d{3,}\.txt', p.name))
+    lines = {path: [_source_line(s) for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
+             for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
+    candidates = []
+    for path, rows in lines.items():
+        for index, text in enumerate(rows, 1):
+            hit = QUESTION_BOUNDARY.match(text)
+            if not hit or int(hit.group(1)) != int(number):
+                continue
+            if path == '01_source/正文.txt' and not re.search(EXPLANATION_LABEL + r'|【答案】', text):
+                continue  # A stem/option line is not an independent answer.
+            value = re.split(EXPLANATION_LABEL, text[hit.end():], maxsplit=1)[0].strip()
+            value = re.sub(r'^【答案】\s*', '', value)
+            if scoped_source_matches(unit, number, path, index, lines):
+                candidates.append((path, index, value))
+    primary = [row for row in candidates if row[0] in SOURCES]
+    candidates = primary or candidates
+    def cited(path, line):
+        stem = Path(path).stem
+        aliases = (path, stem) if sum(Path(p).stem == stem for p in lines) == 1 else (path,)
+        return any(any(re.search(re.escape(alias) + r'\s*(?::\s*|[Ll]\s*|第\s*)' + str(line) + r'(?!\d)', str(e))
+                       for alias in aliases) for e in (evidence or []))
+    bound = [row for row in candidates if normalize_answer(row[2]) == normalize_answer(answer) and cited(row[0], row[1])]
+    if len({normalize_answer(row[2]) for row in candidates}) > 1:
+        bound = []
+    if len(bound) != 1:
+        raise ValueError(f"{unit.get('unit_id')}/题{number}: scoped answer source is not uniquely bound; "
+                         "答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用")
+
+
+def validate_scoped_missing(batch_dir, unit, number, evidence=None):
+    """Reject an absence claim only when a real scoped answer is provable."""
+    if unit.get('identity_version') != 'scoped-v1' or unit.get('type') == '书面表达':
+        return
+    batch = Path(batch_dir)
+    paths = [*SOURCES, *(p.relative_to(batch).as_posix() for p in (batch / '01_source/materials').glob('attachment_*.txt')
+                        if re.fullmatch(r'attachment_\d{3,}\.txt', p.name))]
+    source_lines = {path: [_source_line(s) for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
+                    for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
+    confirmed = batch / '01_source/structure.confirmed.json'
+    units = json.loads(confirmed.read_text(encoding='utf-8-sig')).get('units', []) if confirmed.is_file() else [unit]
+    found, unbound = [], []
+    for path in paths:
+        file = batch / path
+        if not file.is_file() or path in reference_only_sources(batch):
+            continue
+        for line, raw in enumerate(file.read_text(encoding='utf-8-sig').splitlines(), 1):
+            text = _source_line(raw)
+            hit = QUESTION_BOUNDARY.match(text)
+            if not hit or int(hit.group(1)) != int(number):
+                continue
+            value = re.split(EXPLANATION_LABEL, text[hit.end():], maxsplit=1)[0].strip()
+            value = re.sub(r'^【答案】\s*', '', value)
+            from .content_rules import is_placeholder
+            if is_placeholder(value):
+                continue
+            if path != '01_source/正文.txt' and not any(
+                    scoped_source_matches(other, number, path, line, source_lines)
+                    for other in units if number in (other.get('numbers') or [])):
+                unbound.append(f'{path}:{line}')
+            try:
+                validate_scoped_answer(batch, unit, number, value, [f'{path}:{line}'])
+            except ValueError:
+                continue
+            found.append(f'{path}:{line}')
+    if found:
+        raise ValueError(f"{unit.get('unit_id')}/题{number}: missing contradicts an original scoped answer at " + ', '.join(found))
+    if unbound:
+        raise ValueError(f"{unit.get('unit_id')}/题{number}: answer scope unbound at " + ', '.join(unbound)
+                         + '; 纯数字答案附录缺少大题scope证据，不能宣称绑定成功或缺失')
+
+
 def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
     """共享来源绑定；只有显式 restore 模式允许恢复内存候选，不写文件。"""
     batch = Path(batch_dir).resolve()
@@ -212,7 +360,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 parts.append(later)
             questions.append({'number': int(match.group(1)), 'text': _norm(''.join(parts)),
                               'verbatim': _verbatim(''.join(parts)), 'source_text': '\n'.join(parts).strip(),
-                              'path': relative, 'line': index + 1})
+                              'path': relative, 'line': index + 1, 'end_line': index + len(parts)})
         # Some answer keys print the answer on its own numbered line and the
         # 【解析】 in a following paragraph without a number (e.g. "74. It wasn't
         # easy." then "【解析】根据…"). Bind such a stray explanation to the most
@@ -232,7 +380,8 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 boundary = QUESTION_BOUNDARY.match(previous)
                 if boundary and _question(previous) is None:
                     number = int(boundary.group(1))
-                    if not any(row['number'] == number and row['path'] == relative for row in questions):
+                    if not any(row['number'] == number and row['path'] == relative
+                               and back + 1 <= row['line'] <= index + 1 for row in questions):
                         owner = number
                     break
             if owner is None:
@@ -249,7 +398,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 parts.append(later)
             questions.append({'number': owner, 'text': _norm(''.join(parts)),
                               'verbatim': _verbatim(''.join(parts)), 'source_text': '\n'.join(parts).strip(),
-                              'path': relative, 'line': index + 1})
+                              'path': relative, 'line': index + 1, 'end_line': index + len(parts)})
         for index, line in enumerate(lines):
             match = SUMMARY.search(line)
             if not match:
@@ -314,7 +463,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                         members = prior
                         owner = prior[0]
                 summaries.append({'text': value, 'verbatim': _verbatim(''.join(parts)), 'source_text': '\n'.join(parts).strip(), 'owner': owner, 'members': members,
-                                  'path': relative, 'line': index + 1})
+                                  'path': relative, 'line': index + 1, 'end_line': index + len(parts)})
 
     # A PDF supplied alongside Word is layout evidence, not a competing text
     # authority. Prefer the primary/answer Word excerpts per question or passage;
@@ -372,7 +521,8 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
     except (OSError, ValueError):
         confirmed_units = {}
     writing_number_set = {str(n) for unit in confirmed_units.values()
-                          if str(unit.get('type') or '').strip() == '书面表达'
+                          if unit.get('identity_version') != 'scoped-v1'
+                          and str(unit.get('type') or '').strip() == '书面表达'
                           for n in (unit.get('numbers') or [])}
 
     def unit_numbers(uid, item):
@@ -383,7 +533,19 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
         declared = unit.get('numbers') or []
         return [int(n) for n in declared if str(n).isdigit()] or numbers
 
+    active_unit = {}
+
     def unique_anchor(number, path, line, *, allow_answer_source=False, expected=None):
+        if active_unit.get('identity_version') == 'scoped-v1':
+            if not scoped_source_matches(active_unit, number, path, line, source_lines):
+                return False
+            # Distinct originals inside this scope still conflict. Equivalent
+            # extraction copies do not create another question identity.
+            competing = [row for row in questions if row['number'] == number
+                         and row['path'] not in reference_only
+                         and scoped_source_matches(active_unit, number, row['path'], row['line'], source_lines)
+                         and (expected is None or row['text'] != _norm(expected))]
+            return allow_answer_source or not competing
         if not isinstance(number, int):
             return False
         candidates = body_anchors if path == '01_source/正文.txt' else anchors
@@ -555,6 +717,12 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
         if not restore or not isinstance(value, str) or AI_MARK in value:
             return
         candidates = []
+        if active_unit.get('identity_version') == 'scoped-v1':
+            all_rows = all_questions if field == 'explanation' else all_summaries
+            local_rows = questions if field == 'explanation' else summaries
+            if (any(row['text'] == _norm(value) for row in all_rows)
+                    and not any(row['text'] == _norm(value) for row in local_rows)):
+                return  # Exact content from another scope is not a copy typo.
         if field == 'explanation':
             candidates = [row for row in questions if row['path'] in SOURCES
                           and row['number'] in numbers and _norm(value) == row['text']
@@ -574,6 +742,9 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                                  and all(n in row['members'] for n in numbers)]
         else:
             attachment_proofs = []
+        if active_unit.get('identity_version') == 'scoped-v1':
+            attachment_proofs = [row for row in attachment_proofs if any(
+                scoped_source_matches(active_unit, n, row['path'], row['line'], source_lines) for n in numbers)]
         # A punctuation/width correction is safe only when the candidate is
         # exactly the companion OCR excerpt and that excerpt uniquely matches
         # the authoritative fragment. NFKC alone is never sufficient evidence.
@@ -597,7 +768,9 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                         if row['owner'] in numbers and numbers
                         and all(n in row['members'] for n in numbers)
                         and row['text'] == _norm(value)]
-            pool = [row for row in pool if row.get('source_text')]
+            pool = [row for row in pool if row.get('source_text') and (
+                active_unit.get('identity_version') != 'scoped-v1' or any(
+                    scoped_source_matches(active_unit, n, row['path'], row['line'], source_lines) for n in numbers))]
             if len(pool) == 1:
                 source = pool[0]
         # 单字漏抄/多抄的近似修复：文章大意的**唯一**权威候选（owner 属于该组、
@@ -624,9 +797,11 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             return
         # 书面表达不是客观题：没有确定答案，范文/写作指导可有可无，只要题目存在
         # 即可。不做答案/解析/大意的逐字来源绑定与“原文有却缺失”判定。
-        writing_unit = (str(unit_type or '').strip() == '书面表达'
-                        or str(item.get('question_type') or item.get('type') or '').strip() == '书面表达'
-                        or any(str(n) in writing_number_set for n in numbers))
+        writing_unit = (str(active_unit.get('type') or unit_type or '').strip() == '书面表达'
+                        if active_unit.get('identity_version') == 'scoped-v1' else
+                        (str(unit_type or '').strip() == '书面表达'
+                         or str(item.get('question_type') or item.get('type') or '').strip() == '书面表达'
+                         or any(str(n) in writing_number_set for n in numbers)))
         restore_field(item, uid, numbers, 'explanation')
         restore_field(item, uid, numbers, 'articleSummary')
         summary = item.get('articleSummary', item.get('article_summary', ''))
@@ -686,7 +861,8 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             traceable = bool(value) and any(row['number'] in numbers and (_verbatim(explanation) == row['verbatim'] if strict else value in row['text'])
                             and unique_anchor(row['number'], row['path'], row['line'], expected=explanation)
                             for row in questions)
-            if writing and not child and not item.get('subquestions'):
+            if (writing and not child and not item.get('subquestions')
+                    and (active_unit.get('identity_version') != 'scoped-v1' or writing_unit)):
                 traceable = traceable or (numbers == [writing[0]] and (_verbatim(explanation) if strict else value) == writing[1])
             # A group overview may quote an explicitly labelled summary; its
             # ownership is checked above and cross-material quotes are flagged.
@@ -727,10 +903,30 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 check(sub, f'{uid}/{number if number is not None else index}', [number], True,
                       listening, has_any_expl)
 
+    question_pool, summary_pool = list(all_questions), list(all_summaries)
+    legacy_questions, legacy_summaries = list(questions), list(summaries)
+    legacy_attachment_questions, legacy_attachment_summaries = list(attachment_questions), list(attachment_summaries)
     for index, item in enumerate(payload.get('items', []) if isinstance(payload, dict) else []):
         if not isinstance(item, dict):
             continue
         uid = str(item.get('unit_id') or item.get('id') or index)
+        active_unit = confirmed_units.get(uid) or item
+        questions, summaries = legacy_questions, legacy_summaries
+        attachment_questions, attachment_summaries = legacy_attachment_questions, legacy_attachment_summaries
+        if active_unit.get('identity_version') == 'scoped-v1':
+            def owned(row, summary=False):
+                members = row.get('members') if summary else [row.get('number')]
+                return bool(members) and all(scoped_source_matches(
+                    active_unit, n, row['path'], row['line'], source_lines)
+                    for n in members if n in active_unit.get('numbers', [])) and any(
+                        n in active_unit.get('numbers', []) for n in members)
+            scoped_questions = [row for row in question_pool if row['path'] not in reference_only and owned(row)]
+            primary = {row['number'] for row in scoped_questions if row['path'] in SOURCES}
+            questions = [row for row in scoped_questions if row['path'] in SOURCES or row['number'] not in primary]
+            scoped_summaries = [row for row in summary_pool if row['path'] not in reference_only and owned(row, True)
+                                and set(row.get('members') or []) == set(active_unit.get('numbers') or [])]
+            primary_summary = any(row['path'] in SOURCES for row in scoped_summaries)
+            summaries = [row for row in scoped_summaries if row['path'] in SOURCES or not primary_summary]
         numbers = unit_numbers(uid, item)
         if item.get('subquestions'):
             numbers = [sub.get('number') for sub in item['subquestions'] if isinstance(sub, dict)]
@@ -743,6 +939,22 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
         listening = isinstance(qtype, str) and qtype.startswith('听力')
         # 用户要求：缺解析直接留空跳过，不再要求补写（F7 旧规则已按用户要求取消）。
         unit_type = str((confirmed_units.get(str(uid)) or {}).get('type') or '')
+        if active_unit.get('identity_version') == 'scoped-v1' and unit_type != '书面表达' and not listening:
+            primary_bound = {row['number'] for row in questions if row['path'] in SOURCES}
+            unbound = [row for row in question_pool if row['number'] in numbers
+                       and (row['path'] in SOURCES or row['number'] not in primary_bound)
+                       and row['path'] not in reference_only
+                       and not any(scoped_source_matches(other, row['number'], row['path'], row['line'], source_lines)
+                                   for other in confirmed_units.values() if row['number'] in (other.get('numbers') or []))]
+            unbound_summaries = [row for row in summary_pool if set(row.get('members') or []) == set(numbers)
+                                and (row['path'] in SOURCES or not any(r['path'] in SOURCES for r in summaries))
+                                and row['path'] not in reference_only
+                                and not any(all(scoped_source_matches(other, n, row['path'], row['line'], source_lines)
+                                                for n in numbers) for other in confirmed_units.values()
+                                            if set(other.get('numbers') or []) == set(numbers))]
+            if unbound or unbound_summaries:
+                error('CONTENT_SCOPE_UNBOUND', '原解析/大意缺少可核验的大题scope及原文窗口，不能按纯数字题号绑定或宣称缺失',
+                      uid, 'explanation', [f"{row['path']}:{row['line']}" for row in unbound + unbound_summaries])
         check(item, uid, numbers, listening=listening, unit_type=unit_type)
     return {'passed': not errors, 'errors': errors, 'warnings': warnings,
             'restorations': restorations, 'source_sha256': hashes,
@@ -762,6 +974,34 @@ def collect_source_index(batch_dir):
     绝不凭猜测挑一条。
     """
     report = _inspect_content(batch_dir, {'items': []}, strict=False)
+    confirmed = Path(batch_dir) / '01_source/structure.confirmed.json'
+    units = json.loads(confirmed.read_text(encoding='utf-8-sig')).get('units', []) if confirmed.is_file() else []
+    if any(unit.get('identity_version') == 'scoped-v1' for unit in units):
+        from .question_identity import question_key, validate_units
+        if not validate_units(units):
+            raise ValueError('Invalid scoped question identities')
+        lines = {path: [_source_line(s) for s in (Path(batch_dir) / path).read_text(encoding='utf-8-sig').splitlines()]
+                 for path in report['source_sha256'] if (Path(batch_dir) / path).suffix == '.txt'}
+        index, summaries = {}, []
+        reference_only = reference_only_sources(batch_dir)
+        for unit in units:
+            for number in unit['numbers']:
+                rows = [row for row in report['all_questions'] if row['number'] == number
+                        and row['path'] not in reference_only
+                        and scoped_source_matches(unit, number, row['path'], row['line'], lines)]
+                primary = [row for row in rows if row['path'] in SOURCES]
+                rows = primary or rows
+                values = {row['source_text'] for row in rows if row.get('source_text')}
+                if len(values) == 1:
+                    index[question_key(unit, number)] = values.pop()
+            rows = [row for row in report['all_summaries'] if row['path'] not in reference_only
+                    and set(row.get('members') or []) == set(unit['numbers'])
+                    and all(scoped_source_matches(unit, n, row['path'], row['line'], lines) for n in unit['numbers'])]
+            primary = [row for row in rows if row['path'] in SOURCES]
+            for row in primary or rows:
+                summaries.append(dict(row, unit_id=unit['unit_id'],
+                                      question_ids={str(n): question_key(unit, n) for n in unit['numbers']}))
+        return index, summaries
     index = {}
     conflicted = set()
     for row in report.get('questions', []):

@@ -640,18 +640,25 @@ def _apply(root, data, stage, artifact):
             target["attachments"] = attachments
         touched.add(uid)
     if stage == "answers":
+        from .agent_tasks import confirmed_units
+        from .question_identity import question_key
+        units = {u["unit_id"]: u for u in confirmed_units(root)}
         owners = {}
         for uid, row in rows.items():
             targets = list(_children(row).values()) or [row]
             for node in targets:
-                owners.setdefault(_number(node["number"]), []).append((uid, node))
+                owners.setdefault(question_key(units.get(uid, row), node["number"]), []).append((uid, node))
         for key, output in (("answers", "answer"), ("difficulty", "difficulty")):
             values = artifact.get(key, {})
             if not isinstance(values, dict):
                 raise ValueError("Invalid numbered answer/difficulty mapping")
             normalized = set()
             for number, value in values.items():
-                number = _number(number)
+                if not isinstance(number, str) or not number:
+                    raise ValueError("Answer keys must be confirmed string question identities")
+                # Legacy numeric keys retain their strict normalization checks.
+                if number.isdigit():
+                    number = _number(number)
                 if number in normalized or len(owners.get(number, [])) > 1:
                     raise ValueError("Numbered stage answer has no unique uid ownership: " + number)
                 normalized.add(number)

@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import agent_tasks, local_agent, unit_tasks
+from .question_identity import question_key
 
 STAGES = ("answers", "explanations")
 
@@ -22,7 +23,7 @@ def check_inputs(batch, stage, expected):
 
 def _unit_payload(stage, payload, unit):
     if stage == "answers":
-        numbers = {str(n) for n in unit["numbers"]}
+        numbers = {question_key(unit, n) for n in unit["numbers"]}
         return {key: {n: value for n, value in mapping.items() if n in numbers}
                 for key, mapping in payload.items()}
     matches = [r for r in payload["items"] if r.get("unit_id") == unit["unit_id"]]
@@ -47,7 +48,7 @@ def _envelope(stage, response, units):
     if stage == "answers":
         agent_tasks._fields(payload, ("answers", "evidence", "missing", "difficulty", "difficultyEvidence"),
                             ("answers", "evidence", "missing"))
-        numbers = {str(n) for u in units for n in u["numbers"]}
+        numbers = {question_key(u, n) for u in units for n in u["numbers"]}
         if any(not isinstance(m, dict) or not set(m) <= numbers for m in payload.values()):
             raise ValueError("Answer partition contains unknown numbers or invalid mappings")
     else:

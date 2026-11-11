@@ -1,5 +1,6 @@
 import json
 import tempfile
+from contextlib import nullcontext
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -186,7 +187,11 @@ class AssembleLocalTest(unittest.TestCase):
         report = agent_tasks.accept_result(initial, "assemble", response, validate_only=True)
         self.assertTrue(report["completed"])
         self.assertFalse((initial / assemble_local.BATCH).exists())
-        self.assertEqual(assemble_local.try_assemble(initial, {"timeout_seconds": 1}), 0)
+        # This tests deterministic assembly, not the process-global agent lock;
+        # concurrent workflow modules may hold the real lock beyond this timeout.
+        with patch("workflow.local_agent._agent_lock", return_value=nullcontext()) as lock:
+            self.assertEqual(assemble_local.try_assemble(initial, {"timeout_seconds": 1}), 0)
+        lock.assert_called_once_with(1)
         self.assertTrue((initial / assemble_local.BATCH).is_file())
         self.assertTrue((initial / assemble_local.GUARD).is_file())
 

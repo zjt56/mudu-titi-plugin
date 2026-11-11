@@ -223,6 +223,9 @@ def build(batch_dir) -> dict:
     answer_data = _load(batch / ANSWERS) if (batch / ANSWERS).is_file() else {"answers": {}, "difficulty": {}}
     answers = answer_data.get("answers") or {}
     difficulty = answer_data.get("difficulty") or {}
+    from .agent_tasks import confirmed_units
+    from .question_identity import question_key, fields as identity_fields
+    units = {u["unit_id"]: u for u in confirmed_units(batch)}
     meta = _load(batch / STRUCTURE).get("meta") or {}
     from .wire_format import _year
 
@@ -239,6 +242,13 @@ def build(batch_dir) -> dict:
                 if key in item:
                     item[key] = _meta_value(key, meta[key])
         uid = _unit_id(item)
+        unit = units.get(uid, item)
+        item.update(identity_fields(unit))
+        if unit.get("identity_version") == "scoped-v1":
+            if item.get("unit_kind") == "standalone":
+                item["question_id"] = question_key(unit, item["number"])
+            for child in item.get("subquestions") or []:
+                child["question_id"] = question_key(unit, child["number"])
         row_type = types.get(uid) or {}
         if row_type.get("type"):
             item["question_type"] = row_type["type"]
@@ -251,7 +261,7 @@ def build(batch_dir) -> dict:
         number = item.get("number")
         # 题组的答案挂在子题上，单元级答案保持原样，避免把首题答案当成整组答案。
         if item.get("unit_kind") == "standalone" and number is not None:
-            key = str(number)
+            key = question_key(units.get(uid, item), number)
             if key in answers:
                 item["answer"] = answers[key]
             if key in difficulty:
@@ -269,10 +279,11 @@ def build(batch_dir) -> dict:
             key = str(child.get("number"))
             _overlay_labels(child, kids_know.get(key) or {})
             _overlay_text(child, kids_expl.get(key) or {}, kids_know.get(key) or {}, "explanation")
-            if key in answers:
-                child["answer"] = answers[key]
-            if key in difficulty and "difficulty" in child:
-                child["difficulty"] = difficulty[key]
+            answer_key = question_key(units.get(uid, item), child.get("number"))
+            if answer_key in answers:
+                child["answer"] = answers[answer_key]
+            if answer_key in difficulty and "difficulty" in child:
+                child["difficulty"] = difficulty[answer_key]
     return data
 
 

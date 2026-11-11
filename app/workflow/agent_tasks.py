@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from workbench import taxonomy, textbook
 from . import ingest, label_audit, review, content_rules
 from .task_cache import TaskCache
+from .question_identity import question_key, fields as identity_fields, validate_units
 
 _TASK_TEMPLATE_CACHE = TaskCache()
 
@@ -47,7 +48,7 @@ EXAMPLE_REQUIRED = {
 REVIEW_FILES = ("content-review.json", "metadata-review.json", "manual-review-queue.json")
 AI_MARK = "（AI生成，待校对）"
 RULES = {
-    "answers": "You are labeling subagent 4 (answers, explanation alignment, difficulty). Artifact: {answers:{question_number:string}, evidence:{question_number:[nonempty location strings]}, difficulty:{question_number:容易|适中|困难}}. Extract every answer and explanation mapping actually present in all supplied answer materials, including question numbers outside the current tentative structure. Never discard questions merely because the source paper currently contains only another section. Never solve or guess; preserve original wording. Difficulty is optional: when the actual stem/options are supplied, make a concise subjective judgment; otherwise leave it empty. Do not write difficulty evidence. Every confirmed question must have either an original answer or an explicit missing entry: missing:{question_number:[nonempty source-location strings confirming no independent answer]}. Do NOT treat 书面表达 (writing) like an objective question: it has no fixed answer, and a model essay or writing guidance may be absent—that is normal. Never require an answer for 书面表达, never invent an essay/guidance, and do not force its explanation to bind verbatim to the source. Never leave a confirmed question undecided. Source priority: use the Word answer material first; if Word lacks a specific question's answer, use the supplied PDF/OCR text for that same question and cite it in evidence; if neither exists, record an explicit missing entry. Never invent an answer or carry one across materials. A reference essay is source content: preserve it when it is the supplied model answer; do not invent one. Missing must be disjoint from answers. Conflicts, undecided numbers and invalid values are unfinished work, not completed delivery.",
+    "answers": "You are labeling subagent 4 (answers, explanation alignment, difficulty). Artifact: {answers:{question_key:string}, evidence:{question_key:[nonempty location strings]}, difficulty:{question_key:容易|适中|困难}}. Use the exact question_ids[str(original_number)] key when a confirmed unit provides question_ids; otherwise use its normalized original numeric question number. Original numbers may repeat across sections: bind by unit_id, section_id/source_section and source coordinates, never borrow another section's answer. Keep numbers and child number unchanged. Extract every answer and explanation mapping actually present in all supplied answer materials, including question numbers outside the current tentative structure. Never discard questions merely because the source paper currently contains only another section. Never solve or guess; preserve original wording. Difficulty is optional: when the actual stem/options are supplied, make a concise subjective judgment; otherwise leave it empty. Do not write difficulty evidence. Every confirmed question must have either an original answer or an explicit missing entry: missing:{question_key:[nonempty source-location strings confirming no independent answer]}. Do NOT treat 书面表达 (writing) like an objective question: it has no fixed answer, and a model essay or writing guidance may be absent—that is normal. Never require an answer for 书面表达, never invent an essay/guidance, and do not force its explanation to bind verbatim to the source. Never leave a confirmed question undecided. Source priority: use the Word answer material first; if Word lacks a specific question's answer, use the supplied PDF/OCR text for that same question and cite it in evidence; if neither exists, record an explicit missing entry. Never invent an answer or carry one across materials. A reference essay is source content: preserve it when it is the supplied model answer; do not invent one. Missing must be disjoint from answers. Conflicts, undecided numbers and invalid values are unfinished work, not completed delivery.",
     "audio": "Artifact: {items:[{unit_id,file,start,end,evidence:[location strings]}]}. Cover exactly the listening units. file is an existing batch-relative already-cut media segment, never the original full recording. For every listening unit copy file, start and end EXACTLY from a 02_audio/segment-evidence.json item; prefer rows whose verified is true. start/end are offsets on the whole-paper recording, never re-based to the segment's own 0. Do not guess, round or adjust them. If a unit has only an unverified candidate row (verified false) whose segment file exists, still copy its file/start/end exactly and include the review_reasons in evidence; never invent, round or adjust times. Only return needs_review when no evidence row exists at all.",
     "types": "You classify type, word count and content completeness INSIDE the preassembly stage. Use the just-split source-bound questions, section instructions, options and shared material together; do not guess from an isolated stem. The legacy types identity is also used for scoped repairs. Artifact: {items:[{unit_id,type,subtypes:[string],words:integer,contentComplete:boolean,evidence:[location strings]}]}. Exactly one row per confirmed unit. Use only catalog main types and their exact subtypes. All applicable subtypes are required; only 单词拼写 permits multiple subtypes. words is the English word count of the unit's own stem/material/options (digits and Chinese not counted); contentComplete is false when the question is truncated, missing options, or its stem does not match the passage. Never rename IDs or change unit boundaries.",
     "knowledge": "You are labeling subagent 2 (knowledge points; textbook matching only for lesson-synced sources). Artifact: {items:[{unit_id,knowledge:[full catalog leaf paths],knowledgeIds:[matching catalog IDs],textbook:{version,book,unit,section,evidence},subquestions:[{number,knowledge:[full leaf paths],knowledgeIds:[]}],evidence:[nonempty location strings]}]}. Output tags ONLY. The importer validates and installs this label artifact; it does not read answers or explanations. Those are merged deterministically with your labels only after all producer artifacts independently pass their own contracts. Assign knowledge tags only. knowledgeIds is optional but must match paths. Use the matching types.json row as type/subtype context. Groups cover each confirmed child number exactly once; standalone subquestions is []. Whole-unit types (阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话) take ONLY group-level tags (genre/theme/content): their subquestions must carry knowledge=[] and are never tagged per child. Per-question types (听力短对话理解, 听力关键词语选择, 单项填空, 单词拼写, 完成句子, 翻译, 情景运用, 语音题 etc.) tag every child separately. textbook placement is ONLY for lesson-synced sources (同步练习/单元测验) whose own title or section header names the textbook unit: use exact strings from the supplied textbook_index and cite paper evidence; otherwise omit. Every knowledge path MUST be copied verbatim from the supplied catalog (references/knowledge-catalog.json); never append an invented child below an existing leaf (e.g. '语用/情景交际' is already a leaf — writing '语用/情景交际/询问目的' is invalid), and never invent names or IDs. When no valid leaf exists for a dimension, omit that dimension. But whole-unit types MUST still include every mandatory dimension their type declares in references/type-knowledge-map.json (dims), each as one valid catalog leaf — e.g. 听力长对话理解 requires 主题, 阅读理解/完形填空 require 主题 and (when declared) 语篇体裁; a missing mandatory dimension fails validation and reruns the whole group. Evidence must be nonempty and refer to supplied text. JSON discipline: return exactly ONE root object with keys status, artifacts, notes, findings and nothing after it — no second object, no prose, no extra '}' or ']' (an extra closing brace makes the whole artifact unusable).",
@@ -129,7 +130,7 @@ def _inject_content(row, children, explanation_row, answers, unit, *, strict=Tru
     因此判定知识点过期（否则换一次解析就要重跑知识点）。
     """
     expected = {
-        "answer": (answers.get(str(unit["numbers"][0]), "无答案")
+        "answer": (answers.get(question_key(unit, unit["numbers"][0]), "无答案")
                    if unit["unit_kind"] == "standalone" else ""),
         "explanation": explanation_row.get("explanation", ""),
         "articleSummary": explanation_row.get("articleSummary", ""),
@@ -142,7 +143,7 @@ def _inject_content(row, children, explanation_row, answers, unit, *, strict=Tru
     prior = {str(c["number"]): c for c in explanation_row.get("subquestions", [])}
     for child in children:
         number = str(child["number"])
-        expected_child = {"answer": answers.get(number, "无答案"),
+        expected_child = {"answer": answers.get(question_key(unit, number), "无答案"),
                           "explanation": prior.get(number, {}).get("explanation", "")}
         for key, value in expected_child.items():
             same_placeholder = key != "answer" and content_rules.is_placeholder(child.get(key)) and content_rules.is_placeholder(value)
@@ -177,7 +178,7 @@ def stage_gaps(batch_dir, stage):
         units = confirmed_units(batch)
     except (OSError, ValueError, TypeError):
         units = []
-    expected = {str(n) for unit in units for n in unit.get("numbers", [])}
+    expected = {question_key(unit, n) for unit in units for n in unit.get("numbers", [])}
     if stage == "answers":
         path = batch / ARTIFACTS[stage]
         data = _json(path) if path.is_file() else {}
@@ -202,22 +203,38 @@ def confirmed_units(batch_dir):
     rows = data.get("units") if isinstance(data, dict) else None
     if not isinstance(rows, list) or not rows:
         raise ValueError("Confirmed structure requires nonempty units; run structure_gate first")
-    units, ids, seen = [], set(), set()
+    units, ids, seen, question_ids = [], set(), set(), set()
+    scoped = data.get("identity_version") == "scoped-v1"
     for row in rows:
+        if isinstance(row, dict) and scoped:
+            row = dict(row, identity_version="scoped-v1")
         if not isinstance(row, dict) or not isinstance(row.get("numbers"), list) or not row["numbers"]:
             raise ValueError("Confirmed unit needs numbers array")
         nums = [_number(n) for n in row["numbers"]]
         kind = row.get("unit_kind")
         if kind not in ("standalone", "group") or (kind == "standalone" and len(nums) != 1):
             raise ValueError("Invalid confirmed unit_kind/numbers")
-        if len(set(nums)) != len(nums) or seen.intersection(nums):
+        if len(set(nums)) != len(nums) or (not scoped and seen.intersection(nums)):
             raise ValueError("Confirmed units have duplicate question numbers")
+        if scoped:
+            mapping = row.get("question_ids")
+            if not isinstance(mapping, dict) or set(mapping) != set(nums):
+                raise ValueError("Scoped confirmed units need question_ids for every original question number")
+            values = list(mapping.values())
+            if (any(not isinstance(qid, str) or not re.fullmatch(r"[\w.-]+", qid) for qid in values)
+                    or len(set(values)) != len(values) or question_ids.intersection(values)):
+                raise ValueError("Scoped question IDs must be unique safe strings")
+            question_ids.update(values)
+            if not row.get("unit_id"):
+                raise ValueError("Scoped confirmed units need explicit unit_id")
         uid = row.get("unit_id") or row.get("id") or (("q-" if kind == "standalone" else "group-") + "-".join(nums))
         if not isinstance(uid, str) or not re.fullmatch(r"[\w.-]+", uid) or uid in ids:
             raise ValueError("Confirmed unit IDs must be unique safe strings")
         units.append(dict(row, unit_id=uid))
         ids.add(uid)
         seen.update(nums)
+    if scoped and not validate_units(units):
+        raise ValueError("Invalid scoped confirmed unit identities or section ownership")
     return units
 
 
@@ -414,7 +431,7 @@ def _collect(batch, stage, speculative=False):
         if stage in ("types", "explanations", "knowledge"):
             contexts["confirmed_units_with_stable_ids"] = _sanitized([
                 {k: v for k, v in unit.items()
-                 if k in ("unit_id", "numbers", "unit_kind", "type", "stem", "label")}
+                 if k in ("unit_id", "numbers", "unit_kind", "type", "stem", "label", "identity_version", "question_ids", "section_id", "source_section", "source_span")}
                 for unit in units])
         else:
             contexts["confirmed_units_with_stable_ids"] = _sanitized(units)
@@ -599,7 +616,8 @@ def compact_label_context(context):
             draft.pop("input_hashes", None)
             draft.pop("content_sha256", None)
             fields = {"unit_id", "id", "unit_kind", "numbers", "number", "stem", "material",
-                      "materialBlocks", "material_blocks", "options", "subquestions"}
+                      "materialBlocks", "material_blocks", "options", "subquestions", "question_ids", "question_id",
+                      "identity_version", "section_id", "source_section"}
             draft["items"] = [{k: v for k, v in row.items() if k in fields}
                               for row in draft["items"] if isinstance(row, dict)]
             for row in draft["items"]:
@@ -751,7 +769,7 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
         if isinstance(units_ctx, list):
             context["confirmed_units_with_stable_ids"] = [
                 {k: v for k, v in u.items()
-                 if k in ("unit_id", "numbers", "unit_kind", "type", "label")}
+                 if k in ("unit_id", "numbers", "unit_kind", "type", "label", "identity_version", "question_ids", "section_id", "source_section", "source_span")}
                 for u in units_ctx if isinstance(u, dict)]
     snapshot = {"stage": stage, "budget": max_input_chars, "context": context,
                 "hashes": hashes, "missing": missing, "units": units,
@@ -826,9 +844,10 @@ def _build_task_template(stage, max_input_chars, context, hashes, missing, units
         "Before returning, check braces: notes and findings belong INSIDE the outer object, AFTER artifacts.\n"
     )
     number = str(units[0]["numbers"][0]) if units else "1"
+    answer_key = question_key(units[0], number) if units else number
     uid = units[0]["unit_id"] if units else "q-1"
     example_payloads = {
-        "answers": {"answers": {number: "A"}, "evidence": {number: ["附录 L1"]}, "missing": {}, "difficulty": {number: "容易"}},
+        "answers": {"answers": {answer_key: "A"}, "evidence": {answer_key: ["附录 L1"]}, "missing": {}, "difficulty": {answer_key: "容易"}},
         "types": {"items": [{"unit_id": uid, "type": "单项填空", "subtypes": ["四个选项"], "words": 5, "contentComplete": True, "evidence": ["正文 L1"]}]},
         "explanations": {"items": [{"unit_id": uid, "explanation": "无", "articleSummary": "无", "subquestions": [], "evidence": ["正文 L1；附录 L1 仅给答案，无原解析/原大意"]}]},
         "knowledge": {"items": [{"unit_id": uid, "knowledge": ["词汇/词汇辨析/动词辨析"], "answer": "A", "explanation": "无", "articleSummary": "无", "subquestions": [], "evidence": ["正文 L1；解析与大意取自 explanations 产物"]}]},
@@ -1175,7 +1194,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 content_rules.normalize_optional_content(row)
     if stage == "assemble":
         _normalize_payload_blanks(payload)
-    numbers = {str(n) for u in units for n in u["numbers"]}
+    numbers = {question_key(u, n) for u in units for n in u["numbers"]}
     if stage == "answers":
         _fields(payload, ("answers", "evidence", "missing", "difficulty", "difficultyEvidence"),
                 ("answers", "evidence", "missing"))
@@ -1189,12 +1208,14 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                              f"in_both_answers_and_missing={_numbers_preview(set(answers).intersection(missing))}")
         # 书面表达没有确定答案：范文/写作指导可有可无，只要题目存在即可。
         # 不要求它出现在 answers 或 missing 中，也不做逐字来源绑定。
-        writing_numbers = {_number(n) for u in units
+        writing_numbers = {question_key(u, n) for u in units
                            if str(u.get('type') or '').strip() == '书面表达'
                            for n in u.get('numbers', [])}
-        expected_numbers = {_number(n) for n in numbers}
-        if any(_number(n) != n for n in (*answers.keys(), *missing.keys())):
-            raise ValueError("Answer and missing keys must use normalized positive question numbers")
+        expected_numbers = numbers
+        scoped_keys = any(u.get("identity_version") == "scoped-v1" for u in units)
+        if any(not isinstance(n, str) or not n or (not scoped_keys and _number(n) != n)
+               for n in (*answers.keys(), *missing.keys())):
+            raise ValueError("Answer and missing keys must use normalized confirmed question identities")
         required_numbers = expected_numbers - writing_numbers
         allowed_numbers = expected_numbers
         covered = set(answers).union(missing)
@@ -1204,6 +1225,8 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                              f"not_in_batch={_numbers_preview(covered - allowed_numbers)}")
         if any(not isinstance(value, str) or not value.strip() for value in answers.values()):
             raise ValueError("Answers must be nonempty original text; use missing with evidence when absent")
+        owners = {question_key(u, n): (u, n) for u in units for n in u["numbers"]}
+        from .upload_content import validate_scoped_answer, validate_scoped_missing
         for number, locations in missing.items():
             _strings(locations, f"missing answer evidence {number}", True)
             if number in writing_numbers:
@@ -1211,6 +1234,8 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             if not all(any(token in value.lower() for token in ("无", "未提供", "未见", "none", "not provided", "not present"))
                        for value in locations):
                 raise ValueError(f"Missing answer {number} needs an explicit absence observation in its evidence")
+            owner, printed_number = owners[number]
+            validate_scoped_missing(batch, owner, printed_number, locations)
         source_keys = ("01_source_ans/正文.txt", "answer_source_text", "01_source/附录.txt")
         extra_keys = [key for key in context if re.fullmatch(r'01_source/materials/attachment_\d{3,}\.txt', key)]
         text = "\n".join(str(context.get(k, "")) for k in (*source_keys, *extra_keys))
@@ -1226,11 +1251,14 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             if number not in writing_numbers and not _answer_found(answer):
                 raise ValueError(f"Answer {number} is not verbatim-bound to supplied answer material")
             _strings(evidence[number], "answer evidence", True)
+            owner, printed_number = owners[number]
+            validate_scoped_answer(batch, owner, printed_number, answer, evidence[number])
         difficulty = payload.get("difficulty", {})
         if not isinstance(difficulty, dict):
             raise ValueError("difficulty must be an optional question-number mapping")
-        if any(_number(n) != n for n in difficulty):
-            raise ValueError("Difficulty keys must use positive numeric question numbers")
+        if any(not isinstance(n, str) or (n not in expected_numbers if scoped_keys else _number(n) != n)
+               for n in difficulty):
+            raise ValueError("Difficulty keys must use confirmed question identities")
         levels = set(taxonomy.difficulties())
         for number, level in difficulty.items():
             if level not in levels:
@@ -1415,6 +1443,12 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                     source_draft = {r["unit_id"]: r for r in draft.get("items", [])}
                     source_bindings = draft.get("source_bindings", {})
                 _restore_source_fields(row, children, source_draft.get(unit["unit_id"]), notes)
+                row.update(identity_fields(unit))
+                if unit.get("identity_version") == "scoped-v1":
+                    for child in children:
+                        child["question_id"] = question_key(unit, child["number"])
+                    if unit["unit_kind"] == "standalone":
+                        row["question_id"] = question_key(unit, unit["numbers"][0])
                 if row.get("id", row["unit_id"]) != row["unit_id"] or row.get("unit_kind") != unit["unit_kind"]:
                     raise ValueError("Assembled ID and unit_kind must preserve confirmed structure")
                 if [_number(n) for n in row.get("numbers", [])] != [_number(n) for n in unit["numbers"]] or _number(row.get("number")) != _number(unit["numbers"][0]):
@@ -1471,11 +1505,11 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             if problems:
                 raise ValueError(f"{unit['unit_id']}: Invalid knowledge labels: " + "; ".join(problems))
             if unit["unit_kind"] == "standalone":
-                _provenance(row, source_text, answers.get(str(unit["numbers"][0])))
+                _provenance(row, source_text, answers.get(question_key(unit, unit["numbers"][0])))
             elif not isinstance(row.get("answer"), str) or not isinstance(row.get("explanation"), str):
                 raise ValueError("Group answer/explanation must be strings")
             for child in children:
-                _provenance(child, source_text, answers.get(_number(child["number"])))
+                _provenance(child, source_text, answers.get(question_key(unit, child["number"])))
         if stage == "assemble":
             from .question_content import (apply_required_writing_stem, audit_batch_source,
                                            restore_source_fidelity, restore_source_stems)
@@ -1520,7 +1554,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 if words is not None:
                     item["wordCount"] = words
                 if isinstance(levels, dict) and unit["unit_kind"] == "standalone":
-                    level = levels.get(str(unit["numbers"][0]))
+                    level = levels.get(question_key(unit, unit["numbers"][0]))
                     if level in set(taxonomy.difficulties()):
                         item["difficulty"] = level
             audit = label_audit.inspect_batch(payload)

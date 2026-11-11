@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .preview import slice_text
+from .question_identity import source_key
 
 IMAGE = re.compile(r"\[IMG\s+([^\]]+)\]")
 FORBIDDEN = re.compile(r"(?:考试时间|满分\s*\d+分|本试卷共|扫码练听力|答案链接|初中学业水平考试)")
@@ -174,8 +175,11 @@ def _canonical_image_text(value: str) -> str:
     return _canonical(_MARKDOWN_IMAGE.sub("", value))
 
 
-def question_parts(lines: list[str], number: int) -> dict:
+def question_parts(lines: list[str], number: int, *, scoped=False) -> dict:
     """Return this child's exact source stem and ordered labeled options."""
+    if scoped:
+        from .question_identity import numbered_projection
+        lines = numbered_projection(lines)
     from .extract import _plain, material_label, guide_numbers
     from .preview import _find, _strong_number, SECTION, LEADIN
     start = _find(lines, number)
@@ -293,9 +297,21 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
             and 1 <= start <= end <= len(source_lines)):
         lines = source_lines[start - 1:end]
     numbers = unit.get("numbers") or []
-    parts = {n: question_parts(lines, n) for n in numbers}
+    scoped = unit.get('identity_version') == 'scoped-v1'
+    unnumbered = span.get('number_binding') == 'unnumbered_section'
+    parts = {n: question_parts(lines, n, scoped=scoped) for n in numbers}
+    if unnumbered and len(numbers) == 1:
+        parts[numbers[0]] = {'stem': '', 'options': [], 'found': True}
     issues = []
-    max_options = max([int(unit.get("source_expected_options") or 0), *[len(p["options"]) for p in parts.values()]])
+    scoped_shared = []
+    if scoped and unit.get('unit_kind') == 'group' and unit.get('type') == '补全对话':
+        located = option_block_start(lines)
+        if located is not None:
+            first_option, offset = located
+            scoped_shared = question_parts(['0.' + '\n'.join([lines[first_option][offset:]] + lines[first_option + 1:])], 0)['options']
+            for part in parts.values():
+                part['options'] = []
+    max_options = 0 if scoped_shared else max([int(unit.get("source_expected_options") or 0), *[len(p["options"]) for p in parts.values()]])
     choice_group = any(hint in str(unit.get("type") or "") for hint in ("完形", "语法选择"))
     if len(numbers) == 1 and unit.get("source_span", {}).get("number_binding") == "single_writing_section":
         # A writing section is bounded only by its own section, so its raw stem
@@ -314,8 +330,8 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
             issues.append({"code": "SOURCE_OPTIONS_INCOMPLETE", "number": n,
                            "message": f"第 {n} 题源头选项 {labels}，本组应完整包含 {expected} 且内容非空"})
     from .preview import BARE_OPTION, _strong_number
-    shared_options = []
-    if unit.get("unit_kind") == "group" and not any(_strong_number(line) is not None for line in lines):
+    shared_options = scoped_shared
+    if not shared_options and unit.get("unit_kind") == "group" and not any(_strong_number(line) is not None for line in lines):
         located = option_block_start(lines)
         if located is not None:
             first, offset = located
@@ -368,11 +384,11 @@ def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
             fresh = [unit for unit in confirmed_units if isinstance(unit, dict) and unit.get('numbers')]
     except (OSError, ValueError, TypeError):
         pass
-    counts = Counter(tuple(u['numbers']) for u in fresh)
-    by_numbers = {tuple(u['numbers']): u for u in fresh if counts[tuple(u['numbers'])] == 1}
+    counts = Counter(source_key(u) for u in fresh)
+    by_numbers = {source_key(u): u for u in fresh if counts[source_key(u)] == 1}
     changed = 0
     for row in batch.get("items") or []:
-        key = tuple(row.get("numbers") or ([row.get("number")] if row.get("number") else []))
+        key = source_key(row)
         unit = by_numbers.get(key)
         if not unit:
             continue
@@ -390,7 +406,7 @@ def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
         child_images = set()
         for number in unit.get("numbers") or []:
             try:
-                part = question_parts(unit_lines, int(number))
+                part = question_parts(unit_lines, int(number), scoped=unit.get('identity_version') == 'scoped-v1')
             except (TypeError, ValueError):
                 continue
             source_images = set(_image_names(str(part.get("stem") or "").splitlines()))
@@ -436,12 +452,12 @@ def apply_required_writing_stem(batch_dir: str | Path, batch: dict) -> int:
     for unit in fresh:
         if (unit.get("source_span", {}).get("number_binding") == "single_writing_section"
                 and len(unit.get("numbers") or []) == 1):
-            required[tuple(unit["numbers"])] = _required_stem(unit.get("stem") or "")
+            required[source_key(unit)] = _required_stem(unit.get("stem") or "")
     if not required:
         return 0
     changed = 0
     for row in batch.get("items") or []:
-        key = tuple(row.get("numbers") or ([row.get("number")] if row.get("number") else []))
+        key = source_key(row)
         want = required.get(key)
         if not want:
             continue
@@ -462,7 +478,7 @@ def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
         confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return 0
-    by_numbers = {tuple(u.get("numbers") or []): u for u in confirmed.get("units") or [] if isinstance(u, dict)}
+    by_numbers = {source_key(u): u for u in confirmed.get("units") or [] if isinstance(u, dict)}
     changed = 0
 
     def lookup(parsed, number):
@@ -487,7 +503,7 @@ def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
                 changed += 1
 
     for row in batch.get("items") or []:
-        key = tuple(row.get("numbers") or ([row.get("number")] if row.get("number") else []))
+        key = source_key(row)
         unit = by_numbers.get(key)
         if not unit:
             continue
@@ -551,7 +567,12 @@ def _validated_ai_units(units, fresh, lines):
     expected = [n for unit in fresh for n in unit.get("numbers", [])]
     if not expected or any(type(n) is not int or n < 1 for n in expected):
         return None
-    if len(set(expected)) != len(expected):
+    from .question_identity import VERSION, validate_units, assign_scoped
+    scoped = any(u.get("identity_version") == VERSION for u in fresh)
+    if scoped:
+        if not validate_units(units) or not validate_units(fresh):
+            return None
+    elif len(set(expected)) != len(expected):
         return None
     expected_set = set(expected)
     seen, occupied, result = set(), set(), []
@@ -561,7 +582,7 @@ def _validated_ai_units(units, fresh, lines):
         nums, span, stem = unit.get("numbers"), unit.get("source_span"), unit.get("stem")
         if (not isinstance(nums, list) or not nums or
                 any(type(n) is not int or n < 1 for n in nums) or
-                len(set(nums)) != len(nums) or seen.intersection(nums) or
+                len(set(nums)) != len(nums) or (not scoped and seen.intersection(nums)) or
                 unit.get("unit_kind") not in ("standalone", "group") or
                 (unit.get("unit_kind") == "standalone" and len(nums) != 1) or
                 not isinstance(span, dict) or span.get("basis") != "ai_classified" or
@@ -577,9 +598,14 @@ def _validated_ai_units(units, fresh, lines):
         # A number must be evidenced in both the declared span and the retained
         # stem, not merely invented by the classifier or borrowed from elsewhere.
         stem_lines = stem.splitlines()
-        if any(_find(stem_lines, n) is None and _find(stem_lines, n, strong=False) is None for n in nums):
+        from .question_identity import question_position, printed_anchors
+        unnumbered = span.get('number_binding') in {'single_writing_section', 'unnumbered_section'}
+        if scoped:
+            if not unnumbered and any(question_position(stem_lines, n) is None for n in nums):
+                return None
+        elif any(_find(stem_lines, n) is None and _find(stem_lines, n, strong=False) is None for n in nums):
             return None
-        visible = set()
+        visible = set(n for _, n in printed_anchors(chunk)) if scoped else set()
         guides = []
         for line in chunk:
             number = _strong_number(line)
@@ -599,6 +625,30 @@ def _validated_ai_units(units, fresh, lines):
         # Audit the whole bound source span so a shortened but exact substring
         # cannot hide material, options, images or instructions from the audit.
         result.append({**unit, "stem": "\n".join(chunk).strip()})
+    if scoped:
+        def anchors(rows):
+            positions = []
+            for row in rows:
+                span = row.get('source_span') or {}
+                start, end = span.get('start_line'), span.get('end_line')
+                if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
+                    return None
+                local = lines[start - 1:end]
+                for n in row.get('numbers') or []:
+                    pos = question_position(local, n)
+                    if pos is None and span.get('number_binding') in {'single_writing_section', 'unnumbered_section'}:
+                        positions.append((n, start, 'unnumbered'))
+                        continue
+                    if pos is None:
+                        return None
+                    positions.append((n, start + pos))
+            return Counter(positions)
+        # Compare actual printed occurrences, not the set of numeric labels.
+        # Dropping a second “1” or moving it into another section is a failure.
+        actual, wanted = anchors(result), anchors(fresh)
+        if actual is None or wanted is None or actual != wanted:
+            return None
+        return result
     return result if seen == expected_set else None
 
 
@@ -611,13 +661,13 @@ def restore_table_blocks_from_structure(batch_dir: str | Path, batch: dict) -> i
     """
     root = Path(batch_dir)
     confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
-    by_numbers = {tuple(u.get("numbers") or []): u for u in confirmed.get("units") or []}
+    by_numbers = {source_key(u): u for u in confirmed.get("units") or []}
     repaired = 0
     for item in batch.get("items") or []:
         blocks = item.get("materialBlocks") or item.get("material_blocks")
         if not isinstance(blocks, list) or not any(isinstance(b, dict) and b.get("type") == "table" and not b.get("rows") for b in blocks):
             continue
-        unit = by_numbers.get(tuple(item.get("numbers") or []))
+        unit = by_numbers.get(source_key(item))
         if not unit:
             continue
         stem = str(unit.get("stem") or "")
@@ -661,7 +711,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
     cleaned, _, _ = denoise.clean_body(source)
     fresh = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
-    by_numbers = {tuple(u["numbers"]): u for u in fresh}
+    by_numbers = {source_key(u): u for u in fresh}
     items = batch.get("items") or []
     issues, checked = [], []
 
@@ -672,8 +722,8 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
         issues.append(entry)
 
     expected_units = confirmed.get("units") or []
-    expected_sets = [tuple(u.get("numbers") or []) for u in expected_units]
-    actual_sets = [tuple(row.get("numbers") or ([row.get("number")] if row.get("number") else [])) for row in items]
+    expected_sets = [source_key(u) for u in expected_units]
+    actual_sets = [source_key(row) for row in items]
     if Counter(expected_sets) != Counter(actual_sets):
         issue("BATCH_NUMBER_COVERAGE", "正式批次单元题号及分组与确认结构不一致")
     # AI grouping is usable only after rechecking its bindings against the
@@ -685,7 +735,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
         if validated is None:
             issue("SOURCE_GROUP_BOUNDARY_MISMATCH", "AI确认结构的原卷行号、题号或分组证据无效；须重跑结构闸门")
         else:
-            by_numbers = {tuple(u["numbers"]): u for u in validated}
+            by_numbers = {source_key(u): u for u in validated}
     elif Counter(expected_sets) != Counter(list(by_numbers)):
         # A merged legacy group cannot conceal independently guided source groups.
         issue("SOURCE_GROUP_BOUNDARY_MISMATCH", "确认结构与原卷材料/分段导语的实际分组不一致；须重跑结构闸门")
@@ -712,6 +762,16 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
         if unit is None:
             issue("SOURCE_UNIT_NOT_FOUND", f"源头找不到正式单元题号 {list(key)} 的独立边界", uid)
             continue
+        if (item.get('numbers') or [item.get('number')]) != unit.get('numbers'):
+            issue('BATCH_NUMBER_COVERAGE', '单元身份对应的原始小题号不一致', uid)
+        if unit.get('identity_version') == 'scoped-v1':
+            from .question_identity import fields, question_key
+            if any(item.get(k) != v for k, v in fields(unit).items()):
+                issue('BATCH_IDENTITY_MISMATCH', '正式题目与确认结构的大题/题目身份不一致', uid)
+            targets = item.get('subquestions') or [] if unit['unit_kind'] == 'group' else [item]
+            if any(child.get('question_id') != question_key(unit, child.get('number')) for child in targets
+                   if child.get('number') in unit['numbers']):
+                issue('BATCH_IDENTITY_MISMATCH', '子题身份与所属单元不一致', uid)
         checked.append(uid)
         candidate_body = "\n".join(_field_text(item.get(k)) for k in
                                    ("stem", "material", "materialBlocks", "material_blocks", "options", "subquestions"))
@@ -797,7 +857,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
             candidate_text = _canonical_image_text(candidate_material)
             from .question_draft import _bound_source, _rubric_lines
             from .shared_rubric import section_rubric
-            confirmed_unit = next((u for u in expected_units if tuple(u.get("numbers") or []) == key), unit)
+            confirmed_unit = next((u for u in expected_units if source_key(u) == key), unit)
             bound, proof = _bound_source(confirmed_unit, source, cleaned, fresh)
             rubric_lines = source.splitlines() if proof.get("line_basis") == "01_source/正文.txt" else cleaned.splitlines()
             shared_rubric = (_rubric_lines(bound.splitlines(), unit.get("type") or "")
@@ -840,7 +900,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                         issue("FOREIGN_GROUP_MATERIAL", f"材料混入另一题组 {list(other)} 的正文：{line[:100]}", uid)
         children = item.get("subquestions") or [] if unit["unit_kind"] == "group" else [item]
         child_numbers = [c.get("number") for c in children]
-        if Counter(map(str, child_numbers)) != Counter(map(str, key)):
+        if Counter(map(str, child_numbers)) != Counter(map(str, unit['numbers'])):
             issue("CHILD_NUMBER_COVERAGE", "组内子题实际题号缺失、重复或归属错误", uid)
         by_child = {str(c.get("number")): c for c in children}
         for n, part in source_audit["questions"].items():
@@ -851,7 +911,10 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                                       ("stem", "material", "materialBlocks", "material_blocks"))
             check_images(part["stem"], _image_refs(child), n)
             check_option_images(part["options"], child, n)
-            if part["stem"] and _canonical_image_text(part["stem"]) not in _canonical_image_text(child_content):
+            stem_present = _canonical_image_text(child_content)
+            if shared_options and unit.get('identity_version') == 'scoped-v1' and unit.get('type') == '补全对话':
+                stem_present += _canonical_image_text(candidate_material)
+            if part["stem"] and _canonical_image_text(part["stem"]) not in stem_present:
                 issue("SOURCE_STEM_MISSING", f"第 {n} 题题干缺失或改写", uid, n)
             options = child.get("options") or []
             normalized = _candidate_options(options)

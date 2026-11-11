@@ -51,7 +51,7 @@ def _hashes(root, media=()):
         path = _safe(root, relative)
         result[relative] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
     # Parser changes also invalidate a persisted draft, without mtime dependence.
-    for name in ("question_draft.py", "question_content.py", "wire_format.py", "denoise.py"):
+    for name in ("question_draft.py", "question_content.py", "wire_format.py", "denoise.py", "question_identity.py"):
         path = Path(__file__).with_name(name)
         result["parser:" + name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
@@ -90,8 +90,11 @@ def _raw_fragment(raw, needle, after=0):
     return raw[left:right].strip(), end
 
 
-def _parts(lines, number):
+def _parts(lines, number, *, scoped=False):
     """Use the existing source parser, retaining Word markup rather than OCR."""
+    if scoped:
+        from .question_identity import numbered_projection
+        lines = numbered_projection(lines)
     parsed = question_content.question_parts(lines, int(number))
     from .preview import _find
     start = _find(lines, int(number))
@@ -253,7 +256,8 @@ def _bound_source(unit, source, cleaned, fresh):
         if skipped:
             proof["material_labels_skipped"] = True
         return text, proof
-    matches = [u for u in fresh if u.get("numbers") == unit.get("numbers")
+    from .question_identity import source_key
+    matches = [u for u in fresh if source_key(u) == source_key(unit)
                and u.get("unit_kind") == unit.get("unit_kind")]
     if len(matches) == 1 and str(matches[0].get("stem") or "").strip() != text:
         return "", {"reason": "确认片段与当前原文独立切片不一致，不能沿用旧题干"}
@@ -487,7 +491,7 @@ def build(batch_dir, *, units=None):
                 if (unit.get("source_span") or {}).get("number_binding") == "single_writing_section":
                     row["stem"] = question_content._required_stem(text)
                 else:
-                    part = _parts(lines, unit["numbers"][0])
+                    part = _parts(lines, unit["numbers"][0], scoped=unit.get('identity_version') == 'scoped-v1')
                     row.update(stem=part["stem"], options=part["options"])
                     # Listening word-choice items may print only a number and
                     # options. Retain that actual source token as the field's
@@ -540,12 +544,18 @@ def build(batch_dir, *, units=None):
                 else:
                     row["material"] = "\n".join(body_lines[:body_first]).strip()
                 for number in unit["numbers"]:
-                    part = _parts(lines, number)
+                    part = _parts(lines, number, scoped=unit.get('identity_version') == 'scoped-v1')
+                    unnumbered = (unit.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
+                    if unnumbered:
+                        part = {'stem': '', 'options': [], 'found': True}
+                    elif audit['shared_options']:
+                        # Dialogue blanks are already printed in the shared text.
+                        part = {'stem': '______', 'options': [], 'found': True}
                     child = _empty(number)
                     child.update(stem=part["stem"], options=part["options"])
                     if not child["stem"] and any(int(number) in _weak_numbers(line) for line in lines[:first]):
                         child["stem"] = "______"  # Explicit blank exists in shared source, not generated prose.
-                    elif not child["stem"] and not child["options"]:
+                    elif not unnumbered and not child["stem"] and not child["options"]:
                         issues.append({"unit_id": uid, "number": number, "code": "CHILD_CONTENT_UNRESOLVED",
                                        "reason": "保留子题身份；当前原文不能可靠拆出独立题干"})
                     row["subquestions"].append(child)
@@ -584,6 +594,15 @@ def build(batch_dir, *, units=None):
         # Cover every child even when its source scope is unresolved.
         if unit["unit_kind"] == "group" and not row["subquestions"]:
             row["subquestions"] = [_empty(n) for n in unit["numbers"]]
+        from .question_identity import fields, question_key, VERSION as IDENTITY_VERSION
+        row.update(fields(unit))
+        if (unit.get('source_span') or {}).get('printed_numbers') == []:
+            row['printed_numbers'] = []
+            row['source_span'] = dict(unit['source_span'])
+        if unit.get('identity_version') == IDENTITY_VERSION:
+            row['question_id'] = question_key(unit, unit['numbers'][0]) if unit['unit_kind'] == 'standalone' else ''
+            for child in row.get('subquestions') or []:
+                child['question_id'] = question_key(unit, child['number'])
         items.append(row)
         proof["object_sha256"] = _digest(row)
     hashes = _hashes(root, media)

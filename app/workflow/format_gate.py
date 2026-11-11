@@ -72,7 +72,7 @@ def _text(value):
 def _shape(batch):
     """Check final wire shape before the builder can default/convert values."""
     errors = []
-    ids, units, numbers = {}, {}, {}
+    ids, units = {}, {}
 
     def error(code, message, path):
         errors.append({"code": code, "message": message, "path": path})
@@ -104,10 +104,6 @@ def _shape(batch):
         children = item.get("subquestions", [])
         if "number" in item and not _positive(item["number"]):
             error("QUESTION_NUMBER_INVALID", "number 必须是正整数", path)
-        # The group's first number repeats its first child's identity by design.
-        if child or kind != "group":
-            if _positive(item.get("number")):
-                unique(item["number"], numbers, "QUESTION_NUMBER_DUPLICATE", path)
         if not child and "numbers" in item:
             ns = item["numbers"]
             if (not isinstance(ns, list) or not ns or any(not _positive(n) for n in ns)
@@ -143,6 +139,7 @@ def _shape(batch):
     if isinstance(batch, dict) and isinstance(batch.get("items"), list):
         for index, item in enumerate(batch["items"]):
             visit(item, f"items[{index}]")
+        errors.extend(upload_payload.identity_errors(batch["items"], legacy_numbers=True))
     return errors
 
 

@@ -28,6 +28,7 @@ def is_placeholder(text) -> bool:
 RULES = """Artifact: {items:[{unit_id,explanation:string|source_ref,articleSummary:string|source_ref,subquestions:[{number,explanation:string|source_ref}],evidence:[nonempty location strings]}]}.
 优先定位后引用原文，避免重新抄写长段解析：source_fragment_index 提供文件 path、完整文件 sha256 和原始行号。字段可返回 {"source_ref":{"path":"01_source/附录.txt","sha256":"索引中的完整摘要","start_line":12,"end_line":13,"start_column":0,"end_column":20}}；行号1起含首尾，列号0起、末列不含，列号可省略。程序逐字复制该范围后仍校验题号与材料归属；引用不证明归属。仅选择已提供的来源，不猜行号，不用确定性直抄标记。缺失仍填字符串「无」，也可沿用既有字符串格式。
 你只做匹配与定位，不判题型、不打知识点、不改答案、不改结构，也**不撰写、不生成、不推断**任何解析或文章大意。
+同课时跨大题允许重复印刷题号：unit_id/section_id/source_section 与 source_span 是归属身份，numbers 和子题 number 原样保留。source_ref 必须位于本单元原文窗口，或具有可独立核验的同大题 context+occurrence 来源身份；标题相似、题型相同或答案文字相同都不能替代来源证据。纯数字附录没有大题 scope 证据时须明确定位未绑定，不能选首条、跨大题借用或声称匹配成功。
 1) 解析匹配：按真实题号、章节和材料边界，在原卷正文、附录、答案册中定位该题原解析，逐字保留（去掉“【解析】”等字段标题），evidence 写明来源文件与行号/题号。
 2) 文章大意匹配：按实际篇章及其所属题号匹配原【文章大意】，逐字保留并记录来源位置；重复的 A/B 篇号不是唯一标识。大意只写组级一份，不在每个子题重复。
 3) 缺失处理（用户规则）：确认已提供来源确实没有该题解析或该篇文章大意时，对应字段一律只填字符串「无」，直接跳过；严禁用 AI 生成或自行补写任何内容，也不加任何来源标记。
@@ -119,6 +120,42 @@ def normalize_optional_content(row):
 def validate(payload, units, typed, batch):
     """校验子智能体1的产物；返回按 unit_id 索引的行，供下游搬运与比对。"""
     rows = _coverage(payload, units)
+    from .question_identity import validate_units
+    if not validate_units(units):
+        raise ValueError('Invalid scoped question identities')
+    # References lose their object coordinates on expansion. Verify ownership
+    # first so identical text in another section cannot launder a wrong ref.
+    from .upload_content import scoped_source_matches, _source_line, SOURCES
+    from pathlib import Path
+    root = Path(batch)
+    paths = [*SOURCES, *(p.relative_to(root).as_posix() for p in (root / '01_source/materials').glob('attachment_*.txt'))]
+    source_lines = {path: [_source_line(line) for line in (root / path).read_text(encoding='utf-8-sig').splitlines()]
+                    for path in paths if (root / path).is_file()}
+    reference_index = None
+    for unit in units:
+        if unit.get('identity_version') != 'scoped-v1' or typed[unit['unit_id']]['type'] == '书面表达':
+            continue
+        row = rows[unit['unit_id']]
+        targets = [(row, field, unit['numbers']) for field in ('explanation', 'articleSummary')]
+        targets.extend((child, 'explanation', [child.get('number')]) for child in row.get('subquestions') or [] if isinstance(child, dict))
+        for obj, field, numbers in targets:
+            value = obj.get(field)
+            if not isinstance(value, dict) or not isinstance(value.get('source_ref'), dict):
+                continue
+            ref = value['source_ref']
+            if not numbers or not all(scoped_source_matches(unit, n, ref.get('path'), boundary, source_lines)
+                                      for n in numbers for boundary in (ref.get('start_line'), ref.get('end_line'))):
+                raise ValueError(f"{unit['unit_id']}/{field}: source_ref does not belong to the unit source scope")
+            if reference_index is None:
+                from .upload_content import inspect_content
+                reference_index = inspect_content(batch, {'items': []})
+            candidates = reference_index['all_summaries' if field == 'articleSummary' else 'all_questions']
+            matches = [fragment for fragment in candidates if fragment['path'] == ref.get('path')
+                       and fragment['line'] <= ref.get('start_line', 0) <= ref.get('end_line', 0) <= fragment.get('end_line', fragment['line'])
+                       and (set(fragment.get('members') or []) == set(numbers) if field == 'articleSummary'
+                            else fragment.get('number') in numbers)]
+            if len(matches) != 1:
+                raise ValueError(f"{unit['unit_id']}/{field}: source_ref has no unique question fragment ownership")
     from .content_fragments import expand_references
     expand_references(rows.values(), batch)
     for row in rows.values():

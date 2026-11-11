@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-11 | [2026-11-11-scoped-question-identity.md](2026-11-11-scoped-question-identity.md) | 同课时跨大题重号的稳定身份、原标题原号保留、全链来源隔离及真实首课回归 |
 | 2026-11-11 | [2026-11-11-sync-source-recognition.md](2026-11-11-sync-source-recognition.md) | 同步课时正文识别、305处原件回归、单课时来源及证据绑定 |
 | 2026-11-10 | [2026-11-10-operations-first-blocker.md](2026-11-10-operations-first-blocker.md) | 运维在线时首个阻断异常安全建单接手，先落账分析建议；不可用时保留原自愈 |
 | 2026-11-10 | [2026-11-10-idle-flow-svg-adaptive.md](2026-11-10-idle-flow-svg-adaptive.md) | 无任务也全量展示流程图；自绘 SVG 节点/连线三态（运行中闪烁）；整图自适应宽度 |

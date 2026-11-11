@@ -272,11 +272,42 @@ def slice_range(lines: list[str], numbers) -> list[str]:
     return out
 
 
-def source_slice(batch_dir, numbers, lines: list[str] | None = None) -> list[str]:
-    """Preview source by numbers, using explicit section binding for unnumbered writing.
+def _scoped_source_slice(unit: dict, lines: list[str]) -> list[str]:
+    """Bind a scoped preview to its confirmed window, never a global number hit."""
+    from .denoise import clean_body
+    span = unit.get("source_span") or {}
+    if span.get("basis") in ("ai_classified", "cleaned_source"):
+        cleaned, _, _ = clean_body("\n".join(lines))
+        lines = cleaned.splitlines()
+    start, end = span.get("start_line"), span.get("end_line")
+    if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
+        return []
+    window = lines[start - 1:end]
+    stem = str(unit.get("stem") or "").strip()
+    # Only layout whitespace may differ. A stale/misbound stem must not cause
+    # a fallback to another section's identically numbered question.
+    compact = ""
+    owners = []
+    for index, line in enumerate(window):
+        visible = re.sub(r"\s+", "", line)
+        compact += visible
+        owners.extend([index] * len(visible))
+    wanted = re.sub(r"\s+", "", stem)
+    if not wanted or compact.count(wanted) != 1:
+        return []
+    if unit.get("unit_kind") == "group":
+        selected = window
+    else:
+        offset = compact.index(wanted)
+        selected = window[owners[offset]:owners[offset + len(wanted) - 1] + 1]
+    return [line.rstrip() for line in selected if line.strip()]
 
-    Rebuild the binding from the current source/structure rather than trusting a
-    stale confirmed stem. This displays candidates without approving numbering.
+
+def source_slice(batch_dir, numbers, lines: list[str] | None = None, *, unit_id=None) -> list[str]:
+    """Bind scoped previews by identity; retain global-number legacy behavior.
+
+    Scoped windows must prove their confirmed stem. Only legacy unnumbered
+    writing rebuilds a stale binding from the current source/structure.
     """
     root = Path(batch_dir)
     if lines is None:
@@ -285,6 +316,29 @@ def source_slice(batch_dir, numbers, lines: list[str] | None = None) -> list[str
     nums = [int(n) for n in numbers if str(n).isdigit()]
     if not nums:
         return []
+    try:
+        confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
+        units = confirmed.get("units") or []
+    except (OSError, ValueError, TypeError):
+        units = []
+    scoped = [u for u in units if isinstance(u, dict) and u.get("identity_version") == "scoped-v1"]
+    if scoped:
+        if unit_id is not None:
+            matches = [u for u in scoped if str(u.get("unit_id")) == str(unit_id)]
+        else:
+            matches = [u for u in scoped if set(nums).issubset(u.get("numbers") or [])]
+        if len(matches) != 1 or not set(nums).issubset(matches[0].get("numbers") or []):
+            return []
+        return _scoped_source_slice(matches[0], lines)
+    # A scoped batch without its confirmed binding cannot safely use the
+    # legacy first-number heuristic (including a temporarily missing file).
+    try:
+        batch = json.loads((root / "06_batch/batch.json").read_text(encoding="utf-8-sig"))
+        if any(isinstance(item, dict) and item.get("identity_version") == "scoped-v1"
+               for item in batch.get("items", [])):
+            return []
+    except (OSError, ValueError, TypeError):
+        pass
     chunk = slice_range(lines, nums) if len(nums) > 1 else slice_text(lines, nums[0])
     if chunk or len(nums) != 1:
         if chunk and len(nums) > 1:
@@ -437,6 +491,9 @@ def source_group_candidates(batch_dir: Path, items: list[dict]) -> list[dict]:
     result = []
     for item in items:
         nums = _numbers_of(item)
+        if item.get("identity_version") == "scoped-v1":
+            result.append(item)
+            continue
         pieces = [u for u in units if u.get("unit_kind") == "group" and set(u["numbers"]).issubset(nums)
                   and u.get("type") == (item.get("question_type") or item.get("type"))]
         covered = [n for u in pieces for n in u["numbers"]]
@@ -488,21 +545,32 @@ def _rows_from_batch(batch_dir: Path, review_rows: list[dict]) -> list[dict] | N
         return None
     items = source_group_candidates(batch_dir, items)
 
-    by_number = {str(r["number"]): r for r in review_rows}
+    by_number = {str(r["number"]): r for r in review_rows if "number" in r}
+    by_unit = {}
+    for review_row in review_rows:
+        by_unit.setdefault(str(review_row.get("unit_id") or ""), []).append(review_row)
     rows = []
     for item in items:
         nums = _numbers_of(item)
         if not nums:
             continue
-        related = [by_number[str(n)] for n in nums if str(n) in by_number]
+        scoped = item.get("identity_version") == "scoped-v1"
+        uid = str(item.get("unit_id") or item.get("id") or "")
+        related = (by_unit.get(uid, []) if scoped else
+                   [by_number[str(n)] for n in nums if str(n) in by_number])
         state = "unverified" if item.get("source_projection") else _worst([r["state"] for r in related])
         opened, resolved = [], []
         for r in related:
             opened.extend(r.get("open") or [])
             resolved.extend(r.get("resolved") or [])
         label = str(nums[0]) if len(nums) == 1 else f"{nums[0]}–{nums[-1]}"
+        printed_numbers = item.get("printed_numbers", (item.get("source_span") or {}).get("printed_numbers"))
+        if scoped and printed_numbers == []:
+            label = str((item.get("source_section") or {}).get("title") or "无印刷题号")
         rows.append({
-            "unit_id": item.get("id", ""),
+            "unit_id": uid if scoped else item.get("id", ""),
+            **{key: item[key] for key in ("identity_version", "section_id", "source_section", "question_ids", "printed_numbers") if key in item},
+            **({"printed_numbers": printed_numbers} if printed_numbers is not None else {}),
             "number": str(nums[0]),
             "label": label,
             "numbers": nums,
@@ -531,7 +599,8 @@ def _rows_from_batch(batch_dir: Path, review_rows: list[dict]) -> list[dict] | N
             "table": None,
             "media": [],
         })
-    rows.sort(key=lambda r: int(r["number"]) if r["number"].isdigit() else 10 ** 6)
+    if not any(r.get("identity_version") == "scoped-v1" for r in rows):
+        rows.sort(key=lambda r: int(r["number"]) if r["number"].isdigit() else 10 ** 6)
     return rows
 
 
