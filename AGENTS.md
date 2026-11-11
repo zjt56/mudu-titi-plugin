@@ -1,4 +1,4 @@
-﻿# AGENTS.md — 给所有接手本项目的 Agent
+# AGENTS.md — 给所有接手本项目的 Agent
 
 本文件是**项目根目录的总入口**。任何 Agent（DSH、Codex、Cursor、Copilot、CLI 或其它）接手本项目前先读这里。
 用户当面或文字明确提出的要求**永远优先于本文件**；本文件与用户冲突时，按用户执行并在 `CHANGELOG/` 记一条。
