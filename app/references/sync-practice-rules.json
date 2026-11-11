@@ -63,9 +63,9 @@
       "id": "task-reading-mindmap",
       "any": ["完成任务思维导图", "完成思维导图"],
       "type": "任务型阅读",
-      "subtype": "信息摘录",
+      "subtype": "阅读综合",
       "kind": "group",
-      "note": "短文后要求填思维导图（每空不超过 N 个词）属信息摘录。"
+      "note": "短文后要求填思维导图按 阅读综合 记（题型汇总表一 2026-11-11 修订；原记 信息摘录）。"
     },
     {
       "id": "task-reading",
@@ -225,30 +225,40 @@
       "kind": "standalone"
     },
     {
+      "id": "sentence-picture",
+      "any": ["根据图片提示完成下列句子", "家谱所示信息完成下列句子",
+              "根据地图用合适的方位介词", "根据图示用适当的方位介词",
+              "根据图片信息完成句子"],
+      "type": "完成句子",
+      "subtype": "补全句子",
+      "kind": "group",
+      "note": "看图补全句子的整题记组题；题型汇总表一 2026-11-11 由 单词拼写/看图填词 改判（用户确认本地目录补 补全句子 子类）。"
+    },
+    {
       "id": "spell-picture",
       "any": ["家谱", "根据地图", "根据图示", "看图", "图片提示", "图片信息",
               "图片中的节日", "根据图片"],
       "type": "单词拼写",
       "subtype": "看图填词",
       "kind": "group",
-      "note": "凡“根据下图/图图片信息”类一律组题（用户 2026-11-11 定）。"
+      "note": "凡“根据下图/图图片信息”类一律组题（用户 2026-11-11 定）；看图补全句子先由 sentence-picture 命中。"
     },
     {
       "id": "spell-modal",
       "any": ["can、can", "can’t", "could"],
-      "type": "单词拼写",
-      "subtype": "句意",
+      "type": "选词填空",
+      "subtype": "多句",
       "kind": "group",
-      "note": "用 can/can't/could/couldn't 的适当形式填空整题记组题（用户 2026-11-11 定）。"
+      "note": "用 can/can't/could/couldn't 的适当形式填空整题记组题（用户 2026-11-11 定）；题型汇总表一改为 选词填空/多句。"
     },
     {
       "id": "spell-grammar-word",
       "any": ["人称代词", "do、does", "介词in、on", "连词and", "用适当的介词",
               "How、What", "if、whether", "关系代词", "介词for或of"],
-      "type": "单词拼写",
-      "subtype": "句意",
+      "type": "选词填空",
+      "subtype": "多句",
       "kind": "standalone",
-      "note": "一句一空的语法功能词填空，暂时按单独题处理；用户若统一改为组题，只改本规则。"
+      "note": "一句一空的语法功能词填空，题型汇总表一 2026-11-11 改为 选词填空/多句；默认单独题，组题处由 spell-modal 等更具体规则先命中。"
     },
     {
       "id": "single-choice",

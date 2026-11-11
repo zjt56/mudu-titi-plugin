@@ -44,9 +44,9 @@ class TestClassify(unittest.TestCase):
         ("Ⅱ.按照名字的字母顺序为下列人物排序,并按照性别进行分类", "语音题", None, "group"),
         ("选出下列每组单词中画线部分读音不同的一项", "语音题", None, "group"),
         ("根据所给音标写出单词", "单词拼写", "句意及音标", "group"),
-        ("根据下图家谱所示信息完成下列句子,每空仅填一词", "单词拼写", "看图填词", "group"),
-        ("用can、can’t、could或couldn’t的适当形式填空", "单词拼写", "句意", "group"),
-        ("根据句意用介词in、on或under填空", "单词拼写", "句意", "standalone"),
+        ("根据下图家谱所示信息完成下列句子,每空仅填一词", "完成句子", "补全句子", "group"),
+        ("用can、can’t、could或couldn’t的适当形式填空", "选词填空", "多句", "group"),
+        ("根据句意用介词in、on或under填空", "选词填空", "多句", "standalone"),
         ("写出下面画线词的汉语意思", "翻译", "英翻汉", "standalone"),
         ("☆佳句仿写", "翻译", "汉翻英", "standalone"),
         ("根据例句及汉语意思仿写句子", "翻译", "汉翻英", "standalone"),
@@ -78,6 +78,56 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(sp.normalize("Ⅰ.阅读理解[情境题]"), "阅读理解")
         self.assertEqual(sp.normalize("【2026·淮南期末】Ⅲ.补全对话"), "补全对话")
         self.assertEqual(sp.normalize(" Ⅰ ． 单项填空 "), "单项填空")
+
+
+class TestWorkbookSheetOneAlignment(unittest.TestCase):
+    """桌面《英语题型汇总.xlsx》表一（题型汇总）2026-11-11 改判的对照。"""
+
+    CHANGED = [
+        ("用适当的人称代词或形容词性物主代词填空", "选词填空", "多句", "standalone"),
+        ("根据句意用do、does、don’t或doesn’t填空", "选词填空", "多句", "standalone"),
+        ("根据句意用介词in、on或under填空", "选词填空", "多句", "standalone"),
+        ("用连词and、but或because填空", "选词填空", "多句", "standalone"),
+        ("根据句意用适当的介词填空", "选词填空", "多句", "standalone"),
+        ("用can、can’t、could或couldn’t的适当形式填空", "选词填空", "多句", "group"),
+        ("根据句意用How、What或What a/an填空", "选词填空", "多句", "standalone"),
+        ("根据句意用介词for或of填空", "选词填空", "多句", "standalone"),
+        ("根据句意用if、whether或that填空", "选词填空", "多句", "standalone"),
+        ("用关系代词that、which或who填空", "选词填空", "多句", "standalone"),
+        ("根据图片提示完成下列句子", "完成句子", "补全句子", "group"),
+        ("根据下图家谱所示信息完成下列句子,每空仅填一词", "完成句子", "补全句子", "group"),
+        ("根据地图用合适的方位介词或介词短语填空", "完成句子", "补全句子", "group"),
+        ("根据图示用适当的方位介词或介词短语填空,每空一词", "完成句子", "补全句子", "group"),
+        ("根据图片信息完成句子,每空一词", "完成句子", "补全句子", "group"),
+        ("根据短文内容完成思维导图。每空不得超过三个词", "任务型阅读", "阅读综合", "group"),
+    ]
+
+    KEPT_PICTURE = [
+        ("根据首字母及图片提示完成单词", "单词拼写", "看图填词", "group"),
+        ("用英语写出下列图片中的节日所在的农历月份", "单词拼写", "看图填词", "group"),
+    ]
+
+    def test_changed_rows_follow_sheet_one(self):
+        for title, type_name, subtype, kind in self.CHANGED:
+            with self.subTest(title=title):
+                hit = sp.classify(title)
+                self.assertIsNotNone(hit, title)
+                self.assertEqual(hit["type"], type_name)
+                self.assertEqual(hit["subtype"], subtype)
+                self.assertEqual(hit["kind"], kind)
+
+    def test_other_picture_spelling_rows_unchanged(self):
+        for title, type_name, subtype, kind in self.KEPT_PICTURE:
+            with self.subTest(title=title):
+                hit = sp.classify(title)
+                self.assertIsNotNone(hit, title)
+                self.assertEqual(hit["type"], type_name)
+                self.assertEqual(hit["subtype"], subtype)
+                self.assertEqual(hit["kind"], kind)
+
+    def test_finished_sentence_catalog_carries_bucian_sentence(self):
+        from workbench import taxonomy
+        self.assertIn("补全句子", taxonomy.subtypes("完成句子"))
 
 
 class TestRefineWithBody(unittest.TestCase):

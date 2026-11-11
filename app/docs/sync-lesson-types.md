@@ -76,6 +76,22 @@
 4. 真实批次复验：`python -m workflow.runner run --batch-dir <批次> --stage extract --force`，再 `--stage structure_gate --force`；已完成阶段不加 `--force` 不会重跑。
 5. 记 `CHANGELOG/`（现象/改动/边界/验证数字/回退），卡点用 `python -m workflow.issue_log add|fix` 落 `ISSUES/`。
 
+### 5.1 按桌面《英语题型汇总.xlsx》表一对齐（2026-11-11）
+
+表一（`题型汇总`）是题型/子类/组单的最终口径，逐处明细与插件规则都要向它看齐。本轮改判 15 行：
+
+| 原卷标题族 | 旧口径 | 表一新口径 | 规则 id |
+|---|---|---|---|
+| 一句一空语法功能词（人称代词 / do、does / 介词 in、on、under / 连词 and、but、because / 适当的介词 / How、What / for、of / if、whether、that / 关系代词） | 单词拼写·句意 | 选词填空·多句（仍单独题） | `spell-grammar-word` |
+| can/can't/could/couldn't 的适当形式 | 单词拼写·句意 | 选词填空·多句（组题） | `spell-modal` |
+| 看图补全句子（图片提示 / 家谱 / 地图 / 图示 / 图片信息） | 单词拼写·看图填词 | 完成句子·补全句子（组题） | `sentence-picture` |
+| 短文后完成思维导图 | 任务型阅读·信息摘录 | 任务型阅读·阅读综合 | `task-reading-mindmap` |
+
+- `补全句子` 是**本地补入** `app/references/filter-framework.json` 的 `完成句子` 子类（平台 1.0 框架原无）；
+  平台侧若不接受，上传体检 A7 会报「子类不属于完成句子」，届时只能退回 `看图填词` 或改投 `情景运用`。
+- `sentence-picture` 必须排在 `spell-picture` **之前**（顺序即优先级），否则「家谱 / 根据地图 / 图示」先被
+  看图填词命中；「根据首字母及图片提示完成单词」「图片中的节日」等仍走 `spell-picture`。
+
 ## 六、边界（不要误读）
 
 - 这些规则只用于**课时同步材料**；单元卷、期中期末、月考、中考卷不得套用（`looks_like_sync_practice` 判定）。
