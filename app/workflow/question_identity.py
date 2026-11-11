@@ -114,15 +114,19 @@ def assign_scoped(units, source_lines, sections=None, previous=None) -> list[dic
     from .sync_practice import heading_candidates, plain_text
     lines = source_lines.splitlines() if isinstance(source_lines, str) else list(source_lines)
     candidates = heading_candidates("\n".join(lines))
-    if not candidates:
-        for index, row in enumerate(sections or [], 1):
-            start = row.get("start_line") or row.get("source_line") or row.get("line")
-            if type(start) is int:
-                candidates.append(dict(row, start_line=start, occurrence=index,
-                                       title=row.get("title") or row.get("heading") or ""))
-        candidates.sort(key=lambda row: row["start_line"])
-        for index, row in enumerate(candidates):
-            row.setdefault("end_line", candidates[index + 1]["start_line"] - 1 if index + 1 < len(candidates) else len(lines))
+    # 标题规则可能只识别部分大题；原提取器已定位的其它来源窗口也须参与归属。
+    # 同一坐标仍优先使用规则候选，不覆盖其标题、课时上下文与 occurrence。
+    known_starts = {row["start_line"] for row in candidates}
+    for index, row in enumerate(sections or [], 1):
+        start = row.get("start_line") or row.get("source_line") or row.get("line")
+        if type(start) is int and start not in known_starts:
+            candidates.append(dict(row, start_line=start, occurrence=index,
+                                   title=row.get("title") or row.get("heading") or ""))
+            known_starts.add(start)
+    candidates.sort(key=lambda row: row["start_line"])
+    for index, row in enumerate(candidates):
+        boundary = candidates[index + 1]["start_line"] - 1 if index + 1 < len(candidates) else len(lines)
+        row["end_line"] = min(row.get("end_line") or row.get("source_end_line") or len(lines), boundary)
     prior = {}
     for row in previous or []:
         if row.get("identity_version") == VERSION:

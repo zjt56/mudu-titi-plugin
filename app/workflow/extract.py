@@ -54,6 +54,38 @@ def blank_numbers(line: str) -> list[int]:
         r"(?:_{2,}|\u3000+)\s*(\d{1,3})\s*(?=_{2,}|\u3000)", normalized)]
 
 
+# 对话补全题的小题号常带说话人前缀（`C:1.<u>…`），行首不是数字。
+DIALOGUE_QUESTION = re.compile(r"^\s*[A-Z]{1,2}\s*[:：]\s*(\d{1,4})\s*[.．、)]")
+# 同一行并排两个小题（`1.U　v (　　)　　　2.W　x (　　)`）：题号前面是空白、后面紧跟
+# 文字/括号/图片标记。只在这种「一行多小题」的版面里追加，避免把题干里的数字当题号。
+INLINE_ITEM = re.compile(r"(?:^|[\s\u3000])(\d{1,4})\s*[.．、]\s*(?=[A-Za-z(\[（])")
+
+
+def same_line_numbers(line: str, first: int) -> list[int]:
+    """读出与首个小题并排在同一行的后续小题号。
+
+    语音/判断类同步练习把 8 个小题排成 4 行、每行 2 个；只认行首会让 2/4/6/8
+    完全丢失，结构闸门随即报「题号未归属」。这里要求该行确实有成组空档
+    （括号或下划线），且题号严格递增，避免误读题干中的数字。
+    """
+    if not re.search(r"(?:_{2,}|\u3000{2,}|[(（]\s*[)）])", line):
+        return []
+    extra: list[int] = []
+    for match in INLINE_ITEM.finditer(line):
+        number = int(match.group(1))
+        if number in extra or number == first and not extra:
+            continue
+        if number <= 0:
+            continue
+        extra.append(number)
+    if not extra:
+        return []
+    sequence = [first, *extra]
+    if sequence != sorted(sequence) or len(set(sequence)) != len(sequence):
+        return []
+    return extra
+
+
 def guide_numbers(line: str) -> list[int]:
     """Read only explicit answering ranges/lists in a group lead-in."""
     match = re.search(r"回答\s*第?\s*([\d\s、,，和及至到\-—–～~第]+)\s*(?:小)?题", _plain(line))
@@ -250,12 +282,18 @@ def _is_trailing_answer_block(lines: list[str], start: int, seen_headings=None) 
             # 答案册常重复已有大题标题；只有“没出现过的新大题”才说明后面还是试卷正文。
             if kind and (heading.group(1), kind) not in (seen_headings or set()):
                 return False
+    ordinal_answer = re.compile(
+        r"^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+|[一二三四五六七八九十]+)\s*[.．、]\s*"
+        r"\d{1,4}(?:\s*[~～\-–—]\s*\d{1,4})?\s*[.．、]?\s*\S")
     hits = 0
     for raw in tail:
         plain = _plain(raw).strip()
         if QUESTION.match(plain) or re.match(r"^\s*\d{1,4}\s*[~～\-–—]\s*\d{1,4}\b", plain):
             hits += 1
         elif re.match(r"^\s*\d{1,4}\s*[.．、]\s*[A-Ha-h]\s*$", plain):
+            hits += 1
+        # 同步练习答案册常以“罗马序号 + 行内答案”成行（Ⅰ.1.Bb;Dd…、Ⅴ.1~5 BACDD）。
+        elif ordinal_answer.match(plain):
             hits += 1
     return hits >= 2
 
@@ -299,6 +337,9 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
     is_sync = sync_practice.looks_like_sync_practice(text)
     sync_headings = sync_practice.heading_candidates(text) if is_sync else []
     sync_by_line = {row['start_line']: row for row in sync_headings}
+    # 同步练习册的文末答案区不属于任何大题：即使答案行被 skip_lines 过滤掉、
+    # 或答案区里没有题号行，也必须从最后一个大题的窗口里切出去。
+    sync_answer = sync_practice.answer_key_start(text) if is_sync else None
     skip = {int(n) for n in (skip_lines or []) if str(n).strip().isdigit()}
     sections, unresolved, groups, image_questions = [], [], [], []
     active = None
@@ -312,6 +353,11 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
     for index, raw in enumerate(lines):
         if index < skip_until:
             continue
+        if sync_answer and index + 1 == sync_answer:
+            appendix_start = index
+            unresolved.append({"code": "ANSWER_APPENDIX_DETECTED", "line": index + 1,
+                               "message": "文末参考答案已按课时来源边界分离，答案题号不参与正文统计"})
+            break
         if index + 1 in skip:
             continue
         if (active is not None and paper_title and _title_key(raw) == paper_title
@@ -389,7 +435,7 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
             continue
         if not is_sync and _is_numbered_letter_answer(line, scan_numbers):
             continue
-        match = QUESTION.match(line)
+        match = QUESTION.match(line) or (DIALOGUE_QUESTION.match(line) if is_sync else None)
         if active["type"] == "书面表达":
             # 题号只可能在任务开头；正文里的数字列表不能仅凭连续性视为题号。
             prior = [n for section in sections[:-1] for n in section["questions"]]
@@ -400,6 +446,10 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
                                      line[match.end():], re.I)):
                 match = None
         numbers = [int(match.group(1))] if match else []
+        # 一行并排两个小题时，行首题号之后的题号也要收进来，否则结构闸门会把
+        # 这些真实存在的题号判成「未归属」并阻断整卷。
+        if is_sync and numbers and not DIALOGUE_QUESTION.match(line):
+            numbers.extend(same_line_numbers(plain_line, numbers[0]))
         # 表格/文章里的空位题号：只认明确下划线或全角空格边界，不扫普通数字。
         if not numbers:
             numbers = blank_numbers(plain_line)
@@ -410,6 +460,10 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
             scan_numbers.add(int(number))
         if "[IMG " in raw and active["questions"]:
             image_questions.append(active["questions"][-1])
+    if sync_answer:
+        # 同步练习册的文末答案区不属于正文：最后一个大题的窗口必须止于答案区之前，
+        # 否则答案里的题号会撞进正文题号、答案文字会混进题干与选项。
+        appendix_start = min(appendix_start, sync_answer - 1)
     previous = 0
     for section_index, section in enumerate(sections):
         end_line = sections[section_index + 1]["source_line"] - 1 if section_index + 1 < len(sections) else appendix_start
@@ -423,6 +477,15 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
                                "message": f"{section['title']} 内题号重复：{duplicates}"})
         section["questions"] = nums = sorted(set(nums))
         declared = section["declared_count"]
+        if not nums:
+            body = [line for line in lines[section["source_line"]:end_line] if _plain(line).strip()]
+            # 先识别纯图片窗口，不能因上一节存在编号就猜出图片中的印刷题号。
+            if (any("[IMG " in line for line in body)
+                    and not any(re.sub(r"\[IMG\s+[^\]]*\]", "", _plain(line)).strip() for line in body)):
+                section["image_only"] = True
+                unresolved.append({"code": "IMAGE_SECTION_UNNUMBERED", "line": section["source_line"],
+                                   "message": f"{section['title']} 的小题只存在于图片中，保留完整来源单元；图片识别能力限制不阻断"})
+                continue
         # 听力稿常没有逐题行首编号：长对话用“回答第X~Y题”导语，
         # 短文用“有五个小题”说明题量，信息转换通常承接连续五个空位。
         if section["type"] in GROUP_TYPES and not nums:

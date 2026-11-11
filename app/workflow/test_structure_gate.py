@@ -81,6 +81,51 @@ class StructureGateTest(unittest.TestCase):
         self.assertIn("The museum opens at nine.", units[0]["stem"])
         self.assertEqual(units[0]["source_span"]["start_line"], 1)
 
+    def test_image_only_standalone_retains_source_and_missing_unit_blocks(self):
+        from copy import deepcopy
+        from workflow import extract
+        text = ("第一课时 Section A\nⅠ.完成句子\n[IMG image2.jpeg]\n"
+                "Ⅱ.单项填空\n1.Who?\nA.a B.b C.c D.d")
+        structure, body, _ = extract.infer_structure(text)
+        batch = make_batch(self.root, structure, body)
+        report = structure_gate.run_gate(batch)
+        self.assertTrue(report["passed"], report["blockers"])
+        confirmed = json.loads((batch / "01_source/structure.confirmed.json").read_text(encoding="utf-8"))
+        units = confirmed["units"]
+        self.assertEqual(len(units), 2)
+        image = units[0]
+        self.assertEqual(image["unit_kind"], "standalone")
+        self.assertEqual(image["stem"], "[IMG image2.jpeg]")
+        self.assertEqual(image["numbers"], [1])
+        self.assertEqual(image["source_span"], {
+            "start_line": 3, "end_line": 3, "basis": "cleaned_source",
+            "number_binding": "unnumbered_section", "printed_numbers": []})
+        self.assertIsNone(image["original_number"])
+        self.assertFalse(image["printed_number"])
+        self.assertNotEqual(image["question_ids"]["1"], units[1]["question_ids"]["1"])
+        # bare 完成句子不是规则标题，单项填空是：部分候选不能丢掉前一节身份。
+        self.assertEqual(image["source_section"]["title"], "Ⅰ.完成句子")
+        self.assertEqual(image["source_section"]["start_line"], 2)
+        self.assertEqual(units[1]["source_section"]["title"], "Ⅱ.单项填空")
+        self.assertEqual(units[1]["source_section"]["occurrence"], 1)
+        errors = structure_gate._scoped_source_errors(units[1:], structure["sections"], body.splitlines())
+        self.assertIn("SOURCE_SECTION_UNCOVERED", {issue["code"] for issue in errors})
+        damaged = deepcopy(units)
+        damaged[0]["source_span"]["start_line"] = 5
+        errors = structure_gate._scoped_source_errors(damaged, structure["sections"], body.splitlines())
+        self.assertIn("SOURCE_SECTION_UNCOVERED", {issue["code"] for issue in errors})
+
+    def test_image_only_group_cannot_be_omitted_by_capability_warning(self):
+        from workflow import extract
+        text = ("第一课时 Section A\nⅠ.按照字母表顺序,写出空白处所缺字母\n[IMG image2.jpeg]\n"
+                "Ⅱ.单项填空\n1.Who?\nA.a B.b C.c D.d")
+        structure, body, _ = extract.infer_structure(text)
+        units = structure_gate._build_units(structure["sections"], structure["groups"], body.splitlines())
+        self.assertEqual(len(units), 2)
+        self.assertEqual(units[0]["unit_kind"], "group")
+        errors = structure_gate._scoped_source_errors(units[1:], structure["sections"], body.splitlines())
+        self.assertIn("SOURCE_SECTION_UNCOVERED", {issue["code"] for issue in errors})
+
     def test_original_website_content_survives_confirmed_structure(self):
         from workflow import extract
         text = ("2024年安徽省中考\nⅠ.单项填空(共1小题)\n"

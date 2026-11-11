@@ -339,6 +339,7 @@ class LocalAgentTest(unittest.TestCase):
         metadata = json.loads(Path(caught.exception.artifacts["metadata"]).read_text())
         self.assertEqual(metadata["error_code"], "quota")
 
+    @unittest.skipUnless(os.name == "posix", "Private candidate cache requires POSIX dir_fd/O_NOFOLLOW")
     def test_opt_in_candidate_cache_revalidates_and_avoids_second_call(self):
         batch = self.root / "batch"
         batch.mkdir()
@@ -357,6 +358,32 @@ class LocalAgentTest(unittest.TestCase):
         self.assertTrue(json.loads(output.getvalue().splitlines()[-1])["cache_hit"])
         self.assertGreaterEqual(sum(bool(call.kwargs.get("validate_only")) for call in parent.accept_result.call_args_list), 2)
 
+    @unittest.skipUnless(os.name == "nt", "Windows candidate cache fallback")
+    def test_windows_candidate_cache_stays_disabled_and_checks_input_hashes(self):
+        from workflow import candidate_cache
+        batch = self.root / "batch"
+        batch.mkdir()
+        source = batch / "source.txt"
+        source.write_text("source", encoding="utf-8")
+        digest = hashlib.sha256(b"source").hexdigest()
+        parent = types.ModuleType("workflow.agent_tasks")
+        parent.build_task = MagicMock(return_value={"prompt": "context", "input_hashes": {"source.txt": digest}})
+        parent.accept_result = MagicMock(return_value={"completed": True})
+        config = {**self.config, "candidate_cache": True}
+        response = {"status": "completed", "artifacts": {}, "notes": [], "findings": []}
+        with patch.dict(sys.modules, {"workflow.agent_tasks": parent}), patch("workflow.agent_tasks", parent, create=True), patch.object(agent, "load_config", return_value=config), patch.object(agent, "invoke", return_value={"response": response, "artifacts": {}}) as invoke, patch.object(candidate_cache, "load") as cache_load, patch.object(candidate_cache, "store") as cache_store, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+            args = ["--stage", "types", "--batch-dir", str(batch)]
+            self.assertEqual(agent.main(args), 0)
+            self.assertEqual(agent.main(args), 0)
+            source.write_text("changed", encoding="utf-8")
+            self.assertEqual(agent.main(args), 2)
+        self.assertEqual(invoke.call_count, 2)
+        self.assertEqual(parent.accept_result.call_count, 2)
+        cache_load.assert_not_called()
+        cache_store.assert_not_called()
+        self.assertFalse(any(json.loads(line).get("cache_hit") for line in output.getvalue().splitlines()))
+        self.assertEqual(json.loads(errors.getvalue())["code"], "context_changed")
+
     def test_validation_failure_retries_once_with_feedback(self):
         parent = types.ModuleType("workflow.agent_tasks")
         parent.build_task = MagicMock(return_value={"prompt": "bundled context", "input_hashes": {}})
@@ -369,6 +396,31 @@ class LocalAgentTest(unittest.TestCase):
         self.assertEqual(invoke.call_count, 2)
         self.assertIn("上一次返回未通过校验", invoke.call_args_list[1].args[0])
         self.assertIn("findings must be objects", invoke.call_args_list[1].args[0])
+
+    def test_validation_refreshing_draft_stops_retry_before_model_call(self):
+        batch = self.root / "batch"
+        draft = batch / "06_batch" / "question-draft.json"
+        draft.parent.mkdir(parents=True)
+        draft.write_text('{"parser": "original"}', encoding="utf-8")
+        hashes = {"06_batch/question-draft.json": hashlib.sha256(draft.read_bytes()).hexdigest()}
+        parent = types.ModuleType("workflow.agent_tasks")
+        parent.build_task = MagicMock(return_value={"prompt": "original draft context", "input_hashes": hashes})
+        def accept(*args, **kwargs):
+            draft.write_text('{"parser": "updated"}', encoding="utf-8")
+            raise ValueError("knowledge must be a nonempty list of nonempty strings")
+        parent.accept_result = MagicMock(side_effect=accept)
+        config = {**self.config, "retries": 1}
+        response = {"status": "completed", "artifacts": {}}
+        with patch.dict(sys.modules, {"workflow.agent_tasks": parent}), patch("workflow.agent_tasks", parent, create=True), patch.object(agent, "load_config", return_value=config), patch.object(agent, "invoke", return_value={"response": response, "artifacts": {}}) as invoke, contextlib.redirect_stderr(io.StringIO()) as errors:
+            status = agent.main(["--stage", "knowledge", "--batch-dir", str(batch)])
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(errors.getvalue())["code"], "context_changed")
+        self.assertIn("06_batch/question-draft.json", json.loads(errors.getvalue())["error"])
+        invoke.assert_called_once()
+        parent.accept_result.assert_called_once()
+        parent.build_task.assert_called_once()
+        self.assertEqual(hashes["06_batch/question-draft.json"], hashlib.sha256(b'{"parser": "original"}').hexdigest())
+        self.assertEqual(draft.read_text(encoding="utf-8"), '{"parser": "updated"}')
 
     def test_timeout_kills_group_and_drains_without_retry(self):
         process = MagicMock()

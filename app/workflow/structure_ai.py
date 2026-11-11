@@ -363,6 +363,25 @@ def _classify_prompt(raw_text: str, candidate: dict, pdf_ocr=None) -> str:
     )
 
 
+def sync_subtype(candidate: dict, start: int, qtype: str) -> str:
+    """按包含该窗口的大题标题回填子类；题型不一致或规则无子类时返回空串。
+
+    课时同步里模型经常只回题型不回子类（如 单词拼写 的「汉语及首字母」）。
+    子类只从本批次已确认的大题标题里确定性反查，判不出就留空，不自造。
+    """
+    owner = next((section for section in ((candidate or {}).get("sections") or [])
+                  if isinstance(section, dict)
+                  and isinstance(section.get("start_line"), int)
+                  and isinstance(section.get("end_line"), int)
+                  and section["start_line"] <= start <= section["end_line"]), None)
+    if owner is None:
+        return ""
+    hit = sync_practice.classify(str(owner.get("title") or ""))
+    if hit and hit.get("type") == qtype and hit.get("subtype"):
+        return str(hit["subtype"])
+    return ""
+
+
 def _sanitize_classified(reply, raw_text: str, candidate: dict) -> list[dict]:
     if not isinstance(reply, dict) or not isinstance(reply.get("units"), list):
         return []
@@ -397,6 +416,11 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict) -> list[dict]:
         positions = set(range(start, end + 1))
         if occupied.intersection(positions):
             return []
+        # 课时同步：模型常只给出题型、把子类留空（如 单词拼写 → 汉语及首字母）。
+        # 用同一张大题的标题按确定性口径回填子类，判不出就保持空，不猜。
+        subtype = str(raw.get("subtype") or "").strip()
+        if scoped and not subtype:
+            subtype = sync_subtype(candidate, start, qtype)
         source_chunk = "\n".join(lines[start - 1:end])
         # The model chooses the range, never the stored wording. Map its exact
         # non-whitespace characters back to the Word text so punctuation,
@@ -443,7 +467,7 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict) -> list[dict]:
             binding = {"number_binding": "unnumbered_section", "printed_numbers": []}
         elif scoped and span.get("number_binding") == "single_writing_section" and "书面表达" in qtype and len(nums) == 1:
             binding = {"number_binding": "single_writing_section"}
-        units.append({"unit_kind": kind, "type": qtype, "numbers": nums,
+        units.append({"unit_kind": kind, "type": qtype, **({"subtype": subtype} if subtype else {}), "numbers": nums,
                       **({"original_number": None, "printed_number": False} if binding else {}),
                       "label": str(raw.get("label") or ""), "stem": stem,
                       "source_span": {"start_line": start, "end_line": end,

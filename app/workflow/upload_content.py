@@ -228,6 +228,167 @@ def scoped_source_matches(unit, number, path, line, source_lines):
     return len(anchors) == 1
 
 
+# Compact lesson keys retain the printed Roman section, but omit its instruction.
+# Keep this grammar answer-only: it must not weaken explanation/source_ref ownership.
+_ROMAN_ANSWER = re.compile(r'^\s*([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+)[.．、]\s*(?=\d)')
+_ROMAN_TITLE = re.compile(r'^\s*([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+)[.．、]')
+_ANSWER_ITEM = re.compile(r'(?:^|(?<=\s))(\d{1,3})[.．、](?!\d)')
+_COMPACT_RANGE = re.compile(r'^\s*(\d{1,3})\s*[~～—–-]\s*(\d{1,3})\s+([A-HFTa-hft]+)\s*$')
+
+
+def _answer_items(text):
+    """Return only explicitly numbered answers, including inline items/ranges."""
+    text = re.split(EXPLANATION_LABEL, text, maxsplit=1)[0].strip()
+    text = re.sub(r'^[(（]\s*[)）]\s*', '', text)
+    interval = _COMPACT_RANGE.fullmatch(text)
+    if interval:
+        first, last = int(interval[1]), int(interval[2])
+        values = interval[3]
+        if first <= last and len(values) == last - first + 1:
+            return list(zip(range(first, last + 1), values))
+        return []
+    matches = list(_ANSWER_ITEM.finditer(text))
+    if not matches or matches[0].start() != 0:
+        return []
+    numbers = [int(match[1]) for match in matches]
+    if numbers != sorted(set(numbers)):
+        return []
+    return [(int(match[1]), re.sub(r'^【答案】\s*', '', text[match.end():
+             matches[pos + 1].start() if pos + 1 < len(matches) else len(text)]).strip())
+            for pos, match in enumerate(matches)]
+
+
+def _compact_answer_blocks(lines):
+    blocks, active = [], None
+    for line, text in enumerate(lines, 1):
+        heading = _ROMAN_ANSWER.match(text)
+        if heading:
+            active = {'ordinal': _norm(heading[1]), 'rows': [], 'line': line, 'invalid': False}
+            blocks.append(active)
+            text = text[heading.end():]
+        elif not active:
+            continue
+        items = _answer_items(text)
+        if not items:
+            if re.match(r'^\s*\d{1,3}[.．、~～—–-]', text):
+                active['invalid'] = True
+            elif re.fullmatch(rf'\s*(?:{IMG}\s*)?(?:基础巩固|能力提升)\s*(?:{IMG}\s*)?', text):
+                # A complete printed lesson-band banner ends this block. Images
+                # or free text alone remain possible answer continuations.
+                active = None
+            elif text.strip():
+                # An unnumbered continuation may belong to the last answer.
+                # Never publish its first line alone as a complete original.
+                active['invalid'] = True
+                active = None
+            continue
+        active['rows'].extend((n, line, value) for n, value in items)
+    return blocks
+
+
+def _compact_scoped_candidates(unit, number, source_lines):
+    """Bind a complete single-lesson Roman skeleton, never a global number.
+
+    The body may have image-only foundation/extension banners. A complete ordered
+    skeleton is usable only within one nonempty lesson context, with every Roman
+    section present on both sides. A partial key or a repeated lesson stays unbound.
+    """
+    from .sync_practice import heading_candidates, plain_text, _LESSON, _UNIT
+    body_path = '01_source/正文.txt'
+    body = source_lines.get(body_path, [])
+    sections = heading_candidates('\n'.join(body))
+    contexts = {_norm(row.get('context') or '') for row in sections}
+    lesson_markers = [text for text in body if _LESSON.match(plain_text(text).strip())]
+    if len(contexts) != 1 or not next(iter(contexts), '') or len(lesson_markers) > 1:
+        return []
+    ordinals = [_ROMAN_TITLE.match(_source_line(row['title'])) for row in sections]
+    if not sections or not all(ordinals):
+        return []
+    # An unrecognized printed Roman heading must not silently disappear from the
+    # skeleton and shift every later foundation/extension occurrence.
+    roman_lines = {line for line, text in enumerate(body, 1) if _ROMAN_TITLE.match(text)}
+    if roman_lines != {row['start_line'] for row in sections}:
+        return []
+    owner = unit.get('source_section') or {}
+    positions = [i for i, row in enumerate(sections) if row['start_line'] == owner.get('start_line')
+                 and row['end_line'] == owner.get('end_line')
+                 and _norm(row['title']) == _norm(owner.get('title') or '')
+                 and _norm(row.get('context') or '') == _norm(owner.get('context') or '')
+                 and row['occurrence'] == owner.get('occurrence')]
+    start = (unit.get('source_span') or {}).get('start_line')
+    if len(positions) != 1 or not scoped_source_matches(unit, number, body_path, start, source_lines):
+        return []
+    # A companion row cannot disambiguate repeated passage numbers in one section.
+    from .question_identity import printed_anchors
+    section = sections[positions[0]]
+    anchors = printed_anchors(body[section['start_line'] - 1:section['end_line']])
+    if sum(n == int(number) for _, n in anchors) > 1:
+        return []
+    skeleton = [_norm(match[1]) for match in ordinals]
+    result = []
+    for path, lines in source_lines.items():
+        if path == body_path:
+            continue
+        explicit_contexts = {_norm(plain_text(text).strip()) for text in lines
+                             if _LESSON.match(plain_text(text).strip())
+                             or _UNIT.match(plain_text(text).strip())}
+        if explicit_contexts and explicit_contexts != contexts:
+            continue
+        blocks = _compact_answer_blocks(lines)
+        if [block['ordinal'] for block in blocks] != skeleton:
+            continue
+        block = blocks[positions[0]]
+        # Even equal duplicate numbers are ambiguous inside a compact block.
+        numbers = [n for n, _, _ in block['rows']]
+        if block['invalid'] or len(numbers) != len(set(numbers)):
+            raise ValueError('scoped answer source scope unbound: duplicate or malformed compact answer block')
+        result.extend((path, line, value) for n, line, value in block['rows'] if n == int(number))
+    return result
+
+
+def _scoped_answer_candidates(unit, number, lines):
+    candidates = []
+    for path, rows in lines.items():
+        for index, text in enumerate(rows, 1):
+            if path == '01_source/正文.txt' and not re.search(EXPLANATION_LABEL + r'|【答案】', text):
+                continue  # A stem/option line is not an independent answer.
+            for n, value in _answer_items(text):
+                if n == int(number) and scoped_source_matches(unit, number, path, index, lines):
+                    candidates.append((path, index, value))
+    candidates.extend(_compact_scoped_candidates(unit, number, lines))
+    candidates = list(dict.fromkeys(candidates))
+    primary = [row for row in candidates if row[0] in SOURCES]
+    return primary or candidates
+
+
+def resolve_scoped_answer(batch_dir, unit, number, answer=None):
+    """Read-only deterministic recovery of a unique value and real coordinates.
+
+    Consumers may add this independently verified citation to a retained candidate;
+    no task artifact, manifest, or model claim is trusted or changed here.
+    """
+    if unit.get('identity_version') != 'scoped-v1' or unit.get('type') == '书面表达':
+        return None
+    from .agent_tasks import _answer_comparison_text as normalize_answer
+    from .content_rules import is_placeholder
+    batch = Path(batch_dir)
+    paths = [*SOURCES, *(p.relative_to(batch).as_posix() for p in sorted(
+        (batch / '01_source/materials').glob('attachment_*.txt'))
+        if re.fullmatch(r'attachment_\d{3,}\.txt', p.name))]
+    lines = {path: [_source_line(s) for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
+             for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
+    try:
+        rows = _scoped_answer_candidates(unit, number, lines)
+    except ValueError:
+        return None
+    if not rows or len({normalize_answer(row[2]) for row in rows}) != 1:
+        return None
+    value = rows[0][2]
+    if is_placeholder(value) or (answer is not None and normalize_answer(value) != normalize_answer(answer)):
+        return None
+    return {'answer': value, 'evidence': [f'{path}:{line}' for path, line, _ in rows]}
+
+
 def validate_scoped_answer(batch_dir, unit, number, answer, evidence):
     """Raise on unbound scoped answers; legacy callers keep their existing checks.
 
@@ -244,20 +405,7 @@ def validate_scoped_answer(batch_dir, unit, number, answer, evidence):
                  if re.fullmatch(r'attachment_\d{3,}\.txt', p.name))
     lines = {path: [_source_line(s) for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
              for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
-    candidates = []
-    for path, rows in lines.items():
-        for index, text in enumerate(rows, 1):
-            hit = QUESTION_BOUNDARY.match(text)
-            if not hit or int(hit.group(1)) != int(number):
-                continue
-            if path == '01_source/正文.txt' and not re.search(EXPLANATION_LABEL + r'|【答案】', text):
-                continue  # A stem/option line is not an independent answer.
-            value = re.split(EXPLANATION_LABEL, text[hit.end():], maxsplit=1)[0].strip()
-            value = re.sub(r'^【答案】\s*', '', value)
-            if scoped_source_matches(unit, number, path, index, lines):
-                candidates.append((path, index, value))
-    primary = [row for row in candidates if row[0] in SOURCES]
-    candidates = primary or candidates
+    candidates = _scoped_answer_candidates(unit, number, lines)
     def cited(path, line):
         stem = Path(path).stem
         aliases = (path, stem) if sum(Path(p).stem == stem for p in lines) == 1 else (path,)
@@ -266,13 +414,13 @@ def validate_scoped_answer(batch_dir, unit, number, answer, evidence):
     bound = [row for row in candidates if normalize_answer(row[2]) == normalize_answer(answer) and cited(row[0], row[1])]
     if len({normalize_answer(row[2]) for row in candidates}) > 1:
         bound = []
-    if len(bound) != 1:
+    if not bound:
         raise ValueError(f"{unit.get('unit_id')}/题{number}: scoped answer source is not uniquely bound; "
                          "答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用")
 
 
 def validate_scoped_missing(batch_dir, unit, number, evidence=None):
-    """Reject an absence claim only when a real scoped answer is provable."""
+    """Reject absence when a real answer exists or its scope remains unresolved."""
     if unit.get('identity_version') != 'scoped-v1' or unit.get('type') == '书面表达':
         return
     batch = Path(batch_dir)
@@ -282,30 +430,25 @@ def validate_scoped_missing(batch_dir, unit, number, evidence=None):
                     for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
     confirmed = batch / '01_source/structure.confirmed.json'
     units = json.loads(confirmed.read_text(encoding='utf-8-sig')).get('units', []) if confirmed.is_file() else [unit]
-    found, unbound = [], []
-    for path in paths:
-        file = batch / path
-        if not file.is_file() or path in reference_only_sources(batch):
+    from .content_rules import is_placeholder
+    candidates = _scoped_answer_candidates(unit, number, source_lines)
+    found = [f'{path}:{line}' for path, line, value in candidates if not is_placeholder(value)]
+    unbound = []
+    # Missing is not a way to discard a conflicting or unbound compact source.
+    for path, rows in source_lines.items():
+        if path == '01_source/正文.txt':
             continue
-        for line, raw in enumerate(file.read_text(encoding='utf-8-sig').splitlines(), 1):
-            text = _source_line(raw)
-            hit = QUESTION_BOUNDARY.match(text)
-            if not hit or int(hit.group(1)) != int(number):
+        compact = _compact_answer_blocks(rows)
+        parsed = [(n, line, value) for block in compact for n, line, value in block['rows']]
+        parsed.extend((n, line, value) for line, text in enumerate(rows, 1)
+                      for n, value in _answer_items(text))
+        for n, line, value in parsed:
+            if n != int(number) or is_placeholder(value):
                 continue
-            value = re.split(EXPLANATION_LABEL, text[hit.end():], maxsplit=1)[0].strip()
-            value = re.sub(r'^【答案】\s*', '', value)
-            from .content_rules import is_placeholder
-            if is_placeholder(value):
-                continue
-            if path != '01_source/正文.txt' and not any(
-                    scoped_source_matches(other, number, path, line, source_lines)
-                    for other in units if number in (other.get('numbers') or [])):
+            if not any(any(p == path and l == line for p, l, _ in
+                           _scoped_answer_candidates(other, number, source_lines))
+                       for other in units if number in (other.get('numbers') or [])):
                 unbound.append(f'{path}:{line}')
-            try:
-                validate_scoped_answer(batch, unit, number, value, [f'{path}:{line}'])
-            except ValueError:
-                continue
-            found.append(f'{path}:{line}')
     if found:
         raise ValueError(f"{unit.get('unit_id')}/题{number}: missing contradicts an original scoped answer at " + ', '.join(found))
     if unbound:

@@ -1590,6 +1590,17 @@ def review_snapshot(folder):
             "revision": "|".join(revision)}, records
 
 
+def _row_subtype(row):
+    """行上现有的子类（subtypes 列表优先，其次单值），空串表示没有。"""
+    subtypes = row.get("subtypes")
+    if isinstance(subtypes, list):
+        for item in subtypes:
+            text = str(item or "").strip()
+            if text:
+                return text
+    return str(row.get("subtype") or "").strip()
+
+
 def decorate_review_rows(folder, rows):
     """把真实分轮结果与“跳过听力”口径落到行上；总览与单元详情共用。"""
     try:
@@ -1597,6 +1608,37 @@ def decorate_review_rows(folder, rows):
     except (ImportError, OSError, ValueError, TypeError, KeyError):
         review_status, records = {}, {}
     skip_listening = (folder / "02_audio" / "SKIP_LISTENING").is_file()
+    # 审核页要直接展示目录题型（语音题/单词拼写/阅读理解…），不能让人对着题干猜。
+    # 只有题型/子类确实缺失时，才按同步练习册的确定性口径从本行大题标题反查一次；
+    # 已判定过的题型（批次 question_type / 人工改过的标签）一律不覆盖。
+    if any(not str(row.get("type") or "").strip()
+           or (str(row.get("type") or "").strip() and not _row_subtype(row)) for row in rows):
+        try:
+            from workflow import sync_practice
+            text = "\n".join(source_lines(folder))
+            if sync_practice.looks_like_sync_practice(text):
+                for row in rows:
+                    title = str((row.get("source_section") or {}).get("title") or "")
+                    hit = sync_practice.classify(title) if title else None
+                    if not hit:
+                        continue
+                    current = str(row.get("type") or "").strip()
+                    changed = False
+                    if not current and hit.get("type"):
+                        row["type"] = hit["type"]
+                        row["type_from"] = "section_rule"
+                        current = hit["type"]
+                        changed = True
+                    if current == hit.get("type") and hit.get("subtype") and not _row_subtype(row):
+                        row["subtype"] = hit["subtype"]
+                        changed = True
+                    if changed:
+                        row["subtypes"] = [row["subtype"]] if row.get("subtype") else []
+        except (ImportError, OSError, ValueError, TypeError, KeyError):
+            pass
+    for row in rows:
+        if not isinstance(row.get("subtypes"), list):
+            row["subtypes"] = [row["subtype"]] if row.get("subtype") else []
     for row in rows:
         checks = [c for record in records.values() for c in record.get("checks", [])
                   if str(c.get("unit_id")) == str(row.get("unit_id"))]
@@ -2921,6 +2963,10 @@ def detail(name, unit_id):
             "unit_id": row.get("unit_id", unit_id), "label": row.get("label") or "-".join(str(n) for n in numbers),
             "unit_kind": row.get("unit_kind", "standalone"), "numbers": numbers,
             "type": row.get("type") or batch_item.get("type", ""),
+            "subtypes": row.get("subtypes") if isinstance(row.get("subtypes"), list)
+                        else ([_row_subtype(row)] if _row_subtype(row) else []),
+            "source_section": row.get("source_section") or {},
+            "printed_numbers": row.get("printed_numbers"),
             "material": batch_item.get("material") or row.get("material") or "",
             "stem": row.get("stem") or batch_item.get("stem") or "",
             "labels": labels, "comparison": comparison, "label_warnings": labels.get("warnings", []),

@@ -576,6 +576,7 @@ def _rows_from_batch(batch_dir: Path, review_rows: list[dict]) -> list[dict] | N
             "numbers": nums,
             "unit_kind": item.get("unit_kind", "standalone"),
             "type": item.get("type") or item.get("question_type", ""),
+            **{key: item[key] for key in ("subtype", "subtypes") if key in item},
             "answer": item.get("answer", ""),
             "difficulty": item.get("difficulty", ""),
             "knowledge": _short_knowledge_list(item.get("knowledge")),

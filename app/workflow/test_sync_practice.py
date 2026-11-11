@@ -134,5 +134,96 @@ class TestMaterialScope(unittest.TestCase):
         self.assertEqual(sp.main([]), 0)
 
 
+class TestAnswerAppendixBoundary(unittest.TestCase):
+    def test_intermediate_answers_never_remove_following_lesson(self):
+        from . import extract
+        text = ('第一课时 Section A\nⅠ.单项填空\n1.Who?\nA.a B.b C.c D.d\n'
+                '参考答案\n1.A\n2.B\n第二课时 Section B\nⅡ.根据汉语意思完成句子\n1.He is ____.')
+        self.assertIsNone(sp.answer_key_start(text))
+        structure, main, _ = extract.infer_structure(text)
+        self.assertIn('第二课时', main)
+        self.assertTrue(all(row['source_end_line'] >= row['source_line'] for row in structure['sections']))
+
+    def test_tail_answers_do_not_create_heading_candidates(self):
+        from . import extract
+        text = ('第一课时 Section A\nⅠ.单项填空\n1.Who?\nA.a B.b C.c D.d\n'
+                '参考答案\nⅠ.1.A\nⅡ.1.B')
+        self.assertEqual(sp.answer_key_start(text), 5)
+        self.assertEqual(len(sp.heading_candidates(text)), 1)
+        structure, main, appendix = extract.infer_structure(text)
+        self.assertEqual(structure['sections'][0]['questions'], [1])
+        self.assertNotIn('参考答案', main)
+        self.assertIn('Ⅱ.1.B', appendix)
+
+    def test_non_lesson_numbers_inside_a_stem_are_not_new_items(self):
+        from . import extract
+        text = ('2026年期末测试卷\nⅠ.单项填空(共1小题)\n'
+                '( )1.Which word completes ____: 2.Planning or 3.Action?\nA.a B.b C.c D.d')
+        structure, _, _ = extract.infer_structure(text)
+        self.assertEqual(structure['sections'][0]['questions'], [1])
+        self.assertFalse(any(row['code'] == 'QUESTION_COUNT_MISMATCH' for row in structure['unresolved']))
+
+    def test_declared_image_section_is_not_given_guessed_printed_numbers(self):
+        from . import extract
+        text = ('第一课时 Section A\nⅠ.单项填空\n1.Who?\nA.a B.b C.c D.d\n'
+                'Ⅱ.根据汉语意思完成句子(共1小题)\n[IMG image2.jpeg]')
+        structure, _, _ = extract.infer_structure(text)
+        section = structure['sections'][-1]
+        self.assertTrue(section.get('image_only'))
+        self.assertEqual(section['questions'], [])
+        self.assertFalse(any(row['code'] in {'QUESTION_COUNT_MISMATCH', 'QUESTION_NUMBER_INFERRED'}
+                             and row['line'] == section['source_line'] for row in structure['unresolved']))
+
+
+class TestLessonHeadingsMatchesRulesDocument(unittest.TestCase):
+    """课时同步的真实大题标题 → 题型映射表（与 app/docs/sync-lesson-types.md 第三节同源）。
+
+    这些表述来自 2026-11-11 真实课时批次（七上 Starter Unit 1 第一课时）逐条核过的原卷标题。
+    改规则必须同时改文档表格与这张表，避免「文档写一套、代码判另一套」。
+    """
+
+    LESSON_HEADINGS = [
+        ("Ⅰ.按照字母表顺序,写出空白处所缺字母", "语音题", None, "group"),
+        ("Ⅱ.按照名字的字母顺序为下列人物排序,并将句子补充完整", "语音题", None, "group"),
+        ("Ⅲ.根据首字母及汉语提示补全单词", "单词拼写", "汉语及首字母", "standalone"),
+        ("Ⅳ.根据汉语意思完成句子,每空一词", "完成句子", "汉语提示", "standalone"),
+        ("Ⅴ.单项填空", "单项填空", "四个选项", "standalone"),
+        ("Ⅰ.判断下列各组字母的大小写是否一致,一致的写T,不一致的写F", "语音题", None, "group"),
+        ("Ⅱ.找出下列句子中书写错误的单词并改正", "改错", "句子改错", "standalone"),
+        ("Ⅲ.补全对话", "补全对话", None, "group"),
+        ("Ⅳ.阅读理解", "阅读理解", None, "group"),
+    ]
+
+    def test_every_lesson_heading_maps_to_catalog_type(self):
+        for title, type_name, subtype, kind in self.LESSON_HEADINGS:
+            with self.subTest(title=title):
+                hit = sp.classify(title)
+                self.assertIsNotNone(hit, title)
+                self.assertEqual(hit["type"], type_name)
+                self.assertEqual(hit["subtype"], subtype)
+                self.assertEqual(hit["kind"], kind)
+
+    def test_type_is_never_the_heading_itself(self):
+        # 审核页展示的是目录题型，不能把大题标题（题干）当题型。
+        for title, type_name, _subtype, _kind in self.LESSON_HEADINGS:
+            with self.subTest(title=title):
+                self.assertNotEqual(sp.classify(title)["type"], title)
+
+    def test_rules_document_covers_every_lesson_heading(self):
+        doc = (ROOT / "docs" / "sync-lesson-types.md").read_text(encoding="utf-8")
+        self.assertIn("同步课时题型匹配规则", doc)
+        self.assertIn("审核页必须直接展示题型", doc)
+        for title, _type_name, _subtype, _kind in self.LESSON_HEADINGS:
+            with self.subTest(title=title):
+                self.assertIn(title, doc)
+
+    def test_prompt_block_states_lesson_numbering_and_type_rule(self):
+        block = sp.prompt_block()
+        self.assertIn("从 1 重新开始", block)
+        self.assertIn("不能把大题标题、题干或答题指令抄进题型字段", block)
+        self.assertIn("参考答案", block)
+
+
+
 if __name__ == "__main__":
     unittest.main()

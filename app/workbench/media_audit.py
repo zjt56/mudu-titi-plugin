@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """媒体归属体检：区分题目图片与卷头广告、水印、没有被正文引用的图片。
 
-判据只有三条，都是可复核的事实，不做图像内容识别：
+已确认 scoped 单元的有效来源切片优先证明图片归属；其余图片使用可复核的启发式，不做图像内容识别：
 
 1. 正文有没有 `[IMG 文件名]` 引用（没有引用 → 不可能属于某道题）；
 2. 图片出现在第一道题之前还是之后（卷头横幅、水印一般在前面）；
@@ -132,6 +132,52 @@ def _owner(index: int, starts):
     return owner
 
 
+def _scoped_image_owners(folder: Path, lines: list[str]):
+    """Use the preview's checked source window, never an unchecked span or stem alone."""
+    try:
+        confirmed = json.loads((folder / "01_source" / "structure.confirmed.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(confirmed, dict) or not isinstance(confirmed.get("units"), list):
+        return {}
+    from workflow.preview import _scoped_source_slice
+    from workflow.denoise import clean_body
+    from workflow.sync_practice import heading_candidates
+    cleaned = clean_body("\n".join(lines))[0].splitlines()
+    sections = heading_candidates("\n".join(cleaned))
+    units = [unit for unit in confirmed["units"] if isinstance(unit, dict)
+             and unit.get("identity_version") == "scoped-v1"]
+    ids = [str(unit.get("unit_id") or "") for unit in units]
+    owners = {}
+    for unit, uid in zip(units, ids):
+        span = unit.get("source_span")
+        if not uid or ids.count(uid) != 1 or not isinstance(span, dict):
+            continue
+        if (span.get("basis") not in ("ai_classified", "cleaned_source")
+                or unit.get("unit_kind") not in ("group", "standalone")):
+            continue
+        section = unit.get("source_section")
+        if not isinstance(section, dict):
+            continue
+        matches = [row for row in sections
+                   if all(row.get(key) == section.get(key)
+                          for key in ("start_line", "end_line", "title"))
+                   and all(row.get(key) == section[key]
+                           for key in ("context", "occurrence") if key in section)]
+        start, end = span.get("start_line"), span.get("end_line")
+        if (len(matches) != 1 or type(start) is not int or type(end) is not int
+                or not matches[0]["start_line"] <= start <= end <= matches[0]["end_line"]):
+            continue
+        # Keep the full group window, including images before its first number,
+        # only after proving that window still belongs to the current section.
+        chunk = _scoped_source_slice(unit, lines)
+        for line in chunk:
+            for match in IMG_REF.finditer(line):
+                name = Path(match.group(1).strip()).name
+                owners.setdefault(name, set()).add(uid)
+    return {name: sorted(uids) for name, uids in owners.items() if len(uids) == 1}
+
+
 def audit(folder: Path, numbers=None):
     """列出媒体文件、正文引用位置与判定。只读，不改文件。"""
     media_dir = folder / "01_source" / "media"
@@ -143,6 +189,7 @@ def audit(folder: Path, numbers=None):
             name = Path(match.group(1).strip()).name
             refs.setdefault(name, []).append(index)
     starts = _question_starts(lines, numbers or [])
+    scoped_owners = _scoped_image_owners(folder, lines)
     exclusions = load_exclusions(folder)
     excluded = {str(x) for x in exclusions.get("excluded", [])}
     items = []
@@ -158,6 +205,8 @@ def audit(folder: Path, numbers=None):
             verdict, reason = "excluded", "已标记为非题目图片，上传时跳过"
         elif not positions:
             verdict, reason = "unused", "正文没有 [IMG] 引用，不属于任何小题（常见于卷头广告、水印）"
+        elif path.name in scoped_owners:
+            verdict, reason = "question", "已由 scoped 单元的有效来源切片证明图片归属"
         elif positions and starts and min(positions) < starts[0][0]:
             verdict, reason = "header", "只出现在第一道题之前，属于卷头/说明区"
         elif ratio is not None and ratio >= 5:
@@ -167,6 +216,7 @@ def audit(folder: Path, numbers=None):
         items.append({"name": path.name, "bytes": path.stat().st_size,
                       "width": size[0] if size else None, "height": size[1] if size else None,
                       "ratio": ratio, "lines": [i + 1 for i in positions], "numbers": owners,
+                      "unit_ids": scoped_owners.get(path.name, []),
                       "verdict": verdict, "reason": reason})
     summary = {key: sum(1 for item in items if item["verdict"] == key)
                for key in ("question", "unused", "header", "banner", "excluded")}

@@ -333,3 +333,15 @@
 | 2026-11-10 | **确定性直抄先于模型**：只要该阶段存在来源坐标可绑定的确定性路径（如解析/文章大意直抄），无论整批还是 scoped 局部修复都必须先走它；直抄判不了才回模型，且回模型不得伪装成功。局部修复不得因“范围小”绕开确定性路径重复烧模型。 | `app/workflow/agent.py` 的 explanations 快路径；回归 `workflow.test_direct_explanations_delivery::test_scoped_repair_also_uses_model_free_direct_copy`；`CHANGELOG/2026-11-10-scoped-direct-copy-and-healing-state.md` |
 | 2026-11-10 | **展示投影不得当数据来源**：工作台卡片/预览把知识点缩成「二级/末级」短名只是展示；标签核对、修改与保存必须读批次里的目录全路径。合并行汇总与批次标签时不得把短名当独立标签（否则同一叶子显示两遍、被判目录外、并在保存时污染批次）。 | `app/workflow/preview.py` 行的 `knowledge_projection`；`app/workbench/server.py::drop_short_knowledge_copies`、`label_payload`；回归 `workflow.test_workbench_catalog_archive`；`CHANGELOG/2026-11-10-label-dialog-knowledge-duplicates.md` |
 | 2026-11-11 | **同步练习类的题型与组题判定必须走统一口径（落码）**：用户原话「这个规则添加到该项目的插件代码，并注重是同步练习类和课时同步的规则」。把 26秋《课时A计划》英语 RJ 七上·八上·九上（学用）正文 854 处大题 + 用户逐条看图确认的结论固化为唯一口径：题型/子类/组题单独题一起判定，`unit_kind` 在结构确认阶段定死；完形/阅读/任务型/选词/短文填空/教材语篇填空/补全对话/语音题整大题/看图题/四线三格/填词游戏 → group，单项填空/完成句子/单词拼写一句一空/翻译/改错/书面表达 → standalone，`☆拓展设问` 并入所属组题且不计入空数，`综合阅读提升`/`单元话题写作` 只是容器。只适用于按课时编排的同步练习册，单元卷/期中期末/月考/中考卷不得套用；结构确认阶段把口径注入提示词并用 `audit_units` 与原卷比对，差异只写 `sync_audit` 留痕，不得据此改题型/组单或放行闸门。 | `app/references/sync-practice-rules.json`、`app/workflow/sync_practice.py`、`app/workflow/structure_ai.py::_classify_prompt/auto_classify`、`app/workflow/test_sync_practice.py`、`app/docs/sync-practice.md`；根 `AGENTS.md` 硬规则 25；`CHANGELOG/2026-11-11-sync-practice-rules.md` |
+
+## 2026-11-11：课时同步卷的答案区、并排小题与审核页题型直显
+
+用户原话（m05238）：「这个是同步课时题型的，然后跟之前中考试卷不一样，你需要依据同步课时这种题型的一个特点，再给他写一篇对应的匹配规则」；（m05271）：「这批试卷录入到试卷审核页面的时候，它那个题型啊，它应该直接展示题型，而不是说题干……按这种题就是你要匹配一下这个匹配规则」。两个卡点同一根因：课时卷的版式特征（每大题重排题号、并排小题、说话人前缀、图片小题、卷末紧跟答案区）没有确定性口径，结构闸门把答案行当正文题号全部阻断，审核页又拿大题标题充题型。落地：`app/workflow/sync_practice.py::answer_key_start`（把末节窗口截到「参考答案」之前）、`app/workflow/extract.py::same_line_numbers`/`DIALOGUE_QUESTION`/图片题 informational、`app/workflow/structure_ai.py::sync_subtype`（子类按本大题标题确定性回填）、`app/workbench/server.py::decorate_review_rows`（审核页只补缺失、不覆盖已判定）、`lib/client.js`（行与标题栏展示题型+子类）、`app/docs/sync-lesson-types.md`、根 `AGENTS.md` 硬规则 30。
+
+## 2026-11-11：已验证题组图片不得被页眉启发式隐藏
+
+用户指出课时前两题都是组题却看不到图片。有效 scoped 来源窗口已证明题图归属时，图片优先于首题号位置与宽高比启发式；显式排除仍优先，过期、冲突、跨单元归属不得提升。验收须贯通切片、blocks、detail JSON 与实际媒体接口，并保留题组、子类列表和无印刷号语义。落地：`app/workbench/media_audit.py`、`app/workbench/server.py`、`app/workflow/preview.py`、`workbench.test_media_scoped_preview`；根 `AGENTS.md` 硬规则 14。
+
+## 2026-11-11：模型重试前重新核验在途输入
+
+验收动作可能刷新派生输入；每次调用模型前必须重新检查初始精确绑定。发生变化立即返回 `context_changed` 并保留候选，不得沿用旧提示词再烧一轮模型，也不放宽哈希校验。落地：`app/workflow/local_agent.py`、`workflow.test_local_agent::test_validation_refreshing_draft_stops_retry_before_model_call`，延续硬规则 2/19。

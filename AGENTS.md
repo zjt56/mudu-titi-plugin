@@ -43,7 +43,7 @@
 12. **原卷预览图片显示**：表格单元格里的图片必须与该单元格文字在同一单元格内显示，不得拆到单独的行尾/额外单元格；表格必须自适应容器宽度并自动断行（`width:100%`、`table-layout:fixed`、`word-break:break-word`），不得因内容撑宽导致左右滑动；原图（尤其表格内图）缩得很小（表格内缩略图约 36×28，正文图 `max-width:200px`）。只影响预览渲染，不改题目数据。落地：`app/workbench/server.py::source_blocks`/`attach_media`、`lib/client.js` 表格样式。
 13. **题组材料必须在题号前完整绑定**：group（题组）从原卷绑定来源时，必须使用**完整 confirmed span 窗口（文章/表格/导语 + 题目）**；定位 stem 只能证明其在窗内，绝不得据此从首个题号起截取、把题号前的材料丢掉（否则 group 的 `material` 为空、装配报 A8）。`source_span.basis` 为 `ai_classified` 或 `cleaned_source` 均属可信边界；standalone 仍只绑定自身题干。表格材料用 `[TABLE ...]` 原样保留。落地：`app/workflow/question_draft.py::_bound_source`。
 
-14. **预览不得丢题组材料**：原卷预览按题号切出的片段必须包含题号之前的共享材料（文章、`[TABLE N]` 表格、`※Notes` 备注、分段 A/B 标签）；预览切片不得因“段落标签/弱题号”把表格或正文截掉，也不得把材料排到题目之后。只影响预览与只读核对，不改题目数据。落地：`app/workflow/preview.py::slice_range`。
+14. **预览不得丢题组材料**：已验证 scoped 来源窗口中的题组图片（含纯图组题、首个印刷题号前的材料图）优先于页眉位置/宽高比启发式，不能误删；显式排除仍优先，过期或冲突来源不能提升。原卷预览按题号切出的片段必须包含题号之前的共享材料（文章、`[TABLE N]` 表格、`※Notes` 备注、分段 A/B 标签）；预览切片不得因“段落标签/弱题号”把表格或正文截掉，也不得把材料排到题目之后。只影响预览与只读核对，不改题目数据。落地：`app/workflow/preview.py::slice_range`。
     **数据完整 ≠ 展示完整**：修复“内容丢失”类问题必须同时验证①批次数据字段、②每一层消费/展示输出（预览切片、`source_blocks`、payload），只验证一层不算通过；并且必须补一条覆盖该链路的回归测试，避免同类问题再次漏检。
     **共用大题题干不得只挂在第一组**：完形 A/B、阅读各篇共用同一大题的作答导语；后一组来源窗口只含自己的文章时，必须依据已验证来源坐标补回同节标题之后、首篇材料之前的完整公共导语；含限定题号的组内导语不得传播，本组专属导语优先。生成、原文审计和预览使用同一归属规则，保留 `A`/`B` 分段标签与材料原文，禁止留空或编造；`第一节`/`第二节` 分段前缀只用于识别匹配。落地：`app/workflow/question_draft.py::_section_rubric`、`question_content.py::SECTION_LEAD`。
 
@@ -75,6 +75,8 @@
 28. **提取来源优先级固定为 Word > 可用文字层 PDF > 扫描/OCR**：同批原卷同时有 Word/PDF 时选 Word 为主源；PDF 逐页优先使用合格文字层，质量不足才转 OCR，不覆盖已有 Word 原文；缺失答案/解析/大意仍遵守规则22的有证据兜底。实际来源及 PDF 页级提取方式记录到 `01_source/source-policy.json` 与提取报告，不改历史批次。落地：`app/workflow/source_policy.py`、`extract.py`、`app/workbench/server.py`。
 
 29. **AI运维消息固定在下方区域、内部上下滚动**：消息数量不得撑高面板或上推流程图；工具栏与状态保持可见，重复提示合并，用户上滑查看时不得被轮询拉回底部。落地：`lib/client.js::OperationsPanel`、`backend/operations-ui.test.cjs`。
+
+30. **审核页必须直接显示目录题型，不许拿题干充题型**：列表行与详情标题栏一律展示题型（+子类），不得把大题标题/题干/答题指令当题型让人自己对应；题型缺失时只能按确定性规则从本行大题标题反查一次（`type_from=section_rule`），已判定（批次 `question_type`、人工标签）绝不覆盖，子类判不出留空不猜。同步课时的课时化识别、题号每大题重排、并排小题、说话人前缀、图片小题、卷末答案区等口径以 `app/docs/sync-lesson-types.md` 为准，新增表述必须走「规则 JSON → 测试表 → 文档 → 三个测试 → `--force` 真实批次复验」流程。落地：`app/references/sync-practice-rules.json`、`app/workflow/sync_practice.py`、`app/workbench/server.py::decorate_review_rows`、`lib/client.js`、`app/docs/sync-lesson-types.md`。
 
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 

@@ -29,6 +29,15 @@ RULES_PATH = ROOT / "references" / "sync-practice-rules.json"
 _NUMBER_PREFIX = re.compile(r"^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+|[一二三四五六七八九十]+)\s*[.．、,，)）]\s*")
 # 方括号标签：来源（[2025·滁州天长市月考]）、命题特征（[情境题]/[跨学科]/[原创]）
 _BRACKET = re.compile(r"[\[【][^\]】]*[\]】]")
+# 文末答案区标题：与 extract.ANSWER_HEADING 同一口径，不能各自解释。
+_ANSWER_HEADING = re.compile(
+    r"^\s*【?\s*(?:参考答案及解析|参考答案与解析|答案与解析|答案及解析|参考答案"
+    r"|选择题答案|答案速查表|答案速查|答案)\s*】?\s*[:：]?\s*$")
+# 答案行形态：罗马/中文序号接行内答案，或「1~5 ABD」这类区间答案。
+_ANSWER_ROW = re.compile(
+    r"^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+|[一二三四五六七八九十]+)\s*[.．、,，]\s*(?:答案|解析|\d)"
+    r"|^\s*\d{1,4}\s*[~～\-–—至]\s*\d{1,4}\s*[A-Ha-h]"
+    r"|^\s*\d{1,4}\s*[.．、]\s*[A-Ha-h]\s*$")
 
 
 def plain_text(text: str) -> str:
@@ -203,11 +212,39 @@ def heading_hit(line: str, path: str | Path | None = None) -> dict | None:
     return None
 
 
+def answer_key_start(raw_text: str) -> int | None:
+    """文末答案区起始行（1 基）；没有可靠答案区标题时返回 None。
+
+    同步练习册的答案区常紧跟最后一个大题，标题是「参考答案」；若把它算进上一大题
+    的来源窗口，答案里的题号会和正文题号撞车（`SOURCE_DUPLICATE_NUMBERS`），
+    还会把答案文字当成题干/选项（`QUESTION_NOT_FOUND`、`SOURCE_OPTIONS_INCOMPLETE`）。
+    只有标题后面确实成行出现答案（至少 2 行）才认定，避免正文里一句「答案：B」
+    被误判成附录。
+    """
+    lines = [plain_text(line).strip() for line in str(raw_text or "").splitlines()]
+    for index, line in enumerate(lines):
+        if not _ANSWER_HEADING.match(line):
+            continue
+        tail = [item for item in lines[index + 1:] if item]
+        if sum(1 for item in tail[:40] if _ANSWER_ROW.match(item)) < 2:
+            continue
+        # 合订练习册可能每课时后都附答案，后面仍有真实课时/大题。
+        # 这类中间答案不能作为整份正文的终点；罗马序号行内答案不算新大题。
+        if any(_LESSON.match(item) or _UNIT.match(item)
+               or (heading_hit(item) and not _ANSWER_ROW.match(item)) for item in tail):
+            continue
+        return index + 1
+    return None
+
+
 def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[dict]:
     """原文坐标上的大题 occurrence 候选；不生成/改写正式题号或确认单元。"""
     lines = str(raw_text or "").splitlines()
     rows, context, table_depth = [], "", 0
+    appendix = answer_key_start(raw_text)
     for index, raw in enumerate(lines, 1):
+        if appendix and index >= appendix:
+            break
         plain = plain_text(raw).strip()
         if plain.startswith("[TABLE"):
             table_depth += 1
@@ -229,6 +266,9 @@ def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[di
             if _LESSON.match(plain) or _UNIT.match(plain) or plain in ("综合阅读提升", "单元话题写作", "Pronunciation"):
                 end = cursor
                 break
+        # 文末答案区不属于任何大题：答案里的题号/选项不得进入来源窗口。
+        if appendix and row["start_line"] < appendix <= end:
+            end = appendix - 1
         row["end_line"] = max(row["start_line"], end)
     return rows
 
@@ -242,6 +282,13 @@ def prompt_block(path: str | Path | None = None, limit: int = 0) -> str:
     """给模型看的紧凑版判定口径（含同步练习册里真实出现过的全部表述）。"""
     data = load(path)
     lines = ["同步练习/课时同步判定口径（仅当本卷是按课时编排的同步练习册时适用）："]
+    lines.append("- 题号在每个大写罗马数字大题从 1 重新开始，属正常编排：不得按全卷连续号合并，也不得因此判冲突。")
+    lines.append("- 题型必须填目录题型名（语音题/单词拼写/完成句子/单项填空/改错/补全对话/阅读理解…），"
+                 "不能把大题标题、题干或答题指令抄进题型字段；子类填不出就留空，不得自造。")
+    lines.append("- 卷末「参考答案/答案与解析」不属于最后一个大题：其窗口必须在答案标题前结束，答案行不得当题干/选项。")
+    lines.append("- 一行内并排的两个小题（`1.U　v (　　　)　　　　2.W　x (　　　)`）都要认出题号；"
+                 "`B:1.<u>　　</u>` 这类说话人前缀后的题号也是题号。")
+    lines.append("- 小题只存在于图片中（窗口正文只有 `[IMG …]`）按图片能力限制记录，不阻断切题、不进人工队列。")
     lines.append("- 共用一段语篇/对话/表格/方框/图片的整题记 group；每小句独立成题的记 standalone。")
     chosen = data.get("rules") or []
     if limit and limit > 0:

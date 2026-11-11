@@ -17,6 +17,30 @@ def reply(lines):
 
 
 class StructureAiClassifyTest(unittest.TestCase):
+    def test_sync_subtype_backfills_from_its_own_heading(self):
+        candidate = {"sections": [
+            {"title": "Ⅲ.根据首字母及汉语提示补全单词", "start_line": 2, "end_line": 5},
+            {"title": "Ⅱ.按照名字的字母顺序为下列人物排序,并按照性别进行分类", "start_line": 6, "end_line": 9},
+        ]}
+        self.assertEqual(structure_ai.sync_subtype(candidate, 3, "单词拼写"), "汉语及首字母")
+        # 题型与本大题规则不一致时不回填，不能让子类跨越题型。
+        self.assertEqual(structure_ai.sync_subtype(candidate, 3, "语音题"), "")
+        # 语音题在目录里没有子类，只能留空。
+        self.assertEqual(structure_ai.sync_subtype(candidate, 7, "语音题"), "")
+        self.assertEqual(structure_ai.sync_subtype(candidate, 99, "单词拼写"), "")
+        self.assertEqual(structure_ai.sync_subtype({}, 3, "单词拼写"), "")
+
+    def test_scoped_sanitize_calls_subtype_backfill(self):
+        raw = "课时A计划 第一课时 Section A\nⅢ.根据首字母及汉语提示补全单词\n1.Hello h____."
+        candidate = {"sections": [{"title": "Ⅲ.根据首字母及汉语提示补全单词",
+                                   "start_line": 2, "end_line": 3, "questions": [1]}]}
+        value = {"units": [{"unit_kind": "standalone", "type": "单词拼写", "numbers": [1],
+                             "stem": "1.Hello h____.",
+                             "source_span": {"start_line": 3, "end_line": 3}}]}
+        got = structure_ai._sanitize_classified(value, raw, candidate)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["subtype"], "汉语及首字母")
+
     def test_accepts_evidence_bound_units(self):
         raw = ["1. What is it?", "A. A", "B. B", "2. Shared material", "3. Next line"]
         candidate = {"sections": [{"questions": [1, 2, 3]}]}

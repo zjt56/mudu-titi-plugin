@@ -170,6 +170,7 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
         articles = _material_windows(lines, start + 1, end) if group else [(start + 1, end)]
         declared = set(_section_numbers(section))
         if not any(start < u.get("source_span", {}).get("start_line", 0) <= u.get("source_span", {}).get("end_line", 0) <= end for u in units):
+            # 图片理解能力受限不等于可以漏掉整节；仍必须保留绑定原文的来源单元。
             errors.append({"code": "SOURCE_SECTION_UNCOVERED", "source_line": start,
                            "message": "原文大题窗口未产生任何来源单元"})
         observed = _source_members(lines[start:end])
@@ -260,7 +261,20 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
         else:
             anchors = [(i, _strong_number(source_lines[i])) for i in range(start, end)
                        if _strong_number(source_lines[i]) in numbers]
-            if not anchors and "书面表达" in type_name and len(numbers) == 1:
+            image_only = (section.get("image_only") and any("[IMG " in line for line in local)
+                          and all(not _plain(line).strip() or "[IMG " in line or "[TABLE" in line for line in local))
+            if not anchors and not numbers and image_only:
+                # 没有可读印刷题号时只保留整节一个来源对象，不猜图片里的题数。
+                # [1] 是兼容字段内部别名，不能展示成原卷第 1 题。
+                unit = _make_unit("standalone", type_name, [1], local)
+                unit["stem"] = "\n".join(local).strip()
+                unit["source_span"] = {"start_line": start + 1, "end_line": end,
+                                       "basis": "cleaned_source", "number_binding": "unnumbered_section",
+                                       "printed_numbers": []}
+                unit["original_number"] = None
+                unit["printed_number"] = False
+                units.append(unit)
+            elif not anchors and "书面表达" in type_name and len(numbers) == 1:
                 chunk = source_lines[start:end]
                 unit = _make_unit("standalone", type_name, numbers, chunk)
                 unit["source_span"] = {"start_line": start + 1, "end_line": end,
@@ -647,8 +661,8 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                                        "message": issue.get("message", "文末答案附录"),
                                        "resolution": "文末重复标题之后按题号+答案字母/解析判定为答案册，保留为答案附录候选"})
                 continue
-            if issue.get("code") in ("EXTRACTION_WARNING", "OCR_VISUAL_REVIEW"):
-                # 提取告警/OCR复核结果都是“版面视觉”层面，不是结构（题号/选项/材料）错误：
+            if issue.get("code") in ("EXTRACTION_WARNING", "OCR_VISUAL_REVIEW", "IMAGE_SECTION_UNNUMBERED"):
+                # 提取告警/OCR复核结果/图片题都是“版面与能力”层面，不是结构（题号/选项/材料）错误：
                 # 保留为非阻断告警，并强制 layout_required 走整页渲染/版面复核（上传前必过），
                 # 不让 OCR 补充证据反过来阻断结构切题。
                 warnings.append({**issue, "blocking": False, "status": "layout_review_required"})

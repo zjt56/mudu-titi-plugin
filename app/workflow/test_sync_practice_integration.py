@@ -53,6 +53,31 @@ class SyncSourceRegressionTest(unittest.TestCase):
         self.assertIn('(　)1.Who?', body)
         self.assertIn('参考答案', appendix)
 
+    def test_answer_key_is_not_inside_the_last_heading_window(self):
+        """答案区不算最后一个大题的来源窗口。
+
+        同步练习册的答案紧跟在最后一道题后面；若窗口算到全文末尾，答案里的题号会
+        和正文题号撞车（SOURCE_DUPLICATE_NUMBERS），答案文字还会被当成题干/选项。
+        """
+        text = ('第一课时　Section A (1a-2d)\n'
+                'Ⅳ.阅读理解\n'
+                'Teacher:Good afternoon,class!\n'
+                '(　)1.When is this class?\n'
+                'A.In the morning.\tB.In the afternoon.\n'
+                '参考答案\n'
+                'Ⅰ.1.Bb;Dd\n'
+                'Ⅳ.1~3 BAC\n')
+        headings = sp.heading_candidates(text)
+        last = headings[-1]
+        self.assertEqual((last['start_line'], last['end_line']), (2, 5))
+        self.assertEqual(sp.answer_key_start(text), 6)
+        structure, body, appendix = extract.infer_structure(text)
+        section = structure['sections'][-1]
+        self.assertEqual(section['source_end_line'], 5)
+        self.assertEqual(section['questions'], [1])
+        self.assertTrue(appendix.lstrip().startswith('参考答案'))
+        self.assertNotIn('参考答案', body)
+
     def test_group_prefix_gap_is_located_not_automatically_rewritten(self):
         text = '第一课时 Section A\nⅠ.阅读理解\nRead this story.\n[TABLE 1]\nFacts\n[/TABLE]\n(　)1.Who?\nA.a B.b C.c D.d'
         unit = {'unit_kind':'group','type':'阅读理解','numbers':[1],

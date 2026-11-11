@@ -1158,6 +1158,7 @@ def main(argv=None):
                 run_dir = Path(tempfile.mkdtemp(prefix=args.stage + "-retry-", dir=attempts))
                 _json_write(run_dir / "input-hashes.json", hashes)
             try:
+                _check_input_hashes(batch_dir, hashes)
                 result = invoke(delivered, run_dir, config)
             except AgentError as exc:
                 # 额度/限流/超时/启动失败重试没有意义；协议类错误带反馈重试一次。

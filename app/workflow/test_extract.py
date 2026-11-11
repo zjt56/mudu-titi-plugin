@@ -232,6 +232,48 @@ class StructureCandidateTest(unittest.TestCase):
         self.assertEqual(structure['sections'][0]['questions'], [66, 67, 68])
         self.assertNotIn('QUESTION_COUNT_MISMATCH', {x['code'] for x in structure['unresolved']})
 
+    def test_same_line_pairs_are_all_numbered(self):
+        """一行两个小题（字母书写、判断大小写）不能被当成只有一个题号。"""
+        structure, _, _ = extract.infer_structure(
+            '2026年某同步练习\n'
+            'Ⅰ.语音题(共4小题)\n'
+            '1.U　v (　　　)　　　　2.W　x (　　　)\n'
+            '3.F　f (　　　)　　　　4.C　g (　　　)\n')
+        self.assertEqual(structure['sections'][0]['questions'], [1, 2, 3, 4])
+        self.assertNotIn('QUESTION_COUNT_MISMATCH', {x['code'] for x in structure['unresolved']})
+        self.assertEqual(extract.same_line_numbers('1.U　v (　　　)　　　　2.W　x (　　　)', 1), [2])
+
+    def test_same_line_number_needs_a_real_parenthesised_slot(self):
+        """正文里随手出现的「2.」不是第二个小题；必须有成组空档才算。"""
+        self.assertEqual(extract.same_line_numbers('1.U v and 2.W x', 1), [])
+        # 缺空档的「( )」也不算，避免把括号里的注释当答题位
+        self.assertEqual(extract.same_line_numbers('1.U v  2.W x', 1), [])
+
+    def test_dialogue_slot_prefixed_by_speaker_is_numbered(self):
+        """补全对话的小题号常写成 `C:1.<u>`，必须认得出题号。"""
+        structure, _, _ = extract.infer_structure(
+            'Ⅰ.补全对话(共2小题)\n'
+            'A:Hi,Ann.\n'
+            'B:1.<u>　　　</u>\n'
+            'A:2.<u>　　　</u>\n')
+        self.assertEqual(structure['sections'][0]['questions'], [1, 2])
+        self.assertNotIn('QUESTION_BOUNDARY_MISSING', {x['code'] for x in structure['unresolved']})
+
+    def test_image_only_section_is_informational_not_a_boundary_error(self):
+        """小题只在图片里（字母书写）时按图片能力限制记录，不报题号缺失。"""
+        structure, _, _ = extract.infer_structure(
+            '2026年某同步练习\n'
+            'Ⅰ.语音题(共1小题)\n'
+            '[IMG image2.jpeg]\n'
+            'Ⅱ.单项填空(共1小题)\n'
+            '1.Hello!\nA.Hi. B.Bye.\n')
+        first = structure['sections'][0]
+        self.assertTrue(first.get('image_only'))
+        self.assertEqual(structure['sections'][1]['questions'], [1])
+        codes = {x['code'] for x in structure['unresolved']}
+        self.assertIn('IMAGE_SECTION_UNNUMBERED', codes)
+        self.assertNotIn('QUESTION_BOUNDARY_MISSING', codes)
+
     def test_ambiguous_sections_never_claim_coverage(self):
         structure, _, _ = extract.infer_structure('Ⅰ.完形填空(共5小题)\n1. one\n2. two\n')
         codes = {x['code'] for x in structure['unresolved']}

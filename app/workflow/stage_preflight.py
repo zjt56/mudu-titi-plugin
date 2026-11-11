@@ -147,14 +147,25 @@ def _audio_locked(batch):
 def run(batch_dir, stage_id, *, dry_run=False):
     """Return (exit code, report) if handled, or None for normal model work.
 
-    Explanations retain the existing source-bound export/import transaction,
-    including scoped fallback. Audio never invents a mapping from evidence.
+    Answers require complete scoped originals and use the export/import transaction.
+    Explanations retain their source-bound transaction including scoped fallback.
+    Audio never invents a mapping from evidence.
     """
-    if dry_run or stage_id not in ('explanations', 'audio'):
+    if dry_run or stage_id not in ('answers', 'explanations', 'audio'):
         return None
     batch = Path(batch_dir).resolve()
     if stage_id == 'audio':
         return _audio(batch)
+    if stage_id == 'answers':
+        from . import answers_direct, scoped_regeneration
+        if scoped_regeneration.requested(batch, stage_id) or answers_direct.build_payload(batch) is None:
+            return None
+        installed = answers_direct.install(batch)
+        if installed is None:
+            return None
+        return 0, {'stage': 'answers', 'status': 'completed', 'completed': True,
+                   'deterministic': True, 'model_calls': 0,
+                   'detail': '完整原文答案已通过大题来源绑定并经通用协议导入'}
     from . import explanations_direct, scoped_regeneration
     scoped = scoped_regeneration.requested(batch, stage_id)
     if explanations_direct.build_payload(batch) is None:
