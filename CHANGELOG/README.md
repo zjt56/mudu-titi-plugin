@@ -158,3 +158,4 @@
 | 2026-11-10 | [2026-11-10-interrupted-diagnosis-and-upload-busy.md](2026-11-10-interrupted-diagnosis-and-upload-busy.md) | 重启中断的诊断不再冒充内容失败、不吃重试预算；上传任务计入在途工作 |
 | 2026-11-10 | [2026-11-10-scoped-direct-copy-and-healing-state.md](2026-11-10-scoped-direct-copy-and-healing-state.md) | 局部修复绕过直抄导致连烧模型；运维面板在自愈进行中仍显示待命 |
 | 2026-11-10 | [2026-11-10-label-dialog-knowledge-duplicates.md](2026-11-10-label-dialog-knowledge-duplicates.md) | 修改标签弹窗把预览短名当标签来源，同一知识点显示两遍并误报目录外路径 |
+| 2026-11-11 | [2026-11-11-sync-practice-rules.md](2026-11-11-sync-practice-rules.md) | 把 854 处实测的「同步练习类题型+子类+组题/单独题」口径落进插件代码（规则 JSON + sync_practice 模块 + 结构确认注入 + 差异留痕） |
