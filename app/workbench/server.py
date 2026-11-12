@@ -619,6 +619,50 @@ _advance_queue_lock = threading.Lock()
 _advance_worker_running = False
 
 
+QUEUE_REMOVED = "workflow/.queue-removed"
+
+
+def queue_removed(folder) -> bool:
+    return (Path(folder) / QUEUE_REMOVED).is_file()
+
+
+def remove_from_queue(name: str, reason: str = "") -> dict:
+    """Move one batch out of 排队区 without deleting or editing its data."""
+    folder = batch_dir(name)
+    with _lock:
+        with _advance_queue_lock:
+            _advance_queue[:] = [entry for entry in _advance_queue
+                                if (entry.get("name") if isinstance(entry, dict) else entry) != name]
+        state = _advance_state.get(name) or {}
+        if state.get("running"):
+            return {"removed": False, "error": "批次正在推进当前阶段，请等阶段结束后再移出"}
+        _advance_state.pop(name, None)
+        marker = folder / QUEUE_REMOVED
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        temporary = marker.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"removed_at": now(), "reason": str(reason)[:300]},
+                                        ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(marker)
+    global _OVERVIEW_SNAPSHOT
+    _OVERVIEW_CACHE.clear()
+    _OVERVIEW_SNAPSHOT = None
+    return {"removed": True, "batch": name, "batch_dir": str(folder)}
+
+
+def restore_queue(name: str) -> dict:
+    """Put one batch back into 排队区; data is untouched either way."""
+    folder = batch_dir(name)
+    marker = folder / QUEUE_REMOVED
+    if marker.is_file():
+        marker.unlink()
+    with _lock:
+        _advance_state.pop(name, None)
+    global _OVERVIEW_SNAPSHOT
+    _OVERVIEW_CACHE.clear()
+    _OVERVIEW_SNAPSHOT = None
+    return {"restored": True, "batch": name, "batch_dir": str(folder)}
+
+
 def _queue_batch_order() -> list[str]:
     """Batches still in 排队区 (not uploaded, not flow_done), earliest first.
 
@@ -633,6 +677,8 @@ def _queue_batch_order() -> list[str]:
         try:
             if folder.is_symlink() or not folder.is_dir() or folder.name.startswith('.'):
                 continue
+            if (folder / QUEUE_REMOVED).is_file():
+                continue  # 用户显式移出排队区；批次数据保留，可再点继续处理恢复
             manifest_path = folder / 'workflow' / 'manifest.json'
             if manifest_path.is_symlink() or not manifest_path.is_file():
                 continue
@@ -964,6 +1010,11 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
         if (operations_expectation.get("identity") != operations._identity(folder)
                 or operations_expectation.get("incident_id") != (operations._load(folder).get("incident") or {}).get("incident_id")):
             return {"started": False, "error": "stale_operations_identity"}
+    # A batch the user explicitly removed must not be restarted by the supervisor
+    # or operations loop. Only an explicit 继续处理 (reset_budget) restores it.
+    if not reset_budget and (folder / QUEUE_REMOVED).is_file():
+        return {"started": False, "removed": True,
+                "reason": "批次已由用户移出排队区；点继续处理才会恢复"}
     # Strict queue serialization: only the earliest unfinished batch may start.
     # A later batch waits until every earlier one is complete and out of 排队区.
     predecessor = _waiting_for_predecessor(name)
@@ -1009,10 +1060,20 @@ def start_advance(name: str, *, reset_budget=True) -> dict:
     """Run one local pass; automatic callers preserve durable retry accounting."""
     if auto_flow is None:
         raise ValueError("流水线模块不可用")
-    return _launch_advance(name, batch_dir(name), reset_budget=reset_budget)
+    folder = batch_dir(name)
+    if reset_budget and (folder / QUEUE_REMOVED).is_file():
+        # 用户点“继续处理”即显式恢复排队；自动调度不得自行恢复。
+        restore_queue(name)
+    return _launch_advance(name, folder, reset_budget=reset_budget)
 
 
 def _dispatch_supervised(name):
+    try:
+        if queue_removed(batch_dir(name)):
+            return {"started": False, "removed": True,
+                    "reason": "批次已由用户移出排队区；点继续处理才会恢复"}
+    except (ValueError, OSError):
+        pass  # 目录不可用时交给 start_advance 给出真实错误，不伪装成已移出
     # HTTP overview reads may hold this lock while inspecting many media files.
     # The watchdog must remain bounded and never queue behind such a request.
     if not _lock.acquire(blocking=False):
@@ -1924,6 +1985,7 @@ def _overview_key(folder):
         parts.append(("server-code", "unknown"))
     audio = folder / "02_audio" / "SKIP_LISTENING"
     parts.append(("skip_listening", audio.is_file()))
+    parts.append(("queue_removed", (folder / QUEUE_REMOVED).is_file()))
     raw = repr(parts).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -2108,6 +2170,8 @@ def _overview_uncached(name, folder):
             "stages": stages, "rows": rows, "has_audio": has_audio,
             # 自动流程是否结束（审核后最终格式检查通过）；上传页排队区按此移除。
             "flow_done": flow_done,
+            # 用户显式移出排队区：只影响排队展示与自动串行，不改批次数据或完成态。
+            "queue_removed": queue_removed(folder),
             # 流程开始/完成绝对时间与总耗时（分钟）；审核页卡片展示完成时间与耗时。
             "flow_started_at": flow_started_at, "flow_finished_at": flow_finished_at,
             "flow_minutes": flow_minutes,
@@ -3384,6 +3448,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"code": "worker_busy", "admitted": False,
                         "retryable": True, "retry_after_ms": 500,
                         "batch_name": folder.name, "batch_dir": str(folder), "error": str(exc)}, 409)
+            if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "queue" and parts[4] == "remove":
+                return self.send_json({"ok": True, **remove_from_queue(parts[2], str(payload.get("reason") or ""))})
+            if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "queue" and parts[4] == "restore":
+                return self.send_json({"ok": True, **restore_queue(parts[2])})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "upload":
                 return self.send_json({"ok": True, **start_batch_upload(
                     parts[2], allow_unreviewed=payload.get('allow_unreviewed', False),

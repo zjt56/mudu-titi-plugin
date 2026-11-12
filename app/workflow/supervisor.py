@@ -594,6 +594,12 @@ class WorkflowSupervisor:
             return "removed"
         try:
             dispatched = self.dispatch(folder.name)
+            if isinstance(dispatched, dict) and dispatched.get("removed"):
+                # User moved this batch out of 排队区. Keep its data and stop
+                # scheduling until an explicit 继续处理 restores it.
+                state.update(status="removed", updated_at=now)
+                _write_existing(folder, LEDGER, state)
+                return "removed"
             if isinstance(dispatched, dict) and dispatched.get("started") is False:
                 state.update(status="active", no_progress_attempts=attempts,
                              next_retry_at=now + self.config.interval,

@@ -64,6 +64,28 @@ class UploadStatusTests(unittest.TestCase):
                           SimpleNamespace(local_complete=lambda folder, manifest: False)):
             self.assertEqual(server._queue_batch_order(), ["b20"])
 
+    def test_queue_removed_marker_hides_batch_until_restored(self):
+        self._mk_batch("b20", "2026-01-01T00:00:00+08:00")
+        with patch.object(server, "wf_execution_state",
+                          SimpleNamespace(local_complete=lambda folder, manifest: False)):
+            self.assertEqual(server._queue_batch_order(), ["b20"])
+            removed = server.remove_from_queue("b20", "user cleanup")
+            self.assertTrue(removed.get("removed"), removed)
+            self.assertTrue((self.root / "b20" / "workflow/.queue-removed").is_file())
+            self.assertEqual(server._queue_batch_order(), [])
+            self.assertIsNone(server._queue_head())
+            restored = server.restore_queue("b20")
+            self.assertTrue(restored.get("restored"), restored)
+            self.assertFalse((self.root / "b20" / "workflow/.queue-removed").exists())
+            self.assertEqual(server._queue_batch_order(), ["b20"])
+
+    def test_supervisor_dispatch_does_not_restart_removed_batch(self):
+        self._mk_batch("b20", "2026-01-01T00:00:00+08:00")
+        server.remove_from_queue("b20", "user cleanup")
+        result = server._dispatch_supervised("b20")
+        self.assertFalse(result.get("started"))
+        self.assertTrue(result.get("removed"), result)
+
     def test_advance_state_hides_stale_self_heal_after_stage_completes(self):
         (self.folder / "workflow").mkdir(parents=True, exist_ok=True)
         (self.folder / "workflow" / "manifest.json").write_text(json.dumps(

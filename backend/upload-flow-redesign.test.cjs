@@ -13,7 +13,7 @@ test('后端阶段卡复用契约顺序与 flow_done 口径，客户端无需维
 });
 
 test('排队区只列处理中的试卷；内容审核与上传格式检查结束的从队列消失', () => {
-  assert.match(client, /const pendingBatches = batches\.filter\(\(b\) => !b\.flow_done && !b\.uploaded\)/);
+  assert.match(client, /const pendingBatches = batches\.filter\(\(b\) => !b\.flow_done && !b\.uploaded(?: && !b\.queue_removed)?\)/);
   assert.match(client, /const finishedBatches = batches\.filter\(\(b\) => b\.flow_done && !b\.uploaded\)/);
   // 队列行遍历的是 pendingBatches，不是全部 batches。
   assert.match(client, /pendingBatches\.map\(\(b, i\)/);
