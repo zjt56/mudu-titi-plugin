@@ -93,6 +93,41 @@ class SupervisorTest(SupervisorFixture):
         self.assertEqual(self.state(folder)["status"], "complete")
         self.assertEqual(len(calls), 3)
 
+    def test_idle_pause_settles_a_finished_batch_instead_of_leaving_it_scheduled(self):
+        folder = self.make_batch(status="pending_confirmation", stages={
+            **{sid: {"status": "completed"} for sid in supervisor.LOCAL_STAGES},
+            "review_gate": {"status": "needs_review", "execution_completed": True,
+                            "continue_unqualified": True, "release_ready": False},
+            "format_gate": {"status": "completed"}})
+        put(folder / "07_review/review-gate.json", {"passed": False, "quality_status": "needs_review"})
+        put(folder / format_gate.FINAL_PATH, valid_final_batch())
+        self.assertTrue(format_gate.run(folder)["passed"])
+        manifest = supervisor._read(folder / "workflow/manifest.json")
+        self.assertTrue(supervisor.local_complete(folder, manifest))
+        put(folder / "workflow" / supervisor.LEDGER, {
+            "status": "scheduled", "no_progress_attempts": 3, "progress": "old",
+            "next_retry_at": self.clock.now + 240, "retry_reservation_at": self.clock.now + 240,
+            "last_result": {"action": "gate", "status": "blocked", "reason": "闸门未通过"},
+            "escalation": "旧升级提示"})
+        dispatch = Mock(return_value={"started": True})
+        watch = self.make_supervisor(dispatch)
+        self.assertFalse(supervisor.has_pending_work(self.workflows, busy=lambda folder: False))
+        self.assertEqual(watch.settle(), {"active": "complete"})
+        state = self.state(folder)
+        self.assertEqual(state["status"], "complete")
+        self.assertEqual(state["no_progress_attempts"], 0)
+        self.assertEqual(state["next_retry_at"], 0)
+        self.assertEqual(state["retry_reservation_at"], 0)
+        self.assertEqual(state["last_result"]["action"], "complete")
+        self.assertNotIn("escalation", state)
+        dispatch.assert_not_called()
+        # Settling is idempotent and never manufactures a pass for a batch that
+        # still owes local stages.
+        self.assertEqual(watch.settle(), {"active": "complete"})
+        pending = self.make_batch(name="unfinished", stages={"validate": {"status": "pending"}})
+        self.assertNotIn("unfinished", watch.settle())
+        self.assertFalse((pending / "workflow" / supervisor.LEDGER).exists())
+
     def test_new_pending_failed_blocked_needs_review_invalidated_are_scheduled(self):
         for index, status in enumerate(("pending", "failed", "blocked", "needs_review", "invalidated", "running")):
             with self.subTest(status=status):

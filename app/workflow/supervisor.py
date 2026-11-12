@@ -523,8 +523,19 @@ class WorkflowSupervisor:
             return "active"
         state = _read(folder / "workflow" / LEDGER)
         if local_complete(folder, manifest):
-            if state.get("status") != "complete":
-                state.update(status="complete", next_retry_at=0, updated_at=now)
+            stale = (state.get("status") != "complete"
+                     or _number(state.get("no_progress_attempts"), 0, 0) != 0
+                     or _number(state.get("next_retry_at"), 0, 0) != 0
+                     or _number(state.get("retry_reservation_at"), 0, 0) != 0
+                     or (state.get("last_result") or {}).get("action") != "complete"
+                     or "escalation" in state)
+            if stale:
+                # Everything local is done: drop the stale retry/cooldown view so
+                # the workbench does not keep showing the last failed dispatch.
+                state.update(status="complete", next_retry_at=0, retry_reservation_at=0,
+                             no_progress_attempts=0, updated_at=now,
+                             last_result={"action": "complete", "status": "passed",
+                                          "reason": "本地阶段已全部完成；剩余人工闸门等待确认"})
                 state.pop("escalation", None)
                 _write_existing(folder, LEDGER, state)
             return "complete"
@@ -612,6 +623,40 @@ class WorkflowSupervisor:
             return "dispatch_error"
         return "dispatched"
 
+    def settle(self, now=None):
+        """Write the final ledger for batches whose local work is already done.
+
+        The watch loop pauses as soon as nothing needs driving. Without this
+        pass the ledger keeps the status written before that pause ("scheduled"
+        plus the previous failed dispatch), so a finished batch looks like it is
+        still queued. Only fully local-complete batches are touched; a batch that
+        still owes local stages keeps its scheduling state for the next tick.
+        """
+        now = self.clock() if now is None else now
+        outcomes = {}
+        root = self.workflows
+        if root.is_symlink() or not root.is_dir():
+            return outcomes
+        try:
+            folders = [folder for folder in root.iterdir() if _active_folder(root, folder)]
+        except OSError:
+            return outcomes
+        for folder in folders:
+            manifest = _read(folder / "workflow/manifest.json")
+            if not isinstance(manifest.get("stages"), dict):
+                continue
+            if _remote_boundary(folder, manifest) or not local_complete(folder, manifest):
+                continue
+            try:
+                with _try_file_lock(folder / "workflow/.supervisor.lock") as acquired:
+                    if not acquired:
+                        continue
+                    outcomes[folder.name] = self._tick_batch(folder, now)
+            except (OSError, ValueError, TypeError) as exc:
+                outcomes[folder.name] = "error"
+                LOGGER.warning("Workflow supervisor could not settle %s: %s", folder.name, exc)
+        return outcomes
+
     def one_tick(self):
         """Run one bounded scan without sleeping or invoking any model directly."""
         if not self._tick_lock.acquire(blocking=False):
@@ -653,6 +698,10 @@ class WorkflowSupervisor:
                         # polling everything forever. Resume on wake() or any of
                         # the bounded idle re-checks below.
                         self._paused = True
+                        try:
+                            self.settle()
+                        except Exception:
+                            LOGGER.exception("Workflow supervisor settle failed")
                         self._wake.clear()
                         if self._wake.wait(self.config.pause_poll):
                             self._paused = False
