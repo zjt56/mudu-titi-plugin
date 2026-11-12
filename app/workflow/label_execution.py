@@ -175,8 +175,12 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
         if stage == "explanations":
             typed = context[agent_tasks.ARTIFACTS["types"]]
             scoped[agent_tasks.ARTIFACTS["types"]] = dict(typed, items=[r for r in typed["items"] if r.get("unit_id") == uid])
-        agent_tasks._validate(batch, stage, candidate, scoped, [by_id[uid]])
-        return {"status": "completed", "artifacts": {path: candidate}, "notes": [], "findings": []}
+        notes = []
+        if stage == 'answers':
+            agent_tasks._validate(batch, stage, candidate, scoped, [by_id[uid]], notes=notes)
+        else:
+            agent_tasks._validate(batch, stage, candidate, scoped, [by_id[uid]])
+        return {"status": "completed", "artifacts": {path: candidate}, "notes": notes, "findings": []}
 
     for uid, part in singleton.items():
         if uid in accepted:
@@ -212,7 +216,7 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
                 retain_failure(uid, failed["payload"], failed["response"], exc,
                                failed.get("original_response"))
             else:
-                candidate["notes"] = list(failed["response"]["notes"])
+                candidate["notes"] = list(dict.fromkeys([*failed["response"]["notes"], *candidate["notes"]]))
                 candidate["findings"] = list(failed["response"]["findings"])
                 accepted[uid] = candidate
                 local_agent._store_part_snapshot(batch, stage, singleton[uid], hashes, config, candidate)
@@ -278,7 +282,7 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
                     try:
                         candidate = validate(uid, unit_payload)
                         candidate["findings"] = problems
-                        candidate["notes"] = list(response["notes"])
+                        candidate["notes"] = list(dict.fromkeys([*response["notes"], *candidate["notes"]]))
                     except (ValueError, TypeError, KeyError) as exc:
                         errors[uid] = str(exc)
                         retain_failure(uid, unit_payload, response, exc)

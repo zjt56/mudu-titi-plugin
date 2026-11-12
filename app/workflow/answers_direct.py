@@ -59,14 +59,30 @@ def install(batch_dir):
     import sys
     from . import agent_protocol, agent_tasks, scoped_regeneration
     batch = Path(batch_dir)
-    if scoped_regeneration.requested(batch, 'answers') or build_payload(batch) is None:
+    complete = build_payload(batch)
+    if complete is None:
         return None
+    # Localized recovery must keep the accepted untouched baseline. Prove the
+    # full original set first, then submit only selected identities to the same
+    # scoped importer/merge validator used by model responses.
+    context, _, missing, units = agent_tasks._collect(batch, 'answers')
+    chosen = scoped_regeneration.selected('answers', context, units)
+    if missing:
+        return None
+    if chosen is not None:
+        candidate = scoped_regeneration._subset('answers', complete, chosen)
+        try:
+            scoped_regeneration.merge(batch, 'answers', candidate, context, units, notes=[])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
     exported = agent_protocol.export_task(batch, 'answers', max_input_chars=sys.maxsize)
     if exported.get('status') != 'ready':
         raise ValueError('答案直抄前置交付未满足：' + json.dumps(exported, ensure_ascii=False))
     payload = build_payload(batch)
     if payload is None:
         raise ValueError('答案直抄导出后来源已变化或不再唯一；候选未交付')
+    if chosen is not None:
+        payload = scoped_regeneration._subset('answers', payload, chosen)
     response = {'protocol': agent_protocol.PROTOCOL, 'task_id': exported['task_id'],
                 'result': {'status': 'completed',
                            'artifacts': {agent_tasks.ARTIFACTS['answers']: payload},

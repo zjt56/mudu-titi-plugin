@@ -110,8 +110,16 @@ def reference_only_sources(batch_dir):
     return frozenset(result)
 
 
-def _source_line(value):
-    """Remove DOCX inline style markers before recognizing structural boundaries."""
+def _source_line(value, *, anchor_view=False):
+    """Strip styles; only the body anchor view may normalize numbered blanks.
+
+    An underlined number in an answer appendix is an ANSWER, not a question
+    slot. Never normalize answer-column whitespace or rewrite answer values.
+    """
+    if anchor_view:
+        from .wire_format import normalize_blank_text
+        value = re.sub(r'<u>\s*(?:\d{1,3}\s*)?</u>',
+                       lambda match: normalize_blank_text(match.group()), value)
     return re.sub(r'\*+|<[^>]+>', '', value).strip()
 
 
@@ -528,7 +536,7 @@ def resolve_scoped_answer(batch_dir, unit, number, answer=None):
     paths = [*SOURCES, *(p.relative_to(batch).as_posix() for p in sorted(
         (batch / '01_source/materials').glob('attachment_*.txt'))
         if re.fullmatch(r'attachment_\d{3,}\.txt', p.name))]
-    lines = {path: [_source_line(s) for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
+    lines = {path: [_source_line(s, anchor_view=path == '01_source/正文.txt') for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
              for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
     try:
         rows = _scoped_answer_candidates(unit, number, lines)
@@ -556,7 +564,7 @@ def validate_scoped_answer(batch_dir, unit, number, answer, evidence):
     paths = list(SOURCES)
     paths.extend(p.relative_to(batch).as_posix() for p in sorted((batch / '01_source/materials').glob('attachment_*.txt'))
                  if re.fullmatch(r'attachment_\d{3,}\.txt', p.name))
-    lines = {path: [_source_line(s) for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
+    lines = {path: [_source_line(s, anchor_view=path == '01_source/正文.txt') for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
              for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
     candidates = _scoped_answer_candidates(unit, number, lines)
     def cited(path, line):
@@ -587,7 +595,7 @@ def validate_scoped_missing(batch_dir, unit, number, evidence=None):
     batch = Path(batch_dir)
     paths = [*SOURCES, *(p.relative_to(batch).as_posix() for p in (batch / '01_source/materials').glob('attachment_*.txt')
                         if re.fullmatch(r'attachment_\d{3,}\.txt', p.name))]
-    source_lines = {path: [_source_line(s) for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
+    source_lines = {path: [_source_line(s, anchor_view=path == '01_source/正文.txt') for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
                     for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
     confirmed = batch / '01_source/structure.confirmed.json'
     units = json.loads(confirmed.read_text(encoding='utf-8-sig')).get('units', []) if confirmed.is_file() else [unit]
@@ -647,7 +655,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
         raw = path.read_bytes(); hashes[relative] = hashlib.sha256(raw).hexdigest()
         text = raw.decode('utf-8-sig')
         raw_source_lines[relative] = text.splitlines()
-        lines = [_source_line(line) for line in raw_source_lines[relative]]
+        lines = [_source_line(line, anchor_view=relative == '01_source/正文.txt') for line in raw_source_lines[relative]]
         source_lines[relative] = lines
         if relative in reference_only:
             continue  # Corroborating copies never supply or compete for content.
@@ -1424,7 +1432,7 @@ def collect_source_index(batch_dir):
         from .question_identity import question_key, validate_units
         if not validate_units(units):
             raise ValueError('Invalid scoped question identities')
-        lines = {path: [_source_line(s) for s in (Path(batch_dir) / path).read_text(encoding='utf-8-sig').splitlines()]
+        lines = {path: [_source_line(s, anchor_view=path == '01_source/正文.txt') for s in (Path(batch_dir) / path).read_text(encoding='utf-8-sig').splitlines()]
                  for path in report['source_sha256'] if (Path(batch_dir) / path).suffix == '.txt'}
         index, summaries = {}, []
         reference_only = reference_only_sources(batch_dir)

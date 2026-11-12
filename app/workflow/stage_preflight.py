@@ -157,8 +157,8 @@ def run(batch_dir, stage_id, *, dry_run=False):
     if stage_id == 'audio':
         return _audio(batch)
     if stage_id == 'answers':
-        from . import answers_direct, scoped_regeneration
-        if scoped_regeneration.requested(batch, stage_id) or answers_direct.build_payload(batch) is None:
+        from . import answers_direct
+        if answers_direct.build_payload(batch) is None:
             return None
         installed = answers_direct.install(batch)
         if installed is None:

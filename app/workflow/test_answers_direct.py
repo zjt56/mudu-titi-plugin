@@ -70,7 +70,7 @@ class AnswersDirectTest(unittest.TestCase):
             self.assertIsNone(stage_preflight.run(self.batch, 'answers'))
             self.assertEqual(self.snapshot(), before)
 
-    def test_legacy_and_scoped_repair_do_not_use_full_stage_fast_path(self):
+    def test_legacy_does_not_use_scoped_answer_fast_path(self):
         document = {'units': copy.deepcopy(self.units)}
         for unit in document['units']:
             unit.pop('identity_version')
@@ -78,9 +78,42 @@ class AnswersDirectTest(unittest.TestCase):
         self.put('01_source/structure.confirmed.json', document)
         self.assertIsNone(answers_direct.build_payload(self.batch))
         self.fixture.write_sources()
-        with patch.object(scoped_regeneration, 'requested', return_value=True):
-            self.assertIsNone(stage_preflight.run(self.batch, 'answers'))
-            self.assertIsNone(answers_direct.install(self.batch))
+
+    def scope_first_unit(self):
+        uid = self.units[0]['unit_id']
+        self.put('workflow/repair-feedback/answers.json', {
+            'version': 1, 'stage': 'answers', 'reason': '仅修首组证据', 'error': '坐标需恢复',
+            'unit_ids': [uid], 'feedback_by_unit': {uid: {'reason': '仅修首组证据', 'error': '坐标需恢复'}},
+            'all_units': False, 'scoped_units': True, 'attempt': 1})
+
+    def test_scoped_direct_recovery_submits_only_selected_and_keeps_baseline(self):
+        payload = answers_direct.build_payload(self.batch)
+        self.put(agent_tasks.ARTIFACTS['answers'], payload)
+        self.scope_first_unit()
+        from workflow.question_identity import question_key
+        chosen_keys = {question_key(self.units[0], n) for n in self.units[0]['numbers']}
+        seen = []
+        original = agent_protocol.import_result
+        def imported(batch, task, path):
+            response = json.loads(path.read_text())
+            seen.append(set(response['result']['artifacts'][agent_tasks.ARTIFACTS['answers']]['answers']))
+            return original(batch, task, path)
+        with patch.object(agent_protocol, 'import_result', side_effect=imported):
+            code, report = stage_preflight.run(self.batch, 'answers')
+        self.assertEqual(code, 0)
+        self.assertEqual(report['model_calls'], 0)
+        self.assertEqual(seen, [chosen_keys])
+        self.assertEqual(json.loads((self.batch / agent_tasks.ARTIFACTS['answers']).read_text()), payload)
+
+    def test_scoped_direct_recovery_refuses_invalid_untouched_baseline(self):
+        self.scope_first_unit()
+        payload = answers_direct.build_payload(self.batch)
+        key = next(key for key, value in payload['answers'].items() if value == 'nice')
+        payload['answers'][key] = 'wrong value'
+        self.put(agent_tasks.ARTIFACTS['answers'], payload)
+        before = (self.batch / agent_tasks.ARTIFACTS['answers']).read_bytes()
+        self.assertIsNone(answers_direct.install(self.batch))
+        self.assertEqual((self.batch / agent_tasks.ARTIFACTS['answers']).read_bytes(), before)
 
     def test_dry_run_writes_nothing_and_does_not_export(self):
         before = self.snapshot()

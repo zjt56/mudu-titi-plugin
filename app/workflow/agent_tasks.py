@@ -1280,7 +1280,22 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 raise ValueError(f"Answer {number} is not verbatim-bound to supplied answer material")
             _strings(evidence[number], "answer evidence", True)
             owner, printed_number = owners[number]
-            validate_scoped_answer(batch, owner, printed_number, answer, evidence[number])
+            try:
+                validate_scoped_answer(batch, owner, printed_number, answer, evidence[number])
+            except ValueError:
+                if notes is None:
+                    raise  # Read-only consumers must not silently migrate evidence.
+                # An imprecise model citation is not a reason to regenerate a
+                # correct answer. Independently re-prove SAME value + SAME scoped
+                # identity against current originals, then validate real coords.
+                # Conflict, wrong value and unresolved scope still fail closed.
+                from .upload_content import resolve_scoped_answer
+                recovered = resolve_scoped_answer(batch, owner, printed_number, answer)
+                if recovered is None:
+                    raise
+                evidence[number] = list(dict.fromkeys([*evidence[number], *recovered['evidence']]))
+                validate_scoped_answer(batch, owner, printed_number, answer, evidence[number])
+                notes.append(f"答案{number}已按当前大题身份与同值原文补齐坐标，答案原文未改")
         difficulty = payload.get("difficulty", {})
         if not isinstance(difficulty, dict):
             raise ValueError("difficulty must be an optional question-number mapping")
