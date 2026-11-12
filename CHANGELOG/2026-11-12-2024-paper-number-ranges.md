@@ -54,6 +54,8 @@
 3. 前端 `static/papers.js::paperNumberLabel` 在 `numberStart` 非空时输出 `21.`，
    不再走 `unitOrderLabel` 的 `10.` 回退。
 
+
+以上验证结果均通过。
 ## 回退方式
 
 用修复前备份覆盖 `~/mudu-quiz/data/mudu.sqlite3`（先停 `mudu-quiz` 服务）后重启即可。

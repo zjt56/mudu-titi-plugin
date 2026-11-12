@@ -4,7 +4,7 @@
 
 06七上人教版课时A计划StarterUnit2KeepTidy!第二课时Pro结构闸门正式通过后，组装审计出现5个BATCH_IDENTITY_MISMATCH及B横幅被误算到语音题D选项的SOURCE_IMAGE_MISSING；随后语音组因原始导语未恢复而触发A8。前一轮只验证结构/草稿/payload而漏掉最终audit_batch_source与shared_rubric的独立重建，是本轮修复遗漏。
 
-## 修改
+## 改了什么
 
 - question_content._rebuild_source_units：来源审计、保真恢复、写作原题干恢复共用当前lesson_bands.for_text验证后的sections，再按结构闸门相同方式规范source_section。不相信批次自身band宣称，不放宽身份检查。
 - shared_rubric.phonetic_section_rubric接收调用方独立验证的band_evidence，独立标题候选经同源截窗后比较；question_draft、preview、最终审计均从当前原件/正文/媒体取得证据，不用unit自身字段当证明。原严格标题、全题号、完整窗口检查保留。

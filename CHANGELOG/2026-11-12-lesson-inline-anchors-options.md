@@ -1,10 +1,10 @@
 # 2026-11-12 同行印刷题号与音标紧贴选项修复
 
-## 触发
+## 背景（触发）
 
 真实隔离课时「七上13」结构闸门出现三类确定性错误：`3.Emma is in Class 2.` 内部的 `2.` 被识别成重复题号；Pronunciation 末尾缩写题每行双列1–10仅生成左列；`/e/A.eye` 中首个A选项遗漏，造成BCD不完整。
 
-## 改动
+## 改了什么
 
 - 新增 `app/workflow/source_anchors.py`，只认行首数字、Tab/全角空格或至少双ASCII空格后的列题号；普通英文单空格后的班级/编号数字不作为印刷题号。保持同一行实际重复token，不用数字去重掩盖重复。
 - `structure_gate._scope_anchors`、`question_identity.printed_anchors/numbered_projection` 复用同一边界口径，不改 `preview._weak_numbers` 或 extract。

@@ -224,12 +224,19 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
 
     rounds = []
     concurrency = local_agent._part_concurrency(config)
+    # Answers are a single source-matching problem. Keep all pending units in
+    # one prompt whenever the input budget permits; splitting repair attempts
+    # into one-unit calls destroys the cross-section context needed to bind
+    # repeated printed numbers (and multiplies model startup/round-trip cost).
+    # build_parts still falls back to size-bounded partitions when necessary.
+    answer_part_limit = len(singleton) if stage == "answers" else 8
     for attempt in range(int(config.get("retries", 0)) + 1):
         pending = set(singleton) - set(accepted) - set(deterministic)
         if not pending:
             break
         _, parts = unit_tasks.build_parts(batch, stage, prompt_budget,
-                                         max_units=8 if attempt == 0 else 1, selected_ids=pending)
+                                         max_units=answer_part_limit if stage == "answers" else 8,
+                                         selected_ids=pending)
         def call(index_part):
             index, part = index_part
             local_agent._check_input_hashes(batch, strict_hashes)

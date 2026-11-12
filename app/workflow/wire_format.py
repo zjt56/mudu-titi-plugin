@@ -60,17 +60,19 @@ def safe_blocks(blocks):
     return result
 
 
-def _walk_images(node, media_map, attachments, skip=("attachments", "subquestions")):
+def _walk_images(node, media_map, attachments, skip=("attachments", "subquestions"),
+                 placement="question"):
     if isinstance(node, dict):
         for key, value in node.items():
             if key in skip:
                 continue
-            node[key] = _walk_images(value, media_map, attachments, skip)
+            child_placement = key if key in ("answer", "explanation") else placement
+            node[key] = _walk_images(value, media_map, attachments, skip, child_placement)
         return node
     if isinstance(node, list):
-        return [_walk_images(value, media_map, attachments, skip) for value in node]
+        return [_walk_images(value, media_map, attachments, skip, placement) for value in node]
     if isinstance(node, str):
-        return replace_images(node, "question", None, media_map, attachments)
+        return replace_images(node, placement, None, media_map, attachments)
     return node
 
 
@@ -266,16 +268,15 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None):
             if url and not any(a.get("kind") == "audio" for a in attachments):
                 attachments.append({"kind": "audio", "url": url, "name": filename.split("/")[-1]})
 
-    # 按身份去重，保持首次出现顺序，幂等。同一张图片/同一音频文件（kind+name 相同）
-    # 无论出现在哪个字段或 placement，都只是同一媒体的一份引用，只保留首次出现的那条
-    # （通常是 preassemble 已挂好的权威附件）；避免既有附件与文本 [IMG] 各存一份导致重复。
+    # 按媒体及显示归属去重，保持首次出现顺序，幂等。同图可同时属于不同选项或
+    # question/answer/explanation；仅同一 placement/optionKey 内的重复引用合并。
+    # 现有附件优先，避免既有附件与同归属的文本 [IMG] 各存一份导致重复。
     deduped = []
     seen_att = set()
     for a in attachments:
         name = a.get("name") or str(a.get("url", "")).rsplit("/", 1)[-1]
         kind = a.get("kind")
-        key = (kind, name) if kind in ("image", "audio") else (
-            kind, name, a.get("placement"), a.get("optionKey"))
+        key = (kind, name, a.get("placement"), a.get("optionKey"))
         if key in seen_att:
             continue
         seen_att.add(key)

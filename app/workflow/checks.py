@@ -21,25 +21,28 @@ class Check:
     blocking: bool = True
     needs: tuple = ()          # 需要 manifest 里的输入键：source / answers
     note: str = ""
+    phase: str = "content"
 
 
 CHECKS: tuple[Check, ...] = (
     Check("目录与匹配规则 label_audit", "workflow/label_audit.py"),
     Check("排版 check_text", "scripts/06-upload/check_text.py", blocking=False,
-          note="只报告，不阻断"),
+          note="最终格式阶段报告，不阻断", phase="format"),
     # 画线/空档/表格属格式表达问题（下划线、全角空档、表格列数），脚本内以
     # [W… 提示输出；这里再兜底为不阻断，避免格式小问题卡住整卷流程。
     # 题目/题干/题号对不上等实质错误仍由结构、答案、来源审计等阻断项拦截。
     Check("空档 audit_underlines", "scripts/06-upload/audit_underlines.py", blocking=False,
-          note="格式类提示，不阻断"),
+          note="最终格式阶段报告，不阻断", phase="format"),
     Check("画线 check_underline", "scripts/06-upload/check_underline.py", blocking=False,
-          note="画线/下划线属格式提示，不阻断"),
+          note="最终格式阶段报告，不阻断", phase="format"),
     Check("表格 check_tables", "scripts/06-upload/check_tables.py", blocking=False,
-          note="表格列数/空档写法属格式提示，不阻断"),
+          note="最终格式阶段报告，不阻断", phase="format"),
+    # 重复整句/题号属于内容形状错误（子题本该是空壳），不是标点/空档这类
+    # 表达层问题，因此仍在 validate 阻断；只是不再在 assemble 前置重试。
     Check("题型版面 audit_type_layout", "scripts/06-upload/audit_type_layout.py"),
     Check("批次完整性 audit_batch_integrity", "scripts/06-upload/audit_batch_integrity.py"),
     Check("完成句子 audit_sentence_blanks", "scripts/06-upload/audit_sentence_blanks.py",
-          blocking=False, note="空档写法属格式提示，不阻断"),
+          blocking=False, note="最终格式阶段报告，不阻断", phase="format"),
     Check("结构 check_structure", "scripts/06-upload/check_structure.py"),
     Check("标签 check_tags", "scripts/04-knowledge/check_tags.py"),
     Check("题型标签 audit_type_tags", "scripts/06-upload/audit_type_tags.py"),
@@ -52,6 +55,10 @@ CHECKS: tuple[Check, ...] = (
     Check("正文保真 check_fidelity", "scripts/06-upload/check_fidelity.py", blocking=False,
           needs=("source",), note="图片材料天然对不上，交人工确认"),
 )
+
+
+CONTENT_CHECKS = tuple(c for c in CHECKS if c.phase == "content")
+FINAL_FORMAT_CHECKS = tuple(c for c in CHECKS if c.phase == "format")
 
 
 def _tail(text: str, limit: int = 400) -> str:
@@ -112,15 +119,22 @@ def run_check(check: Check, skill_root: Path, batch_json: Path, inputs: dict,
         "passed": code == 0,
         "exit_code": code,
         "output": _tail(out),
-        "warnings": [line.strip() for line in out.splitlines() if line.startswith("提示：")],
+        "warnings": [line.strip() for line in out.splitlines()
+                     if line.strip().startswith(("提示：", "[W"))],
         "error": _tail(err),
         "note": check.note,
     }
 
 
 def run_all(skill_root: Path, batch_json: Path, inputs: dict,
-            only: tuple = ()) -> dict:
-    selected = [c for c in CHECKS if not only or c.name in only or c.script in only]
+            only: tuple = (), profile: str = "content") -> dict:
+    if profile not in {"content", "format", "all"}:
+        raise ValueError(f"未知检查阶段：{profile}")
+    # 显式单项诊断兼容旧入口；正常 validate 不启动格式子进程。
+    if only:
+        selected = [c for c in CHECKS if c.name in only or c.script in only]
+    else:
+        selected = [c for c in CHECKS if profile == "all" or c.phase == profile]
     if not batch_json.is_file():
         return {"passed": False, "error": f"批次文件不存在：{batch_json}",
                 "checks": [], "blocking_failures": [], "warnings": [], "skipped": []}

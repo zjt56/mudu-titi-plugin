@@ -39,6 +39,8 @@ cd .. && node --test backend/*.test.cjs                          # 253 pass / 0 
 node --check lib/client.js lib/index.js                          # OK
 ```
 
+结果：后端 7 项 + 51 项用例通过（skip 9），前端 253 项通过（skip 2），`node --check` 通过。
+
 ## 五、回退方式
 
 - 删除 `app/workflow/test_workbench_delete_batch.py`；

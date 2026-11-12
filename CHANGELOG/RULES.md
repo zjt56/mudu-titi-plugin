@@ -1,5 +1,9 @@
 # RULES — 规则与强调台账
 
+## 2026-11-12：Harness 子智能体用于运行时提取与匹配
+
+用户明确要求用于插件运行时，并授权按评估方案实现：知识点、复杂答案/解析来源查证、前置组装题型、结构整卷取证和图片补证。模型提交候选，由现有程序验收；大段规则与答案即使从首轮提示压缩也必须能通过只读快照工具取得。恢复、预算、取消、输入绑定及删除批次的子会话清理一并实现。此为既有原文保真、独立审核、模型严格路由和不自动上传等规则的落地，不放宽质量或上传边界。落地与实测结果见 `2026-11-12-harness-content-agents.md`。
+
 ## 2026-11-12：Word图片板块由视觉辅助，答案按同源结构绑定
 
 用户明确“培优”即B能力提升，要求视觉辅助Word内容提取，并直接落地速度、质量、准确性及答案匹配优化。正文A/B横幅为图片，不能从答案区文字、文件名或宽高比猜正文分界。视觉读取真实图片，按原件/正文/所有候选媒体及当前模型路由绑定边界；结构、草稿、预览与答案共同消费，原文/原号/有效ID保留。答案必须证明课时/专题/板块/大题与全题号覆盖；错scope或已有陈旧/有问题视觉证据不回退数字串答。多图批量和字节+路由缓存，失败明确延期，视觉不编题不编答案。落地：lesson_bands、visual_transport、wf-vision、structure_gate/question_draft/upload_content与消费链路测试；根规则27补充。当前来源证明完整ABCD的纯选项语音组可保留原本空的子题干，缺来源/少选项/改文仍拒绝。
@@ -446,3 +450,24 @@
 ## 2026-11-12：上传题号必须显式写原卷范围，location/paperOrder 不再代替
 
 用户原话要点：「开发者文档新增了关于题号的规范，请阅读并设计修改内容」「将本机目前所有批次都进行对应的修改」「不在放在排队区修改，你直接自己后台改」。规则：`items` 保持原卷单元顺序；独立题顶层 `numberStart/numberEnd` 为同一原卷数字题号，题组为全部唯一子题号的连续闭区间，经来源证明无印刷数字题号的单元显式 `null/null`；`location` 只作来源追溯，`paperOrder` 只是单元序位，均不能代替结构化题号。唯一投影在 `app/workflow/upload_numbering.py::project_batch`：有号只认当前确认结构与原文锚点；无号只认可重建的 `single_writing_section`/`unnumbered_section` 证据，禁止按题型、空 `printed_numbers`、内部续号或图片题别名猜 null；scoped 课时跨大题同号按各自身份保留原号，不全局去重、不重编号。显式范围形状非法或与来源冲突即阻断。存量迁移只改派生范围字段，先备份、原子写入、只允许范围变化、逐批复验；已批准上传的最终 `batch_meta.json` 字节不改写、不伪造批准、不自动重传。无号题组子题的远端 `number=null`/缺省契约未核实，本地保留内部别名和原答案整串，仅写 `UNNUMBERED_SUBQUESTION_CONTRACT_UNRESOLVED` 诊断，不把内部 `1` 或新聚合「1.」冒充印刷号。落地：`app/workflow/upload_numbering.py`、`numbering_migration.py`、`upload_payload.py`、`format_gate.py`、`manifest.py`、`stage_semantics.py`、`review.py`、`assemble_local.py`；根 `AGENTS.md` 硬规则 32；验证见 `2026-11-12-question-number-upload.md`。
+
+## 2026-11-12：上传 PDF 一律整卷 OCR，JSON 作 Word 版面参考
+
+用户原话：「有PDF文件上传时，需要调用OCR识别的功能，产生的JSON文件作为Word的版面参考辅助」；随后确认选择「有 PDF 就整卷 OCR 出 JSON」。规则：只要批次输入含 PDF，无论 OCR 总开关是否关闭、文字层是否合格、Word 是否为主源，都调用识别服务整卷识别，产出 `01_source/pdf-ocr.json`（含页、版面块、坐标、阅读顺序与警告）作为 Word 的版面参考；Word 原文仍是内容权威，`extract._pdf` 只在文字层质量不足的页用 OCR 文字替换，不覆盖 Word 正文；阅读顺序由识别服务负责，不手工重排。落地：`app/workflow/pdf_ocr.py::run`（`force_ocr=True, mandatory_pdf=True`）、`app/docs/extraction.md`「PDF 版面证据」、根 `AGENTS.md` 硬规则 28；验证见 `2026-11-12-pdf-ocr-full-layout.md`。
+
+## 2026-11-12：前期只做内容体检，格式与上传适配集中到最终闸门
+
+用户原话：「目前该流程各个阶段的校验有哪些，感觉有点严了」，随后给出「按照以上进行修改」，采纳
+「前期流程要快、少做格式校验；最终对接上传时一次性适配」的改造建议。规则：`validate` 只跑内容/
+结构/来源/标签类检查（`checks.CONTENT_CHECKS`）与原卷逐题对账，不再调用 `upload.local_preflight`；
+文本/空档/画线/表格/完成句子等格式表达脚本（`FINAL_FORMAT_CHECKS`）只在 `format_gate` 报告，
+`[W…` 提示不得当成阻断。`assemble` 的前置预检只保留 `check_structure.py` 与
+`audit_type_layout.py --content-only`（结构与选项完整性），不再因空档/画线/表格/重复显示触发模型重试。
+`format_gate` 是唯一本地上传格式闸门：格式检查结果写 `report["format_checks"]` 与 warnings，不改
+`errors/passed`；真正的阻断仍由 `upload_payload.build_payload` 的 identity/numbering/label_audit/
+content shape/catalog/media/table/schema 校验负责。**没有把内容、结构、来源、标签校验降级**；D7 子题
+重复整句仍属内容形状错误，继续在 validate 阻断；格式归一化不得改写原始批次内容凑通过，远端目录/
+媒体/冻结仍由 prepare-upload 与 submit 校验。落地：`app/workflow/checks.py`、`runner.py::do_validate`、
+`assemble_precheck.py`、`format_gate.py::_run_final_format_checks`、`substeps.py`、
+`app/scripts/06-upload/audit_type_layout.py`、`app/docs/pipeline.md`、根 `AGENTS.md` 硬规则 33；
+验证见 `CHANGELOG/2026-11-12-early-content-late-format-gates.md`。

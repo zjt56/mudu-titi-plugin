@@ -4,7 +4,7 @@
 
 现有视觉路径硬编码 magpie，不能跟随插件所选模型。用户要求保留 Word 原生精确文字提取，另用真实图片输入理解视觉结构；禁止静默换 provider/model，禁止让纯文字 CLI 猜自己已看图。
 
-## 变更
+## 改了什么
 
 - 新增 `backend/wf-vision.mjs`：JSON 输入/输出，严格读取设备插件模型路由与 Harness 所选默认模型。沿用角色/阶段/review round 优先级；显式损坏配置及未知/不支持图片的模型失败，无 bootstrap fallback。
 - 直接使用当前已安装 Harness pi-ai provider adapter；桌面发行版通过配套 Electron Node 原生只读加载 ASAR。模型、端点、协议取自当前 profile/catalog，无裸猜 URL。多图一次调用，真实 base64 图片块带独立 ID；原生 SDK sessionId 满足 OpenCode Go 的会话头契约。

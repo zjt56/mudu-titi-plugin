@@ -1,6 +1,6 @@
 # 2026-11-11 画线阶段：整行表格标签不再被当“孤立字段”拒收
 
-## 背景/触发
+## 背景（触发）
 
 12 年安徽卷（`C:\Users\Administrator\.dsh\wf-plugin-data\workflows\【木牍教育】12年安徽中考英语`）
 解析阶段改用确定性直抄跑完后（`04_knowledge/explanations.json` 52 单元，`model_calls=0`），

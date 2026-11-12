@@ -370,17 +370,12 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
     mf.touch_stage(manifest, "validate", mf.RUNNING)
     evidence_before = _validate_inputs(batch_dir, manifest)
     report = checks.run_all(SKILL_ROOT, batch_json, manifest.get("inputs", {}))
-    # 上传前本地预检前移到 validate：不访问网络、不冻结文件，但提前暴露最终批次、
-    # 解析来源、媒体引用和 payload 大小问题，避免用户点击上传后才第一次发现。
-    try:
-        from . import upload as upload_flow
-        report["upload_local_preflight"] = upload_flow.local_preflight(batch_dir)
-    except (OSError, ValueError, TypeError) as exc:
-        report["upload_local_preflight"] = {"passed": False, "network_checked": False,
-                                             "errors": [{"code": "LOCAL_PREFLIGHT_ERROR", "message": str(exc)}]}
-    # 这是提前提示，不替代现有 validate 阻断契约；真正上传时仍由 prepare/verify 严格拦截。
-    if not report["upload_local_preflight"].get("passed"):
-        report.setdefault("warnings", []).append("UPLOAD_LOCAL_PREFLIGHT")
+    # 上传形状、媒体部署和 payload 预检集中到 format_gate / prepare-upload。
+    # 明确记录延期，不把未执行的预检显示成通过。
+    report["upload_local_preflight"] = {"status": "skipped", "skipped": True,
+                                        "reason": "后移至 format_gate / prepare-upload"}
+    report["deferred"] = [{"check": c.name, "stage": "format_gate"}
+                          for c in checks.FINAL_FORMAT_CHECKS]
     # 脚本的字段/目录体检不能代替原卷逐题覆盖与材料归属复核。
     try:
         audit = source_audit_for_batch(batch_dir, json.loads(batch_json.read_text(encoding="utf-8-sig")))

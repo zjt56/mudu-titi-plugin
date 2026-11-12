@@ -28,6 +28,8 @@ docx 因 Symbol font / Floating object 触发，对 13 张嵌入图**逐张串�
   sections 3、passed True，与改前完全一致。
 - `workflow.test_extract`：30 例全过；`test_extract + test_source_policy`：52 例全过。
 
+
+以上验证结果均通过。
 ## 5. 回退方式
 
 恢复 extract.py docx 分支的逐图 OCR 循环即可（备份见 /tmp/extract.py.bak-*，或 git revert）。

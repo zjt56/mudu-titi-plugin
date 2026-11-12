@@ -38,8 +38,11 @@ class PdfOcrTest(unittest.TestCase):
             report = pdf_ocr.run(self.batch, manifest, config)
         self.assertEqual(report["status"], "completed")
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0][2], {"force_ocr": True, "config": config, "mandatory_pdf": True})
-        self.assertEqual(calls[1][2], {"force_ocr": False, "config": config, "mandatory_pdf": False})
+        # Every uploaded PDF is fully OCR'd, including the companion PDFs of a
+        # Word-primary batch: their JSON is the Word layout reference and must
+        # exist even when the OCR assist switch is off.
+        for _, _, kwargs in calls:
+            self.assertEqual(kwargs, {"force_ocr": True, "config": config, "mandatory_pdf": True})
         self.assertEqual(report['sources'][0]['pages'][0]['text'], 'OCR text')
         first, second, duplicate = report["sources"]
         self.assertEqual(duplicate["duplicate_of"], "answers")
@@ -74,6 +77,18 @@ class PdfOcrTest(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertTrue(all(x["status"] == "failed" for x in report["sources"]))
         self.assertIn("SHA-256", report["sources"][0]["error"]["message"])
+
+    def test_companion_pdf_of_word_batch_is_fully_ocrd(self):
+        manifest = {"inputs": {"source": self.entry(self.word),
+                               "attachment_001": self.entry(self.other)}}
+        calls = []
+        def recognize(source, output, **kwargs):
+            calls.append(kwargs)
+            return {"pages": [{"page": 1, "text": "OCR text"}]}
+        with patch.object(pdf_ocr.ocr_backend, "recognize", side_effect=recognize):
+            report = pdf_ocr.run(self.batch, manifest)
+        self.assertEqual(report["status"], "completed")
+        self.assertEqual(calls, [{"force_ocr": True, "config": None, "mandatory_pdf": True}])
 
     def test_no_pdfs(self):
         report = pdf_ocr.run(self.batch, {"inputs": {"source": self.entry(self.word)}})

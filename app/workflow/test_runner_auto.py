@@ -112,7 +112,21 @@ class RunnerAutoTest(unittest.TestCase):
         retries = []
         validation = []
         lock = threading.Lock()
+        saving = threading.Lock()
+        original_save = mf.save
         default = auto.load_bridge()
+
+        def save(batch, manifest):
+            # Simulate Windows process-owned file locks: sibling threads can
+            # both enter _agent_lock, but must never read/replace this ledger
+            # concurrently. The model barrier below still requires overlap.
+            if not saving.acquire(blocking=False):
+                raise RuntimeError("concurrent manifest save")
+            try:
+                threading.Event().wait(0.02)
+                return original_save(batch, manifest)
+            finally:
+                saving.release()
 
         def export(batch, stage, **kwargs):
             package = self.batch / "test-packages" / stage
@@ -155,6 +169,8 @@ class RunnerAutoTest(unittest.TestCase):
             return {"completed": True, "notes": []}
 
         with patch.object(auto, "PARALLEL_AGENTS_ENABLED", True), \
+             patch.object(agent_protocol, "_agent_lock", side_effect=lambda *a, **k: nullcontext()), \
+             patch.object(mf, "save", side_effect=save), \
              patch.object(agent, "configured", return_value=True), \
              patch.object(local_agent, "load_config", return_value={"max_input_chars": 10000, "retries": 1}), \
              patch.object(agent_prepare, "prepare_answers"), \

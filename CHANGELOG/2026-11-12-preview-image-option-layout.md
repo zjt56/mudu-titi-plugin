@@ -29,6 +29,8 @@ image14 从选项里丢失、其余错位一格。数据层（batch.json attachm
 - `node --test backend/*.test.cjs`：255 例，pass 253、fail 0。
 - 生效方式：宿主插件前端，需重载 DSH 插件/刷新 GUI 才在界面显示（非 dev:web 不自动热更）。
 
+
+以上验证结果均通过。
 ## 5. 回退方式
 
 git revert 本提交即可；纯展示层，无数据影响。

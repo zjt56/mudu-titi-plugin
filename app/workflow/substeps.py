@@ -10,8 +10,10 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .checks import CHECKS
+from .checks import CONTENT_CHECKS, FINAL_FORMAT_CHECKS
 from .contracts import STAGES
+
+CHECKS = CONTENT_CHECKS
 
 # Stable ids belong to the tooltip API, not to the scheduler's stage contract.
 STEPS = {
@@ -32,12 +34,13 @@ STEPS = {
     "assemble": (("merge", "合并"), ("fidelity", "保真")),
     "meta": (("metadata", "元数据整理"),),
     "underlines": (("underlines", "画线补全"),),
-    "validate": tuple((Path(c.script).stem, c.name) for c in CHECKS)
-                + (("source_audit", "原卷逐题覆盖与材料归属 source_audit"), ("local_preflight", "本地上传预检 local preflight")),
+    "validate": tuple((Path(c.script).stem, c.name) for c in CONTENT_CHECKS)
+                + (("source_audit", "原卷逐题覆盖与材料归属 source_audit"),),
     "review": (("labels", "第一轮标签审核"), ("sample", "第二轮抽检"), ("coverage", "审核覆盖")),
     "review_gate": (("differences", "差异归集"), ("conclusion", "执行质量结论")),
-    "format_gate": (("fields", "字段"), ("media", "媒体"), ("serialization", "序列化"),
-                    ("consistency", "一致性"), ("freeze", "固化")),
+    "format_gate": tuple((Path(c.script).stem, c.name) for c in FINAL_FORMAT_CHECKS)
+                   + (("fields", "字段"), ("media", "媒体"), ("serialization", "序列化"),
+                      ("consistency", "一致性"), ("freeze", "固化")),
 }
 OK = {"completed", "approved"}
 FAIL = {"failed", "blocked"}
@@ -111,7 +114,6 @@ def _details(sid, report, read):
                     if row.get("check") == title:
                         result[key] = "skipped"
         result.setdefault("source_audit", _outcome(report.get("source_audit")))
-        result["local_preflight"] = _outcome(report.get("upload_local_preflight") or read("07_upload/local-preflight.json"))
     elif sid == "structure_gate":
         checks = _object(report.get("checks"))
         mapping = {"denoise": ("denoise",), "coverage": ("coverage", "source_number_coverage"),
@@ -155,6 +157,13 @@ def _details(sid, report, read):
             result["differences"] = "completed"
             result["conclusion"] = "needs_review" if report.get("passed") is False else _outcome(report)
     elif sid == "format_gate":
+        for row in _rows(_object(report.get("format_checks")).get("checks")):
+            if not isinstance(row, dict):
+                continue
+            for key, title in STEPS[sid]:
+                if row.get("check") == title or (row.get("script") and Path(str(row["script"])).stem == key):
+                    # 最终格式检查只作提示，不改变本地阻断结论。
+                    result[key] = "completed" if row.get("passed") is True else "warning"
         for issue in _rows(report.get("errors")):
             if not isinstance(issue, dict):
                 continue
@@ -218,7 +227,7 @@ def project(manifest, batch_dir=None, activity=None, audio_state=None):
                 if good and outcome in {"failed", "pending", "needs_review"}:
                     # A registered accepted delivery outranks an older failed
                     # attempt's report; auxiliary checks may still have warnings.
-                    if (sid, key) in {("validate", "local_preflight"), ("extract", "ocr")} and outcome == "failed":
+                    if (sid, key) == ("extract", "ocr") and outcome == "failed":
                         by_id[key]["status"] = "warning"
                     continue
                 by_id[key]["status"] = outcome

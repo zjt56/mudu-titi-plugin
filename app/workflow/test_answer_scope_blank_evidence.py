@@ -68,7 +68,7 @@ class AnswerBlankEvidenceTest(unittest.TestCase):
         self.assertTrue(report['completed'])
         self.assertEqual(response, original)
         import json
-        installed = json.loads((self.batch / agent_tasks.ARTIFACTS['answers']).read_text())
+        installed = json.loads((self.batch / agent_tasks.ARTIFACTS['answers']).read_text(encoding='utf-8'))
         self.assertEqual(installed['answers'], payload['answers'])
         self.assertIn('01_source/附录.txt:2', installed['evidence'][key])
         self.assertTrue(any('补齐坐标' in note for note in report['notes']))
@@ -78,9 +78,11 @@ class AnswerBlankEvidenceTest(unittest.TestCase):
         from workflow import label_execution, unit_tasks
         payload = answers_direct.build_payload(self.batch)
         calls = []
+        call_batches = []
         def invoke(prompt, directory, config, **kwargs):
             data = json.loads(prompt.split(unit_tasks._BEGIN, 1)[1].split(unit_tasks._END, 1)[0])
             selected = data['confirmed_units_with_stable_ids']
+            call_batches.append([u['unit_id'] for u in selected])
             calls.extend(u['unit_id'] for u in selected)
             keys = {question_key(u, n) for u in selected for n in u['numbers']}
             candidate = {'answers': {key: value for key, value in payload['answers'].items() if key in keys},
@@ -91,6 +93,8 @@ class AnswerBlankEvidenceTest(unittest.TestCase):
                   'model_cache_identity': 'fixture-model'}
         result = label_execution.run(self.batch, 'answers', config, self.batch / 'run', invoke=invoke)
         self.assertEqual(sorted(calls), sorted(u['unit_id'] for u in self.units))
+        self.assertEqual(len(call_batches), 1)
+        self.assertEqual(set(call_batches[0]), {u['unit_id'] for u in self.units})
         accepted = result['response']['artifacts'][agent_tasks.ARTIFACTS['answers']]
         self.assertTrue(any('补齐坐标' in note for note in result['response']['notes']))
         self.assertEqual(accepted['answers'], payload['answers'])

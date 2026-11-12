@@ -51,7 +51,7 @@ def _hashes(root, media=()):
         path = _safe(root, relative)
         result[relative] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
     # Parser changes also invalidate a persisted draft, without mtime dependence.
-    for name in ("question_draft.py", "question_content.py", "wire_format.py", "denoise.py", "question_identity.py", "shared_rubric.py", "phonetic_structure.py"):
+    for name in ("question_draft.py", "question_content.py", "wire_format.py", "denoise.py", "question_identity.py", "shared_rubric.py", "phonetic_structure.py", "source_objects.py"):
         path = Path(__file__).with_name(name)
         result["parser:" + name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
@@ -421,52 +421,63 @@ def _source_table_rows(table, *, include_omitted=True):
 
 
 def _table_grid_equal(left, right):
-    """Compare a table text with Word's table text ignoring layout whitespace.
-
-    Word keeps non-breaking and trailing spaces inside cells; the confirmed
-    source may have been reflowed. Only whitespace may differ here — visible
-    text and grid shape still have to match, so a dropped word or cell fails.
-    """
+    """Compare serialized grid rows, allowing only layout whitespace changes."""
     def lines(text):
         cleaned = []
         for line in str(text or "").splitlines():
             line = line.replace("\xa0", " ").replace("\u3000", " ")
-            cleaned.append(re.sub(r"\s+", " ", line).strip())
+            line = re.sub(r"\s+", " ", line).strip()
+            cleaned.append(re.sub(r"\s*\|\s*", "|", line))
         return cleaned
     left_lines, right_lines = lines(left), lines(right)
     return bool(left_lines) and left_lines == right_lines
 
 
-def _table_grid_matches(table, flat_rows):
-    """Word 抽出的表格网格必须和正文网格同形，合并证据才可采用。"""
+def _table_grid_matches(table, flat_rows, *, native=False):
+    """Word 网格须与正文同形；已验证原生对象按真实单元格序列化核对。"""
     grid = table.get("grid")
-    flat_widths = [len(line.split("|")) for line in flat_rows]
     if not isinstance(grid, list) or not grid or not all(isinstance(row, list) for row in grid):
         # 旧协议/人工元数据没有逐格网格证据时只按文本判定，不额外猜形状。
         return True
+    if native:
+        # resolve_table has already verified the object identity/content digest.
+        # A literal pipe or nested-table marker belongs to its native cell, so
+        # splitting those strings on pipes would invent columns. Require the
+        # complete native grid serialization instead; never waive shape checks.
+        serialized = [" | ".join(str(value).replace("\n", "<br>") for value in row) for row in grid]
+        return (len(serialized) == len(flat_rows)
+                and _table_grid_equal("\n".join(["[TABLE]", *serialized, "[/TABLE]"]),
+                                      "\n".join(["[TABLE]", *flat_rows, "[/TABLE]"])))
+    flat_widths = [len(line.split("|")) for line in flat_rows]
     return len(grid) == len(flat_widths) and [len(row) for row in grid] == flat_widths
 
 
-def _table_blocks(text, extraction, issues, uid, unit_type=""):
+def _table_blocks(text, extraction, issues, uid, unit_type="", *, references=None, layout_diagnostics=None):
+    from .source_objects import resolve_table, capabilities, table_markers
     blocks = []
-    tables = extraction.get("tables") or [] if isinstance(extraction, dict) else []
-    for match in _TABLE.finditer(text):
+    for marker in table_markers(text):
+        match = _TABLE.fullmatch(marker)
+        table, reason = resolve_table(extraction, marker)
+        grid_text = re.sub(r"^[ \t\r]*\n", "", match.group(2), count=1)
+        grid_text = re.sub(r"\n[ \t\r]*$", "", grid_text, count=1)
+        # Remove only the marker-boundary newlines. Empty physical rows (even
+        # at either edge) are real native grid positions and must survive.
+        flat_rows = grid_text.split("\n")
+        native = isinstance(extraction, dict) and "source_objects" in extraction
+        if table is not None and not _table_grid_matches(table, flat_rows, native=native):
+            table = None
+            reason = "Word合并单元格网格与原表格形状不一致"
         rows = []
-        flat_rows = match.group(2).strip("\n").splitlines()
-        exact = [table for table in tables if isinstance(table, dict)
-                 and str(table.get("number")) == match.group(1)
-                 and _table_grid_equal(table.get("text"), match.group(0))]
-        structured = exact[0] if len(exact) == 1 else None
-        if structured is not None and not _table_grid_matches(structured, flat_rows):
-            structured = None
-            issues.append({"unit_id": uid, "code": "TABLE_LAYOUT_UNVERIFIED",
-                           "reason": "Word合并单元格网格与原表格形状不一致"})
-        if structured is not None:
-            rows = _source_table_rows(structured)
+        if table is not None:
+            rows = _source_table_rows(table)
+            if references is not None:
+                references.append({"source_ref": table.get("source_ref"),
+                                   "table_number": table["number"],
+                                   "binding": "native_object" if native else "legacy_exact_content"})
+            if layout_diagnostics is not None:
+                layout_diagnostics.extend(dict(problem, unit_id=uid, stage="format_gate")
+                                          for problem in capabilities(table))
         else:
-            if len(exact) != 1:
-                issues.append({"unit_id": uid, "code": "TABLE_LAYOUT_UNVERIFIED",
-                               "reason": "保留正文表格网格；没有唯一匹配的Word合并单元格证据"})
             # Physical newlines inside an underline belong to its cell, not to
             # a new table row. Keep them through row splitting, then normalize.
             grid = re.sub(r"<u>.*?</u>", lambda m: m.group(0).replace("\n", "<br>"),
@@ -475,6 +486,11 @@ def _table_blocks(text, extraction, issues, uid, unit_type=""):
                 if "|" in line:
                     rows.append({"cells": [{"text": _skeleton_text(cell.strip()), "items": []}
                                            for cell in line.split("|")]})
+            issues.append({"unit_id": uid, "code": "TABLE_LAYOUT_UNVERIFIED",
+                           "reason": "保留正文表格网格；" + reason})
+            if layout_diagnostics is not None and native:
+                layout_diagnostics.append({"unit_id": uid, "stage": "format_gate",
+                                           "code": "LAYOUT_SOURCE_OBJECT_INVALID", "reason": reason})
         converted = _table_blank_cells(rows, unit_type)
         block = {"type": "table", "rows": converted}
         if _information_conversion(text, unit_type):
@@ -558,6 +574,7 @@ def build(batch_dir, *, units=None):
     sections = lesson_bands.annotate_sections(structure.get("sections") or [], evidence)
     fresh = _build_units(sections, structure.get("groups") or [], cleaned.splitlines())
     items, bindings, issues, media = [], {}, [], set()
+    layout_diagnostics = []
     inspected_media = {}
     for unit in units:
         uid = unit["unit_id"]
@@ -658,7 +675,11 @@ def build(batch_dir, *, units=None):
                         issues.append({"unit_id": uid, "number": number, "code": "CHILD_CONTENT_UNRESOLVED",
                                        "reason": "保留子题身份；当前原文不能可靠拆出独立题干"})
                     row["subquestions"].append(child)
-            blocks = _table_blocks(text, extraction, issues, uid, unit.get("type") or "")
+            table_refs = []
+            blocks = _table_blocks(text, extraction, issues, uid, unit.get("type") or "",
+                                   references=table_refs, layout_diagnostics=layout_diagnostics)
+            if table_refs:
+                proof["source_objects"] = table_refs
             if blocks:
                 if "信息转换" in str(unit.get("type") or ""):
                     for block in blocks:
@@ -712,8 +733,35 @@ def build(batch_dir, *, units=None):
     result = {"version": VERSION, "status": "candidate", "release_ready": False,
               "label_status": "not_started", "media_status": "local_evidence_only_unverified",
               "input_hashes": hashes, "items": items, "source_bindings": bindings,
-              "issues": issues, "notice": "来源绑定只证明机械回指；不代表结构、标签、视觉/听音、装配或审核通过。空答案及无解析/大意是待匹配占位，不证明原卷没有。"}
+              "issues": issues, "layout_diagnostics": layout_diagnostics, "notice": "来源绑定只证明机械回指；不代表结构、标签、视觉/听音、装配或审核通过。空答案及无解析/大意是待匹配占位，不证明原卷没有。"}
     return result
+
+
+def _equivalent_parser_refresh(previous, current):
+    """Retain an honest old receipt only after rebuilding equal source objects.
+
+    Parser provenance records which code produced the persisted draft. It must
+    not be rewritten just to acknowledge newer code with identical output: that
+    would invalidate unrelated tasks holding the original bytes. Source/media
+    hashes, parser key sets, objects and all diagnostics still compare exactly.
+    """
+    if not isinstance(previous, dict):
+        return False
+    old = dict(previous)
+    receipt = old.pop("content_sha256", None)
+    if receipt != _digest(old):
+        return False
+    new = dict(current)
+    new.pop("content_sha256", None)
+    old_hashes, new_hashes = old.get("input_hashes"), new.get("input_hashes")
+    if not isinstance(old_hashes, dict) or not isinstance(new_hashes, dict) or old_hashes.keys() != new_hashes.keys():
+        return False
+    if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+           for key, value in old_hashes.items() if key.startswith("parser:")):
+        return False
+    old["input_hashes"] = {k: v for k, v in old_hashes.items() if not k.startswith("parser:")}
+    new["input_hashes"] = {k: v for k, v in new_hashes.items() if not k.startswith("parser:")}
+    return old == new
 
 
 def ensure(batch_dir, *, units=None):
@@ -727,12 +775,25 @@ def ensure(batch_dir, *, units=None):
         raise ValueError("Source changed during question draft build")
     result["content_sha256"] = _digest(result)
     content = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-    if target.is_file() and target.read_bytes() == content.encode("utf-8"):
+    persisted = target.read_bytes() if target.is_file() else None
+    if persisted == content.encode("utf-8"):
         return result
-    # Inputs, including media, must still match before committing the candidate.
+    # Inputs, including media, must still match before retaining or committing
+    # a candidate. Do not make an equivalence decision on a changing source.
     media = [key for key in result["input_hashes"] if key.startswith("01_source/media/")]
     if result["input_hashes"] != _hashes(root, media):
         raise ValueError("Source or media changed during question draft build")
+    if persisted is not None:
+        try:
+            previous = json.loads(persisted.decode("utf-8"))
+        except (UnicodeError, ValueError):
+            previous = None
+        if _equivalent_parser_refresh(previous, result):
+            # Keep both original provenance and exact original serialization.
+            # A concurrent real change is never replaced by the stale receipt.
+            if target.read_bytes() != persisted:
+                raise ValueError("Question draft changed during equivalence check")
+            return previous
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:

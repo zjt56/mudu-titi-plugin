@@ -40,6 +40,8 @@ D 无图——每个图整体错位一格、首图未绑任何选项。根因链
 - 04 批次：invalidate preassemble 下游→重建 question-draft(正确)→重跑 preassemble→assemble
   后 batch 选项图应正确到位。
 
+
+以上验证结果均通过。
 ## 5. 回退方式
 
 git revert 本提交即可；无数据破坏，重跑可再生成。

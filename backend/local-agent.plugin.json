@@ -16,5 +16,12 @@
   "input_mode": "none",
   "retries": 2,
   "retry_feedback_chars": 1600,
-  "review_max_attempts": 2
+  "review_max_attempts": 2,
+  "native_agent": {
+    "enabled": true,
+    "mode": "auto",
+    "stages": ["knowledge", "answers", "explanations", "preassemble", "types", "structure_gate"],
+    "max_tool_calls": 40,
+    "max_turns": 4
+  }
 }

@@ -47,5 +47,5 @@
 回退本次 `lib/index.js` 与测试文件的改动即可；看门狗不写任何持久状态，回退后行为与之前一致。
 
 ## 关联
-- ISSUES/open：`2026-11-12-排队批次静默停摆-工作台后端退出后无人自动拉起.md`（stage=queue，
+- ISSUES/fixed：`2026-11-12-排队批次静默停摆-工作台后端退出后无人自动拉起.md`（stage=queue，
   check=WORKBENCH_BACKEND_ABSENT）。

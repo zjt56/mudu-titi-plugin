@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from workflow import activity, substeps
-from workflow.checks import CHECKS
+from workflow.checks import CONTENT_CHECKS as CHECKS, FINAL_FORMAT_CHECKS
 from workflow.contracts import STAGES
 from workbench import server
 
@@ -38,7 +38,8 @@ class SubstepsTest(unittest.TestCase):
             for row in rows:
                 self.assertEqual(set(row), {"id", "title", "status"})
                 self.assertEqual(row["status"], "pending")
-        self.assertEqual(len(projected["validate"]), len(CHECKS) + 2)
+        self.assertEqual(len(projected["validate"]), len(CHECKS) + 1)
+        self.assertEqual(len(projected["format_gate"]), len(FINAL_FORMAT_CHECKS) + 5)
 
     def test_pending_and_invalidated_ignore_all_old_files(self):
         self.put("07_review/validation-report.json", {"passed": True, "checks": [
@@ -55,14 +56,12 @@ class SubstepsTest(unittest.TestCase):
             {"check": CHECKS[0].name, "passed": True},
             {"script": "scripts/06-upload/check_structure.py", "passed": False},
             {"check": "原卷逐题覆盖与材料归属 source_audit", "passed": True}],
-            "skipped": [{"check": "答案 check_answers", "reason": "缺少输入"}],
-            "upload_local_preflight": {"passed": False}})
+            "skipped": [{"check": "答案 check_answers", "reason": "缺少输入"}]})
         states = self.states("validate", "failed")
         self.assertEqual(states["label_audit"], "completed")
         self.assertEqual(states["check_structure"], "failed")
         self.assertEqual(states["source_audit"], "completed")
         self.assertEqual(states["check_answers"], "skipped")
-        self.assertEqual(states["local_preflight"], "failed")
         self.assertEqual(states["check_tags"], "pending")
         self.assertNotIn("stage_execution", states)
 
@@ -78,13 +77,11 @@ class SubstepsTest(unittest.TestCase):
 
     def test_nonblocking_check_failure_is_warning_and_accepted_parent_wins(self):
         self.put("07_review/validation-report.json", {"passed": False, "checks": [
-            {"check": "表格 check_tables", "passed": False, "blocking": False},
-            {"check": CHECKS[0].name, "passed": False}],
-            "upload_local_preflight": {"passed": False}})
+            {"check": "正文保真 check_fidelity", "passed": False, "blocking": False},
+            {"check": CHECKS[0].name, "passed": False}]})
         states = self.states("validate", "completed")
-        self.assertEqual(states["check_tables"], "warning")
+        self.assertEqual(states["check_fidelity"], "warning")
         self.assertEqual(states["label_audit"], "completed")
-        self.assertEqual(states["local_preflight"], "warning")
         self.assertNotIn("failed", states.values())
 
     def test_malformed_and_oversized_reports_are_unknown(self):

@@ -162,7 +162,7 @@ def _check_option_count(problems, uid, qt, kind, u, subs, want, where):
             _unit_count()
 
 
-def _check_unit(u):
+def _check_unit(u, *, content_only=False):
     problems = []
     uid = u.get("unit_id") or u.get("id") or "?"
     qt = (u.get("question_type") or "").strip()
@@ -202,7 +202,7 @@ def _check_unit(u):
         problems.append(f"[C11] {uid} ({qt}): 完形单元级 options 应留空，选项挂在各子题")
 
     # D7 / SHELL_SUB：材料已带齐题号时，子题 stem 只能空壳，不重复整句/题号
-    if qt in SHELL_SUB_TYPES:
+    if not content_only and qt in SHELL_SUB_TYPES:
         mat_numbers = _material_numbers(u.get("material") or "")
         nums = set(_sub_numbers(u))
         # 只有当材料里确实带齐了每个子题号才按「材料已编号」判定
@@ -213,7 +213,9 @@ def _check_unit(u):
 
 
 def main(argv=None):
-    args = arg_parser("题型版面体检 E20-选项条数·选项连续/D7-子题空壳·D10-组题粒度/C11-完形选项/C12-填空无选项").parse_args(argv)
+    parser = arg_parser("题型版面体检 E20-选项条数·选项连续/D7-子题空壳·D10-组题粒度/C11-完形选项/C12-填空无选项")
+    parser.add_argument("--content-only", action="store_true", help="前期只查内容结构，跳过重复显示检查")
+    args = parser.parse_args(argv)
     try:
         batch = load_batch(args.batch)
     except Exception as exc:
@@ -226,7 +228,7 @@ def main(argv=None):
             problems.append(f"[格式] 非对象单元被忽略：{type(u).__name__}")
             continue
         try:
-            problems.extend(_check_unit(u))
+            problems.extend(_check_unit(u, content_only=args.content_only))
         except Exception as exc:
             uid = u.get("unit_id") or u.get("id") or "?"
             problems.append(f"[ERROR] 单元 {uid} 体检异常：{exc}")

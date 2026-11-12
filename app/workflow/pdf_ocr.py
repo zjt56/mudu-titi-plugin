@@ -77,14 +77,14 @@ def run(batch, manifest, config=None):
             snapshot.write_bytes(data)
             item["snapshot"] = snapshot.relative_to(batch).as_posix()
             item["result_dir"] = source_dir.relative_to(batch).as_posix()
-            primary = manifest['inputs'].get('source') or {}
-            structural_reference = (Path(str(primary.get('path') or '')).suffix.lower() == '.docx'
-                                    and key not in ('source', 'answers'))
-            # A companion PDF supplies hierarchy/layout. Read usable native
-            # pages directly; OCR only unreliable pages instead of forcing a
-            # full second transcription of the Word content.
-            result = ocr_backend.recognize(snapshot, source_dir, force_ocr=not structural_reference,
-                                           config=config, mandatory_pdf=not structural_reference)
+            # Every uploaded PDF is OCR'd in full, including a companion PDF whose
+            # batch also has a Word original. The resulting JSON (pages, blocks,
+            # reading order) is the layout reference for the Word text, so it must
+            # exist even when the global OCR assist switch is off or the PDF has a
+            # clean text layer. Word stays the content authority: extract._pdf only
+            # replaces pages whose native text layer fails the quality check.
+            result = ocr_backend.recognize(snapshot, source_dir, force_ocr=True,
+                                           config=config, mandatory_pdf=True)
             if not isinstance(result, dict) or not isinstance(result.get("pages"), list) or not result["pages"]:
                 raise ValueError("OCR returned no pages")
             if any(not isinstance(page, dict) or not isinstance(page.get("text"), str)

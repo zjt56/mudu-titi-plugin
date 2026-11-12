@@ -574,6 +574,8 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
     # Resolve the selected route before looking at cached candidates. Injected
     # invokers use only their supplied configuration and never contact a bridge.
     route_binding = {"config": config}
+    native_selected = False
+    prepared = None
     if invoke_fn is None:
         from . import agent as agent_entry, local_agent, visual_transport
         if config is None and not agent_entry.configured():
@@ -587,8 +589,17 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
                 config.get("provider") == "command" and any(
                     isinstance(token, str) and Path(token).name in ("wf-router.sh", "wf-router.mjs")
                     for token in config.get("command", [])))
-            if harness_route:
+            native = config.get("native_agent") or {}
+            if native.get("enabled") is True and "structure_gate" in native.get("stages", []):
+                from . import content_agent
+                native_selected = native.get("mode", "strict") == "strict" or content_agent.available()
+            if harness_route or native_selected:
                 route_binding["actual_route"] = visual_transport.route_identity(stage="structure_gate")
+            if native_selected:
+                from . import content_structure
+                prepared = content_structure.prepare(batch_dir=batch, raw=raw, candidate=candidate, pdf_ocr=pdf_ocr)
+                route_binding["native_structure"] = True
+                route_binding["native_input_binding"] = prepared["input_binding"]
         except (OSError, ValueError, RuntimeError, TypeError) as exc:
             return {"ran": False, "reason": "结构归类路由不可用：" + str(exc)[:160]}
         invoke_fn = local_agent.invoke
@@ -599,6 +610,7 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
                   and marker.get('pdf_ocr_sha256', '') == pdf_sha
                   and marker.get('lesson_bands_sha256', hashlib.sha256(b'[]').hexdigest()) == band_sha)
     reused = False
+    native_failure = marker.get("native_failure") if same_input else None
     prior_response = None
     if same_input and isinstance(marker.get('attempt'), str):
         prior_path = (batch / marker['attempt'] / 'response.json').resolve()
@@ -628,18 +640,57 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
         run_root = batch / "workflow" / "structure-classify-attempts"
         run_root.mkdir(parents=True, exist_ok=True)
         run_dir = Path(tempfile.mkdtemp(prefix="structure-", dir=run_root))
+        native_failure = None
         try:
-            response = invoke_fn("Stage: structure_gate\nAgent: structure_gate\n" +
-                                 _classify_prompt(raw, candidate, pdf_ocr), run_dir, config)
+            if native_selected:
+                from . import content_agent, content_structure
+                settings = dict(config, _content_batch_dir=str(batch.resolve()),
+                                _content_input_hashes=prepared["input_binding"],
+                                _content_route_identity=route_binding["actual_route"])
+                response = content_agent.invoke(prepared["prompt"], run_dir, settings)
+                try:
+                    content_structure.verify_binding(prepared, batch)
+                except ValueError as exc:
+                    raise local_agent.AgentError(str(exc), "context_changed") from exc
+            else:
+                response = invoke_fn("Stage: structure_gate\nAgent: structure_gate\n" +
+                                     _classify_prompt(raw, candidate, pdf_ocr), run_dir, config)
             reply = response.get("response") if isinstance(response, dict) and "response" in response else response
             artifacts = reply.get("artifacts", {}) if isinstance(reply, dict) else {}
             structured = artifacts.get("structure", {}) if isinstance(artifacts, dict) else {}
             if not isinstance(reply, dict) or reply.get("status") != "completed":
-                return {"ran": False, "reason": "结构归类响应未完成"}
-        except Exception as exc:  # noqa: BLE001 - AI failure is non-destructive
-            return {"ran": False, "reason": "结构归类调用失败：" + str(exc)[:160]}
+                if not native_selected:
+                    return {"ran": False, "reason": "结构归类响应未完成"}
+                native_failure = {"check": "NATIVE_RESPONSE_INCOMPLETE", "message": "结构原生响应未完成"}
+        except Exception as exc:  # noqa: BLE001 - native failures retain evidence, never fallback
+            if not native_selected:
+                return {"ran": False, "reason": "结构归类调用失败：" + str(exc)[:160]}
+            native_failure = {"check": "NATIVE_STRUCTURE_FAILED", "message": str(exc)[:2400],
+                              "code": getattr(exc, "code", "native_failure"),
+                              "diagnostics": getattr(exc, "diagnostics", None)}
+            # Only validation failures may expose a candidate for local evidence
+            # quarantine. Stale input/route/cancellation cannot become a view.
+            preserved = _load(run_dir / "candidate.json")
+            artifacts = preserved.get("artifacts", {}) if isinstance(preserved, dict) else {}
+            structured = artifacts.get("structure", {}) if isinstance(artifacts, dict) else {}
+            (run_dir / "native-failure.json").write_text(
+                json.dumps(native_failure, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     diagnostics, quarantine = [], []
-    units = _sanitize_classified(structured, raw, candidate, diagnostics=diagnostics, quarantine=quarantine)
+    if native_selected:
+        from . import content_structure
+        checked = content_structure.validate(prepared, structured)
+        units, diagnostics, quarantine = checked["units"], checked["diagnostics"], checked["quarantine_units"]
+        # Reused native candidates still undergo the complete current validator.
+        if reused and native_failure and native_failure.get("code") == "validation" and units:
+            native_failure = None
+        if native_failure:
+            diagnostics.append(native_failure)
+            quarantine = units or quarantine
+            units = []
+            if native_failure.get("code") in {"context_changed", "route_changed", "cancelled", "input", "config"}:
+                quarantine = []
+    else:
+        units = _sanitize_classified(structured, raw, candidate, diagnostics=diagnostics, quarantine=quarantine)
     unit_diagnostics = []
     for index, item in enumerate(structured.get('units', []) if isinstance(structured, dict) else [], 1):
         item = item if isinstance(item, dict) else {}
@@ -658,6 +709,7 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
                     'sync_applicable': sync_applicable,
                     "units": units, "attempt": str(run_dir.relative_to(batch)),
                     "candidate_response": structured, "quarantine_units": quarantine if not units else [],
+                     **({"native_failure": native_failure} if native_selected and native_failure else {}),
                     "diagnostics": diagnostics, "unit_diagnostics": unit_diagnostics,
                     "repair_request": ({"status": "blocked_on_source_evidence", "retryable": False,
                                         "instruction": "先修复有证据的来源/边界，再本地复验原候选；不得改写原件、标记通过或按新提示原样重试模型。",

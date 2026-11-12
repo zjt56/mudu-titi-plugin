@@ -4,7 +4,7 @@
 
 用户报告06七上人教版课时A计划StarterUnit2KeepTidy!第二课时Pro的结构闸门仍被NUMBERING_RESTART/GROUP_BOUNDARY_REVIEW阻断。实际报告还包含第2、4题QUESTION_NOT_FOUND。两题位于第Ⅱ题的前题续行右栏：`c<u>空格</u>/eɪ/ke\t2.[IMG ...]`。印刷锚点已经找到右栏题号，但内容消费的project_numbered仅在同一行有至少两个token时拆分，因此一个右栏token加无号续行的形态没有投影，校验误报缺题并使重编号无法消解。
 
-## 修改
+## 改了什么
 
 - source_anchors.project_numbered：没有行首题号时，保留右栏题号之前的原续行并单独投影真实列题号。没有列锚点或单个行首题号时原样保留。普通单ASCII空格Class 2.不作为列边界。只改变解析视图，不改正文、来源顺序、题号或媒体。
 - test_source_continuation_columns：真实版式字符串覆盖投影、逐子题图片/音标归属，以及infer_structure→结构闸门→draft→source_slice/source_blocks→payload消费链路；证明2/4可见且前题/后题文字不串。

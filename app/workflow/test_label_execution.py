@@ -123,38 +123,29 @@ class LabelExecutionTest(unittest.TestCase):
         self.assertEqual(calls, [['q-1', 'q-2'], ['q-2']])
         self.assertEqual(result['response']['status'], 'completed')
 
-    def test_parallel_timeout_does_not_discard_other_successes(self):
-        import threading
+    def test_overall_answer_timeout_can_resume_without_partial_install(self):
         source = '\n'.join(str(n) + '. Question? A. Yes B. No' for n in range(1, 10))
         self.put('01_source/正文.txt', source)
         self.put('01_source/附录.txt', '\n'.join(str(n) + '. B' for n in range(1, 10)))
         self.put('01_source/structure.confirmed.json', {'units': [
             {'unit_id': 'q-' + str(n), 'unit_kind': 'standalone', 'numbers': [n], 'type': '单项填空', 'stem': line}
             for n, line in enumerate(source.splitlines(), 1)]})
-        event = threading.Event()
         config = dict(self.config, part_concurrency=2)
-        def first(prompt, *a, **kw):
-            units = self.selected(prompt)
-            if units[0]['numbers'] == [1]:
-                self.assertTrue(event.wait(5))
-                raise local_agent.AgentError('timeout', 'timeout')
-            event.set()
-            return {'response': self.answers(units)}
+        def timeout(*args, **kwargs):
+            raise local_agent.AgentError('timeout', 'timeout')
         with self.assertRaises(local_agent.AgentError):
-            label_execution.run(self.batch, 'answers', config, self.batch / 'run', invoke=first)
+            label_execution.run(self.batch, 'answers', config, self.batch / 'run', invoke=timeout)
         calls = []
         def resume(prompt, *a, **kw):
-            units = self.selected(prompt); calls.extend(u['unit_id'] for u in units)
-            return {'response': self.answers(units)}
-        # All nine explicit answers are B; resume keeps the original source unchanged.
-        def valid_resume(prompt, *a, **kw):
-            result = resume(prompt, *a, **kw)
-            result['response']['artifacts'][agent_tasks.ARTIFACTS['answers']]['answers']['1'] = 'B'
-            return result
-        result = label_execution.run(self.batch, 'answers', config, self.batch / 'run2', invoke=valid_resume)
+            units = self.selected(prompt)
+            calls.extend(u['unit_id'] for u in units)
+            response = self.answers(units)
+            response['artifacts'][agent_tasks.ARTIFACTS['answers']]['answers'] = {
+                str(n): 'B' for u in units for n in u['numbers']}
+            return {'response': response}
+        result = label_execution.run(self.batch, 'answers', config, self.batch / 'run2', invoke=resume)
         self.assertEqual(result['response']['status'], 'completed')
-        self.assertNotIn('q-9', calls)
-        self.assertEqual(set(calls), {'q-' + str(n) for n in range(1, 9)})
+        self.assertEqual(set(calls), {'q-' + str(n) for n in range(1, 10)})
 
     def test_scoped_regeneration_consumes_real_feedback_and_preserves_other_unit(self):
         from workflow import self_heal
@@ -171,7 +162,7 @@ class LabelExecutionTest(unittest.TestCase):
         result = label_execution.run(self.batch, 'answers', self.config, self.batch / 'run', invoke=invoke)
         self.assertEqual(calls, ['q-1'])
         self.assertTrue(agent_tasks.accept_result(self.batch, 'answers', result['response'])['completed'])
-        saved = json.loads((self.batch / agent_tasks.ARTIFACTS['answers']).read_text())
+        saved = json.loads((self.batch / agent_tasks.ARTIFACTS['answers']).read_text(encoding='utf-8'))
         for field in ('answers', 'evidence', 'difficulty', 'difficultyEvidence'):
             self.assertEqual(saved[field]['2'], prior[field]['2'])
         self.assertEqual(saved['answers']['1'], 'A')
@@ -269,10 +260,10 @@ class LabelExecutionTest(unittest.TestCase):
             self.assertEqual(calls, [])
         self.assertEqual(failed['response']['status'], 'needs_review')
         self.assertEqual(resumed['response']['artifacts'], {})
-        progress = json.loads((self.batch / 'run2/repair-progress.json').read_text())
+        progress = json.loads((self.batch / 'run2/repair-progress.json').read_text(encoding='utf-8'))
         self.assertEqual(progress['validated_units'], ['q-2'])
         self.assertEqual(progress['calls'], [])
-        evidence = json.loads(Path(progress['deterministic_failures']['q-1']['evidence_path']).read_text())
+        evidence = json.loads(Path(progress['deterministic_failures']['q-1']['evidence_path']).read_text(encoding='utf-8'))
         self.assertEqual(evidence['payload']['items'][0]['explanation'], '第一题原解析。')
         self.assertEqual(len(evidence['original_response']['artifacts'][agent_tasks.ARTIFACTS['explanations']]['items']), 2)
         self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', evidence['validation_error'])
@@ -296,7 +287,7 @@ class LabelExecutionTest(unittest.TestCase):
             self.assertEqual(result['response']['status'], 'needs_review')
             self.assertEqual(result['response']['artifacts'], {})
         self.assertEqual(calls, [['q-1', 'q-2']])
-        progress = json.loads((self.batch / 'run-2/repair-progress.json').read_text())
+        progress = json.loads((self.batch / 'run-2/repair-progress.json').read_text(encoding='utf-8'))
         self.assertEqual(progress['validated_units'], ['q-2'])
         diagnostic = progress['deterministic_failures']['q-1']['diagnostics'][0]
         self.assertFalse(diagnostic['retryable'])

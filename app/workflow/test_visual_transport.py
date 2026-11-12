@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +25,20 @@ class VisualTransportTests(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], 1500)
         self.assertTrue(payload["prompt"].startswith("Stage: extract\nAgent: extract\n"))
         self.assertNotIn("shell", run.call_args.kwargs)
+
+    @patch("workflow.visual_transport.shutil.which", return_value="node")
+    @patch("workflow.visual_transport.subprocess.run")
+    def test_identify_pins_utf8_for_non_ascii_paths_and_prompt(self, run, _which):
+        run.return_value = self.run_result({"provider": "selected", "model": "precise", "text": '{"items":[]}'})
+        path = Path("课时") / "基础巩固.jpeg"
+        identify([{"id": "图片一", "path": str(path)}], "核对基础巩固图片")
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        # Model bridge reads stdin as UTF-8, independent of Windows locale.
+        received = json.loads(kwargs["input"].encode(kwargs["encoding"]).decode("utf-8"))
+        self.assertEqual(received["images"], [{"id": "图片一", "path": str(path.resolve())}])
+        self.assertIn("核对基础巩固图片", received["prompt"])
+        self.assertEqual(run.call_count, 1)
 
     @patch("workflow.visual_transport.shutil.which", return_value="node")
     @patch("workflow.visual_transport.subprocess.run")

@@ -63,6 +63,8 @@
 - 现场模拟（真实批次失败类别样式）：同一个 answers 预算 key 在三次不同 detail 下
   attempts 1→2→3，第 3 次 `retry_budget_exhausted`。
 
+
+以上验证结果均通过。
 ## 回退方式
 
 - 代码：`git revert` 本次提交；或把 `recover()` 的 signature 那行改回拼 `detail`，

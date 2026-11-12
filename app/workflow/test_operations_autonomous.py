@@ -204,18 +204,28 @@ class AutonomousOperationsTests(unittest.TestCase):
                 self.assertEqual(result['status'], 'queued')
                 self.assertFalse(result['verification']['verified'])
 
-    def test_discovery_unknown_write_prevents_consumed_stage_auto_resolution(self):
+    def test_discovery_unknown_write_never_replays_and_cannot_hide_unverified_stage(self):
         self.claim()
         state = op._load(self.folder)
         state['incident']['status'] = 'queued'
         state['receipts'] = [{'request_id': 'unknown', 'status': 'unknown'}]
         op._save(self.folder, state)
         self.put('workflow/manifest.json', {'inputs': {}, 'stages': {'validate': {'status': 'completed'}}})
-        with patch.object(op, '_verify', return_value={'verified': True}) as verify:
+        # An unverified stage keeps the incident open and the request quarantined.
+        with patch.object(op, '_verify', return_value={'verified': False}) as verify:
             result = op.view(self.root, self.folder)['incident']
-        verify.assert_not_called()
+        verify.assert_called_once()
         self.assertEqual(result['status'], 'queued')
         self.assertEqual(op._load(self.folder)['receipts'][0]['status'], 'unknown')
+        # Real consumer re-verification settles the incident; the unconfirmed
+        # request stays recorded as quarantined history and is never replayed.
+        with patch.object(op, '_verify', return_value={'verified': True}) as verify:
+            result = op.view(self.root, self.folder)['incident']
+        self.assertEqual(result['status'], 'resolved')
+        self.assertEqual(result['quarantined_receipts'], ['unknown'])
+        state = op._load(self.folder)
+        self.assertEqual(state['receipts'][0]['status'], 'unknown')
+        self.assertFalse(op.pending_incident(self.folder))
 
     def test_same_workspace_and_test_strategy_cannot_repeat(self):
         from workflow import operations_development as dev

@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""装配产物的格式预检：导入前先跑体检脚本，避免到 validate 才发现写法问题。
+"""装配最小结构验收：只查结构与选项完整性，不启动纯格式检查。
 
-只读、离线：把候选批次写到临时文件，依次运行文本/空档/表格/结构/题型版面
-五项确定性检查。返回的问题会直接给回执行者（含一次带反馈的重试），
-不修改候选、也不代表审核或放行。
+空档、画线、表格写法和重复显示留到最终 format_gate；这些问题不得触发模型重试。
+只读、离线，不代表审核或上传放行。
 """
 from __future__ import annotations
 
@@ -15,9 +14,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = (
-    "check_text.py",
-    "audit_underlines.py",
-    "check_tables.py",
     "check_structure.py",
     "audit_type_layout.py",
 )
@@ -34,6 +30,8 @@ def precheck(payload: dict, timeout: int = 120, batch_dir: str | Path | None = N
         for name in SCRIPTS:
             script = ROOT / "scripts" / "06-upload" / name
             command = [sys.executable, str(script), "--batch", str(path)]
+            if name == "audit_type_layout.py":
+                command.append("--content-only")
             if name == "check_structure.py" and batch_dir is not None:
                 command.extend(["--source-batch-dir", str(Path(batch_dir).resolve())])
             try:

@@ -587,21 +587,30 @@ def _discover(folder):
             return state
         # The original pipeline may have completed while an old incident was
         # queued or parked. Reconcile consumers before spending another model
-        # round; status alone, historical findings and unknown writes are not proof.
-        if (incident.get("status") in {"queued", "waiting_evidence", "needs_human",
-                                       "needs_deep_repair", "awaiting_execution"}
-                and not any(row.get("status") == "unknown" for row in state["receipts"])):
+        # round; status alone and historical findings are not proof. A request
+        # whose result was never confirmed stays recorded and is never replayed,
+        # but it must not keep a genuinely re-verified stage open forever: the
+        # current consumer evidence is the truth for this stage, and the stale
+        # request is carried on the incident as quarantined history.
+        if incident.get("status") in {"queued", "waiting_evidence", "needs_human",
+                                      "needs_deep_repair", "awaiting_execution"}:
             stage_record = (mf.load(folder).get("stages", {}).get(incident.get("stage")) or {})
             if stage_record.get("status") in {mf.COMPLETED, mf.APPROVED}:
                 checked = _verify(folder, incident)
                 incident["verification"] = checked
                 if checked["verified"]:
+                    quarantined = [row.get("request_id") for row in state["receipts"]
+                                   if row.get("status") == "unknown" and row.get("request_id")]
                     prior = incident["status"]
                     incident.update(status="resolved", eligible=False, attempt_id=None,
                                     lease_expires_at=0, not_before=0, prior_disposition=prior)
+                    if quarantined:
+                        incident["quarantined_receipts"] = quarantined
                     _settle_code_repair(folder, incident, "resolved")
-                    _event(incident, "reconcile", "resolved",
-                           "原阶段已由当前消费者复验通过；保留历史发现，不再调查旧卡点", checked)
+                    detail = "原阶段已由当前消费者复验通过；保留历史发现，不再调查旧卡点"
+                    if quarantined:
+                        detail += ("；历史未确认请求保持隔离、不重放：" + "、".join(quarantined[:3]))
+                    _event(incident, "reconcile", "resolved", detail, checked)
                     return state
         if incident.get("status") == "needs_human":
             _queue_recovery(folder, incident, "needs_human", "迁移历史人工终态，自动升级隔离修复")

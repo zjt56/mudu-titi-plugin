@@ -59,7 +59,7 @@ def _call(payload: dict, timeout: float) -> dict:
     env["WF_VISION_TIMEOUT_MS"] = str(max(1, int(timeout * 1000)))
     try:
         completed = subprocess.run([node, str(bridge)], input=json.dumps(payload, ensure_ascii=False),
-                                   text=True, capture_output=True, timeout=timeout + 5, env=env)
+                                   text=True, encoding="utf-8", capture_output=True, timeout=timeout + 5, env=env)
     except subprocess.TimeoutExpired as exc:
         raise VisualTransportError("VISION_TIMEOUT: selected model call timed out; no fallback attempted") from exc
     except OSError as exc:

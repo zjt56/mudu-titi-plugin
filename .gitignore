@@ -6,6 +6,9 @@ backend/.local-agent.effective.json.tmp-*
 /workflows/
 /inbox/
 /.workbench-trash/
+# 原生内容子智能体队列/取证快照（含试卷原文，不入库）
+/.content-agent/
+/.content-agent-*-tests*.log
 
 # Python
 __pycache__/

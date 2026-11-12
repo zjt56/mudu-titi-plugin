@@ -6,7 +6,7 @@
 
 用户提供 `http://101.43.1.57/docs/`，要求阅读新增题号规范并设计修改内容。实际读取文档中心和纯文本：要求 items 保持原卷单元序；独立题显式同值 numberStart/numberEnd；题组显式连续范围并保留子题印刷号；无号单元显式 null/null；location/paperOrder 不能替代结构化题号。
 
-## 本次产出
+## 改了什么
 
 - 新增 `app/docs/question-number-upload-design.md`，记录规范、代码证据、三态编号投影、来源唯一回接、连续性/冲突检查、scoped 重号兼容、冻结摘要及验收矩阵。
 - 确认当前 upload_payload 把范围字段列为 LOCAL_FIELDS 并剥离；以合成输入复现“显式范围丢失但passed=true”。

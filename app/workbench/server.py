@@ -91,6 +91,12 @@ def serialized(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
         global _batches_snapshot, _batches_epoch
+        # Broker receipts own their process lock. In particular a native purge
+        # acknowledgement must reach the server while explicit batch deletion
+        # waits, and image observation must not hold the global write lock.
+        if (function.__name__ == "do_POST" and args
+                and urlparse(getattr(args[0], "path", "")).path.startswith("/api/content-agent/")):
+            return function(*args, **kwargs)
         with _lock:
             try:
                 return function(*args, **kwargs)
@@ -279,46 +285,105 @@ def structured_rows(table, flat_rows):
     return structured
 
 
-def source_blocks(lines, tables=None):
+def source_blocks(lines, tables=None, *, extraction=None):
+    # Keep the original table-number mapping API and the newer full extraction
+    # positional API. Native evidence must retain its full-text/reference checks.
+    if extraction is None and isinstance(tables, dict) and any(
+            key in tables for key in ("tables", "source_objects", "blocks", "source_sha256")):
+        extraction, tables = tables, None
+    tables = tables if isinstance(tables, dict) else {}
+
+    def cell_content(text):
+        names = [Path(m.group(1).strip()).name
+                 for m in re.finditer(r"\[IMG\s+([^\]]+)\]", text)]
+        return re.sub(r"\[IMG\s+[^\]]+\]", "", text).strip(), names
+
+    def native_block(marker):
+        if not isinstance(extraction, dict):
+            return None
+        from workflow.source_objects import resolve_table
+        try:
+            native, _ = resolve_table(extraction, marker)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if native is None:
+            return None
+        rows, images, spans = [], [], []
+        try:
+            for row in native.get("rows") or []:
+                cells, cell_images, cell_spans = [], [], []
+                before, after = row.get("grid_before", 0), row.get("grid_after", 0)
+                if any(type(n) is not int or not 0 <= n <= 1000 for n in (before, after)):
+                    return None
+                def append_cell(text, rowspan=1, colspan=1):
+                    cleaned, names = cell_content(text)
+                    cells.append(cleaned)
+                    cell_images.append(names)
+                    cell_spans.append({"rowspan": rowspan, "colspan": colspan})
+                for _ in range(before):
+                    append_cell("")
+                for cell in row.get("cells") or []:
+                    if cell.get("merge_origin") is not None:
+                        continue
+                    rs, cs = cell.get("rowspan", 1), cell.get("colspan", 1)
+                    if any(type(n) is not int or not 1 <= n <= 1000 for n in (rs, cs)):
+                        return None
+                    append_cell(str(cell.get("text") or ""), rs, cs)
+                for _ in range(after):
+                    append_cell("")
+                rows.append(cells)
+                images.append(cell_images)
+                spans.append(cell_spans)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return {"type": "table", "rows": rows, "cellImages": images, "cellSpans": spans}
+
     blocks = []
     table = None
     table_images = []
+    table_lines = []
+    table_depth = 0
     table_number = None
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("[TABLE"):
+        # Count inline markers too: nested Word tables are serialized inside a
+        # cell with <br>, and an inner closing marker cannot close its parent.
+        openings = len(re.findall(r"\[TABLE(?:\s[^\]]*)?\]", line))
+        closings = len(re.findall(r"\[/TABLE\]", line))
+        if table is None and stripped.startswith("[TABLE"):
             table = []
             table_images = []
             match = re.match(r"\[TABLE(?:\s+(\d+))?\]", stripped)
             table_number = match.group(1) if match else None
+            table_lines = [line]
+            table_depth = openings - closings
             continue
-        if stripped.startswith("[/TABLE]"):
-            if table is not None:
-                # table_images 与 rows 同形：table_images[行][列] = 该单元格的图片名列表。
-                block = {"type": "table", "rows": table, "cellImages": table_images}
-                structured = structured_rows((tables or {}).get(str(table_number)), table)
-                if structured is not None:
-                    block["structured"] = structured
+        if table is not None:
+            table_lines.append(line)
+            table_depth += openings - closings
+            if table_depth <= 0:
+                # Bind complete text, never a table number alone: a stale table
+                # must not lend its spans or cell boundaries to another source.
+                block = native_block("\n".join(table_lines))
+                if block is None:
+                    block = {"type": "table", "rows": table, "cellImages": table_images}
+                    # Explicit legacy mappings have no native reference contract.
+                    # Never use them to bypass rejected extraction evidence.
+                    if extraction is None:
+                        structured = structured_rows(tables.get(str(table_number)), table)
+                        if structured is not None:
+                            block["structured"] = structured
                 blocks.append(block)
                 table = None
                 table_images = []
+                table_lines = []
                 table_number = None
-            continue
-        if table is not None:
-            # 表格单元格里也可能嵌图片（如 `[IMG image10.jpeg]<br>Weather`）。
-            # 图片必须留在它原本所在的单元格内，与同一单元格的文字一起渲染。
-            # 因此按单元格切分后，逐单元格收集其图片名。
-            cell_images = []
-            cells = []
-            for raw_cell in line.split("|"):
-                names = [Path(m.group(1).strip()).name
-                         for m in re.finditer(r"\[IMG\s+([^\]]+)\]", raw_cell)]
-                cleaned = re.sub(r"\[IMG\s+[^\]]+\]", "", raw_cell).strip()
-                cells.append(cleaned)
-                cell_images.append(names)
-            if any(cells) or any(cell_images):
-                table.append(cells)
-                table_images.append(cell_images)
+                continue
+            # Legacy text has no merge evidence. Preserve all rows (including
+            # blank single-cell rows), and keep each image with its own text.
+            values = [cell_content(raw_cell) for raw_cell in line.split("|")]
+            table.append([text for text, _ in values])
+            table_images.append([names for _, names in values])
             continue
         cursor = 0
         for match in re.finditer(r"\[IMG\s+([^\]]+)\]", line):
@@ -1738,7 +1803,11 @@ def purge_batch(name: str, confirm_name: str) -> dict:
                     for stage in stages.values())):
                 raise ValueError("批次正在运行，请等待任务结束后再删除")
         audio_targets = _purge_audio_targets(name)
-        # Preflight every target before the first irreversible removal.
+        # Preflight every target before the first irreversible removal. The
+        # native host must erase its bound persisted sessions before these
+        # directories disappear; its acknowledgement bypasses this write lock.
+        from workflow import content_agent
+        content_agent.purge_batch(folder)
         removed = []
         unique = set(targets)
         for target in sorted(unique, key=lambda path: len(path.parts)):
@@ -3267,7 +3336,11 @@ def detail(name, unit_id):
         chunk = slice_text(lines, numbers[0])
     else:
         chunk = []
-    blocks = attach_media(source_blocks(chunk, table_structure(folder)), folder, name)
+    try:
+        extraction = load(folder / "01_source" / "extraction.json", {})
+    except (UnicodeError, ValueError, TypeError):
+        extraction = {}
+    blocks = attach_media(source_blocks(chunk, extraction=extraction), folder, name)
     audio_units = [row.get("unit_id") or unit_id]
     if row.get("source_parent_id"):
         audio_units.append(row["source_parent_id"])
@@ -3409,6 +3482,9 @@ class Handler(BaseHTTPRequestHandler):
                                        "busy": work_in_flight(),
                                        "workflow_runtime_version": wf_execution_state.RUNTIME_VERSION if wf_execution_state else None,
                                        "self_heal_supervisor": _workflow_supervisor.health() if _workflow_supervisor else {"running": False}})
+            if decoded_path.startswith("/api/content-agent/"):
+                from workflow import content_agent
+                return self.send_json(content_agent.dispatch("GET", decoded_path, {}))
             if decoded_path == "/api/audio/config":
                 return self.send_json(audio_overview())
             if decoded_path == "/api/audio/status":
@@ -3505,6 +3581,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("请求内容必须是对象")
+            if parts[:2] == ["api", "content-agent"]:
+                from workflow import content_agent
+                return self.send_json(content_agent.dispatch("POST", unquote(parsed.path), payload))
             if parts == ["api", "operations", "service"]:
                 from workflow import operations
                 return self.send_json(operations.service_heartbeat(payload.get('available')))

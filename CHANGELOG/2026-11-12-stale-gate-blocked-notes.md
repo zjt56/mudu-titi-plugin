@@ -1,6 +1,6 @@
 # 结构/体检闸门：阻断态必须写明具体检查；陈旧 blocked 态可提示重跑收敛
 
-## 背景/触发
+## 背景（触发）
 
 用户报批次 `04七上人教版课时A计划StarterUnit1Hello!第四课时Projec` 结构自动确认「阶段被阻断：3 条未解决」。实际排查：`07_review/structure-gate.json` 早已 `passed=true`、`blockers=[]`（12 单元），manifest 却是旧的 `blocked`；直接重跑 `structure_gate` 即 `completed`。用户要求修复此类问题，避免下次继续出现。
 

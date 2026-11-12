@@ -36,3 +36,46 @@ test('无题号的空白下划线保留为普通填空线', () => {
   const ctx = harness();
   assert.match(ctx.markLine('a <u> </u> b'), /<u> <\/u>/);
 });
+
+function renderTable(block) {
+  const from = client.indexOf('      function renderBlocks(blocks) {');
+  const to = client.indexOf('      // 预览小字标签', from);
+  const ctx = vm.createContext({
+    h: (type, props, ...children) => ({ type, props, children }),
+    optionLabel: () => null, isHeaderRow: () => false,
+    markLine: (text) => text, PreviewImage: 'image',
+  });
+  vm.runInContext(client.slice(from, to), ctx);
+  return ctx.renderBlocks([block]);
+}
+
+function tableCells(nodes) {
+  const result = [];
+  function walk(value) {
+    if (Array.isArray(value)) return value.forEach(walk);
+    if (!value || typeof value !== 'object') return;
+    if (value.type === 'td' || value.type === 'th') result.push(value);
+    walk(value.children);
+  }
+  walk(nodes);
+  return result;
+}
+
+test('完整来源对象的 cellSpans 与单元格图片共同渲染', () => {
+  const cells = tableCells(renderTable({ type: 'table', rows: [['原文']],
+    cellSpans: [[{ rowspan: 2, colspan: 3 }]],
+    cellImages: [[[{ name: 'a.png', url: '/a.png' }]]] }));
+  assert.equal(cells.length, 1);
+  assert.equal(cells[0].props.rowSpan, 2);
+  assert.equal(cells[0].props.colSpan, 3);
+  assert.equal(cells[0].props.className, 'wf-table-imgcell');
+});
+
+test('旧 structured 表格保留合并跨度与显式表头', () => {
+  const cells = tableCells(renderTable({ type: 'table', rows: [['平面副本']],
+    structured: [{ cells: [{ text: '原文', rowspan: 3, colspan: 2, header: true }] }] }));
+  assert.equal(cells.length, 1);
+  assert.equal(cells[0].type, 'th');
+  assert.equal(cells[0].props.rowSpan, 3);
+  assert.equal(cells[0].props.colSpan, 2);
+});

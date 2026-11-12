@@ -4,7 +4,7 @@
 
 用户要求直接落地 Word 原生内容提取配合视觉理解，兼顾速度、质量、准确性，并解决答案与题目匹配。真实课时正文的 A基础巩固/B能力提升是图片；答案区有同名文字，不能误以为正文已有可匹配文字。
 
-## 实现
+## 改了什么
 
 - 新 `workflow/lesson_bands.py`：原生独立图片候选一次最多8图，由用户已选 Harness 模型判断真实图片内容；宽高比和文件名不作为分类真相。`01_source/lesson-bands.json` 保存原件/正文/全部候选媒体摘要、图片可见字、模型与源行边界。附录不能反推正文缺失板块。证据不改写正文或原题号。
 - 标题边界通过 `structure_ai` 提示及缓存、`structure_gate` 窗口、`question_identity.source_section.lesson_band`、`question_draft` 独立复建贯通。单元有效 ID 不因增加板块前缀而改写。图片横幅不并入前题材料；Pronunciation 等真实专题结束前一个板块。

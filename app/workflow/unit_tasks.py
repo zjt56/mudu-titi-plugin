@@ -132,7 +132,9 @@ def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=Non
                      "不得改答案、题型、知识点或用完成状态/直抄声明跳过同一来源检查。\n")
         if stage == "answers":
             extra = ("答案产物仍使用 answers/evidence/missing 等题号映射，不能输出 items；"
-                     "映射键使用所选单元的 question_ids[str(原小题号)]（旧批次无映射才用数字原号），原小题号不能改；只返回所选单元内的身份键，缺失须给来源证据，题组内全部子题必须覆盖。\n")
+                     "映射键使用所选单元的 question_ids[str(原小题号)]（旧批次无映射才用数字原号），原小题号不能改；只返回所选单元内的身份键，缺失须给来源证据，题组内全部子题必须覆盖。"
+                     "先整体阅读本批次正文与答案材料，再一次性完成所选单元的匹配；不要按单题猜测或跨大题借用重复题号。"
+                     "每条 evidence 必须包含可机器解析的来源坐标：相对文件路径:行号（如 01_source/附录.txt:3）或唯一别名+行号（如 附录 L3/附录 第3行）；自然语言描述只能补充，不能替代坐标。\n")
         if stage == "assemble":
             for key in _ASSEMBLE_DROP:
                 subset.pop(key, None)

@@ -50,6 +50,8 @@ AI 运维等待，于是每录一个课时停一次。
   与本改动无关，基线同样 2）。
 - 卡点台账：`ISSUES/fixed/2026-11-11-同步练习课时跨大题重号被判来源单元题号重复…md`。
 
+
+以上验证结果均通过。
 ## 5. 回退方式
 
 `git checkout app/workflow/legacy_format.py app/workflow/self_heal_actions.py` 即可；

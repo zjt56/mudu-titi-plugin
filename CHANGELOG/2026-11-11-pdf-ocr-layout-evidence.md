@@ -1,6 +1,6 @@
 # PDF OCR 版面证据保留、课时 Markdown 识别与失败候选诊断
 
-## 触发与核查
+## 背景（触发与核查）
 
 用户要求修复批次 `05八上人教版课时A计划Unit1HappyHoliday第五课时Section` 的 PDF-OCR 版面信息丢失及结构卡点，随后明确纠正：识别自身错序不能用针对单页的手工调行或自创重排补丁消化，应先核查官方识别参数。
 
@@ -8,7 +8,7 @@
 
 原模型产出12个结构单元，但 Markdown 标题未触发同步课时识别，跨大题重号受到全局拒绝；选择题第3题又因模型重排 stem 不能匹配连续来源片段而拒绝。原报告把这些合并为空列表，定位信息不足。
 
-## 修改
+## 改了什么
 
 - `paddle_jobs.py`：保存原始服务块与字段、保留服务列表次序，添加 type/text/bbox/order 别名；条件性报告坐标缺失/部分/非法。`normalize_jsonl` 支持已有原响应本地再处理。独立 `raw-result.jsonl` 递归脱敏凭据、令牌、远端URL；下载仍使用内存中的真实资产引用。
 - `extract.py`：OCR版面块进入提取证据，原生PDF块另留 native_blocks，OCR坐标尺度不冒充PDF points。来源策略页统计从真实 extraction.json 读取，修正之前 pdf_unknown/0页的错误展示。

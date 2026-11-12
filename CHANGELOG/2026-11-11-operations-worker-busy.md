@@ -1,6 +1,6 @@
 # AI 运维执行锁竞争的准入等待
 
-## 背景/触发
+## 背景（触发）
 
 用户反馈 AI 运维接手时出现 `worker_busy: 批次执行锁已占用; name=Error`。现场批次为「【木牍教育】12年安徽中考英语」，目录 `C:\Users\Administrator\.dsh\wf-plugin-data\workflows\【木牍教育】12年安徽中考英语`，事件 `9eb1f62f9c3c45d1b36c93ad3fe7e961`。11:19 的只读证据读取后，释放因锁竞争被错误显示为 `release_unknown`。
 

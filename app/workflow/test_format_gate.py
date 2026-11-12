@@ -460,6 +460,38 @@ class FormatGateTest(unittest.TestCase):
         self.assertIn("FINAL_BATCH_CHANGED", self.codes(result))
         self.assertFalse(result["passed"])
 
+    def test_final_format_profile_runs_at_upload_boundary_as_warnings(self):
+        self.put()
+        observed = {}
+
+        def fake_run(*args, **kwargs):
+            observed["args"] = args
+            observed["kwargs"] = kwargs
+            return {"passed": False, "checks": [{
+                "check": "排版 check_text", "script": "scripts/06-upload/check_text.py",
+                "passed": False, "error": "格式提示", "warnings": []}],
+                    "blocking_failures": ["排版 check_text"], "warnings": ["排版 check_text"],
+                    "skipped": []}
+
+        with patch.object(format_gate.checks, "run_all", side_effect=fake_run):
+            result = format_gate.run(self.root)
+        self.assertTrue(result["passed"], result["errors"])
+        self.assertEqual(observed["kwargs"].get("profile"), "format")
+        self.assertTrue(any(row.get("code") == "FINAL_FORMAT_CHECK_FAILED"
+                            for row in result["warnings"]))
+        self.assertFalse(any(row.get("code") == "FINAL_FORMAT_CHECK_FAILED"
+                             for row in result["errors"]))
+        self.assertIn("format_checks", result)
+
+    def test_final_format_profile_execution_failure_is_explicit_warning(self):
+        self.put()
+        with patch.object(format_gate.checks, "run_all",
+                          side_effect=RuntimeError("checker unavailable")):
+            result = format_gate.run(self.root)
+        self.assertTrue(result["passed"], result["errors"])
+        self.assertTrue(any(row.get("code") == "FINAL_FORMAT_CHECK_EXECUTION_FAILED"
+                            for row in result["warnings"]))
+
     def test_cli_exit_codes_and_source_change_sha(self):
         self.put()
         original = format_gate.run(self.root)["final_sha256"]

@@ -13,6 +13,7 @@ Invalid/unsafe packages raise ValueError (ordinary file I/O errors propagate).
 """
 from __future__ import annotations
 
+import hashlib
 import posixpath
 import re
 import zipfile
@@ -379,8 +380,10 @@ def extract_docx(source: Path, output_dir: Path) -> dict:
                     elif child.tag == _w("altChunk"):
                         extractor.warn("Embedded alternate document content was not extracted")
             append_content(body)
-            return {"text": "\n".join(block["text"] for block in blocks),
-                    "blocks": blocks, "tables": extractor.tables, "media": extractor.media,
-                    "warnings": extractor.warnings, "method": "docx-native"}
+            from .source_objects import attach
+            result = {"text": "\n".join(block["text"] for block in blocks),
+                      "blocks": blocks, "tables": extractor.tables, "media": extractor.media,
+                      "warnings": extractor.warnings, "method": "docx-native"}
+            return attach(result, hashlib.sha256(source.read_bytes()).hexdigest())
     except zipfile.BadZipFile as exc:
         raise ValueError("Invalid DOCX ZIP archive") from exc

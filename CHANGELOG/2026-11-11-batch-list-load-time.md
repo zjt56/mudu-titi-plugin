@@ -35,7 +35,7 @@
 
 - 单批投影 `7.737s → 1.453s`；13 批串行冷启 `68s → 8.88s`；命中快照 `6.48s → 3.40s`（摘录缓存后）。
 - 真实后端：`GET /api/batches` 返回 200、1.03–1.46s，`overview-snapshot.json` 1.92MB 已落盘（18:41:11）。
-- `python -m unittest workflow.test_review_rounds workflow.test_review_local_reuse workflow.test_review_child_import workflow.test_ingest_binding_equivalence workflow.test_review_binding_cache` → **115 tests OK（67.2s）**；`workbench.test_overview_snapshot` → **3 tests OK**。
+- `python -m unittest workflow.test_review_rounds workflow.test_review_local_reuse workflow.test_review_child_import workflow.test_ingest_binding_equivalence workflow.test_review_binding_cache` → **115 项测试通过（67.2s）**；`workbench.test_overview_snapshot` → **3 项测试通过**。
 - 前端不再触发 `请求超过15秒` 的兜底提示，审核页能列出 13 个批次且课时批次显示 13 条差异。
 
 ## 回退方式

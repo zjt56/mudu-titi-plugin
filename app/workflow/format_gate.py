@@ -14,7 +14,7 @@ from pathlib import Path
 import tempfile
 from urllib.parse import urlsplit
 
-from . import metadata_policy, upload_payload, wire_format, phonetic_structure, shared_rubric, upload_numbering
+from . import checks, metadata_policy, upload_payload, wire_format, phonetic_structure, shared_rubric, upload_numbering
 from .label_audit import RULE_FILES as LABEL_RULE_FILES
 
 RULE_VERSION = "final-upload-format-v1"
@@ -24,7 +24,9 @@ RULE_FILES = (Path(__file__), Path(upload_payload.__file__),
               Path(upload_payload.label_audit.__file__),
               Path(upload_payload.taxonomy.__file__), Path(wire_format.__file__),
               Path(metadata_policy.__file__), Path(phonetic_structure.__file__),
-              Path(shared_rubric.__file__), Path(upload_numbering.__file__), *LABEL_RULE_FILES)
+              Path(shared_rubric.__file__), Path(upload_numbering.__file__),
+              Path(__file__).with_name("source_objects.py"),
+              Path(__file__).with_name("question_draft.py"), *LABEL_RULE_FILES)
 DEFERRED_CODES = frozenset({"CATALOG_REQUIRED", "TEXTBOOK_CATALOG_UNSUPPORTED",
                             "TEXTBOOK_KNOWLEDGE_INVALID"})
 
@@ -245,7 +247,9 @@ def _defer_local_urls(owners, errors):
 
 
 def _write_report(path, report):
-    raw = (json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2,
+    # Escape non-ASCII so reports and CLI output remain portable across Windows
+    # code pages; JSON consumers recover the original Unicode text.
+    raw = (json.dumps(report, ensure_ascii=True, sort_keys=True, indent=2,
                       allow_nan=False) + "\n").encode("utf-8")
     path = _safe(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,6 +268,56 @@ def _write_report(path, report):
             os.unlink(temporary)
 
 
+def _run_final_format_checks(root, final, report, inputs):
+    """Run the format-only checks at the final upload boundary.
+
+    These checks are observational: their output is retained as structured
+    warnings and never changes the content/identity result from build_payload.
+    A runner failure is reported explicitly so a missing check is not mistaken
+    for a clean format result.
+    """
+    try:
+        result = checks.run_all(Path(__file__).resolve().parents[1], final, inputs,
+                                profile="format")
+    except Exception as exc:  # a diagnostic must not hide payload validation
+        result = {"passed": False, "checks": [], "blocking_failures": [],
+                  "warnings": [], "error": f"格式检查执行失败：{exc}"}
+    # Do not persist raw subprocess output: it may contain undecodable bytes
+    # represented as U+FFFD on Windows and is not needed for the final report.
+    report["format_checks"] = {
+        "passed": bool(result.get("passed")),
+        "blocking_failures": list(result.get("blocking_failures") or []),
+        "warnings": list(result.get("warnings") or []),
+        "skipped": list(result.get("skipped") or []),
+        "error": result.get("error"),
+        "checks": [{key: check.get(key) for key in
+                    ("check", "script", "blocking", "passed", "error", "warnings", "note")
+                    if key in check}
+                   for check in (result.get("checks") or []) if isinstance(check, dict)],
+    }
+    if result.get("error"):
+        report["warnings"].append({"code": "FINAL_FORMAT_CHECK_EXECUTION_FAILED",
+                                   "message": result["error"]})
+    for check in result.get("checks") or []:
+        if not check.get("passed", False):
+            report["warnings"].append({
+                "code": "FINAL_FORMAT_CHECK_FAILED",
+                "check": check.get("check"),
+                "script": check.get("script"),
+                "message": check.get("error") or "格式检查未通过",
+            })
+        for warning in check.get("warnings") or []:
+            report["warnings"].append({"code": "FINAL_FORMAT_CHECK_WARNING",
+                                       "check": check.get("check"),
+                                       "message": warning})
+    for name in result.get("warnings") or []:
+        if not any(row.get("check") == name for row in report["warnings"]
+                   if isinstance(row, dict)):
+            report["warnings"].append({"code": "FINAL_FORMAT_CHECK_WARNING",
+                                       "check": name, "message": name})
+    return result
+
+
 def run(batch_dir) -> dict:
     report = {"passed": False, "status": "failed", "scope": "local_upload_format",
               "rule": RULE_VERSION, "rule_sha256": {p.name: _sha(p.read_bytes()) for p in RULE_FILES},
@@ -279,6 +333,18 @@ def run(batch_dir) -> dict:
         batch = _load(raw)
         report["errors"].extend(_shape(batch))
         options = _options(root, batch, report)
+        # Format-only checks are intentionally late-bound here.  They inspect
+        # the final batch and contribute diagnostics only; payload/content
+        # errors below retain their existing blocking semantics.
+        inputs = {}
+        manifest_path = _safe(root / "workflow/manifest.json")
+        if manifest_path.is_file():
+            manifest_raw = manifest_path.read_bytes()
+            manifest = _load(manifest_raw)
+            report["input_sha256"]["workflow/manifest.json"] = _sha(manifest_raw)
+            if isinstance(manifest, dict) and isinstance(manifest.get("inputs"), dict):
+                inputs = manifest["inputs"]
+        _run_final_format_checks(root, final, report, inputs)
         report["dry_run_options"] = options
         owners, local_files = _local_attachments(root, batch, report)
         # This is the real, read-only mapping API. No client/prepare imports.
@@ -295,7 +361,8 @@ def run(batch_dir) -> dict:
                 report["deferred"].append({**issue, "checked_by": "prepare-upload"})
             else:
                 report["errors"].append(issue)
-        report["warnings"] = built["warnings"]
+        format_warnings = report.get("warnings", [])
+        report["warnings"] = format_warnings + built["warnings"]
         report["summary"] = built["summary"]
         report["deferred"].append({"code": "REMOTE_MEDIA_AND_FREEZE_VERIFICATION",
             "message": "远端媒体部署、可达性和冻结一致性仍由真实 prepare-upload/verify 检查；本报告不证明线上就绪。",
@@ -336,7 +403,7 @@ def main(argv=None) -> int:
     parser.add_argument("--batch-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     report = run(args.batch_dir)
-    print(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
+    print(json.dumps(report, ensure_ascii=True, indent=2, allow_nan=False))
     return 0 if report["passed"] else 1
 
 

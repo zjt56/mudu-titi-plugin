@@ -234,6 +234,16 @@ def _validate_config(data, base):
     if model is not None:
         if provider != "codex" or not isinstance(model, str) or not model.strip():
             raise AgentError("model must be a nonempty string and is supported only for codex", "config")
+    native = config.get("native_agent", {})
+    if not isinstance(native, dict) or not isinstance(native.get("enabled", False), bool):
+        raise AgentError("native_agent must be an object with boolean enabled", "config")
+    if native.get("mode", "strict") not in ("auto", "strict"):
+        raise AgentError("native_agent.mode must be auto or strict", "config")
+    stages = native.get("stages", ["knowledge"])
+    supported_native = {"knowledge", "answers", "explanations", "types", "preassemble", "structure_gate"}
+    if (not isinstance(stages, list) or len(stages) != len(set(map(str, stages)))
+            or any(not isinstance(stage, str) or stage not in supported_native for stage in stages)):
+        raise AgentError("native_agent.stages contains unsupported or duplicate stages", "config")
     return config
 
 
@@ -507,6 +517,32 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False, co
     if len(prompt) > settings["max_input_chars"]:
         raise AgentError("Prompt exceeds max_input_chars", "input_limit")
     root = Path(run_dir).expanduser().resolve()
+    header = prompt.split("BEGIN SUPPLIED CONTENT", 1)[0]
+    stage_match = re.search(r"(?m)^Stage:\s*([A-Za-z0-9_-]+)\s*$", header)
+    stage = stage_match.group(1) if stage_match else None
+    native = settings.get("native_agent", {})
+    if native.get("enabled") and stage in native.get("stages", ["knowledge"]):
+        from . import content_agent
+        # Auto is an explicit transport policy: standalone CLI keeps its existing
+        # provider when no native host advertises service. A selected native task
+        # never falls back after claim, route failure, timeout or validation failure.
+        if native.get("mode", "strict") == "strict" or content_agent.available():
+            batch = settings.get("_content_batch_dir")
+            if not batch:
+                batch = next((parent.parent for parent in root.parents
+                              if parent.name == "workflow"), None)
+            if batch is None:
+                raise AgentError("Native content agent requires an explicit batch directory", "integration")
+            from . import visual_transport, agent_tasks
+            native_settings = dict(settings, _content_batch_dir=str(batch))
+            if "_content_input_hashes" not in native_settings:
+                native_settings["_content_input_hashes"] = agent_tasks.build_task(
+                    Path(batch), stage, max_input_chars=sys.maxsize)["input_hashes"]
+            try:
+                native_settings["_content_route_identity"] = visual_transport.route_identity(stage)
+            except visual_transport.VisualTransportError as exc:
+                raise AgentError(str(exc), "config") from exc
+            return content_agent.invoke(prompt, root, native_settings, permit_parallel=permit_parallel)
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -931,6 +967,7 @@ def main(argv=None):
         from workflow import agent_tasks
         config = dict(config, _part_model_binding=_part_model_binding(config))
         batch_dir = args.batch_dir.expanduser().resolve()
+        config["_content_batch_dir"] = str(batch_dir)
         assembling = args.stage == "preassemble"
         accept_stage = args.stage
         if assembling:

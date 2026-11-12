@@ -1,10 +1,10 @@
 # 2026-11-12 原件仅选项语音组题的消费闭环
 
-## 触发
+## 背景（触发）
 
 真实隔离「八上01」辨音组题有5个子题，每题只有A–D选项，无独立子题干；draft已保留完整大题标题stem、原始选项与身份，material为空。既有 `phonetic_structure.shape` 仅认可非空子stem，导致payload误报GROUP_INCOMPLETE/MISSING_STEM。
 
-## 改动
+## 改了什么
 
 仅修改 `app/workflow/phonetic_structure.py` 的shape边界，并补 `test_phonetic_structure.py`：
 

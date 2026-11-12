@@ -28,6 +28,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -279,6 +280,10 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
     attempts = batch_dir / "workflow" / "agent-runs"
     attempts.mkdir(parents=True, exist_ok=True)
     prepared, outcomes, deterministic = {}, {}, set()
+    # Windows byte-range locks are process-owned and do not exclude sibling
+    # threads. Keep bookkeeping serialized locally as well as across processes;
+    # release both locks before any model call so independent workers overlap.
+    bookkeeping_lock = threading.RLock()
     for stage in stages:
         try:
             preflight = stage_preflight.run(batch_dir, stage.id)
@@ -320,11 +325,12 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
         stage_id, (_, task, run_dir) = item
         # Persist actual worker activity so the UI need not pretend every ready
         # stage is already running (idle/queued/cooldown must remain distinct).
-        with agent_protocol._agent_lock(5):
+        with bookkeeping_lock, agent_protocol._agent_lock(5):
             current = mf.load(batch_dir)
             mf.touch_stage(current, stage_id, mf.RUNNING, notes="")
             mf.save(batch_dir, current)
-        invoke_config = dict(config)
+        invoke_config = dict(config, _content_batch_dir=str(batch_dir),
+                             _content_input_hashes=task.get("input_hashes", {}))
         if stage_id in {"explanations", "knowledge"}:
             invoke_config["max_input_chars"] = max(int(invoke_config.get("max_input_chars", 180000)), 600000)
         if stage_id in {"answers", "explanations"}:
@@ -346,7 +352,7 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
                 for retry in range(1 if stage.id in {"answers", "explanations"} else int(config.get("retries", 0)) + 1):
                     envelope = json.loads(response_path.read_text(encoding="utf-8"))
                     try:
-                        with agent_protocol._agent_lock(5):
+                        with bookkeeping_lock, agent_protocol._agent_lock(5):
                             agent_tasks.accept_result(batch_dir, stage.id, envelope["result"], validate_only=True)
                         break
                     except ValueError as exc:
@@ -361,7 +367,8 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
                         response_path = run_dir / "portable-result.json"
                         response_path.write_text(json.dumps({"protocol": agent_protocol.PROTOCOL,
                             "task_id": exported["task_id"], "result": response}, ensure_ascii=False), encoding="utf-8")
-                receipt = agent_protocol.import_result(batch_dir, exported["task_id"], response_path)
+                with bookkeeping_lock:
+                    receipt = agent_protocol.import_result(batch_dir, exported["task_id"], response_path)
                 code = 0 if receipt["completed"] else 3
                 imported = True
             except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
@@ -370,7 +377,7 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
             # Coordinate with protocol imports and do not overwrite a stage another
             # participant completed while the model call was running.
             limited = _is_rate_limited(str(value))
-            with agent_protocol._agent_lock(5):
+            with bookkeeping_lock, agent_protocol._agent_lock(5):
                 manifest = mf.load(batch_dir)
                 if manifest["stages"].get(stage.id, {}).get("status") not in mf.TERMINAL_OK:
                     if limited:

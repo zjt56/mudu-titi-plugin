@@ -34,6 +34,8 @@
   “不能用什么吃中餐”对应，答案应是餐叉），证明视觉判图片选项可靠。
 - test_structure_gate + test_question_content 33 例全过；legacy_format+visual 28 例全过。
 
+
+以上验证结果均通过。
 ## 5. 回退方式
 
 删除 image_option_evidence 与 structure_gate 中该降级分支即可；无数据改动。

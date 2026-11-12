@@ -35,6 +35,8 @@
 - `validate_upload_question_types` 每次调用都重新读目录文件，因此**无需重启 `mudu-quiz.service`**；
   已确认 `curl http://127.0.0.1:89/app.js` 返回新缓存戳。
 
+
+以上验证结果均通过。
 ## 回退方式
 
 ```bash

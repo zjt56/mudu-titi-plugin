@@ -51,6 +51,38 @@ class DeleteBatchTest(unittest.TestCase):
         self.assertFalse(self.inbox.exists())
         self.assertEqual(server.list_batches(), [])
 
+    def test_native_cleanup_failure_keeps_batch_and_inbox(self):
+        with patch("workflow.content_agent.purge_batch", side_effect=ValueError("native purge failed")):
+            with self.assertRaisesRegex(ValueError, "native purge failed"):
+                server.delete_batch(self.name, self.name)
+        self.assertTrue(self.folder.exists())
+        self.assertTrue(self.inbox.exists())
+
+    def test_native_cleanup_precedes_batch_removal(self):
+        def cleanup(folder):
+            self.assertEqual(folder.resolve(), self.folder.resolve())
+            self.assertTrue(folder.exists())
+            self.assertTrue(self.inbox.exists())
+            return {"removed": 0}
+        with patch("workflow.content_agent.purge_batch", side_effect=cleanup) as call:
+            result = server.delete_batch(self.name, self.name)
+        self.assertTrue(result["purged"])
+        call.assert_called_once()
+
+    def test_content_post_receipt_does_not_wait_for_global_delete_lock(self):
+        import threading
+        done = threading.Event()
+        class Handler:
+            path = "/api/content-agent/purges/test"
+        def do_POST(handler):
+            done.set()
+        wrapped = server.serialized(do_POST)
+        with server._lock:
+            worker = threading.Thread(target=wrapped, args=(Handler(),), daemon=True)
+            worker.start()
+            self.assertTrue(done.wait(1), "native purge acknowledgement was blocked by delete lock")
+        worker.join(1)
+
     def test_delete_requests_cancel_queue_and_purges_when_queued(self):
         # 批次排列在排队区：删除应先移除队列项，再彻底删除。
         server._advance_state[self.name] = {"running": False, "queued": True, "queued_at": "now"}

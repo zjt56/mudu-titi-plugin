@@ -9,40 +9,43 @@ def verified_groups(batch_path):
     from . import question_draft
     path = Path(batch_path).resolve()
     root = path.parent.parent if path.parent.name == "06_batch" else path.parent
-    try:
-        draft = question_draft.build(root)
-    except (OSError, ValueError, KeyError, TypeError):
-        return {}
     from .agent_tasks import confirmed_units
     from collections import Counter
     from .question_content import legitimate_source_shape
-    eligible = {u['unit_id']: u.get('type') for u in confirmed_units(root)
-                if u.get('type') == '语音题' or (
-                    u.get('unit_kind') == 'group' and u.get('numbers') == [1]
-                    and (u.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
-                    and legitimate_source_shape(u) in {'image_only', 'unnumbered_no_image'})}
-    owners = Counter(a.get("name") for item in draft["items"] for a in item.get("attachments") or []
-                     if a.get("kind") == "image")
-    invalid_media = set()
-    for item in draft["items"]:
-        for attachment in item.get("attachments") or []:
-            if attachment.get("kind") != "image":
-                continue
-            name = attachment.get("name") or ""
-            media = root / "01_source/media" / name
-            if (owners[name] != 1 or not media.is_file() or media.is_symlink() or media.stat().st_size == 0
-                    or not media.resolve().is_relative_to(root / "01_source/media")):
-                invalid_media.add(item["unit_id"])
-    invalid = {p.get("unit_id") for p in draft["issues"]
-               if p.get("code") not in {"TABLE_LAYOUT_UNVERIFIED"}}
-    return {item["unit_id"]: dict(item, _source_media_batch=root.name,
-                                   _source_question_type=eligible[item['unit_id']]) for item in draft["items"]
-            if item.get("unit_id") in eligible
-            and item.get("unit_id") not in invalid | invalid_media
-            and item.get("identity_version") == "scoped-v1"
-            and item.get("unit_kind") == "group"
-            and draft["source_bindings"][item["unit_id"]].get("shared_rubric")
-            and str(item.get("stem") or "").strip()}
+    try:
+        eligible = {u['unit_id']: u.get('type') for u in confirmed_units(root)
+                    if u.get('type') == '语音题' or (
+                        u.get('unit_kind') == 'group' and u.get('numbers') == [1]
+                        and (u.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
+                        and legitimate_source_shape(u) in {'image_only', 'unnumbered_no_image'})}
+        if not eligible:
+            return {}
+        draft = question_draft.build(root)
+        owners = Counter(a.get("name") for item in draft["items"] for a in item.get("attachments") or []
+                         if a.get("kind") == "image")
+        invalid_media = set()
+        for item in draft["items"]:
+            for attachment in item.get("attachments") or []:
+                if attachment.get("kind") != "image":
+                    continue
+                name = attachment.get("name") or ""
+                media = root / "01_source/media" / name
+                if (owners[name] != 1 or not media.is_file() or media.is_symlink() or media.stat().st_size == 0
+                        or not media.resolve().is_relative_to(root / "01_source/media")):
+                    invalid_media.add(item["unit_id"])
+        invalid = {p.get("unit_id") for p in draft["issues"]
+                   if p.get("code") not in {"TABLE_LAYOUT_UNVERIFIED"}}
+        return {item["unit_id"]: dict(item, _source_media_batch=root.name,
+                                       _source_question_type=eligible[item['unit_id']]) for item in draft["items"]
+                if item.get("unit_id") in eligible
+                and item.get("unit_id") not in invalid | invalid_media
+                and item.get("identity_version") == "scoped-v1"
+                and item.get("unit_kind") == "group"
+                and draft["source_bindings"][item["unit_id"]].get("shared_rubric")
+                and str(item.get("stem") or "").strip()}
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, IndexError):
+        # Missing or malformed current evidence cannot grant a shape exemption.
+        return {}
 
 
 def shape(unit, verified=None):

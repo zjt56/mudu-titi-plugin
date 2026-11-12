@@ -1627,8 +1627,8 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             audit = label_audit.inspect_batch(payload)
             if not audit["passed"]:
                 raise ValueError("Strict label_audit failed: " + json.dumps(audit["errors"], ensure_ascii=False))
-            # 把文本/空档/表格/结构/版面五项体检前移到导入处：问题直接回到
-            # 执行者并触发一次带反馈的重试，不再等 validate 才发现。
+            # 只验收结构与选项完整性；纯格式脚本后移到 format_gate，
+            # 不让空档、画线、表格表现问题触发模型重试。
             from . import assemble_precheck
             pre = assemble_precheck.precheck(payload, batch_dir=batch)
             if not pre["passed"]:
