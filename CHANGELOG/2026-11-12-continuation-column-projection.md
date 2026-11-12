@@ -18,7 +18,8 @@
 
 - Python3.12、独立TMPDIR：新增3测试及6个受影响模块合计84 tests，OK，4 skipped（21.895s）。
 - 指定真实批次正式runner `--stage structure_gate --force`：通过，5组；23答案逐题validate_scoped_answer通过。
-- 后续续跑结果与最终回归追加在交付记录。
+- 扩展14个受影响模块：259 tests，OK，4 skipped（4.556s）。
+- 已通过正常runner继续前置组装；本记录不把运行中阶段算作交付。
 
 ## 回退
 
