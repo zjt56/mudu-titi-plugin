@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-12 | [2026-11-12-continuation-column-projection.md](2026-11-12-continuation-column-projection.md) | 续行右栏单个图片题号纳入共用解析投影，06批次重编号阻断正式复验通过 |
 | 2026-11-12 | [2026-11-12-source-proven-phonetic-choices.md](2026-11-12-source-proven-phonetic-choices.md) | 原卷证明的纯选项语音组保留空子题干，缺选项和改文仍严格拒绝 |
 | 2026-11-12 | [2026-11-12-word-visual-bands.md](2026-11-12-word-visual-bands.md) | Word图片A/B板块来源证据贯通结构、独立切片、答案与预览，真实三课时逐题复验 |
 | 2026-11-12 | [2026-11-12-answer-lesson-band-binding.md](2026-11-12-answer-lesson-band-binding.md) | 答案按板块/专题完整序列与全题号绑定，错范围和陈旧证据不借答 |
