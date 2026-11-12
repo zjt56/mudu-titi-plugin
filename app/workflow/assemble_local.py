@@ -50,14 +50,16 @@ _LABEL_KEYS = frozenset((
 
 
 def _structure_digest(payload) -> str:
-    """SHA-256 over the payload with label-only fields removed, recursively."""
+    """Bind structure, excluding labels and items' derived upload ranges only."""
+    from .stage_semantics import batch_content_value, has_range_evidence
     def strip(value):
         if isinstance(value, dict):
-            return {k: strip(v) for k, v in value.items() if k not in _LABEL_KEYS}
+            return {k: strip(v) for k, v in value.items()
+                    if k not in _LABEL_KEYS or k == "evidence" and has_range_evidence(v)}
         if isinstance(value, list):
             return [strip(v) for v in value]
         return value
-    return hashlib.sha256(json.dumps(strip(payload), ensure_ascii=False, sort_keys=True,
+    return hashlib.sha256(json.dumps(strip(batch_content_value(payload)), ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 

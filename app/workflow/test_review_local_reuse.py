@@ -154,6 +154,8 @@ class ReviewLocalReuseTest(unittest.TestCase):
         old = self.load('07_review/review-rounds.json')
         for row in final['items']:
             row['subquestions'][0].pop('source')
+        for row, unit in zip(final['items'], self.units):
+            row.update(numberStart=min(unit['numbers']), numberEnd=max(unit['numbers']))
         self.write('06_batch/batch_meta.json', final)
         plan = review.prepare_round_plan(self.batch)
         accepted = review.acceptable_unit_bindings(self.batch, plan)
@@ -170,6 +172,81 @@ class ReviewLocalReuseTest(unittest.TestCase):
             self.assertEqual(review_rounds.export_task(self.batch)['action'], 'complete')
             self.assertTrue(review.evaluate_rounds(self.batch)['execution_completed'])
             invoke.assert_not_called()
+
+    def test_added_question_ranges_keep_unresolved_findings_and_rounds(self):
+        self.write('06_batch/batch_meta.json', self.load('06_batch/batch.json'))
+        original_response = self.response
+        def with_finding(exported):
+            response = original_response(exported)
+            for check in response['artifacts']['review_round']['checks']:
+                if exported['round_id'] == 'labels' and check['unit_id'] == 'q-3':
+                    check.update(verdict='error', rationale='第3题答案与正文语义冲突。')
+            return response
+        self.response = with_finding
+        self.finish()
+        before = review.prepare_round_plan(self.batch)
+        semantic = review.stage_semantic_inputs(self.batch)
+        pending = [row for row in self.load('07_review/manual-review-queue.json')['items'] if row['unit_id'] == 'q-3']
+        self.assertTrue(pending)
+        for name in ('06_batch/batch.json', '06_batch/batch_meta.json'):
+            final = self.load('06_batch/batch.json')
+            for row, unit in zip(final['items'], self.units):
+                row.update(numberStart=min(unit['numbers']), numberEnd=max(unit['numbers']))
+            self.write(name, final)
+        current = review.prepare_round_plan(self.batch)
+        self.assertNotEqual(before['input_binding'], current['input_binding'])
+        self.assertEqual(before['unit_bindings'], current['unit_bindings'])
+        self.assertEqual(semantic, review.stage_semantic_inputs(self.batch))
+        self.assertEqual(review_rounds.export_task(self.batch)['action'], 'complete')
+        result = review.evaluate_rounds(self.batch)
+        self.assertTrue(result['execution_completed'])
+        self.assertTrue(any(row['unit_id'] == 'q-3' for row in result['findings']))
+        after = [row for row in self.load('07_review/manual-review-queue.json')['items'] if row['unit_id'] == 'q-3']
+        self.assertEqual({row['finding_id'] for row in pending}, {row['finding_id'] for row in after})
+        self.assertFalse(result['resolved_findings'])
+
+    def test_question_range_projection_retains_numbers_children_and_evidence(self):
+        row = {'unit_id': 'q-1', 'number': 1, 'numbers': [1], 'stem': 'Original',
+               'content': {'evidence': {'source': '原文', 'numberStart': 10, 'numberEnd': 20}},
+               'subquestions': [{'number': 1, 'stem': 'Child', 'numberStart': 5}]}
+        baseline = review.semantic_review_value(row, question=True)
+        self.assertEqual(baseline, review.semantic_review_value(dict(row, numberStart=1, numberEnd=1), question=True))
+        for field, value in [('number', 2), ('numbers', [2]), ('stem', 'Changed'),
+                             ('content', {'evidence': {'source': '原文', 'numberStart': 11, 'numberEnd': 20}}),
+                             ('subquestions', [{'number': 1, 'stem': 'Changed', 'numberStart': 5}]),
+                             ('subquestions', [{'number': 1, 'stem': 'Child', 'numberStart': 6}])]:
+            with self.subTest(field=field):
+                self.assertNotEqual(baseline, review.semantic_review_value(dict(row, **{field: value}), question=True))
+        self.assertNotEqual(review.semantic_review_value({'numberStart': 1}), review.semantic_review_value({'numberStart': 2}))
+        self.assertNotEqual(review.semantic_review_value({'evidence': {'numberStart': 1, 'numberEnd': 2}}, question=True),
+                            review.semantic_review_value({'evidence': {'numberStart': 2, 'numberEnd': 2}}, question=True))
+
+    def test_nested_evidence_range_and_original_number_changes_rebind_only_target(self):
+        final = self.load('06_batch/batch.json')
+        final['items'][0].update(number=1, numbers=[1],
+            content={'evidence': {'source': '原文', 'numberStart': 10, 'numberEnd': 20}})
+        self.write('06_batch/batch.json', final)
+        self.finish()
+        baseline = review.prepare_round_plan(self.batch)['unit_bindings']
+        for field, value in [('number', 2), ('numbers', [2]),
+                             ('content', {'evidence': {'source': '原文', 'numberStart': 11, 'numberEnd': 20}})]:
+            with self.subTest(field=field):
+                changed = copy.deepcopy(final)
+                changed['items'][0][field] = value
+                self.write('06_batch/batch.json', changed)
+                current = review.prepare_round_plan(self.batch)['unit_bindings']
+                self.assertEqual([uid for uid in baseline if baseline[uid] != current[uid]], ['q-1'])
+                self.assertFalse(review.evaluate_rounds(self.batch)['execution_completed'])
+        self.assert_only_target_pending('q-1')
+
+    def test_added_question_range_still_rejects_inflight_exact_hash(self):
+        exported = review_rounds.export_task(self.batch, max_units_per_part=2)
+        response = self.response(exported)
+        final = self.load('06_batch/batch.json')
+        final['items'][0].update(numberStart=1, numberEnd=1)
+        self.write('06_batch/batch.json', final)
+        with self.assertRaisesRegex((ValueError, RuntimeError), 'changed|stale|binding'):
+            review_rounds.import_result(self.batch, exported['task_id'], response)
 
     def test_metadata_only_change_still_rejects_inflight_exact_hash(self):
         final = self.load('06_batch/batch.json')

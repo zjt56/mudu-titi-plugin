@@ -442,3 +442,7 @@
 ## 2026-11-12：审核页知识点标签差异只展示末级
 
 用户原话：「试卷审核页面的知识点标签差异那里，标签只展示到子级，上一级都不需要展示，简洁一点。」规则：审核详情左栏「知识点标签」三行（原标签/一审/二审）正文只显示末级短名，完整路径放进 `title` 悬浮可查；**差异判定仍比较完整路径集合**，同名叶子不同分支不得因短名相同而漏判。落地：`lib/client.js::cmpRow/labelAuditPanels`、`backend/review-results.test.cjs`；验证见 `2026-11-12-review-knowledge-leaf-only.md`。
+
+## 2026-11-12：上传题号必须显式写原卷范围，location/paperOrder 不再代替
+
+用户原话要点：「开发者文档新增了关于题号的规范，请阅读并设计修改内容」「将本机目前所有批次都进行对应的修改」「不在放在排队区修改，你直接自己后台改」。规则：`items` 保持原卷单元顺序；独立题顶层 `numberStart/numberEnd` 为同一原卷数字题号，题组为全部唯一子题号的连续闭区间，经来源证明无印刷数字题号的单元显式 `null/null`；`location` 只作来源追溯，`paperOrder` 只是单元序位，均不能代替结构化题号。唯一投影在 `app/workflow/upload_numbering.py::project_batch`：有号只认当前确认结构与原文锚点；无号只认可重建的 `single_writing_section`/`unnumbered_section` 证据，禁止按题型、空 `printed_numbers`、内部续号或图片题别名猜 null；scoped 课时跨大题同号按各自身份保留原号，不全局去重、不重编号。显式范围形状非法或与来源冲突即阻断。存量迁移只改派生范围字段，先备份、原子写入、只允许范围变化、逐批复验；已批准上传的最终 `batch_meta.json` 字节不改写、不伪造批准、不自动重传。无号题组子题的远端 `number=null`/缺省契约未核实，本地保留内部别名和原答案整串，仅写 `UNNUMBERED_SUBQUESTION_CONTRACT_UNRESOLVED` 诊断，不把内部 `1` 或新聚合「1.」冒充印刷号。落地：`app/workflow/upload_numbering.py`、`numbering_migration.py`、`upload_payload.py`、`format_gate.py`、`manifest.py`、`stage_semantics.py`、`review.py`、`assemble_local.py`；根 `AGENTS.md` 硬规则 32；验证见 `2026-11-12-question-number-upload.md`。

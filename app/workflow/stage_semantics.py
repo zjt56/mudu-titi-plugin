@@ -42,6 +42,33 @@ def without_clocks(value):
     return value
 
 
+BATCH_CONTENT_FILES = frozenset(("batch.base.json", "batch.json", "batch_meta.base.json", "batch_meta.json"))
+QUESTION_RANGE_KEYS = frozenset(("numberStart", "numberEnd"))
+
+
+def question_content_value(value):
+    """Remove only a question row's redundant upload range, never nested evidence."""
+    if isinstance(value, dict):
+        return {key: child for key, child in value.items() if key not in QUESTION_RANGE_KEYS}
+    return value
+
+
+def has_range_evidence(value):
+    """A range inside evidence is substantive, unlike question metadata."""
+    if isinstance(value, dict):
+        return bool(QUESTION_RANGE_KEYS.intersection(value)) or any(has_range_evidence(v) for v in value.values())
+    if isinstance(value, list):
+        return any(has_range_evidence(v) for v in value)
+    return False
+
+
+def batch_content_value(value):
+    """Project only items' top-level metadata; child numbers/ranges stay exact."""
+    if isinstance(value, dict) and isinstance(value.get("items"), list):
+        return dict(value, items=[question_content_value(row) for row in value["items"]])
+    return value
+
+
 def file_value(path):
     path = Path(path)
     if not path.is_file():
@@ -50,21 +77,26 @@ def file_value(path):
     if path.suffix.lower() == ".json":
         try:
             # JSON whitespace/key order is not a change to the data.
-            return without_clocks(json.loads(raw.decode("utf-8-sig")))
+            value = without_clocks(json.loads(raw.decode("utf-8-sig")))
+            if path.parent.name == "06_batch" and path.name in BATCH_CONTENT_FILES:
+                value = batch_content_value(value)
+            return value
         except (UnicodeError, ValueError):
             pass
     return {"bytes_sha256": hashlib.sha256(raw).hexdigest()}
 
 
 def output_signatures(batch, stage):
-    # Preserve all question fields; only JSON representation and clocks are
-    # irrelevant. In particular an edited stem can never migrate as equivalent.
+    # Ignore serialization, clocks and redundant top-level question ranges.
+    # Substantive fields (including original numbers and nested evidence) remain.
     return {rel: digest(file_value(Path(batch) / rel)) for rel in stage.produces}
 
 
 def _projection(stage, rel, value):
     if not isinstance(value, dict):
         return value
+    if rel in {"06_batch/" + name for name in BATCH_CONTENT_FILES}:
+        value = batch_content_value(value)
     if rel == "06_batch/batch.base.json" and stage in (CONTENT_STAGES | {"audio"}):
         if stage == "assemble":
             return value

@@ -14,7 +14,7 @@ from pathlib import Path
 import tempfile
 from urllib.parse import urlsplit
 
-from . import metadata_policy, upload_payload, wire_format, phonetic_structure, shared_rubric
+from . import metadata_policy, upload_payload, wire_format, phonetic_structure, shared_rubric, upload_numbering
 from .label_audit import RULE_FILES as LABEL_RULE_FILES
 
 RULE_VERSION = "final-upload-format-v1"
@@ -24,7 +24,7 @@ RULE_FILES = (Path(__file__), Path(upload_payload.__file__),
               Path(upload_payload.label_audit.__file__),
               Path(upload_payload.taxonomy.__file__), Path(wire_format.__file__),
               Path(metadata_policy.__file__), Path(phonetic_structure.__file__),
-              Path(shared_rubric.__file__), *LABEL_RULE_FILES)
+              Path(shared_rubric.__file__), Path(upload_numbering.__file__), *LABEL_RULE_FILES)
 DEFERRED_CODES = frozenset({"CATALOG_REQUIRED", "TEXTBOOK_CATALOG_UNSUPPORTED",
                             "TEXTBOOK_KNOWLEDGE_INVALID"})
 

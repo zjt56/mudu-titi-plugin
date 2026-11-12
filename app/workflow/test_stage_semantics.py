@@ -147,6 +147,71 @@ class ContentReuseTest(unittest.TestCase):
         self.assertFalse(self.stale("types"))
         self.assertEqual(mf.reconcile_deliveries(self.batch, self.state), [])
 
+    def test_question_range_metadata_preserves_old_semantic_outputs_and_inputs(self):
+        from workflow import stage_semantics as semantics
+        from types import SimpleNamespace
+        payload = {'items': [{'unit_id': 'q-1', 'number': 1, 'numbers': [1], 'stem': 'Original',
+                              'evidence': {'numberStart': 10, 'numberEnd': 20},
+                              'subquestions': [{'number': 1, 'numberStart': 5}]}]}
+        for name in semantics.BATCH_CONTENT_FILES:
+            rel = '06_batch/' + name
+            with self.subTest(path=rel):
+                path = self.put(rel, payload)
+                stage = SimpleNamespace(id='meta', produces=(rel,))
+                old_output = semantics.output_signatures(self.batch, stage)
+                raw = mf.output_hashes(self.batch, stage)
+                inputs = semantics.input_signatures(self.batch, self.state, stage, {'upstream:' + rel: raw[rel]})
+                changed = json.loads(json.dumps(payload))
+                changed['items'][0].update(numberStart=1, numberEnd=1)
+                self.put(rel, changed)
+                self.assertEqual(semantics.file_value(path), payload)
+                self.assertEqual(old_output, semantics.output_signatures(self.batch, stage))
+                self.assertEqual(inputs, semantics.input_signatures(self.batch, self.state, stage, {'upstream:' + rel: 'changed'}))
+                self.assertEqual(semantics._projection('meta', rel, changed), payload)
+                self.assertNotEqual(raw, mf.output_hashes(self.batch, stage))
+        other = self.put('04_knowledge/batch.json', changed)
+        self.assertEqual(semantics.file_value(other), changed)
+
+    def test_question_range_projection_keeps_original_numbers_and_nested_ranges(self):
+        from workflow import stage_semantics as semantics
+        payload = {'numberStart': 90, 'items': [{'number': 1, 'numbers': [1], 'stem': 'Original',
+            'evidence': {'numberStart': 10, 'numberEnd': 20}, 'subquestions': [{'number': 1, 'numberStart': 5}]}]}
+        path = self.put('06_batch/batch.json', payload)
+        baseline = semantics.digest(semantics.file_value(path))
+        for field, value in [('number', 2), ('numbers', [2]), ('stem', 'Changed'),
+                             ('evidence', {'numberStart': 11, 'numberEnd': 20}),
+                             ('subquestions', [{'number': 1, 'numberStart': 6}])]:
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(payload))
+                changed['items'][0][field] = value
+                self.put('06_batch/batch.json', changed)
+                self.assertNotEqual(baseline, semantics.digest(semantics.file_value(path)))
+        changed = dict(payload, numberStart=91)
+        self.put('06_batch/batch.json', changed)
+        self.assertNotEqual(baseline, semantics.digest(semantics.file_value(path)))
+
+    def test_range_metadata_keeps_completed_producers_and_derived_views_current(self):
+        payload = {'items': [{'unit_id': 'q-1', 'number': 1, 'numbers': [1], 'stem': 'Original'}]}
+        for rel in ('06_batch/batch.base.json', '06_batch/batch.json',
+                    '06_batch/batch_meta.base.json', '06_batch/batch_meta.json'):
+            self.put(rel, payload)
+        for sid in ('preassemble', 'assemble', 'meta', 'underlines', 'validate'):
+            self.finish(sid)
+        for rel in ('06_batch/batch.base.json', '06_batch/batch.json',
+                    '06_batch/batch_meta.base.json', '06_batch/batch_meta.json'):
+            self.put(rel, {'items': [dict(payload['items'][0], numberStart=1, numberEnd=1)]})
+        self.assertEqual(mf.reconcile_deliveries(self.batch, self.state), [])
+        for sid in ('preassemble', 'assemble', 'meta', 'underlines', 'validate'):
+            with self.subTest(stage=sid):
+                self.assertFalse(self.stale(sid))
+                self.assertEqual(self.state['stages'][sid]['status'], mf.COMPLETED)
+
+    def test_added_question_range_still_invalidates_exact_upload_freeze(self):
+        final = self.put('06_batch/batch_meta.json', {'items': [{'number': 1}]})
+        mf.touch_stage(self.state, 'upload_gate', mf.APPROVED, approved_batch_sha256=mf.sha256_file(final))
+        self.put('06_batch/batch_meta.json', {'items': [{'number': 1, 'numberStart': 1, 'numberEnd': 1}]})
+        self.assertTrue(self.stale('upload_gate'))
+
     def test_real_output_edit_reopens_stage_for_validation(self):
         # Serialization-only rewrites are ignored, but a real payload change must
         # not be reused as if the previously accepted output were still present.

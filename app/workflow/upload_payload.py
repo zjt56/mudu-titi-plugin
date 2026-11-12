@@ -31,13 +31,14 @@ ALIASES = {"question_type": "type", "filter_metadata": "filterMetadata", "knowle
            "material_blocks": "materialBlocks", "article_summary": "articleSummary", "textbook_mappings": "textbookMappings"}
 WIRE_FIELDS = {"id", "title", "unit_kind", "stem", "options", "answer", "explanation", "curriculum", "textbook_id",
                "knowledge_version_id", "knowledge_ids", "knowledge", "type", "difficulty", "filterMetadata",
-               "material", "materialBlocks", "articleSummary", "subquestions", "attachments", "relations", *SOURCE_FIELDS}
+               "material", "materialBlocks", "articleSummary", "subquestions", "attachments", "relations",
+               "numberStart", "numberEnd", *SOURCE_FIELDS}
 # Explicit local bookkeeping is deliberately excluded from the API request.
 LOCAL_FIELDS = {"unit_id", "number", "numbers", "status", "warnings", "knowledgeStatus", "human_confirmed",
                 "evidence", "source_slice", "source_parent_id", "source_numbers", "review", "review_status",
                 "checked", "notes", "wordCount", "word_count", "materialBlocksLocked", "filterMetadataStored",
                 "optionColumns", "subquestionOptionColumns", "paperId", "paperOrder", "paperSection", "paperInstruction",
-                "numberStart", "numberEnd", "subtypes", "categories", "audio", "images", "image", "audio_map", "image_map",
+                "subtypes", "categories", "audio", "images", "image", "audio_map", "image_map",
                  "identity_version", "section_id", "source_section", "question_ids", "question_id",
                  "original_number", "printed_number", "printed_numbers", "source_span"}
 
@@ -632,17 +633,8 @@ class _Builder:
             data["type"] = TYPE_ALIASES.get(data["type"], data["type"])
         if isinstance(data.get("source_type"), str):
             data["source_type"] = SOURCE_ALIASES.get(data["source_type"], data["source_type"])
-        # 整卷题序：独立题的 number 是原卷印刷题号（不是上传单元序号），但平台
-        # questions 没有题号列，试卷档案只从子题号或 location 的「第 N 题」推断。
-        # 空 location 时补成「第N题」，避免线上整卷档案把单元序号当题号显示。
-        # 书面表达通常无印刷数字题号（number 是装配续号），不得据此编造；
-        # scoped 课时批次同号分节重复，也不参与整卷档案。
-        if (not child and not data.get("subquestions")
-                and not data.get("identity_version")
-                and not _nonempty(data.get("location"))
-                and _positive(data.get("number"))
-                and data.get("type") != "书面表达"):
-            data["location"] = f"第{data['number']}题"
+        # Original numbers are projected explicitly at the top level before
+        # allowlisting. location remains source prose and never supplies a number.
         # 用户规则：缺答案/缺解析不阻断，显式填「无答案」「无解析」占位。
         if not _nonempty(data.get("answer")) and not (
                 not child and data.get("unit_kind") == "group" and data.get("subquestions")):
@@ -655,6 +647,8 @@ class _Builder:
                 data[key] = ""
         output = {k: deepcopy(v) for k, v in data.items() if k in WIRE_FIELDS or k == "textbookMappings"}
         if child:
+            output.pop("numberStart", None)
+            output.pop("numberEnd", None)
             output["number"] = raw.get("number")
             if not _positive(raw.get("number")):
                 self.error("SUBQUESTION_NUMBER_INVALID", "子题 number 必须是原卷正整数题号", uid)
@@ -925,6 +919,10 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
         builder.error("BATCH_ITEMS_INVALID", "batch.items 必须是非空数组")
         items = []
     builder.errors.extend(identity_errors(items))
+    from .upload_numbering import project_batch
+    numbering = project_batch(batch, batch_dir=batch_dir)
+    builder.errors.extend(numbering["errors"])
+    items = numbering["items"] if isinstance(numbering["items"], list) else []
     # Audit the local labels before any remote ID replacement or group union.
     audit = label_audit.inspect_batch(_local_audit_view(batch))
     builder.errors.extend({"unit_id": "", **error} for error in audit["errors"])
@@ -987,4 +985,5 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
         builder.error("PAYLOAD_NOT_JSON", "上传数据必须是标准 JSON，不能包含媒体 bytes 或非有限数值")
         payload = None
     return {"passed": not builder.errors, "payload": payload, "errors": builder.errors,
-            "warnings": builder.warnings, "summary": builder.summary, "catalog_sha256": builder.catalog_sha256}
+            "warnings": builder.warnings, "summary": builder.summary, "catalog_sha256": builder.catalog_sha256,
+            "numbering_evidence": numbering["evidence"]}

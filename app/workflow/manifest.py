@@ -392,6 +392,12 @@ def _content_digest(path) -> str:
     try:
         if path.suffix == ".json":
             data = json.loads(path.read_text(encoding="utf-8-sig"))
+            if path.parent.name == "06_batch" and path.name in ("batch.base.json", "batch.json",
+                                                                "batch_meta.base.json", "batch_meta.json"):
+                # Top-level upload ranges are derived metadata, not question content.
+                # Exact raw hashes (audit, task bindings, upload approval) stay exact.
+                from . import stage_semantics
+                data = stage_semantics.batch_content_value(data)
             canon = json.dumps(_canonical_json(data), ensure_ascii=False, sort_keys=True)
             return "json:" + hashlib.sha256(canon.encode("utf-8")).hexdigest()
     except (OSError, UnicodeError, ValueError):

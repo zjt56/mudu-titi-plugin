@@ -84,6 +84,8 @@
 
 31. **当前只匹配知识点标签，教材匹配暂停**：用户 2026-11-11 明确教材尚未就绪；所有来源（含同步练习、单元测验）均不提供 `textbook_index`、不生成教材位置。旧候选的本地 `textbook` 在正常导入时省略并留说明，组装不再传播；原始候选留证。知识点路径/ID/维度/题号覆盖/行级证据仍严格校验，不因教材停用而放宽。教材目录与独立工具保留，恢复自动匹配须另行明确要求；远端 `textbookMappings` 与上传边界不变。落地：`app/workflow/agent_tasks.py`、`assemble_local.py`、`batch_fill.py`、`substeps.py`，说明见 `app/docs/content-labeling.md`。
 
+32. **上传题号按原卷显式范围，不得用 location/paperOrder 代替**：开发者文档新增题号规范（2026-11-12 核对 `http://101.43.1.57/docs/`）要求 `items` 保持原卷单元顺序，独立题顶层 `numberStart/numberEnd` 为同一原卷数字题号，题组为全部唯一子题号的连续闭区间，经来源证明无印刷数字题号的单元显式 `null/null`；`location` 只作来源追溯，`paperOrder` 只是单元序位，均不能代替结构化题号。落地以 `app/workflow/upload_numbering.py::project_batch` 为唯一投影：有号只认当前确认结构与原文锚点；无号只认可重建的 `single_writing_section`/`unnumbered_section` 证据，禁止按题型、空 `printed_numbers`、内部续号或图片题别名猜 null；scoped 课时跨大题同号按各自身份保留原号、不全局去重、不重编号；显式范围形状非法或与来源冲突即阻断，不得排序/补号掩盖。上传、最终格式检查、冻结复验共用同一投影；`location` 自动补号旧逻辑不得恢复。存量批次迁移只改派生范围字段，必须先备份、原子写入、只允许范围变化并逐批复验；已批准上传绑定的最终 `batch_meta.json` 字节不改写、不伪造批准、不自动重传。无号题组子题的远端 `number=null`/缺省契约尚未核实，本地保留内部别名和原答案整串并只写 `UNNUMBERED_SUBQUESTION_CONTRACT_UNRESOLVED` 诊断，不得把内部 `1` 或新聚合「1.」冒充印刷号。落地：`app/workflow/upload_payload.py`、`upload_numbering.py`、`numbering_migration.py`、`format_gate.py`、`manifest.py`、`stage_semantics.py`、`review.py`、`assemble_local.py`；回归 `test_upload_numbering.py`、`test_numbering_migration.py`、`test_upload_payload.py`、`test_stage_semantics.py`；说明见 `app/docs/question-number-upload-design.md`、`app/docs/upload-api.md`。
+
 > 以上是**当前生效**的硬规则集合。新增或修订硬规则时，必须同步更新本节**并在 `CHANGELOG/RULES.md` 追加一条**（见第三节）。
 
 ## 三、变更记录制度（强制）

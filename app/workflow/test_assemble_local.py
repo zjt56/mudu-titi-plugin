@@ -114,6 +114,38 @@ class AssembleLocalTest(unittest.TestCase):
         self.assertEqual(rebuilt["items"][0]["filterMetadata"]["year"], 2026)
         self.assertIs(type(rebuilt["items"][0]["filterMetadata"]["year"]), int)
 
+    def test_added_question_range_preserves_historical_guard(self):
+        assemble_local.record_guard(self.batch)
+        before = json.loads((self.batch / assemble_local.BATCH).read_text())
+        guard = (self.batch / assemble_local.GUARD).read_bytes()
+        changed = json.loads(json.dumps(before))
+        changed['items'][0].update(numberStart=1, numberEnd=1)
+        _write(self.batch, assemble_local.BATCH, changed)
+        self.assertEqual(assemble_local._structure_digest(before), assemble_local._structure_digest(changed))
+        ok, reason = assemble_local.guard_status(self.batch)
+        self.assertTrue(ok, reason)
+        self.assertEqual((self.batch / assemble_local.GUARD).read_bytes(), guard)
+
+    def test_range_projection_does_not_hide_structure_or_nested_evidence_changes(self):
+        data = json.loads((self.batch / assemble_local.BATCH).read_text())
+        data['items'][0]['content'] = {'evidence': {'numberStart': 10, 'numberEnd': 20}}
+        data['items'][0]['evidence'] = {'numberStart': 10, 'numberEnd': 20}
+        data['items'][0]['subquestions'] = [{'number': 1, 'stem': 'Child', 'numberStart': 5}]
+        _write(self.batch, assemble_local.BATCH, data)
+        assemble_local.record_guard(self.batch)
+        for key, value in [('number', 2), ('numbers', [2]),
+                           ('evidence', {'numberStart': 11, 'numberEnd': 20}),
+                           ('content', {'evidence': {'numberStart': 11, 'numberEnd': 20}}),
+                           ('subquestions', [{'number': 1, 'stem': 'Changed', 'numberStart': 5}]),
+                           ('subquestions', [{'number': 1, 'stem': 'Child', 'numberStart': 6}])]:
+            with self.subTest(key=key, value=value):
+                changed = json.loads(json.dumps(data))
+                changed['items'][0][key] = value
+                _write(self.batch, assemble_local.BATCH, changed)
+                ok, reason = assemble_local.guard_status(self.batch)
+                self.assertFalse(ok, reason)
+                self.assertIn('被改动', reason)
+
     def test_batch_tamper_invalidates_baseline(self):
         assemble_local.record_guard(self.batch)
         data = json.loads((self.batch / assemble_local.BATCH).read_text(encoding="utf-8"))

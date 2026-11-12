@@ -432,12 +432,18 @@ _REVIEW_METADATA = frozenset({
 })
 
 
-def semantic_review_value(value, *, question=False):
+def semantic_review_value(value, *, question=False, range_metadata=True):
     """Project review semantics, excluding provenance/difficulty bookkeeping."""
     if isinstance(value, dict):
+        from .stage_semantics import has_range_evidence, question_content_value
+        if question and range_metadata:
+            value = question_content_value(value)
         result = {}
         for key, child in value.items():
-            if (key in _REVIEW_METADATA or key == "source" and question and isinstance(child, str)
+            # Preserve actual evidence ranges; the historical evidence envelope
+            # remains ignored when it has no range (avoids rebinding old reviews).
+            range_evidence = key == "evidence" and has_range_evidence(child)
+            if (key in _REVIEW_METADATA and not range_evidence or key == "source" and question and isinstance(child, str)
                     or key in {"words", "word_count", "wordCount"} and isinstance(child, (int, float))):
                 continue
             if key == "filterMetadata" and isinstance(child, dict):
@@ -456,7 +462,7 @@ def semantic_review_value(value, *, question=False):
             # Only identified question rows/subquestions carry display-source metadata.
             # A nested evidence/content object's source remains substantive.
             if question and key == "subquestions" and isinstance(child, list):
-                result[key] = [semantic_review_value(row, question=True) for row in child]
+                result[key] = [semantic_review_value(row, question=True, range_metadata=False) for row in child]
             else:
                 result[key] = semantic_review_value(child)
         if (value.get("question_type", value.get("type")) == "听力关键词语选择"
@@ -494,7 +500,10 @@ def _unit_bindings(batch, units, hashes, *, legacy_source=False, restore_missing
             for row in meta.get("items", []):
                 restore(row)
     def question_value(value):
-        return semantic_review_value(value, question=not legacy_source)
+        from .stage_semantics import question_content_value
+        # The pre-source-metadata compatibility proof uses the same question
+        # range projection; adding derived ranges must not retire old findings.
+        return semantic_review_value(question_content_value(value), question=not legacy_source)
     answers = _load(batch / "01_source_ans/answers.json")
     global_hashes = {k: v for k, v in hashes.items() if k.startswith("rules:") or k in (
         "01_source/附录.txt", "01_source_ans/正文.txt") or k.startswith("01_source/materials/")}
