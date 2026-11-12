@@ -173,6 +173,24 @@ class ReviewLocalReuseTest(unittest.TestCase):
             self.assertTrue(review.evaluate_rounds(self.batch)['execution_completed'])
             invoke.assert_not_called()
 
+    def test_compat_bindings_replay_the_pre_clip_section_end(self):
+        """修复 scoped 窗口后，旧轮次的绑定必须能重放，而不是整轮判缺失。"""
+        self.finish()
+        review._COMPAT_BINDINGS_CACHE.clear()
+        plan = review.prepare_round_plan(self.batch)
+        seen, real = [], review._unit_bindings
+
+        def spy(batch, units, hashes, **kwargs):
+            seen.append((kwargs.get('legacy_source'), kwargs.get('scoped_end'),
+                         kwargs.get('restore_missing_source')))
+            return real(batch, units, hashes, **kwargs)
+
+        with patch.object(review, '_unit_bindings', side_effect=spy):
+            accepted = review.acceptable_unit_bindings(self.batch, plan)
+        self.assertIn((False, False, False), seen)
+        self.assertIn((False, False, True), seen)
+        self.assertTrue(all(digest in accepted[uid] for uid, digest in plan['unit_bindings'].items()))
+
     def test_added_question_ranges_keep_unresolved_findings_and_rounds(self):
         self.write('06_batch/batch_meta.json', self.load('06_batch/batch.json'))
         original_response = self.response

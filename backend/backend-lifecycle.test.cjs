@@ -324,6 +324,20 @@ test('watchdog leaves a healthy backend alone and spawns nothing', async () => {
   } finally { await f.stopBackend(); }
 });
 
+test('watchdog reuses a running unmanaged workbench instead of spawning a duplicate', async () => {
+  let spawned = 0;
+  const api = load({
+    fetch: async () => ({ ok: true, json: async () => ({ workflow_runtime_version: 'workflow-runtime-v2' }) }),
+    spawn: () => { spawned += 1; throw new Error('must not spawn a second backend'); },
+  });
+  const result = await api.backendWatchdogTick();
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, 'unmanaged');
+  assert.equal(spawned, 0);
+  assert.equal(api.backend.ready, true); // 代理直接复用已在服务的后端
+  assert.equal(api.backend.proc, null);
+});
+
 test('watchdog scheduler is idempotent and stops cleanly', () => {
   const f = fake();
   try {

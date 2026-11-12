@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-12 | [2026-11-12-review-gate-source-window-and-unchecked.md](2026-11-12-review-gate-source-window-and-unchecked.md) | 审核闸门确定性阻断：课时板块尾裁剪不再误判来源、绑定升级用 strict_end 重放旧轮次不重跑模型、陈旧 unchecked 条目按分轮记录清理 |
 | 2026-11-12 | [2026-11-12-harness-content-agents.md](2026-11-12-harness-content-agents.md) | 运行时原生内容子智能体：受控取证、结构整卷校验、来源/知识点匹配、图片辅助、恢复预算与删除会话闭环 |
 | 2026-11-12 | [2026-11-12-cell-media-warning.md](2026-11-12-cell-media-warning.md) | 表格单元格内图片平台无法表达：降为带码 warning（non_blocking）不再阻断 format_gate，图片仍按单元级附件交付、文字保持原文 |
 | 2026-11-12 | [2026-11-12-backend-watchdog.md](2026-11-12-backend-watchdog.md) | 工作台后端退出后无人拉起导致队列静默停摆：插件侧后端存活看门狗按 15s（失败退避至 60s）自动重启并续跑 |

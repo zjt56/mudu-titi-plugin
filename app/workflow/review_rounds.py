@@ -198,10 +198,10 @@ def _round_prompt(round_id, targets, context):
 _EXCERPT_CACHE = {}
 
 
-def _excerpt_cache_key(source, selected, force, adjacent_units):
+def _excerpt_cache_key(source, selected, force, adjacent_units, strict_end=True):
     """Identity of one excerpt request: source bytes + the units it must locate."""
     import hashlib
-    parts = [hashlib.sha256(source.encode('utf-8')).hexdigest(), bool(force)]
+    parts = [hashlib.sha256(source.encode('utf-8')).hexdigest(), bool(force), bool(strict_end)]
     for unit in selected:
         parts.append((unit.get('unit_id'), unit.get('unit_kind'), unit.get('stem'),
                       repr(unit.get('source_span'))))
@@ -210,7 +210,7 @@ def _excerpt_cache_key(source, selected, force, adjacent_units):
     return tuple(parts)
 
 
-def _source_excerpts(source, selected, force=False, adjacent_units=()):
+def _source_excerpts(source, selected, force=False, adjacent_units=(), strict_end=True):
     """Exact, located unit spans, or the whole source when proof fails.
 
     This runs for every unit in every round of every binding variant while the
@@ -220,18 +220,18 @@ def _source_excerpts(source, selected, force=False, adjacent_units=()):
     """
     if not isinstance(source, str) or not selected:
         return source
-    key = _excerpt_cache_key(source, selected, force, adjacent_units)
+    key = _excerpt_cache_key(source, selected, force, adjacent_units, strict_end)
     hit = _EXCERPT_CACHE.get(key)
     if hit is not None:
         return hit[1]
-    value = _source_excerpts_uncached(source, selected, force, adjacent_units)
+    value = _source_excerpts_uncached(source, selected, force, adjacent_units, strict_end)
     if len(_EXCERPT_CACHE) > 512:
         _EXCERPT_CACHE.clear()
     _EXCERPT_CACHE[key] = (source, value)
     return value
 
 
-def _source_excerpts_uncached(source, selected, force=False, adjacent_units=()):
+def _source_excerpts_uncached(source, selected, force=False, adjacent_units=(), strict_end=True):
     """Return exact, located unit spans, or the whole source when proof fails."""
     if not isinstance(source, str) or not selected:
         return source
@@ -261,7 +261,7 @@ def _source_excerpts_uncached(source, selected, force=False, adjacent_units=()):
         span = unit.get('source_span')
         if span is not None:
             from .review_child_source import _raw_unit_lines
-            indices = _raw_unit_lines(source, unit)
+            indices = _raw_unit_lines(source, unit, strict_end=strict_end)
             if indices is None:
                 return source
             first, last = indices

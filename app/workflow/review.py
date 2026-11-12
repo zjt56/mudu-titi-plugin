@@ -59,6 +59,41 @@ REVIEW_DIR = "07_review"
 
 RESOLVED = {"reviewed", "resolved", "accepted", "fixed", "closed", "approved", "passed", "waived"}
 OPEN = {"open", "pending", "needs_review", "blocked", "proposed", "unchecked", "hold"}
+# 分轮记录自己写的“未验证”类条目：来源绑定升级后可能已能复验通过。
+ROUND_UNCHECKED_CODES = ("REVIEW_ROUND_UNCHECKED", "REVIEW_SAMPLE_SOURCE_UNVERIFIED")
+
+
+def reconcile_unchecked(batch_dir) -> list:
+    """Drop round "unchecked" rows that the current rounds already prove resolved.
+
+    A source-binding upgrade can leave a stale sample/round row in
+    ``07_review/unchecked.json``: the rounds now re-verify their targets, but the
+    old file still blocks the gate. ``evaluate_rounds`` is the authority — only
+    rows whose round item is no longer reported are dropped; anything still
+    unresolved (or non-round: AI execution, media) stays untouched.
+    """
+    from . import review_rounds
+    batch = Path(batch_dir)
+    path = batch / REVIEW_DIR / "unchecked.json"
+    if not path.is_file():
+        return []
+    rows = _load(path)
+    if not isinstance(rows, list) or not rows:
+        return []
+    rounds = evaluate_rounds(batch)
+    if not rounds.get("execution_completed"):
+        return []
+    live = {(row.get("unit_id"), row.get("field"))
+            for row in rounds.get("unchecked") or [] if isinstance(row, dict)}
+    dropped = [row for row in rows
+               if isinstance(row, dict) and row.get("code") in ROUND_UNCHECKED_CODES
+               and (row.get("unit_id"), row.get("field")) not in live]
+    if not dropped:
+        return []
+    dropped_ids = {id(row) for row in dropped}
+    review_rounds._save(batch, "07_review/unchecked.json",
+                        [row for row in rows if id(row) not in dropped_ids])
+    return dropped
 
 
 def compact_knowledge_catalog(types, catalog=None):
@@ -478,7 +513,8 @@ def semantic_review_value(value, *, question=False, range_metadata=True):
     return value
 
 
-def _unit_bindings(batch, units, hashes, *, legacy_source=False, restore_missing_source=False):
+def _unit_bindings(batch, units, hashes, *, legacy_source=False, restore_missing_source=False,
+                   scoped_end=True):
     """Bind whole review units; unprovable source scopes remain global."""
     from .review_rounds import _source_excerpts, _transcript_excerpt, CONTEXT_VERSION, PROMPT_VERSION
     source = _read_bound_bytes(batch / "01_source/正文.txt").decode('utf-8-sig')
@@ -519,7 +555,8 @@ def _unit_bindings(batch, units, hashes, *, legacy_source=False, restore_missing
         from .question_identity import question_key
         uid, numbers = unit["unit_id"], {question_key(unit, n) for n in unit["numbers"]}
         known_answer_keys = {question_key(u, n) for u in units for n in u['numbers']}
-        text = _source_excerpts(source, [unit], force=True, adjacent_units=units)
+        text = _source_excerpts(source, [unit], force=True, adjacent_units=units,
+                                strict_end=scoped_end)
         if isinstance(text, dict):
             text = [span["text"] for span in text["spans"]]
         payload = {"unit": question_value(unit), "source": text,
@@ -557,8 +594,11 @@ def _unit_bindings(batch, units, hashes, *, legacy_source=False, restore_missing
 def acceptable_unit_bindings(batch_dir, plan=None):
     """Current digests plus exact pre-source-projection compatibility proofs.
 
-    Only the known removed child display placeholder is replayed. No task,
-    response, original plan, or in-flight byte binding is rewritten.
+    Two upgrades are replayed, both proven by recomputing this batch's own
+    bindings: the removed child display placeholder, and scoped source windows
+    that the older section parser could not locate (it fell back to the whole
+    source). Reusing such a round keeps its original findings; it never rewrites
+    a task, response, plan or in-flight byte binding.
     """
     batch = Path(batch_dir)
     plan = plan or prepare_round_plan(batch)
@@ -568,10 +608,14 @@ def acceptable_unit_bindings(batch_dir, plan=None):
         return {uid: set(values) for uid, values in _COMPAT_BINDINGS_CACHE[key].items()}
     accepted = {uid: {digest} for uid, digest in plan['unit_bindings'].items()}
     for restore in (False, True):
-        legacy = _unit_bindings(batch, units, plan['input_hashes'], legacy_source=True,
-                                restore_missing_source=restore)
-        for uid, digest in legacy.items():
-            accepted[uid].add(digest)
+        for legacy_source in (False, True):
+            for scoped_end in (True, False):
+                if legacy_source and scoped_end:
+                    continue  # current variant, already in `accepted`
+                legacy = _unit_bindings(batch, units, plan['input_hashes'], legacy_source=legacy_source,
+                                        restore_missing_source=restore, scoped_end=scoped_end)
+                for uid, digest in legacy.items():
+                    accepted[uid].add(digest)
     if len(_COMPAT_BINDINGS_CACHE) > 64:
         _COMPAT_BINDINGS_CACHE.clear()
     _COMPAT_BINDINGS_CACHE[key] = {uid: set(values) for uid, values in accepted.items()}

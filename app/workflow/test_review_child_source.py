@@ -292,6 +292,55 @@ class ScopedChildSourceTest(unittest.TestCase):
         unit = {'numbers': list(range(1, 9)), 'stem': self.stem}
         self.assertEqual(prove_child(self.source, unit, 8)['status'], 'uncertain')
 
+    def test_lesson_container_clip_keeps_band_image_outside_the_section(self):
+        """A lesson band ends before the next heading, so the band's trailing
+        image placeholder (and its blank spacer) is counted by the coarse heading
+        parser as the previous section's last line. That explained clip must keep
+        proving; a tail holding real content still must not."""
+        source = ("第三课时　Section B (1a-1d)\nⅣ.单项填空\n"
+                  "(　　)3.—Thank you very much for the flowers,Helen!\n"
+                  "A.Yes,please B.No,thanks C.You are welcome D.That's right\n"
+                  "\n[IMG image4.jpeg]\nⅠ.阅读理解\nPassage text\n")
+        stem = ("(　　)3.—Thank you very much for the flowers,Helen!\n"
+                "A.Yes,please B.No,thanks C.You are welcome D.That's right")
+        unit = self.scoped(source, stem, 3, 4, [3])
+        self.assertEqual(unit['source_section']['end_line'], 6)
+        clipped = deepcopy(unit)
+        clipped['source_section'].update({'end_line': 5, 'lesson_container_end_line': 5})
+        proof = prove_child(source, clipped, 3)
+        self.assertEqual(proof['status'], 'proven', proof)
+        self.assertIn('Thank you very much for the flowers', proof['text'])
+        self.assertTrue(quote_belongs_to_child(source, clipped, 3, '—Thank you very much'))
+        # An unexplained clip, a non-container boundary and a content tail reject.
+        for patch in ({'lesson_container_end_line': 6}, {'lesson_container_end_line': None}):
+            forged = deepcopy(clipped)
+            forged['source_section'].update(patch)
+            with self.subTest(patch=patch):
+                self.assertEqual(prove_child(source, forged, 3)['status'], 'uncertain')
+        content_tail = source.replace('\n\n[IMG image4.jpeg]', '\n\nC.extra content line\n[IMG image4.jpeg]')
+        self.assertEqual(prove_child(content_tail, clipped, 3)['status'], 'uncertain')
+
+    def test_strict_end_off_replays_the_pre_clip_projection(self):
+        """審核绑定必须能重放修复前的投影：同一单元在旧口径下定位不到窗口，
+        新口径能定位。差异只影响绑定摘要，不重写任何任务/响应/计划。"""
+        from workflow import review_rounds
+        from workflow.review_child_source import _raw_unit_lines
+        source = ("第三课时　Section B (1a-1d)\nⅣ.单项填空\n"
+                  "(　　)3.—Thank you very much for the flowers,Helen!\n"
+                  "A.Yes,please B.No,thanks C.You are welcome D.That's right\n"
+                  "\n[IMG image4.jpeg]\nⅠ.阅读理解\nPassage text\n")
+        stem = ("(　　)3.—Thank you very much for the flowers,Helen!\n"
+                "A.Yes,please B.No,thanks C.You are welcome D.That's right")
+        clipped = self.scoped(source, stem, 3, 4, [3])
+        clipped['source_section'].update({'end_line': 5, 'lesson_container_end_line': 5})
+        self.assertEqual(_raw_unit_lines(source, clipped)[0], 2)
+        self.assertIsNone(_raw_unit_lines(source, clipped, strict_end=False))
+        current = review_rounds._source_excerpts(source, [clipped], force=True, adjacent_units=[clipped])
+        legacy = review_rounds._source_excerpts(source, [clipped], force=True,
+                                                adjacent_units=[clipped], strict_end=False)
+        self.assertIsInstance(current, dict)
+        self.assertEqual(legacy, source)
+
 
 if __name__ == '__main__':
     unittest.main()

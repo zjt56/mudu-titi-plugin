@@ -15,6 +15,7 @@ import re
 
 _QUESTION_START = re.compile(r'^\s*(?:\(\s*\)\s*)?(\d+)\s*[.、]')
 _SECTION_START = re.compile(r'^\s*(?:第[一二三四五六七八九十]+部分|[一二三四五六七八九十]+、)')
+_IMAGE_ONLY_LINE = re.compile(r'^\[IMG\s+[^\]]+\]$')
 
 
 def _norm(text):
@@ -27,6 +28,39 @@ def _source_lines(source):
         lines.append((offset, raw.rstrip('\r\n')))
         offset += len(raw)
     return lines
+
+
+def _section_end_matches(lines, section, owner):
+    """Section end must equal the current parse, or be an explained lesson clip.
+
+    A lesson band ends before the next heading: the coarse heading parser then
+    counts the band's trailing image placeholder (and a blank spacer line) as
+    part of the previous section, while the confirmed section stops at the band
+    boundary. Such a clip is acceptable only when the persisted end is exactly
+    the recorded lesson container end and every extra line is provably not
+    section content. A clipped content line still fails.
+    """
+    from .sync_practice import _LESSON, _UNIT, is_section_title, plain_text
+
+    end, parsed = section.get('end_line'), owner.get('end_line')
+    if type(end) is not int or type(parsed) is not int:
+        return False
+    if end == parsed:
+        return True
+    if not 0 < end < parsed <= len(lines):
+        return False
+    if type(section.get('lesson_container_end_line')) is not int:
+        return False
+    if section['lesson_container_end_line'] != end:
+        return False
+    for text in lines[end:parsed]:
+        plain = plain_text(text).strip()
+        if not plain or _IMAGE_ONLY_LINE.match(plain):
+            continue
+        if _LESSON.match(plain) or _UNIT.match(plain) or is_section_title(plain):
+            continue
+        return False
+    return True
 
 
 def prove_child(source, unit, number, *, source_sha256=None):
@@ -103,11 +137,13 @@ def prove_child(source, unit, number, *, source_sha256=None):
                 text=source[start:end], method='numbered-stem-lines-verbatim/v2')
 
 
-def _scoped_context(source, unit):
+def _scoped_context(source, unit, *, strict_end=True):
     """Rebuild the current section and map verbatim projected stem to raw chars.
 
     Persisted coordinates alone are not evidence: every section identity field
-    and its exact end must agree with the current independently parsed source.
+    and its end must agree with the current independently parsed source.
+    ``strict_end=False`` reproduces the older byte-exact end comparison; it
+    exists only so already accepted review bindings can be replayed.
     Inline projection is parsing only; returned offsets always index raw text.
     """
     from . import denoise, question_identity
@@ -143,8 +179,10 @@ def _scoped_context(source, unit):
     if len(owners) != 1:
         return None
     owner = owners[0]
-    if any(section.get(key) != owner.get(key) for key in
-           ('title', 'context', 'occurrence', 'start_line', 'end_line')):
+    if (any(section.get(key) != owner.get(key) for key in
+            ('title', 'context', 'occurrence', 'start_line'))
+            or not (_section_end_matches(lines, section, owner) if strict_end
+                    else section.get('end_line') == owner.get('end_line'))):
         return None
     ordinal = re.match(r'^([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+[.．、]?)', plain_text(owner['title']).strip())
     if section.get('ordinal') != (ordinal.group(1) if ordinal else ''):
@@ -338,13 +376,14 @@ def quote_belongs_to_child_loose(source, unit, number, quote):
     return start >= 0 and normalized.find(wanted, start + 1) < 0
 
 
-def _raw_unit_lines(source, unit):
+def _raw_unit_lines(source, unit, *, strict_end=True):
     """Map confirmed cleaned-source lines to raw line indices, or fail closed."""
     from . import denoise
     from .extract import material_label
 
     if isinstance(unit, dict) and unit.get('identity_version') == 'scoped-v1':
-        context = _scoped_context(source, unit) if isinstance(source, str) else None
+        context = (_scoped_context(source, unit, strict_end=strict_end)
+                   if isinstance(source, str) else None)
         return ((context['mapping'][context['first'] - 1],
                  context['mapping'][context['last'] - 1]) if context else None)
     span = unit.get('source_span') if isinstance(unit, dict) else None
