@@ -444,6 +444,18 @@ def mark_row(row, findings):
     row["format_severity"] = max((str(f.get("severity") or "") for f in fmt_open),
                                  key=lambda s: SEVERITY_ORDER.get(s, 0), default="")
     row["needs_human"] = bool(label_open)
+    # 待审差异必须能一眼看出「审的是哪一项、原标签是什么、本轮判了什么」，
+    # 不能只显示一个数字让人以为“题目正常却被标待审核”。
+    diffs = []
+    for finding in label_open:
+        text = str(finding.get("reason") or finding.get("question") or "").strip()
+        if not text:
+            continue
+        field = str(finding.get("field") or "").strip()
+        label = {"type": "题型", "subtypes": "子类", "knowledge": "知识点"}.get(field, field)
+        diffs.append((f"{label}：" if label and not text.startswith(label) else "") + text)
+    row["open_diffs"] = list(dict.fromkeys(diffs))[:8]
+    row["open_summary"] = "；".join(row["open_diffs"])
     return row
 
 

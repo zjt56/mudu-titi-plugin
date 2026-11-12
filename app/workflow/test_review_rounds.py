@@ -188,6 +188,23 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertIn('source_comparison:string', prompt)
         self.assertIn('二审的 assessment 必须包含', prompt)
 
+    def test_prompt_forbids_option_types_without_letter_options(self):
+        """无 A–D 选项的填空题不得判单项填空；示例也不得诱导照抄单项填空/四个选项。
+
+        真实回归：Starter Unit 1 课时4 一审把「根据句意用所给词的适当形式填空」
+        6 题判成 单项填空/四个选项（原标签 单词拼写/适当形式），造成 12 项假差异。
+        """
+        for rid in ('labels', 'sample'):
+            with self.subTest(round=rid):
+                prompt = review_rounds._round_prompt(rid, [], '{}')
+                self.assertIn('【无选项不判选项题型·必须遵守】', prompt)
+                self.assertIn('不得因为要满足『子类必填』', prompt)
+                # 旧的示例把「单项填空/四个选项」放在必读句里，容易被照抄。
+                self.assertNotIn('『单项填空』有 四个选项 等', prompt)
+                # 子类必填本身仍然生效（不能为了消除误判而放松）。
+                self.assertIn('【子类必填·必须遵守】', prompt)
+
+
     def test_catalog_filter_retains_metadata_and_unknown_type_falls_back(self):
         from workbench import taxonomy
         catalog = json.loads(taxonomy.KNOWLEDGE_PATH.read_text())
