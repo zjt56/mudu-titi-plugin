@@ -29,11 +29,17 @@ def project_numbered(lines):
     projected = []
     for line in lines:
         tokens = printed_tokens(line)
-        if len(tokens) < 2:
+        # A continuation line can have no leading question number and still
+        # introduce the next item after a real column separator. Keep its prefix
+        # with the preceding item, then expose the column's printed number.
+        leading = _LEADING.search(line)
+        if not tokens or len(tokens) == 1 and leading:
             projected.append(line)
             continue
+        if not leading and line[:tokens[0][0]].strip():
+            projected.append(line[:tokens[0][0]].rstrip())
         for index, (offset, _number) in enumerate(tokens):
-            left = 0 if index == 0 else offset
+            left = 0 if index == 0 and leading else offset
             right = tokens[index + 1][0] if index + 1 < len(tokens) else len(line)
             projected.append(line[left:right].strip())
     return projected
