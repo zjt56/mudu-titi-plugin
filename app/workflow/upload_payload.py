@@ -919,6 +919,11 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
         builder.error("BATCH_ITEMS_INVALID", "batch.items 必须是非空数组")
         items = []
     builder.errors.extend(identity_errors(items))
+    if batch_dir is not None:
+        from .source_objects import layout_issues
+        layout = layout_issues(batch_dir, items)
+        builder.errors.extend(layout["errors"])
+        builder.warnings.extend(layout["warnings"])
     from .upload_numbering import project_batch
     numbering = project_batch(batch, batch_dir=batch_dir)
     builder.errors.extend(numbering["errors"])

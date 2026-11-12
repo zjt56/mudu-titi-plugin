@@ -27,7 +27,7 @@ function load(overrides = {}) {
     ...overrides,
   };
   vm.createContext(context);
-  return vm.runInContext(lifecycle + '\n({ backend, ensureBackend, spawnBackend, probeBackend, stopBackend, pickPort, reapStaleWorkbenchProcesses })', context);
+  return vm.runInContext(lifecycle + '\n({ backend, ensureBackend, spawnBackend, probeBackend, stopBackend, pickPort, reapStaleWorkbenchProcesses, backendWatchdogTick, startBackendWatchdog, stopBackendWatchdog })', context);
 }
 
 function fake(options = {}) {
@@ -291,4 +291,45 @@ test('lifecycle kills the process tree and reaps this plugin\'s orphans', () => 
   assert.match(host, /function reapStaleWorkbenchProcesses/);
   assert.match(host, /process\.kill\(pid, 'SIGTERM'\)/);
   assert.match(host, /start \+ 100/);
+});
+
+test('watchdog restarts a backend that exited without anyone asking', async () => {
+  const f = fake({ exitDelay: 5 });
+  try {
+    assert.equal((await f.ensureBackend()).ok, true);
+    const dead = f.backend.proc;
+    dead.exitCode = 1;
+    f.bound.delete(dead.port);
+    dead.emit('exit', 1, null);
+    assert.equal(f.backend.proc, null);
+    const result = await f.backendWatchdogTick();
+    assert.equal(result.ok, true);
+    assert.notEqual(f.backend.proc, null);
+    assert.notEqual(f.backend.proc, dead);
+    assert.equal(f.backend.ready, true);
+    assert.equal(f.children.length, 2);
+  } finally { await f.stopBackend(); }
+});
+
+test('watchdog leaves a healthy backend alone and spawns nothing', async () => {
+  const f = fake();
+  try {
+    await f.ensureBackend();
+    const current = f.backend.proc;
+    const result = await f.backendWatchdogTick();
+    assert.equal(result.ok, true);
+    assert.equal(result.skipped, 'alive');
+    assert.equal(f.backend.proc, current);
+    assert.equal(f.children.length, 1);
+  } finally { await f.stopBackend(); }
+});
+
+test('watchdog scheduler is idempotent and stops cleanly', () => {
+  const f = fake();
+  try {
+    assert.equal(f.startBackendWatchdog({ intervalMs: 60000 }), true);
+    assert.equal(f.startBackendWatchdog(), false);
+    f.stopBackendWatchdog();
+    assert.equal(f.startBackendWatchdog(), true);
+  } finally { f.stopBackendWatchdog(); }
 });

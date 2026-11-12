@@ -32,6 +32,27 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-12 | [2026-11-12-cell-media-warning.md](2026-11-12-cell-media-warning.md) | 表格单元格内图片平台无法表达：降为带码 warning（non_blocking）不再阻断 format_gate，图片仍按单元级附件交付、文字保持原文 |
+| 2026-11-12 | [2026-11-12-backend-watchdog.md](2026-11-12-backend-watchdog.md) | 工作台后端退出后无人拉起导致队列静默停摆：插件侧后端存活看门狗按 15s（失败退避至 60s）自动重启并续跑 |
+| 2026-11-12 | [2026-11-12-early-content-late-format-gates.md](2026-11-12-early-content-late-format-gates.md) | 前期只做内容体检：assemble 前置只留结构与选项、validate 不再跑上传预检、格式脚本集中到 format_gate 且只报告 |
+| 2026-11-12 | [2026-11-12-visual-image-option-evidence.md](2026-11-12-visual-image-option-evidence.md) | 图片选项题改用视觉/原文佐证判定，替代正则硬啃选项排版 |
+| 2026-11-12 | [2026-11-12-router-merge-device-providers.md](2026-11-12-router-merge-device-providers.md) | 路由补齐设备侧 provider（opencode-go 等 host provider 可选） |
+| 2026-11-12 | [2026-11-12-review-status-root-cause-hardening.md](2026-11-12-review-status-root-cause-hardening.md) | 审核状态深查与防复发 |
+| 2026-11-12 | [2026-11-12-review-blind-type-and-diff-display.md](2026-11-12-review-blind-type-and-diff-display.md) | 一审盲判误判修复（无选项题不得判单项填空）＋待审核差异展示 |
+| 2026-11-12 | [2026-11-12-preview-image-option-layout.md](2026-11-12-preview-image-option-layout.md) | 原卷预览：图片选项 A/B/C/D 按选项标签正确配对（图在前也认） |
+| 2026-11-12 | [2026-11-12-image-option-dict-binding.md](2026-11-12-image-option-dict-binding.md) | 修正图片选项题 A/B/C/D 选项图错位（dict 选项按 key 绑图） |
+| 2026-11-12 | [2026-11-12-assemble-leading-image-options.md](2026-11-12-assemble-leading-image-options.md) | 图片选项前置于标签（[IMG a]A.）导致选项解析错位 |
+| 2026-11-12 | [2026-11-12-answers-point-and-reading-banners.md](2026-11-12-answers-point-and-reading-banners.md) | 紧凑 Roman 答案键含 重要考点集训/创新阅读专练 版块横幅时无法唯一绑定 |
+| 2026-11-12 | [2026-11-12-answer-scope-blank-and-citation-recovery.md](2026-11-12-answer-scope-blank-and-citation-recovery.md) | 课时答案 scope 绑定卡点：正文空位证据保留与同值坐标补证 |
+| 2026-11-12 | [2026-11-12-a8-self-contained-and-source-marks.md](2026-11-12-a8-self-contained-and-source-marks.md) | A8 自包含组题豁免 + 组题原卷标记补入 stem + Symbol 字体误报 |
+| 2026-11-11 | [2026-11-11-word-extract-skip-ocr.md](2026-11-11-word-extract-skip-ocr.md) | Word 提取不再对嵌入图跑本地 OCR（改由视觉复核） |
+| 2026-11-11 | [2026-11-11-self-heal-retry-budget-loop.md](2026-11-11-self-heal-retry-budget-loop.md) | 自愈重试预算死循环导致整机卡死（修复） |
+| 2026-11-11 | [2026-11-11-knowledge-phonetic-group-and-typo-hints.md](2026-11-11-knowledge-phonetic-group-and-typo-hints.md) | 语音题组子题可空 + 完成句子禁语用 + 路径错字提示（装配/恢复链同口径） |
+| 2026-11-12 | [2026-11-12-advance-feedback.md](2026-11-12-advance-feedback.md) | 继续处理立即反馈请求回执、队列/等待/执行错误，超时只读对账且不重复提交 |
+| 2026-11-12 | [2026-11-12-draft-receipt-stability.md](2026-11-12-draft-receipt-stability.md) | 解析器输出等价时保留共享草稿原回执，修复答案在途绑定误失效；Windows 视觉中文路径固定 UTF-8 |
+| 2026-11-12 | [2026-11-12-native-layout-projection.md](2026-11-12-native-layout-projection.md) | 原生来源对象索引、合并表格预览、媒体分位置去重及最终逐格来源校验；不支持的单元格图片/嵌套表格明确报错 |
+| 2026-11-12 | [2026-11-12-answer-overall-matching.md](2026-11-12-answer-overall-matching.md) | 答案阶段保持整体文字匹配上下文，修复轮不再强制一题一模型调用；严格坐标契约与确定性补齐保留 |
+| 2026-11-12 | [2026-11-12-pdf-ocr-full-layout.md](2026-11-12-pdf-ocr-full-layout.md) | 上传 PDF 一律整卷 OCR 出 JSON 作 Word 版面参考；总开关/文字层/主源都不再跳过，Word 原文仍是权威 |
 | 2026-11-12 | [2026-11-12-band-aware-final-source-audit.md](2026-11-12-band-aware-final-source-audit.md) | 最终来源审计与语音导语独立重建共同消费当前视觉板块证据，修06组装身份和A8误报 |
 | 2026-11-12 | [2026-11-12-table-span-accuracy.md](2026-11-12-table-span-accuracy.md) | 表格识别保真：空白容忍的 Word 合并匹配、多段下划线空档归一、预览按真实 rowspan/colspan 渲染 |
 | 2026-11-12 | [2026-11-12-question-number-upload-design.md](2026-11-12-question-number-upload-design.md) | 题号新规适配设计：显式范围、来源三态、原卷题序与无号/重号兼容；尚未改运行代码 |
