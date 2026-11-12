@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-12 | [2026-11-12-band-aware-final-source-audit.md](2026-11-12-band-aware-final-source-audit.md) | 最终来源审计与语音导语独立重建共同消费当前视觉板块证据，修06组装身份和A8误报 |
 | 2026-11-12 | [2026-11-12-continuation-column-projection.md](2026-11-12-continuation-column-projection.md) | 续行右栏单个图片题号纳入共用解析投影，06批次重编号阻断正式复验通过 |
 | 2026-11-12 | [2026-11-12-source-proven-phonetic-choices.md](2026-11-12-source-proven-phonetic-choices.md) | 原卷证明的纯选项语音组保留空子题干，缺选项和改文仍严格拒绝 |
 | 2026-11-12 | [2026-11-12-word-visual-bands.md](2026-11-12-word-visual-bands.md) | Word图片A/B板块来源证据贯通结构、独立切片、答案与预览，真实三课时逐题复验 |

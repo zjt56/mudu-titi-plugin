@@ -570,7 +570,7 @@ def build(batch_dir, *, units=None):
                     from .shared_rubric import section_rubric, phonetic_section_rubric
                     rubric_source = (source.splitlines() if proof.get("line_basis") == "01_source/正文.txt"
                                      else cleaned_lines)
-                    rubric = (phonetic_section_rubric(rubric_source, unit)
+                    rubric = (phonetic_section_rubric(rubric_source, unit, band_evidence=evidence)
                               or section_rubric(rubric_source, proof.get("start_line"), unit.get("type") or ""))
                     if rubric:
                         proof["shared_rubric"] = rubric

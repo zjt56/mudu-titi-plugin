@@ -556,6 +556,21 @@ def _candidate_options(options) -> list[dict]:
     return normalized
 
 
+def _rebuild_source_units(root, structure, cleaned):
+    """Every source consumer uses the same current verified container windows."""
+    from . import lesson_bands, structure_gate
+    evidence = lesson_bands.for_text(root, cleaned)
+    sections = lesson_bands.annotate_sections(structure.get("sections") or [], evidence)
+    units = structure_gate._build_units(sections, structure.get("groups") or [], cleaned.splitlines())
+    # Match the gate's final canonical annotation, including its verified stop.
+    for unit in units:
+        section = unit.get("source_section") or {}
+        annotated = lesson_bands.annotate_sections([section], evidence)[0]
+        if annotated.get("lesson_band"):
+            unit["source_section"] = annotated
+    return units
+
+
 def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
     """把原卷的实词下划线与图片引用补回组装产物，避免模型把 `n____` 或表格图标磨掉。
 
@@ -572,7 +587,7 @@ def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
         return 0
     cleaned, _, _ = denoise.clean_body(source)
     lines = cleaned.splitlines()
-    fresh = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], lines)
+    fresh = _rebuild_source_units(root, structure, cleaned)
     # Confirmed units carry the AI-checked grouping and Word line spans. Prefer
     # those for assembly, so an OCR-informed grouping is not discarded by a
     # second deterministic reconstruction of the old candidate structure.
@@ -647,7 +662,7 @@ def apply_required_writing_stem(batch_dir: str | Path, batch: dict) -> int:
     except (OSError, ValueError):
         return 0
     cleaned, _, _ = denoise.clean_body(source)
-    fresh = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
+    fresh = _rebuild_source_units(root, structure, cleaned)
     required = {}
     for unit in fresh:
         if (unit.get("source_span", {}).get("number_binding") == "single_writing_section"
@@ -932,7 +947,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     every labeled option are checked at the corresponding actual number.
     This is deterministic text evidence, never a claim of visual review.
     """
-    from . import denoise, structure_gate
+    from . import denoise, structure_gate, lesson_bands
     from .extract import _plain, material_label
     from .preview import _strong_number, BARE_OPTION, SECTION
     root = Path(batch_dir)
@@ -940,7 +955,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     structure = json.loads((root / "01_source/structure.json").read_text(encoding="utf-8-sig"))
     confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
     cleaned, _, _ = denoise.clean_body(source)
-    fresh = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
+    fresh = _rebuild_source_units(root, structure, cleaned)
     by_numbers = {source_key(u): u for u in fresh}
     items = batch.get("items") or []
     issues, checked = [], []
@@ -1091,7 +1106,8 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
             bound, proof = _bound_source(confirmed_unit, source, cleaned, fresh)
             rubric_lines = source.splitlines() if proof.get("line_basis") == "01_source/正文.txt" else cleaned.splitlines()
             shared_rubric = (_rubric_lines(bound.splitlines(), unit.get("type") or "")
-                             or (phonetic_section_rubric(rubric_lines, confirmed_unit) if bound else [])
+                             or (phonetic_section_rubric(rubric_lines, confirmed_unit,
+                                                          band_evidence=lesson_bands.for_text(root, '\n'.join(rubric_lines))) if bound else [])
                              or section_rubric(rubric_lines, proof.get("start_line"), unit.get("type") or ""))
             for required in shared_rubric:
                 if _canonical_image_text(required) not in candidate_text:

@@ -288,7 +288,7 @@ def slice_range(lines: list[str], numbers) -> list[str]:
     return out
 
 
-def _scoped_source_slice(unit: dict, lines: list[str]) -> list[str]:
+def _scoped_source_slice(unit: dict, lines: list[str], *, batch_dir=None) -> list[str]:
     """Bind a scoped preview to its confirmed window, never a global number hit."""
     from .denoise import clean_body
     span = unit.get("source_span") or {}
@@ -319,7 +319,9 @@ def _scoped_source_slice(unit: dict, lines: list[str]) -> list[str]:
         return []
     if unit.get("unit_kind") == "group":
         from .shared_rubric import phonetic_section_rubric
-        selected = phonetic_section_rubric(lines, unit) + window
+        from . import lesson_bands
+        evidence = lesson_bands.for_text(batch_dir, "\n".join(lines)) if batch_dir is not None else {}
+        selected = phonetic_section_rubric(lines, unit, band_evidence=evidence) + window
     else:
         offset = compact.index(wanted)
         selected = window[owners[offset]:owners[offset + len(wanted) - 1] + 1]
@@ -352,7 +354,7 @@ def source_slice(batch_dir, numbers, lines: list[str] | None = None, *, unit_id=
             matches = [u for u in scoped if set(nums).issubset(u.get("numbers") or [])]
         if len(matches) != 1 or not set(nums).issubset(matches[0].get("numbers") or []):
             return []
-        return _scoped_source_slice(matches[0], lines)
+        return _scoped_source_slice(matches[0], lines, batch_dir=root)
     # A scoped batch without its confirmed binding cannot safely use the
     # legacy first-number heuristic (including a temporarily missing file).
     try:

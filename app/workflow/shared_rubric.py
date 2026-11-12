@@ -18,7 +18,7 @@ def instruction(line, kind=""):
                 or re.match(r"(?:将答案填写|答案写在|从每小题所给)", text))
 
 
-def phonetic_section_rubric(lines, unit):
+def phonetic_section_rubric(lines, unit, *, band_evidence=None):
     """Bind a whole scoped phonetic/legitimate unnumbered group's real heading.
 
     Keep the historical entry point shared by draft creation and source audit.
@@ -44,7 +44,8 @@ def phonetic_section_rubric(lines, unit):
     # Reconstruct the owner independently: persisted section end/span cannot
     # extend this instruction into the next exercise or answer appendix.
     from .sync_practice import heading_candidates
-    owners = [row for row in heading_candidates("\n".join(lines))
+    from .lesson_bands import annotate_sections
+    owners = [row for row in annotate_sections(heading_candidates("\n".join(lines)), band_evidence or {})
               if row["start_line"] == heading]
     if (len(owners) != 1 or owners[0]['type'] != unit.get('type')
             or owners[0]['kind'] != 'group'

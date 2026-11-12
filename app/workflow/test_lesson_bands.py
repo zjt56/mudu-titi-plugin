@@ -43,6 +43,43 @@ class LessonBandsTest(unittest.TestCase):
         with patch('workflow.visual_transport.route_identity', return_value=self.route):
             return bands.build(self.root, identify=self.identify, **kwargs)
 
+    def test_assembly_audit_and_phonetic_rubric_use_verified_banner_stop(self):
+        self.text = ('Unit 1 You and Me\n第一课时 Pronunciation\n[IMG a.png]\n'
+                     'Ⅰ.找出下列每组单词中画线部分读音不同的一项\n'
+                     '(　)1.A.make B.take C.father D.game\n[IMG b.png]\n'
+                     '阅读理解\nA short story.\n(　)1.What?\nA.One B.Two C.Three D.Four\n')
+        self.write('01_source/正文.txt', self.text)
+        self.build()
+        structure, _, _ = extract.infer_structure(self.text)
+        self.write('01_source/structure.json', structure)
+        from workflow import question_draft, question_content, phonetic_structure, preview
+        with patch('workflow.structure_ai.auto_classify', return_value={'ran': False}):
+            report = structure_gate.run_gate(self.root)
+        self.assertTrue(report['passed'], report['blockers'])
+        draft = question_draft.build(self.root)
+        self.assertEqual(draft['issues'], [])
+        first = draft['items'][0]
+        self.assertIn('找出下列每组', first['stem'])
+        self.assertEqual(first['material'], '')
+        self.assertNotIn('b.png', json.dumps(first))
+        confirmed = json.loads((self.root / '01_source/structure.confirmed.json').read_text())
+        for row, unit in zip(draft['items'], confirmed['units']):
+            row['question_type'] = unit['type']
+        checked = question_content.audit_batch_source(self.root, {'items': draft['items']})
+        self.assertTrue(checked['passed'], checked['issues'])
+        verified = phonetic_structure.verified_groups(self.root / '06_batch/batch.json')
+        self.assertEqual(phonetic_structure.shape(first, verified), (True, True))
+        view = preview.source_slice(self.root, [1], unit_id=first['unit_id'])
+        self.assertIn(first['stem'], '\n'.join(view))
+        self.assertNotIn('b.png', '\n'.join(view))
+        bad = copy.deepcopy(draft['items'])
+        bad[0]['source_section']['lesson_band']['label'] = '能力提升'
+        self.assertIn('BATCH_IDENTITY_MISMATCH', {e['code'] for e in
+            question_content.audit_batch_source(self.root, {'items': bad})['issues']})
+        # Loss of current media proof must not authorize the tightened window.
+        (self.root / '01_source/media/a.png').write_bytes(b'tampered')
+        self.assertFalse(question_content.audit_batch_source(self.root, {'items': draft['items']})['passed'])
+
     def test_canonical_names_are_exact_and_marker_consistent(self):
         for value in ('A 基础巩固', '**基础巩固**', '[IMG x.png]基础巩固[IMG y.png]'):
             self.assertEqual(bands.canonical_label(value), '基础巩固')
