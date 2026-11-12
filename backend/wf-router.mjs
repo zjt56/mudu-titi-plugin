@@ -138,9 +138,64 @@ function providerOverlay(file) {
   return out.join('\n').trimEnd();
 }
 /** Provider ids the route profile can actually serve, derived from the overlay
- * itself (llm-pi-ai provider map and llm-deepseek adapters). Host-only providers
- * such as a WorkBuddy relay are not in the overlay, so selecting one makes dsh
- * fail with NO_ADAPTER; the router must refuse it up front instead. */
+ * itself (llm-pi-ai provider map and llm-deepseek adapters). A provider that the
+ * device profile declares but the base bundle does not ship is merged in by
+ * makeProfile; anything still absent makes dsh fail with NO_ADAPTER, so the
+ * router refuses such a selection up front. */
+/** Provider sub-blocks (6-space keys under llm-pi-ai.providers) of a patch file. */
+function providerBlocks(file) {
+  const blocks = new Map();
+  if (!existsSync(file)) return blocks;
+  const lines = readFileSync(file, 'utf8').split(/\r?\n/);
+  let inRow = false;
+  let inProviders = false;
+  let current = null;
+  for (const line of lines) {
+    if (/^- /.test(line)) {
+      inRow = /^- id:\s*['"]?llm-pi-ai['"]?\s*(?:#.*)?$/.test(line);
+      inProviders = false;
+      current = null;
+      continue;
+    }
+    if (!inRow) continue;
+    if (/^\s{4}providers:\s*$/.test(line)) { inProviders = true; continue; }
+    if (!inProviders) continue;
+    const start = line.match(/^ {6}([A-Za-z0-9._-]+):\s*$/);
+    if (start) { current = start[1]; blocks.set(current, [line]); continue; }
+    if (current) {
+      if (line.trim() === '' || /^ {7,}\S/.test(line)) blocks.get(current).push(line);
+      else current = null;
+    }
+  }
+  return blocks;
+}
+/** Merge provider blocks missing from an overlay into its llm-pi-ai row.
+ * The device's own profile may declare providers (e.g. opencode-go) that the
+ * workflow base profile does not ship; without them the route patch has no
+ * adapter and dsh fails with NO_ADAPTER, so the selected model would be
+ * refused even though it is fully configured on this device. */
+function mergeProviders(overlay, extra) {
+  if (!extra || !extra.size) return overlay;
+  const lines = overlay.split(/\r?\n/);
+  let rowStart = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^- id:\s*['"]?llm-pi-ai['"]?\s*(?:#.*)?$/.test(lines[i])) { rowStart = i; break; }
+  }
+  if (rowStart === -1) return overlay;
+  let rowEnd = lines.length;
+  for (let i = rowStart + 1; i < lines.length; i += 1) {
+    if (/^- /.test(lines[i])) { rowEnd = i; break; }
+  }
+  const have = new Set();
+  for (let i = rowStart; i < rowEnd; i += 1) {
+    const name = lines[i].match(/^ {6}([A-Za-z0-9._-]+):\s*$/);
+    if (name) have.add(name[1]);
+  }
+  const inject = [];
+  for (const [name, block] of extra) if (!have.has(name)) inject.push(...block);
+  if (!inject.length) return overlay;
+  return [...lines.slice(0, rowEnd), ...inject, ...lines.slice(rowEnd)].join('\n').trimEnd();
+}
 function overlayProviders(patch) {
   const ids = new Set();
   let block = '';
@@ -162,7 +217,8 @@ function makeProfile(baseProfile, provider, model) {
   if (!baseDir) fail(`no base profile found under ${join(dshHome, 'profiles')}`);
   const source = join(baseDir, 'cordis.patch.yml');
   if (!existsSync(source)) fail(`base profile patch missing: ${source}`);
-  const overlay = providerOverlay(source);
+  const overlay = mergeProviders(providerOverlay(source),
+    providerBlocks(join(dshHome, 'profiles', 'desktop', 'cordis.patch.yml')));
   // Content-address the complete overlay, including provider endpoints/model
   // catalogs. Never reuse a copied desktop package.json or stale provider patch.
   const content = `${overlay}\n- id: agent-default-model\n  config:\n    provider: ${JSON.stringify(provider)}\n    model: ${JSON.stringify(model)}\n    reasoningEffort: null\n`;
