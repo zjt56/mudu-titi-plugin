@@ -85,9 +85,12 @@ test('流程图精修：紧凑两行节点名、方向箭头、已完成段用�
   assert.match(client, /it\.status === 'needs_review' \|\| it\.status === 'invalidated'/);
 });
 
-test('试卷审核列表：已结束的排在最前并标「待人工确认」', () => {
-  assert.match(client, /Number\(!!b\.flow_done\) - Number\(!!a\.flow_done\)/);
+test('试卷审核列表：按最新时间在最上面，待人工确认仍标出', () => {
+  assert.match(client, /function batchLatestTime\(b\)/);
+  assert.match(client, /sort\(\(a, b\) => batchLatestTime\(b\) - batchLatestTime\(a\)\)/);
   assert.match(client, /待人工确认/);
+  assert.match(server, /"created_at": manifest\.get\("created_at"\)/);
+  assert.match(server, /"updated_at": manifest\.get\("updated_at"\)/);
 });
 
 test('减文案：上传页冗余小字说明与冗长按钮文字已移除', () => {

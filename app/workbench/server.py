@@ -2319,6 +2319,9 @@ def _overview_uncached(name, folder):
             # 流程开始/完成绝对时间与总耗时（分钟）；审核页卡片展示完成时间与耗时。
             "flow_started_at": flow_started_at, "flow_finished_at": flow_finished_at,
             "flow_minutes": flow_minutes,
+            # 试卷审核列表按“最新”排序：完成/最近进度优先，其次批次更新时间。
+            "created_at": manifest.get("created_at"),
+            "updated_at": manifest.get("updated_at"),
             # 已写入云端上传暂存的批次视为完成，试卷审核列表不再展示。
             "uploaded": uploaded, "upload_pending_confirmation": upload_pending,
             "upload_status": upload}
