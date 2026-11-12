@@ -266,5 +266,46 @@ class LegacyFormatTest(unittest.TestCase):
         self.assert_refused(legacy_format.prepare(link))
 
 
+class SectionScopedIdentityTest(unittest.TestCase):
+    """同步练习课时题号每大题从 1 重排，身份键必须纳入题号作用域。
+
+    回归：Ⅰ.1 与 Ⅱ.1 都写作 numbers=[1]，旧实现只按题号做键，会把跨大题的
+    同一题号误判为「来源单元题号重复」，导致 repair_source_tables/options 连
+    预演都跑不动（同步练习册结构闸门 + 答案阶段反复卡）。
+    """
+
+    def test_identity_key_distinguishes_same_numbers_across_sections(self):
+        a = {"section_id": "sec-aaaa", "numbers": [1]}
+        b = {"section_id": "sec-bbbb", "numbers": [1]}
+        self.assertEqual(legacy_format._key(a), legacy_format._key(b))  # 纯题号相同
+        self.assertNotEqual(legacy_format._identity_key(a), legacy_format._identity_key(b))
+
+    def test_identity_key_falls_back_to_numbers_without_section(self):
+        row = {"numbers": [1]}
+        self.assertEqual(legacy_format._identity_key(row), (None, (1,)))
+
+    def test_source_units_accepts_number_restart_across_sections(self):
+        # 两个大题各自从 1 开始；旧实现第二次遇到 (1,) 就抛「来源单元题号重复」。
+        confirmed = {"units": [
+            {"section_id": "sec-aaaa", "numbers": [1], "unit_kind": "standalone"},
+            {"section_id": "sec-bbbb", "numbers": [1], "unit_kind": "standalone"},
+        ]}
+        structure = {"sections": [], "groups": []}
+        by_key, rebuilt, _ = legacy_format._source_units(confirmed, structure, "")
+        keys = set(by_key)
+        self.assertEqual(len(keys), 2)  # 两个作用域各自独立，不再合并/误判重复
+        self.assertIn(("sec-aaaa", (1,)), keys)
+        self.assertIn(("sec-bbbb", (1,)), keys)
+
+    def test_source_units_still_rejects_true_duplicate_within_section(self):
+        # 同一 section 内真正重复的题号仍必须报错，不能因作用域放宽而漏判。
+        confirmed = {"units": [
+            {"section_id": "sec-aaaa", "numbers": [1], "unit_kind": "standalone"},
+            {"section_id": "sec-aaaa", "numbers": [1], "unit_kind": "standalone"},
+        ]}
+        with self.assertRaisesRegex(ValueError, "来源单元题号重复"):
+            legacy_format._source_units(confirmed, {"sections": [], "groups": []}, "")
+
+
 if __name__ == "__main__":
     unittest.main()

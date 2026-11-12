@@ -130,8 +130,13 @@ class SyncSourceRegressionTest(unittest.TestCase):
                 self.assertTrue(reused['reused'])
                 self.assertIn('sync_audit', reused)
             with patch.object(sp, 'policy_fingerprint', return_value='policy-2'):
-                structure_ai.auto_classify(batch, invoke_fn=invoke, force=True)
-            self.assertEqual(len(calls), 2)
+                revalidated = structure_ai.auto_classify(batch, invoke_fn=invoke, force=True)
+            # Policy changes revalidate the retained source-bound candidate
+            # locally; they do not burn another identical model request.
+            self.assertTrue(revalidated['reused'])
+            marker = json.loads((batch / structure_ai.CLASSIFY_MARKER).read_text())
+            self.assertEqual(marker['sync_policy_sha256'], 'policy-2')
+            self.assertEqual(len(calls), 1)
             self.assertIn('大题出现位置候选', calls[0])
 
     def test_type_task_receives_rules_and_binds_rule_files(self):

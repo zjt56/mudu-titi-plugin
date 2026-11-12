@@ -1,9 +1,15 @@
-﻿# RULES — 规则与强调台账
+# RULES — 规则与强调台账
 
 ## 2026-11-12：Word图片板块由视觉辅助，答案按同源结构绑定
 
 用户明确“培优”即B能力提升，要求视觉辅助Word内容提取，并直接落地速度、质量、准确性及答案匹配优化。正文A/B横幅为图片，不能从答案区文字、文件名或宽高比猜正文分界。视觉读取真实图片，按原件/正文/所有候选媒体及当前模型路由绑定边界；结构、草稿、预览与答案共同消费，原文/原号/有效ID保留。答案必须证明课时/专题/板块/大题与全题号覆盖；错scope或已有陈旧/有问题视觉证据不回退数字串答。多图批量和字节+路由缓存，失败明确延期，视觉不编题不编答案。落地：lesson_bands、visual_transport、wf-vision、structure_gate/question_draft/upload_content与消费链路测试；根规则27补充。当前来源证明完整ABCD的纯选项语音组可保留原本空的子题干，缺来源/少选项/改文仍拒绝。
 
+## 2026-11-11：OCR 识别错误先查官方参数，不针对单页自行重排
+
+- 用户纠正：“它返回来的有问题，那说明就是识别的问题，你不应该自己再去修复这种东西，因为你下一篇内容又不一样了，你怎么修复？”并要求查官方识别设置。
+- OCR Markdown 沿用服务阅读顺序；通用修复保留脱敏原始响应、全部块字段及坐标/序号，不能把只保存文字当成版面识别完整接入。识别错序明确保留，禁止单页硬编码行置换或按坐标自排来冒充通用识别修复。当前临时行重排模块、映射及集成均撤销，批次经正常runner恢复原始OCR顺序后复验，结构仍阻断，未伪称完成。
+- 官方 jobs 文档的 optionalPayload 引用 VL 参数表，包含 useLayoutDetection、layoutThreshold、layoutNms、layoutUnclipRatio、layoutMergeBboxesMode；三个预处理/图表开关只是官方示例，不能当作全部能力。本地/自部署默认与托管1.6实际默认须分开核实，不擅发未文档参数或擅换模型。
+- 落地：根规则28、paddle_jobs.py、extract.py、structure_ai.py、sync_practice.py、app/docs/extraction.md；测试保留真实OCR错序失败与有效候选诊断，不按单页移行造通过。
 
 ## 2026-11-11 编号空格/空位号不是印刷题号（用户要求同类错误沉淀为约束）
 
@@ -428,3 +434,11 @@
 ## 2026-11-11：知识点「knowledge 非空」卡点属代码误判，按组题口径修复并强化维度/路径约束
 
 用户原话：「卡点诊断 批次：01七上…StarterUnit1Hello!第一课时Sectio … 知识点标签匹配：阶段失败 原因：knowledge must be a nonempty list of nonempty strings」「需要，并且把这个错误也加强到代码层面，然后增强约束」。规则：**整组题（有子题或 unit_kind=group）的知识点以组级为准，子题 knowledge 可空**——`agent_tasks._validate` 的 knowledge 与 assemble 两处前置校验都改用 `whole_unit_type(...) or is_group`，与权威校验 `taxonomy.check_question_labels` 的 `child_of_whole` 同口径；「语音题」是整组题（仅组级「语音」维度），子题留空正确，不得据此判失败。**维度范围代码强制**：完成句子/改错只 词汇·语法（禁语用/主题）、单词拼写 词汇·语法·语音、单项填空 +语用、补全对话 体裁·主题·语用、完形/语法选择/书面表达 仅 体裁·主题，越界即 `超出允许维度/范围` 阻断。**路径笔误可定位**：未解析知识点路径由 `taxonomy._closest_leaf` 报最近目录叶子提示（只提示不自动纠正、不放宽）。**装配/恢复同口径**：`restore_source_stems` 对材料已带齐空位题号的组题（补全对话等）子题题干强制 `______`，不抄后一行对白。落地：`app/workflow/agent_tasks.py::_validate(knowledge/assemble)`、`RULES["knowledge"]`、`app/workbench/taxonomy.py::_check_labels/_closest_leaf`、`app/workflow/question_content.py::restore_source_stems/_material_blank_numbers`、`app/prompts/roles/knowledge.md`；回归 `test_agent_tasks::test_phonetic_group_accepts_empty_child_knowledge`、`test_label_audit::test_completing_sentence_rejects_pragmatic_dimension/test_unknown_theme_path_reports_closest_leaf_typo_hint/test_phonetic_group_child_knowledge_may_be_empty`、`test_question_draft::test_shared_blank_dialogue_children_keep_shell_stem`。验证见 `2026-11-11-knowledge-phonetic-group-and-typo-hints.md`。
+
+## 2026-11-12：整卷题号不得用「上传单元序号」推断；独立题补 location「第N题」
+
+用户原话要点：「这是为了避免把『第几个审核/上传单元』误当成『原卷题号』。正确修复需要给 2024 试卷这些单元补上 numberStart / numberEnd。」规则：线上整卷档案的 `numberStart/numberEnd` 只认原卷印刷题号；页面在没有真实题号时回退显示 `paperOrder` 是设计，不得据此反推题号。插件侧：独立题（无子题、legacy 整卷批次）`location` 为空时按结构确认的 `number` 补成「第N题」，供远端 `inferred_paper_numbers` 建立范围；`书面表达`（无印刷数字题号，`number` 是装配续号）与 scoped 课时批次（同号分节重复）不补，已有 `location` 不覆盖。落地：`app/workflow/upload_payload.py::_Builder.item()`、`app/docs/upload-api.md`、`app/workflow/test_upload_payload.py`；线上 2024 卷数据修复见 `2026-11-12-2024-paper-number-ranges.md`，代码固化见 `2026-11-12-upload-paper-number-location.md`。
+
+## 2026-11-12：审核页知识点标签差异只展示末级
+
+用户原话：「试卷审核页面的知识点标签差异那里，标签只展示到子级，上一级都不需要展示，简洁一点。」规则：审核详情左栏「知识点标签」三行（原标签/一审/二审）正文只显示末级短名，完整路径放进 `title` 悬浮可查；**差异判定仍比较完整路径集合**，同名叶子不同分支不得因短名相同而漏判。落地：`lib/client.js::cmpRow/labelAuditPanels`、`backend/review-results.test.cjs`；验证见 `2026-11-12-review-knowledge-leaf-only.md`。

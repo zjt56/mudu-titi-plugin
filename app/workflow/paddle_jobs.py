@@ -141,11 +141,76 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def run_job(config, *, file_url=None, file_path=None, pages=None):
+def _redact(value, token):
+    """Keep response structure/content, but never persist credentials or URLs.
+
+    URL values (including signed asset URLs embedded in Markdown and map keys)
+    are usable only in memory while downloading. Even unknown signing schemes
+    are covered by removing the entire remote URL rather than a query allowlist.
+    """
+    if isinstance(value, dict):
+        return {_redact(str(key), token): (
+            "[REDACTED]" if re.search(
+                r"(?i)(token|authorization|api[_-]?key|password|secret|signature|credential|cookie|^ak$|^sk$)", str(key))
+            else _redact(item, token)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact(item, token) for item in value]
+    if isinstance(value, str):
+        value = value.replace(token, "[REDACTED]") if token else value
+        value = re.sub(r"https?://[^\s\"'<>]+", "[URL REDACTED]", value, flags=re.I)
+        value = re.sub(r"Bearer\s+[^\s\"'<>]+", "Bearer [REDACTED]", value, flags=re.I)
+        return re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|token|authorization)\s*[=:]\s*)[^\s,;\"'<>]+", r"\1[REDACTED]", value)
+    return value
+
+
+def _layout_blocks(layout):
+    """Adapt the documented PaddleOCR-VL prunedResult, never infer reading order.
+
+    Official schema: PaddleOCR/docs/version3.x/pipeline_usage/PaddleOCR-VL.en.md,
+    sections 2.2 and 4.3. parsing_res_list is already in service reading order;
+    block_order may be None. Coordinates retain their service units/scale.
+    """
+    pruned = layout.get("prunedResult")
+    raw_blocks = pruned.get("parsing_res_list", []) if isinstance(pruned, dict) else []
+    blocks, warnings = [], []
+    if not isinstance(raw_blocks, list):
+        raw_blocks = []
+        warnings.append("layout_blocks_invalid")
+    for index, block in enumerate(raw_blocks):
+        if not isinstance(block, dict):
+            warnings.append("layout_blocks_invalid")
+            continue
+        # Keep every provider field, including IDs, polygons and future fields.
+        item = dict(block)
+        for source, target in (("block_label", "type"), ("block_content", "text"),
+                               ("block_bbox", "bbox"), ("block_order", "order")):
+            if source in block:
+                item[target] = block[source]
+        item["service_index"] = index
+        blocks.append(item)
+    missing = sum(block.get("bbox") is None or block.get("bbox") == [] for block in blocks)
+    if not blocks or missing == len(blocks):
+        warnings.append("coordinates_absent")
+    elif missing:
+        warnings.append("coordinates_partial")
+    for block in blocks:
+        bbox = block.get("bbox")
+        if bbox is None or bbox == []:
+            continue
+        if (not isinstance(bbox, list) or len(bbox) != 4
+                or any(type(n) not in (int, float) or not math.isfinite(n) for n in bbox)
+                or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]):
+            warnings.append("coordinates_invalid")
+            break
+    return blocks, list(dict.fromkeys(warnings))
+
+
+def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consumer=None):
     """Submit once, poll to done, then fetch and normalize JSONL results.
 
-    Result/image URLs receive no Authorization header. Remote images are retained
-    as references, not fetched or represented as locally verified evidence.
+    Result/image URLs receive no Authorization header. Returned remote references
+    are redacted; recognize downloads assets before redaction via its internal
+    consumer. Downloaded images remain visually unverified evidence.
     """
     config = validate_config(config)
     token = _token(config)
@@ -245,17 +310,31 @@ def run_job(config, *, file_url=None, file_path=None, pages=None):
         if remaining <= 0:
             raise PaddleJobsError("timeout")
         time.sleep(min(config["poll_interval_seconds"], remaining))
-    normalized = []
+    return normalize_jsonl(raw, token=token, pages=pages, job_id=job_id,
+                           seconds=round(time.monotonic() - start, 3), model=config["model"],
+                           _image_consumer=_image_consumer)
+
+
+def normalize_jsonl(raw, *, token="", pages=None, job_id=None, seconds=None, model=None, _image_consumer=None):
+    """Reprocess saved service JSONL without submitting or downloading a job.
+
+    The returned raw_jsonl preserves every response field after credential/URL
+    redaction. Page selection affects normalized pages only, never raw evidence.
+    """
+    if not isinstance(raw, str):
+        raise PaddleJobsError("invalid_result")
+    normalized, raw_rows = [], []
     try:
-        for line in raw.replace(token, "[REDACTED]").splitlines():
+        for line in raw.splitlines():
             if not line.strip():
                 continue
             row = json.loads(line)
+            raw_rows.append(_redact(row, token))
             result = row["result"]
             layouts = result["layoutParsingResults"]
             if not isinstance(layouts, list) or not layouts:
                 raise ValueError()
-            for layout in layouts:
+            for layout_index, layout in enumerate(layouts):
                 markdown = layout["markdown"]
                 text = markdown["text"]
                 if not isinstance(text, str):
@@ -264,8 +343,12 @@ def run_job(config, *, file_url=None, file_path=None, pages=None):
                 output_images = layout.get("outputImages", result.get("outputImages", row.get("outputImages", {})))
                 if not isinstance(images, (dict, list)) or not isinstance(output_images, (dict, list)):
                     raise ValueError()
-                normalized.append({"page": len(normalized) + 1, "text": text, "method": "ocr", "blocks": [],
-                                   "images": images, "outputImages": output_images, "warnings": ["coordinates_absent", "remote_images_unverified"]})
+                blocks, warnings = _layout_blocks(layout)
+                if images or output_images:
+                    warnings.append("remote_images_unverified")
+                normalized.append({"page": len(normalized) + 1, "text": text, "method": "ocr", "blocks": blocks,
+                                   "images": images, "outputImages": output_images, "warnings": warnings,
+                                   "layout_source": {"jsonl_row": len(raw_rows), "layout_index": layout_index}})
     except (ValueError, KeyError, TypeError):
         raise PaddleJobsError("invalid_result") from None
     if pages is not None:
@@ -279,10 +362,18 @@ def run_job(config, *, file_url=None, file_path=None, pages=None):
         normalized = normalized[first - 1:last]
     if not normalized:
         raise PaddleJobsError("invalid_result")
-    return {"pages": normalized, "markdown": "\n\n".join(page["text"] for page in normalized),
-            "job_id": job_id, "seconds": round(time.monotonic() - start, 3),
-            "warnings": ["coordinates_absent", "remote_images_unverified"],
-            "provenance": {"backend": "paddle_jobs", "model": config["model"], "pages_requested": pages}}
+    result = {"pages": normalized, "job_id": job_id,
+              "seconds": seconds,
+              "warnings": list(dict.fromkeys(w for page in normalized for w in page["warnings"])),
+              "raw_jsonl": "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in raw_rows),
+              "provenance": {"backend": "paddle_jobs", "model": model, "pages_requested": pages,
+                             "block_order": "service_list_order", "coordinates": "service_units_unspecified",
+                             "layout_verified": False}}
+    # Only this internal consumer sees remote asset URLs, before redaction.
+    if _image_consumer is not None:
+        _image_consumer(result)
+    result["markdown"] = "\n\n".join(page["text"] for page in normalized)
+    return _redact(result, token)
 
 
 def _download_images(result, attempt, deadline):
@@ -357,16 +448,21 @@ def _download_images(result, attempt, deadline):
 
 def recognize(source, output_dir, *, config, pages=None, **kwargs):
     started = time.monotonic()
-    result = run_job(config, file_path=str(source), pages=pages)
     root = Path(output_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     attempt = Path(tempfile.mkdtemp(prefix="paddle-ocr-", dir=root))
-    media = _download_images(result, attempt, started + validate_config(config)["timeout_seconds"])
+    media = []
+    def consume_images(result):
+        media.extend(_download_images(result, attempt, started + validate_config(config)["timeout_seconds"]))
+    result = run_job(config, file_path=str(source), pages=pages, _image_consumer=consume_images)
     markdown, output = attempt / "result.md", attempt / "result.json"
+    raw_path = attempt / "raw-result.jsonl"
+    raw_path.write_text(result.pop("raw_jsonl"), encoding="utf-8")
     result.pop("markdown")
     markdown.write_text("\n\n".join(page["text"] for page in result["pages"]), encoding="utf-8")
     result["source"] = str(Path(source).resolve())
-    result["artifacts"] = {"attempt_dir": str(attempt), "markdown": str(markdown), "json": str(output), "images": media}
+    result["artifacts"] = {"attempt_dir": str(attempt), "markdown": str(markdown), "json": str(output), "images": media,
+                           "raw_jsonl": str(raw_path)}
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 

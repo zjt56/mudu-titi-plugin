@@ -179,6 +179,82 @@ class PaddleJobsTest(unittest.TestCase):
             if call[1].startswith("/media/") or call[1] == "/redirect-media":
                 self.assertNotIn("Authorization", call[2])
 
+    def test_structured_service_blocks_preserve_reading_order_and_raw_fields(self):
+        # Official response schema, also confirmed by GET of an existing done
+        # job: prunedResult.parsing_res_list; never order by the block bbox.
+        blocks = [
+            {"block_label": "text", "block_content": "Left bottom", "block_bbox": [10, 200, 80, 240],
+             "block_order": 1, "block_id": 7, "group_id": 3, "block_polygon_points": [[10, 200], [80, 240]]},
+            {"block_label": "table", "block_content": "<table>Right top</table>", "block_bbox": [100, 10, 200, 80],
+             "block_order": None, "block_id": 2, "future_field": {"kept": True}}]
+        self.result["result"]["layoutParsingResults"] = [{"markdown": {"text": "service markdown", "images": {}},
+            "prunedResult": {"width": 300, "height": 400, "parsing_res_list": blocks}}]
+        result = paddle_jobs.run_job(self.config, file_path=self.source)
+        page = result["pages"][0]
+        self.assertEqual(page["text"], "service markdown")
+        self.assertEqual([b["block_id"] for b in page["blocks"]], [7, 2])
+        self.assertEqual([b["service_index"] for b in page["blocks"]], [0, 1])
+        for source, actual in zip(blocks, page["blocks"]):
+            self.assertEqual({key: actual[key] for key in source}, source)
+            self.assertEqual(actual["text"], source["block_content"])
+            self.assertEqual(actual["type"], source["block_label"])
+            self.assertEqual(actual["bbox"], source["block_bbox"])
+            self.assertEqual(actual["order"], source["block_order"])
+        self.assertNotIn("coordinates_absent", result["warnings"])
+        self.assertFalse(result["provenance"]["layout_verified"])
+        raw = json.loads(result["raw_jsonl"])
+        self.assertEqual(raw["result"]["layoutParsingResults"][0]["prunedResult"]["width"], 300)
+        self.assertEqual(paddle_jobs.normalize_jsonl(result["raw_jsonl"])["pages"][0]["blocks"], page["blocks"])
+
+    def test_coordinate_warnings_reflect_missing_partial_and_invalid_data(self):
+        base = {"markdown": {"text": "legacy-compatible"}}
+        valid = {"block_bbox": [0, 0, 20, 30], "block_content": "text", "block_label": "text"}
+        for raw_blocks, expected in (([], "coordinates_absent"), ([valid, {"block_content": "missing"}], "coordinates_partial"),
+                                     ([{**valid, "block_bbox": [20, 0, 0, 30]}], "coordinates_invalid"),
+                                     ([{**valid, "block_bbox": [True, 0, 20, 30]}], "coordinates_invalid")):
+            raw = json.dumps({"result": {"layoutParsingResults": [{**base, "prunedResult": {"parsing_res_list": raw_blocks}}]}})
+            with self.subTest(expected=expected, blocks=raw_blocks):
+                result = paddle_jobs.normalize_jsonl(raw)
+                self.assertIn(expected, result["warnings"])
+                self.assertEqual(len(result["pages"][0]["blocks"]), len(raw_blocks))
+        legacy = paddle_jobs.normalize_jsonl(json.dumps({"result": {"layoutParsingResults": [base]}}))
+        self.assertEqual(legacy["pages"][0]["blocks"], [])
+        self.assertIn("coordinates_absent", legacy["warnings"])
+
+    def test_raw_jsonl_all_rows_survive_page_selection_and_credentials_are_redacted(self):
+        signed = self.origin + "/media/image.png?X-Amz-Signature=sign-secret&token=other-token"
+        self.result["unknown_service_field"] = {"authorization": "Bearer unknown-secret", "apiKey": "unknown-key",
+                                                 "nested": {"signature": "another-secret", "url": signed}}
+        page = self.result["result"]["layoutParsingResults"][0]
+        page["markdown"]["text"] = "![figure](" + signed + ") synthetic-test-token"
+        page["markdown"]["images"] = {"img.png": signed}
+        page["prunedResult"] = {"parsing_res_list": [{"block_content": "synthetic-test-token", "block_bbox": [0, 0, 1, 1]}]}
+        first = json.dumps(self.result)
+        self.result = first + "\n" + json.dumps({"result": {"layoutParsingResults": [{"markdown": {"text": "third page"}}]}})
+        result = paddle_jobs.recognize(self.source, self.root / "out", config=self.config, pages=2)
+        self.assertEqual([p["page"] for p in result["pages"]], [2])
+        raw_path = Path(result["artifacts"]["raw_jsonl"])
+        rows = [json.loads(line) for line in raw_path.read_text().splitlines()]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["result"]["layoutParsingResults"][0]["markdown"]["text"], "third page")
+        for path in (raw_path, Path(result["artifacts"]["json"]), Path(result["artifacts"]["markdown"])):
+            text = path.read_text()
+            for secret in ("synthetic-test-token", "sign-secret", "other-token", "unknown-secret", "unknown-key", "another-secret", "X-Amz-Signature"):
+                self.assertNotIn(secret, text)
+        self.assertIn("unknown_service_field", rows[0])
+
+    def test_signed_media_downloads_before_redaction_even_when_download_fails(self):
+        signed = self.origin + "/media/image.png?signature=private-signature"
+        self.result["result"]["layoutParsingResults"] = [{"markdown": {"text": "![figure](" + signed + ")", "images": {"figure.png": signed}},
+            "outputImages": {"bad": self.origin + "/redirect-media?token=unknown-secret"}}]
+        result = paddle_jobs.recognize(self.source, self.root / "out", config=self.config)
+        self.assertEqual(len(result["artifacts"]["images"]), 1)
+        self.assertTrue(any(call[1] == "/media/image.png?signature=private-signature" for call in self.calls))
+        self.assertIn("](media/page-0001-images-001.png)", Path(result["artifacts"]["markdown"]).read_text())
+        self.assertNotIn("private-signature", json.dumps(result))
+        self.assertNotIn("unknown-secret", json.dumps(result))
+        self.assertNotIn("private-signature", Path(result["artifacts"]["raw_jsonl"]).read_text())
+
     def test_private_config_becomes_live_without_environment_token(self):
         config_path = self.root / "private.json"
         key_path = self.root / "token"

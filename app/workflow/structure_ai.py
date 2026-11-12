@@ -347,6 +347,10 @@ def _classify_prompt(raw_text: str, candidate: dict, pdf_ocr=None) -> str:
         "题号numbers、题型type、题干或共享材料stem、source_span(start_line/end_line)，"
         "可用 source_parts 数组记录各部分：每项包含 kind、start_line、end_line，"
         "kind 仅取 question_number、stem、material、option、answer、explanation、heading。"
+        "stem 必须是 source_span 内唯一且连续的原文切片（仅忽略空白），不得将后行提前、重排对话、改写或补字。"
+        "source_parts 只记录真实源行及用途，其排列或 notes 不能证明跨栏顺序，不能据此重写原文。"
+        "每个窗口必须完全落在本大题标题之后、下一个大题之前；不要把上一容器标题（例如能力提升）或本节标题纳入材料窗口。"
+        "遇到错序或边界疑点保留真实源行并在 notes 点名单元、行号和缺少的证据，禁止自称修复或通过。"
         "独立题逐题一个单元；共享材料题组合成一个group。请区分大题标题、正文材料、"
         "题干、A-H选项、答案和解析；答案/解析不应伪装成题干。缺少题干/选项时保留可见材料，"
         "在notes说明，不要编造。返回 JSON：{\"status\":\"completed\",\"artifacts\":{\"structure\":{\"units\":[...]}},\"notes\":[],\"findings\":[]}，不要 markdown。行号从1开始。\n"
@@ -386,119 +390,153 @@ def sync_subtype(candidate: dict, start: int, qtype: str) -> str:
     return ""
 
 
-def _sanitize_classified(reply, raw_text: str, candidate: dict) -> list[dict]:
-    if not isinstance(reply, dict) or not isinstance(reply.get("units"), list):
+def _sanitize_classified(reply, raw_text: str, candidate: dict, *, diagnostics=None, quarantine=None) -> list[dict]:
+    """Validate independently, but expose formal units only for a complete result.
+
+    Quarantine is evidence, never an alternative downstream structure. In
+    particular, source_parts cannot prove a model's reordered stem authentic.
+    """
+    diagnostics = diagnostics if diagnostics is not None else []
+    quarantine = quarantine if quarantine is not None else []
+    if not isinstance(reply, dict) or not isinstance(reply.get("units"), list) or not reply["units"]:
+        diagnostics.append({"check": "UNITS_MISSING", "message": "结构响应缺少非空 units"})
         return []
     lines = raw_text.splitlines()
     scoped = sync_practice.looks_like_sync_practice(raw_text)
-    units, seen, occupied = [], set(), set()
-    for raw in reply["units"]:
+    units, indices, seen, occupied = [], [], set(), set()
+    conflicted = set()
+    visible_numbers = {int(m.group(1)) for line in lines if (m := NUMBER.match(_plain(line)))}
+    for index, raw in enumerate(reply["units"], 1):
+        def reject(check, message):
+            diagnostics.append({"unit_index": index, "numbers": raw.get("numbers") if isinstance(raw, dict) else None,
+                                "source_span": raw.get("source_span") if isinstance(raw, dict) else None,
+                                "check": check, "message": message})
         if not isinstance(raw, dict):
+            reject("UNIT_INVALID", "单元必须是对象")
             continue
         numbers = raw.get("numbers")
-        if not isinstance(numbers, list) or not numbers:
-            continue
         try:
-            nums = sorted({int(n) for n in numbers})
+            nums = sorted({int(n) for n in numbers}) if isinstance(numbers, list) else []
         except (TypeError, ValueError):
+            nums = []
+        if not nums or any(n < 1 for n in nums) or len(nums) != len(numbers):
+            reject("NUMBERS_INVALID", "numbers 必须为非空、正整数且不重复")
             continue
-        if any(n < 1 for n in nums) or len(nums) != len(numbers) or (not scoped and seen.intersection(nums)):
+        if not scoped and seen.intersection(nums):
+            reject("GLOBAL_NUMBER_DUPLICATE", f"非同步来源禁止跨单元重复题号：{sorted(seen.intersection(nums))}")
             continue
         kind = raw.get("unit_kind")
         if kind not in ("standalone", "group") or (kind == "standalone" and len(nums) != 1):
+            reject("UNIT_KIND_INVALID", "单独题必须仅含一个题号；unit_kind 仅允许 standalone/group")
             continue
-        qtype = str(raw.get("type") or "").strip()
-        stem = str(raw.get("stem") or "").strip()
+        qtype, stem = str(raw.get("type") or "").strip(), str(raw.get("stem") or "").strip()
         span = raw.get("source_span")
         if not qtype or not stem or not isinstance(span, dict):
+            reject("UNIT_FIELDS_MISSING", "type/stem/source_span 不得为空")
             continue
         start, end = span.get("start_line"), span.get("end_line")
-        if (isinstance(start, bool) or isinstance(end, bool) or
-                not isinstance(start, int) or not isinstance(end, int) or
-                not 1 <= start <= end <= len(lines)):
+        if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
+            reject("SOURCE_SPAN_INVALID", f"source_span 必须落在原文 1–{len(lines)} 行")
             continue
-        # Reject source-heading crossings before anchor parsing.
+        # A source-heading crossing is independently provable before parsing
+        # question anchors (OCR/LaTeX blanks may not be recognizable anchors).
+        # Preserve that actual boundary failure instead of hiding it behind a
+        # later QUESTION_NOT_FOUND and dropping the candidate from diagnostics.
         if scoped and kind == "group":
             from .structure_gate import _scope_windows
-            if any(start <= section["source_line"] <= end
-                   for section in _scope_windows(candidate.get("sections") or [], lines)):
-                return []
+            crossed = [section["source_line"] for section in _scope_windows(candidate.get("sections") or [], lines)
+                       if start <= section["source_line"] <= end]
+            if crossed:
+                reject("GROUP_CROSSES_SECTION", "题组来源窗口包含大题标题或跨越大题边界，必须完全位于所属标题之后")
+                diagnostics[-1].update(unit_indices=[index], source_line=crossed[0],
+                                       source_spans=[{"start_line": start, "end_line": end}])
+                continue
         positions = set(range(start, end + 1))
         if occupied.intersection(positions):
-            return []
-        # 课时同步：模型常只给出题型、把子类留空（如 单词拼写 → 汉语及首字母）。
-        # 用同一张大题的标题按确定性口径回填子类，判不出就保持空，不猜。
+            conflicted.update(i for i, u in enumerate(units)
+                              if max(start, u['source_span']['start_line']) <= min(end, u['source_span']['end_line']))
+            reject("SOURCE_WINDOWS_OVERLAP", "来源窗口与先前单元重叠")
+            diagnostics[-1]['unit_indices'] = [indices[i] for i in sorted(conflicted)] + [index]
+            continue
         subtype = str(raw.get("subtype") or "").strip()
         if scoped and not subtype:
             subtype = sync_subtype(candidate, start, qtype)
         source_chunk = "\n".join(lines[start - 1:end])
-        # The model chooses the range, never the stored wording. Map its exact
-        # non-whitespace characters back to the Word text so punctuation,
-        # spelling, formatting and line breaks remain source-authentic.
-        char_positions = [index for index, character in enumerate(source_chunk) if not character.isspace()]
-        compact = ''.join(source_chunk[index] for index in char_positions)
+        char_positions = [i for i, c in enumerate(source_chunk) if not c.isspace()]
+        compact = ''.join(source_chunk[i] for i in char_positions)
         compact_stem = _norm(stem)
         match_at = compact.find(compact_stem) if compact_stem else -1
         if match_at < 0 or compact.find(compact_stem, match_at + 1) >= 0:
+            reject("STEM_NOT_UNIQUE_SOURCE_SLICE", f"stem 不是第 {start}–{end} 行中唯一的连续原文切片；不得重排或改写")
             continue
         stem = source_chunk[char_positions[match_at]:char_positions[match_at + len(compact_stem) - 1] + 1]
         if scoped and kind == "group":
             stem = source_chunk.strip()
-        # When the paper visibly numbers a unit, its numbers must occur in that
-        # unit's source span. Unnumbered listening material stays a candidate.
-        visible_numbers = {int(m.group(1)) for line in lines
-                           if (m := NUMBER.match(_plain(line)))}
-        span_numbers = {int(m.group(1)) for line in lines[start - 1:end]
-                        if (m := NUMBER.match(_plain(line)))}
+        span_numbers = {int(m.group(1)) for line in lines[start - 1:end] if (m := NUMBER.match(_plain(line)))}
         if scoped:
             from .structure_gate import _source_members
             span_numbers = _source_members(lines[start - 1:end])
         unnumbered = scoped and span.get("number_binding") == "unnumbered_section"
         if not unnumbered and any(n in visible_numbers and n not in span_numbers for n in nums):
-            return []
+            reject("QUESTION_NOT_FOUND", f"题号未在本窗口定位：{sorted(set(nums) - span_numbers)}")
+            continue
         parts = raw.get('source_parts', [])
         valid_kinds = {'question_number', 'stem', 'material', 'option', 'answer', 'explanation', 'heading'}
-        if not isinstance(parts, list):
-            return []
-        normalized_parts = []
-        for part in parts:
-            if not isinstance(part, dict) or part.get('kind') not in valid_kinds:
-                return []
-            lo, hi = part.get('start_line'), part.get('end_line')
-            if (type(lo) is not int or type(hi) is not int or not start <= lo <= hi <= end):
-                return []
-            normalized_parts.append({'kind': part['kind'], 'start_line': lo, 'end_line': hi})
-        occupied.update(positions)
+        if not isinstance(parts, list) or any(
+                not isinstance(part, dict) or part.get('kind') not in valid_kinds
+                or type(part.get('start_line')) is not int or type(part.get('end_line')) is not int
+                or not start <= part['start_line'] <= part['end_line'] <= end for part in parts):
+            reject("SOURCE_PARTS_INVALID", "source_parts 的类型或行范围无效，必须完全包含在 source_span 内")
+            continue
+        normalized_parts = [{k: part[k] for k in ('kind', 'start_line', 'end_line')} for part in parts]
         binding = {}
-        if scoped and raw.get("source_span", {}).get("number_binding") == "unnumbered_section":
-            from .structure_gate import _source_members
+        if unnumbered:
             if _source_members(lines[start - 1:end]) or not any("[IMG " in line or "[TABLE" in line for line in lines[start - 1:end]):
-                return []
+                reject("UNNUMBERED_BINDING_INVALID", "无号图片绑定与本窗口原文不符")
+                continue
             binding = {"number_binding": "unnumbered_section", "printed_numbers": []}
         elif scoped and span.get("number_binding") == "single_writing_section" and "书面表达" in qtype and len(nums) == 1:
             binding = {"number_binding": "single_writing_section"}
-        units.append({"unit_kind": kind, "type": qtype, **({"subtype": subtype} if subtype else {}), "numbers": nums,
-                      **({"original_number": None, "printed_number": False} if binding else {}),
-                      "label": str(raw.get("label") or ""), "stem": stem,
-                      "source_span": {"start_line": start, "end_line": end,
-                                      "basis": "ai_classified", **binding},
-                      "source_parts": normalized_parts,
-                      "source_expected_options": int(raw.get("source_expected_options") or 0)})
-        if scoped and raw.get("identity_version") == "scoped-v1":
-            units[-1].update({key: raw[key] for key in ("identity_version", "section_id", "unit_id", "question_ids") if key in raw})
-        seen.update(nums)
-    if len(units) != len(reply["units"]):
-        return []
-    if scoped:
-        from .question_identity import assign_scoped
-        from .structure_gate import _scoped_source_errors
         try:
-            units = assign_scoped(units, lines, sections=candidate.get("sections"))
-            if _scoped_source_errors(units, candidate.get("sections") or [], lines):
-                return []
-        except ValueError:
-            return []
-    return units
+            expected_options = int(raw.get("source_expected_options") or 0)
+        except (ValueError, TypeError):
+            reject("EXPECTED_OPTIONS_INVALID", "source_expected_options 必须为整数")
+            continue
+        unit = {"unit_kind": kind, "type": qtype, **({"subtype": subtype} if subtype else {}), "numbers": nums,
+                **({"original_number": None, "printed_number": False} if binding else {}),
+                "label": str(raw.get("label") or ""), "stem": stem,
+                "source_span": {"start_line": start, "end_line": end, "basis": "ai_classified", **binding},
+                "source_parts": normalized_parts, "source_expected_options": expected_options}
+        if scoped and raw.get("identity_version") == "scoped-v1":
+            unit.update({key: raw[key] for key in ("identity_version", "section_id", "unit_id", "question_ids") if key in raw})
+        if scoped:
+            from .question_identity import assign_scoped
+            try:
+                unit = assign_scoped([unit], lines, sections=candidate.get("sections"))[0]
+            except ValueError as exc:
+                reject("QUESTION_IDENTITY_INVALID", str(exc))
+                continue
+        units.append(unit)
+        indices.append(index)
+        occupied.update(positions)
+        seen.update(nums)
+    invalid = set(conflicted)
+    if scoped:
+        from .structure_gate import _scoped_source_errors
+        for error in _scoped_source_errors(units, candidate.get("sections") or [], lines):
+            at = error.get("source_line")
+            owners = [i for i, u in enumerate(units) if type(at) is int
+                      and u['source_span']['start_line'] <= at <= u['source_span']['end_line']]
+            if error['code'] == 'QUESTION_IDENTITY_INVALID':
+                owners = list(range(len(units)))
+            diagnostics.append({"check": error['code'], **error,
+                                "unit_indices": [indices[i] for i in owners],
+                                "source_spans": [units[i]['source_span'] for i in owners]})
+            # Missing coverage elsewhere must not erase independently valid
+            # units. A failure inside a candidate's own window quarantines it.
+            invalid.update(owners)
+    quarantine.extend(u for i, u in enumerate(units) if i not in invalid)
+    return units if len(units) == len(reply['units']) and not diagnostics else []
 
 
 def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False) -> dict:
@@ -555,37 +593,81 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
             return {"ran": False, "reason": "结构归类路由不可用：" + str(exc)[:160]}
         invoke_fn = local_agent.invoke
     route_sha = hashlib.sha256(json.dumps(route_binding, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    if (isinstance(marker, dict) and marker.get("units") and marker.get("raw_sha256") == raw_sha
-            and marker.get("route_sha256") == route_sha
-            and marker.get("lesson_bands_sha256") == band_sha
-            and marker.get("candidate_sha256") == candidate_sha and marker.get('pdf_ocr_sha256', '') == pdf_sha
-            and marker.get('sync_policy_sha256') == policy_sha):
-        units = marker.get("units") or []
-        if sync_applicable:
-            units = _sanitize_classified({"units": units}, raw, candidate)
-        if units:
-            # 复用缓存时按当前口径重算留痕，避免旧 marker 的差异/标记结论过期。
-            return {"ran": True, "reused": True, "units": units,
-                    'sync_applicable': sync_applicable,
-                    'sync_audit': sync_practice.audit_units(units, raw) if sync_applicable else [],
-                    'sync_marks': sync_practice.audit_source_marks(units, raw) if sync_applicable else []}
-    run_root = batch / "workflow" / "structure-classify-attempts"
-    run_root.mkdir(parents=True, exist_ok=True)
-    run_dir = Path(tempfile.mkdtemp(prefix="structure-", dir=run_root))
-    try:
-        response = invoke_fn("Stage: structure_gate\nAgent: structure_gate\n" +
-                             _classify_prompt(raw, candidate, pdf_ocr), run_dir, config)
-        reply = response.get("response") if isinstance(response, dict) else response
-        artifacts = reply.get("artifacts", {}) if isinstance(reply, dict) else {}
-        structured = artifacts.get("structure", {}) if isinstance(artifacts, dict) else {}
-        units = _sanitize_classified(structured, raw, candidate) if reply.get("status") == "completed" else []
-    except Exception as exc:  # noqa: BLE001 - AI failure is non-destructive
-        return {"ran": False, "reason": "结构归类调用失败：" + str(exc)[:160]}
+    same_input = (isinstance(marker, dict) and marker.get("route_sha256") == route_sha
+                  and marker.get("raw_sha256") == raw_sha
+                  and marker.get("candidate_sha256") == candidate_sha
+                  and marker.get('pdf_ocr_sha256', '') == pdf_sha
+                  and marker.get('lesson_bands_sha256', hashlib.sha256(b'[]').hexdigest()) == band_sha)
+    reused = False
+    prior_response = None
+    if same_input and isinstance(marker.get('attempt'), str):
+        prior_path = (batch / marker['attempt'] / 'response.json').resolve()
+        if prior_path.is_relative_to(batch.resolve()):
+            prior = _load(prior_path)
+            if isinstance(prior, dict) and prior.get('status') == 'completed':
+                artifacts = prior.get('artifacts') or {}
+                prior_response = artifacts.get('structure') if isinstance(artifacts, dict) else None
+    if same_input and isinstance(marker.get("candidate_response"), dict):
+        # Revalidate the original response locally even after validator/policy
+        # changes. force means run the stage, not burn another identical request.
+        structured = marker["candidate_response"]
+        run_dir = batch / marker.get("attempt", "workflow/structure-classify-attempts")
+        reused = True
+    elif same_input and isinstance(prior_response, dict):
+        # Legacy rejected markers stored units=[] but kept the actual model
+        # response in the attempt directory. Missing formal units is not proof
+        # that the model never produced candidates.
+        structured = prior_response
+        run_dir = batch / marker['attempt']
+        reused = True
+    elif same_input and marker.get("units") and marker.get('sync_policy_sha256') == policy_sha:
+        structured = {"units": marker["units"]}
+        run_dir = batch / marker.get("attempt", "workflow/structure-classify-attempts")
+        reused = True
+    else:
+        run_root = batch / "workflow" / "structure-classify-attempts"
+        run_root.mkdir(parents=True, exist_ok=True)
+        run_dir = Path(tempfile.mkdtemp(prefix="structure-", dir=run_root))
+        try:
+            response = invoke_fn("Stage: structure_gate\nAgent: structure_gate\n" +
+                                 _classify_prompt(raw, candidate, pdf_ocr), run_dir, config)
+            reply = response.get("response") if isinstance(response, dict) and "response" in response else response
+            artifacts = reply.get("artifacts", {}) if isinstance(reply, dict) else {}
+            structured = artifacts.get("structure", {}) if isinstance(artifacts, dict) else {}
+            if not isinstance(reply, dict) or reply.get("status") != "completed":
+                return {"ran": False, "reason": "结构归类响应未完成"}
+        except Exception as exc:  # noqa: BLE001 - AI failure is non-destructive
+            return {"ran": False, "reason": "结构归类调用失败：" + str(exc)[:160]}
+    diagnostics, quarantine = [], []
+    units = _sanitize_classified(structured, raw, candidate, diagnostics=diagnostics, quarantine=quarantine)
+    unit_diagnostics = []
+    for index, item in enumerate(structured.get('units', []) if isinstance(structured, dict) else [], 1):
+        item = item if isinstance(item, dict) else {}
+        raw_span = item.get('source_span')
+        span = raw_span if isinstance(raw_span, dict) else {}
+        retained = any(u['source_span']['start_line'] == span.get('start_line')
+                       and u['source_span']['end_line'] == span.get('end_line') for u in (units or quarantine))
+        checks = [d for d in diagnostics if d.get('unit_index') == index or index in d.get('unit_indices', [])]
+        unit_diagnostics.append({'unit_index': index, 'numbers': item.get('numbers'), 'source_span': raw_span,
+                                 'status': ('accepted' if units else 'quarantined') if retained else 'rejected',
+                                 'checks': checks or [{'check': 'SOURCE_VALIDATED', 'message': '局部来源校验通过；整卷覆盖仍须独立通过'}]})
     marker_value = {"raw_sha256": raw_sha, "candidate_sha256": candidate_sha,
                     "pdf_ocr_sha256": pdf_sha, 'sync_policy_sha256': policy_sha,
-                    "lesson_bands_sha256": band_sha, "route_sha256": route_sha,
+                     "lesson_bands_sha256": band_sha, "route_sha256": route_sha,
+                    "validator_sha256": _sha(Path(__file__)),
                     'sync_applicable': sync_applicable,
-                    "units": units, "attempt": str(run_dir.relative_to(batch))}
+                    "units": units, "attempt": str(run_dir.relative_to(batch)),
+                    "candidate_response": structured, "quarantine_units": quarantine if not units else [],
+                    "diagnostics": diagnostics, "unit_diagnostics": unit_diagnostics,
+                    "repair_request": ({"status": "blocked_on_source_evidence", "retryable": False,
+                                        "instruction": "先修复有证据的来源/边界，再本地复验原候选；不得改写原件、标记通过或按新提示原样重试模型。",
+                                        "preserved_unit_ids": [u.get('unit_id') for u in quarantine],
+                                        "failed_units": [d for d in unit_diagnostics if d['status'] == 'rejected'],
+                                        "coverage_checks": diagnostics,
+                                        "heading_candidates": sync_practice.heading_candidates(raw) if sync_applicable else []}
+                                       if not units else None), "retryable": False,
+                    "failure_class": "source_binding" if not units else "",
+                    "status": "candidate" if units else "quarantined"}
     # 同步练习册：把题型/组题口径和 AI 结构对一遍，差异只留痕、不阻断（闸门仍以原卷证据为准）
     sync_audit = sync_practice.audit_units(units, raw) if units and sync_applicable else []
     if sync_audit:
@@ -595,7 +677,10 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
     if sync_marks:
         marker_value["sync_marks"] = sync_marks
     (batch / CLASSIFY_MARKER).write_text(json.dumps(marker_value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    return {"ran": True, "units": units, "sync_audit": sync_audit, 'sync_marks': sync_marks,
+    return {"ran": True, "reused": reused, "units": units, "sync_audit": sync_audit, 'sync_marks': sync_marks,
+            "quarantine_units": marker_value["quarantine_units"], "diagnostics": diagnostics,
+            "retryable": False, "failure_class": marker_value["failure_class"],
+            "unit_diagnostics": unit_diagnostics, "repair_request": marker_value['repair_request'],
             'sync_applicable': sync_applicable,
             "reason": "AI结构归类已校验" if units else "AI输出未通过结构证据校验"}
 

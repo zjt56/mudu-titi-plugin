@@ -203,6 +203,58 @@ class SelfHealTest(unittest.TestCase):
         self.assertFalse(result["changed"])
         invoke.assert_not_called()
 
+    def test_volatile_detail_does_not_reset_retry_budget(self):
+        # Regression: the retry signature used to include the raw failure detail,
+        # which drifts on every whole-paper rerun (different unit ids, killed
+        # subprocess exit codes, shard order). Each drift looked like new evidence
+        # and reset the budget to zero, so a deterministic blocker re-ran the whole
+        # stage forever — spawning dozens of headless processes that froze the host.
+        # Same class of failure must now accumulate one budget regardless of noise.
+        variant_a = "sec-0ed7068246aa3d4e-u21: scoped answer source is not uniquely bound; " \
+                    "sec-8a849c1f18e3dbda-u30: Agent subprocess failed (exit -15, exit)"
+        variant_b = "sec-1111111122223333-u5: scoped answer source is not uniquely bound; " \
+                    "sec-99999999eeeebbbb-u44: Agent subprocess failed (exit -9, exit)"
+        self.assertEqual(self_heal._failure_class_key(variant_a),
+                         self_heal._failure_class_key(variant_b))
+        # A genuinely different defect still earns a distinct budget.
+        self.assertNotEqual(
+            self_heal._failure_class_key(variant_a),
+            self_heal._failure_class_key(
+                "sec-0ed7068246aa3d4e-u21: knowledge label 超出允许维度"))
+
+        manifest = mf.load(self.batch)
+        mf.touch_stage(manifest, "review", mf.FAILED, notes="scoped answer source is not uniquely bound")
+        mf.save(self.batch, manifest)
+        # Repeated failures of the same class, each with a slightly different
+        # detail/shared retry evidence, must exhaust the budget instead of looping.
+        details = [
+            "sec-1111111122223333-u5: scoped answer source is not uniquely bound; exit -15",
+            "sec-2222222233334444-u6: scoped answer source is not uniquely bound; exit -9",
+            "sec-3333333344445555-u7: scoped answer source is not uniquely bound; exit -6",
+            "sec-4444444455556666-u8: scoped answer source is not uniquely bound; exit -3",
+        ]
+        clock = [10000.0]
+        cycle = iter(details)
+        with patch.object(self_heal, "_candidate",
+                          side_effect=lambda b, m: ("review", next(cycle))), \
+             patch.object(self_heal, "_retry_evidence", return_value={"inputs": "same", "code": "same"}), \
+             patch.object(self_heal, "_plan", return_value={"action": "record_only", "reason": "no safe edit"}), \
+             patch.object(self_heal.time, "time", side_effect=lambda: clock[0]):
+            statuses = []
+            for _ in range(len(details)):
+                clock[0] += 100000
+                result = self_heal.recover(self.batch)
+                statuses.append(result["status"])
+                # Executor reproduces the same class of failure with fresh noise.
+                state = mf.load(self.batch)
+                mf.touch_stage(state, "review", mf.FAILED, notes="scoped answer source is not uniquely bound")
+                mf.save(self.batch, state)
+        # One shared budget: it must reach retry_budget_exhausted, not stay requeued.
+        self.assertIn("retry_budget_exhausted", statuses, statuses)
+        ledger = self_heal._load(self.batch)
+        self.assertEqual(list(ledger["attempts"].values()), [len(details)],
+                         "volatile detail must not fork the retry budget")
+
 
 if __name__ == "__main__":
     unittest.main()

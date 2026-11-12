@@ -727,3 +727,53 @@ class NeverParkTest(unittest.TestCase):
         (batch / "01_source/structure.confirmed.json").write_text('{"units": [{"numbers": [1]}]}', encoding="utf-8")
         again = _heal._apply(batch, _mf.load(batch), "preassemble", "同样的错误", plan, 2, {"files": {}})
         self.assertIn(again["outcome"], ("upstream_escalated", "deferred_and_continuing"))
+
+
+class KnowledgeOutOfScopeSingleUnitTest(unittest.TestCase):
+    """knowledge 单题知识点越界（完成句子打语用/情景交际）应只重生成该题。
+
+    回归 03 批次形态：报错形如
+      ``sec-...-u21: Invalid knowledge labels: 题目：「完成句子」知识点超出允许维度…``
+    要求 self_heal._content_retry_scope 能把范围收敛到 u21 这一题；定位不到时
+    仍拒绝整卷模型重跑（content_retry_requires_scope）。
+    """
+
+    def _batch(self, units):
+        import tempfile
+        from pathlib import Path as _Path
+        from workflow import manifest as _mf
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        batch = _Path(tmp.name).resolve()
+        (batch / "01_source").mkdir(parents=True)
+        (batch / "01_source/structure.confirmed.json").write_text(
+            __import__("json").dumps({"units": units, "identity_version": "scoped-v1"},
+                                     ensure_ascii=False), encoding="utf-8")
+        _mf.save(batch, _mf.new_manifest("kb-scope", batch, {}, {}))
+        return batch
+
+    def _units(self):
+        def u(uid, num, qid):
+            return {"unit_id": uid, "unit_kind": "standalone", "numbers": [num],
+                    "section_id": "sec-abc", "question_ids": {str(num): qid},
+                    "source_section": {"title": "Ⅰ.完成句子", "ordinal": "Ⅰ.", "occurrence": 1}}
+        return [u("sec-abc-u13", 1, "sec-abc-q13"),
+                u("sec-abc-u21", 5, "sec-abc-q21"),
+                u("sec-abc-u25", 6, "sec-abc-q25")]
+
+    def test_single_unit_out_of_scope_is_the_only_target(self):
+        from workflow import self_heal as _heal
+        batch = self._batch(self._units())
+        detail = ("sec-abc-u21: Invalid knowledge labels: 题目：「完成句子」知识点超出"
+                  "允许维度/范围（词汇、语法）：['语用/情景交际']")
+        scope = _heal._content_retry_scope(batch, "knowledge", detail)
+        self.assertEqual(scope, ["sec-abc-u21"])  # 只这一题，且不误吞 u13/u25
+        self.assertEqual(_heal._content_retry_scope(batch, "knowledge", detail, unit_ids=["sec-abc-u21"]),
+                         ["sec-abc-u21"])
+
+    def test_no_locatable_unit_refuses_whole_paper_model_retry(self):
+        from workflow import self_heal as _heal
+        batch = self._batch(self._units())
+        # 报错里没有任何可定位的 unit_id：拒绝整卷模型重跑，绝不静默全卷。
+        with self.assertRaisesRegex(ValueError, "content_retry_requires_scope"):
+            _heal._content_retry_scope(batch, "knowledge", "Invalid knowledge labels: 超出允许维度")

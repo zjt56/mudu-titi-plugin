@@ -86,15 +86,28 @@ test('不再有单独的红色差异块：不一致直接在知识点标签里�
   assert.match(source, /kpDiff \? '差异已在上方「知识点标签」中标出。'/);
 });
 
-test('同名叶子不同完整路径必须显示差异与完整分支', () => {
+test('同名叶子不同完整路径：只显示末级，完整路径留在 title', () => {
   const d = detail([],'未覆盖');
   d.comparison.original.labels.knowledge = ['设题角度/阅读/细节理解'];
   d.comparison.rounds[0].checks[0].assessment.knowledge = ['主题/人与社会/细节理解'];
   assert.equal(hasKnowledgeDiff(d), true);
-  const rendered = text(labelAuditPanels(d));
+  const nodes = labelAuditPanels(d);
+  const rendered = text(nodes);
   assert.match(rendered, /不一致/);
-  assert.match(rendered, /设题角度\/阅读\/细节理解/);
-  assert.match(rendered, /主题\/人与社会\/细节理解/);
+  // 用户要求：知识点标签只展示到子级，上级不展示。
+  assert.doesNotMatch(rendered, /设题角度\/阅读\/细节理解/);
+  assert.doesNotMatch(rendered, /主题\/人与社会\/细节理解/);
+  assert.match(rendered, /细节理解/);
+  // 完整路径仍在 title 里，可悬浮查看分支。
+  const titles = [];
+  (function walk(node) {
+    if (node == null || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.props && node.props.title) titles.push(node.props.title);
+    (node.children || []).forEach(walk);
+  })(nodes);
+  assert.ok(titles.some((t) => t.includes('设题角度/阅读/细节理解')), titles.join(' | '));
+  assert.ok(titles.some((t) => t.includes('主题/人与社会/细节理解')), titles.join(' | '));
 });
 
 test('完整路径集合相同，顺序和重复项不产生差异', () => {

@@ -108,6 +108,16 @@ PDF 原生文字块有坐标；现有本机 `ocr_local.py` 返回的 OCR 结果�
 
 下游仍以现有阶段契约执行。若没有配置答案/听力/标签等执行器，提取结束后会如实停在对应阶段等待，不能将“复合提取已接入”解释为全流程入库已自动完成。
 
+## PaddleOCR 托管 jobs 的版面证据与参数边界
+
+`paddle_jobs` 使用官方 `/api/v2/ocr/jobs`，保留 `layoutParsingResults[].prunedResult.parsing_res_list` 的全部块字段与服务顺序，并提供 `type/text/bbox/order` 别名。独立 `raw-result.jsonl` 保存脱敏原始响应；令牌、凭据及远端签名 URL 不写入证据。PDF 提取页保留这些 OCR 块，原生 PDF 块另放 `native_blocks`；未声明尺度的 OCR 坐标不能冒充 PDF points。块存在不等于版面或阅读顺序已核验。
+
+OCR 返回的 Markdown 按服务给定的阅读顺序消费。不得针对某页手工调行、硬编码重排或按 bbox 自排来冒充识别修复。识别自身错序先核查官方参数及原始结果；结构验收保留原响应、有效隔离单元、失败单元与来源行范围，缺题结构不能交付下游；同输入确定性拒收先本地复验，不重复烧模型。Markdown `#` 标题在识别课时/大题时去除标记，但保存文字不改变；中考等非同步卷仍不允许全局重号。
+
+官方文档：[异步 jobs](https://ai.baidu.com/ai-doc/AISTUDIO/Mml7n69e7) 的 `optionalPayload` 链接到 [VL 参数表](https://ai.baidu.com/ai-doc/AISTUDIO/2mh4okm66)。版面相关字段包括 `useLayoutDetection`（检测与排序模块）、`layoutThreshold`、`layoutNms`、`layoutUnclipRatio`、`layoutMergeBboxesMode`。示例的三个预处理/图表开关不是完整参数表。当前适配器尚只发送这三个开关，未接入上述版面调参；服务已经返回版面检测图，不可据“未显式发送”判定服务未启用布局分析。托管文档旧版本表与当前 1.6 的实际默认值应分别核实，不能直接套用本地默认。
+
+[本地 Python/自部署文档](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/PaddleOCR-VL.en.md) 说明完整产线先分析版面阅读顺序，再识别区域并合并。`use_layout_detection` 本地有效默认启用；`layout_shape_mode` 是区域框形状，不是阅读顺序开关；没有已核实的独立 `useReadingOrder` 参数。检测框扩张、合并和去重影响分区，但不能保证修正所有跨栏错误；未经对应 jobs 文档/服务验证的参数不应直接发送，也不得擅换模型。
+
 ## 验证
 
 ```bash

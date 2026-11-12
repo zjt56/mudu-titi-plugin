@@ -210,9 +210,50 @@ class UploadPayloadTest(unittest.TestCase):
         for key in ("SOURCE_TYPE", "SOURCE"):
             self.assertIn("MISSING_" + key, self.codes(report))
         # 服务端对 location/version/authorization 有默认值：本地不再硬阻断，
-        # 只保留警告，避免为可选来源字段反复重跑。
-        self.assertEqual([w["code"] for w in report["warnings"]].count("SOURCE_FIELD_EMPTY"), 3)
+        # 只保留警告，避免为可选来源字段反复重跑。独立题的 location 会用原卷
+        # 印刷题号补成「第N题」，因此只剩 version/authorization 两条警告。
+        self.assertEqual([w["code"] for w in report["warnings"]].count("SOURCE_FIELD_EMPTY"), 2)
+        self.assertEqual(report["payload"]["items"][0]["location"], "第81题")
         self.assertNotIn("source_type", report["payload"]["items"][0])
+
+    def test_standalone_location_carries_printed_number_for_paper_order(self):
+        q = question()
+        q.pop("location")
+        report = self.build(batch(q))
+        self.assertTrue(report["passed"], report["errors"])
+        self.assertEqual(report["payload"]["items"][0]["location"], "第81题")
+
+    def test_existing_location_is_not_overwritten_by_number(self):
+        q = question()
+        q["location"] = "第一部分 第1题"
+        report = self.build(batch(q))
+        self.assertTrue(report["passed"], report["errors"])
+        self.assertEqual(report["payload"]["items"][0]["location"], "第一部分 第1题")
+
+    def test_writing_and_scoped_units_do_not_invent_location(self):
+        # 书面表达没有印刷数字题号：number 是装配续号，不能写成“第81题”。
+        writing = question()
+        writing.update(question_type="书面表达", number=81, numbers=[81])
+        writing["options"] = []
+        writing["answer"] = "参考范文"
+        writing["filterMetadata"] = {"subtypes": ["图文结合"], "difficultyValue": 0.65}
+        writing["knowledge"] = ["语篇体裁/记叙文/故事"]
+        writing.pop("knowledgeIds")
+        writing.pop("location")
+        report = self.build(batch(writing))
+        self.assertTrue(report["passed"], report["errors"])
+        self.assertNotIn("location", report["payload"]["items"][0])
+
+        # scoped 课时批次同号分节重复，题号不进入整卷档案。
+        scoped = question()
+        scoped.update(identity_version="scoped-v1", unit_id="u21", id="u21", section_id="s1",
+                      numbers=[21], number=21, question_id="q21", question_ids={"21": "q21"},
+                      source_section={"title": "Ⅰ. 单项填空", "ordinal": "Ⅰ", "context": "第一课时",
+                                      "occurrence": 1})
+        scoped.pop("location")
+        report = self.build(batch(scoped))
+        self.assertTrue(report["passed"], report["errors"])
+        self.assertNotIn("location", report["payload"]["items"][0])
 
     def test_mock_metadata_and_year_must_be_truthful(self):
         q = question()

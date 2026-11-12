@@ -76,7 +76,7 @@
 
     **图片板块与答案共同归属**：正文A基础巩固/B能力提升为图片时，用当前所选Harness模型看图并将原件/正文/全部候选媒体摘要及边界存证；不从附录反推正文、不按文件名或宽高比猜板块。边界同源消费到结构、独立切片、答案和预览，保留有效身份/原题号；Pronunciation专题不继承前A/B。答案必须核对完整课时/专题/板块/大题序列及每节全题号覆盖，错scope、已存在但过期或partial的问题证据不能退回数字猜配。视觉不生成正文/答案，多图批量和字节+实际路由缓存，失败短暂延期避免紧邻重复。见`lesson_bands.py`、`visual_transport.py`、`source_anchors.py`、`docs/sync-practice.md`（2026-11-12用户确认并授权落地）。
 
-28. **提取来源优先级固定为 Word > 可用文字层 PDF > 扫描/OCR**：同批原卷同时有 Word/PDF 时选 Word 为主源；PDF 逐页优先使用合格文字层，质量不足才转 OCR，不覆盖已有 Word 原文；缺失答案/解析/大意仍遵守规则22的有证据兜底。实际来源及 PDF 页级提取方式记录到 `01_source/source-policy.json` 与提取报告，不改历史批次。落地：`app/workflow/source_policy.py`、`extract.py`、`app/workbench/server.py`。
+28. **提取来源优先级固定为 Word > 可用文字层 PDF > 扫描/OCR**：同批原卷同时有 Word/PDF 时选 Word 为主源；PDF 逐页优先使用合格文字层，质量不足才转 OCR，不覆盖已有 Word 原文；缺失答案/解析/大意仍遵守规则22的有证据兜底。实际来源及 PDF 页级提取方式记录到 `01_source/source-policy.json` 与提取报告，不改历史批次。**OCR 顺序由识别服务负责**：完整保留脱敏原始响应、版面块、坐标与服务阅读顺序，消费 Markdown 不自行重排；识别自身错序先查官方版面/排序参数及识别链路，不针对单页手工调行、硬编码或自创重排来冒充通用修复。版面块存在不证明顺序正确，未完整验收的结构候选只能隔离留证，不能伪造整卷通过。落地：`app/workflow/source_policy.py`、`extract.py`、`paddle_jobs.py`、`structure_ai.py`、`app/workbench/server.py`，说明见 `app/docs/extraction.md`。
 
 29. **AI运维消息固定在下方区域、内部上下滚动**：消息数量不得撑高面板或上推流程图；工具栏与状态保持可见，重复提示合并，用户上滑查看时不得被轮询拉回底部。落地：`lib/client.js::OperationsPanel`、`backend/operations-ui.test.cjs`。
 

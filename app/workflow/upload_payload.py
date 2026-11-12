@@ -632,6 +632,17 @@ class _Builder:
             data["type"] = TYPE_ALIASES.get(data["type"], data["type"])
         if isinstance(data.get("source_type"), str):
             data["source_type"] = SOURCE_ALIASES.get(data["source_type"], data["source_type"])
+        # 整卷题序：独立题的 number 是原卷印刷题号（不是上传单元序号），但平台
+        # questions 没有题号列，试卷档案只从子题号或 location 的「第 N 题」推断。
+        # 空 location 时补成「第N题」，避免线上整卷档案把单元序号当题号显示。
+        # 书面表达通常无印刷数字题号（number 是装配续号），不得据此编造；
+        # scoped 课时批次同号分节重复，也不参与整卷档案。
+        if (not child and not data.get("subquestions")
+                and not data.get("identity_version")
+                and not _nonempty(data.get("location"))
+                and _positive(data.get("number"))
+                and data.get("type") != "书面表达"):
+            data["location"] = f"第{data['number']}题"
         # 用户规则：缺答案/缺解析不阻断，显式填「无答案」「无解析」占位。
         if not _nonempty(data.get("answer")) and not (
                 not child and data.get("unit_kind") == "group" and data.get("subquestions")):

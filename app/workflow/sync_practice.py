@@ -43,7 +43,10 @@ _ANSWER_ROW = re.compile(
 def plain_text(text: str) -> str:
     """只为识别去掉原生提取的字符格式；不改源文件或来源坐标。"""
     value = re.sub(r"\[IMG\s+[^\]]*\]", "", str(text or ""))
-    return re.sub(r"</?(?:u|sup|sub|b|strong|i|em)\b[^>]*>", "", value).replace("**", "")
+    value = re.sub(r"</?(?:u|sup|sub|b|strong|i|em)\b[^>]*>", "", value).replace("**", "")
+    # PDF OCR emits ATX headings. Strip formatting only in this recognition
+    # copy; original wording and 1-based source coordinates remain untouched.
+    return re.sub(r"^\s{0,3}#{1,6}[ \t]+|[ \t]+#+[ \t]*$", "", value)
 
 
 def normalize(title: str) -> str:

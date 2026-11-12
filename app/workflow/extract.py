@@ -701,7 +701,13 @@ def _pdf(source, out, config, ocr_result=None, ocr_warning=None, ocr_wait=None):
             continue
         page["native_text"] = page.get("text", "")
         page["native_blocks"] = page.get("blocks", [])
-        page["blocks"] = []
+        # OCR boxes belong to the OCR image coordinate system, never to the
+        # native PDF points. Preserve both sources without relabeling boxes.
+        page["blocks"] = recognized.get("blocks") or []
+        page["ocr_coordinate_system"] = recognized.get("coordinate_system", "unspecified")
+        for key in ("layout", "outputImages", "warnings"):
+            if key in recognized:
+                page["ocr_" + key] = recognized[key]
         page["text"] = recognized["text"]
         page["method"] = "ocr"
     result["warnings"] = warnings

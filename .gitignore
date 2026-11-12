@@ -41,3 +41,4 @@ app/audio/vendor/ffmpeg/
 
 # DSH office 预览/渲染临时目录（每次运行随机后缀，属本机产物）
 /.dsh-office-*/
+app/workflow/local-agent.json.bak-*

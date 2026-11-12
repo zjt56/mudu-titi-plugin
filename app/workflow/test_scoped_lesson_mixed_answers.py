@@ -375,5 +375,54 @@ class MixedCompactLessonAnswersTest(unittest.TestCase):
         self.assertIsNone(answers_direct.build_payload(self.batch))
 
 
+class CompactAnswerGrammarTest(unittest.TestCase):
+    """Regression: Roman keys mixing whole-task ranges and single items, and
+    cloze material inline blank markers must not double-count printed anchors.
+
+    Real batch 03（七上·课时A计划 Starter Unit 1 课时3 Section B）regressed here:
+    附录 ``Ⅳ.1~5 BDBCA　6.D`` and ``Ⅱ.1~5 ACABD　6~10 DDBAB`` were parsed as an
+    invalid block, so every unit sharing that skeleton raised "scoped answer
+    source scope unbound: duplicate or malformed compact answer block".
+    """
+
+    def test_range_plus_single_item_parses(self):
+        from workflow.upload_content import _answer_items
+        self.assertEqual(_answer_items('1~5 BDBCA\u30006.D'),
+                         [(1, 'B'), (2, 'D'), (3, 'B'), (4, 'C'), (5, 'A'), (6, 'D')])
+        self.assertEqual(_answer_items('1~5 ACABD\u30006~10 DDBAB'),
+                         [(1, 'A'), (2, 'C'), (3, 'A'), (4, 'B'), (5, 'D'),
+                          (6, 'D'), (7, 'D'), (8, 'B'), (9, 'A'), (10, 'B')])
+
+    def test_pure_range_and_numbered_items_unchanged(self):
+        from workflow.upload_content import _answer_items
+        self.assertEqual(_answer_items('1~5 EFAGB'),
+                         [(1, 'E'), (2, 'F'), (3, 'A'), (4, 'G'), (5, 'B')])
+        self.assertEqual(_answer_items('1.great\u30002.spell\u30003.bell'),
+                         [(1, 'great'), (2, 'spell'), (3, 'bell')])
+        self.assertEqual(_answer_items('4.do you spell\u30005.How is;fine/OK;thank you'),
+                         [(4, 'do you spell'), (5, 'How is;fine/OK;thank you')])
+
+    def test_malformed_ranges_still_rejected(self):
+        from workflow.upload_content import _answer_items
+        for text in ('1~2 A', '1~5 A', '1.A\u30001.B', 'Hello world 3.x'):
+            with self.subTest(text=text):
+                self.assertEqual(_answer_items(text), [])
+
+    def test_cloze_blank_markers_not_double_counted(self):
+        from workflow.upload_content import _printed_item_anchors
+        lines = [
+            'Good morning.That\u2019s the <u>\u30001\u3000</u>.Let\u2019s have our <u>\u30002\u3000</u> now.',
+            '(\u3000)1.A.bell\tB.section',
+            '(\u3000)2.A.room\tB.water',
+        ]
+        counts = {}
+        for _, n in _printed_item_anchors(lines):
+            counts[n] = counts.get(n, 0) + 1
+        self.assertEqual(counts, {1: 1, 2: 1})
+        # Literal duplicates on one line must still be visible to the caller.
+        dup = [n for _, n in _printed_item_anchors(['1.A\u30001.B'])]
+        self.assertEqual(dup, [1, 1])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1050,6 +1050,49 @@ def _retry_evidence(batch, manifest, stage_id):
                         for name in ("self_heal.py", "auto.py", "manifest.py")}}
 
 
+_VOLATILE_FAILURE_PATTERNS = (
+    # Unit / section ids and question numbers differ between reruns of the same
+    # class of defect and must not fork the retry budget.
+    re.compile(r"sec-[0-9a-f]{8,}-u\d+", re.IGNORECASE),
+    re.compile(r"sec-[0-9a-f]{8,}", re.IGNORECASE),
+    re.compile(r"-q\d+"),
+    # Subprocess exit codes / killed markers are execution noise, not evidence.
+    re.compile(r"exit -?\d+"),
+    re.compile(r"exit\s*[:=]?\s*-?\d+"),
+    # Timestamps and line/offset numbers drift between runs.
+    re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)"),
+    re.compile(r"第\d+行"),
+    re.compile(r"\bline\s*\d+", re.IGNORECASE),
+    # JSON body content (per-unit evidence blobs) is the most volatile part.
+    re.compile(r"\[\[\{.*"),
+    re.compile(r"\[\{.*"),
+)
+
+
+def _failure_class_key(detail):
+    """Normalize a failure detail into a stable *class* key for retry budgeting.
+
+    The retry budget must survive reruns of the same defect. Only the shape of
+    the failure (which checker codes / reasons recur) counts; accidental
+    differences between rounds — unit ids, exit codes, timestamps, shard order,
+    embedded evidence JSON — must not look like new evidence, or a deterministic
+    blocker reruns the whole stage forever (硬规则 2/19). Real changes are still
+    caught by ``_retry_evidence`` (inputs/code), which stays in the signature.
+    """
+    text = str(detail or "")
+    # Collapse any embedded structured error payload to its checker codes/reasons.
+    codes = sorted(set(re.findall(r'"(?:code|check|failure_class)"\s*:\s*"([^"]+)"', text)))
+    reasons = sorted(set(re.sub(r"\s+", " ", m).strip().lower() for m in
+                         re.findall(r'"(?:reason|message)"\s*:\s*"([^"]+)"', text)))
+    for pattern in _VOLATILE_FAILURE_PATTERNS:
+        text = pattern.sub("<x>", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    # Keep the classification short and order-stable so shard order cannot drift.
+    head = text[:400]
+    return json.dumps({"codes": codes[:8], "reasons": reasons[:8], "shape": head},
+                      sort_keys=True, ensure_ascii=False)
+
+
 def recover(batch_dir, *, config: dict | None = None) -> dict:
     """Detect -> model judgment -> checked local action; actual retry runs later."""
     batch = Path(batch_dir).resolve()
@@ -1087,8 +1130,20 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
     ledger, now = _load(batch), time.time()
     # New evidence/code opens a fresh strategy budget and bypasses old cooldowns.
     # A requeue's timestamps and model explanation cannot reset this identity.
+    #
+    # The signature must key on the stable failure *class* (stage + normalized
+    # failure reasons + actual inputs/code), never on the volatile raw detail.
+    # Every whole-paper rerun produces slightly different detail text (shard
+    # order, which units happened to fail, killed-subprocess exit codes), so a
+    # detail-keyed signature reset the retry budget to zero each round and the
+    # stage reran forever — burning dozens of headless processes until the host
+    # froze. `_retry_evidence` already isolates real input/code changes; the
+    # remaining dimension is *which* failure, normalized so serialization noise
+    # cannot masquerade as a brand-new problem (硬规则 2/19).
     evidence = json.dumps(_retry_evidence(batch, manifest, stage_id), sort_keys=True)
-    signature = hashlib.sha256((stage_id + "\n" + detail + "\n" + evidence).encode("utf-8")).hexdigest()[:16]
+    failure_class = _failure_class_key(detail)
+    signature = hashlib.sha256(
+        (stage_id + "\n" + failure_class + "\n" + evidence).encode("utf-8")).hexdigest()[:16]
     attempt_key = stage_id + ":" + signature
     if _close_interrupted_diagnosis(ledger, attempt_key, stage_id, signature):
         # The interrupted claim may have left a cooldown behind; the stage still

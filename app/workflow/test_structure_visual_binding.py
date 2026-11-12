@@ -17,12 +17,7 @@ class StructureVisualBindingTest(unittest.TestCase):
         source.mkdir()
         (source / '正文.txt').write_text('一、单项选择\n1. Test? A. Yes B. No\n', encoding='utf-8')
         (source / 'structure.json').write_text('{"sections": []}', encoding='utf-8')
-        self.reply = {'status': 'completed', 'artifacts': {'structure': {'units': [
-            {'unit_kind': 'standalone', 'type': '单项填空', 'numbers': [1],
-             'stem': '1. Test? A. Yes B. No',
-             'source_span': {'start_line': 2, 'end_line': 2}}
-        ]}}}
-        self.invoke = Mock(return_value={'response': self.reply})
+        self.invoke = Mock(return_value={'status': 'completed', 'artifacts': {'structure': {'units': []}}})
 
     def classify(self, config=None, **kwargs):
         return structure_ai.auto_classify(self.batch, invoke_fn=self.invoke, config=config, force=True, **kwargs)
@@ -33,9 +28,9 @@ class StructureVisualBindingTest(unittest.TestCase):
             same = self.classify({'settings': {'endpoint': 'local', 'temperature': 0}, 'model': 'A'})
             changed = self.classify({'model': 'B', 'settings': {'temperature': 0, 'endpoint': 'local'}})
             changed_settings = self.classify({'model': 'B', 'settings': {'temperature': 1, 'endpoint': 'local'}})
-        self.assertTrue(same.get('reused', False))
-        self.assertFalse(changed.get('reused', False))
-        self.assertFalse(changed_settings.get('reused', False))
+        self.assertTrue(same['reused'])
+        self.assertFalse(changed['reused'])
+        self.assertFalse(changed_settings['reused'])
         self.assertEqual(self.invoke.call_count, 3)
         self.assertTrue(self.invoke.call_args.args[0].startswith('Stage: structure_gate\nAgent: structure_gate\n'))
         marker = json.loads((self.batch / structure_ai.CLASSIFY_MARKER).read_text())
@@ -50,10 +45,10 @@ class StructureVisualBindingTest(unittest.TestCase):
              patch('workflow.visual_transport.route_identity', return_value=route) as selected:
             structure_ai.auto_classify(self.batch, force=True)
             same = structure_ai.auto_classify(self.batch, force=True)
-            self.assertTrue(same.get('reused', False))
+            self.assertTrue(same['reused'])
             route['model'] = 'B'
             changed = structure_ai.auto_classify(self.batch, force=True)
-            self.assertFalse(changed.get('reused', False))
+            self.assertFalse(changed['reused'])
             self.assertEqual(self.invoke.call_count, 2)
             selected.assert_called_with(stage='structure_gate')
             marker_before = (self.batch / structure_ai.CLASSIFY_MARKER).read_bytes()
@@ -69,15 +64,15 @@ class StructureVisualBindingTest(unittest.TestCase):
         import sys
         script = self.batch / 'fake_agent.py'
         script.write_text('import sys\nsys.stdin.read()\nprint(' + repr(json.dumps(
-            self.reply)) + ')\n', encoding='utf-8')
+            self.invoke.return_value)) + ')\n', encoding='utf-8')
         config = {'provider': 'command', 'command': [sys.executable, str(script)], 'timeout_seconds': 10}
         with patch('workflow.visual_transport.route_identity', side_effect=RuntimeError('Harness unavailable')) as route, \
              patch('workflow.local_agent._agent_lock', side_effect=lambda *a, **kw: nullcontext()):
             first = structure_ai.auto_classify(self.batch, config=config, force=True)
             second = structure_ai.auto_classify(self.batch, config=config, force=True)
         self.assertTrue(first['ran'])
-        self.assertFalse(first.get('reused', False))
-        self.assertTrue(second.get('reused', False))
+        self.assertFalse(first['reused'])
+        self.assertTrue(second['reused'])
         route.assert_not_called()
 
     def test_direct_codex_uses_config_binding_without_harness_route(self):
@@ -88,7 +83,7 @@ class StructureVisualBindingTest(unittest.TestCase):
             first = structure_ai.auto_classify(self.batch, config=config, force=True)
             second = structure_ai.auto_classify(self.batch, config=config, force=True)
         self.assertTrue(first['ran'])
-        self.assertTrue(second.get('reused', False))
+        self.assertTrue(second['reused'])
         route.assert_not_called()
 
     def test_direct_dsh_binds_actual_harness_route(self):
@@ -119,7 +114,7 @@ class StructureVisualBindingTest(unittest.TestCase):
         marker.pop('route_sha256')
         marker_path.write_text(json.dumps(marker), encoding='utf-8')
         result = self.classify({'model': 'B'})
-        self.assertFalse(result.get('reused', False))
+        self.assertFalse(result['reused'])
         self.assertEqual(self.invoke.call_count, 2)
 
     def test_failed_band_builder_does_not_skip_other_visual_builders(self):

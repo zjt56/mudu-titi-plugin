@@ -1,0 +1,429 @@
+{
+  "status": "completed",
+  "artifacts": {
+    "structure": {
+      "units": [
+        {
+          "unit_kind": "standalone",
+          "numbers": [
+            "1"
+          ],
+          "type": "单词拼写",
+          "stem": "Standing at the top of the  $ \\underline{t} $____ (塔), I could enjoy the beauty of the ancient city.",
+          "source_span": {
+            "start_line": 8,
+            "end_line": 8
+          },
+          "source_parts": [
+            {
+              "kind": "question_number",
+              "start_line": 8,
+              "end_line": 8
+            },
+            {
+              "kind": "stem",
+              "start_line": 8,
+              "end_line": 8
+            }
+          ],
+          "notes": "据首字母及汉语提示补全单词。"
+        },
+        {
+          "unit_kind": "standalone",
+          "numbers": [
+            "2"
+          ],
+          "type": "单词拼写",
+          "stem": "It's useful for each family member to make a  $ \\underline{b} $____ (预算) every year.",
+          "source_span": {
+            "start_line": 10,
+            "end_line": 10
+          },
+          "source_parts": [
+            {
+              "kind": "question_number",
+              "start_line": 10,
+              "end_line": 10
+            },
+            {
+              "kind": "stem",
+              "start_line": 10,
+              "end_line": 10
+            }
+          ]
+        },
+        {
+          "unit_kind": "standalone",
+          "numbers": [
+            "3"
+          ],
+          "type": "单词拼写",
+          "stem": "3. [2025·合肥庐江县期中] The guide reminded everyone to keep their  $ \\underline{p} $____ (护照) safe during the journey.",
+          "source_span": {
+            "start_line": 12,
+            "end_line": 12
+          },
+          "source_parts": [
+            {
+              "kind": "question_number",
+              "start_line": 12,
+              "end_line": 12
+            },
+            {
+              "kind": "stem",
+              "start_line": 12,
+              "end_line": 12
+            }
+          ]
+        },
+        {
+          "unit_kind": "standalone",
+          "numbers": [
+            "4"
+          ],
+          "type": "单词拼写",
+          "stem": "It took my  $ \\underline{b} $____ (呼吸) away when I saw the beautiful lake.",
+          "source_span": {
+            "start_line": 14,
+            "end_line": 14
+          },
+          "source_parts": [
+            {
+              "kind": "question_number",
+              "start_line": 14,
+              "end_line": 14
+            },
+            {
+              "kind": "stem",
+              "start_line": 14,
+              "end_line": 14
+            }
+          ]
+        },
+        {
+          "unit_kind": "standalone",
+          "numbers": [
+            "5"
+          ],
+          "type": "单词拼写",
+          "stem": " $ \\underline{A} $____(秋天) is coming and the weather is getting cool.",
+          "source_span": {
+            "start_line": 16,
+            "end_line": 16
+          },
+          "source_parts": [
+            {
+              "kind": "question_number",
+              "start_line": 16,
+              "end_line": 16
+            },
+            {
+              "kind": "stem",
+              "start_line": 16,
+              "end_line": 16
+            }
+          ]
+        },
+        {
+          "unit_kind": "group",
+          "numbers": [
+            "1",
+            "2",
+            "3",
+            "4",
+            "5"
+          ],
+          "type": "选词填空",
+          "stem": "worry forget countryside\n\nsurprise turn around",
+          "source_span": {
+            "start_line": 20,
+            "end_line": 32
+          },
+          "source_parts": [
+            {
+              "kind": "material",
+              "start_line": 20,
+              "end_line": 22
+            },
+            {
+              "kind": "question_number",
+              "start_line": 24,
+              "end_line": 24
+            },
+            {
+              "kind": "stem",
+              "start_line": 24,
+              "end_line": 24
+            },
+            {
+              "kind": "question_number",
+              "start_line": 26,
+              "end_line": 26
+            },
+            {
+              "kind": "stem",
+              "start_line": 26,
+              "end_line": 26
+            },
+            {
+              "kind": "question_number",
+              "start_line": 28,
+              "end_line": 28
+            },
+            {
+              "kind": "stem",
+              "start_line": 28,
+              "end_line": 28
+            },
+            {
+              "kind": "question_number",
+              "start_line": 30,
+              "end_line": 30
+            },
+            {
+              "kind": "stem",
+              "start_line": 30,
+              "end_line": 30
+            },
+            {
+              "kind": "question_number",
+              "start_line": 32,
+              "end_line": 32
+            },
+            {
+              "kind": "stem",
+              "start_line": 32,
+              "end_line": 32
+            }
+          ],
+          "notes": "共享方框（word box）材料：worry, forget, countryside, surprise, turn around。用方框中所给单词或短语的适当形式填空。"
+        },
+        {
+          "unit_kind": "standalone",
+          "numbers": [
+            "1"
+          ],
+          "type": "单项填空",
+          "stem": "( ) 1. [熟词生义] We should have clear life goals. They can _____ us to a bright future.",
+          "source_span": {
+            "start_line": 36,
+            "end_line": 38
+          },
+          "source_parts": [
+            {
+              "kind": "question_number",
+              "start_line": 36,
+              "end_line": 36
+            },
+            {
+              "kind": "stem",
+              "start_line": 36,
+              "end_line": 36
+            },
+            {
+              "kind": "option",
+              "start_line": 38,
+              "end_line": 38
+            }
+          ],
+          "options": [
+            "A. change",
+            "B. guide",
+            "C. hold",
+            "D. leave"
+          ]
+        },
+        {
+          "unit_kind": "standalone",
+          "numbers": [
+            "2"
+          ],
+          "type": "单项填空",
+          "stem": "( ) 2. To create a more _____ space, we mustn't eat or drink on the underground.",
+          "source_span": {
+            "start_line": 40,
+            "end_line": 44
+          },
+          "source_parts": [
+            {
+              "kind": "question_number",
+              "start_line": 40,
+              "end_line": 40
+            },
+            {
+              "kind": "stem",
+              "start_line": 40,
+              "end_line": 40
+            },
+            {
+              "kind": "option",
+              "start_line": 42,
+              "end_line": 44
+            }
+          ],
+          "options": [
+            "A. dangerous",
+            "B. comfortable",
+            "C. delicious",
+            "D. magical"
+          ]
+        },
+        {
+          "unit_kind": "standalone",
+          "numbers": [
+            "3"
+          ],
+          "type": "单项填空",
+          "stem": "( ) 3. —Why are most school desks light blue?\n—I guess it's ___ because light blue is a calm colour. It may help the students learn better.",
+          "source_span": {
+            "start_line": 46,
+            "end_line": 54
+          },
+          "source_parts": [
+            {
+              "kind": "stem",
+              "start_line": 46,
+              "end_line": 46
+            },
+            {
+              "kind": "option",
+              "start_line": 48,
+              "end_line": 50
+            },
+            {
+              "kind": "question_number",
+              "start_line": 54,
+              "end_line": 54
+            },
+            {
+              "kind": "stem",
+              "start_line": 54,
+              "end_line": 54
+            }
+          ],
+          "options": [
+            "A. probably",
+            "B. hardly",
+            "C. easily",
+            "D. widely"
+          ],
+          "notes": "原文顺序异常：对话后半句与选项（46-50行）排在题号“（ ）3.”（54行）之前，此处按同题合并，行号保持原样。"
+        },
+        {
+          "unit_kind": "standalone",
+          "numbers": [
+            "4"
+          ],
+          "type": "单项填空",
+          "stem": "( ) 4. If buildings fall down with people inside, the robots can help ___ people under the buildings.",
+          "source_span": {
+            "start_line": 56,
+            "end_line": 60
+          },
+          "source_parts": [
+            {
+              "kind": "question_number",
+              "start_line": 56,
+              "end_line": 56
+            },
+            {
+              "kind": "stem",
+              "start_line": 56,
+              "end_line": 56
+            },
+            {
+              "kind": "option",
+              "start_line": 58,
+              "end_line": 60
+            }
+          ],
+          "options": [
+            "A. look for",
+            "B. look at",
+            "C. look like",
+            "D. look out"
+          ]
+        },
+        {
+          "unit_kind": "standalone",
+          "numbers": [
+            "5"
+          ],
+          "type": "单项填空",
+          "stem": "( )5. [2024·山东菏泽改编]—Where are you going this summer vacation?\n—I ___ go to Zibo, but I'm not sure.",
+          "source_span": {
+            "start_line": 64,
+            "end_line": 70
+          },
+          "source_parts": [
+            {
+              "kind": "question_number",
+              "start_line": 64,
+              "end_line": 64
+            },
+            {
+              "kind": "stem",
+              "start_line": 64,
+              "end_line": 66
+            },
+            {
+              "kind": "option",
+              "start_line": 68,
+              "end_line": 70
+            }
+          ],
+          "options": [
+            "A. must",
+            "B. needn't",
+            "C. might",
+            "D. shouldn't"
+          ]
+        },
+        {
+          "unit_kind": "group",
+          "numbers": [
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8"
+          ],
+          "type": "短文填空",
+          "stem": "During this year's summer holiday, many children chose to take a \"museum walk\" to have fun. However, they 1. _____ (face) some problems. There were too many 2. _____ (tour) in museums every day, and it was sometimes hard 3. _____ (get) tickets. To solve these problems, museums had a great 4.  $ \\underline{\\text{i}} $____: staying open at night!",
+          "source_span": {
+            "start_line": 72,
+            "end_line": 80
+          },
+          "source_parts": [
+            {
+              "kind": "heading",
+              "start_line": 72,
+              "end_line": 72
+            },
+            {
+              "kind": "heading",
+              "start_line": 74,
+              "end_line": 74
+            },
+            {
+              "kind": "material",
+              "start_line": 76,
+              "end_line": 80
+            }
+          ],
+          "notes": "整段短文含 1-8 号空位，共享材料；原文未单独给出各小题选项。"
+        }
+      ]
+    }
+  },
+  "notes": [
+    "原文仅有 1 页，包含三个版块：A 基础巩固（Ⅰ 补全单词、Ⅱ 选词填空、Ⅲ 单项填空）与 B 能力提升（根据短文内容或所给提示填空）。",
+    "Ⅱ 题首行未标注题号，从材料下方 1-5 依次编号；Ⅲ 题的原文顺序有错位：第3题的对话后半句与选项位于第54行题号之前。",
+    "原文不含答案、解析或独立选项列表（除单项填空外），未编造。",
+    "OCR 警告 coordinates_absent、remote_images_unverified 仍存在；本结果只依据所给的原文文本，未做视觉复核。"
+  ],
+  "findings": []
+}

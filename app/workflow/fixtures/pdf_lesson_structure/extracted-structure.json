@@ -1,0 +1,30 @@
+{
+  "version": "composite-extract-1",
+  "status": "candidate",
+  "sections": [],
+  "groups": [],
+  "image_questions": [],
+  "unresolved": [
+    {
+      "code": "NO_RELIABLE_SECTIONS",
+      "message": "未定位可靠的大题标题，需要按原页整理结构"
+    },
+    {
+      "code": "OCR_VISUAL_REVIEW",
+      "message": "OCR 结果需核对题号、音标、画线、表格和图文顺序，未提供逐字可靠性证明"
+    },
+    {
+      "code": "EXTRACTION_WARNING",
+      "message": "原生/OCR 提取有警告，详见 extraction.json"
+    }
+  ],
+  "requires_visual_review": false,
+  "coverage_verified": false,
+  "source_sha256": "dc8ae0bbdf017b6a4a48588a728dfa15ad483c82315cc7ba508a3ee02ac896af",
+  "layout_required": true,
+  "layout_review_command": "python -m workflow.layout_review --help",
+  "extraction_warnings": [
+    "coordinates_absent",
+    "remote_images_unverified"
+  ]
+}

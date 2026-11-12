@@ -310,6 +310,32 @@ class CompositeExtractionTest(unittest.TestCase):
             self.assertIn('OCR_VISUAL_REVIEW', {i['code'] for i in structure['unresolved']})
             self.assertEqual(source.read_bytes(), b'PDF fixture')
 
+    def test_pdf_layout_survives_extraction_without_borrowing_native_coordinates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'source.pdf'
+            source.write_bytes(b'PDF fixture')
+            native_box = {'type': 'text', 'bbox': [1, 2, 3, 4], 'text': 'bad'}
+            ocr_box = {'type': 'paragraph_title', 'bbox': [100, 200, 300, 400],
+                       'text': 'Ⅰ.单项填空', 'order': 7}
+            native = {'pages': [{'page': 1, 'method': 'text', 'text': 'bad',
+                                'blocks': [native_box], 'needs_ocr': True}], 'warnings': []}
+            recognized = {'pages': [{'page': 1, 'method': 'ocr',
+                'text': 'Ⅰ.单项填空(共1小题)\n1. Read?', 'blocks': [ocr_box],
+                'coordinate_system': 'image pixels',
+                'outputImages': {'layout_det_res': 'local-layout.jpg'},
+                'warnings': ['downloaded_images_require_visual_review']}], 'warnings': []}
+            with patch.object(ocr_backend, 'read_pdf', return_value=native):
+                extract.extract_source(source, root / 'out', ocr_result=recognized)
+            evidence = json.loads((root / 'out' / 'extraction.json').read_text())
+            page = evidence['pages'][0]
+            self.assertEqual(page['blocks'], [ocr_box])
+            self.assertEqual(page['native_blocks'], [native_box])
+            self.assertEqual(page['ocr_coordinate_system'], 'image pixels')
+            self.assertEqual(page['ocr_outputImages'], {'layout_det_res': 'local-layout.jpg'})
+            self.assertEqual(evidence['pdf_ocr']['pages'][0]['blocks'], page['blocks'])
+            self.assertEqual(source.read_bytes(), b'PDF fixture')
+
     def test_pdf_keeps_text_layer_and_skips_ocr_when_assist_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); source = root / 'source.pdf'; source.write_bytes(b'PDF fixture')
