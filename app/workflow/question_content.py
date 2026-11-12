@@ -83,6 +83,29 @@ def capability_limited_source(unit: dict, appendix_text: str | None = None) -> b
     return legitimate_source_shape(unit, appendix_text) in ("image_only", "blank_answer_grid")
 
 
+def self_contained_group(unit: dict) -> bool:
+    """组题是否「每小题目包含内容、无共享 material」的合法形态。
+
+    四线三格写单词（每小题目带空白作答网格）、看图题（每小题目带图）等，组级本就没有
+    共享材料，空 material 不是丢内容（硬规则 9「空白作答网格」、硬规则 27）。判据严格：
+    必须**每个**子题都有非空 stem，且每个子题的 stem 都自带表格(空白网格)或图片。
+    阅读理解/完形/任务型等共享语篇的组题不满足（子题只有题目文字），仍须 material。
+    结构体检与发布闸门的 A8 共用此口径，避免两处各写一套。
+    """
+    subs = unit.get("subquestions")
+    if not isinstance(subs, list) or not subs:
+        return False
+    for child in subs:
+        if not isinstance(child, dict):
+            return False
+        stem = str(child.get("stem") or "")
+        if not stem.strip():
+            return False
+        if not re.search(r"\[TABLE|\[IMG", stem):
+            return False
+    return True
+
+
 _IMG_REF = re.compile(r"\[IMG\s+[^\]]+?\]")
 _OPTION_LABEL_CHARS = "ABCDEFGH"
 

@@ -242,5 +242,53 @@ class NativeUnnumberedStructureTest(unittest.TestCase):
         self.assertTrue(codes.intersection({"GROUP_INCOMPLETE", "MISSING_STEM"}), codes)
 
 
+
+class A8SelfContainedGroupTest(unittest.TestCase):
+    """A8：每小题目包含内容、无共享材料的合法组题形态（四线三格空白网格）不误报。
+
+    原卷视觉已核实 05 Starter Unit 2 四线三格：每条诗句下是空白三格，空 material 属
+    硬规则 9 的「空白作答网格」合法形态，不是丢内容。阅读理解/完形等共享语篇仍须 material。
+    """
+
+    def script(self):
+        path = Path(__file__).parents[1] / "scripts/06-upload" / "check_structure.py"
+        spec = importlib.util.spec_from_file_location("a8_self_contained", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def a8(self, unit):
+        return [p for p in self.script()._check_unit(unit) if "[A8]" in p]
+
+    def test_four_line_grid_group_without_material_passes(self):
+        # 四线三格：每个小题自带诗句 + 空白表格网格，组级无共享 material。
+        unit = {"unit_id": "u1", "question_type": "单词拼写", "unit_kind": "group", "material": "",
+                "subquestions": [
+                    {"number": 1, "stem": "两个黄鹂鸣翠柳\n[TABLE 1]\n\n\n[/TABLE]", "answer": "a"},
+                    {"number": 2, "stem": "近朱者赤\n[TABLE 2]\n\n\n[/TABLE]", "answer": "b"}]}
+        self.assertEqual(self.a8(unit), [])
+
+    def test_reading_group_without_material_still_blocks(self):
+        unit = {"unit_id": "u2", "question_type": "阅读理解", "unit_kind": "group", "material": "",
+                "subquestions": [
+                    {"number": 1, "stem": "What is it?", "answer": "A",
+                     "options": ["A.a", "B.b", "C.c", "D.d"]}]}
+        self.assertTrue(self.a8(unit))
+
+    def test_cloze_group_without_material_still_blocks(self):
+        unit = {"unit_id": "u3", "question_type": "完形填空", "unit_kind": "group", "material": "",
+                "subquestions": [{"number": 1, "stem": "1.", "answer": "A",
+                                  "options": ["A.a", "B.b", "C.c", "D.d"]}]}
+        self.assertTrue(self.a8(unit))
+
+    def test_partial_grid_still_blocks(self):
+        # 某个小题没有自带网格 → 视为不完整的自包含形态，仍报 A8。
+        unit = {"unit_id": "u4", "question_type": "单词拼写", "unit_kind": "group", "material": "",
+                "subquestions": [
+                    {"number": 1, "stem": "诗句\n[TABLE 1]\n\n[/TABLE]", "answer": "a"},
+                    {"number": 2, "stem": "诗句", "answer": "b"}]}
+        self.assertTrue(self.a8(unit))
+
+
 if __name__ == "__main__":
     unittest.main()

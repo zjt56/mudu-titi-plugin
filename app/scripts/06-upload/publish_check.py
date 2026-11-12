@@ -87,8 +87,11 @@ def main(argv=None):
             phonetic_material, phonetic_alias = shape(unit, verified)
             # A8：题组必须有 material 与 subquestions
             # 听力组题的材料是音频，跳过听力时允许 material 为空（不伪造文本）。
+            # 「每小题目包含内容、无共享材料」的合法形态（四线三格空白网格/看图题）不要求
+            # material；判据与结构体检共用 question_content.self_contained_group 同一口径。
+            from workflow.question_content import self_contained_group
             if (_is_blank(unit.get("material")) and not str(qt or "").startswith("听力")
-                    and not phonetic_material):
+                    and not phonetic_material and not self_contained_group(unit)):
                 problems.append(f"{uid}: 题组缺少 material（A8）")
             if not has_subs:
                 problems.append(f"{uid}: 题组缺少 subquestions（A8）")

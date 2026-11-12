@@ -148,8 +148,6 @@ class _Extractor:
                     else:
                         result[key] = value
         result.update(self.props(rpr))
-        if re.search(r"symbol|wingdings|webdings", result.get("font", ""), re.I):
-            self.warn("Symbol font encountered; glyph/font mapping was not guessed")
         return result
 
     def image(self, rel_id):
@@ -201,6 +199,17 @@ class _Extractor:
             text = "".join(self.inline(child, style, breaks) for child in node if child.tag != _w("rPr"))
             if not text:
                 return text
+            # 符号字体（Symbol/Wingdings/Webdings 等）只可能在两种情况下改变字面：
+            # ① 把 ASCII 字母/数字按字形表改写成图符（如 Wingdings 的 l→●）；
+            # ② 承载私用区(PUA)码位，该码位本身需字体映射才有确定字形。
+            # 若 run 文本已是明确的 Unicode 符号（如 ★ U+2605，Segoe UI Symbol 只是承载
+            # 字体），原码位即真实字符，不存在映射歧义，不告警、不阻断——与「私用区字形
+            # 不阻断」保持同一口径，也避免装饰星号把整卷误判为提取不确定。
+            _pua = any(0xE000 <= ord(c) <= 0xF8FF or 0xF0000 <= ord(c) <= 0xFFFFD
+                       or 0x100000 <= ord(c) <= 0x10FFFD for c in text)
+            if (re.search(r"symbol|wingdings|webdings", str(fmt.get("font") or ""), re.I)
+                    and (re.search(r"[A-Za-z0-9]", text) or _pua)):
+                self.warn("Symbol font encountered; glyph/font mapping was not guessed")
             if fmt.get("vertAlign") in ("superscript", "subscript"):
                 tag = "sup" if fmt["vertAlign"] == "superscript" else "sub"
                 text = f"<{tag}>{text}</{tag}>"

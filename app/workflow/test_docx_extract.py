@@ -151,6 +151,24 @@ class DocxExtractTests(unittest.TestCase):
         self.assertTrue(any("Private-use" in w for w in result["warnings"]))
         self.assertTrue(any("Symbol font" in w for w in result["warnings"]))
 
+    def test_symbol_font_with_defined_unicode_char_does_not_warn(self):
+        # Segoe UI Symbol 承载的是明确的 Unicode 符号 ★(U+2605)，不是字体映射歧义，
+        # 不应告警、不应把整卷判为提取不确定（05 批次装饰星号误报的回归）。
+        body = ('<w:p><w:r><w:rPr><w:rFonts w:ascii="Segoe UI Symbol"/></w:rPr>'
+                '<w:t>\u2605</w:t></w:r></w:p>')
+        self.make_docx(body)
+        result = self.run_extract()
+        self.assertEqual(result["text"], "\u2605")
+        self.assertFalse(any("Symbol font" in w for w in result["warnings"]), result["warnings"])
+
+    def test_symbol_font_with_ascii_letter_still_warns(self):
+        # Wingdings 把 ASCII 字母按字形表改写成图符，仍必须告警（字面可能不一致）。
+        body = ('<w:p><w:r><w:rPr><w:rFonts w:ascii="Wingdings"/></w:rPr>'
+                '<w:t>l</w:t></w:r></w:p>')
+        self.make_docx(body)
+        result = self.run_extract()
+        self.assertTrue(any("Symbol font" in w for w in result["warnings"]), result["warnings"])
+
     def test_sparse_table_grid_does_not_invent_cell_text(self):
         body = ('<w:tbl><w:tblGrid><w:gridCol/><w:gridCol/><w:gridCol/></w:tblGrid>'
                 '<w:tr><w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>'

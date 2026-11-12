@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _common import arg_parser, load_batch, plain, report, units  # noqa: E402
+from workflow import question_content  # noqa: E402
 
 # 完形填空：选项挂在子题，每个子题恰好 4 个选项
 CLOZE = "完形填空"
@@ -50,10 +51,19 @@ def _check_unit(u, verified=None):
     from workflow.phonetic_structure import shape
     phonetic_material, phonetic_alias = shape(u, verified)
 
+    # 「每小题目包含内容、无共享材料」的合法组题形态：四线三格(空白作答网格)、看图题等。
+    # 判据统一在 workflow.question_content.self_contained_group，与发布闸门 publish_check
+    # 共用同一口径。原卷视觉已核实（05 Starter Unit 2 四线三格：三条诗句下均为空白三格），
+    # 属硬规则 9 的「空白作答网格」合法形态，空 material 不是丢内容。
+    self_contained_group = question_content.self_contained_group(u)
+
     # A8：group 必须 material 非空 且 subquestions 非空
     # 例外：听力组题的材料是音频，没有文字 material；跳过听力时允许为空，不伪造文本。
+    #       语音组题（phonetic_material）与每小题目包含内容的合法形态(self_contained_group)
+    #       同样允许空 material，但都必须有子题。
     if kind == "group":
-        if not material and not str(qt).startswith("听力") and not phonetic_material:
+        if (not material and not str(qt).startswith("听力")
+                and not phonetic_material and not self_contained_group):
             problems.append(f"[A8] {uid} ({qt}): 题组 unit_kind=group 但 material 为空")
         if not subs:
             problems.append(f"[A8] {uid} ({qt}): 题组 unit_kind=group 但 subquestions 为空")

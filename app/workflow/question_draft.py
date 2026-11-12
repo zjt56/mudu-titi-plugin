@@ -554,6 +554,18 @@ def build(batch_dir, *, units=None):
                               or section_rubric(rubric_source, proof.get("start_line"), unit.get("type") or ""))
                     if rubric:
                         proof["shared_rubric"] = rubric
+                if not rubric:
+                    # 本节标题行本身即作答指令且携带原卷提示标记（如
+                    # 「Ⅰ.[跨学科]在下列四线三格中写出…」「Ⅲ.阅读理解[2025·滁州天长市月考]」）
+                    # 时，必须原样留在题组作答指令里（硬规则 25：大题标记留在所属题组作答
+                    # 指令）。这类组的 span 常从首题开始、标题行落在窗口之外，若不补回，
+                    # 标记只存在于 source_section 元数据，D27/B9 判定为未交付。
+                    heading = str((unit.get("source_section") or {}).get("title") or "").strip()
+                    if heading:
+                        from .sync_practice import source_marks as _source_marks
+                        if _source_marks(heading):
+                            rubric = [heading]
+                            proof["section_heading_rubric"] = heading
                 if rubric:
                     row["stem"] = "\n".join(rubric).strip()
                 offset_lines = len(rubric) if own_rubric else 0
