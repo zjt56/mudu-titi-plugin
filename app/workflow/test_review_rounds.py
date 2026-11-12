@@ -187,6 +187,13 @@ class ReviewRoundsTest(unittest.TestCase):
         prompt = review_rounds._round_prompt('sample', [], '{}')
         self.assertIn('source_comparison:string', prompt)
         self.assertIn('二审的 assessment 必须包含', prompt)
+        # 组题按小题抽样时（如单词拼写组的第 2 小题）必须写回同一个 number；
+        # 只有 number=null 才是整组核对，否则模型会把 u7/2 当整组返回而漏覆盖。
+        self.assertIn('【number 与核对范围严格对应 TARGETS】', prompt)
+        self.assertIn('必须在该条 check 原样写回同一个 number', prompt)
+        self.assertIn('只有 TARGETS 中 number=null 的才是整组题', prompt)
+        labels = review_rounds._round_prompt('labels', [], '{}')
+        self.assertNotIn('【number 与核对范围严格对应 TARGETS】', labels)
 
     def test_prompt_forbids_option_types_without_letter_options(self):
         """无 A–D 选项的填空题不得判单项填空；示例也不得诱导照抄单项填空/四个选项。

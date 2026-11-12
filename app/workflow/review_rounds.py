@@ -148,9 +148,12 @@ def _round_prompt(round_id, targets, context):
                    "带编号子题的选择题组，组级 options 按协议为空、选项只存在于各子题；严禁因『组级 options 为空』或旧证据里曾出现的串题生成意见，一切判断以本次绑定的当前数据为准。"
                    "【引证口径】quote 必须是绑定文件的逐字连续片段，不得改写原文的单复数、所有格、拼写或标点，先在给定正文中逐字定位再复制。"
                    + ("二审还须提供 source_comparison:string，说明目标与原文、答案的对照；"
-                      "二审目标是整组题（阅读理解/完形填空/任务型阅读/补全对话/听力信息转换/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解等）时，"
-                      "TARGETS 里该目标 number=null，请整组核对、只给组级标签，subquestions 逐小题列出但 knowledge=[]，"
-                      "check 省略 number，不拆成逐小题 check、不做小题二审；目标是独立单题时每条 check 必须带 number 字段，取值与 TARGETS 中该目标的 number 完全一致。"
+                      "【number 与核对范围严格对应 TARGETS】只有 TARGETS 中 number=null 的才是整组题"
+                      "（阅读理解/完形填空/任务型阅读/补全对话/听力信息转换/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解等），"
+                      "请整组核对、只给组级标签，subquestions 逐小题列出但 knowledge=[]，check 省略 number，不拆成逐小题 check；"
+                      "TARGETS 中带 number 的目标（包括单词拼写、完成句子等组题按小题抽中的情况，如 单词拼写组 抽中第 2 小题）"
+                      "必须在该条 check 原样写回同一个 number，只核对这一小题，不得省略 number、不得改成整组核对、不得拆成或合并成多条 check；"
+                      "每条 check 的 unit_id+number 必须与 TARGETS 一一对应，覆盖全部目标恰好一次。"
                       if round_id == 'sample' else ""))
     check_shape = ("{unit_id,number?,verdict:ok|error|uncertain,rationale,evidence:[{path,locator,quote}],assessment:{type:string,subtypes:[string],knowledge:[string],subquestions:[{number:string,knowledge:[string]}],source_comparison:string}}"
                    if round_id == 'sample' else

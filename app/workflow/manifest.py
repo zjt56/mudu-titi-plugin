@@ -47,6 +47,17 @@ EXTRA_STAGE_INPUTS = {
     ),
 }
 
+# Deterministic views/gates must be rebuilt when an upstream artifact's real
+# content changes. Model/fill stages deliberately stay reusable on source edits
+# (explicit invalidation owns that decision), but a stale derived view silently
+# feeds final format checks with old labels (e.g. batch.json relabelled while
+# batch_meta.json still carries the previous knowledge paths). Compare only
+# upstream "artifact:" inputs so unrelated source edits keep the documented
+# no-auto-reopen behaviour, while a changed producer output always refreshes the
+# view that projects it.
+DERIVED_ARTIFACT_STAGES = ("structure_gate", "meta", "underlines", "validate",
+                           "review_gate", "format_gate")
+
 # Public aliases keep every existing importer and on-disk status compatible.
 PENDING = execution_state.PENDING
 RUNNING = execution_state.RUNNING
@@ -258,6 +269,18 @@ def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use
     if stage.id in ('structure_gate', 'answers', 'types', 'explanations', 'knowledge', 'assemble', 'review', 'review_gate'):
         pdf_ocr = Path(batch_dir) / '01_source/pdf-ocr.json'
         hashes['direct:01_source/pdf-ocr.json'] = _fp(pdf_ocr)
+        # Visual container evidence is consumed by structure and answer binding.
+        # Ignore timing/call counters: only semantic source-bound evidence matters.
+        band_path = Path(batch_dir) / '01_source/lesson-bands.json'
+        if band_path.is_file():
+            try:
+                band_data = json.loads(band_path.read_text(encoding='utf-8'))
+                band_binding = {k: band_data.get(k) for k in
+                                ('version', 'source_sha256', 'text_sha256', 'bands', 'issues', 'status')}
+                hashes['direct:01_source/lesson-bands.json'] = hashlib.sha256(
+                    json.dumps(band_binding, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            except (OSError, ValueError, AttributeError):
+                hashes['direct:01_source/lesson-bands.json'] = _fp(band_path)
     if stage.id in ('answers', 'types', 'explanations', 'knowledge', 'assemble', 'review', 'review_gate'):
         roles_path = Path(batch_dir) / '01_source/material-roles.json'
         hashes['material:roles'] = _fp(roles_path)
@@ -767,6 +790,18 @@ def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, s
             for rel, digest in saved_outputs.items():
                 if sha256_file(Path(batch_dir) / rel) != digest:
                     return True, f"产物已变化 {rel}"
+    if stage.id in DERIVED_ARTIFACT_STAGES and record.get("status") != SKIPPED:
+        saved_inputs = record.get("semantic_inputs") or {}
+        upstream_inputs = {key: value for key, value in saved_inputs.items()
+                           if key.startswith("artifact:")}
+        if upstream_inputs:
+            current_inputs = input_hashes(batch_dir, manifest, stage)
+            changed = sorted(key[len("artifact:"):] for key, old in upstream_inputs.items()
+                             if current_inputs.get(key) != old)
+            if changed:
+                # A derived view still contains the previous producer content.
+                # Rebuild it instead of letting final checks read stale labels.
+                return True, "上游交付内容已变化：" + "、".join(changed)
     upstream_stable = all(
         (manifest['stages'].get(dep) or {}).get('status') in TERMINAL_OK
         and not (manifest['stages'].get(dep) or {}).get('rebuild_required')

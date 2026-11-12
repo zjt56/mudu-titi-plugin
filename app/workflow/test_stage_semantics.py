@@ -226,6 +226,47 @@ class ContentReuseTest(unittest.TestCase):
         self.assertEqual(self.state["stages"]["assemble"]["status"], mf.COMPLETED)
         self.assertEqual(self.state["stages"]["meta"]["status"], mf.COMPLETED)
 
+    def test_changed_upstream_artifact_reopens_derived_views(self):
+        # 批次 05 卡点：knowledge 局部重生成后 assemble 更新了 batch.json，
+        # 但 meta/underlines 仍是旧内容，最终上传格式检查读到旧知识点并报
+        # KNOWLEDGE_REQUIRED 幻影。纯派生视图必须在生产者内容变化后重算。
+        self.finish("assemble")
+        self.finish("meta")
+        self.finish("underlines")
+        self.finish("validate")
+        self.finish("review")
+        self.finish("review_gate")
+        self.finish("format_gate")
+        batch = self.batch / "06_batch/batch.json"
+        value = json.loads(batch.read_text(encoding="utf-8"))
+        # 仅空白/键序的等价重写不算内容变化。
+        batch.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.assertFalse(self.stale("meta"))
+        self.put("06_batch/batch.json", {"items": [{"unit_id": "q-40",
+                                                    "knowledge": ["词汇/词汇辨析/形容词辨析"]}]})
+        stale, reason = mf.is_stale(self.batch, self.state, contracts.STAGE_BY_ID["meta"])
+        self.assertTrue(stale)
+        self.assertIn("06_batch/batch.json", reason)
+        # meta 重算后其产物变化，underlines 必须跟着重算（依次向下直到最终闸门）。
+        self.put("06_batch/batch_meta.base.json", {"items": [{"knowledge": ["词汇/词汇辨析/形容词辨析"]}]})
+        self.assertTrue(self.stale("underlines"))
+        self.put("06_batch/batch_meta.json", {"items": [{"knowledge": ["词汇/词汇辨析/形容词辨析"]}]})
+        self.assertTrue(self.stale("validate"))
+        self.put("07_review/review-rounds.json", {"rounds": [{"id": "new"}]})
+        self.assertTrue(self.stale("review_gate"))
+        self.put("07_review/review-gate.json", {"passed": False, "rounds": {"errors": []}})
+        self.assertTrue(self.stale("format_gate"))
+
+    def test_assemble_reopened_delivery_invalidates_stale_derived_views(self):
+        self.finish("assemble")
+        self.finish("meta")
+        self.finish("underlines")
+        self.put("06_batch/batch.json", {"items": [{"unit_id": "q-40",
+                                                   "knowledge": ["词汇/拼写与词形"]}]})
+        changed = mf.invalidate_changed_consumers(self.batch, self.state, "assemble")
+        self.assertIn("meta", changed)
+        self.assertEqual(self.state["stages"]["meta"]["status"], mf.INVALIDATED)
+
     def test_legacy_changed_output_cannot_gain_new_trust(self):
         self.put("03_types/types.json", {"items": []})
         stage = contracts.STAGE_BY_ID["types"]
