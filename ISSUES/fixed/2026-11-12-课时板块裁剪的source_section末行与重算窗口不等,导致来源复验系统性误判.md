@@ -1,7 +1,7 @@
 # 卡点：课时板块裁剪的source_section末行与重算窗口不等，导致来源复验系统性误判
 
 - id: 2026-11-12-课时板块裁剪的source_section末行与重算窗口不等,导致来源复验系统性误判
-- status: open
+- status: fixed
 - batch: 07七上人教版课时A计划StarterUnit2KeepTidy!第三课时Sec
 - batch_dir: C:\Users\Administrator\.dsh\wf-plugin-data\workflows\07七上人教版课时A计划StarterUnit2KeepTidy!第三课时Sec
 - stage: review_gate
@@ -9,6 +9,9 @@
 - created: 2026-11-12T19:22:20+08:00
 - last_seen: 2026-11-12T19:22:20+08:00
 - occurrences: 1
+- fixed_at: 2026-11-12T19:23:01+08:00
+- fix_commit: d9fe33d
+- verification: workflow.test_review_child_source/test_review_local_reuse/test_review_rounds 等 157 项 OK；批次 05/07 失败单元 5/24→0/24、6/26→0/26；批次 07 review_gate 复跑 required_unchecked=0
 - title: 课时板块裁剪的source_section末行与重算窗口不等，导致来源复验系统性误判
 
 ## 现象（卡点）
@@ -23,4 +26,8 @@ review-gate.json errors: REVIEW_SAMPLE_SOURCE_UNVERIFIED [sec-1de4ef313aac00fb-u
 
 ## 修复记录
 
-（未修复）
+- 修复方式：_scoped_context 改用 _section_end_matches：仅当 end<parsed、lesson_container_end_line==end 且尾部行全为空行/纯图片占位/标题时接受较短 end；裁到真实内容仍 uncertain
+- 修复提交：d9fe33d
+- 复验证据：workflow.test_review_child_source/test_review_local_reuse/test_review_rounds 等 157 项 OK；批次 05/07 失败单元 5/24→0/24、6/26→0/26；批次 07 review_gate 复跑 required_unchecked=0
+- 标记时间：2026-11-12T19:23:01+08:00
+

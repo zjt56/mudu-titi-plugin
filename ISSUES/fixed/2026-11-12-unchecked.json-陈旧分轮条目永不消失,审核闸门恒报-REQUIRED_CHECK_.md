@@ -1,7 +1,7 @@
 # 卡点：unchecked.json 陈旧分轮条目永不消失，审核闸门恒报 REQUIRED_CHECK_UNCHECKED
 
 - id: 2026-11-12-unchecked.json-陈旧分轮条目永不消失,审核闸门恒报-REQUIRED_CHECK_
-- status: open
+- status: fixed
 - batch: 07七上人教版课时A计划StarterUnit2KeepTidy!第三课时Sec
 - batch_dir: C:\Users\Administrator\.dsh\wf-plugin-data\workflows\07七上人教版课时A计划StarterUnit2KeepTidy!第三课时Sec
 - stage: review_gate
@@ -9,6 +9,9 @@
 - created: 2026-11-12T19:22:20+08:00
 - last_seen: 2026-11-12T19:22:20+08:00
 - occurrences: 1
+- fixed_at: 2026-11-12T19:23:01+08:00
+- fix_commit: d9fe33d
+- verification: 批次 07 复跑 review_gate：reconciled_unchecked=2、unchecked.json=[]、required_unchecked=0，仅剩 15 项人工差异
 - title: unchecked.json 陈旧分轮条目永不消失，审核闸门恒报 REQUIRED_CHECK_UNCHECKED
 
 ## 现象（卡点）
@@ -23,4 +26,8 @@ review-gate.json errors: REQUIRED_CHECK_UNCHECKED ×2（来自 07_review/uncheck
 
 ## 修复记录
 
-（未修复）
+- 修复方式：新增 review.reconcile_unchecked，以 evaluate_rounds 为权威清理陈旧分轮行；do_review_gate 开头执行并记录 reconciled_unchecked
+- 修复提交：d9fe33d
+- 复验证据：批次 07 复跑 review_gate：reconciled_unchecked=2、unchecked.json=[]、required_unchecked=0，仅剩 15 项人工差异
+- 标记时间：2026-11-12T19:23:01+08:00
+
