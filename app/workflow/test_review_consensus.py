@@ -76,6 +76,27 @@ class ConsensusTest(unittest.TestCase):
         return {'plan': self.plan, 'rounds': records}
 
     @patch.object(review, '_verify_round_sources', return_value=None)
+    def test_matching_sets_never_enter_queue_or_pending_rows(self, _verify_sources):
+        from workflow import ingest
+        from workbench import server
+        payload = self.payload()
+        payload['rounds'][0]['checks'][0]['assessment']['knowledge'].reverse()
+        ingest.build_review_files(self.batch, {'review_rounds': payload}, reconcile_rounds=True)
+        queue = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
+        self.assertEqual([item for item in queue if server.is_open(item)], [])
+        row = server.mark_row({'unit_id': 'g'}, queue)
+        self.assertFalse(row['needs_human'])
+        self.assertEqual(row['open_count'], 0)
+        # 一审一致、二审不同仍须送审，不能借“一审正常”丢掉二审发现。
+        payload['rounds'][1]['checks'][0]['assessment']['knowledge'].append('设题角度/阅读/细节理解')
+        ingest.build_review_files(self.batch, {'review_rounds': payload}, reconcile_rounds=True)
+        queue = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
+        opened = [item for item in queue if server.is_open(item)]
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(server.mark_row({'unit_id': 'g'}, opened)['needs_human'])
+        self.assertEqual(opened[0]['field'], 'knowledge')
+
+    @patch.object(review, '_verify_round_sources', return_value=None)
     def test_sample_and_agreement(self, _verify_sources):
         # 阅读理解整组题型：二审整组抽取一个目标，只做组级核对。
         self.assertEqual(len(self.plan['sample']), 1)

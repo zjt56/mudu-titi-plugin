@@ -84,6 +84,24 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(stale['original']['labels'], {})
         self.assertTrue(all(r['status'] == '待重新审核' and not r['checks'] for r in stale['rounds']))
 
+    def test_round_projection_reports_structured_differences_even_when_verdict_ok(self):
+        from workflow.test_review_rounds import ReviewRoundsTest
+        fixture = ReviewRoundsTest(methodName='runTest')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        payload = fixture.payload()
+        # 同末级、不同完整目录路径。verdict=ok 不能掩盖结构化差异。
+        payload['rounds'][0]['checks'][0]['assessment']['knowledge'] = ['主题/人与社会/细节理解']
+        fixture.write('07_review/review-rounds.json', payload)
+        with patch('workflow.review.evaluate_rounds', return_value={
+                'checked_rounds': ['labels', 'sample'], 'plan': fixture.plan}):
+            result = review_comparison(fixture.batch, 'group-1-6', list(range(1, 7)))
+        first = result['rounds'][0]['checks'][0]
+        self.assertEqual(first['verdict'], 'ok')
+        self.assertEqual([d['field'] for d in first['differences']], ['knowledge'])
+        self.assertEqual(first['differences'][0]['original'], fixture.knowledge['knowledge'])
+        self.assertEqual(result['rounds'][1]['checks'][0]['differences'], [])
+
     def test_detail_api_reports_untrusted_history_without_exposing_results(self):
         from workbench import server
         from workflow.test_workbench_catalog_archive import invoke

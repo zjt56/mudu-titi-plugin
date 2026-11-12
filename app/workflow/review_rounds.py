@@ -136,10 +136,10 @@ def _round_prompt(round_id, targets, context):
                    "knowledge 路径必须逐字取自供给目录（references/knowledge-catalog.json），不得自造更深的子级：目录里 '语用/情景交际' 已是叶子时只能写它，不能写 '语用/情景交际/询问目的'；某维度没有合法叶子就不写该维度。"
                    "【叶子即终点·必须遵守】供给目录每个节点都带 leaf 与 leafTerminal：leaf=true（『叶子：到此为止』）表示该路径就是可选的最终知识点，必须原样照抄、绝不能再往后拼接任何子级；leaf=false（非叶子）必须继续往下选到某个 leaf=true 的叶子。注意同名为不同层级的情况：例如『电子邮件』是『语篇体裁/新媒体语篇/电子邮件』这一片的叶子，不是『语篇体裁/应用文/电子邮件』——照抄目录中真实存在的完整路径，不得把不同分支的词拼在一起。"
                    "assessment.knowledge 还必须遵守 references/type-knowledge-map.json 的题型维度：例如听力长对话理解只允许主题、设题角度/听力，不得写语篇体裁；路径不在目录或超出允许维度会让整轮校验失败。"
-                   "【主类与知识点维度自洽·必须遵守】assessment 内部必须自洽：一旦确定主类，知识点只能取该主类允许的维度根，绝不能写超范围根。典型：单词拼写只允许 词汇、语法、语音，严禁写 语用/情景交际 或 主题；完成句子/改错只允许 词汇·语法；单项填空允许 词汇·语法·语音·语用。若你的语义判断落在该主类不允许的维度（例如给单词拼写题想标『情景交际』），请在允许维度内选最近的合法叶子，或干脆省略该维度，绝不写超范围路径——那会让整轮标签校验失败并导致本轮作废。"
-                   "【子类必填·必须遵守】只要主类在目录里有子类，assessment.subtypes 必须给出至少一个取自目录的合法子类，不得留空数组；留空会被判为标签缺项并作为差异送人工核对。只有目录里确实无子类的主类才可写 subtypes:[]，不得自造目录外子类。"
-                   "【无选项不判选项题型·必须遵守】判断主类前先看该目标的真实作答形态：只有当题干或材料里确实存在 A 到 D（或更多）多个并列的可选答案文本时，才可判为含选项题型（单项填空、完形填空、语法选择、听力短对话理解等）；若原卷只有下划线空档要填词或作答短句、没有任何字母选项，则绝不是单项填空，应按真实作答形态判单词拼写、完成句子、翻译或书面表达等。"
-                   "例如『根据句意用所给词的适当形式填空』『根据汉语提示补全单词』这类没有字母选项的填空题，主类应判单词拼写，子类取目录中的适当形式、首字母提示等；不得因为要满足『子类必填』就把无选项题填成单项填空与四个选项，那会构成错误标签。"
+                   "【主类与知识点维度自洽·必须遵守】assessment 的知识点维度以供给的 references/type-knowledge-map.json 为唯一口径，不凭提示词示例扩展允许范围。若无法在该主类允许维度中找到有语义证据的合法叶子，使用 uncertain、assessment=null 并说明原因；不得为了目录校验挑一个『最近』的知识点，也不得改主类来迁就知识点。"
+                   "【子类必填·必须遵守】只要主类在目录里有子类，assessment.subtypes 必须给出至少一个取自目录的合法子类，不得留空数组；只有目录里确实无子类的主类才可写 subtypes:[]，不得自造目录外子类。"
+                   "【无选项不判选项题型·必须遵守】先核对目标自身及其共享材料、图片和音频的真实作答方式，再独立判型。明确要求用所给词的适当形式填空、根据汉语提示补词等且没有备选答案的独立填词题，不得因为要填子类而判成单项填空/四个选项。此规则不以 A–D 文字是否出现为充分条件：三个选项、图片选项、共享选项和听力选项都可能合法；证据只有图片/音频占位时不得据此断言没有选项，也不得编造其内容。"
+                   "填词题仍需区分句子、整篇语境、选词框及作答指令，不一律套用单词拼写；主类、子类与知识点均按供给目录和原卷证据独立判断。返回前逐条核对 rationale 与 assessment：理由若明确否定某主类/子类，assessment 不得同时填写该值；无法确定则如实 uncertain，不为减少与原标签的差异改判。"
                    "整篇题型（阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话）只判定组级知识点，其子题 knowledge=[]。"
                    "无法判断标签时使用 verdict=uncertain、assessment=null 并说明具体原因及可核验证据，继续审其他目标；不得猜测。"
                    "【标签分层口径·必须遵守】以组题为准的单元在组级挂体裁/主题/内容标签，subquestions[].knowledge 允许为空数组；"
@@ -504,6 +504,40 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
     return parts
 
 
+def _reject_assessment_contradiction(check):
+    """Reject explicit self-negation, never infer correctness or original labels.
+
+    Only new candidates use this guard. Keep the raw response, and use the
+    existing failed-target repair path; accepted historical evidence is unchanged.
+    """
+    assessment = check.get("assessment")
+    if not isinstance(assessment, dict):
+        return
+    main = assessment.get("type")
+    if not isinstance(main, str) or not main:
+        return
+    label = re.escape(main)
+    subtypes = assessment.get("subtypes")
+    if isinstance(subtypes, list):
+        names = [re.escape(x) for x in subtypes if isinstance(x, str) and x]
+        if names:
+            label += r"(?:[/／、](?:" + "|".join(names) + r"))?"
+    text = str(check.get("rationale") or "")
+    # Narrow, explicit assertions only. A real disagreement with the official
+    # label, absent text options, media limits or verdict=error is NOT rejected.
+    negative = r"(?:不是|不属于|不应(?:该)?(?:判为|判成|归为)|不能(?:判为|判成|归为))"
+    after = r"(?:按|判为|判成|归为)" + label + r"(?:记录|判定|标注|归类|分类)?(?:并)?(?:不合理|不正确|错误)"
+    contradictions = list(re.finditer(negative + r"[「『\"']?" + label, text)) + list(re.finditer(after, text))
+    # Statements about an old/original label do not negate this assessment.
+    contradictions = [match for match in contradictions
+                      if not re.search(r"(?:原标签|原标注|旧标签|原题型|上一轮|上一版|一审|二审|模型|第\s*\d+\s*题)[^。；，,;]*$",
+                                       text[:match.start()])]
+    if contradictions:
+        raise ValueError(
+            "REVIEW_ASSESSMENT_CONTRADICTION: rationale 明确否定 assessment.type="
+            + main + "，请仅重新独立核对该目标的理由与结构化判断；不得修改正式标签或迎合原标签。")
+
+
 def _partition_check_issues(review, plan, round_id, checks, batch):
     """Validate each check on its own so one bad target keeps the others."""
     valid, failed = [], []
@@ -519,6 +553,7 @@ def _partition_check_issues(review, plan, round_id, checks, batch):
         record = {"round_id": round_id, "input_binding": plan["input_binding"],
                   "execution_id": "single", "checks": [check]}
         try:
+            _reject_assessment_contradiction(check)
             review._round_checks(record, round_id, single, batch, lenient=True, require_coverage=True)
             valid.append(check)
         except review.RoundCheckError as exc:
@@ -837,7 +872,10 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
     previous_path = _path(batch, "07_review/" + review.ROUND_FILE)
     previous = _load(previous_path.read_bytes()) if previous_path.is_file() else None
     reused_checks, reuse = review.reusable_checks(batch, previous, plan, round_id)
-    state_key = [plan, round_id, input_hashes, CONTEXT_VERSION, PROMPT_VERSION, reuse]
+    # New exports follow actual prompt/role bytes even when a version tag was
+    # not bumped. Existing in-flight packages and their bindings stay immutable.
+    prompt_digest = review._digest(_round_prompt(round_id, [], ""))
+    state_key = [plan, round_id, input_hashes, CONTEXT_VERSION, PROMPT_VERSION, reuse, prompt_digest]
     generation = _review_generation(batch, plan)
     if generation is not None:
         state_key.append(generation['nonce'])

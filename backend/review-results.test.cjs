@@ -86,6 +86,56 @@ test('不再有单独的红色差异块：不一致直接在知识点标签里�
   assert.match(source, /kpDiff \? '差异已在上方「知识点标签」中标出。'/);
 });
 
+test('同名叶子不同完整路径必须显示差异与完整分支', () => {
+  const d = detail([],'未覆盖');
+  d.comparison.original.labels.knowledge = ['设题角度/阅读/细节理解'];
+  d.comparison.rounds[0].checks[0].assessment.knowledge = ['主题/人与社会/细节理解'];
+  assert.equal(hasKnowledgeDiff(d), true);
+  const rendered = text(labelAuditPanels(d));
+  assert.match(rendered, /不一致/);
+  assert.match(rendered, /设题角度\/阅读\/细节理解/);
+  assert.match(rendered, /主题\/人与社会\/细节理解/);
+});
+
+test('完整路径集合相同，顺序和重复项不产生差异', () => {
+  const d = detail([],'未覆盖');
+  d.comparison.original.labels.knowledge = ['语法/be动词','词汇/动词辨析'];
+  d.comparison.rounds[0].checks[0].assessment.knowledge = ['词汇/动词辨析','语法/be动词','语法/be动词'];
+  assert.equal(hasKnowledgeDiff(d), false);
+  assert.doesNotMatch(text(labelAuditPanels(d)), /不一致/);
+  assert.deepEqual(Array.from(auditNotes(d)), []);
+});
+
+test('本轮已提供空知识点是差异，不伪装成待审核', () => {
+  const d = detail([],'未覆盖');
+  d.comparison.rounds[0].checks[0].assessment.knowledge = [];
+  assert.equal(hasKnowledgeDiff(d), true);
+  assert.match(text(labelAuditPanels(d)), /不一致/);
+});
+
+test('子类按集合比较且一审理由从实际check读取', () => {
+  const d = detail([],'未覆盖');
+  d.comparison.original.labels.subtypes = ['a','b'];
+  d.comparison.rounds[0].checks[0].assessment.subtypes = ['b','a'];
+  assert.equal(auditNotes(d).length,0);
+  d.comparison.rounds[0].checks[0].assessment.knowledge = ['主题/新标签'];
+  d.comparison.rounds[0].checks[0].rationale = '一审依据原文明确判断该知识点';
+  assert.match(auditNotes(d).join(' '), /一审依据原文/);
+});
+
+test('verdict ok 加结构化差异不能显示全通过，未抽中也不伪装完成', () => {
+  const a = source.indexOf('      const ROUND_SHORT =');
+  const b = source.indexOf('      // 知识点：多选', a);
+  vm.runInContext(source.slice(a,b) + '\nthis.roundApi={nodeState,renderRounds};', context);
+  const { nodeState, renderRounds } = context.roundApi;
+  const round = {round_id:'labels', status:'已提供', checks:[{verdict:'ok', differences:[{
+    field:'knowledge',original:['语法/be动词'],reviewed:['词汇/动词辨析']}]}]};
+  assert.equal(nodeState(round).kind,'diff');
+  assert.doesNotMatch(text(renderRounds({rounds:[round]})), /全通过/);
+  assert.match(text(renderRounds({rounds:[round]})), /差异/);
+  assert.equal(nodeState({status:'未覆盖',checks:[]}).kind,'na');
+});
+
 test('难度即使被审核改动，也只按第一次打标签结果显示', () => {
   const d = {
     unit_kind: 'standalone', numbers: [9],

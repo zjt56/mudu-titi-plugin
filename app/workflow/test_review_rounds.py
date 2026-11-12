@@ -198,12 +198,56 @@ class ReviewRoundsTest(unittest.TestCase):
             with self.subTest(round=rid):
                 prompt = review_rounds._round_prompt(rid, [], '{}')
                 self.assertIn('【无选项不判选项题型·必须遵守】', prompt)
-                self.assertIn('不得因为要满足『子类必填』', prompt)
+                self.assertIn('不得因为要填子类', prompt)
+                self.assertIn('三个选项、图片选项、共享选项和听力选项', prompt)
+                self.assertIn('不得为了目录校验挑一个', prompt)
                 # 旧的示例把「单项填空/四个选项」放在必读句里，容易被照抄。
                 self.assertNotIn('『单项填空』有 四个选项 等', prompt)
                 # 子类必填本身仍然生效（不能为了消除误判而放松）。
                 self.assertIn('【子类必填·必须遵守】', prompt)
 
+
+    def test_prompt_change_gets_new_export_without_changing_frozen_task(self):
+        first = review_rounds.export_task(self.batch, only_round='labels')
+        package = Path(first['package_dir']) / 'task.json'
+        frozen = package.read_bytes()
+        original = review_rounds._round_prompt
+        with patch.object(review_rounds, '_round_prompt', side_effect=lambda *args:
+                          original(*args) + "\nNEW INSTRUCTION REVISION"):
+            second = review_rounds.export_task(self.batch, only_round='labels')
+        self.assertNotEqual(first['task_id'], second['task_id'])
+        self.assertEqual(package.read_bytes(), frozen)
+        self.assertIn('NEW INSTRUCTION REVISION',
+                      json.loads((Path(second['package_dir']) / 'task.json').read_text())['prompt'])
+        review_rounds._check_bound_inputs(self.batch, first['task_id'])
+
+    def test_explicit_self_negation_is_rejected_without_rewriting_labels(self):
+        bad = {'assessment': {'type': '单项填空', 'subtypes': ['四个选项']},
+               'rationale': '本空考查be动词，按单项填空/四个选项记录不合理，故仅判断知识点。'}
+        with self.assertRaisesRegex(ValueError, 'REVIEW_ASSESSMENT_CONTRADICTION'):
+            review_rounds._reject_assessment_contradiction(bad)
+        self.assertEqual(bad['assessment']['type'], '单项填空')
+        for reason in ('原标签是单词拼写，但本题应判单项填空。',
+                       '图片选项未见，不能判断答案。',
+                       '题型是单项填空，答案不正确。',
+                       '上一轮判成单项填空不合理。',
+                       '第2题不是单项填空。'):
+            review_rounds._reject_assessment_contradiction(dict(bad, rationale=reason))
+        review_rounds._reject_assessment_contradiction(dict(bad, assessment=None))
+
+    def test_contradiction_uses_failed_target_path_and_preserves_valid_checks(self):
+        good = self.checks('labels')[0]
+        bad = copy.deepcopy(good)
+        bad['unit_id'] = 'bad-unit'
+        bad['assessment']['type'] = '单项填空'
+        bad['assessment']['subtypes'] = ['四个选项']
+        bad['rationale'] = '按单项填空/四个选项记录不合理'
+        valid, failed = review_rounds._partition_check_issues(
+            review, self.plan, 'labels', [good, bad], self.batch)
+        self.assertEqual(valid, [good])
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]['unit_id'], 'bad-unit')
+        self.assertIn('REVIEW_ASSESSMENT_CONTRADICTION', failed[0]['reason'])
 
     def test_catalog_filter_retains_metadata_and_unknown_type_falls_back(self):
         from workbench import taxonomy
@@ -567,6 +611,32 @@ class ReviewRoundsTest(unittest.TestCase):
             fixed = self._part_response(prompt, 'labels')
             invoked.extend(c['unit_id'] for c in fixed['artifacts']['review_round']['checks'])
             self.assertIn('BLIND_LABEL_ABSENCE', prompt)
+            return {'response': fixed}
+        with patch.object(review_rounds, 'invoke', side_effect=repair):
+            report = review_rounds._repair_round(self.batch, first['task_id'], {'provider': 'fixture'})
+        self.assertEqual(invoked, [failed_uid])
+        self.assertEqual(report.get('part_completed'), 1)
+
+    def test_self_negation_repairs_only_failed_target_and_retains_original(self):
+        self._parallel_batch()
+        first = review_rounds.export_task(self.batch, max_units_per_part=2)
+        task = json.loads((Path(first['package_dir']) / 'task.json').read_text())
+        response = self._part_response(task['prompt'], 'labels')
+        checks = response['artifacts']['review_round']['checks']
+        checks[0]['rationale'] = '按阅读理解/阅读判断记录不合理'
+        failed_uid = checks[0]['unit_id']
+        unaffected = copy.deepcopy(checks[1:])
+        with self.assertRaisesRegex(review.RoundCheckError, 'REVIEW_ASSESSMENT_CONTRADICTION'):
+            review_rounds.import_result(self.batch, first['task_id'], response)
+        partial = json.loads((self.batch / 'workflow/review-partial' / (first['task_id'] + '.json')).read_text())
+        self.assertEqual(partial['valid_checks'], unaffected)
+        retained = list((self.batch / 'workflow/review-results' / first['task_id']).glob('*.json'))
+        self.assertTrue(any('记录不合理' in path.read_text() for path in retained))
+        invoked = []
+        def repair(prompt, run_dir, config, permit_parallel=False):
+            fixed = self._part_response(prompt, 'labels')
+            invoked.extend(c['unit_id'] for c in fixed['artifacts']['review_round']['checks'])
+            self.assertIn('REVIEW_ASSESSMENT_CONTRADICTION', prompt)
             return {'response': fixed}
         with patch.object(review_rounds, 'invoke', side_effect=repair):
             report = review_rounds._repair_round(self.batch, first['task_id'], {'provider': 'fixture'})

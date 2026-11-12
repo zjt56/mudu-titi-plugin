@@ -85,6 +85,54 @@ class ReviewStatusOverviewTest(unittest.TestCase):
             self.assertEqual(status["rounds"][0]["reviewed"], 1)
             self.assertIn("labels", records)
 
+    def test_cache_key_tracks_all_declared_inputs_and_nested_drafts(self):
+        import json
+        import os
+        from workflow import review
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            for relative in (*review.ROUND_INPUTS,
+                             '01_source/materials/attachment_001.txt',
+                             'candidates/units/scoped-u1.json',
+                             'workflow/review-attempts/round-one/response.json'):
+                with self.subTest(input=relative):
+                    target = folder / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text('{}')
+                    before = server._review_inputs_key(folder)
+                    info = target.stat()
+                    target.write_text('[]')
+                    os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
+                    self.assertNotEqual(before, server._review_inputs_key(folder))
+            media = folder / '01_source/images/one.png'
+            media.parent.mkdir(parents=True)
+            media.write_bytes(b'old')
+            (folder / 'workflow/media-observations.json').write_text(json.dumps({
+                'observations': [{'path': '01_source/images/one.png'}]}))
+            before = server._review_inputs_key(folder)
+            media.write_bytes(b'new')
+            self.assertNotEqual(before, server._review_inputs_key(folder))
+
+    def test_cached_snapshot_rechecks_when_original_label_changes(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            target = folder / '04_knowledge/knowledge.json'
+            target.parent.mkdir(parents=True)
+            target.write_text('old')
+            def evaluate(*args):
+                complete = target.read_text() == 'new'
+                return {'checked_rounds': ['labels'] if complete else [],
+                        'execution_completed': False, 'passed': False}
+            with patch('workflow.review.evaluate_rounds', side_effect=evaluate) as evaluator:
+                server.review_snapshot(folder)
+                server.review_snapshot(folder)
+                self.assertEqual(evaluator.call_count, 1)
+                target.write_text('new')
+                status, _ = server.review_snapshot(folder)
+                self.assertEqual(evaluator.call_count, 2)
+                self.assertEqual(status['rounds'][0]['state'], 'completed')
+
     def test_without_skip_marker_listening_units_stay_unverified(self):
         data = self.run_overview(False, {}, [])
         by_id = {row["unit_id"]: row for row in data["rows"]}

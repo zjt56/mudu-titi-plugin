@@ -54,6 +54,9 @@
 ## 回退方式
 回退本提交即恢复旧提示词与旧展示；不影响已归档轮次与批次数据。
 
+## 后续深查更正
+2026-11-12 后续深查发现：第三次 labels 调用仍复用冻结旧提示，未包含后来添加的维度规则；不能把该次成功归因于维度规则。原始输出矛盾有证据，但“模型一定照抄示例”的因果没有证据。前端还存在完整路径被缩为叶名后比较、顺序敏感、轮次缺 differences 及缓存漏输入等确定性缺陷，故此前“程序判定本身正确”的表述不能扩大到整条展示链路。详见 `2026-11-12-review-status-root-cause-hardening.md`。
+
 ## 已知遗留（本次未改，改动前即失败）
 `workflow.test_workbench_review_status::test_stale_round_keeps_history_without_claiming_current_completion`
 在本次改动前就失败（`git stash` 后复现）：同一目录两次 `review_snapshot` 因

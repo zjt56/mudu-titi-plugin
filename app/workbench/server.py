@@ -1652,41 +1652,53 @@ _REVIEW_SNAPSHOT_CACHE = {}
 
 
 def _review_inputs_key(folder):
-    """Fingerprint every file the round evaluation reads.
+    """Project the evaluator's declared dependencies and retained evidence.
 
-    逐字绑定复验要读来源正文、确认结构、候选与轮次记录；只要这些没变，
-    同一份审核结论就可以复用。切换题目时每行都要重新算一遍会慢到 1-2 秒。
+    Hash contents rather than mtime/size: same-length replacements and restored
+    timestamps must not leave a page showing the previous review generation.
     """
     import hashlib
+    from workflow import review
+    paths = {folder / relative for relative in review.ROUND_INPUTS}
+    paths.update(folder / relative for relative in (
+        "07_review/review-rounds.json", "07_review/manual-review-queue.json",
+        "07_review/review-gate.json", "07_review/report.json",
+        "07_review/content-review.json", "07_review/metadata-review.json",
+        "workflow/manifest.json", "workflow/media-observations.json",
+        "02_audio/SKIP_LISTENING", "06_batch/batch.json", "06_batch/batch_meta.json"))
+    rule_root = Path(review.__file__).resolve().parents[1]
+    paths.update(rule_root / relative for relative in review.ROUND_RULES)
+    paths.add(rule_root / "prompts/roles/review.md")
+    paths.update(rule_root / "workflow" / name for name in (
+        "review.py", "review_consensus.py", "review_rounds.py", "agent_tasks.py"))
+    # Verification also consumes frozen bindings, responses and generation state.
+    # Candidates are recursive: unit editor drafts live in candidates/units/.
+    for directory in (folder / "07_review", folder / "workflow"):
+        paths.update(directory.glob("*.json"))
+    for relative in ("candidates", "01_source/materials", "02_audio/sources",
+                     "workflow/review-transactions", "workflow/review-bindings", "workflow/review-results",
+                     "workflow/review-attempts", "workflow/review-partitions",
+                     "workflow/review-generations", "workflow/review-history",
+                     "workflow/review-reuse"):
+        directory = folder / relative
+        if directory.is_dir():
+            paths.update(p for p in directory.rglob("*")
+                         if p.is_file() and p.suffix in (".json", ".txt")
+                         and not (relative == "workflow/review-attempts" and p.name == "input.txt"))
+    observations = load(folder / "workflow/media-observations.json", {}) or {}
+    for item in observations.get("observations", []):
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            target = (folder / item["path"]).resolve()
+            if target.is_relative_to(folder.resolve()):
+                paths.add(target)
     parts = []
-    for relative in ("07_review/review-rounds.json", "07_review/manual-review-queue.json",
-                     "07_review/review-gate.json", "07_review/report.json",
-                     "07_review/content-review.json", "07_review/metadata-review.json",
-                     "workflow/manifest.json", "01_source/structure.confirmed.json",
-                     "06_batch/batch.json", "06_batch/batch_meta.json"):
-        path = folder / relative
+    for path in sorted(paths):
         try:
-            stat = path.stat()
-            parts.append((relative, stat.st_mtime_ns, stat.st_size))
+            parts.append((str(path), hashlib.sha256(path.read_bytes()).hexdigest()))
         except OSError:
-            parts.append((relative, "missing"))
-    source = folder / "01_source"
-    for path in sorted(source.glob("*.txt")) if source.is_dir() else []:
-        try:
-            stat = path.stat()
-            parts.append((path.name, stat.st_mtime_ns, stat.st_size))
-        except OSError:
-            pass
-    candidates = folder / "candidates"
-    if candidates.is_dir():
-        metas = []
-        for path in sorted(candidates.glob("*.json")):
-            try:
-                stat = path.stat()
-                metas.append((path.name, stat.st_mtime_ns, stat.st_size))
-            except OSError:
-                pass
-        parts.append(("candidates", tuple(metas)))
+            parts.append((str(path), "missing"))
+    # An evaluator replacement in tests/hot reload must not reuse old projections.
+    parts.append(("evaluator", id(review.evaluate_rounds)))
     return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()
 
 
@@ -1720,7 +1732,7 @@ def _review_snapshot_uncached(folder):
                       if isinstance(r, dict) and r.get("round_id") == rid
                       and r.get("execution_id") and isinstance(r.get("checks"), list)
                       and r["checks"]]
-        previous_checks = historical[0]["checks"] if len(historical) == 1 else []
+        previous_checks = [check for record in historical for check in record["checks"]]
         current = rid in checked
         rounds.append({"round_id": rid, "name": name, "completed": current,
                        "state": "completed" if current else "needs_refresh" if previous_checks else "not_started",
@@ -2955,7 +2967,13 @@ def review_comparison(folder: Path, unit_id, numbers):
                                         "scope": ("subquestion" if str(check.get("number") or "").strip()
                                                   else "unit"),
                                         "verdict": check.get("verdict"), "rationale": check.get("rationale"),
-                                        "assessment": assessment, "evidence": check.get("evidence")})
+                                        "assessment": assessment, "evidence": check.get("evidence"),
+                                        "differences": [
+                                            {"field": field, "original": labels[field], "reviewed": assessment[field]}
+                                            for field in ("type", "subtypes", "knowledge")
+                                            if field in labels and field in assessment
+                                            and (sorted(set(labels[field])) if isinstance(labels[field], list) else labels[field])
+                                            != (sorted(set(assessment[field])) if isinstance(assessment[field], list) else assessment[field])]})
             entry["status"] = "已提供" if entry["checks"] else "未覆盖"
             entry["source"] = source_name
             entry["execution_id"] = record.get("execution_id")
@@ -3171,6 +3189,7 @@ def detail(name, unit_id):
             })
 
     findings = detail_findings(numbers)
+    row = mark_row(row, findings)
     label_findings, format_findings, other_findings = split_findings(findings)
     whole_unit = taxonomy.whole_unit_type(row.get("type") or batch_item.get("type") or "")
     label_open = group_duplicate_findings(label_findings, whole_unit=whole_unit)
