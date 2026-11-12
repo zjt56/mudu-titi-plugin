@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workflow import agent_tasks, question_draft
+from workflow import agent_tasks, question_draft, wire_format
 
 
 class QuestionDraftTest(unittest.TestCase):
@@ -165,6 +165,45 @@ class QuestionDraftTest(unittest.TestCase):
         self.source(table, [([26, 27], "group", "听力信息转换", 1, 3)], metadata)
         cell = question_draft.build(self.root)["items"][0]["materialBlocks"][0]["rows"][0]["cells"][0]
         self.assertEqual(cell, {"text": "__26__\n__27__", "colspan": 2, "rowspan": 1})
+
+    def test_split_underline_runs_are_one_numbered_blank(self):
+        """一处空档被 Word 拆成多段下划线时，只能归一成一个 __N__。"""
+        self.assertEqual(wire_format.normalize_blank_text(
+            "how to <u>　</u><u>16</u><u>　</u><u> </u>"), "how to __16__")
+        self.assertEqual(wire_format.normalize_blank_text("<u>　26　</u>"), "__26__")
+        self.assertEqual(wire_format.normalize_blank_text("<u>　 </u> <u>　 </u>"), "______ ______")
+        self.assertEqual(wire_format.normalize_blank_text("<u>farmers</u>"), "<u>farmers</u>")
+        self.assertEqual(wire_format.normalize_blank_text("plain words"), "plain words")
+
+    def test_reflowed_table_text_keeps_word_merge_evidence(self):
+        """确认文本行尾空白被归一后，Word 合并跨度仍必须被采用。"""
+        raw = ("[TABLE 1]\n"
+               "It’s important to learn how to <u>　</u><u>16</u><u>　</u><u>\xa0</u> |  | \n"
+               "Reasons | It helps us to make friends. | ●to help others to feel cared about\n"
+               " | It teaches us how to be fair. | ●to think about the <u>　</u><u>18</u><u>　</u> of other people\n"
+               "[/TABLE]")
+        text = "你将听到一篇短文。\n" + raw
+        reflowed = "\n".join(line.rstrip() for line in text.splitlines())
+        header = "It’s important to learn how to <u>　</u><u>16</u><u>　</u><u>\xa0</u>"
+        metadata = {"tables": [{"number": 1, "text": raw,
+                                "grid": [line.split("|") for line in raw.splitlines()[1:-1]],
+                                "rows": [
+            {"cells": [{"text": header, "colspan": 3, "rowspan": 1}]},
+            {"cells": [{"text": "Reasons", "colspan": 1, "rowspan": 3},
+                       {"text": "It helps us to make friends."},
+                       {"text": "●to help others to feel cared about"}]},
+            {"cells": [{"text": "", "colspan": 1, "rowspan": 1, "merge_origin": [1, 0]},
+                       {"text": "It teaches us how to be fair."},
+                       {"text": "●to think about the <u>　</u><u>18</u><u>　</u> of other people"}]}]}]}
+        self.source(reflowed, [([16, 17, 18], "group", "听力信息转换", 1, len(reflowed.splitlines()))],
+                    metadata)
+        result = question_draft.build(self.root)
+        block = result["items"][0]["materialBlocks"][0]
+        self.assertEqual(block["rows"][0]["cells"][0]["colspan"], 3)
+        self.assertEqual(block["rows"][0]["cells"][0]["text"], "It’s important to learn how to __16__")
+        self.assertEqual(block["rows"][1]["cells"][0]["rowspan"], 3)
+        self.assertEqual(len(block["rows"][2]["cells"]), 2)  # merge_origin 不重复成新单元格
+        self.assertNotIn("TABLE_LAYOUT_UNVERIFIED", [p["code"] for p in result["issues"]])
 
     def test_unchanged_ensure_preserves_file_and_ignores_label_changes(self):
         self.standalone()

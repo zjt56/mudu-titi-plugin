@@ -216,22 +216,93 @@ def source_lines(folder):
     return path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
 
 
-def source_blocks(lines):
+def table_structure(folder):
+    """Word 抽出的表格结构（含合并跨度），按表号索引，供预览沿用原表格网格。"""
+    data = load(folder / "01_source" / "extraction.json", {})
+    tables = {}
+    for table in (data.get("tables") if isinstance(data, dict) else None) or []:
+        if isinstance(table, dict) and table.get("number") is not None:
+            tables[str(table["number"])] = table
+    return tables
+
+
+def _cell_text_images(raw):
+    names = [Path(m.group(1).strip()).name for m in re.finditer(r"\[IMG\s+([^\]]+)\]", raw)]
+    text = re.sub(r"\[IMG\s+[^\]]+\]", "", raw).strip()
+    # 图片原本占位在文字之前/之后时，去掉留下的空行，避免单元格开头多一个换行。
+    text = re.sub(r"^(?:<br\s*/?>\s*)+", "", text, flags=re.I)
+    text = re.sub(r"(?:\s*<br\s*/?>)+$", "", text, flags=re.I)
+    return text.strip(), names
+
+
+def structured_rows(table, flat_rows):
+    """结构化表格行（含 rowspan/colspan）；与正文网格不同形时返回 None。
+
+    预览按 01_source/正文.txt 切片，只有 Word 表格的行数与每行列宽都和正文
+    网格一致，才能用它的合并跨度渲染；否则退回按 `|` 切分的平面表格，不猜。
+    """
+    if not isinstance(table, dict):
+        return None
+    rows = table.get("rows")
+    if not isinstance(rows, list) or not rows or len(rows) != len(flat_rows):
+        return None
+    structured = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            return None
+        before, after = row.get("grid_before", 0), row.get("grid_after", 0)
+        if any(type(value) is not int or not 0 <= value <= 1000 for value in (before, after)):
+            return None
+        cells = []
+        width = before + after
+        for _ in range(before):
+            cells.append({"text": "", "images": [], "rowspan": 1, "colspan": 1})
+        for cell in row.get("cells") or []:
+            if not isinstance(cell, dict):
+                return None
+            colspan, rowspan = cell.get("colspan", 1), cell.get("rowspan", 1)
+            if (type(colspan) is not int or colspan < 1
+                    or type(rowspan) is not int or rowspan < 1):
+                return None
+            width += colspan
+            if cell.get("merge_origin") is not None:
+                continue
+            text, names = _cell_text_images(str(cell.get("text") or "").replace("\n", "<br>"))
+            cells.append({"text": text, "images": [{"name": name} for name in names],
+                          "rowspan": rowspan, "colspan": colspan,
+                          "header": bool(cell.get("header"))})
+        for _ in range(after):
+            cells.append({"text": "", "images": [], "rowspan": 1, "colspan": 1})
+        if width != len(flat_rows[index]):
+            return None
+        structured.append({"cells": cells})
+    return structured
+
+
+def source_blocks(lines, tables=None):
     blocks = []
     table = None
     table_images = []
+    table_number = None
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("[TABLE"):
             table = []
             table_images = []
+            match = re.match(r"\[TABLE(?:\s+(\d+))?\]", stripped)
+            table_number = match.group(1) if match else None
             continue
         if stripped.startswith("[/TABLE]"):
             if table is not None:
                 # table_images 与 rows 同形：table_images[行][列] = 该单元格的图片名列表。
-                blocks.append({"type": "table", "rows": table, "cellImages": table_images})
+                block = {"type": "table", "rows": table, "cellImages": table_images}
+                structured = structured_rows((tables or {}).get(str(table_number)), table)
+                if structured is not None:
+                    block["structured"] = structured
+                blocks.append(block)
                 table = None
                 table_images = []
+                table_number = None
             continue
         if table is not None:
             # 表格单元格里也可能嵌图片（如 `[IMG image10.jpeg]<br>Weather`）。
@@ -283,6 +354,10 @@ def attach_media(blocks, folder, name):
                 ]
                 for row in grid
             ]
+            for row in block.get("structured") or []:
+                for cell in row.get("cells") or []:
+                    cell["images"] = [{"name": image.get("name"), "url": media_url(image.get("name"))}
+                                      for image in cell.get("images") or []]
     return blocks
 
 
@@ -3192,7 +3267,7 @@ def detail(name, unit_id):
         chunk = slice_text(lines, numbers[0])
     else:
         chunk = []
-    blocks = attach_media(source_blocks(chunk), folder, name)
+    blocks = attach_media(source_blocks(chunk, table_structure(folder)), folder, name)
     audio_units = [row.get("unit_id") or unit_id]
     if row.get("source_parent_id"):
         audio_units.append(row["source_parent_id"])

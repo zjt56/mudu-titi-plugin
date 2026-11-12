@@ -33,6 +33,7 @@
 | 日期 | 记录 | 摘要 |
 |---|---|---|
 | 2026-11-12 | [2026-11-12-band-aware-final-source-audit.md](2026-11-12-band-aware-final-source-audit.md) | 最终来源审计与语音导语独立重建共同消费当前视觉板块证据，修06组装身份和A8误报 |
+| 2026-11-12 | [2026-11-12-table-span-accuracy.md](2026-11-12-table-span-accuracy.md) | 表格识别保真：空白容忍的 Word 合并匹配、多段下划线空档归一、预览按真实 rowspan/colspan 渲染 |
 | 2026-11-12 | [2026-11-12-question-number-upload-design.md](2026-11-12-question-number-upload-design.md) | 题号新规适配设计：显式范围、来源三态、原卷题序与无号/重号兼容；尚未改运行代码 |
 | 2026-11-12 | [2026-11-12-question-number-upload.md](2026-11-12-question-number-upload.md) | 题号新规落地：显式原卷范围、来源三态、18 批次直接迁移备份复验、审核语义兼容 |
 | 2026-11-12 | [2026-11-12-queue-remove.md](2026-11-12-queue-remove.md) | 排队区支持移出/恢复，当前 13 份处理中批次已移出且不自动重启 |

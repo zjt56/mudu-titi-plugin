@@ -84,10 +84,30 @@ def _year(value):
     return value
 
 
+# 同一个空档在 Word 里常被拆进连续多段下划线：`<u>　</u><u>26</u><u>　</u><u> </u>`。
+# 只按单段 `<u>` 归一，会把它写成一串并列的下划线（`______  __26__  ______`），
+# 既读不出“一处空档带题号”，也会在窄列里换行成孤立横线。
+BLANK_RUN = re.compile(
+    r"(?:<u>[\s\u3000\xa0]*</u>|<u>\s*\d{1,3}\s*</u>)"
+    r"(?:(?:<u>[\s\u3000\xa0]*</u>)|(?:<u>\s*\d{1,3}\s*</u>))+"
+)
+
+
+def _blank_run(match):
+    numbers = re.findall(r"<u>\s*(\d{1,3})\s*</u>", match.group(0))
+    if not numbers:
+        return "______"
+    return "".join(f"__{number}__" for number in numbers)
+
+
 def normalize_blank_text(text):
-    """库侧空档写法：<u>　26　</u> → __26__，纯空档 → ______。"""
+    """库侧空档写法：<u>　26　</u> → __26__，纯空档 → ______。
+
+    连续多段下划线属于同一处空档（题号 + 两侧留白），必须先整体识别再归一。
+    """
     if not isinstance(text, str):
         return text
+    text = BLANK_RUN.sub(_blank_run, text)
     text = re.sub(r"<u>\s*[\u3000\s]*(\d{1,3})[\u3000\s]*\s*</u>", r"__\1__", text)
     text = re.sub(r"\u3000\s*(\d{1,3})\s*\u3000", r"__\1__", text)
     text = re.sub(r"<u>\s*[\u3000\s]*\s*</u>", "______", text)

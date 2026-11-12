@@ -420,17 +420,53 @@ def _source_table_rows(table, *, include_omitted=True):
     return rows
 
 
+def _table_grid_equal(left, right):
+    """Compare a table text with Word's table text ignoring layout whitespace.
+
+    Word keeps non-breaking and trailing spaces inside cells; the confirmed
+    source may have been reflowed. Only whitespace may differ here — visible
+    text and grid shape still have to match, so a dropped word or cell fails.
+    """
+    def lines(text):
+        cleaned = []
+        for line in str(text or "").splitlines():
+            line = line.replace("\xa0", " ").replace("\u3000", " ")
+            cleaned.append(re.sub(r"\s+", " ", line).strip())
+        return cleaned
+    left_lines, right_lines = lines(left), lines(right)
+    return bool(left_lines) and left_lines == right_lines
+
+
+def _table_grid_matches(table, flat_rows):
+    """Word 抽出的表格网格必须和正文网格同形，合并证据才可采用。"""
+    grid = table.get("grid")
+    flat_widths = [len(line.split("|")) for line in flat_rows]
+    if not isinstance(grid, list) or not grid or not all(isinstance(row, list) for row in grid):
+        # 旧协议/人工元数据没有逐格网格证据时只按文本判定，不额外猜形状。
+        return True
+    return len(grid) == len(flat_widths) and [len(row) for row in grid] == flat_widths
+
+
 def _table_blocks(text, extraction, issues, uid, unit_type=""):
     blocks = []
+    tables = extraction.get("tables") or [] if isinstance(extraction, dict) else []
     for match in _TABLE.finditer(text):
-        tables = extraction.get("tables") or [] if isinstance(extraction, dict) else []
+        rows = []
+        flat_rows = match.group(2).strip("\n").splitlines()
         exact = [table for table in tables if isinstance(table, dict)
                  and str(table.get("number")) == match.group(1)
-                 and str(table.get("text") or "").strip() == match.group(0).strip()]
-        rows = []
-        if len(exact) == 1:
-            rows = _source_table_rows(exact[0])
+                 and _table_grid_equal(table.get("text"), match.group(0))]
+        structured = exact[0] if len(exact) == 1 else None
+        if structured is not None and not _table_grid_matches(structured, flat_rows):
+            structured = None
+            issues.append({"unit_id": uid, "code": "TABLE_LAYOUT_UNVERIFIED",
+                           "reason": "Word合并单元格网格与原表格形状不一致"})
+        if structured is not None:
+            rows = _source_table_rows(structured)
         else:
+            if len(exact) != 1:
+                issues.append({"unit_id": uid, "code": "TABLE_LAYOUT_UNVERIFIED",
+                               "reason": "保留正文表格网格；没有唯一匹配的Word合并单元格证据"})
             # Physical newlines inside an underline belong to its cell, not to
             # a new table row. Keep them through row splitting, then normalize.
             grid = re.sub(r"<u>.*?</u>", lambda m: m.group(0).replace("\n", "<br>"),
@@ -439,8 +475,6 @@ def _table_blocks(text, extraction, issues, uid, unit_type=""):
                 if "|" in line:
                     rows.append({"cells": [{"text": _skeleton_text(cell.strip()), "items": []}
                                            for cell in line.split("|")]})
-            issues.append({"unit_id": uid, "code": "TABLE_LAYOUT_UNVERIFIED",
-                           "reason": "保留正文表格网格；没有唯一匹配的Word合并单元格证据"})
         converted = _table_blank_cells(rows, unit_type)
         block = {"type": "table", "rows": converted}
         if _information_conversion(text, unit_type):
