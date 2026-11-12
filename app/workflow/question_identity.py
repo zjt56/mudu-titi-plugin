@@ -57,13 +57,13 @@ def printed_anchors(lines):
         if strong is not None:
             nums.append(strong)
         nums.extend(n for n in _weak_numbers(line) if n not in nums)
-        for match in re.finditer(r"(?:^|[\s：:])([1-9]\d{0,2})[.．、](?!\d)", line):
-            n = int(match.group(1))
+        from .source_anchors import printed_tokens
+        literal = [number for _offset, number in printed_tokens(line)]
+        for n in literal:
             if n not in nums:
                 nums.append(n)
         # Preserve repeated printed occurrences; strong/weak views of the same
         # token are one occurrence, two literal inline tokens are not.
-        literal = [int(m.group(1)) for m in re.finditer(r"(?:^|[\s：:])([1-9]\d{0,2})[.．、](?!\d)", line)]
         for n in set(literal):
             nums.extend([n] * max(0, literal.count(n) - nums.count(n)))
         result.extend((index, n) for n in nums)
@@ -80,20 +80,8 @@ def question_position(lines, number):
 
 def numbered_projection(lines):
     """Split inline printed items for parsing only; never rewrite source evidence."""
-    result = []
-    for line in lines:
-        matches = list(re.finditer(r"(?:^|[\s：:])([1-9]\d{0,2})[.．、](?!\d)", line))
-        if not matches:
-            result.append(line)
-            continue
-        # Speaker prefixes belong to shared dialogue, while the child is its blank.
-        for index, match in enumerate(matches):
-            left = match.start(1)
-            right = matches[index + 1].start() if index + 1 < len(matches) else len(line)
-            if index == 0 and not line[:left].strip().rstrip(':：').isalpha():
-                left = 0
-            result.append(line[left:right].strip())
-    return result
+    from .source_anchors import project_numbered
+    return project_numbered(lines)
 
 
 def _anchor(unit, lines):
@@ -119,6 +107,12 @@ def assign_scoped(units, source_lines, sections=None, previous=None) -> list[dic
     known_starts = {row["start_line"] for row in candidates}
     for index, row in enumerate(sections or [], 1):
         start = row.get("start_line") or row.get("source_line") or row.get("line")
+        if type(start) is int and row.get("lesson_band"):
+            for candidate in candidates:
+                if candidate["start_line"] == start:
+                    candidate["lesson_band"] = deepcopy(row["lesson_band"])
+                    candidate["end_line"] = min(candidate.get("end_line", len(lines)),
+                                                 row.get("end_line") or row.get("source_end_line") or len(lines))
         if type(start) is int and start not in known_starts:
             candidates.append(dict(row, start_line=start, occurrence=index,
                                    title=row.get("title") or row.get("heading") or ""))
@@ -153,11 +147,15 @@ def assign_scoped(units, source_lines, sections=None, previous=None) -> list[dic
         sid = row.get("section_id") or old.get("section_id") or sid
         # The printed anchor is independent of the retained window and type.
         uid = row.get("unit_id") if row.get("identity_version") == VERSION else None
-        uid = uid or old.get("unit_id") or f"{sid}-u{anchor}"
+        offset = (row.get("source_span") or {}).get("start_offset")
+        column_suffix = f"-c{offset}" if type(offset) is int else ""
+        uid = uid or old.get("unit_id") or f"{sid}-u{anchor}{column_suffix}"
         row.update(identity_version=VERSION, section_id=sid, unit_id=uid,
                    source_section={"title": title, "ordinal": ordinal.group(1) if ordinal else "",
                                    "context": context, "occurrence": occurrence,
                                    "start_line": owner["start_line"], "end_line": owner.get("end_line", len(lines))})
+        if owner.get("lesson_band"):
+            row["source_section"]["lesson_band"] = deepcopy(owner["lesson_band"])
         existing = row.get("question_ids") or old.get("question_ids") or {}
         start, end = _range(row)
         qids = {}
@@ -165,7 +163,7 @@ def assign_scoped(units, source_lines, sections=None, previous=None) -> list[dic
             local = lines[start - 1:end]
             pos = question_position(local, n)
             qanchor = start + pos if pos is not None else anchor
-            qids[str(n)] = existing.get(str(n)) or f'{sid}-l{qanchor}-q{n}'
+            qids[str(n)] = existing.get(str(n)) or f'{sid}-l{qanchor}{column_suffix}-q{n}'
         row['question_ids'] = qids
         keys = list(row["question_ids"].values())
         if uid in used_units or used_questions.intersection(keys) or len(set(keys)) != len(keys):

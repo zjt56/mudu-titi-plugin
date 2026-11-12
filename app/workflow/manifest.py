@@ -276,7 +276,7 @@ def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use
             try:
                 band_data = json.loads(band_path.read_text(encoding='utf-8'))
                 band_binding = {k: band_data.get(k) for k in
-                                ('version', 'source_sha256', 'text_sha256', 'bands', 'issues', 'status')}
+                                ('version', 'source_sha256', 'text_sha256', 'input_images', 'bands', 'issues', 'status')}
                 hashes['direct:01_source/lesson-bands.json'] = hashlib.sha256(
                     json.dumps(band_binding, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
             except (OSError, ValueError, AttributeError):

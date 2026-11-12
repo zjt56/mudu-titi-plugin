@@ -71,6 +71,11 @@ def _weak_numbers(line: str) -> list[int]:
     plain = _plain(line)
     found = [int(m.group(1)) for m in _BLANK_BEFORE_NUMBER.finditer(plain)]
     found += [int(m.group(1)) for m in _NUMBER_BEFORE_BLANK.finditer(plain)]
+    if re.match(r'^\s*[A-Za-z][A-Za-z .-]*[:：]', plain):
+        # A dialogue may print the answer line as an embedded image. Require a
+        # speaker and an adjacent printed number; an arbitrary image proves none.
+        found += [int(m.group(1)) for m in re.finditer(
+            r'(?<!\d)(\d{1,3})\s*[.．]\s*(?=\[IMG\s+[^\]]+\])', plain)]
     return sorted(set(found))
 
 
@@ -294,6 +299,12 @@ def _scoped_source_slice(unit: dict, lines: list[str]) -> list[str]:
     if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
         return []
     window = lines[start - 1:end]
+    if "start_offset" in span or "end_offset" in span:
+        left, right = span.get("start_offset"), span.get("end_offset")
+        if (start != end or type(left) is not int or type(right) is not int
+                or not 0 <= left < right <= len(window[0])):
+            return []
+        window = [window[0][left:right]]
     stem = str(unit.get("stem") or "").strip()
     # Only layout whitespace may differ. A stale/misbound stem must not cause
     # a fallback to another section's identically numbered question.

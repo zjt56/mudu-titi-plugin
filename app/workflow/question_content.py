@@ -14,7 +14,10 @@ from .question_identity import source_key
 
 IMAGE = re.compile(r"\[IMG\s+([^\]]+)\]")
 FORBIDDEN = re.compile(r"(?:考试时间|满分\s*\d+分|本试卷共|扫码练听力|答案链接|初中学业水平考试)")
-OPTION = re.compile(r"(?<![A-Za-z0-9&/.\-])([A-H])[.．、]\s*")
+# A phonetic target may touch option A: ``/e/A.eye``. Only a short
+# slash-delimited IPA token permits that boundary; URL/path slashes stay excluded.
+_IPA = r"[a-zɑɒæəɛɜɪʊʌɔθðʃʒŋɡːˈˌ]"
+OPTION = re.compile(r"(?:(?<![A-Za-z0-9&/.\-])|(?<=/" + _IPA + r"/)|(?<=/" + _IPA + r"{2}/)|(?<=/" + _IPA + r"{3}/))([A-H])[.．、]\s*")
 
 CONTRACT = {
     "standalone": ["题号", "题干/作答指令", "本题选项或作答空位（如有）", "答案及来源", "题内图片/图标引用（如有）"],
@@ -477,6 +480,11 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
     if (isinstance(source_lines, list) and type(start) is int and type(end) is int
             and 1 <= start <= end <= len(source_lines)):
         lines = source_lines[start - 1:end]
+        if start == end and all(type(span.get(key)) is int for key in ("start_offset", "end_offset")):
+            left, right = span["start_offset"], span["end_offset"]
+            if not 0 <= left < right <= len(lines[0]):
+                return {"passed": False, "issues": [{"code": "SOURCE_OFFSET_INVALID", "message": "同行来源偏移越界"}], "questions": {}, "shared_options": []}
+            lines = [lines[0][left:right]]
     numbers = unit.get("numbers") or []
     scoped = unit.get('identity_version') == 'scoped-v1'
     unnumbered = span.get('number_binding') == 'unnumbered_section'

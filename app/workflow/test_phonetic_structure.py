@@ -199,6 +199,66 @@ class PhoneticStructureTest(unittest.TestCase):
             row = copy.deepcopy(self.rows[0]); row['attachments'][0]['url'] = url
             self.assertEqual(phonetic_structure.shape(row, self.verified()), (False, False))
 
+    def test_source_choices_only_phonetic_group_survives_draft_and_payload(self):
+        from workflow import extract, structure_gate, denoise
+        text = ('Unit 1 Where did you go on vacation?\n第一课时 Section A\n'
+                'Ⅰ.找出每组单词中画线部分的读音不同的一项\n'
+                '(　)1.A.c<u>a</u>t　B.<u>a</u>pple　C.n<u>a</u>me　D.b<u>a</u>g\n'
+                '(　)2.A.p<u>e</u>n　B.r<u>e</u>d　C.b<u>e</u>d　D.h<u>e</u>\n'
+                '(　)3.A.b<u>i</u>g　B.s<u>i</u>t　C.t<u>i</u>me　D.f<u>i</u>sh\n'
+                '(　)4.A.n<u>o</u>t　B.d<u>o</u>g　C.b<u>o</u>x　D.h<u>o</u>me\n'
+                '(　)5.A.c<u>u</u>p　B.b<u>u</u>s　C.m<u>u</u>sic　D.s<u>u</u>n')
+        structure, body, _ = extract.infer_structure(text)
+        lines = denoise.clean_body(body)[0].splitlines()
+        units = structure_gate._build_units(structure['sections'], structure['groups'], lines)
+        self.write('01_source/正文.txt', body)
+        self.write('01_source/structure.json', structure)
+        self.write('01_source/structure.confirmed.json', {'units': units, 'identity_version': 'scoped-v1'})
+        draft = question_draft.build(self.root)
+        self.assertEqual(draft['issues'], [])
+        self.assertEqual(len(draft['items']), 1)
+        row = draft['items'][0]
+        row['question_type'] = '语音题'
+        self.assertEqual(row['material'], '')
+        self.assertTrue(row['stem'])
+        self.assertEqual(len(row['subquestions']), 5)
+        self.assertTrue(all(not child['stem'] and len(child['options']) == 4 for child in row['subquestions']))
+        verified = self.verified()
+        self.assertEqual(phonetic_structure.shape(row, verified), (True, True))
+        # Keep an untouched source-shaped baseline: a consumer may normalize its
+        # input objects in place, so each invocation owns a fresh deep copy.
+        baseline = copy.deepcopy(row)
+        result = upload_payload.build_payload({'items': [copy.deepcopy(baseline)]}, batch_dir=self.root)
+        self.assertEqual(row, baseline)
+        codes = {error['code'] for error in result['errors']}
+        self.assertNotIn('GROUP_INCOMPLETE', codes)
+        self.assertNotIn('MISSING_STEM', codes)
+        self.assertEqual(result['payload']['items'][0]['subquestions'][0]['stem'], '')
+        for mutation in ('missing', 'changed', 'child_id', 'invented_stem'):
+            bad = copy.deepcopy(baseline)
+            child = bad['subquestions'][0]
+            if mutation == 'missing':
+                child['options'].pop()
+            elif mutation == 'changed':
+                child['options'][0] = 'A. fabricated'
+            elif mutation == 'child_id':
+                child['question_id'] = 'foreign'
+            else:
+                child['stem'] = 'fabricated'
+            self.assertEqual(phonetic_structure.shape(bad, verified), (False, False), mutation)
+            before_call = copy.deepcopy(bad)
+            codes = {e['code'] for e in upload_payload.build_payload({'items': [copy.deepcopy(bad)]}, batch_dir=self.root)['errors']}
+            self.assertEqual(bad, before_call)
+            self.assertEqual(row, baseline)
+            self.assertIn('GROUP_INCOMPLETE', codes, mutation)
+        # A deficient original is not enough proof, even if the batch matches it.
+        deficient = copy.deepcopy(verified)
+        deficient[baseline['unit_id']]['subquestions'][0]['options'].pop()
+        same = copy.deepcopy(baseline)
+        same['subquestions'][0]['options'].pop()
+        self.assertEqual(phonetic_structure.shape(same, deficient), (False, False))
+        self.assertEqual(phonetic_structure.shape(row), (False, False))
+
     def test_source_audit_requires_instruction_and_shared_image(self):
         for field in ('stem', 'attachments'):
             rows = copy.deepcopy(self.rows)

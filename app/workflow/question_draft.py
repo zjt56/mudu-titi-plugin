@@ -252,6 +252,23 @@ def _bound_source(unit, source, cleaned, fresh):
     text = str(unit.get("stem") or "").strip()
     span = unit.get("source_span") or {}
     lines = cleaned.splitlines()
+    if "start_offset" in span or "end_offset" in span:
+        start, end = span.get("start_line"), span.get("end_line")
+        left, right = span.get("start_offset"), span.get("end_offset")
+        if (type(start) is not int or start != end or not 1 <= start <= len(lines)
+                or type(left) is not int or type(right) is not int
+                or not 0 <= left < right <= len(lines[start - 1])):
+            return "", {"reason": "同行题目的字符范围无效"}
+        exact = lines[start - 1][left:right].strip()
+        from .question_identity import source_key
+        peers = [u for u in fresh if source_key(u) == source_key(unit)]
+        if (exact != text or len(peers) != 1
+                or peers[0].get("source_span") != span
+                or str(peers[0].get("stem") or "").strip() != text):
+            return "", {"reason": "同行题目字符范围与当前独立重建不一致"}
+        return exact, {"basis": "source_character_window", "line_basis": "denoise.clean_body(01_source/正文.txt)",
+                       "start_line": start, "end_line": end,
+                       "start_offset": left, "end_offset": right, "boundary_rebuilt": True}
     # A grouped unit's material (article/table/rubric) lives between the section
     # start and its first question number. When the confirmed span is trusted,
     # bind the WHOLE span window as the source text so the leading material is
@@ -502,7 +519,10 @@ def build(batch_dir, *, units=None):
     cleaned_lines = cleaned.splitlines()
     from .structure_gate import _build_units
     from .preview import _find, _strong_number, _weak_numbers
-    fresh = _build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
+    from . import lesson_bands
+    evidence = lesson_bands.for_text(root, cleaned)
+    sections = lesson_bands.annotate_sections(structure.get("sections") or [], evidence)
+    fresh = _build_units(sections, structure.get("groups") or [], cleaned.splitlines())
     items, bindings, issues, media = [], {}, [], set()
     inspected_media = {}
     for unit in units:

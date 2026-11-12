@@ -351,6 +351,10 @@ def _classify_prompt(raw_text: str, candidate: dict, pdf_ocr=None) -> str:
         "题干、A-H选项、答案和解析；答案/解析不应伪装成题干。缺少题干/选项时保留可见材料，"
         "在notes说明，不要编造。返回 JSON：{\"status\":\"completed\",\"artifacts\":{\"structure\":{\"units\":[...]}},\"notes\":[],\"findings\":[]}，不要 markdown。行号从1开始。\n"
         + sync_hint +
+        ("\n视觉已绑定的板块边界（不是题面文字）：" + json.dumps(candidate.get("lesson_bands"), ensure_ascii=False)
+         + "\n图片横幅是容器边界，不得并入上一题材料。跨栏/跨页不自动结束大题，"
+         "编号空位不是独立普通题；无罗马号标题仍可成大题。不要按A/B文件名或数字次序猜归属。\n"
+         if candidate.get("lesson_bands") else "") +
         "候选结构仅供参考，不能覆盖原文证据：" + json.dumps(candidate, ensure_ascii=False) +
         ("\n同批次 PDF 的 OCR 是版面辅助证据：先比对卷名、章节、题号与上下文，"
          "只将对应的 PDF 页用于理解题号、共享材料、题干和选项的层级及分组；"
@@ -413,6 +417,12 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict) -> list[dict]:
                 not isinstance(start, int) or not isinstance(end, int) or
                 not 1 <= start <= end <= len(lines)):
             continue
+        # Reject source-heading crossings before anchor parsing.
+        if scoped and kind == "group":
+            from .structure_gate import _scope_windows
+            if any(start <= section["source_line"] <= end
+                   for section in _scope_windows(candidate.get("sections") or [], lines)):
+                return []
         positions = set(range(start, end + 1))
         if occupied.intersection(positions):
             return []
@@ -512,10 +522,42 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
     pdf_path = batch / '01_source/pdf-ocr.json'
     pdf_ocr = _load(pdf_path) if pdf_path.is_file() else None
     pdf_sha = _sha(pdf_path)
+    # Visual banners are a source-bound structural input, not rewritten text.
+    from . import lesson_bands
+    band_evidence = lesson_bands.for_text(batch, raw) if sync_practice.looks_like_sync_practice(raw) else {}
+    if band_evidence.get("bands"):
+        candidate = dict(candidate, sections=lesson_bands.annotate_sections(
+            candidate.get("sections") or [], band_evidence), lesson_bands=band_evidence["bands"])
+    band_sha = hashlib.sha256(json.dumps(band_evidence.get("bands") or [], sort_keys=True,
+                                       ensure_ascii=False).encode()).hexdigest()
     marker = _load(batch / CLASSIFY_MARKER)
     sync_applicable = sync_practice.looks_like_sync_practice(raw)
     policy_sha = sync_practice.policy_fingerprint()
+    # Resolve the selected route before looking at cached candidates. Injected
+    # invokers use only their supplied configuration and never contact a bridge.
+    route_binding = {"config": config}
+    if invoke_fn is None:
+        from . import agent as agent_entry, local_agent, visual_transport
+        if config is None and not agent_entry.configured():
+            return {"ran": False, "reason": "模型未配置"}
+        try:
+            config = local_agent.load_config() if config is None else local_agent._validate_config(config, Path.cwd())
+            route_binding = {"config": config}
+            # Match local_agent's explicit router-command recognition. Generic
+            # command and Codex providers do not use the Harness model router.
+            harness_route = config.get("provider") == "dsh" or (
+                config.get("provider") == "command" and any(
+                    isinstance(token, str) and Path(token).name in ("wf-router.sh", "wf-router.mjs")
+                    for token in config.get("command", [])))
+            if harness_route:
+                route_binding["actual_route"] = visual_transport.route_identity(stage="structure_gate")
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
+            return {"ran": False, "reason": "结构归类路由不可用：" + str(exc)[:160]}
+        invoke_fn = local_agent.invoke
+    route_sha = hashlib.sha256(json.dumps(route_binding, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     if (isinstance(marker, dict) and marker.get("units") and marker.get("raw_sha256") == raw_sha
+            and marker.get("route_sha256") == route_sha
+            and marker.get("lesson_bands_sha256") == band_sha
             and marker.get("candidate_sha256") == candidate_sha and marker.get('pdf_ocr_sha256', '') == pdf_sha
             and marker.get('sync_policy_sha256') == policy_sha):
         units = marker.get("units") or []
@@ -527,20 +569,12 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
                     'sync_applicable': sync_applicable,
                     'sync_audit': sync_practice.audit_units(units, raw) if sync_applicable else [],
                     'sync_marks': sync_practice.audit_source_marks(units, raw) if sync_applicable else []}
-    if invoke_fn is None:
-        from . import agent as agent_entry, local_agent
-        if not agent_entry.configured():
-            return {"ran": False, "reason": "模型未配置"}
-        try:
-            config = config or local_agent.load_config()
-        except (OSError, ValueError, RuntimeError) as exc:
-            return {"ran": False, "reason": "模型未配置：" + str(exc)[:120]}
-        invoke_fn = local_agent.invoke
     run_root = batch / "workflow" / "structure-classify-attempts"
     run_root.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix="structure-", dir=run_root))
     try:
-        response = invoke_fn(_classify_prompt(raw, candidate, pdf_ocr), run_dir, config)
+        response = invoke_fn("Stage: structure_gate\nAgent: structure_gate\n" +
+                             _classify_prompt(raw, candidate, pdf_ocr), run_dir, config)
         reply = response.get("response") if isinstance(response, dict) else response
         artifacts = reply.get("artifacts", {}) if isinstance(reply, dict) else {}
         structured = artifacts.get("structure", {}) if isinstance(artifacts, dict) else {}
@@ -549,6 +583,7 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
         return {"ran": False, "reason": "结构归类调用失败：" + str(exc)[:160]}
     marker_value = {"raw_sha256": raw_sha, "candidate_sha256": candidate_sha,
                     "pdf_ocr_sha256": pdf_sha, 'sync_policy_sha256': policy_sha,
+                    "lesson_bands_sha256": band_sha, "route_sha256": route_sha,
                     'sync_applicable': sync_applicable,
                     "units": units, "attempt": str(run_dir.relative_to(batch))}
     # 同步练习册：把题型/组题口径和 AI 结构对一遍，差异只留痕、不阻断（闸门仍以原卷证据为准）

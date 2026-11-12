@@ -1,5 +1,6 @@
 """Current-source proof for phonetic and legitimate unnumbered native groups."""
 from pathlib import Path
+import re
 from urllib.parse import unquote, urlsplit
 
 
@@ -83,5 +84,31 @@ def shape(unit, verified=None):
              and unit.get('printed_numbers') == [] and unit.get('source_span') == expected.get('source_span')
              and expected.get('source_span', {}).get('number_binding') == 'unnumbered_section'
              and (bool(images) or bool(str(expected.get('material') or '').strip())))
+    def source_choices_only(child):
+        # This exception is source-proven, not an invitation to erase stems:
+        # every child must originally contain only the full printed A-D choices.
+        if str(child.get('stem') or '').strip():
+            return False
+        options = child.get('options')
+        if not isinstance(options, list) or len(options) != 4:
+            return False
+        labels = []
+        for option in options:
+            if isinstance(option, dict):
+                label, text = option.get('label', option.get('key')), option.get('text')
+            elif isinstance(option, str):
+                match = re.match(r'^\s*([A-D])[.．、]\s*(.*)$', option, re.S)
+                if not match:
+                    return False
+                label, text = match.groups()
+            else:
+                return False
+            if not isinstance(text, str) or not text.strip():
+                return False
+            labels.append(label)
+        return labels == list('ABCD')
+    choices_only = (expected.get('_source_question_type') == '语音题'
+                    and not str(expected.get('material') or '').strip()
+                    and all(source_choices_only(child) for child in wanted))
     complete = all(str(c.get('stem') or '').strip() for c in subs)
-    return (bool(images) or complete or alias), alias
+    return (bool(images) or complete or alias or choices_only), (alias or choices_only)

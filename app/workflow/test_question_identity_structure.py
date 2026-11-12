@@ -81,6 +81,28 @@ class ScopedStructureTests(unittest.TestCase):
         structure, _, lines, units = self.build(text)
         self.assertIn("SOURCE_DUPLICATE_NUMBERS", {e["code"] for e in _scoped_source_errors(units, structure["sections"], lines)})
 
+    def test_class_number_inside_stem_is_not_a_second_printed_item(self):
+        text = "Unit 1\n第一课时\nⅠ.按要求完成句子,每空一词\n1.Peter is here.\n2.He is there.\n3.Emma is in <u>Class 2</u>.(对画线部分提问)"
+        structure, _, lines, units = self.build(text)
+        self.assertEqual(_scoped_source_errors(units, structure["sections"], lines), [])
+        from .question_identity import printed_anchors, numbered_projection
+        self.assertEqual(printed_anchors([lines[-1]]), [(0, 3)])
+        self.assertEqual(numbered_projection([lines[-1]]), [lines[-1]])
+
+    def test_two_column_abbreviations_keep_ten_exact_scoped_units(self):
+        text = "Unit 1\n第一课时\nⅡ.写出下列缩写词的完全形式\n" + "\n".join(
+            f"{i}.I’m<u>　　　 </u>\t{i+1}.it’s<u>　　　 </u>" for i in (1, 3, 5, 7, 9))
+        structure, _, lines, units = self.build(text)
+        self.assertEqual([u["numbers"] for u in units], [[i] for i in range(1, 11)])
+        self.assertEqual(len({u["unit_id"] for u in units}), 10)
+        for unit in units:
+            span = unit["source_span"]
+            self.assertEqual(span["start_line"], span["end_line"])
+            self.assertTrue(0 <= span["start_offset"] < span["end_offset"])
+            from .question_content import audit_source_unit
+            self.assertTrue(audit_source_unit(unit, lines)["passed"])
+        self.assertEqual(_scoped_source_errors(units, structure["sections"], lines), [])
+
     def test_group_cannot_drop_material_before_first_number(self):
         text = "Unit 1\n第一课时\nⅠ.阅读理解\nA\nAlpha is a real passage.\n1. Alpha?\nA. yes B. no C. red D. blue"
         structure, body, lines, units = self.build(text)

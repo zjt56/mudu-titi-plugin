@@ -263,6 +263,14 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
         except (OSError, ValueError, RuntimeError, TypeError) as exc:
             print(f"  · 元信息识别跳过：{str(exc)[:160]}")
     if code == 0 and stage.id == "extract":
+        # Source-bound graphical lesson containers precede general image review.
+        try:
+            from . import lesson_bands
+            with activity.track(batch_dir, "extract", "正在识别图片板块并绑定原文边界"):
+                bands = lesson_bands.build(batch_dir)
+            print(f"  · 板块视觉：{len(bands.get('bands', []))} 个边界，{bands.get('model_calls', 0)} 次调用，状态 {bands.get('status')}")
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
+            print(f"  · 板块视觉暂不可用：{str(exc)[:160]}")
         # 原卷图片视觉语义复核：候选证据，仅供后续结构/题型参考。网关不可用
         # 或任何异常都只打日志、绝不阻断主流程（硬规则 2/18）。
         try:
@@ -646,7 +654,8 @@ def _structure_inputs(batch_dir: Path, manifest: dict) -> tuple:
     """Capture the actual evidence read by the structure gate, including absences."""
     source = manifest.get("inputs", {}).get("source", {})
     original = source.get("path") or ""
-    paths = ("01_source/正文.txt", "01_source/structure.json", "01_source/原始正文.txt")
+    paths = ("01_source/正文.txt", "01_source/structure.json", "01_source/原始正文.txt",
+             "01_source/lesson-bands.json")
     return (json.dumps(source, sort_keys=True, ensure_ascii=False),
             tuple(mf.sha256_file(batch_dir / path) for path in paths),
             mf.sha256_file(original) if original else "")
@@ -659,10 +668,18 @@ def _ensure_visual_evidence(batch_dir: Path) -> None:
     extract 钩子已触发；此处兜底存量批次或非 extract 路径。只写候选产物，不阻断。
     """
     try:
+        from . import lesson_bands
+        lesson_bands.build(batch_dir)
+    except Exception:  # noqa: BLE001 - 可选板块识别失败不得跳过其它视觉检查
+        pass
+    try:
         sem = batch_dir / "01_source" / "image_semantics.json"
         if not sem.is_file():
             from . import visual_review
             visual_review.build(batch_dir)
+    except Exception:  # noqa: BLE001 - 图片检查失败不得跳过原件交叉核对
+        pass
+    try:
         cross = batch_dir / "01_source" / "source_crosscheck.json"
         if not cross.is_file():
             from . import visual_crosscheck

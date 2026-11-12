@@ -32,6 +32,12 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-12 | [2026-11-12-source-proven-phonetic-choices.md](2026-11-12-source-proven-phonetic-choices.md) | 原卷证明的纯选项语音组保留空子题干，缺选项和改文仍严格拒绝 |
+| 2026-11-12 | [2026-11-12-word-visual-bands.md](2026-11-12-word-visual-bands.md) | Word图片A/B板块来源证据贯通结构、独立切片、答案与预览，真实三课时逐题复验 |
+| 2026-11-12 | [2026-11-12-answer-lesson-band-binding.md](2026-11-12-answer-lesson-band-binding.md) | 答案按板块/专题完整序列与全题号绑定，错范围和陈旧证据不借答 |
+| 2026-11-12 | [2026-11-12-independent-vision-transport.md](2026-11-12-independent-vision-transport.md) | 视觉调用跟随实际Harness选定模型，多图批量和路由绑定缓存 |
+| 2026-11-12 | [2026-11-12-sync-dialogue-body-slots.md](2026-11-12-sync-dialogue-body-slots.md) | 无号补全对话按正文真实空位定位，图片空位不漏题 |
+| 2026-11-12 | [2026-11-12-lesson-inline-anchors-options.md](2026-11-12-lesson-inline-anchors-options.md) | 同行双列小题字符窗绑定，Class2不误判，音标后A选项完整 |
 | 2026-11-12 | [2026-11-12-derived-view-staleness.md](2026-11-12-derived-view-staleness.md) | 派生批次/闸门按上游真实内容失效，修最终格式检查幻影 KNOWLEDGE_REQUIRED；二审组题小题 number 契约 |
 | 2026-11-12 | [2026-11-12-review-knowledge-leaf-only.md](2026-11-12-review-knowledge-leaf-only.md) | 审核页知识点标签差异只显示末级，完整路径放 title |
 | 2026-11-12 | [2026-11-12-upload-paper-number-location.md](2026-11-12-upload-paper-number-location.md) | 上传独立题用原卷题号补 location，整卷档案不再回退单元序号 |

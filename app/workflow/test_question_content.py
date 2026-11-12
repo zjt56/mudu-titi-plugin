@@ -163,6 +163,14 @@ class OptionBoundaryTest(unittest.TestCase):
             ["39.A.first B.second C.third D.fourth"], 39)
         self.assertEqual([o["label"] for o in part["options"]], list("ABCD"))
 
+    def test_phonetic_target_touching_option_a_preserves_all_four_options(self):
+        from workflow.question_content import question_parts, OPTION
+        for target in ("e", "æ", "iː", "ɪ", "ɒ"):
+            part = question_parts([f"(　)1./{target}/A.<u>e</u>ye　B.<u>a</u>ll　C.sh<u>ee</u>p　D.<u>a</u>ny"], 1)
+            self.assertEqual([o["label"] for o in part["options"]], list("ABCD"))
+            self.assertEqual(part["stem"], f"/{target}/")
+        self.assertFalse(list(OPTION.finditer("https://example.org/A.eye")))
+
     def test_trailing_summary_is_not_absorbed_into_last_option(self):
         from workflow.question_content import question_parts
         unit_stem = ("(　　)55.A.realize\tB.enjoy\t\tC.forget\tD.celebrate\n"

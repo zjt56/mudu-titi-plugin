@@ -132,7 +132,7 @@ def _printed_item_anchors(lines):
     printed anchors. Literal duplicates on one line remain duplicates.
     """
     from .structure_gate import _scope_anchors
-    return _scope_anchors(lines)
+    return sorted(_scope_anchors(lines), key=lambda row: row[0])
 
 
 def _strip_answer_marker(value):
@@ -185,7 +185,7 @@ def _minor_edit(source, value, limit=2):
     return edits <= limit
 
 
-def scoped_source_matches(unit, number, path, line, source_lines):
+def scoped_source_matches(unit, number, path, line, source_lines, *, equivalent_answers=False):
     """Prove a printed number belongs to this unit at actual source coordinates.
 
     A title/type alone is never evidence. Companion excerpts need the complete
@@ -244,7 +244,16 @@ def scoped_source_matches(unit, number, path, line, source_lines):
     anchors = [left + index for index, n in _printed_item_anchors(lines[left - 1:right]) if n == int(number)]
     if not body_hits and path == body_path:
         return not anchors  # Explicit singleton alias; no printed number is asserted.
-    return len(anchors) == 1
+    if len(anchors) == 1:
+        return True
+    if not equivalent_answers or path == body_path or not anchors or line not in anchors:
+        return False
+    # Repeated positions are equivalent only inside this already proven section,
+    # with one verbatim printed row per position. Never merge across scopes or
+    # accept two occurrences on one physical line.
+    if len(anchors) != len(set(anchors)):
+        return False
+    return len({_verbatim(lines[at - 1]) for at in anchors}) == 1
 
 
 # Compact lesson keys retain the printed Roman section, but omit its instruction.
@@ -253,7 +262,39 @@ _ROMAN_ANSWER = re.compile(r'^\s*([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+)[.�
 # A printed lesson band banner. 基础巩固/能力提升 are the canonical pair; the
 # sync-practice lesson books also print 重要考点集训 (foundation/考点 block) and
 # 创新阅读专练 (reading extension block) as the same kind of band container.
-_LESSON_BAND = re.compile(rf'^\s*(?:{IMG}\s*)?(基础巩固|能力提升|重要考点集训|创新阅读专练)\s*(?:{IMG}\s*)?$')
+_LESSON_BAND = re.compile(rf'^\s*(?:{IMG}\s*)*(?:[ABＡＢ]\s*[.．、:：]?\s*)?(基础巩固|能力提升|重要考点集训|创新阅读专练)\s*(?:{IMG}\s*)*$')
+
+
+def _answer_band(text):
+    """An explicit printed answer container; images alone prove no label."""
+    text = _source_line(text)
+    from .lesson_bands import canonical_label
+    label = canonical_label(text)
+    if label:
+        return {'基础巩固': 'foundation', '能力提升': 'extension'}[label]
+    marker = _LESSON_BAND.fullmatch(text)
+    if marker:
+        return {'重要考点集训': 'foundation', '创新阅读专练': 'extension'}.get(marker[1], 'invalid')
+    if re.fullmatch(r'\s*Pronunciation\s*', text, re.I):
+        return 'pronunciation'
+    return ''
+
+
+def _answer_section_bands(sections, lines):
+    """Read explicit source banners at real coordinates without guessing images."""
+    from .sync_practice import _LESSON, _UNIT, is_section_title, plain_text
+    result, active, cursor = [], '', 0
+    for section in sections:
+        while cursor < section['start_line']:
+            text = lines[cursor]
+            visible = plain_text(text).strip()
+            if _LESSON.match(visible) or _UNIT.match(visible) or is_section_title(visible):
+                active = ''  # A lesson/topic boundary cannot inherit an earlier band.
+            active = _answer_band(text) or active
+            cursor += 1
+        result.append(active)
+    return result
+
 # Bands that introduce the extension (trailing) block of an otherwise-Roman key.
 _EXTENSION_BANDS = ('能力提升', '创新阅读专练')
 _LETTER_SEQUENCE = re.compile(r'[A-Za-z](?:\s*[;；]\s*[A-Za-z])+\s*')
@@ -329,12 +370,35 @@ def _answer_items(text):
     return items
 
 
+def _answer_section_topics(sections, lines):
+    from .sync_practice import _LESSON, _UNIT, is_section_title, plain_text
+    result, active, cursor = [], '', 0
+    for section in sections:
+        while cursor < section['start_line']:
+            text = plain_text(lines[cursor]).strip()
+            if _LESSON.match(text) or _UNIT.match(text):
+                active = ''
+            elif is_section_title(text):
+                active = _norm(text)
+            cursor += 1
+        result.append(active)
+    return result
+
+
 def _compact_answer_blocks(lines):
-    blocks, active, band = [], None, ''
+    blocks, active, band, topic = [], None, '', ''
+    from .sync_practice import _LESSON, _UNIT, is_section_title, plain_text
     for line, text in enumerate(lines, 1):
+        visible = plain_text(text).strip()
         marker = _LESSON_BAND.fullmatch(text)
+        if _LESSON.match(visible) or _UNIT.match(visible):
+            topic, band, active = '', '', None
+            continue
+        if is_section_title(visible):
+            topic, band, active = _norm(visible), '', None
+            continue
         if marker:
-            band, active = marker[1], None
+            band, active = marker[1] if _answer_band(text) != 'invalid' else 'invalid', None
             continue
         # ☆拓展设问 / 拓展设问 is a sub-heading that belongs to the preceding group
         # task (rule: it is not a new numbered question). It must not poison or
@@ -344,7 +408,8 @@ def _compact_answer_blocks(lines):
         heading = _ROMAN_ANSWER.match(text)
         if heading:
             active = {'ordinal': _norm(heading[1]), 'rows': [], 'raw': [],
-                      'line': line, 'band': band, 'invalid': False, 'literal': False}
+                      'line': line, 'band': band, 'topic': topic, 'invalid': False, 'literal': False,
+                      'coverage': {}}
             blocks.append(active)
             text = text[heading.end():]
         elif active is None:
@@ -357,11 +422,13 @@ def _compact_answer_blocks(lines):
             # Bare numeric keys are retained so a partial Roman skeleton cannot
             # hide extra answers. Only a unique final extension block may bind.
             active = {'ordinal': None, 'rows': [], 'raw': [], 'line': line,
-                      'band': band, 'invalid': False, 'literal': False}
+                      'band': band, 'topic': topic, 'invalid': False, 'literal': False, 'coverage': {}}
             blocks.append(active)
         items = _answer_items(text)
         if items and not active['literal']:
             active['rows'].extend((n, line, value) for n, value in items)
+            for n, _ in items:
+                active['coverage'].setdefault(n, []).append(line)
             active['raw'].append((line, text.strip()))
         elif _SUBITEM_CONT.match(text.strip()) and active['raw']:
             # A parenthesized (n) sub-blank continues the current numbered item's
@@ -370,6 +437,7 @@ def _compact_answer_blocks(lines):
             if active['rows']:
                 n0, l0, v0 = active['rows'][-1]
                 active['rows'][-1] = (n0, l0, v0 + '\n' + text.strip())
+                active['coverage'].setdefault(n0, [l0]).append(line)
             active['raw'].append((line, text.strip()))
         elif (heading or not active['raw']) and _LETTER_SEQUENCE.fullmatch(text.strip()):
             # A printed Roman section may give one whole-task letter sequence.
@@ -382,7 +450,7 @@ def _compact_answer_blocks(lines):
     return blocks
 
 
-def _compact_scoped_candidates(unit, number, source_lines):
+def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
     """Bind a complete single-lesson Roman skeleton, never a global number.
 
     The body may have image-only foundation/extension banners. A complete ordered
@@ -392,10 +460,26 @@ def _compact_scoped_candidates(unit, number, source_lines):
     from .sync_practice import heading_candidates, plain_text, _LESSON, _UNIT
     body_path = '01_source/正文.txt'
     body = source_lines.get(body_path, [])
-    sections = heading_candidates('\n'.join(body))
+    sections = sections if sections is not None else heading_candidates('\n'.join(body))
+    body_bands = _answer_section_bands(sections, body)
+    if 'invalid' in body_bands:
+        return []
+    for index, section in enumerate(sections):
+        verified = section.get('lesson_band') or {}
+        if verified.get('label'):
+            label = _answer_band(verified['label'])
+            if body_bands[index] and body_bands[index] != label:
+                return []  # Printed text and verified visual evidence disagree.
+            body_bands[index] = label
     contexts = {_norm(row.get('context') or '') for row in sections}
+    topics = _answer_section_topics(sections, body)
     lesson_markers = [text for text in body if _LESSON.match(plain_text(text).strip())]
-    if len(contexts) != 1 or not next(iter(contexts), '') or len(lesson_markers) > 1:
+    lesson_contexts = {_norm(plain_text(text).strip()) for text in lesson_markers}
+    topic_contexts = {topic for topic in topics if topic}
+    if (len(lesson_markers) > 1 or not contexts
+            or (len(contexts) != 1 and not (len(lesson_markers) == 1
+                and contexts <= lesson_contexts | topic_contexts))
+            or not any(contexts)):
         return []
     ordinals = [_ROMAN_TITLE.match(_source_line(row['title'])) for row in sections]
     if not sections:
@@ -403,7 +487,11 @@ def _compact_scoped_candidates(unit, number, source_lines):
     # One otherwise unnumbered final section can have its own extension key.
     # It must follow the complete Roman prefix, not be guessed among several.
     trailing = bool(not ordinals[-1] and all(ordinals[:-1]) and len(ordinals) > 1)
-    if not all(ordinals) and not trailing:
+    verified_extension = [i for i, ordinal in enumerate(ordinals) if not ordinal]
+    verified_extension = bool(verified_extension and all(
+        (sections[i].get('lesson_band') or {}).get('label') == '能力提升'
+        for i in verified_extension))
+    if not all(ordinals) and not trailing and not verified_extension:
         return []
     # An unrecognized printed Roman heading must not silently disappear from the
     # skeleton and shift every later foundation/extension occurrence.
@@ -438,17 +526,50 @@ def _compact_scoped_candidates(unit, number, source_lines):
         explicit_contexts = {_norm(plain_text(text).strip()) for text in lines
                              if _LESSON.match(plain_text(text).strip())
                              or _UNIT.match(plain_text(text).strip())}
-        if explicit_contexts and explicit_contexts != contexts:
+        if explicit_contexts and explicit_contexts != (lesson_contexts or contexts):
             continue
         blocks = _compact_answer_blocks(lines)
         if [block['ordinal'] for block in blocks] != skeleton:
+            continue
+        # Explicit body/verified banners are stronger than the Roman sequence.
+        # Even identical values cannot borrow another foundation/extension band.
+        if any(topic != block['topic'] for topic, block in zip(topics, blocks)):
+            continue  # A topic such as Pronunciation needs explicit appendix proof.
+        if (any(block['band'] == 'invalid' for block in blocks)
+                or any(band and band != 'pronunciation' and _answer_band(block['band']) != band
+                       for band, block in zip(body_bands, blocks))):
             continue
         # The complete sequence is the ownership proof, so a malformed peer
         # cannot silently help assign a later same-number key by elimination.
         for block in blocks:
             numbers = [n for n, _, _ in block['rows']]
-            if block['invalid'] or len(numbers) != len(set(numbers)):
+            duplicates = len(numbers) != len(set(numbers))
+            if duplicates and not block['invalid']:
+                # Only a repeated complete, verbatim key within this same block
+                # is equivalent. A repeated isolated item is not coverage proof.
+                owner_section = sections[blocks.index(block)]
+                printed = [n for _, n in _printed_item_anchors(
+                    body[owner_section['start_line'] - 1:owner_section['end_line']])]
+                width = len(printed)
+                chunks = [block['rows'][i:i + width] for i in range(0, len(numbers), width)] if width else []
+                duplicates = not (printed and len(printed) == len(set(printed)) and chunks
+                    and all([n for n, _, _ in chunk] == printed for chunk in chunks)
+                    and all([(n, value) for n, _, value in chunk]
+                            == [(n, value) for n, _, value in chunks[0]] for chunk in chunks))
+            if block['invalid'] or duplicates:
                 raise ValueError('scoped answer source scope unbound: duplicate or malformed compact answer block')
+        if any(body_bands) or any(topics):
+            complete = True
+            for peer_section, peer in zip(sections, blocks):
+                printed = [n for _, n in _printed_item_anchors(
+                    body[peer_section['start_line'] - 1:peer_section['end_line']])]
+                keyed = list(dict.fromkeys(n for n, _, _ in peer['rows']))
+                if (printed and (len(printed) != len(set(printed)) or keyed != printed)
+                        or not printed and not peer['raw']):
+                    complete = False
+                    break
+            if not complete:
+                continue  # Band-aware skeletons prove the complete printed coverage.
         if trailing:
             markers = [(i, _LESSON_BAND.fullmatch(text)) for i, text in enumerate(lines, 1)
                        if _LESSON_BAND.fullmatch(text)]
@@ -498,27 +619,70 @@ def _compact_scoped_candidates(unit, number, source_lines):
             if value:
                 result.extend((path, line, value) for line, _ in block['raw'])
         elif not block['literal'] and anchors:
-            result.extend((path, line, value) for n, line, value in block['rows'] if n == int(number))
+            result.extend((path, covered, value) for n, line, value in block['rows'] if n == int(number)
+                          for covered in block['coverage'].get(n, [line]))
     return result
 
 
-def _scoped_answer_candidates(unit, number, lines):
+def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
+    from .sync_practice import heading_candidates
+    body_path = '01_source/正文.txt'
+    body = lines.get(body_path, [])
+    sections = heading_candidates('\n'.join(body))
+    if batch_dir is not None:
+        from .lesson_bands import load_verified, annotate_sections
+        # Hash verification must use the untouched text, not the stripped answer
+        # recognition view, whose formatting and numbered blanks may differ.
+        evidence = load_verified(batch_dir)
+        if ((Path(batch_dir) / '01_source/lesson-bands.json').is_file()
+                and (evidence.get('status') == 'unavailable'
+                     or evidence.get('status') == 'partial' and evidence.get('issues')
+                     or any(row.get('code') in {'BAND_EVIDENCE_STALE', 'BAND_MEDIA_STALE', 'BAND_BOUNDARY_INVALID'}
+                            for row in evidence.get('issues') or []))):
+            return []  # A known stale/failed proof cannot fall back to Roman guessing.
+        annotated = annotate_sections(sections, evidence)
+        # Accept a confirmed window tightened exactly to a current verified band
+        # boundary. Keep old identities valid too; never expand a unit span.
+        owner = unit.get('source_section') or {}
+        for original, tagged in zip(sections, annotated):
+            if (tagged.get('lesson_band') and original['start_line'] == owner.get('start_line')
+                    and owner.get('end_line') == tagged.get('end_line')
+                    and tagged['end_line'] <= original['end_line']
+                    and (unit.get('source_span') or {}).get('end_line', len(body) + 1) <= tagged['end_line']):
+                unit = dict(unit, source_section=dict(owner, end_line=original['end_line']))
+        sections = [dict(section, **({'lesson_band': tagged['lesson_band']}
+                                    if tagged.get('lesson_band') else {}))
+                    for section, tagged in zip(sections, annotated)]
+    owners = [row for row in sections
+              if row['start_line'] == (unit.get('source_section') or {}).get('start_line')]
+    bands = _answer_section_bands(sections, body)
+    owner_band = ''
+    if len(owners) == 1:
+        owner_band = bands[sections.index(owners[0])]
+        visual = (owners[0].get('lesson_band') or {}).get('label')
+        if visual:
+            verified = _answer_band(visual)
+            if owner_band and verified != owner_band:
+                return []
+            owner_band = verified
     candidates = []
     for path, rows in lines.items():
         for index, text in enumerate(rows, 1):
             if path == '01_source/正文.txt' and not re.search(EXPLANATION_LABEL + r'|【答案】', text):
                 continue  # A stem/option line is not an independent answer.
             for n, value in _answer_items(text):
-                if n == int(number) and scoped_source_matches(unit, number, path, index, lines):
-                    candidates.append((path, index, value))
+                if n == int(number) and scoped_source_matches(unit, number, path, index, lines, equivalent_answers=True):
+                    companion_band = _answer_section_bands([{'start_line': index}], rows)[0]
+                    if path == body_path or not owner_band or companion_band == owner_band:
+                        candidates.append((path, index, value))
     primary_lines = {path: rows for path, rows in lines.items() if path in SOURCES}
-    candidates.extend(_compact_scoped_candidates(unit, number, primary_lines))
+    candidates.extend(_compact_scoped_candidates(unit, number, primary_lines, sections=sections))
     primary = list(dict.fromkeys(row for row in candidates if row[0] in SOURCES))
     if primary:
         return primary  # Malformed fallback material cannot poison real Word content.
     fallback_lines = {path: rows for path, rows in lines.items()
                       if path == '01_source/正文.txt' or path not in SOURCES}
-    candidates.extend(_compact_scoped_candidates(unit, number, fallback_lines))
+    candidates.extend(_compact_scoped_candidates(unit, number, fallback_lines, sections=sections))
     return list(dict.fromkeys(candidates))
 
 
@@ -539,7 +703,7 @@ def resolve_scoped_answer(batch_dir, unit, number, answer=None):
     lines = {path: [_source_line(s, anchor_view=path == '01_source/正文.txt') for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
              for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
     try:
-        rows = _scoped_answer_candidates(unit, number, lines)
+        rows = _scoped_answer_candidates(unit, number, lines, batch_dir=batch)
     except ValueError:
         return None
     if not rows or len({normalize_answer(row[2]) for row in rows}) != 1:
@@ -566,16 +730,18 @@ def validate_scoped_answer(batch_dir, unit, number, answer, evidence):
                  if re.fullmatch(r'attachment_\d{3,}\.txt', p.name))
     lines = {path: [_source_line(s, anchor_view=path == '01_source/正文.txt') for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
              for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
-    candidates = _scoped_answer_candidates(unit, number, lines)
+    candidates = _scoped_answer_candidates(unit, number, lines, batch_dir=batch)
     def cited(path, line):
         stem = Path(path).stem
         aliases = (path, stem) if sum(Path(p).stem == stem for p in lines) == 1 else (path,)
         return any(any(re.search(re.escape(alias) + r'\s*(?::\s*|[Ll]\s*|第\s*)' + str(line) + r'(?!\d)', str(e))
                        for alias in aliases) for e in (evidence or []))
     bound = [row for row in candidates if normalize_answer(row[2]) == normalize_answer(answer) and cited(row[0], row[1])]
-    if (unit.get('source_span') or {}).get('number_binding') == 'unnumbered_section':
-        # One whole-task value may occupy several original lines. A citation to
-        # just its first line cannot prove the complete aggregate was consumed.
+    if ((unit.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
+            or any('\n' in row[2] for row in candidates
+                   if normalize_answer(row[2]) == normalize_answer(answer))):
+        # Whole tasks and sub-blank continuations may occupy several original
+        # lines. Citing only their first line cannot prove the complete value.
         paths = {path for path, _, _ in bound}
         bound = [row for row in bound if any(
             all(cited(p, line) for p, line, value in candidates
@@ -600,7 +766,7 @@ def validate_scoped_missing(batch_dir, unit, number, evidence=None):
     confirmed = batch / '01_source/structure.confirmed.json'
     units = json.loads(confirmed.read_text(encoding='utf-8-sig')).get('units', []) if confirmed.is_file() else [unit]
     from .content_rules import is_placeholder
-    candidates = _scoped_answer_candidates(unit, number, source_lines)
+    candidates = _scoped_answer_candidates(unit, number, source_lines, batch_dir=batch)
     found = [f'{path}:{line}' for path, line, value in candidates if not is_placeholder(value)]
     unbound = []
     # Missing is not a way to discard a conflicting or unbound compact source.
@@ -616,7 +782,7 @@ def validate_scoped_missing(batch_dir, unit, number, evidence=None):
                 for line, value in block['raw']:
                     if not is_placeholder(value) and not any(
                             any(p == path and l == line for p, l, _ in
-                                _scoped_answer_candidates(other, n, source_lines))
+                                _scoped_answer_candidates(other, n, source_lines, batch_dir=batch))
                             for other in units for n in other.get('numbers') or []):
                         unbound.append(f'{path}:{line}')
         parsed.extend((n, line, value) for line, text in enumerate(rows, 1)
@@ -625,7 +791,7 @@ def validate_scoped_missing(batch_dir, unit, number, evidence=None):
             if n != int(number) or is_placeholder(value):
                 continue
             if not any(any(p == path and l == line for p, l, _ in
-                           _scoped_answer_candidates(other, number, source_lines))
+                           _scoped_answer_candidates(other, number, source_lines, batch_dir=batch))
                        for other in units if number in (other.get('numbers') or [])):
                 unbound.append(f'{path}:{line}')
     if found:

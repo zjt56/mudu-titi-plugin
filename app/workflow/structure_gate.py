@@ -106,6 +106,10 @@ def _scope_windows(sections: list[dict], source_lines: list[str]) -> list[dict]:
         start, end = heading["start_line"], heading["end_line"]
         matching = [s for s in sections if s.get("source_line") == start]
         section = matching[0] if len(matching) == 1 else {}
+        if type(section.get("lesson_container_end_line")) is int:
+            end = min(end, section["lesson_container_end_line"])
+        if section.get("lesson_band"):
+            end = min(end, section.get("source_end_line") or end, section["lesson_band"]["end_line"])
         rows.append({**section, **heading, "source_line": start, "source_end_line": end,
                      "type": section.get("type") or heading.get("type"),
                      "questions": section.get("questions") or []})
@@ -125,8 +129,8 @@ def _scope_anchors(lines: list[str]) -> list[tuple[int, int]]:
     strong, weak = [], []
     for index, line in enumerate(lines):
         normalized = _anchor_text(normalize_blank_text(line))
-        plain = _plain(normalized)
-        nums = [int(m.group(1)) for m in re.finditer(r"(?:^|[\s:：])([1-9]\d{0,2})\s*[.．](?!\d)", plain)]
+        from .source_anchors import printed_tokens
+        nums = [number for _offset, number in printed_tokens(normalized)]
         first = _strong_number(normalized)
         if first is not None and first not in nums:
             nums.insert(0, first)
@@ -180,8 +184,14 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
     except ValueError as exc:
         errors.append({"code": "QUESTION_IDENTITY_INVALID", "message": str(exc)})
     spans = [(u.get("source_span", {}).get("start_line", 0), u.get("source_span", {}).get("end_line", 0)) for u in units]
+    def disjoint_columns(left, right):
+        a, b = left.get("source_span", {}), right.get("source_span", {})
+        return (a.get("start_line") == a.get("end_line") == b.get("start_line") == b.get("end_line")
+                and all(type(s.get(k)) is int for s in (a, b) for k in ("start_offset", "end_offset"))
+                and min(a["end_offset"], b["end_offset"]) <= max(a["start_offset"], b["start_offset"]))
     for index, (start, end) in enumerate(spans):
-        if any(max(start, lo) <= min(end, hi) for lo, hi in spans[:index]):
+        if any(max(start, lo) <= min(end, hi) and not disjoint_columns(units[index], units[prior])
+               for prior, (lo, hi) in enumerate(spans[:index])):
             errors.append({"code": "SOURCE_WINDOWS_OVERLAP", "source_line": start,
                            "message": "不同来源单元窗口重叠，无法证明重复题号各自独立"})
     windows = _scope_windows(sections, lines)
@@ -287,8 +297,10 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                     unit["printed_number"] = False
                 units.append(unit)
         else:
-            anchors = [(i, _strong_number(source_lines[i])) for i in range(start, end)
-                       if _strong_number(source_lines[i]) in numbers]
+            from .source_anchors import printed_tokens
+            anchors = [(i, number, offset, tokens) for i in range(start, end)
+                       for tokens in [printed_tokens(source_lines[i])]
+                       for offset, number in tokens if number in numbers]
             image_only = (section.get("image_only") and any("[IMG " in line for line in local)
                           and all(not _plain(line).strip() or "[IMG " in line or "[TABLE" in line for line in local))
             if not anchors and not numbers and image_only:
@@ -308,11 +320,20 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                 unit["source_span"] = {"start_line": start + 1, "end_line": end,
                                        "basis": "cleaned_source", "number_binding": "single_writing_section"}
                 units.append(unit)
-            for index, (at, number) in enumerate(anchors):
-                stop = anchors[index + 1][0] if index + 1 < len(anchors) else end
-                chunk = source_lines[at:stop]
-                unit = _make_unit("standalone", type_name, [number], chunk)
-                unit["source_span"] = {"start_line": at + 1, "end_line": stop, "basis": "cleaned_source"}
+            for index, (at, number, offset, tokens) in enumerate(anchors):
+                if len(tokens) > 1:
+                    position = next(j for j, token in enumerate(tokens) if token == (offset, number))
+                    left = 0 if position == 0 else offset
+                    right = tokens[position + 1][0] if position + 1 < len(tokens) else len(source_lines[at])
+                    chunk = [source_lines[at][left:right]]
+                    unit = _make_unit("standalone", type_name, [number], chunk)
+                    unit["source_span"] = {"start_line": at + 1, "end_line": at + 1, "basis": "cleaned_source",
+                                           "start_offset": left, "end_offset": right}
+                else:
+                    stop = anchors[index + 1][0] if index + 1 < len(anchors) else end
+                    chunk = source_lines[at:stop]
+                    unit = _make_unit("standalone", type_name, [number], chunk)
+                    unit["source_span"] = {"start_line": at + 1, "end_line": stop, "basis": "cleaned_source"}
                 units.append(unit)
         section_units = [u for u in units if start < u["source_span"]["start_line"] <= end]
         peer_options = max([len(question_parts(local, n)["options"]) for n in numbers] or [0])
@@ -640,6 +661,10 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     visual_notes: list[dict] = []
     from . import sync_practice
     scoped = sync_practice.looks_like_sync_practice(cleaned_text)
+    from . import lesson_bands
+    band_evidence = lesson_bands.for_text(batch_dir, cleaned_text) if scoped else {}
+    if band_evidence.get("bands"):
+        sections = lesson_bands.annotate_sections(sections, band_evidence)
 
     from . import manifest as mf
     original_path = None
@@ -1022,8 +1047,17 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     checks["grouping"] = "failed" if any("GROUP" in b["code"] for b in blockers) else "passed"
     passed = not blockers and bool(units)
 
+    if band_evidence.get("bands"):
+        # Rebind current visual metadata even for reused source-valid AI units;
+        # never let a unit's own stale band claim become evidence.
+        for unit in units:
+            source_section = unit.get("source_section") or {}
+            annotated = lesson_bands.annotate_sections([source_section], band_evidence)[0]
+            if annotated.get("lesson_band"):
+                unit["source_section"] = annotated
     confirmed = {
         "version": "1.0",
+        "lesson_bands": band_evidence,
         "meta": meta,
         "units": units,
         "image_questions": image_questions,

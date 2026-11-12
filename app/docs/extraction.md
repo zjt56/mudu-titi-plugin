@@ -39,6 +39,10 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
   `01_source/source-policy.json`，同内容并进 `07_review/extraction-report.json` 的
   `source_policy` 字段；记录失败不阻断提取。
 
+## Word 图片板块的视觉辅助
+
+纯 Word 仍直接提取文字与原生画线/表格/媒体，不调用 OCR。同步课时正文中的 A基础巩固/B能力提升整图横幅由 `lesson_bands` 批量看图，边界和图片原文分开存证于 `01_source/lesson-bands.json`；文字内容不由视觉重写。原件/正文/所有候选图摘要、实际选定模型、原始行范围都须有效，才参与结构、答案scope和预览独立重建。相同图字节+路由复用，切模型或换原件不沿用旧识别。细节见 `docs/sync-practice.md` 与 `backend/wf-vision.md`。
+
 ## 本机 OCR 配置
 
 复制 `workflow/ocr-config.example.json` 为 `workflow/ocr-config.json`，填写：

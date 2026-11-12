@@ -453,6 +453,10 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
         # 表格/文章里的空位题号：只认明确下划线或全角空格边界，不扫普通数字。
         if not numbers:
             numbers = blank_numbers(plain_line)
+        if (not numbers and is_sync and active.get('candidate_unit_kind') == 'group'
+                and active['type'] in {'补全对话', '完形填空', '选词填空', '短文填空', '教材语篇填空', '听力信息转换'}):
+            from workflow.preview import _weak_numbers
+            numbers = _weak_numbers(raw)
         for number in numbers:
             active["questions"].append(number)
             active["question_locations"].append({"number": number, "line": index + 1,
