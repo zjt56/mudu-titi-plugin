@@ -19,7 +19,10 @@
 - Python3.12、独立TMPDIR，9模块207 tests，OK，4 skipped（2.192s）。最初命令误写不存在的test_shared_rubric模块导致loader错误，已纠正模块列表复跑。
 - 06真实batch.base和batch.json的audit_batch_source均passed、issues=[]，5个unit全部checked。
 - 当前语音组原导语恢复，phonetic_structure.shape=(True,True)，其来源证明含4个语音组。
-- 正式流水线续跑到validate的最终结果另补，不把运行中阶段当通过。
+- 导入前恢复选项采用key/text对象，而draft/wire为带标签字符串；phonetic_structure逐项转成(label,text)比较，仅忽略标签分隔排版，保留标签顺序/文字/画线/题号/身份严格校验，解决实际导入A8/A9误报。真实assemble已正式通过，model_calls=0。
+- 继续发现画线映射把短词选项we/old/put误与其它文章weather/years old/computer竞争。mark_underline保留显式选项上下文角色，只比较完整选项；重复完整选项仍歧义，原文章上下文/镜像边界不放宽。
+- 06正式runner最终到validate：19个体检项目全部通过，0阻断、0提示、0跳过。underlines passed，changes=[]、issues=[]；原始正确画线不改写。内容独立审核尚未运行，未上传发布。
+- 中间新增CLI预检测试因合成样本answer空产生A9，补齐测试夹具答案后重新执行；不修改生产检查来通过测试。
 
 ## 回退
 

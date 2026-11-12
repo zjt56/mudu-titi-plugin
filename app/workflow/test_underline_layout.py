@@ -109,6 +109,18 @@ class UnderlineLayoutTest(unittest.TestCase):
         self.assertEqual(candidate['items'][0]['material'],
                          'School Policy <u>Testing Dates:</u> June 18 <u>Homework:</u> every day')
 
+    def test_option_underlines_do_not_compete_with_article_substrings(self):
+        batch = {'items': [{'subquestions': [{'options': ['A. w<u>e</u>', 'B. <u>o</u>ld', 'C. p<u>u</u>t']}]},
+                           {'material': 'The weather is fine. He is 3 years old. What is a computer?'}]}
+        candidate, report = underline.restore(batch, '1.A.w<u>e</u> B.<u>o</u>ld C.p<u>u</u>t')
+        self.assertTrue(report['passed'], report)
+        self.assertEqual(candidate, batch)
+        self.assertEqual(report['changes'], [])
+        duplicate = {'items': [{'options': ['A. we']}, {'options': ['A. we']}]}
+        _, report = underline.restore(duplicate, '1.A.w<u>e</u>')
+        self.assertFalse(report['passed'])
+        self.assertIn('UNDERLINE_MAPPING_AMBIGUOUS', {i['code'] for i in report['issues']})
+
     def test_whole_line_label_must_stay_unique_across_units(self):
         batch = {'items': [{'material': 'Notice <u>Homework:</u> first'},
                            {'material': 'Notice Homework: second'}]}

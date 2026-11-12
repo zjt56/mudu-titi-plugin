@@ -69,6 +69,19 @@ class LessonBandsTest(unittest.TestCase):
         self.assertTrue(checked['passed'], checked['issues'])
         verified = phonetic_structure.verified_groups(self.root / '06_batch/batch.json')
         self.assertEqual(phonetic_structure.shape(first, verified), (True, True))
+        # The importer restores options as key/text dictionaries before the
+        # CLI format precheck; the draft/wire form uses labeled strings.
+        restored = copy.deepcopy(first)
+        for child in restored['subquestions']:
+            child['options'] = [{'key': option[0], 'text': option[3:]} for option in child['options']]
+        self.assertEqual(phonetic_structure.shape(restored, verified), (True, True))
+        for child in restored['subquestions']:
+            child['answer'] = 'A'
+        from workflow import assemble_precheck
+        pre = assemble_precheck.precheck({'items': [restored]}, batch_dir=self.root)
+        self.assertFalse(any('[A8]' in p or '[A9]' in p for p in pre['problems']), pre)
+        restored['subquestions'][0]['options'][0]['text'] = 'fabricated'
+        self.assertEqual(phonetic_structure.shape(restored, verified), (False, False))
         view = preview.source_slice(self.root, [1], unit_id=first['unit_id'])
         self.assertIn(first['stem'], '\n'.join(view))
         self.assertNotIn('b.png', '\n'.join(view))

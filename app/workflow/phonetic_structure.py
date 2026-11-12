@@ -62,8 +62,29 @@ def shape(unit, verified=None):
     subs, wanted = unit.get("subquestions") or [], expected.get("subquestions") or []
     if not subs or len(subs) != len(wanted):
         return False, False
+    def option_pairs(options):
+        if not isinstance(options, list):
+            return None
+        pairs = []
+        for option in options:
+            if isinstance(option, dict):
+                label, text = option.get('label', option.get('key')), option.get('text')
+            elif isinstance(option, str):
+                match = re.fullmatch(r'\s*([A-H])[.．、]\s*(.*)', option, re.S)
+                if not match:
+                    return None
+                label, text = match.groups()
+            else:
+                return None
+            if label not in list('ABCDEFGH') or not isinstance(text, str):
+                return None
+            pairs.append((label, text.strip()))
+        return pairs
     for child, source in zip(subs, wanted):
-        if any(child.get(key) != source.get(key) for key in ("number", "question_id", "stem", "options")):
+        if any(child.get(key) != source.get(key) for key in ("number", "question_id", "stem")):
+            return False, False
+        actual_options, source_options = option_pairs(child.get('options')), option_pairs(source.get('options'))
+        if actual_options is None or actual_options != source_options:
             return False, False
     images = {a["name"] for a in expected.get("attachments") or []
               if a.get("kind") == "image" and a.get("placement") == "question"}

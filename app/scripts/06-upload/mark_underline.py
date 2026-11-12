@@ -86,19 +86,21 @@ def fields(value, path=()):
             yield from fields(child, path + (index,))
 
 
-def contexts(text):
+def contexts(text, *, include_role=False):
     """Retain full paragraph context, splitting only explicit labeled options."""
     for paragraph in text.splitlines():
         paragraph = re.sub(r"^\s*(?:[（(]\s*[）)]\s*)?\d{1,3}\s*[.．、)]", "", paragraph)
         # Label dots can be separated from text by inline formatting.
         labels = list(re.finditer(r"(?<![A-Za-z])(?:[A-H])[.．、]", paragraph))
         if not labels:
-            yield paragraph
+            yield (paragraph, False) if include_role else paragraph
             continue
         if MARK.search(paragraph[:labels[0].start()]):
-            yield paragraph[:labels[0].start()]
+            prefix = paragraph[:labels[0].start()]
+            yield (prefix, False) if include_role else prefix
         for i, label in enumerate(labels):
-            yield paragraph[label.end():labels[i + 1].start() if i + 1 < len(labels) else len(paragraph)]
+            option = paragraph[label.end():labels[i + 1].start() if i + 1 < len(labels) else len(paragraph)]
+            yield (option, True) if include_role else option
 
 
 def _unit_index(path):
@@ -164,7 +166,7 @@ def restore(batch, source_text):
     # An answer-book example can repeat a prompt verbatim with different marks;
     # it must never supply underlines to the question surface (or fail mapping).
     _, question_text, _ = infer_structure(source_text)
-    for context in contexts(question_text):
+    for context, option_context in contexts(question_text, include_role=True):
         plain_context, _ = visible(context, normalize_blanks=True)
         for mark in MARK.finditer(context):
             marked_plain, _ = visible(mark.group(1))
@@ -179,6 +181,15 @@ def restore(batch, source_text):
             for owner, key, path in targets:
                 text = owner[key]
                 value, offsets = visible(text, normalize_blanks=True)
+                # A source option is a complete option, never a substring of an
+                # unrelated article (we/weather, put/computer, old/years old).
+                # Repeated complete options still compete and remain ambiguous.
+                if option_context:
+                    if 'options' not in path:
+                        continue
+                    unlabelled = re.sub(r'^[A-H][.．、]', '', value)
+                    if unlabelled != plain_context:
+                        continue
                 # A bare marked word must equal an entire field/option; it
                 # cannot be searched globally inside arbitrary prose.
                 if plain_context == marked_value:
