@@ -11,6 +11,7 @@
 - 新增 `app/workflow/upload_numbering.py`：`project_batch(batch, batch_dir=None)` 统一投影。独立题 `n/n`，题组 `min/max` 且要求子题号唯一、完整、连续；无号只认当前来源可重建的 `single_writing_section`/`unnumbered_section` 证据，顶层 `null/null`；scoped 跨大题同号保留原号原序，不全局去重；显式范围非法或冲突报 `PAPER_NUMBER_*`。`build_payload` 在白名单前调用它，顶层保留范围、子题过滤范围，并透出 `numbering_evidence`；删除 `location` 自动补号旧逻辑。
 - 新增 `app/workflow/numbering_migration.py`：只改 `batch.json`/`batch_meta.base.json`/`batch_meta.json` 的派生范围。逐批预演、来源证据校验、仅允许范围变化、备份改前字节与 SHA-256、原子写入、写后重新投影复验；每批 `workflow/numbering-migration.json` 留档。已批准上传且已完成的批次不改最终 `batch_meta.json`，不伪造批准。
 - 审核语义兼容：`stage_semantics.py` 仅对 06_batch 四个文件的 items 顶层范围做内容投影；`review.py` 只对题目初始行浅剥范围，嵌套 `evidence` 范围仍敏感；`assemble_local.py` 的组装结构指纹复用同一投影；`manifest.py::_content_digest` 对同一组文件投影范围，raw `output_hashes`、在途任务绑定、上传冻结仍精确。
+- 顺手修复验证中发现的旧拦截：题组（含语音题）子题知识点留空是既定规则，上传校验原先只放行部分整篇题型，现按 `parent_group` 放行题组子题；独立题仍强制非空。回归 `test_upload_payload::test_group_children_may_leave_knowledge_empty`。
 - `format_gate.py` 把编号模块纳入规则文件摘要；`upload.py` 现有 prepare/verify 走同一 `build_payload`，冻结件与新投影同源复算。
 - 文档：`app/docs/upload-api.md` 更新题号段落；`app/docs/question-number-upload-design.md` 标记已实施；根 `AGENTS.md` 新增硬规则 32；`CHANGELOG/RULES.md` 追加规则条。
 
@@ -31,7 +32,7 @@
 
 ## 如何验证
 
-- 隔离 TMPDIR 合并 suite：`test_upload_numbering`、`test_numbering_migration`、`test_upload_payload`、`test_upload_content`、`test_upload`、`test_format_gate`、`test_stage_semantics`、`test_assemble_local`、`test_review_local_reuse`、`test_question_identity`、`test_question_draft` 共 **296 项通过**。
+- 隔离 TMPDIR 合并 suite：`test_upload_numbering`、`test_numbering_migration`、`test_upload_payload`、`test_upload_content`、`test_upload`、`test_format_gate`、`test_stage_semantics`、`test_assemble_local`、`test_review_local_reuse`、`test_question_identity`、`test_question_draft` 共 **297 项通过**。
 - 审核/装配扩展 suite（子代理）：15 个 suite 共 **266 项通过**；另有 `test_review_read_scope` 1 项旧失败，已用 `git show HEAD:app/workflow/review.py` 基线复现，与本次改动无关。
 - 迁移后逐批复验：`build_payload` 编号错误 0、顶层范围字段齐全；仅范围字段变化；备份 SHA 一致；已批准批次批准摘要仍与冻结最终件一致。
 - 迁移前基线：同批 upload 相关 123 项在隔离 TMPDIR 全通过。

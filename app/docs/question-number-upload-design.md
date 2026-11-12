@@ -154,7 +154,7 @@ location 原有来源描述保持；移除依赖“补 location 让服务端推�
 - 线上文档中心和纯文本各读取一次并交叉核对题号段落；尚未检查远端实现代码或发任何认证 API 请求。
 - 合成复现证明显式范围被静默丢弃，build_payload 仍 passed=true。
 - `workflow.test_upload_payload workflow.test_format_gate workflow.test_upload` 共 123 项：首次共享临时锁运行出现8项lock_timeout；换隔离 TMPDIR 后123项全部通过，用时2.668秒。失败原因来自 local_agent 使用系统临时目录全局工作流锁，未删除锁或中断运行批次。
-- 实施后新增 `upload_numbering.py`（14 项测试）与 `numbering_migration.py`（6 项测试）；合并编号/上传/语义/装配/审核相关 295 项在隔离 TMPDIR 全部通过。审核语义兼容子代理另跑 15 个审核与装配 suite 共 266 项通过。
+- 实施后新增 `upload_numbering.py`（14 项测试）与 `numbering_migration.py`（6 项测试）；合并编号/上传/语义/装配/审核相关 297 项在隔离 TMPDIR 全部通过（含题组子题空知识点放行回归）。审核语义兼容子代理另跑 15 个审核与装配 suite 共 266 项通过。
 - 本机 18 个批次已直接迁移：`batch.json`/`batch_meta.base.json` 全部写入范围；13 份整卷的无号作文为 `null/null`，02 课时两个无号单元为 `null/null`；其余按原卷原号。每批在 `workflow/numbering-migration/backup-<stamp>/` 留有改前备份与 SHA-256，逐批 `workflow/numbering-migration.json` 记录范围、证据和复验。仅范围字段变化，`batch.base.json`、题面/答案/知识点/媒体、manifest、冻结件和回执均未改。
 - 已批准上传的 4 个批次（04、19、2024、20）最终 `batch_meta.json` 保持批准绑定字节不变，下一次准备上传时由同一投影补范围；未伪造批准，也未自动重传。
 - 迁移后 `build_payload` 复验：所有最终批次 0 编号错误、范围字段齐全；批准摘要仍与冻结最终件一致。两个批次（04 `format_gate`、23 `meta`）的上游输入在迁移前即已与记录不一致，非本次迁移造成，未自动改状态或重跑。

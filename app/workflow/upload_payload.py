@@ -620,7 +620,7 @@ class _Builder:
             for child in value:
                 self.scan_media(child, uid)
 
-    def item(self, raw, uid, child=False, parent_type=None, phonetic_alias=False):
+    def item(self, raw, uid, child=False, parent_type=None, phonetic_alias=False, parent_group=False):
         if not isinstance(raw, dict):
             self.error("ITEM_INVALID", "题目/子题必须是结构化对象", uid)
             return {}
@@ -797,7 +797,7 @@ class _Builder:
             self.error("RELATIONS_INVALID", "relations 必须是关系名称字符串数组", uid)
         self.knowledge(data, output, uid,
                        allow_empty=bool(child and isinstance(parent_type, str)
-                                        and taxonomy.whole_unit_type(parent_type)))
+                                        and (parent_group or taxonomy.whole_unit_type(parent_type))))
         self.mappings(data, output, uid)
         children = data.get("subquestions", [])
         if not isinstance(children, list):
@@ -861,7 +861,7 @@ class _Builder:
             numbers = [c.get("number") for c in children if isinstance(c, dict) and _positive(c.get("number"))]
             if len(numbers) != len(set(numbers)):
                 self.error("SUBQUESTION_NUMBER_DUPLICATE", "题组内子题号重复", uid)
-            output["subquestions"] = [self.item(c, f"{uid}/{c.get('number', i) if isinstance(c, dict) else i}", True, main_type, alias_children) for i, c in enumerate(children, 1)]
+            output["subquestions"] = [self.item(c, f"{uid}/{c.get('number', i) if isinstance(c, dict) else i}", True, main_type, alias_children, parent_group=(kind == "group")) for i, c in enumerate(children, 1)]
             # Aggregate names and IDs only on the wire, after the local audit.
             paths = output.get("knowledge", []) + [path for c in output["subquestions"] for path in c.get("knowledge", [])]
             output["knowledge"] = list(dict.fromkeys(paths))

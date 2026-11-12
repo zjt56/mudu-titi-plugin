@@ -172,6 +172,13 @@ def apply_batch(batch_dir, *, include_approved_final: bool = False, stamp: str |
         if not acquired:
             plan.update(status="skipped", reason="该批次正在被自动流程处理，未写入")
             return plan
+        if (batch / "workflow/.delete-requested").exists():
+            plan.update(status="skipped", reason="该批次已请求删除，未写入")
+            return plan
+        from . import operations
+        if operations.lease_active(batch):
+            plan.update(status="skipped", reason="Harness 运维修复租约生效中，未写入")
+            return plan
         if not changed_files:
             plan.update(status="unchanged", reason="题号范围已是当前口径")
             return plan

@@ -73,6 +73,20 @@ class UploadPayloadTest(unittest.TestCase):
         self.assertNotIn('GROUP_INCOMPLETE', self.codes(report))
         self.assertEqual(report['payload']['items'][0]['stem'], '')
 
+    def test_group_children_may_leave_knowledge_empty(self):
+        # 语音题等整组题只在组级打知识点；子题留空是既定规则，不能误拦上传。
+        item = reading_group()
+        item["question_type"] = "语音题"
+        item["filterMetadata"]["subtypes"] = []
+        item["knowledge"] = ["语音/基本读音/26个字母的读音"]
+        for child in item["subquestions"]:
+            child["knowledge"] = []
+        report = self.build(batch(item))
+        self.assertNotIn("KNOWLEDGE_REQUIRED", self.codes(report))
+        # 独立题仍必须有知识点，不能借题组规则放宽。
+        q = question(); q["knowledge"] = []
+        self.assertIn("KNOWLEDGE_REQUIRED", self.codes(self.build(batch(q))))
+
     def test_listening_group_does_not_require_written_transcript(self):
         item = reading_group()
         item.update(question_type='听力长对话理解', material='', stem='听下面一段对话,回答第56至58小题。')
