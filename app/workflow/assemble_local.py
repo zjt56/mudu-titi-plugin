@@ -316,6 +316,7 @@ def build_image_option_repair(batch_dir, payload: dict | None = None) -> dict:
     source = (root / "01_source/正文.txt").read_text(encoding="utf-8-sig")
     structure = _load(root / "01_source/structure.json")
     cleaned, _, _ = denoise.clean_body(source)
+    structure = denoise.project_structure(structure, source, cleaned)
     fresh_units = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
     fresh = {}
     for unit in fresh_units:

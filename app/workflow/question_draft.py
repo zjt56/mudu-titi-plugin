@@ -598,6 +598,7 @@ def build(batch_dir, *, units=None):
     structure = _json(root, "01_source/structure.json", {})
     extraction = _json(root, "01_source/extraction.json", {})
     cleaned, _, _ = denoise.clean_body(source)
+    structure = denoise.project_structure(structure, source, cleaned)
     cleaned_lines = cleaned.splitlines()
     from .structure_gate import _build_units
     from .preview import _find, _strong_number, _weak_numbers

@@ -55,6 +55,7 @@ def _source_units(confirmed, structure, source):
     the normal source audit still runs for every unit before and after editing.
     """
     cleaned = denoise.clean_body(source)[0]
+    structure = denoise.project_structure(structure, source, cleaned)
     fresh = structure_gate._build_units(structure.get("sections") or [],
                                        structure.get("groups") or [], cleaned.splitlines())
     confirmed_units = confirmed.get("units")

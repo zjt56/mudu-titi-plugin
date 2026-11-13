@@ -72,7 +72,8 @@ _IMAGE_HINT_BLANK = re.compile(
 
 def _weak_numbers(line: str) -> list[int]:
     """材料一行里所有空位号（子题号），不把普通句号数字误当题号。"""
-    plain = _plain(line)
+    from .source_anchors import strip_visual_markup
+    plain = _plain(strip_visual_markup(line))
     found = [int(m.group(1)) for m in _BLANK_BEFORE_NUMBER.finditer(plain)]
     found += [int(m.group(1)) for m in _NUMBER_BEFORE_BLANK.finditer(plain)]
     # 图注空（图片+紧随括号提示）是合法子题号，与文本空一致参与锚点。
@@ -389,7 +390,9 @@ def source_slice(batch_dir, numbers, lines: list[str] | None = None, *, unit_id=
     try:
         from . import denoise, structure_gate
         structure = json.loads((root / "01_source/structure.json").read_text(encoding="utf-8-sig"))
-        cleaned, meta, _ = denoise.clean_body("\n".join(lines))
+        raw = "\n".join(lines)
+        cleaned, meta, _ = denoise.clean_body(raw)
+        structure = denoise.project_structure(structure, raw, cleaned)
         units = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
         matches = [u for u in units if u.get("numbers") == nums
                    and u.get("type") == "书面表达"
@@ -521,6 +524,7 @@ def source_group_candidates(batch_dir: Path, items: list[dict]) -> list[dict]:
         raw = (root / "01_source/正文.txt").read_text(encoding="utf-8-sig")
         structure = json.loads((root / "01_source/structure.json").read_text(encoding="utf-8-sig"))
         cleaned, _, _ = denoise.clean_body(raw)
+        structure = denoise.project_structure(structure, raw, cleaned)
         units = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
     except (OSError, ValueError, TypeError, KeyError):
         return items

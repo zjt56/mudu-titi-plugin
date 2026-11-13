@@ -148,14 +148,10 @@ def _scope_anchors(lines: list[str]) -> list[tuple[int, int]]:
 # 表格/图片 HTML（`<table>…`、`img_in_image_box_566_714_638_765.jpg`）里的坐标数字、
 # 温度/日期数字是版面数据，不是印刷题号。题号锚点在扫描前先剥掉这些标记与文件名，
 # 避免 `.jpg` 前的坐标被“数字+句点”误识别成小题号，或温度数字被当成空位号。
-_HTML_MARKUP = re.compile(r"<[^>]*>")
-_IMAGE_NAME = re.compile(r"img_in_image_box[\w.]*\.(?:jpe?g|png|gif|bmp|webp|tiff?)", re.I)
-
-
+# 与提取侧共用 source_anchors.strip_visual_markup，避免两处各自写一套。
 def _anchor_text(line: str) -> str:
-    if "<table" not in line and "<img" not in line and "img_in_image_box" not in line:
-        return line
-    return _IMAGE_NAME.sub(" ", _HTML_MARKUP.sub(" ", line))
+    from .source_anchors import strip_visual_markup
+    return strip_visual_markup(line)
 
 
 def _source_members(lines: list[str]) -> set[int]:
@@ -251,8 +247,16 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
     for section in windows:
         start, end = section["source_line"], section["source_end_line"]
         group = section.get("kind") == "group" if section.get("kind") else is_group_type(_section_type_label(section.get("type")))
-        articles = _material_windows(lines, start + 1, end) if group else [(start + 1, end)]
         declared = set(_section_numbers(section))
+        if group:
+            numbers = sorted(declared | _source_members(lines[start:end]))
+            articles = _material_windows(lines, start + 1, end)
+            if articles and numbers:
+                # 与 _build_scoped_units 同一归一化：选项字母不能切裂题组窗口，
+                # 否则这里会拿伪窗口复核出 GROUP_CROSSES_SECTION/QUESTION_NOT_FOUND。
+                articles = _numbered_windows(articles, lines, numbers, start, end)
+        else:
+            articles = [(start + 1, end)]
         if not any(start < u.get("source_span", {}).get("start_line", 0) <= u.get("source_span", {}).get("end_line", 0) <= end for u in units):
             # 图片理解能力受限不等于可以漏掉整节；仍必须保留绑定原文的来源单元。
             errors.append({"code": "SOURCE_SECTION_UNCOVERED", "source_line": start,
@@ -415,6 +419,34 @@ def _proven_scoped_restart(at: int, units: list[dict], sections: list[dict], lin
     return True
 
 
+def _numbered_windows(windows: list[tuple[int, int]], lines: list[str],
+                      numbers: list[int], start: int, end: int) -> list[tuple[int, int]]:
+    """Keep option letters from splitting a numbered group into fake windows.
+
+    `material_label` cannot tell an article label (`A`/`B` 篇文章) from an option
+    label (`A.`/`B.` 选项), so a question whose options sit on their own lines
+    looks like a new article and yields a window without any printed number.
+    Such windows belong to the neighbouring numbered window; when no window owns
+    a printed number the whole section is one complete group window.
+    """
+    enriched: list[list[int]] = []
+    pending = None
+    for lo, hi in windows:
+        if pending is not None:
+            lo, pending = pending, None
+        if _source_members(lines[lo - 1:hi]).intersection(numbers):
+            enriched.append([lo, hi])
+        elif enriched:
+            enriched[-1][1] = hi
+        else:
+            pending = lo
+    if pending is not None:
+        if not enriched:
+            return [(start + 1, end)]
+        enriched[0][0] = pending
+    return [(lo, hi) for lo, hi in enriched]
+
+
 def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: list[str], visual_columns=None) -> list[dict]:
     from .question_content import question_parts
     from .question_identity import assign_scoped
@@ -431,6 +463,8 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
         numbers = sorted(set(_section_numbers(section)) | _source_members(local))
         group_flag = section.get("kind") == "group" if section.get("kind") else is_group_type(type_name)
         windows = _material_windows(source_lines, start + 1, end) if group_flag else []
+        if group_flag and windows and numbers:
+            windows = _numbered_windows(windows, source_lines, numbers, start, end)
         if group_flag:
             for lo, hi in windows:
                 chunk = source_lines[lo - 1:hi]
@@ -835,7 +869,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     cleaned_text, meta, removed = denoise.clean_body(raw_text) if raw_text else ("", {}, [])
     source_lines = cleaned_text.splitlines()
 
-    structure = _load_structure(structure_path)
+    structure = denoise.project_structure(_load_structure(structure_path), raw_text, cleaned_text)
     sections = structure.get("sections") if isinstance(structure.get("sections"), list) else []
     groups = structure.get("groups") if isinstance(structure.get("groups"), list) else []
     image_questions = structure.get("image_questions") if isinstance(structure.get("image_questions"), list) else []

@@ -2,6 +2,22 @@
 from __future__ import annotations
 import re
 
+# 版面数据不是印刷题号：`<img …>` 标签属性（width/height）和 `img_in_image_box_X_Y_W_H.jpg`
+# 这样由 OCR 生成的图片文件名里带着坐标数字，直接扫「数字+句点/下划线」会把它们误认成
+# 小题号（实测：一张 52_617_158_734 的插图号被收成 52/617/158/734 四个假题号，并把
+# 整段大题的分题集合污染成 20+ 个号）。剥掉标签与文件名，但保留 `[IMG …]` 这类正文占位，
+# 因为「图注空」`N.[IMG …](提示)` 依赖它才是合法小题号。
+_HTML_TAG = re.compile(r"<[^>]*>")
+_VISUAL_NAME = re.compile(r"img_in_image_box[\w.]*\.(?:jpe?g|png|gif|bmp|webp|tiff?)", re.I)
+
+
+def strip_visual_markup(line: str) -> str:
+    """Remove layout-only markup whose numbers are coordinates, not printed items."""
+    if "<" not in line and "img_in_image_box" not in line:
+        return line
+    return _VISUAL_NAME.sub(" ", _HTML_TAG.sub(" ", line))
+
+
 # A later item needs a real column boundary, never an ordinary prose space.
 _COLUMN = re.compile(r"(?:[\t\u3000]+|[ \xa0]{2,})(?:\*{1,3})?(?:[（(][ \u3000]*[）)][ \u3000]*)?([1-9]\d{0,2})\s*[.．、](?!\d)")
 _LEADING = re.compile(r"^\s*(?:\*{1,3})?(?:[（(][ \u3000]*[）)]\s*)?([1-9]\d{0,2})\s*[.．、](?!\d)")

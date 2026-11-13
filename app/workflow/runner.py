@@ -791,9 +791,9 @@ def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
                     current["meta"] = {**old_meta, **{k: v for k, v in detected.items()
                                                       if v not in (None, "", [], {}, MISSING)}}
             if confirmed.is_file():
-                target = batch_dir / "01_source/structure.confirmed.json"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(confirmed, target)
+                confirmed_target = batch_dir / "01_source/structure.confirmed.json"
+                confirmed_target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(confirmed, confirmed_target)
             target = batch_dir / "07_review/structure-gate.json"
             target.parent.mkdir(parents=True, exist_ok=True)
             staged_report = staged / "07_review/structure-gate.json"
@@ -806,6 +806,18 @@ def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
                 current["stages"]["structure_gate"]["notes"] = (
                     f"自动确认：{counts.get('total', 0)} 单元"
                     f"（独立{counts.get('standalone', 0)}/组合{counts.get('group', 0)}）")
+                # 结构重新确认会重写 unit_id：指向旧单元的修复反馈不能猜映射，
+                # 也不能把阶段卡死，按证据退役到 stale/ 后由新任务重新生成。
+                from . import agent_tasks
+                retired = agent_tasks.retire_stale_feedback(
+                    batch_dir,
+                    [unit.get("unit_id") for unit in
+                     json.loads(confirmed_target.read_text(encoding="utf-8-sig")).get("units") or []
+                     if isinstance(unit, dict) and unit.get("unit_id")],
+                    stages=("preassemble", "types", "answers", "explanations",
+                            "knowledge", "assemble", "review"))
+                if retired:
+                    mf.append_log(batch_dir, {"event": "repair_feedback_stale", "files": retired})
             else:
                 _record_structure_findings(batch_dir, report)
                 # 卡片与台账必须写明具体未解决检查（代码+原因+行号），
@@ -1667,6 +1679,43 @@ def cmd_ingest(args) -> int:
     return 0
 
 
+def cmd_refresh_extract(args) -> int:
+    """按留存的原始正文重算提取产物（不重跑 OCR/模型）。
+
+    适用：确定性提取规则（题号收割、去噪、坐标投影）修复后，批次正文/OCR 证据
+    未变但 structure.json 仍是旧规则产物。只重算提取尾巴，并重记 extract 的产物
+    哈希；任何下游阶段已完成/运行中一律拒绝，不做历史数据改写。
+    """
+    from . import extract as extract_stage, supervisor
+    batch_dir = Path(args.batch_dir).expanduser().resolve()
+    if supervisor.execution_busy(batch_dir):
+        print("✗ 批次正在执行，稍后重试")
+        return 2
+
+    def locked():
+        manifest = mf.load(batch_dir)
+        try:
+            report = extract_stage.refresh_from_evidence(batch_dir)
+        except (OSError, ValueError) as exc:
+            print(f"✗ 重算提取产物失败：{exc}")
+            return 1
+        stage = contracts.STAGE_BY_ID["extract"]
+        if not _record_success(batch_dir, manifest, stage):
+            print("✗ 重算完成但登记失败")
+            return 1
+        manifest["status"] = mf.derive_status(manifest)
+        mf.save(batch_dir, manifest)
+        mf.append_log(batch_dir, {"event": "extract_refresh", "chars": report.get("characters"),
+                                  "sections": report.get("sections"),
+                                  "questions": report.get("questions")})
+        print(f"✓ 已按留存正文重算提取产物：{report.get('characters')} 字符，"
+              f"{report.get('sections')} 个分区，{report.get('questions')} 个候选题号"
+              f"（{len(report.get('unresolved') or [])} 项待核验；未重跑 OCR/模型）")
+        return 0
+
+    return _run_batch_locked(batch_dir, locked)
+
+
 def cmd_identify_meta(args) -> int:
     """上传后识别题源分类/卷名/地区/年份；识别不出留空，不阻断流程。"""
     from . import metadata_ai
@@ -1799,6 +1848,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_val = sub.add_parser("validate", help="运行本地确定性体检")
     batch_arg(p_val)
     p_val.set_defaults(func=cmd_validate)
+
+    p_eref = sub.add_parser("refresh-extract", help="按留存原始正文重算提取产物（不重跑 OCR/模型）")
+    batch_arg(p_eref)
+    p_eref.set_defaults(func=cmd_refresh_extract)
 
     p_gate = sub.add_parser("review-gate", help="判断审核是否放行")
     batch_arg(p_gate)

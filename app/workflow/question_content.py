@@ -401,6 +401,29 @@ def _canonical_image_text(value: str) -> str:
     return _canonical(_MARKDOWN_IMAGE.sub("", value))
 
 
+_BARE_OPTION_LABEL = re.compile(r"^[A-H][.．、]?$")
+
+
+def _postfix_image_option_label(lines: list[str], index: int, plain: str) -> bool:
+    """`A.` 换行后紧跟 `[IMG …]` 是图片选项的后置版式，不是材料标签边界。
+
+    `extract.material_label()` 把任何只由选项字母组成的行都当成材料标签，
+    于是后置图片选项（标签一行、图片一行）会被当成新材料的开始，题干窗口
+    在第一个 `A.` 处截断，选项解析得到 0 条（E20）。HTML→项目标记投影后
+    图片就是 `[IMG name]`，只有"下一非空行是纯图片引用"才继续收进窗口；
+    正文材料标签（`A.` 后面跟文章）不受影响。
+    """
+    if not _BARE_OPTION_LABEL.match(plain):
+        return False
+    from .extract import _plain
+    for row in lines[index + 1:]:
+        nxt = _plain(row).strip()
+        if not nxt:
+            continue
+        return bool(_IMG_REF.fullmatch(nxt))
+    return False
+
+
 def question_parts(lines: list[str], number: int, *, scoped=False) -> dict:
     """Return this child's exact source stem and ordered labeled options."""
     if scoped:
@@ -419,7 +442,8 @@ def question_parts(lines: list[str], number: int, *, scoped=False) -> dict:
             end = i
             break
         if (_strong_number(plain) is not None or SECTION.match(plain)
-                or material_label(plain) or guide_numbers(plain) or LEADIN.match(plain)):
+                or (material_label(plain) and not _postfix_image_option_label(lines, i, plain))
+                or guide_numbers(plain) or LEADIN.match(plain)):
             end = i
             break
     text = "\n".join(lines[start:end])
@@ -666,7 +690,11 @@ def _candidate_options(options) -> list[dict]:
 
 def _rebuild_source_units(root, structure, cleaned):
     """Every source consumer uses the same current verified container windows."""
-    from . import lesson_bands, structure_gate, structure_ai, visual_columns
+    from . import denoise, lesson_bands, structure_gate, structure_ai, visual_columns
+    source_path = Path(root) / "01_source/正文.txt"
+    if source_path.is_file():
+        raw = source_path.read_text(encoding="utf-8-sig")
+        structure = denoise.project_structure(structure, raw, cleaned)
     evidence = lesson_bands.for_text(root, cleaned)
     candidate = visual_columns.annotate_candidate(root, cleaned, structure)
     columns = candidate.get("visual_columns") or []

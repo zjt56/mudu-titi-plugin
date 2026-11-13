@@ -39,7 +39,7 @@ class AdapterTest(unittest.TestCase):
     def prepare(self, raw=RAW, candidate=None, pdf=None):
         return adapter.prepare(batch_dir=self.batch, raw=raw, candidate=candidate or {"sections": []}, pdf_ocr=pdf)
 
-    def visual_fixture(self, *, role="question", raw=None, heading=None):
+    def visual_fixture(self, *, role="question", raw=None, heading=None, start=3, expect="verified"):
         from workflow import source_pages, visual_columns
         from workflow.test_source_pages import png
         raw = raw or "第一课时 Section A\n陌生栏目名称\nFill in the blank.\nI ____ a student."
@@ -60,15 +60,17 @@ class AdapterTest(unittest.TestCase):
             source_pages.prepare(self.batch)
         lines = raw.splitlines()
         result = {"columns": [{"id": "c1", "label": lines[1], "role": role, "parent_id": None,
-                  "heading_line": heading, "start_line": 3, "end_line": len(lines),
-                  "start_text": lines[2], "end_text": lines[-1], "printed_numbers": [],
+                  "heading_line": heading, "start_line": start, "end_line": len(lines),
+                  "start_text": lines[start - 1], "end_text": lines[-1], "printed_numbers": [],
                   "boxes": [{"page": 1, "bbox": [0.1, 0.2, 0.9, 0.8]}], "reason": "完整页边框与真实作答窗口"}], "issues": []}
         route = {"provider": "test", "model": "m", "profile": "p"}
         with patch("workflow.visual_transport.route_identity", return_value=route):
             response = visual_columns.build(self.batch, identify=lambda *a, **k: {**route, "text": json.dumps(result)})
-        self.assertEqual(response["status"], "verified", response)
+        self.assertEqual(response["status"], expect, response)
+        if expect != "verified":
+            return raw, None
         row = {"unit_kind": "standalone", "type": "单词拼写", "numbers": [1], "column_id": "c1",
-               "stem": "\n".join(lines[2:]), "source_span": {"start_line": 3, "end_line": len(lines),
+               "stem": "\n".join(lines[start - 1:]), "source_span": {"start_line": start, "end_line": len(lines),
                "number_binding": "unnumbered_section", "printed_numbers": []}}
         return raw, row
 
@@ -109,7 +111,7 @@ class AdapterTest(unittest.TestCase):
                "陌生栏目\nFill in the blank.\nI ____ a student.")
         # Prepare source-bound whole-page evidence, then move the exact task
         # coordinates to its real location in the longer Word view.
-        _, _ = self.visual_fixture(raw=raw)
+        _, _ = self.visual_fixture(raw=raw, start=5)
         path = self.source / "visual-columns.json"
         proof = json.loads(path.read_text())
         row = proof["response"]["columns"][0]
@@ -151,10 +153,13 @@ class AdapterTest(unittest.TestCase):
         self.assertIn("COLUMN_ROLE_INVALID", {r["check"] for r in checked["diagnostics"]})
 
     def test_visual_no_number_claim_cannot_hide_printed_question(self):
-        raw, row = self.visual_fixture(raw="第一课时 Section A\n创新训练\n1. Fill in the blank.\nI ____ a student.")
-        checked = adapter.validate(self.prepare(raw=raw), envelope([row]))
-        self.assertFalse(checked["passed"])
-        self.assertIn("UNNUMBERED_BINDING_INVALID", {r["check"] for r in checked["diagnostics"]})
+        # A visual "no printed number" claim over a window that does print 1. is
+        # refused at column-proof time, before any unit can claim it is numberless.
+        raw, row = self.visual_fixture(raw="第一课时 Section A\n创新训练\n1. Fill in the blank.\nI ____ a student.",
+                                       expect="unavailable")
+        self.assertIsNone(row)
+        proof = json.loads((self.source / "visual-columns.json").read_text())
+        self.assertIn("COLUMN_NUMBERLESS_HAS_PRINTED_ANCHORS", proof["reason"])
 
     def test_visual_task_requires_complete_word_window_and_no_rewrite(self):
         raw, row = self.visual_fixture()

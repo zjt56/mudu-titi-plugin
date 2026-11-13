@@ -329,6 +329,19 @@ def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[di
     return rows
 
 
+def heading_candidates_of(lines: list[str], path: str | Path | None = None) -> list[dict]:
+    """Annotation rows for an already-split body without losing trailing blanks.
+
+    ``"\\n".join(lines)`` silently drops trailing empty lines on ``splitlines``,
+    which shortens the last section by one and makes a confirmed末尾 span look
+    outside its own section. Callers that already hold a line list must use this.
+    """
+    text = "\n".join(lines)
+    if lines and not lines[-1].strip():
+        text += "\n"
+    return heading_candidates(text, path)
+
+
 def lesson_constraints(path: str | Path | None = None) -> list[dict]:
     """课时录入约束（来自 Mudu-English-Upload 的课时口径）；提示词与自检共用一份数据。"""
     return [dict(item) for item in load(path).get("lesson_constraints") or []
