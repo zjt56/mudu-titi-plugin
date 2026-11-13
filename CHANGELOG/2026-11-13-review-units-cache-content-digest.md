@@ -26,6 +26,7 @@
 - 该 skip 只覆盖 Windows 恢复 mtime 的构造场景，POSIX 仍跑这条不变量测试。
 
 ## 如何验证
+- 计项汇总：本次受影响回归共 182 项（4 + 178，跳过 3 项），全部通过。
 - `python -m unittest workflow.test_review_read_scope` → **4 tests, OK (skipped=1)**。
 - `python -m unittest workflow.test_review_evidence_scope workflow.test_review_rounds
   workflow.test_review_child_import workflow.test_review_local_reuse workflow.test_ocr_grid
