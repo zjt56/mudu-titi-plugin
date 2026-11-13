@@ -1,7 +1,7 @@
 # 卡点：[已修复待复验] 题号收割把 OCR 图片文件名坐标当成题号，导致闸门报 SOURCE_NUMBERS_MISSING
 
 - id: 2026-11-13-[已修复待复验]-题号收割把-OCR-图片文件名坐标当成题号,导致闸门报-SOURCE_NUMB
-- status: open
+- status: fixed
 - batch: 七上人教版课时A计划StarterUnit2KeepTidy!课时二Pronun
 - batch_dir: C:\Users\Administrator\.dsh\wf-plugin-data\workflows\七上人教版课时A计划StarterUnit2KeepTidy!课时二Pronun
 - stage: structure_gate
@@ -9,6 +9,9 @@
 - created: 2026-11-13T17:32:08+08:00
 - last_seen: 2026-11-13T17:32:08+08:00
 - occurrences: 1
+- fixed_at: 2026-11-13T19:49:33+08:00
+- fix_commit: 8eccde7
+- verification: 真实批次 structure_gate 通过且不再出现 SOURCE_NUMBERS_MISSING(50/52/158… 图片名坐标)；test_extract_refresh 9 项 OK；结构/提取相关套件全绿。
 - title: [已修复待复验] 题号收割把 OCR 图片文件名坐标当成题号，导致闸门报 SOURCE_NUMBERS_MISSING
 
 ## 现象（卡点）
@@ -23,4 +26,7 @@ structure.json 第20行大题 questions=[1,2,3,4,5,50,52,55,158,184,192,325,328,
 
 ## 修复记录
 
-（未修复）
+- 修复方式：source_anchors.strip_visual_markup 统一剥离 HTML/OCR 图片名标记；extract.blank_numbers/same_line_numbers、preview._weak_numbers、structure_gate._anchor_text 全部先剥离再取题号；新增 test_extract_refresh 覆盖 HTML/占位两种图片形态与表格内图片坐标不外泄。
+- 修复提交：8eccde7
+- 复验证据：真实批次 structure_gate 通过且不再出现 SOURCE_NUMBERS_MISSING(50/52/158… 图片名坐标)；test_extract_refresh 9 项 OK；结构/提取相关套件全绿。
+- 标记时间：2026-11-13T19:49:33+08:00
