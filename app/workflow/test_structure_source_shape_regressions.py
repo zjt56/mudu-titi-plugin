@@ -45,6 +45,94 @@ class StructureSourceShapeRegressions(unittest.TestCase):
         self.assertFalse(unit['printed_number'])
         self.assertEqual(legitimate_source_shape(unit), 'unnumbered_table_response')
 
+    def test_familiar_word_single_unnumbered_response_is_source_bound(self):
+        text = ('Unit 3\n第一课时 Section A\n写出下面画线词的汉语意思\n'
+                'Lang Lang is famous in the <u>field</u> of music.\t<u>　</u>\n'
+                'Pronunciation\nⅠ.找出下列每组单词中画线部分读音不同的一项\n'
+                '( )1.A.a B.b C.c D.d')
+        _, _, report, units = self.gate(text)
+        self.assertTrue(report['passed'], report['blockers'])
+        unit = units[0]
+        self.assertEqual(unit['type'], '翻译')
+        self.assertEqual(unit['unit_kind'], 'standalone')
+        self.assertEqual(unit['source_span']['printed_numbers'], [])
+        self.assertEqual(unit['source_span']['number_binding'], 'unnumbered_section')
+        self.assertIsNone(unit['original_number'])
+        self.assertFalse(unit['printed_number'])
+        self.assertNotIn('Pronunciation', unit['stem'])
+        self.assertEqual(legitimate_source_shape(unit), 'unnumbered_no_image')
+
+    def test_single_unnumbered_response_survives_draft_and_preview(self):
+        from . import preview, question_draft, upload_numbering
+        text = ('Unit 3\n第一课时 Section A\n写出下面画线词的汉语意思\n'
+                'Lang Lang is famous in the <u>field</u> of music.\t<u>　</u>')
+        structure, body, _ = infer_structure(text)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / '01_source').mkdir()
+            (root / '01_source/正文.txt').write_text(body, encoding='utf-8')
+            (root / '01_source/structure.json').write_text(json.dumps(structure), encoding='utf-8')
+            with patch('workflow.structure_ai.auto_classify', return_value={'ran': False}):
+                report = run_gate(root)
+            self.assertTrue(report['passed'], report['blockers'])
+            units = json.loads((root / '01_source/structure.confirmed.json').read_text(encoding='utf-8'))['units']
+            draft = question_draft.build(root)
+            self.assertEqual(draft['issues'], [])
+            self.assertEqual(len(draft['items']), 1)
+            self.assertIn('Lang Lang', draft['items'][0]['stem'])
+            self.assertIn('<u>field</u>', draft['items'][0]['stem'])
+            shown = preview.source_slice(root, [1], unit_id=units[0]['unit_id'])
+            self.assertEqual(shown, [body.splitlines()[-1]])
+            projected = upload_numbering.project_batch({'items': draft['items']}, root)
+            self.assertEqual(projected['errors'], [])
+            self.assertIsNone(projected['items'][0]['numberStart'])
+            self.assertIsNone(projected['items'][0]['numberEnd'])
+
+    def test_unnumbered_response_does_not_invent_count_or_missing_content(self):
+        for content in ('<u>　</u>', 'Lang Lang is famous.',
+                        'One ____ and two ____', 'One sentence.\nTwo <u>　</u>', '[IMG word.jpeg]\nOne <u>　</u>'):
+            with self.subTest(content=content):
+                _, _, report, units = self.gate('Unit 3\n第一课时 Section A\n写出下面画线词的汉语意思\n' + content)
+                self.assertFalse(report['passed'], report)
+                self.assertEqual(units, [])
+
+    def test_consecutive_unnumbered_items_keep_separate_source_identities(self):
+        from . import preview, question_draft, upload_numbering
+        text = ('Unit 3\n第一课时 Section A\n【文化拾趣】\n写出下面画线词的汉语意思\n'
+                'She is in the <u>field</u>.\t<u>　</u>\n'
+                'It is a <u>piece</u> of cake.\t____')
+        structure, body, _ = infer_structure(text)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / '01_source').mkdir()
+            (root / '01_source/正文.txt').write_text(body, encoding='utf-8')
+            (root / '01_source/structure.json').write_text(json.dumps(structure), encoding='utf-8')
+            with patch('workflow.structure_ai.auto_classify', return_value={'ran': False}):
+                report = run_gate(root)
+            self.assertTrue(report['passed'], report['blockers'])
+            units = json.loads((root / '01_source/structure.confirmed.json').read_text(encoding='utf-8'))['units']
+            self.assertEqual(len(units), 2)
+            self.assertEqual(len({u['unit_id'] for u in units}), 2)
+            self.assertEqual(len({u['question_ids']['1'] for u in units}), 2)
+            self.assertTrue(all(u['numbers'] == [1] and u['source_span']['printed_numbers'] == [] for u in units))
+            draft = question_draft.build(root)
+            self.assertEqual(draft['issues'], [])
+            self.assertEqual(len(draft['items']), 2)
+            for unit, word, other in zip(units, ('field', 'piece'), ('piece', 'field')):
+                shown = '\n'.join(preview.source_slice(root, [1], unit_id=unit['unit_id']))
+                self.assertIn(word, shown)
+                self.assertNotIn(other, shown)
+            projected = upload_numbering.project_batch({'items': draft['items']}, root)
+            self.assertEqual(projected['errors'], [])
+            self.assertTrue(all(i['numberStart'] is None and i['numberEnd'] is None for i in projected['items']))
+
+    def test_wrapped_unnumbered_response_is_one_complete_unit(self):
+        _, _, report, units = self.gate('Unit 3\n第一课时 Section A\n写出下面画线词的汉语意思\n'
+                                       'Lang Lang is famous in the\n<u>field</u> of music.\t____')
+        self.assertTrue(report['passed'], report['blockers'])
+        self.assertEqual(len(units), 1)
+        self.assertIn('the\n<u>field</u>', units[0]['stem'])
+
     def test_prose_age_is_not_printed_number(self):
         text = ('Unit 3\n第四课时 Project\nⅠ.任务型阅读\n'
                 '1.<u>　　　　</u> Sally.She is 15.She is not tidy.\n'

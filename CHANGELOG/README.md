@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-13 | [2026-11-13-generic-unnumbered-features.md](2026-11-13-generic-unnumbered-features.md) | 通用无号作答窗口与任意栏目标题来源证明、完整覆盖和真实15单元复验 |
 | 2026-11-13 | [2026-11-13-answer-scope-and-task-budget.md](2026-11-13-answer-scope-and-task-budget.md) | 修单专题紧凑附录答案归属、宿主10分钟截断及校验空转；真实批次14题恢复并通过体检 |
 | 2026-11-13 | [2026-11-13-repo-hygiene-and-temp-paths.md](2026-11-13-repo-hygiene-and-temp-paths.md) | 修 issue_log 文末多余空行根因，全仓清理并新增仓库卫生回归；测试临时路径统一 resolve |
 | 2026-11-13 | [2026-11-13-upload-table-blank-stems.md](2026-11-13-upload-table-blank-stems.md) | 当前来源证明的表格空位仅API副本投影非空stem，正式format通过且原题与审核差异不变 |

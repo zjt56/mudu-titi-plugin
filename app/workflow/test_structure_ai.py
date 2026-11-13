@@ -41,6 +41,41 @@ class StructureAiClassifyTest(unittest.TestCase):
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["subtype"], "汉语及首字母")
 
+    def test_unnumbered_text_requires_exact_complete_rebuilt_window(self):
+        from workflow.extract import infer_structure
+        raw = ('Unit 3\n第一课时 Section A\n写出下面画线词的汉语意思\n'
+               'Lang Lang is famous in the <u>field</u> of music.\t<u>　</u>')
+        candidate, body, _ = infer_structure(raw)
+        value = {'units': [{'unit_kind': 'standalone', 'type': '翻译', 'numbers': [1],
+                            'stem': body.splitlines()[-1],
+                            'source_span': {'start_line': 4, 'end_line': 4,
+                                            'number_binding': 'unnumbered_section'}}]}
+        got = structure_ai._sanitize_classified(value, body, candidate)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]['source_span']['printed_numbers'], [])
+        partial = json.loads(json.dumps(value))
+        partial['units'][0]['stem'] = 'Lang Lang'
+        self.assertEqual(structure_ai._sanitize_classified(partial, body, candidate), [])
+        missing = body.replace('\t<u>　</u>', '')
+        value['units'][0]['stem'] = missing.splitlines()[-1]
+        self.assertEqual(structure_ai._sanitize_classified(value, missing, candidate), [])
+
+    def test_consecutive_unnumbered_candidates_require_full_coverage(self):
+        from workflow.extract import infer_structure
+        raw = 'Unit 3\n第一课时 Section A\n写出下面画线词的汉语意思\nOne word ____\nAnother word ____'
+        candidate, body, _ = infer_structure(raw)
+        value = {'units': [{'unit_kind': 'standalone', 'type': '翻译', 'numbers': [1],
+                            'stem': body.splitlines()[line - 1],
+                            'source_span': {'start_line': line, 'end_line': line,
+                                            'number_binding': 'unnumbered_section'}} for line in (4, 5)]}
+        got = structure_ai._sanitize_classified(value, body, candidate)
+        self.assertEqual(len(got), 2)
+        self.assertNotEqual(got[0]['unit_id'], got[1]['unit_id'])
+        value['units'].pop()
+        diagnostics = []
+        self.assertEqual(structure_ai._sanitize_classified(value, body, candidate, diagnostics=diagnostics), [])
+        self.assertIn('SOURCE_UNNUMBERED_RESPONSE_UNCOVERED', {d['check'] for d in diagnostics})
+
     def test_accepts_evidence_bound_units(self):
         raw = ["1. What is it?", "A. A", "B. B", "2. Shared material", "3. Next line"]
         candidate = {"sections": [{"questions": [1, 2, 3]}]}
@@ -98,7 +133,11 @@ class StructureAiClassifyTest(unittest.TestCase):
             script.write_text('import sys\nsys.stdin.read()\nprint(' + repr(json.dumps(result, ensure_ascii=False)) + ')\n', encoding='utf-8')
             config = local_agent._validate_config({'provider': 'command', 'command': ['{python}', str(script)],
                                                    'timeout_seconds': 10}, batch)
-            classified = structure_ai.auto_classify(batch, invoke_fn=local_agent.invoke, config=config, force=True)
+            # The protocol fixture must not wait on the live plugin's global
+            # execution lock; no real batch or model is involved in this test.
+            from contextlib import nullcontext
+            with patch.object(local_agent, '_agent_lock', return_value=nullcontext()):
+                classified = structure_ai.auto_classify(batch, invoke_fn=local_agent.invoke, config=config, force=True)
             self.assertEqual(classified['units'][0]['numbers'], [1])
 
     def test_classified_stem_uses_word_whitespace_and_rejects_ocr_word_changes(self):

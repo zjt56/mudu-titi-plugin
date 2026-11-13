@@ -338,6 +338,9 @@ def _classify_prompt(raw_text: str, candidate: dict, pdf_ocr=None) -> str:
                      + json.dumps(outline, ensure_ascii=False)
                      + "\n按当前上传的单课时处理；基础/提升重复罗马序号仍是不同大题。"
                      "无序号大题同样保留；Pronunciation 是栏目，栏目内单项填空仍按自己的标题判定。"
+                      "无印刷小题号不等于漏题，不限栏目名称。保留完整正文与作答区域，连续独立作答行分别建单元；唯一作答区域和连续正文可证明的单题自然换行保持一题，不能遗漏第二题或合并多题。"
+                      "用source_span.number_binding=unnumbered_section、printed_numbers=[]和内部numbers=[1]标识；"
+                      "内部别名不得当印刷题号，缺正文或多题混窗不得并成一题。"
                      "题组窗口包含题前完整文章、图片、表格和导语，不能从首个小题号开始截取。"
                      "原始小题号跨大题重复时须保留来源大题位置，在 notes 说明，"
                      "不得把不同大题同号题合并，也不得擅改原文题号。\n")
@@ -491,8 +494,19 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict, *, diagnostics=N
         normalized_parts = [{k: part[k] for k in ('kind', 'start_line', 'end_line')} for part in parts]
         binding = {}
         if unnumbered:
-            if _source_members(lines[start - 1:end]) or not any("[IMG " in line or "[TABLE" in line for line in lines[start - 1:end]):
-                reject("UNNUMBERED_BINDING_INVALID", "无号图片绑定与本窗口原文不符")
+            from .structure_gate import _build_units
+            rebuilt = _build_units(candidate.get("sections") or [], candidate.get("groups") or [], lines)
+            exact_response = [unit for unit in rebuilt
+                              if unit.get("unit_kind") == kind == "standalone"
+                              and unit.get("type") == qtype and unit.get("numbers") == nums
+                              and (unit.get("source_span") or {}).get("number_binding") == "unnumbered_section"
+                              and (unit.get("source_span") or {}).get("start_line") == start
+                              and (unit.get("source_span") or {}).get("end_line") == end
+                              and _norm(unit.get("stem", "")) == _norm(stem)]
+            if (_source_members(lines[start - 1:end])
+                    or (not any("[IMG " in line or "[TABLE" in line for line in lines[start - 1:end])
+                        and len(exact_response) != 1)):
+                reject("UNNUMBERED_BINDING_INVALID", "无号绑定须命中当前完整图片/表格窗口或唯一重建的完整无号文字题")
                 continue
             binding = {"number_binding": "unnumbered_section", "printed_numbers": []}
         elif scoped and span.get("number_binding") == "single_writing_section" and "书面表达" in qtype and len(nums) == 1:
@@ -563,10 +577,12 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
     # Visual banners are a source-bound structural input, not rewritten text.
     from . import lesson_bands
     band_evidence = lesson_bands.for_text(batch, raw) if sync_practice.looks_like_sync_practice(raw) else {}
-    if band_evidence.get("bands"):
+    if band_evidence.get("bands") or band_evidence.get("features"):
         candidate = dict(candidate, sections=lesson_bands.annotate_sections(
-            candidate.get("sections") or [], band_evidence), lesson_bands=band_evidence["bands"])
-    band_sha = hashlib.sha256(json.dumps(band_evidence.get("bands") or [], sort_keys=True,
+            candidate.get("sections") or [], band_evidence), lesson_bands=band_evidence.get("bands") or [],
+            lesson_features=band_evidence.get("features") or [])
+    band_sha = hashlib.sha256(json.dumps({"bands": band_evidence.get("bands") or [],
+                                         "features": band_evidence.get("features") or []}, sort_keys=True,
                                        ensure_ascii=False).encode()).hexdigest()
     marker = _load(batch / CLASSIFY_MARKER)
     sync_applicable = sync_practice.looks_like_sync_practice(raw)

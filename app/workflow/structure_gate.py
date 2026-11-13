@@ -205,6 +205,17 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
             errors.append({"code": "SOURCE_SECTION_UNCOVERED", "source_line": start,
                            "message": "原文大题窗口未产生任何来源单元"})
         observed = _source_members(lines[start:end])
+        if not group and not observed:
+            from .question_content import unnumbered_text_responses
+            for lo, hi in unnumbered_text_responses(lines[start:end]):
+                expected_span = (start + lo + 1, start + hi + 1)
+                owners = [u for u in units if
+                          ((u.get('source_span') or {}).get('start_line'),
+                           (u.get('source_span') or {}).get('end_line')) == expected_span
+                          and (u.get('source_span') or {}).get('number_binding') == 'unnumbered_section']
+                if len(owners) != 1:
+                    errors.append({'code': 'SOURCE_UNNUMBERED_RESPONSE_UNCOVERED', 'source_line': expected_span[0],
+                                   'message': '当前无号作答区域须完整且唯一归属，不能遗漏、截断或合并相邻题'})
         writing_bound = {n for u in units if u.get("source_span", {}).get("number_binding") == "single_writing_section"
                          and start < u["source_span"]["start_line"] <= u["source_span"]["end_line"] <= end for n in u["numbers"]}
         if declared - observed - writing_bound:
@@ -272,10 +283,16 @@ def _proven_unnumbered_scope(unit: dict, sections: list[dict], lines: list[str])
     except ValueError:
         return False
     span, section = unit.get("source_span") or {}, expected["source_section"]
-    return (unit.get("section_id") == expected["section_id"] and unit.get("source_section") == section
-            and span.get("start_line") == section["start_line"] + 1
-            and span.get("end_line") == section["end_line"]
-            and unit.get("stem") == "\n".join(lines[span["start_line"] - 1:span["end_line"]]).strip())
+    if (unit.get("section_id") != expected["section_id"] or unit.get("source_section") != section
+            or unit.get("stem") != "\n".join(lines[span["start_line"] - 1:span["end_line"]]).strip()):
+        return False
+    if (span.get("start_line") == section["start_line"] + 1
+            and span.get("end_line") == section["end_line"]):
+        return True
+    from .question_content import unnumbered_text_responses
+    windows = unnumbered_text_responses(lines[section["start_line"]:section["end_line"]])
+    return any((span.get("start_line"), span.get("end_line")) ==
+               (section["start_line"] + lo + 1, section["start_line"] + hi + 1) for lo, hi in windows)
 
 
 def _proven_scoped_restart(at: int, units: list[dict], sections: list[dict], lines: list[str], problems: list[dict]) -> bool:
@@ -354,7 +371,7 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                        for offset, number in tokens if number in numbers]
             image_only = (section.get("image_only") and any("[IMG " in line for line in local)
                           and all(not _plain(line).strip() or "[IMG " in line or "[TABLE" in line for line in local))
-            unnumbered_text = None
+            unnumbered_text = []
             if not anchors and not numbers and local:
                 from .question_content import legitimate_source_shape
                 candidate = _make_unit("standalone", type_name, [1], local)
@@ -366,12 +383,23 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                 # An absent number alone proves nothing: retain a full real body
                 # with an explicit response blank, using the common shape rule.
                 readable = re.sub(r"<[^>]*>|\[/?TABLE[^\]]*\]|\s|_", "", candidate["stem"])
-                if (readable and re.search(r"<u>\s*</u>|_{2,}", candidate["stem"])
-                        and legitimate_source_shape(candidate) == "unnumbered_table_response"):
+                shape = legitimate_source_shape(candidate)
+                if shape == "unnumbered_no_image":
+                    from .question_content import unnumbered_text_responses
+                    for lo, hi in unnumbered_text_responses(local):
+                        response = _make_unit("standalone", type_name, [1], local[lo:hi + 1])
+                        response["stem"] = "\n".join(local[lo:hi + 1]).strip()
+                        response["source_span"] = {"start_line": start + lo + 1, "end_line": start + hi + 1,
+                                                   "basis": "cleaned_source", "number_binding": "unnumbered_section",
+                                                   "printed_numbers": []}
+                        response.update(original_number=None, printed_number=False)
+                        unnumbered_text.append(response)
+                elif (readable and re.search(r"<u>\s*</u>|_{2,}", candidate["stem"])
+                      and shape == "unnumbered_table_response"):
                     candidate.update(original_number=None, printed_number=False)
-                    unnumbered_text = candidate
-            if unnumbered_text is not None:
-                units.append(unnumbered_text)
+                    unnumbered_text = [candidate]
+            if unnumbered_text:
+                units.extend(unnumbered_text)
             elif not anchors and not numbers and image_only:
                 # 没有可读印刷题号时只保留整节一个来源对象，不猜图片里的题数。
                 # [1] 是兼容字段内部别名，不能展示成原卷第 1 题。
@@ -732,7 +760,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     scoped = sync_practice.looks_like_sync_practice(cleaned_text)
     from . import lesson_bands
     band_evidence = lesson_bands.for_text(batch_dir, cleaned_text) if scoped else {}
-    if band_evidence.get("bands"):
+    if band_evidence.get("bands") or band_evidence.get("features"):
         sections = lesson_bands.annotate_sections(sections, band_evidence)
 
     from . import manifest as mf
@@ -896,12 +924,12 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                 continue
             at = issue.get("source_line")
             owned = [u for u in units if (u.get("source_section") or {}).get("start_line") == at]
-            if (len(owned) == 1 and legitimate_source_shape(owned[0])
-                    and owned[0].get("source_span", {}).get("number_binding") == "unnumbered_section"
+            if (owned and all(legitimate_source_shape(u)
+                              and u.get("source_span", {}).get("number_binding") == "unnumbered_section"
+                              and _proven_unnumbered_scope(u, sections, source_lines) for u in owned)
                     and not any(type(p.get("source_line")) is int
-                                and at <= p["source_line"] <= owned[0]["source_span"]["end_line"]
-                                for p in scoped_problems)
-                    and _proven_unnumbered_scope(owned[0], sections, source_lines)):
+                                and at <= p["source_line"] <= max(u["source_span"]["end_line"] for u in owned)
+                                for p in scoped_problems)):
                 unnumbered_boundaries.append(issue)
         # Full reconciliation above still retains every other section's errors.
         blockers[:] = [b for b in blockers if b not in unnumbered_boundaries]
@@ -1139,13 +1167,13 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     checks["grouping"] = "failed" if any("GROUP" in b["code"] for b in blockers) else "passed"
     passed = not blockers and bool(units)
 
-    if band_evidence.get("bands"):
+    if band_evidence.get("bands") or band_evidence.get("features"):
         # Rebind current visual metadata even for reused source-valid AI units;
         # never let a unit's own stale band claim become evidence.
         for unit in units:
             source_section = unit.get("source_section") or {}
             annotated = lesson_bands.annotate_sections([source_section], band_evidence)[0]
-            if annotated.get("lesson_band"):
+            if annotated != source_section:
                 unit["source_section"] = annotated
     confirmed = {
         "version": "1.0",

@@ -45,6 +45,41 @@ def _blank_table_grids(text: str) -> int:
 LEGITIMATE_SHAPES = ("image_only", "blank_answer_grid", "unnumbered_no_image", "unnumbered_table_response")
 
 
+def unnumbered_text_responses(lines: list[str]) -> list[tuple[int, int]]:
+    """Rebuild response windows from source paragraphs, never from column names.
+
+    A single paragraph may wrap, but must have exactly one terminal answer area.
+    Consecutive independent rows must each end with their own answer area; a
+    mixture of continuations and several blanks is ambiguous and stays rejected.
+    Returned offsets include intervening empty paragraphs, preserving all bytes.
+    """
+    text = "\n".join(lines)
+    if IMAGE.search(text) or re.search(r"\[/?TABLE|<br\s*/?>", text, re.I):
+        return []
+    blank = re.compile(r"<u>\s*</u>|_{2,}", re.I)
+    terminal = re.compile(r"(?:<u>\s*</u>|_{2,})\s*[。.]?\s*$", re.I)
+    def readable(line):
+        return bool(re.search(r"[A-Za-z\u4e00-\u9fff]", re.sub(r"<[^>]*>", "", blank.sub("", line))))
+    nonempty = [(i, line) for i, line in enumerate(lines) if line.strip()]
+    if not nonempty or any(OPTION.search(line) for _, line in nonempty):
+        return []
+    if len(nonempty) == 1 and readable(nonempty[0][1]) and len(blank.findall(text)) == 1:
+        return [(0, len(lines) - 1)]
+    # All readable rows have their own terminal response area: each source row
+    # proves one item. Multiple blanks within a row do not prove multiple items.
+    if all(readable(line) and len(blank.findall(line)) == 1 and terminal.search(line)
+           for _, line in nonempty):
+        starts = [0] + [i for i, _ in nonempty[1:]]
+        return [(lo, starts[n + 1] - 1 if n + 1 < len(starts) else len(lines) - 1)
+                for n, lo in enumerate(starts)]
+    # A single complete wrapped paragraph has just one answer area overall.
+    if (len(blank.findall(text)) == 1 and terminal.search(nonempty[-1][1])
+            and all(readable(line) for _, line in nonempty)
+            and all(not re.search(r"[.!?。！？]\s*$", line) for _, line in nonempty[:-1])):
+        return [(0, len(lines) - 1)]
+    return []
+
+
 def legitimate_source_shape(unit: dict, appendix_text: str | None = None) -> str | None:
     """Classify a legitimate source shape that must not be treated as missing content.
 

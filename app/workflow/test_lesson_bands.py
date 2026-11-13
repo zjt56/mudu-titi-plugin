@@ -43,6 +43,101 @@ class LessonBandsTest(unittest.TestCase):
         with patch('workflow.visual_transport.route_identity', return_value=self.route):
             return bands.build(self.root, identify=self.identify, **kwargs)
 
+    def test_feature_banner_clips_previous_unit_and_reaches_consumers(self):
+        self.text = ('Unit 1 You and Me\n第一课时 Section A\n[IMG b.png]\n'
+                     'Ⅰ.单项填空\n1. First? A. One B. Two C. Three D. Four\n[IMG f.png]\n'
+                     '写出下面画线词的汉语意思\nLang Lang is famous in the <u>field</u> of music.\t<u>　</u>\n'
+                     'Pronunciation\nⅠ.单项填空\n1. Next? A. One B. Two C. Three D. Four\n')
+        self.write('01_source/正文.txt', self.text)
+        (self.root / '01_source/media/f.png').write_bytes(b'visible feature banner')
+        calls = []
+        def identify(images, prompt, **kwargs):
+            calls.append(images)
+            reply = json.loads(self.identify(images, prompt, **kwargs)['text'])
+            for row in reply['items']:
+                if row['id'] == 'f.png':
+                    row.update(role='feature', label='熟词生义', marker='', visible_text='熟词生义')
+            return {'provider': 'test', 'model': 'vision', 'text': json.dumps(reply)}
+        with patch('workflow.visual_transport.route_identity', return_value=self.route):
+            evidence = bands.build(self.root, identify=identify)
+            self.assertEqual(bands.build(self.root, identify=identify)['model_calls'], 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([r['label'] for r in evidence['bands']], ['能力提升'])
+        self.assertEqual([r['label'] for r in evidence['features']], ['熟词生义'])
+        structure, _, _ = extract.infer_structure(self.text)
+        self.write('01_source/structure.json', structure)
+        with patch('workflow.structure_ai.auto_classify', return_value={'ran': False}):
+            report = structure_gate.run_gate(self.root)
+        self.assertTrue(report['passed'], report['blockers'])
+        confirmed = json.loads((self.root / '01_source/structure.confirmed.json').read_text())
+        units = confirmed['units']
+        feature = next(u for u in units if 'Lang Lang' in u['stem'])
+        self.assertEqual(feature['source_section']['source_feature']['label'], '熟词生义')
+        self.assertEqual(feature['source_section']['lesson_band']['label'], '能力提升')
+        self.assertNotIn('f.png', units[0]['stem'])
+        self.assertNotIn('source_feature', units[-1]['source_section'])
+        from workflow import question_draft, preview, upload_numbering, question_content
+        draft = question_draft.build(self.root)
+        self.assertEqual(draft['issues'], [])
+        for row, unit in zip(draft['items'], units):
+            row['question_type'] = unit['type']
+        self.assertTrue(question_content.audit_batch_source(self.root, {'items': draft['items']})['passed'])
+        item = next(i for i in draft['items'] if i['unit_id'] == feature['unit_id'])
+        self.assertIn('Lang Lang', item['stem'])
+        self.assertNotIn('f.png', '\n'.join(preview.source_slice(self.root, [1], unit_id=units[0]['unit_id'])))
+        projected = upload_numbering.project_batch({'items': draft['items']}, self.root)
+        self.assertEqual(projected['errors'], [])
+        numbered = next(i for i in projected['items'] if i['unit_id'] == feature['unit_id'])
+        self.assertIsNone(numbered['numberStart'])
+        self.assertIsNone(numbered['numberEnd'])
+        # Reprojection follows current text coordinates, not the old cached line.
+        moved = bands.for_text(self.root, '\n' + self.text)
+        self.assertEqual(moved['features'][0]['start_line'], evidence['features'][0]['start_line'] + 1)
+        (self.root / '01_source/media/f.png').write_bytes(b'changed')
+        self.assertEqual(bands.load_verified(self.root)['features'], [])
+
+    def test_generic_image_feature_and_wrapped_native_title_boundaries(self):
+        self.text = ('Unit 1\n第一课时 Section A\nⅠ.单项填空\n'
+                     '1. First? A.One B.Two C.Three D.Four\n[IMG a.png]\n'
+                     '写出下面画线词的汉语意思\nOne <u>field</u> ____\n'
+                     '【思维挑战】\n写出下面画线词的汉语意思\nTwo <u>piece</u> ____\n')
+        self.write('01_source/正文.txt', self.text)
+        def identify(images, prompt, **kwargs):
+            self.assertIn('不限栏目名称', prompt)
+            return {'provider': 'test', 'model': 'vision', 'text': json.dumps({'items': [
+                {'id': image['id'], 'role': 'feature', 'label': '文化拾趣', 'marker': '', 'visible_text': '文化拾趣'}
+                for image in images]})}
+        with patch('workflow.visual_transport.route_identity', return_value=self.route):
+            result = bands.build(self.root, identify=identify)
+        self.assertEqual(result['status'], 'verified')
+        self.assertEqual(result['bands'], [])
+        self.assertEqual([f['label'] for f in result['features']], ['文化拾趣', '思维挑战'])
+        self.assertEqual(bands.load_verified(self.root)['features'], result['features'])
+        structure, _, _ = extract.infer_structure(self.text)
+        self.write('01_source/structure.json', structure)
+        with patch('workflow.structure_ai.auto_classify', return_value={'ran': False}):
+            report = structure_gate.run_gate(self.root)
+        self.assertTrue(report['passed'], report['blockers'])
+        units = json.loads((self.root / '01_source/structure.confirmed.json').read_text(encoding='utf-8'))['units']
+        self.assertNotIn('a.png', units[0]['stem'])
+        self.assertEqual([u['source_section']['source_feature']['label'] for u in units[1:]], ['文化拾趣', '思维挑战'])
+
+    def test_feature_titles_reject_instructions_and_prose(self):
+        for text in ('写出下面词语', '参考答案', 'Hello world.', 'A基础巩固', 'Pronunciation'):
+            self.assertEqual(bands.canonical_feature(text, visual=True), '', text)
+        self.assertEqual(bands.canonical_feature('SomePlainProse'), '')
+        self.assertEqual(bands.canonical_feature('【文化拾趣】'), '文化拾趣')
+
+    def test_feature_cannot_be_claimed_from_wrong_visible_text(self):
+        def identify(images, prompt, **kwargs):
+            return {'provider': 'test', 'model': 'vision', 'text': json.dumps({'items': [
+                {'id': image['id'], 'role': 'feature', 'label': '熟词生义', 'marker': '', 'visible_text': '普通图片'}
+                for image in images]})}
+        with patch('workflow.visual_transport.route_identity', return_value=self.route):
+            result = bands.build(self.root, identify=identify)
+        self.assertEqual(result['features'], [])
+        self.assertEqual(result['status'], 'partial')
+
     def test_assembly_audit_and_phonetic_rubric_use_verified_banner_stop(self):
         self.text = ('Unit 1 You and Me\n第一课时 Pronunciation\n[IMG a.png]\n'
                      'Ⅰ.找出下列每组单词中画线部分读音不同的一项\n'
