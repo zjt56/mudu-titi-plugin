@@ -143,10 +143,75 @@ class PostfixImageOptionTest(unittest.TestCase):
         self.assertEqual(parts["options"][3]["text"], "[IMG pdf-page-1-image-11.jpg]")
 
     def test_material_label_still_ends_the_window(self):
-        lines = self.LINES[:2] + ["A.", "Another passage starts here.", "1. next"]
+        lines = self.LINES[:3] + ["A.", "Another passage starts here.", "1. next"]
         parts = question_content.question_parts(lines, 3)
         self.assertIn("What does Linda's brother think Neo is?", parts["stem"])
         self.assertNotIn("Another passage", parts["stem"])
+
+
+class GridAwareRestoreTest(unittest.TestCase):
+    """装配回填不得把网格归位后的正确题干改回线性错位内容。
+
+    真实批次里 `restore_source_stems` 用线性 `_parts` 回填，第 4 格被改成只剩
+    `[IMG …4.jpg]`，随后来源审计按网格判 `SOURCE_STEM_MISSING`，整批装配置为
+    needs_review。回填与审计必须使用同一网格投影。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.batch = Path(self.tmp.name)
+        source = self.batch / "01_source"
+        media = source / "media"
+        media.mkdir(parents=True)
+        blocks = _page_blocks()
+        for ordinal in range(1, sum(1 for block in blocks if block["type"] == "image") + 1):
+            (media / f"pdf-page-1-image-{ordinal}.jpg").write_bytes(b"x")
+        payload = {"sources": [{"status": "completed", "pages": [{"page": 1, "blocks": blocks}]}]}
+        (source / "pdf-ocr.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        linear = "\n".join(BODY)
+        unit = {
+            "unit_id": "sec-grid-u1",
+            "identity_version": "scoped-v1",
+            "unit_kind": "group",
+            "numbers": [1, 2, 3, 4, 5],
+            "stem": linear,
+            "source_span": {"start_line": 2, "end_line": 3},
+            "source_section": {"title": "Ⅱ. 根据图片及所给音标写出下列单词所缺的字母"},
+        }
+        (source / "structure.confirmed.json").write_text(
+            json.dumps({"units": [unit]}, ensure_ascii=False), encoding="utf-8")
+        children = []
+        for number in range(1, 6):
+            children.append({
+                "number": number,
+                "question_id": f"sec-grid-l{number}-q{number}",
+                "stem": "",
+                "options": [{"key": "A", "text": "线性错位选项"}],
+                "attachments": [{"kind": "image",
+                                 "url": f"/source-media/x/pdf-page-1-image-{number}.jpg",
+                                 "placement": "question"}],
+            })
+        self.payload = {"items": [{"unit_id": "sec-grid-u1", "identity_version": "scoped-v1",
+                                   "numbers": [1, 2, 3, 4, 5],
+                                   "unit_kind": "group", "subquestions": children}]}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_restore_uses_grid_cells_instead_of_linear_parse(self):
+        # 线性正文里没有可解析的 1./2. 题号锚点：回填仍必须按网格建立题干，
+        # 这正是真实批次第 4 格被改坏的那条路径。
+        changed = question_content.restore_source_stems(self.batch, self.payload)
+        self.assertGreaterEqual(changed, 5)
+        stems = {child["number"]: child["stem"]
+                 for child in self.payload["items"][0]["subquestions"]}
+        self.assertEqual(stems[1], "c ___ /eɪ/ke")
+        self.assertEqual(stems[2], "n _____/əʊ/se")
+        self.assertEqual(stems[3], "b __/aɪ/ke")
+        self.assertEqual(stems[4], "m _____/iː/t")
+        self.assertEqual(stems[5], "comp __/ju:/ter")
+        self.assertEqual([child["options"] for child in self.payload["items"][0]["subquestions"]],
+                         [[] for _ in range(5)])
 
 
 if __name__ == "__main__":

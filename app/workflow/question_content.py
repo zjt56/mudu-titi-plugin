@@ -888,6 +888,11 @@ def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
             if target.get("options") != filled:
                 target["options"] = filled
                 changed += 1
+        elif parsed.get("authoritative") and target.get("options"):
+            # 页面坐标网格单元格不承载带字母选项：线性解析出的选项属于错位内容，
+            # 留着会被下游当成真实选项（图片题曾因此报 E20）。
+            target["options"] = []
+            changed += 1
 
     for row in batch.get("items") or []:
         key = source_key(row)
@@ -899,12 +904,24 @@ def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
         # restored payload can erase a leading whitespace underline. Recover
         # Word markup with the same parser used by preassembly, then serialize
         # actual blanks without changing underlined words.
+        from . import ocr_grid
         from .question_draft import _parts
         from .wire_format import normalize_blank_text
+        # 双栏网格页的 OCR 行序会把词形行挪到相邻题号下：线性解析在这里回填
+        # 只会把正确网格结果改回错位内容，必须先按页面坐标归位再决定题干。
+        grid = ocr_grid.source_audit_items(root, unit)
         for number in unit.get('numbers') or []:
+            cell = ((grid or {}).get("items") or {}).get(int(number)) if grid else None
+            entry = lookup(parsed, number)
+            if cell:
+                # 网格归位是权威投影：即使线性解析根本没找到这一题，也要按网格
+                # 建立回填项；否则错误的线性结果会继续留在正式产物里。
+                entry = {"stem": normalize_blank_text('\n'.join(cell.get('texts') or [])),
+                         "options": [], "found": True, "authoritative": True}
+                parsed[number] = entry
+                continue
             original = _parts(str(unit.get('stem') or '').splitlines(), int(number),
                               scoped=unit.get('identity_version') == 'scoped-v1')
-            entry = lookup(parsed, number)
             if isinstance(entry, dict) and original.get('found'):
                 if original.get('stem'):
                     entry['stem'] = normalize_blank_text(original['stem'])
@@ -1095,6 +1112,54 @@ def restore_table_blocks_from_structure(batch_dir: str | Path, batch: dict) -> i
     return repaired
 
 
+# 后续验证输入可以给 source_section 追加归属证据（如 visual_columns 的
+# column_path）。这类键只有一侧存在时并未被改写，不属于身份变化；两侧都有
+# 但内容不同仍是真实不一致。
+_ADDITIVE_IDENTITY_KEYS = frozenset({"column_path"})
+
+
+def _identity_value_mismatch(actual, expected) -> bool:
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        for name in set(expected) | set(actual):
+            if name in _ADDITIVE_IDENTITY_KEYS and (name not in expected or name not in actual):
+                continue
+            if name not in expected or name not in actual:
+                return True
+            if _identity_value_mismatch(actual[name], expected[name]):
+                return True
+        return False
+    return actual != expected
+
+
+def _grid_source_audit(root: Path, unit: dict, audit: dict) -> dict:
+    """Compare the same OCR layout-grid projection the draft was built from.
+
+    Two-column grid pages reach extraction as row-major OCR text, so the linear
+    window puts a word row under the neighbouring number. ``ocr_grid`` already
+    rebinds those cells by page coordinates for the draft; reusing it here keeps
+    the source audit and the formal batch on one deterministic projection.
+    """
+    from . import ocr_grid
+    grid = ocr_grid.source_audit_items(root, unit)
+    if not grid:
+        return audit
+    for number, part in (audit.get("questions") or {}).items():
+        try:
+            item = grid["items"].get(int(number))
+        except (TypeError, ValueError):
+            continue
+        if not item:
+            continue
+        part["stem"] = ocr_grid.item_stem(item)
+        part["options"] = []
+    # A grid cell carries no labelled options; option completeness of the
+    # flattened text is not applicable once the projection is authoritative.
+    audit["issues"] = [problem for problem in (audit.get("issues") or [])
+                       if problem.get("code") != "SOURCE_OPTIONS_INCOMPLETE"]
+    audit["passed"] = not audit["issues"]
+    return audit
+
+
 def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     """Read-only final artifact audit against freshly sliced source units.
 
@@ -1166,7 +1231,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
             issue('BATCH_NUMBER_COVERAGE', '单元身份对应的原始小题号不一致', uid)
         if unit.get('identity_version') == 'scoped-v1':
             from .question_identity import fields, question_key
-            if any(item.get(k) != v for k, v in fields(unit).items()):
+            if any(_identity_value_mismatch(item.get(k), v) for k, v in fields(unit).items()):
                 issue('BATCH_IDENTITY_MISMATCH', '正式题目与确认结构的大题/题目身份不一致', uid)
             targets = item.get('subquestions') or [] if unit['unit_kind'] == 'group' else [item]
             if any(child.get('question_id') != question_key(unit, child.get('number')) for child in targets
@@ -1192,7 +1257,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                     issue("SOURCE_UNDERLINE_MISSING", "原卷实词下划线未保留：" + marked[:80], uid)
         # Keep final batch material semantics based on the confirmed unit stem;
         # structure-gate performs the separate raw-span option audit.
-        source_audit = audit_source_unit(unit)
+        source_audit = _grid_source_audit(root, unit, audit_source_unit(unit))
 
         def check_images(required, present, number=None, label=""):
             for name in sorted(set(_image_names(str(required).splitlines())) - present):

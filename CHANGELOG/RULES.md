@@ -505,3 +505,15 @@ content shape/catalog/media/table/schema 校验负责。**没有把内容、结�
 `assemble_precheck.py`、`format_gate.py::_run_final_format_checks`、`substeps.py`、
 `app/scripts/06-upload/audit_type_layout.py`、`app/docs/pipeline.md`、根 `AGENTS.md` 硬规则 33；
 验证见 `CHANGELOG/2026-11-12-early-content-late-format-gates.md`。
+
+## 2026-11-13：同一版面投影必须贯穿草稿、来源审计与装配回填
+
+用户原话（2026-11-13）：「后续还有类似的情况，没有题号，或者其他栏目板块，请做成通用的修复规则，解决这一类题」。
+规则：凡按识别服务坐标/版面证据归位过的题（双栏网格、图片题、栏目板块），草稿生成、来源审计、
+装配回填、上传来源比对必须读**同一份确定性投影**；禁止一步用线性行序、另一步用坐标归位——那样会把
+已归位的正确内容改回错位（本批表现为装配 SOURCE_STEM_MISSING u24 第 4 题，审计判对、回填改坏）。
+投影不可证明时（单栏/跨栏/未投影标记/题号集合不符）一律回退线性解析并留诊断，且**不得放宽审计**：
+SOURCE_STEM_MISSING/SOURCE_OPTIONS_INCOMPLETE 等判定逻辑不变，只让读写两侧对齐。落地：
+pp/workflow/ocr_grid.py::source_audit_items、question_content.py::_grid_source_audit、
+question_content.py::restore_source_stems（网格单元格不承载带字母选项，清掉线性错配选项）；
+验证见 CHANGELOG/2026-11-13-assemble-grid-projection-restore.md。

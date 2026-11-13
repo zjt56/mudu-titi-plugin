@@ -191,6 +191,33 @@ def section_items(root, *, section_title: str, numbers: list[int]) -> dict | Non
     return None
 
 
+def source_audit_items(root, unit: dict) -> dict | None:
+    """The layout grid for one confirmed unit, when it provably applies.
+
+    The source audit compares per-child stems and images against the original
+    paper. On a two-column grid page the OCR text is row-major, so a linear
+    window assigns one word row to the neighbouring number. The draft already
+    rebinds those cells by page coordinates; the audit must compare the same
+    deterministic projection instead of the flattened text, otherwise it
+    reports the (correct) grid result as rewritten or missing content.
+    """
+    if str(unit.get("unit_kind") or "") != "group":
+        return None
+    numbers = []
+    for value in unit.get("numbers") or []:
+        try:
+            numbers.append(int(value))
+        except (TypeError, ValueError):
+            return None
+    if not numbers:
+        return None
+    section = unit.get("source_section") or {}
+    grid = section_items(root, section_title=str(section.get("title") or ""), numbers=numbers)
+    if not grid or any(number not in grid["items"] for number in numbers):
+        return None
+    return grid
+
+
 def item_stem(item: dict) -> str:
     """Render one cell: its own images first, then its own printed word rows."""
     parts = [f"[IMG {name}]" for name in item.get("images") or []]
