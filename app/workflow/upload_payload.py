@@ -56,6 +56,29 @@ def _positive(value):
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+def _extension_child(unit, child):
+    """A ☆拓展设问 child is shown inside the reading group but is not an
+    option-choice item, so 选择N题 must not count it while the group keeps it.
+
+    Prefer the printed ☆拓展设问 marker; otherwise, when the group is a
+    choice-question type and exactly one child has no options while every
+    sibling does, that child is the open-ended tail follow-up, not a choice.
+    """
+    if not isinstance(child, dict):
+        return False
+    stem = child.get("stem") if isinstance(child.get("stem"), str) else (child.get("text") or "")
+    if isinstance(stem, str) and ("拓展设问" in stem or "拓展" in stem[:6]):
+        return True
+    siblings = [c for c in (unit or {}).get("subquestions") or [] if isinstance(c, dict)]
+    if len(siblings) < 2:
+        return False
+    def has_options(row):
+        return bool([o for o in (row.get("options") or []) if isinstance(o, str) and o.strip()])
+    if has_options(child):
+        return False
+    return all(has_options(row) for row in siblings if row is not child)
+
+
 def identity_errors(items, *, legacy_numbers=False):
     """Validate final local identities before transport strips bookkeeping fields.
 
@@ -863,8 +886,14 @@ class _Builder:
             count = re.fullmatch(r"选择(\d+)题|(\d+)空", subtype)
             if not child and kind == "group" and count:
                 expected = int(count.group(1) or count.group(2))
-                if len(children) != expected:
-                    self.error("SUBQUESTION_COUNT_MISMATCH", f"子类{subtype}与 {len(children)} 个结构化子题不符", uid)
+                # ☆拓展设问 is an open-ended follow-up rendered inside the group;
+                # it is not an option-choice item, so 选择N题 counts only the
+                # choice children while the group still keeps the extension.
+                counted = len([c for c in children if not _extension_child(data, c)]) if count.group(1) else len(children)
+                if counted != expected:
+                    self.error("SUBQUESTION_COUNT_MISMATCH",
+                               f"子类{subtype}与 {counted} 个结构化子题不符"
+                               + (f"（另含拓展设问 {len(children) - counted} 题）" if len(children) != counted else ""), uid)
         if children:
             numbers = [c.get("number") for c in children if isinstance(c, dict) and _positive(c.get("number"))]
             if len(numbers) != len(set(numbers)):

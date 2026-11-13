@@ -648,6 +648,35 @@ class UploadPayloadTest(unittest.TestCase):
         q["subquestions"] = q["subquestions"][:2]
         self.assertIn("SUBQUESTION_COUNT_MISMATCH", self.codes(self.build(batch(q))))
 
+    def test_choice_subtype_ignores_open_ended_extension_tail(self):
+        # A reading group with 3 printed choice items plus a 4th open-ended
+        # ☆拓展设问 subject. 选择3题 must count only the choice children while
+        # the group still keeps the extension question.
+        q = reading_group()
+        q["numbers"] = [56, 57, 58, 59]
+        q["subquestions"].append({"number": 59, "stem": "What did they think of the trip? (不超过15个词)",
+                                  "options": [], "answer": "They liked it.",
+                                  "explanation": "开放性设问。", "knowledge": ["设题角度/阅读/细节理解"]})
+        report = self.build(batch(q))
+        self.assertTrue(report["passed"], report["errors"])
+        wire = report["payload"]["items"][0]
+        self.assertEqual(len(wire["subquestions"]), 4)
+        self.assertEqual([c["number"] for c in wire["subquestions"]], [56, 57, 58, 59])
+        # A marked extension tail is likewise not counted as a choice item.
+        q = reading_group()
+        q["numbers"] = [56, 57, 58, 59]
+        q["subquestions"].append({"number": 59, "stem": "☆拓展设问 What else can you do?",
+                                  "options": [], "answer": "Anything reasonable.",
+                                  "explanation": "开放性设问。", "knowledge": ["设题角度/阅读/细节理解"]})
+        self.assertTrue(self.build(batch(q))["passed"])
+        # Two option-less children are not an extension tail: the count must fail.
+        q = reading_group()
+        q["numbers"] = [56, 57, 58, 59]
+        q["subquestions"].append({"number": 59, "stem": "Why?", "options": [], "answer": "Because.",
+                                  "explanation": "无解析", "knowledge": ["设题角度/阅读/细节理解"]})
+        q["subquestions"][0]["options"] = []
+        self.assertIn("SUBQUESTION_COUNT_MISMATCH", self.codes(self.build(batch(q))))
+
     def test_unprinted_writing_number_is_not_exported_or_fabricated(self):
         q = question()
         q.update(question_type="书面表达", options=[], knowledge=["语篇体裁/记叙文/故事", "主题/人与自我/生活与学习/学校生活"])
