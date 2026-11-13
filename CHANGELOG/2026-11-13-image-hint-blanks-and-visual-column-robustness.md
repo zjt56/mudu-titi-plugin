@@ -63,7 +63,17 @@
   → 218 tests OK（回归验证子智能体复跑）。
 - `infer_structure` 对批次正文：Ⅳ短文填空 = [1,2,3,4,5,6,7,8]，其余大题不变（Ⅰ5/Ⅱ6/Ⅲ5/完形10/阅读4）。
 - 结构闸门：`structure_gate` 通过；`structure.confirmed` u47 numbers=[1..8]。
-- （答案填充阶段复验结果见本文件末尾补充。）
+- 全链路复验（本批次）：extract → structure_gate → preassemble → types → answers → assemble →
+  meta → underlines → validate 全部通过；`validate` 本地体检 14 项 0 阻断失败。
+- 答案绑定：u47 短文填空 1-8 全部唯一绑定（trees/aunt/So/at/old/kinds/gives/beautiful）；
+  u50 完形 1-10、u75 阅读理解 1-4（含 ☆拓展设问 "Many of them…"）均绑定；answers 阶段确定性直抄、
+  model_calls=0。
+- 单测：受影响套件共 264 tests OK（含 test_extract_sync_dialogue_blanks / test_upload_content /
+  test_scoped_lesson_answers / test_scoped_lesson_mixed_answers / test_structure_gate /
+  test_question_identity_* / test_visual_columns / test_content_structure / test_structure_visual_binding /
+  test_audit_type_layout / test_answer_sole_topic 等）。
+- 已知非本改动：`workflow.test_answer_lesson_bands::test_real_verified_visual_artifact_controls_direct_and_validator_consumers`
+  在本次改动前的 HEAD(19a22fc) 上即失败（视觉板块证据相关，非本次范围）。
 
 ## 回退方式
 

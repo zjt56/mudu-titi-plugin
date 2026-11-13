@@ -1,5 +1,22 @@
 # RULES — 规则与强调台账
 
+## 2026-11-13：短文填空图注空与视觉栏目身份一致性
+
+批次11（StarterUnit3Welcome第三课时）答案填充卡点修复的经验固化：①短文填空/选词填空材料行里
+「题号+图片+括号提示」`1.[IMG …](tree)`、`2.[IMG …](/aːnt/)` 是**合法图注空（子题号本体）**，
+必须与 `<u>…</u>` 文本空一起收全，否则结构漏题、答案附录键无法绑定；孤立 `N.[IMG …]`（无括号提示）
+仍不计，且「题号在前」的文本空只在同步练习组题类型下合并收集，避免非同步卷把材料行普通数字误当题号。
+②视觉整页栏目归属与结构/答案身份必须一致：有印刷标题的大题即使匹配视觉栏目，也以标题派生身份
+（真实课时 context + 全局 occurrence）为准，栏目只作附加证据，不得把 context 写成 `visual-column:<id>`
+或 occurrence 重置为 1；标题里的装饰性 `[IMG …]` 属版面噪声，确认结构/绑定比较时同源剥离。
+③视觉栏目调用遇 provider abort/超时/截断/参考答答案区未建题良性 issue 属可重试或良性，不硬判失败、
+不换模型；模型把 printed_numbers 写成数字串、response 含 tab 控制字符属格式差异，归一化容忍但
+不补造/不伪造坐标。④阅读理解题组末尾 ☆拓展设问（词数限制的简答子题）无 A–D 选项，E20 选项条数
+基准不应误判，但缺选项的选择题仍报错。落地：`extract.blank_numbers`/`preview._weak_numbers`
+（IMAGE_HINT_BLANK）、`visual_columns`（_benign_issue/_quote_eq/strict=False/重试/复用）、
+`structure_gate._proven_scoped_restart`、`question_identity.assign_scoped`、`upload_content` scoped
+标题比较、`audit_type_layout` E20；验证见 `CHANGELOG/2026-11-13-image-hint-blanks-and-visual-column-robustness.md`。
+
 ## 2026-11-13：无题号与栏目边界按通用来源规则修复
 
 用户要求后续没有题号或其他栏目板块均按同类规则处理。无号题须由当前大题的完整正文和明确作答区域证明；连续独立作答行分别建单元，自然换行只有在唯一末尾作答区域及连续正文可证明时合窗。候选必须覆盖所有重建窗口；内部别名不作印刷题号，上传范围仍由来源证明投影为 `null/null`。图片栏目用当前 Harness 模型读取完整可见标题，不限“熟词生义”；普通文字只认明确栏目包装或既有标记，栏目不决定题型、题数或答案，并与 A/B 板块身份分离。混题、缺正文、边界不清或陈旧视觉证据仍拒绝。落地：`question_content.unnumbered_text_responses`、`structure_gate`、`structure_ai`、`lesson_bands` v3；根规则9与 `app/docs/sync-practice.md`。验证详见 `2026-11-13-generic-unnumbered-features.md`。
