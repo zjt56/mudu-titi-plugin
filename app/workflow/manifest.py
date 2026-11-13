@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -114,11 +115,27 @@ def sha256_file(path) -> str:
     return value
 
 
+def _read_text_with_retry(path, attempts=10, delay=0.02):
+    """读取 JSON 时重试 Windows 替换窗口的瞬时拒绝访问。
+
+    os.replace 把目标标记为删除挂起的一瞬间，恰好打开目标文件的读者会收到
+    PermissionError（WinError 5）。工作台面板高频读 manifest，若不重试会表现为
+    概览/审核页偶发 500；内容本身是完整原子替换的，重试即可拿到新版本。
+    """
+    for attempt in range(attempts):
+        try:
+            return path.read_text(encoding="utf-8")
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
+
+
 def load(batch_dir) -> dict:
     path = manifest_path(batch_dir)
     if not path.is_file():
         raise FileNotFoundError(f"找不到批次清单：{path}（先运行 init）")
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(_read_text_with_retry(path))
     # New local stages are pending on older manifests; never infer completion
     # from pre-existing files or erase any historical stage/decision.
     stages = value.setdefault("stages", {})
@@ -136,6 +153,24 @@ def load(batch_dir) -> dict:
         stages.setdefault(stage.id, {"status": SKIPPED if skip else PENDING,
                                     "input_hashes": {}, "output_hashes": {}, "notes": note})
     return value
+
+
+def _replace_with_retry(temporary, target, attempts=10, delay=0.05):
+    """os.replace 重试 Windows 共享冲突窗口。
+
+    面板/概览读取、杀毒软件扫描新临时文件时，Windows 会短暂拒绝替换目标
+    （PermissionError / WinError 5/32）。manifest 在每次阶段迁移都要重写，
+    一次瞬时拒绝就会让监督器停在 scheduled 并留下"[WinError 5] 拒绝访问"。
+    短暂重试后仍失败才抛出真实错误，语义不变。
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(temporary, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
 
 
 def save(batch_dir, manifest: dict) -> Path:
@@ -159,7 +194,7 @@ def save(batch_dir, manifest: dict) -> Path:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             fd = None
             handle.write(content)
-        os.replace(temporary, target)
+        _replace_with_retry(temporary, target)
     finally:
         if fd is not None:
             os.close(fd)

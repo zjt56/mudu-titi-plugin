@@ -17,6 +17,8 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workflow import manifest as mf
+from workflow import contracts
+from workflow import ocr_markup
 
 VERSION = "composite-extract-1"
 QUESTION = re.compile(r"^\s*(?:[（(]\s*[）)]\s*)?(\d{1,4})\s*[.．、)]")
@@ -63,6 +65,9 @@ def blank_numbers(line: str) -> list[int]:
     # 题号在前（「3.<u></u>」）属同步练习材料行，只在该题组类型下由 infer_structure
     # 的 _weak_numbers 合并收集，避免非同步卷把材料行普通数字误当题号。
     plain = _plain(line)
+    # 图片标签/文件名里的坐标数字不是空位号（见 source_anchors.strip_visual_markup）。
+    from workflow.source_anchors import strip_visual_markup
+    plain = strip_visual_markup(plain)
     normalized = plain.replace("\xa0", "\u3000")
     numbers = [int(n) for n in re.findall(
         r"(?:_{2,}|\u3000|__|_)\s*(\d{1,3})(?!\d)", normalized)]
@@ -87,7 +92,8 @@ def same_line_numbers(line: str, first: int) -> list[int]:
         return []
     # Match the same real column boundaries as scoped source reconciliation.
     # A single prose space before an age (``She is 15.She ...``) is not a column.
-    from workflow.source_anchors import printed_tokens
+    from workflow.source_anchors import printed_tokens, strip_visual_markup
+    line = strip_visual_markup(line)
     extra: list[int] = []
     for _offset, number in printed_tokens(line):
         if number in extra or number == first and not extra:
@@ -690,6 +696,9 @@ def _pdf_ocr_for_source(batch, source, report):
             result = data["result"]
             if data.get("source_sha256") != digest or not isinstance(result.get("pages"), list):
                 raise ValueError("来源或页面无效")
+            # 页图证据目录（批次相对）：正文投影要把 <img src> 换成已落盘的
+            # `[IMG 媒体名]`，下游预览才能显示图片而不是 HTML 代码。
+            result["image_dir"] = str(item.get("result_dir") or "")
             if any(not isinstance(p, dict) or not isinstance(p.get("text"), str) or p.get('method') == 'text'
                    for p in result["pages"]):
                 raise ValueError("页面文字无效或仅为原生文字层")
@@ -742,6 +751,7 @@ def _pdf(source, out, config, ocr_result=None, ocr_warning=None, ocr_wait=None):
         page["method"] = "ocr"
         pages.append(page)
     result.update(method="pdf-ocr", pages=pages, pdf_ocr=ocr_result, warnings=warnings)
+    result["image_dir"] = str((ocr_result or {}).get("image_dir") or "")
     result["text"] = "\n\n".join(f"[PAGE {p['page']}]\n{p.get('text', '')}" for p in pages)
     return result
 
@@ -879,6 +889,111 @@ def extract_source(source: Path, destination: Path, config=None, ocr_result=None
                 "如需保留题图，请用 Word/WPS 另存为 .docx 后重新上传（.docx 保真且无需安装任何工具）。")
         result.setdefault("warnings", []).append("该文件为旧版 .doc，已用系统工具转换为 .docx 解析（不含图片保真）。")
     text = result.get("text", "")
+    return _publish_analysis(source, destination, original_hash, result,
+                             str(evidence.relative_to(destination)), config)
+
+
+def _ocr_image_dir(result, destination, digest=""):
+    """Batch-relative directory of the OCR page images (with report fallback)."""
+    value = str(result.get("image_dir") or "")
+    if value:
+        return value
+    digest = str(digest or result.get("source_sha256") or "")
+    if not digest:
+        return ""
+    try:
+        report = json.loads((destination / "pdf-ocr.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    for item in report.get("sources") or []:
+        recorded = str(item.get("sha256") or item.get("source_sha256") or "")
+        if recorded == digest:
+            return str(item.get("result_dir") or "")
+    return ""
+
+
+def _ocr_media_roots(result, destination, digest=""):
+    """Candidate directories that hold the OCR service's page images."""
+    roots = []
+
+    def remember(value):
+        if not value:
+            return
+        path = Path(str(value)).expanduser()
+        path = path if path.is_absolute() else destination.parent / path
+        if path not in roots:
+            roots.append(path)
+
+    artifacts = result.get("artifacts")
+    if isinstance(artifacts, dict):
+        remember(artifacts.get("attempt_dir"))
+    remember(result.get("image_dir"))
+    remember(_ocr_image_dir(result, destination, digest))
+    return roots
+
+
+def _resolve_ocr_image(roots, relative):
+    """Find one page image on disk; a unique basename match is still evidence."""
+    relative = Path(str(relative))
+    for root in roots:
+        candidate = root / relative
+        if candidate.is_file():
+            return candidate
+    name = relative.name
+    if not name:
+        return None
+    matches = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for candidate in root.rglob(name):
+            if candidate.is_file():
+                matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _publish_ocr_media(result, destination, digest=""):
+    """Copy OCR page images into 01_source/media; return {page: {src: media name}}.
+
+    Only deterministic bookkeeping: the recognition service already stored the
+    images next to its result, so publishing them under the same naming scheme as
+    native PDF pages lets the projection turn `<img src>` into `[IMG …]`.
+    """
+    roots = _ocr_media_roots(result, destination, digest)
+    page_images, warnings = {}, []
+    for page in result.get("pages") or []:
+        images = page.get("images")
+        if page.get("method") != "ocr" or not isinstance(images, dict):
+            continue
+        number = int(page.get("page") or 0)
+        names = {}
+        for index, (src, relative) in enumerate(images.items(), 1):
+            relative_path = Path(str(relative))
+            name = ocr_markup.image_name(number, index, relative_path.suffix.lower())
+            source = _resolve_ocr_image(roots, relative_path)
+            if source is None:
+                warnings.append(f"OCR 第 {number} 页图片 {src} 未找到落盘文件，正文保留原标记")
+                continue
+            target = destination / "media" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and mf.sha256_file(target) != mf.sha256_file(source):
+                shutil.copy2(target, target.with_name(target.name + ".bak"))
+            if not target.exists() or mf.sha256_file(target) != mf.sha256_file(source):
+                shutil.copy2(source, target)
+            names[src] = name
+        page_images[number] = names
+    return page_images, warnings
+
+
+def _publish_analysis(source: Path, destination: Path, original_hash: str, result: dict,
+                      evidence_rel: str, config=None) -> dict:
+    """Deterministic extraction tail: raw text → 正文/附录/structure/metadata.
+
+    Split out of `extract_source` so `refresh_from_evidence` can re-derive the
+    same products from the retained 原始正文.txt after a deterministic rule fix
+    (numbering/denoising/numbering anchors), without re-running OCR or models.
+    """
+    text = result.get("text", "")
     if not re.sub(r"\[PAGE\s+\d+\]", "", text).strip():
         hint = ""
         if source.suffix.lower() in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
@@ -886,6 +1001,20 @@ def extract_source(source: Path, destination: Path, config=None, ocr_result=None
         raise ValueError("提取正文为空，不能完成解析阶段" + hint)
     if mf.sha256_file(source) != original_hash:
         raise ValueError("提取期间原文件发生变化，请重试")
+    raw_text = text
+    # OCR 服务返回的是版面 Markdown（<img>/<table>/$\underline{}$），原样进入
+    # 正文会让结构确认、装配和审核预览到处显示代码。这里做确定性投影：图片落盘
+    # 成 [IMG 媒体名]、画线成 <u>…</u>、HTML 表格成 [TABLE n]，原始 Markdown 仍
+    # 留在 原始正文.txt 与 pdf-ocr.md 作证据。
+    page_images, ocr_media_warnings, unresolved_images = {}, [], []
+    if any(p.get("method") == "ocr" for p in result.get("pages") or []):
+        page_images, ocr_media_warnings = _publish_ocr_media(result, destination, original_hash)
+        merged = {src: name for names in page_images.values() for src, name in names.items()}
+        unresolved_images = ocr_markup.unresolved_images(raw_text, merged)
+        projected = ocr_markup.normalize_document(raw_text, page_images)
+        if projected != raw_text:
+            result["text_projection"] = "ocr-markup-v1"
+        text = projected
     from workflow import denoise
     from workflow.metadata_policy import with_placeholders
     metadata = with_placeholders(denoise.extract_meta(text.splitlines()))
@@ -906,14 +1035,24 @@ def extract_source(source: Path, destination: Path, config=None, ocr_result=None
     if warnings:
         structure["extraction_warnings"] = warnings
         structure["unresolved"].append({"code": "EXTRACTION_WARNING", "message": "原生/OCR 提取有警告，详见 extraction.json"})
+    if unresolved_images:
+        structure["unresolved"].append({
+            "code": "OCR_IMAGE_UNRESOLVED",
+            "message": "OCR 图片未找到落盘文件，正文保留原标记："
+                       + "、".join(unresolved_images[:5])})
+    if ocr_media_warnings:
+        structure.setdefault("extraction_warnings", []).extend(ocr_media_warnings)
+        structure["layout_required"] = True
+        structure["layout_review_command"] = "python -m workflow.layout_review --help"
+        structure["unresolved"].append({"code": "OCR_MEDIA_WARNING", "message": "OCR 页图未能全部落盘，详见 extraction_warnings"})
     result.update({"version": VERSION, "source": str(source), "source_sha256": original_hash,
-                   "evidence_dir": str(evidence.relative_to(destination)), "structure_status": "candidate"})
+                   "evidence_dir": evidence_rel, "structure_status": "candidate"})
     try:
         from workflow import ocr_backend
         result["ocr_assist_enabled"] = ocr_backend.assist_enabled(config)
     except Exception:  # noqa: BLE001 - evidence field is optional; parsing must not fail here
         pass
-    _write(destination / "原始正文.txt", text)
+    _write(destination / "原始正文.txt", raw_text)
     _write(destination / "正文.txt", body)
     _write(destination / "附录.txt", appendix)
     _write(destination / "extraction.json", result)
@@ -923,7 +1062,71 @@ def extract_source(source: Path, destination: Path, config=None, ocr_result=None
     return {"passed": True, "version": VERSION, "source_sha256": original_hash,
             "characters": len(body), "sections": len(structure["sections"]),
             "questions": sum(len(s["questions"]) for s in structure["sections"]),
-            "unresolved": structure["unresolved"], "evidence_dir": result["evidence_dir"]}
+            "unresolved": structure["unresolved"], "evidence_dir": evidence_rel}
+
+
+def refresh_from_evidence(batch_dir: Path) -> dict:
+    """Re-derive extraction products from the retained raw text; never re-OCR.
+
+    A deterministic rule fix (number harvesting, denoising, coordinate
+    projection) invalidates `structure.json` while the OCR/native evidence and
+    the source bytes are unchanged. Re-running the whole extraction would repeat
+    OCR and models for a byte-identical body; this re-runs only the deterministic
+    tail on the exact input of the original run (`01_source/原始正文.txt`), so the
+    result is provably the same computation with the fixed rules.
+
+    Refuses when the evidence or the source bytes no longer match, or when a
+    downstream stage already completed: finished/archived batches are not
+    in-progress data and must not be rewritten here.
+    """
+    batch_dir = Path(batch_dir)
+    manifest = mf.load(batch_dir)
+    destination = batch_dir / "01_source"
+    result_path = destination / "extraction.json"
+    text_path = destination / "原始正文.txt"
+    if not result_path.is_file() or not text_path.is_file():
+        raise ValueError("缺少 01_source/extraction.json 或 原始正文.txt，无法按留存证据重算")
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+    except ValueError as exc:
+        raise ValueError(f"extraction.json 无法解析：{exc}") from exc
+    source_entry = (manifest.get("inputs") or {}).get("source") or {}
+    source_value = source_entry.get("path")
+    if not source_value:
+        raise ValueError("批次缺少 source 输入，无法校验原件")
+    source = Path(source_value).expanduser()
+    if not source.is_absolute():
+        source = batch_dir / source
+    source = source.resolve()
+    if not source.is_file():
+        raise ValueError(f"原件不存在：{source}")
+    original_hash = mf.sha256_file(source)
+    recorded = str(result.get("source_sha256") or "")
+    if recorded != original_hash:
+        raise ValueError("原件与留存证据的 SHA-256 不一致，不能按旧证据重算")
+    expected = str(source_entry.get("sha256") or "")
+    if expected and expected != original_hash:
+        raise ValueError("原件与 manifest 登记的 SHA-256 不一致，不能按旧证据重算")
+    text = text_path.read_text(encoding="utf-8-sig")
+    if text != str(result.get("text") or ""):
+        raise ValueError("原始正文与 extraction.json 记录的正文不一致，不能按旧证据重算")
+    order = [stage.id for stage in contracts.STAGES]
+    extract_index = order.index("extract")
+    for stage_id in order[extract_index + 1:]:
+        status = str((manifest.get("stages") or {}).get(stage_id, {}).get("status") or "")
+        if status not in mf.TERMINAL_OK and status != mf.RUNNING:
+            continue
+        # 可选阶段（如不含听力的卷被 skipped）不算“下游已交付”，可安全重算。
+        if contracts.STAGE_BY_ID[stage_id].optional and status == "skipped":
+            continue
+        raise ValueError(f"阶段 {stage_id} 已执行（{status}），不能只重算提取产物；"
+                         "已完成批次请走对应阶段的局部修复")
+    evidence_rel = str(result.get("evidence_dir") or "")
+    if evidence_rel and not (destination / evidence_rel).is_dir():
+        raise ValueError("提取证据目录缺失，不能按旧证据重算")
+    return _publish_analysis(source, destination, original_hash, dict(result, text=text),
+                             evidence_rel, config=None)
+
 
 
 def _material_classifier():
@@ -1120,9 +1323,14 @@ def run(batch_dir: Path) -> dict:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch-dir", required=True, type=Path)
+    parser.add_argument("--refresh-from-evidence", action="store_true",
+                        help="按留存的 01_source/原始正文.txt 与 extraction.json 重算提取产物（不重跑 OCR/模型）")
     args = parser.parse_args(argv)
     try:
-        report = run(args.batch_dir)
+        if args.refresh_from_evidence:
+            report = refresh_from_evidence(args.batch_dir)
+        else:
+            report = run(args.batch_dir)
     except Exception as exc:
         _write(args.batch_dir / "07_review" / "extraction-report.json", {"passed": False, "error": str(exc)})
         print(f"原卷提取失败：{exc}", file=sys.stderr)

@@ -200,6 +200,39 @@ class RepairFeedbackTest(unittest.TestCase):
                     self.build()
                 self.assertEqual(source, (self.batch / "01_source/正文.txt").read_bytes())
 
+    def test_structure_republish_retires_feedback_naming_retired_units(self):
+        # 结构重新确认会重写 unit_id：旧反馈只描述旧绑定，必须按证据退役而不是
+        # 猜映射到新单元，也不能把整阶段的预检卡死。
+        stale_path = self.save_feedback("knowledge", ids=["q-999"])
+        kept_path = self.save_feedback("types", ids=["q-1"])
+        retired = agent_tasks.retire_stale_feedback(self.batch, ["q-1", "q-2"])
+        self.assertEqual(len(retired), 1)
+        self.assertTrue(retired[0].startswith("workflow/repair-feedback/stale/knowledge-"))
+        self.assertTrue(retired[0].endswith(".json"))
+        self.assertFalse(stale_path.exists())
+        self.assertTrue(kept_path.exists())
+        archived = json.loads((self.batch / retired[0]).read_text(encoding="utf-8"))
+        self.assertEqual(archived["unit_ids"], ["q-999"])
+        _, parts = self.build()
+        self.assertNotIn("repair_feedback", self.context(parts[0]["prompt"]))
+
+    def test_build_retires_feedback_when_structure_changed_without_runner_hook(self):
+        # 真实批次失败路径：结构确认走了另一条路径（started_at=null、无 notes），
+        # runner 的退役钩子没跑；构建任务时必须自己退役，否则整个 answers 阶段
+        # 变成 `Invalid repair feedback ... Unknown confirmed unit` 校验异常。
+        stale_path = self.save_feedback("knowledge", ids=["q-999"])
+        confirmed = self.batch / "01_source/structure.confirmed.json"
+        os.utime(stale_path, (1, 1))
+        os.utime(confirmed, None)
+        _, parts = self.build()
+        self.assertFalse(stale_path.exists())
+        archived = sorted((self.batch / "workflow/repair-feedback/stale").glob("knowledge-*.json"))
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(json.loads(archived[0].read_text(encoding="utf-8"))["unit_ids"], ["q-999"])
+        self.assertNotIn("repair_feedback", self.context(parts[0]["prompt"]))
+        log = (self.batch / "workflow/run-log.jsonl").read_text(encoding="utf-8")
+        self.assertIn("repair_feedback_stale", log)
+
     def test_feedback_file_and_parent_symlinks_are_rejected(self):
         target = self.write("outside.json", self.feedback())
         directory = self.batch / "workflow/repair-feedback"

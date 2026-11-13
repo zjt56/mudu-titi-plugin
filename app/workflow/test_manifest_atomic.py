@@ -69,6 +69,39 @@ class AtomicManifestTest(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(list(self.path.parent.iterdir()), [self.path])
 
+    def test_transient_share_violation_is_retried_then_succeeds(self):
+        real_replace = os.replace
+        calls = []
+
+        def flaky(source, target):
+            calls.append(target)
+            if len(calls) < 3:
+                raise PermissionError(13, "Access is denied", str(target))
+            return real_replace(source, target)
+
+        with mock.patch.object(mf.os, "replace", side_effect=flaky), \
+                mock.patch.object(mf.time, "sleep", return_value=None):
+            mf.save(self.batch, {"value": "new"})
+        self.assertEqual(mf.load(self.batch)["value"], "new")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+
+    def test_persistent_share_violation_raises_after_bounded_attempts(self):
+        before = self.path.read_bytes()
+        calls = []
+
+        def blocked(source, target):
+            calls.append(target)
+            raise PermissionError(13, "Access is denied", str(target))
+
+        with mock.patch.object(mf.os, "replace", side_effect=blocked), \
+                mock.patch.object(mf.time, "sleep", return_value=None):
+            with self.assertRaises(PermissionError):
+                mf.save(self.batch, {"value": "new"})
+        self.assertEqual(len(calls), 10)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+
     @unittest.skipIf(os.name == "nt", "POSIX permission bits")
     def test_existing_permissions_are_preserved(self):
         self.path.chmod(0o640)
