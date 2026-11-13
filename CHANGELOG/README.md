@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-13 | [2026-11-13-ocr-projection-method-images.md](2026-11-13-ocr-projection-method-images.md) | OCR 页级 method/images 丢失致投影未生效；正文 `<div>/###/LaTeX` 清干净，图片恢复 `[IMG …]` |
 | 2026-11-13 | [2026-11-13-lesson-scoped-anchor-band-options-fixes.md](2026-11-13-lesson-scoped-anchor-band-options-fixes.md) | 课时题号黏连/附录栏目主题/视觉预算/选项绑定的确定性修复 |
 | 2026-11-13 | [2026-11-13-all-missing-answers-not-input-error.md](2026-11-13-all-missing-answers-not-input-error.md) | 全量“无答案”决定不再被判成答案输入格式错误 |
 | 2026-11-13 | [2026-11-13-pdf-mandatory-ocr.md](2026-11-13-pdf-mandatory-ocr.md) | PDF 整卷 OCR 成为提取必过条件，拒绝空结果/原生层与无有效 OCR 的旧完成批次复用 |
