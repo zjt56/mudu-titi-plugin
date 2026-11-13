@@ -575,6 +575,10 @@ def diagnose(batch_dir) -> dict:
                               "failure_class": "", "next_action": "waiting_external",
                               "retry_after": waiting["retry_after"], "blocking": False})
                 continue
+            if status == mf.PENDING and record.get("exit_code") == 6:
+                # A modified/failed/stale report cannot keep the old benign wait
+                # view. This is read-only diagnosis; only runner changes state.
+                status = mf.FAILED
         # 用户明确“课时试卷允许没有听力/答案”等：仅在阶段尚未实际执行（pending）
         # 且属可跳过输入时才视为正常可跳过；已 FAILED/needs_review/blocked 的阶段
         # 是真实执行结果，不能被“历史批次”之类的跳过理由掩盖。

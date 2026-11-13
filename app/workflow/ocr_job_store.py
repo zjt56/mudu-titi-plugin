@@ -85,7 +85,9 @@ def atomic_write(path, binary):
 
 
 def _validate(receipt):
-    if (not isinstance(receipt, dict) or set(receipt) - FIELDS
+    required = {"schema", "fingerprint", "source", "config", "phase", "job_id", "batch_id",
+                "created_at", "updated_at", "attempts", "last_error", "state", "retry_after_seconds"}
+    if (not isinstance(receipt, dict) or set(receipt) - FIELDS or not required <= receipt.keys()
             or receipt.get("schema") != SCHEMA or receipt.get("phase") not in PHASES
             or not DIGEST.fullmatch(str(receipt.get("fingerprint", "")))):
         raise StoreError()

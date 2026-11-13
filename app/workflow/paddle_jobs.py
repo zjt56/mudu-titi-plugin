@@ -487,6 +487,24 @@ def _download_images(result, attempt, deadline):
     opener = urllib.request.build_opener(_NoRedirect())
     paths, failures, total_bytes, count = [], [], 0, 0
     suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+
+    def fetch_image(request):
+        for retry in range(3):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError()
+            try:
+                return opener.open(request, timeout=min(remaining, 30))
+            except urllib.error.HTTPError as exc:
+                transient = exc.code in {408, 429, 500, 502, 503, 504}
+                exc.close()
+                if not transient or retry == 2:
+                    raise
+            except (OSError, urllib.error.URLError):
+                if retry == 2:
+                    raise
+            time.sleep(min(.2 * 2 ** retry, max(0, deadline - time.monotonic())))
+
     for page in result["pages"]:
         for category in ("images", "outputImages"):
             refs = page.get(category, {})
@@ -503,7 +521,7 @@ def _download_images(result, attempt, deadline):
                         raise TimeoutError()
                     request = urllib.request.Request(url, headers={"Accept": "image/*"})
                     binary = bytearray()
-                    with opener.open(request, timeout=remaining) as response:
+                    with fetch_image(request) as response:
                         mime = response.headers.get_content_type()
                         # Ignore remote filenames entirely; suffix is a bounded
                         # allowlisted hint. SVG/HTML cannot become active media.
