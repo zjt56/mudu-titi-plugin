@@ -215,12 +215,39 @@ def _execute_command(batch_dir: Path, manifest: dict, stage: contracts.Stage,
         raise
 
 
+def _stage_argv(rendered: list[str]) -> list[str]:
+    """Build the child argv for one stage command.
+
+    A repo-local ``.py`` script must be executed as a module (``python -m
+    wrapper.module``) rather than by file path. Running it by path makes its own
+    directory (for example ``app/workflow``) ``sys.path[0]``, so an absolute
+    ``from workflow import ...`` cannot resolve its parent package and the stage
+    dies with ``attempted relative import with no known parent package``. A
+    standalone script under ``app/scripts`` keeps path-execution (no package
+    parent); anything not ending in ``.py`` already carries its own interpreter.
+    """
+    if not rendered or not rendered[0].lower().endswith(".py"):
+        return rendered
+    script = Path(rendered[0])
+    if not script.is_absolute():
+        script = SKILL_ROOT / script
+    try:
+        module = script.resolve().relative_to(SKILL_ROOT.resolve()).with_suffix("")
+    except ValueError:
+        module = None
+    if module is not None and module.parts and all(
+            (SKILL_ROOT / part / "__init__.py").is_file() for part in module.parts[:-1]):
+        dotted = ".".join(module.parts)
+        return [sys.executable, "-m", dotted, *rendered[1:]]
+    return [sys.executable, *rendered]
+
+
 def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
                            timeout: int = 1800) -> int:
     rendered = _render(stage.command, batch_dir)
     # 契约里的命令首项是仓库内脚本路径，需要补解释器；
     # 代理桥等外部命令自带解释器，不能重复加 python。
-    argv = [sys.executable] + rendered if rendered and rendered[0].lower().endswith(".py") else rendered
+    argv = _stage_argv(rendered)
     log = _log_path(batch_dir, stage.id)
     print(f"  执行：{' '.join(argv[1:])}")
     from .local_agent import _agent_lock

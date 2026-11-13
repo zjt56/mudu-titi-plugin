@@ -1304,3 +1304,22 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(manifest["stages"]["upload_gate"]["status"], mf.SKIPPED)
         self.assertEqual(manifest["stages"]["upload"]["status"], mf.SKIPPED)
         self.assertEqual(manifest["stages"]["publish_gate"]["status"], mf.SKIPPED)
+
+    def test_repo_package_script_runs_as_module_not_by_path(self):
+        """A .py under app/workflow must run as ``-m`` so ``from workflow import`` works.
+
+        Running the script by path made ``app/workflow`` ``sys.path[0]`` and a
+        fresh batch's extract stage died with "attempted relative import with no
+        known parent package". Standalone scripts under app/scripts keep path mode.
+        """
+        import sys
+        extract = runner._stage_argv(["workflow/extract.py", "--batch-dir", "X"])
+        self.assertEqual(extract[:3], [sys.executable, "-m", "workflow.extract"])
+        self.assertEqual(extract[3:], ["--batch-dir", "X"])
+        # A path whose parent dirs are not importable packages stays path-mode.
+        unknown = runner._stage_argv(["workflow/scripts/deep_run.py", "--batch", "B"])
+        self.assertEqual(unknown, [sys.executable, "workflow/scripts/deep_run.py", "--batch", "B"])
+        standalone = runner._stage_argv(["scripts/05-meta/assign_meta.py", "--batch", "B"])
+        self.assertEqual(standalone, [sys.executable, "scripts/05-meta/assign_meta.py", "--batch", "B"])
+        already = runner._stage_argv([sys.executable, "-m", "workflow.preassembly", "check"])
+        self.assertEqual(already, [sys.executable, "-m", "workflow.preassembly", "check"])
