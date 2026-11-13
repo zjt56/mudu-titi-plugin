@@ -6,6 +6,7 @@ into artifacts or error messages. POST is never automatically retried.
 from __future__ import annotations
 
 import json
+import http.client
 import math
 import mimetypes
 import os
@@ -13,6 +14,7 @@ from pathlib import Path
 import re
 import socket
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -154,6 +156,60 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _DeadlineTransport:
+    """Interrupt a slow/trickling HTTP exchange at its absolute deadline.
+
+    Socket timeouts alone measure inactivity, so repeated small packets could
+    otherwise keep response.read or HTTP header parsing alive indefinitely.
+    """
+    def __init__(self, deadline):
+        self.deadline = deadline
+        self.connections = []
+        owner = self
+
+        class BoundConnection:
+            def connect(self):
+                super().connect()
+                held_socket = self.sock
+                remaining = owner.deadline - time.monotonic()
+                if remaining <= 0:
+                    held_socket.close()
+                    raise TimeoutError()
+                def expire():
+                    try:
+                        held_socket.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                timer = threading.Timer(remaining, expire)
+                timer.daemon = True
+                owner.connections.append((timer, held_socket))
+                timer.start()
+
+        class HTTPConnection(BoundConnection, http.client.HTTPConnection):
+            pass
+        class HTTPSConnection(BoundConnection, http.client.HTTPSConnection):
+            pass
+        class HTTPHandler(urllib.request.HTTPHandler):
+            def http_open(self, request):
+                return self.do_open(HTTPConnection, request)
+        class HTTPSHandler(urllib.request.HTTPSHandler):
+            def https_open(self, request):
+                return self.do_open(HTTPSConnection, request, context=self._context)
+        self.opener = urllib.request.build_opener(_NoRedirect(), HTTPHandler(), HTTPSHandler())
+
+    def open(self, request):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError()
+        return self.opener.open(request, timeout=min(remaining, 30))
+
+    def close(self):
+        for timer, connection in self.connections:
+            timer.cancel()
+            connection.close()
+        self.connections.clear()
+
+
 def _redact(value, token):
     """Keep response structure/content, but never persist credentials or URLs.
 
@@ -219,7 +275,7 @@ def _layout_blocks(layout):
 
 
 def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consumer=None,
-            job_store=None):
+            job_store=None, _deadline=None):
     """Submit once, poll to done, then fetch and normalize JSONL results.
 
     Result/image URLs receive no Authorization header. Returned remote references
@@ -231,8 +287,7 @@ def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consume
     if bool(file_url) == bool(file_path):
         raise PaddleJobsError("invalid_config")
     start = time.monotonic()
-    deadline = start + config["timeout_seconds"]
-    opener = urllib.request.build_opener(_NoRedirect())
+    deadline = min(start + config["timeout_seconds"], _deadline) if _deadline is not None else start + config["timeout_seconds"]
     if job_store is not None and not job_store.locked:
         raise RuntimeError("OCR store lock required")
 
@@ -251,8 +306,9 @@ def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consume
         if content_type:
             headers["Content-Type"] = content_type
         req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
+        transport = _DeadlineTransport(deadline)
         try:
-            with opener.open(req, timeout=min(remaining, 30)) as response:
+            with transport.open(req) as response:
                 chunks, total = [], 0
                 while True:
                     if time.monotonic() >= deadline:
@@ -264,6 +320,8 @@ def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consume
                     total += len(chunk)
                     if total > MAX_RESPONSE:
                         raise PaddleJobsError("invalid_result")
+                if time.monotonic() >= deadline:
+                    raise PaddleJobsError("timeout")
                 text = b"".join(chunks).decode("utf-8-sig")
             return json.loads(text) if json_result else text
         except urllib.error.HTTPError as exc:
@@ -283,8 +341,10 @@ def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consume
             raise PaddleJobsError("timeout" if isinstance(exc.reason, (TimeoutError, socket.timeout)) else "network_error") from None
         except (ValueError, UnicodeError):
             raise PaddleJobsError("invalid_result") from None
-        except OSError:
-            raise PaddleJobsError("network_error") from None
+        except (OSError, http.client.HTTPException):
+            raise PaddleJobsError("timeout" if time.monotonic() >= deadline else "network_error") from None
+        finally:
+            transport.close()
 
     def request(url, data=None, content_type=None, *, auth=False, json_result=True, kind="get"):
         # A request has its own finite retry budget; the overall deadline also
@@ -332,13 +392,15 @@ def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consume
             else:
                 raise PaddleJobsError("submission_unknown")
         except PaddleJobsError as exc:
-            if exc.code == "submission_conflict":
-                save(last_error="submission_conflict")
+            if exc.code in {"submission_conflict", "job_not_found", "job_expired"}:
+                save(last_error=exc.code)
                 raise
             save(last_error="submission_unknown")
             raise PaddleJobsError("submission_unknown") from None
 
     if not job_id:
+        if os.environ.get("MD_OCR_RECONCILE_ONLY") == "1":
+            raise PaddleJobsError("submission_unknown")
         optional = {key: config[key] for key in OPTION_KEYS}
         fields = {"model": config["model"], "optionalPayload": optional}
         if job_store is not None:
@@ -378,10 +440,15 @@ def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consume
             save(job_id=job_id, phase="submitted", last_error=None)
         except PaddleJobsError as exc:
             if job_store is not None:
+                # An explicit rejection remains a rejection, but still never
+                # grants permission to automatically create another job.
+                if exc.code in {"http_error", "unsafe_redirect"} and exc.details.get("http_status") not in {408, 500, 502, 503, 504}:
+                    save(phase="failed", last_error=exc.code)
+                    raise
                 save(phase="submission_unknown", last_error="submission_unknown")
                 raise PaddleJobsError("submission_unknown") from None
             raise
-    save(phase="polling")
+    save(phase="polling", retry_after_seconds=2)
     while True:
         status = request(config["endpoint"] + "/" + urllib.parse.quote(job_id, safe=""), auth=True)
         remote_error(status)
@@ -438,6 +505,8 @@ def normalize_jsonl(raw, *, token="", pages=None, job_id=None, seconds=None, mod
             for layout_index, layout in enumerate(layouts):
                 markdown = layout["markdown"]
                 text = markdown["text"]
+                if str(layout.get("method", result.get("method", ""))).lower() in {"native", "text", "pymupdf", "native_text"}:
+                    raise ValueError()
                 if not isinstance(text, str):
                     raise ValueError()
                 images = markdown.get("images", {})
@@ -461,7 +530,7 @@ def normalize_jsonl(raw, *, token="", pages=None, job_id=None, seconds=None, mod
         if first > last or last > len(normalized):
             raise PaddleJobsError("invalid_result")
         normalized = normalized[first - 1:last]
-    if not normalized:
+    if not normalized or not any(page["text"].strip() for page in normalized):
         raise PaddleJobsError("invalid_result")
     result = {"pages": normalized, "job_id": job_id,
               "seconds": seconds,
@@ -484,25 +553,51 @@ def _download_images(result, attempt, deadline):
     visual verification. No Authorization, redirects, arbitrary output paths,
     or unbounded response bodies are permitted.
     """
-    opener = urllib.request.build_opener(_NoRedirect())
     paths, failures, total_bytes, count = [], [], 0, 0
     suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
-    def fetch_image(request):
+    def fetch_image(request, url, key):
         for retry in range(3):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError()
+            transport = _DeadlineTransport(deadline)
             try:
-                return opener.open(request, timeout=min(remaining, 30))
+                binary = bytearray()
+                with transport.open(request) as response:
+                    mime = response.headers.get_content_type()
+                    # Remote filenames are hints only, never output paths.
+                    suffix = Path(urllib.parse.urlsplit(url).path).suffix.lower()
+                    if suffix not in suffixes:
+                        suffix = Path(str(key)).suffix.lower()
+                    if suffix not in suffixes:
+                        suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "image/bmp": ".bmp", "image/tiff": ".tiff"}.get(mime)
+                    if suffix is None or mime in {"image/svg+xml", "text/html", "application/xhtml+xml"}:
+                        raise ValueError()
+                    while True:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError()
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        binary.extend(chunk)
+                        if len(binary) > 20 * 1024 * 1024 or total_bytes + len(binary) > 100 * 1024 * 1024:
+                            raise ValueError()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError()
+                if not binary:
+                    raise ValueError()
+                return binary, suffix
             except urllib.error.HTTPError as exc:
                 transient = exc.code in {408, 429, 500, 502, 503, 504}
                 exc.close()
                 if not transient or retry == 2:
                     raise
-            except (OSError, urllib.error.URLError):
+            except (OSError, urllib.error.URLError, http.client.HTTPException):
                 if retry == 2:
                     raise
+            finally:
+                transport.close()
             time.sleep(min(.2 * 2 ** retry, max(0, deadline - time.monotonic())))
 
     for page in result["pages"]:
@@ -520,33 +615,11 @@ def _download_images(result, attempt, deadline):
                     if remaining <= 0:
                         raise TimeoutError()
                     request = urllib.request.Request(url, headers={"Accept": "image/*"})
-                    binary = bytearray()
-                    with fetch_image(request) as response:
-                        mime = response.headers.get_content_type()
-                        # Ignore remote filenames entirely; suffix is a bounded
-                        # allowlisted hint. SVG/HTML cannot become active media.
-                        suffix = Path(urllib.parse.urlsplit(url).path).suffix.lower()
-                        if suffix not in suffixes:
-                            suffix = Path(str(key)).suffix.lower()
-                        if suffix not in suffixes:
-                            suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "image/bmp": ".bmp", "image/tiff": ".tiff"}.get(mime)
-                        if suffix is None or mime in {"image/svg+xml", "text/html", "application/xhtml+xml"}:
-                            raise ValueError()
-                        while True:
-                            if time.monotonic() >= deadline:
-                                raise TimeoutError()
-                            chunk = response.read(65536)
-                            if not chunk:
-                                break
-                            binary.extend(chunk)
-                            if len(binary) > 20 * 1024 * 1024 or total_bytes + len(binary) > 100 * 1024 * 1024:
-                                raise ValueError()
-                    if not binary:
-                        raise ValueError()
+                    binary, suffix = fetch_image(request, url, key)
                     relative = f"media/page-{page['page']:04d}-{category.lower()}-{index:03d}{suffix}"
                     target = attempt / relative
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(binary)
+                    ocr_job_store.atomic_write(target, binary)
                     total_bytes += len(binary)
                     paths.append(str(target))
                     updated[key] = relative
@@ -579,6 +652,7 @@ def recognize(source, output_dir, *, config, pages=None, task="ocr", progress_ca
     """
     started = time.monotonic()
     config = validate_config(config)
+    deadline = started + config["timeout_seconds"]
     # Preserve configuration validation even when a prior result is reusable.
     _token(config)
     if pages is not None and (not re.fullmatch(r"[1-9]\d*(?:-[1-9]\d*)?", str(pages))
@@ -598,21 +672,42 @@ def recognize(source, output_dir, *, config, pages=None, task="ocr", progress_ca
     store = ocr_job_store.JobStore(output_dir, identity, progress_callback=progress_callback)
     try:
         with store.lock(timeout=0):
+            reconcile_binding = None
+            if os.environ.get("MD_OCR_RECONCILE_ONLY") == "1":
+                try:
+                    bindings = json.loads(os.environ.get("MD_OCR_RECONCILE_BINDINGS", "[]"))
+                    config_sha256 = ocr_job_store.digest(ocr_job_store._json(identity["config"]).encode())
+                    matches = [value for value in bindings if isinstance(value, dict)
+                               and value.get("sha256") == identity["source"]["sha256"]
+                               and value.get("fingerprint") == identity["fingerprint"]
+                               and ("config_sha256" not in value or value["config_sha256"] == config_sha256)] if isinstance(bindings, list) else []
+                    if len(matches) != 1 or not store.receipt_path.is_file() or store.receipt_path.is_symlink():
+                        raise ValueError()
+                    reconcile_binding = matches[0]
+                except (ValueError, TypeError):
+                    raise PaddleJobsError("submission_unknown", phase="submission_unknown", retryable=False) from None
             receipt = store.load()
+            if reconcile_binding is not None and (receipt["batch_id"] != reconcile_binding.get("batch_id")
+                                                   or receipt["phase"] == "prepared"):
+                raise PaddleJobsError("submission_unknown", phase="submission_unknown", retryable=False)
             if receipt["phase"] == "succeeded":
                 cached = store.verify_result()
                 if cached is not None:
                     return cached
                 store.save(phase="polling", last_error="cache_corrupt")
             if store.receipt["phase"] == "failed":
-                raise PaddleJobsError(store.receipt["last_error"] or "job_failed")
+                raise PaddleJobsError(store.receipt["last_error"] or "job_failed",
+                                      job_id=store.receipt.get("job_id"), phase="failed", retryable=False,
+                                      progress=ocr_job_store._safe_progress(store.receipt))
             attempt = store.directory
             media = []
             def consume_images(result):
-                media.extend(_download_images(result, attempt, started + config["timeout_seconds"]))
+                media.extend(_download_images(result, attempt, deadline))
             try:
                 result = run_job(config, file_path=str(source), pages=pages,
-                                 _image_consumer=consume_images, job_store=store)
+                                 _image_consumer=consume_images, job_store=store, _deadline=deadline)
+                if ocr_job_store.digest(source.read_bytes()) != identity["source"]["sha256"]:
+                    raise PaddleJobsError("invalid_config")
                 markdown, output = attempt / "result.md", attempt / "result.json"
                 raw_path = attempt / "raw-result.jsonl"
                 ocr_job_store.atomic_write(raw_path, result.pop("raw_jsonl").encode())
@@ -635,6 +730,7 @@ def recognize(source, output_dir, *, config, pages=None, task="ocr", progress_ca
                     elif remote_code == "11002":
                         code = "job_expired"
                 terminal = code in {"job_failed", "job_not_found", "job_expired", "submission_conflict", "unsafe_redirect"}
+                terminal = terminal or store.receipt["phase"] == "failed"
                 phase = "failed" if terminal else ("submission_unknown" if code == "submission_unknown" else store.receipt["phase"])
                 store.save(phase=phase, last_error=code if code in ocr_job_store.ERROR_CODES else "invalid_result")
                 snapshot = ocr_job_store._safe_progress(store.receipt)
@@ -643,9 +739,14 @@ def recognize(source, output_dir, *, config, pages=None, task="ocr", progress_ca
                                       **{key: value for key, value in exc.details.items() if key in {"http_status", "error_code", "error_message"}}) from None
     except ocr_job_store.StoreError as exc:
         receipt = store.receipt or {}
-        raise PaddleJobsError(exc.code, job_id=receipt.get("job_id"), phase=receipt.get("phase"),
-                              retryable=exc.code in {"waiting", "storage_error"},
-                              progress=ocr_job_store._safe_progress(receipt) if receipt else None) from None
+        if exc.code == "waiting" and not receipt:
+            states = ocr_job_store.progress(output_dir)
+            receipt = next((value for value in states if value.get("fingerprint") == identity["fingerprint"]), {})
+        snapshot = ocr_job_store._safe_progress(receipt) if receipt else {
+            "phase": "waiting" if exc.code == "waiting" else "failed", "state": None,
+            "job_id": None, "retry_after_seconds": 2, "last_error": exc.code}
+        raise PaddleJobsError(exc.code, job_id=receipt.get("job_id"), phase=snapshot["phase"],
+                              retryable=exc.code in {"waiting", "storage_error"}, progress=snapshot) from None
     except OSError:
         receipt = store.receipt or {}
         raise PaddleJobsError("storage_error", job_id=receipt.get("job_id"), phase=receipt.get("phase"), retryable=True) from None

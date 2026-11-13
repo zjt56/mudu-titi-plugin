@@ -169,7 +169,8 @@ class OcrWaitSchedulingTest(unittest.TestCase):
         self.assertEqual(calls, ["extract"])
         self.assertEqual(mf.load(self.batch)["stages"]["extract"]["status"], mf.COMPLETED)
         self.recover.assert_not_called()
-        self.handoff.assert_not_called()
+        # Normal post-success observation resumes after the external wait ends.
+        self.handoff.assert_called_once_with(self.batch)
 
     def test_diagnose_wait_is_nonblocking_safe_and_self_heal_not_candidate(self):
         self.accept()
@@ -198,6 +199,44 @@ class OcrWaitSchedulingTest(unittest.TestCase):
         mf.touch_stage(self.manifest, "knowledge", mf.FAILED, notes="real failure")
         mf.save(self.batch, self.manifest)
         item = next(row for row in diagnose.diagnose(self.batch)["items"] if row["stage"] == "knowledge")
+        self.assertTrue(item["blocking"])
+
+    def test_diagnose_uses_fixed_copy_for_all_progress_phases(self):
+        for phase, state, text in (("submitted", "", "已提交"), ("polling", "queued", "排队"),
+                                   ("polling", "running", "运行"), ("downloading", "done", "下载")):
+            with self.subTest(phase=phase, state=state):
+                report, _ = self.accept()
+                for item in report["sources"]:
+                    item["progress"].update(phase=phase, state=state)
+                put(self.batch / "01_source/pdf-ocr.json", report)
+                item = next(row for row in diagnose.diagnose(self.batch)["items"] if row["stage"] == "extract")
+                self.assertFalse(item["blocking"])
+                self.assertIn(text, item["detail"])
+                self.assertIn("稍后续查", item["detail"])
+
+    def test_auto_unknown_post_failure_is_failed_not_external_wait(self):
+        report = self.report()
+        report["status"] = "failed"
+        report["sources"][0].update(status="failed", error={"code": "submission_unknown"})
+        report["sources"][0]["progress"].pop("job_id")
+        def child(*args, **kwargs):
+            put(self.batch / "01_source/pdf-ocr.json", report)
+            return SimpleNamespace(returncode=1, stdout="submission_unknown", stderr="")
+        with patch.object(runner.subprocess, "run", side_effect=child):
+            outcome = auto._advance_impl(self.batch, {}, audio_worker=None)
+        self.assertEqual(outcome["action"], "failed")
+        self.assertTrue(any(row["stage"] == "extract" for row in outcome["failed_stages"]))
+        self.assertEqual(mf.load(self.batch)["stages"]["extract"]["status"], mf.FAILED)
+
+    def test_wait_consumers_reject_report_replacement_or_changed_source(self):
+        report, _ = self.accept()
+        report["updated_at"] += 0.001
+        put(self.batch / "01_source/pdf-ocr.json", report)
+        self.assertEqual(runner.ocr_wait_state(self.batch, self.manifest), {})
+        self.accept()
+        (self.batch / "answers.pdf").write_bytes(b"new answer PDF")
+        self.assertEqual(runner.ocr_wait_state(self.batch, self.manifest), {})
+        item = next(row for row in diagnose.diagnose(self.batch)["items"] if row["stage"] == "extract")
         self.assertTrue(item["blocking"])
 
     def test_retry_after_is_bounded_and_invalid_values_are_safe(self):

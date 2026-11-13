@@ -4,7 +4,7 @@
 
 用户要求 AI 运维像当前会话一样接收批次报错：自动读取报错证据、分析原因、执行受控修复、复验原失败检查并续跑，而不是只显示建议或等待用户再次点击。
 
-## 修复
+## 改了什么
 
 - `app/workflow/runner.py`：显式 `runner run` 的失败阶段在 `_single_run_lock` 释放后自动调用 `operations.handoff_if_available`；成功、dry-run、审核差异和健康推进不重复建单，运维异常不改变原 runner 退出码。
 - `lib/operations-agent.js`：普通 HTTP 请求仍为短窗口；`code_repair operation=test` 使用 930 秒、安装使用 120 秒动作级窗口。窗口仍受会话最大时长、AbortSignal、停止和未知回执保护，不会因长测试盲目重发。investigation 成功 promote 为 repair 后清零 `readOnlyCount` 与 `noProgress`。

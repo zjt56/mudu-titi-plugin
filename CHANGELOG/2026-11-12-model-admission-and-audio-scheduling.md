@@ -4,7 +4,7 @@
 
 用户要求继续推进上一轮优化方案。上一批完成了队列/回执/唤醒/本地冷却/角色契约，但提取与结构内实际模型入口尚有冷却覆盖缺口，音频模型进入并行波次后仍可能阻塞文字合流。
 
-## 实施范围
+## 改了什么
 
 - 新增model_admission共享准入与8条离线回归；在local_agent启动CLI前、content_agent新建任务前、visual_transport及legacy视觉网络前核对批次冷却。明确批次身份，结构化延期，缓存和本地复验先行，route-only不挡。
 - metadata/structure/lesson_bands/visual_review/content_media传递批次并保留deferred，不把尚未调用模型记成永久失败。

@@ -533,3 +533,19 @@ question_content.py::restore_source_stems（网格单元格不承载带字母选
 `_prune_stale_round_unchecked`、`app/workflow/review_child_source.py::_section_end_matches`、
 `app/workflow/review_rounds.py`（二审抽样提示词）、`app/workflow/runner.py::do_review_gate`；
 验证见 `CHANGELOG/2026-11-13-review-evidence-scope-and-binding.md`。
+
+## 2026-11-13：OCR 异步任务必须持久化身份、可续查、不盲发
+
+用户原话（2026-11-13）：「你帮我补齐这个OCR的这个功能，这个调用功能，以及等待结果返回的一个功能，等等这些东西」。
+规则：PaddleOCR jobs 的每次识别必须有批次内持久回执（POST 前落 `submitting` 与随机 batchId，取得 jobId
+立即落盘）；**POST 结果未知时只能用 `GET /jobs/batch/{batchId}` 对账**，空列表仍未知、多条为冲突，
+任何情况不得盲目重发 POST（不声称远端 exactly-once）。查询/结果是各自三次有界重试 + 绝对截止时间中断，
+预算耗尽但有 jobId 时返回 `waiting` 并可续查；成功的 `result.json` / `result.md` / 脱敏 JSONL 与源摘要
+校验通过后才写 `succeeded`，后续调用本地复验复用、不联网；缓存损坏但仍有 jobId 时续查恢复而不重提。
+等待不是成功：等待期间 extract 退出码 6、报告 `status=waiting`，不写成功产物、不进入下游；多附件有任一
+真实失败即失败。调度把等待记为 `waiting_external`（pending 而非 failed），按 5–300 秒有界间隔自动续查，
+不消耗模型冷却、不触发代码运维修复、不空转；对账重跑必须带 `MD_OCR_RECONCILE_ONLY=1` 与绑定信息，
+后端在配置/回执指纹不匹配时直接拒绝，绝不 POST。回执与诊断不得保存令牌、签名 URL 或远端原始响应。
+落地：`app/workflow/ocr_job_store.py`、`paddle_jobs.py`、`pdf_ocr.py`、`extract.py`、`runner.py::ocr_wait_state`、
+`auto.py`、`supervisor.py`、`diagnose.py`、`ocr_backend.py`、`app/docs/extraction.md`、根 `AGENTS.md` 硬规则 28；
+验证见 `CHANGELOG/2026-11-13-ocr-durable-jobs.md`。

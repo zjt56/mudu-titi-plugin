@@ -32,10 +32,24 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-12 | [2026-11-12-review-newest-first.md](2026-11-12-review-newest-first.md) | 试卷审核列表按最新时间置顶 |
+| 2026-11-12 | [2026-11-12-structure-source-shape-regressions.md](2026-11-12-structure-source-shape-regressions.md) | 2026-11-12：无号古诗来源与课时局部题号证明 |
+| 2026-11-13 | [2026-11-13-ai-operations-autonomous-closure.md](2026-11-13-ai-operations-autonomous-closure.md) | AI 运维自动接收、修复与复验闭环 |
+| 2026-11-13 | [2026-11-13-ai-operations-closed-loop-fixes.md](2026-11-13-ai-operations-closed-loop-fixes.md) | AI 运维接单后闭环链路修复（批次23） |
+| 2026-11-13 | [2026-11-13-ai-operations-reclaim-and-source-tools.md](2026-11-13-ai-operations-reclaim-and-source-tools.md) | AI 运维升级重认领与隔离工具续跑 |
+| 2026-11-13 | [2026-11-13-diagnose-skippable-audio-not-blocker.md](2026-11-13-diagnose-skippable-audio-not-blocker.md) | 诊断不把“无听力课时”误报为缺少 audio 输入的卡点 |
+| 2026-11-13 | [2026-11-13-image-hint-blanks-and-visual-column-robustness.md](2026-11-13-image-hint-blanks-and-visual-column-robustness.md) | 短文填空图注空识别 + 视觉栏目归属健壮性 |
+| 2026-11-13 | [2026-11-13-native-purge-retry.md](2026-11-13-native-purge-retry.md) | 原生会话清理失败后允许重新删除 |
+| 2026-11-13 | [2026-11-13-pdf-ocr-material-roles.md](2026-11-13-pdf-ocr-material-roles.md) | PDF直接OCR双格式交付与多附件角色识别 |
+| 2026-11-13 | [2026-11-13-review-label-edit.md](2026-11-13-review-label-edit.md) | 试卷审核：修复知识点添加与修改反馈 |
+| 2026-11-13 | [2026-11-13-runner-stage-module-execution.md](2026-11-13-runner-stage-module-execution.md) | 调度器按模块执行仓库包内脚本，修复新批次 extract 相对导入失败 |
+| 2026-11-13 | [2026-11-13-table-blank-section-boundary.md](2026-11-13-table-blank-section-boundary.md) | 表格填空题号与栏目边界识别 |
+| 2026-11-13 | [2026-11-13-operations-incident-isolation-and-upstream-cooldown.md](2026-11-13-operations-incident-isolation-and-upstream-cooldown.md) | 既有机房卡点记录补入索引（原文件已存在，仅索引缺失） |
 | 2026-11-13 | [2026-11-13-ocr-projection-method-images.md](2026-11-13-ocr-projection-method-images.md) | OCR 页级 method/images 丢失致投影未生效；正文 `<div>/###/LaTeX` 清干净，图片恢复 `[IMG …]` |
 | 2026-11-13 | [2026-11-13-lesson-scoped-anchor-band-options-fixes.md](2026-11-13-lesson-scoped-anchor-band-options-fixes.md) | 课时题号黏连/附录栏目主题/视觉预算/选项绑定的确定性修复 |
 | 2026-11-13 | [2026-11-13-all-missing-answers-not-input-error.md](2026-11-13-all-missing-answers-not-input-error.md) | 全量“无答案”决定不再被判成答案输入格式错误 |
 | 2026-11-13 | [2026-11-13-pdf-mandatory-ocr.md](2026-11-13-pdf-mandatory-ocr.md) | PDF 整卷 OCR 成为提取必过条件，拒绝空结果/原生层与无有效 OCR 的旧完成批次复用 |
+| 2026-11-13 | [2026-11-13-ocr-durable-jobs.md](2026-11-13-ocr-durable-jobs.md) | OCR 异步任务持久回执：提交前落盘、batchId 对账、等待续查、结果复用、调度等待与安全诊断 |
 | 2026-11-13 | [2026-11-13-pdf-ocr-diagnostics.md](2026-11-13-pdf-ocr-diagnostics.md) | OCR受控错误透传与同源去重；指定八上03批次2页正式提取恢复 |
 | 2026-11-13 | [2026-11-13-host-inject-guard.md](2026-11-13-host-inject-guard.md) | 补 sessionQuery 注入并新增注入声明守卫（含跨模块 scope 读取），防未声明宿主服务复发 |
 | 2026-11-13 | [2026-11-13-sessions-inject-purge.md](2026-11-13-sessions-inject-purge.md) | 内容智能体注入 sessions 服务，修复删除批次时原生会话清理失败 |

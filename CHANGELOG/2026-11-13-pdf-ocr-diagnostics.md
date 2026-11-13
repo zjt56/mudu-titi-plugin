@@ -6,7 +6,7 @@
 
 旧 `pdf-ocr.json` 只保留 `OCRBackendError` 和通用消息，无法区分服务拒绝、网络、任务失败、无效结果；同一 PDF 的 source/docx 别名及异常包装导致重复显示。原调用已进入 Paddle 尝试目录，但没有保存更具体的失败信息，因此本次无法证明最初远端失败的具体根因。
 
-## 修改
+## 改了什么
 
 - `app/workflow/ocr_backend.py`：受控 Paddle 错误传递固定错误码及脱敏的 HTTP 状态、服务错误码和错误摘要；公开投影不直接使用任意异常字符串。
 - `app/workflow/pdf_ocr.py`：保存受控结构化错误；未知异常保持通用信息，不输出私有配置或凭据。

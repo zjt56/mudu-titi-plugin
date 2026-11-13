@@ -10,7 +10,7 @@
 4. 原生内容 Agent 对同 identity 的 `failed` 任务永久复用，上游瞬时恢复后也不会重新调用模型。
 5. 历史 `failed` 阶段即使上游瞬时故障消退也不会冷却重排，普通调度直接跳过。
 
-## 修复
+## 改了什么
 
 - `lib/operations-agent.js`：保留后端失败码；`inputs_changed` 且无未知回执时 release→同 session fresh investigation claim→复用 finding→再 promote，未知回执不重发。
 - `app/workflow/operations.py`：隔离工作区操作/恢复/结算按 `incident_id` 绑定，仅 `restarted_pending_verify` 可由原检查结算；历史纯瞬时事件迁移为 `transient_deferred`/`superseded`（保留未知回执与审计，不称 resolved）。

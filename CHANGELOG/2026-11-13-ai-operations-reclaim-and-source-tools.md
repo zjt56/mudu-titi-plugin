@@ -4,7 +4,7 @@
 
 批次 `23七上人教版课时A计划Unit2We’reFamily!第四课时Section` 已完成调查和根因记录，但 `promote` 因源码指纹变化返回 `inputs_changed`，旧 Agent 未自动释放并重新认领；随后隔离修复工具在 search→read_lines 之间未正确传递真实路径，重复触发拒绝并停在 recovery 队列。
 
-## 修复
+## 改了什么
 
 - `lib/operations-agent.js`：保留后端失败回执中的结构化错误码；`promote` 仅在明确 `inputs_changed` 且没有未知回执时执行 release → 同 session fresh investigation claim → 复用 finding → promote。任何 release/claim 未知结果都进入 quarantine，禁止盲重发。
 - `app/workflow/operations.py`：`code_repair` 支持 search 返回的 cursor 直接用于 `read_lines`，并要求 read/read_lines/write 使用真实工作区相对路径；隔离工作区标记 tests_failed/损坏后，下一次 `request_code_repair` 自动创建新工作区而不是永久复用坏工作区。

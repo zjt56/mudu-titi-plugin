@@ -1,12 +1,10 @@
 """Durable receipt and OS lock tests; all inputs are synthetic."""
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
-
 from workflow import ocr_job_store as store
 from workflow import paddle_jobs
 
@@ -42,7 +40,7 @@ class OCRJobStoreTest(unittest.TestCase):
         states = store.progress(self.root)
         self.assertEqual(states[0]["phase"], "submission_unknown")
         self.assertEqual(states[0]["attempts"]["submit"], 1)
-        self.assertNotIn("batch_id", states[0])
+        self.assertEqual(states[0]["batch_id"], job.receipt["batch_id"])
         self.assertNotIn("private-value", job.receipt_path.read_text())
         self.assertNotIn("paddleocr.aistudio", job.receipt_path.read_text())
         with job.lock():
@@ -72,7 +70,7 @@ class OCRJobStoreTest(unittest.TestCase):
 
     def test_os_cross_process_lock_releases_after_crash(self):
         job = store.JobStore(self.root, self.identity)
-        script = """import json, os, sys
+        script = """import json, sys
 from workflow.ocr_job_store import JobStore
 job = JobStore(sys.argv[1], json.loads(sys.argv[2]))
 with job.lock():
@@ -93,6 +91,44 @@ with job.lock():
         process.communicate(timeout=5)
         with job.lock():
             self.assertEqual(job.load()["phase"], "submitting")
+
+    def test_callback_cannot_mutate_live_receipt(self):
+        def change_snapshot(value):
+            value["attempts"]["submit"] = 999
+            value["source"]["sha256"] = "bad"
+        job = store.JobStore(self.root, self.identity, progress_callback=change_snapshot)
+        with job.lock():
+            job.load()
+            self.assertEqual(job.receipt["attempts"]["submit"], 0)
+            self.assertEqual(job.receipt["source"]["sha256"], self.identity["source"]["sha256"])
+            self.assertEqual(job.load()["attempts"]["submit"], 0)
+
+    def test_missing_job_handle_or_mutated_binding_is_corrupt(self):
+        job = store.JobStore(self.root, self.identity)
+        with job.lock():
+            job.load()
+            for changes in ({"phase": "polling"}, {"job_id": 123}, {"source": {**job.receipt["source"], "size": 900}}):
+                bad = {**job.receipt, **changes}
+                job.receipt_path.write_text(json.dumps(bad))
+                with self.assertRaises(store.StoreError):
+                    job.load()
+
+    def test_completion_manifest_checks_media_bytes_and_core_artifacts(self):
+        job = store.JobStore(self.root, self.identity)
+        with job.lock():
+            job.load()
+            job.save(phase="downloading", job_id="remote-job")
+            media = job.directory / "media/page-0001-images-001.png"
+            media.parent.mkdir()
+            media.write_bytes(b"image-synthetic")
+            result = {"job_id": "remote-job", "pages": [{"text": "OCR text"}], "artifacts": {"images": [str(media)]}}
+            (job.directory / "result.json").write_text(json.dumps(result))
+            (job.directory / "result.md").write_text("OCR text")
+            (job.directory / "raw-result.jsonl").write_text('{}\n')
+            job.complete(result)
+            self.assertIsNotNone(job.verify_result())
+            media.write_bytes(b"tampered")
+            self.assertIsNone(job.verify_result())
 
     def test_binding_mismatch_and_unsafe_progress_are_rejected(self):
         job = store.JobStore(self.root, self.identity)

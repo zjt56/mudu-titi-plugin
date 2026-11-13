@@ -580,10 +580,19 @@ class WorkflowSupervisor:
             reservation = 0
         # OCR polling has its own durable timer. Waiting for an acknowledged job
         # neither spends no-progress/repair attempts nor borrows model cooldown.
-        from .runner import ocr_wait_state
-        waiting = ocr_wait_state(folder, manifest)
+        from .runner import ocr_wait_state, ocr_reconciliation_state
+        reconciliation = ocr_reconciliation_state(folder, manifest)
+        waiting = reconciliation or ocr_wait_state(folder, manifest)
         other_failure = any(value.get("status") in {"failed", "blocked", "needs_review", "invalidated"}
                             for key, value in manifest["stages"].items() if key != "extract")
+        if reconciliation and reconciliation["exhausted"] and not other_failure:
+            state.update(status="reconciliation_exhausted", next_retry_at=0, retry_reservation_at=0,
+                         updated_at=now, last_result={"action": "reconciliation_exhausted", "status": "failed",
+                                                     "reason": "OCR提交结果未知；独立GET对账3轮未确认，保留失败"})
+            if state.pop("dispatch_counted", False):
+                state["no_progress_attempts"] = max(0, int(_number(state.get("no_progress_attempts"), 0, 0)) - 1)
+            _write_existing(folder, LEDGER, state)
+            return "reconciliation_exhausted"
         if waiting and not other_failure:
             attempts = int(_number(state.get("no_progress_attempts"), 0, 0))
             if state.pop("dispatch_counted", False):
@@ -591,14 +600,15 @@ class WorkflowSupervisor:
             same_report = state.get("ocr_wait_report_updated_at") == waiting["report_updated_at"]
             deadline = max(waiting["next_retry_at"], _number(state.get("ocr_wait_retry_at"), 0, 0)
                            if same_report else 0)
-            state.update(version=1, status="waiting_external", progress=progress,
+            external_action = "reconciling_external" if reconciliation else "waiting_external"
+            state.update(version=1, status=external_action, progress=progress,
                          no_progress_attempts=attempts, next_retry_at=deadline,
                          retry_reservation_at=0, ocr_wait_report_updated_at=waiting["report_updated_at"],
                          ocr_wait_retry_at=deadline, updated_at=now)
             state.pop("escalation", None)
             if deadline > now:
                 _write_existing(folder, LEDGER, state)
-                return "waiting_external"
+                return external_action
             # Reserve before dispatch: even if a worker crashes or remains queued,
             # the same receipt cannot create a tight poll loop across restarts.
             deadline = now + waiting["retry_after"]

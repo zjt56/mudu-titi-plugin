@@ -53,8 +53,9 @@
 - 正文 `material` 文本仍是逐字原卷（空档统一为库侧 `__N__`/`______`），不生成、不补写内容。
 - 匹配放宽仅限空白；可见文字、网格行列数、单元格跨度仍逐项校验，改文/改格仍走退回与留痕。
 
-## 如何验证
+## 验证
 
+- 汇总计项：受影响模块共 295 项通过（37 + 233 + 25，其中跳过 4 项）；Node 4 项通过。
 - `cd app && PYTHONPATH=. python3 -m unittest workflow.test_question_draft workbench.test_table_preview`
   → 37 tests OK（含新增 2+4 条）。
 - `cd app && PYTHONPATH=. python3 -m unittest workflow.test_upload_payload workflow.test_question_content

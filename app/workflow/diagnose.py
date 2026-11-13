@@ -563,7 +563,18 @@ def diagnose(batch_dir) -> dict:
         if status in mf.TERMINAL_OK:
             continue
         if stage.id == "extract":
-            from .runner import ocr_wait_state
+            from .runner import ocr_wait_state, ocr_reconciliation_state
+            reconciliation = ocr_reconciliation_state(batch, manifest)
+            if reconciliation:
+                exhausted = reconciliation["exhausted"]
+                items.append({"stage": stage.id, "title": stage.title, "status": mf.FAILED,
+                              "kind": stage.kind, "reason": "OCR提交结果未知；GET对账已达上限" if exhausted else "OCR提交结果未知；待GET对账",
+                              "detail": f"独立GET对账 {reconciliation['attempts']}/{reconciliation['max_attempts']} 轮；未确认提交成功，提取仍失败，不重复POST",
+                              "hint": "保留原回执与失败证据；已停止自动对账" if exhausted else "按间隔仅GET查询原batch回执",
+                              "command": "", "depends_on": [], "unmet": [], "missing_inputs": [], "note": "",
+                              "failure_class": "submission_unknown", "blocking": True,
+                              "next_action": "reconciliation_exhausted" if exhausted else "reconciling_external"})
+                continue
             waiting = ocr_wait_state(batch, manifest)
             if waiting:
                 items.append({"stage": stage.id, "title": stage.title, "status": mf.PENDING,
@@ -576,9 +587,18 @@ def diagnose(batch_dir) -> dict:
                               "retry_after": waiting["retry_after"], "blocking": False})
                 continue
             if status == mf.PENDING and record.get("exit_code") == 6:
-                # A modified/failed/stale report cannot keep the old benign wait
-                # view. This is read-only diagnosis; only runner changes state.
-                status = mf.FAILED
+                report_status = _read(batch / "01_source/pdf-ocr.json").get("status")
+                items.append({"stage": stage.id, "title": stage.title,
+                              "status": mf.FAILED if report_status == "failed" else mf.BLOCKED,
+                              "kind": stage.kind, "reason": "OCR等待证据失效或存在真实失败",
+                              "detail": "当前OCR报告、来源摘要或任务回执不再满足等待条件，需重新核对原任务",
+                              "hint": "先核对已保存任务与当前来源，禁止据旧等待状态放行或重复提交",
+                              "command": "", "depends_on": [], "unmet": [], "missing_inputs": [],
+                              "note": "", "failure_class": "ocr_wait_invalid",
+                              "next_action": "核对当前OCR报告与来源", "blocking": True})
+                if first_blocked is None:
+                    first_blocked = stage.id
+                continue
         # 用户明确“课时试卷允许没有听力/答案”等：仅在阶段尚未实际执行（pending）
         # 且属可跳过输入时才视为正常可跳过；已 FAILED/needs_review/blocked 的阶段
         # 是真实执行结果，不能被“历史批次”之类的跳过理由掩盖。

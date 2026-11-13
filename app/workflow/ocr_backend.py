@@ -44,6 +44,8 @@ ERROR_MESSAGES = {
     "receipt_corrupt": "OCR task receipt is invalid; automatic resubmission refused.",
     "job_not_found": "The existing OCR task is missing or expired; automatic resubmission refused.",
     "submission_conflict": "Multiple OCR jobs match the submitted batch; automatic selection and resubmission refused.",
+    "storage_error": "OCR task receipt or result cannot be safely persisted; resubmission refused.",
+    "job_expired": "The existing OCR task has expired; automatic resubmission refused.",
 }
 SAFE_VALUE_ERRORS = {ERROR_MESSAGES[code]: code for code in (
     "source_digest_mismatch", "empty_pages", "malformed_page_text",

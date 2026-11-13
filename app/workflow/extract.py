@@ -1253,15 +1253,10 @@ def run(batch_dir: Path) -> dict:
         ocr_report = future.result()
         _require_pdf_acquisition(ocr_report)
     result["pdf_ocr"] = ocr_report
-    # 远端强制 OCR 覆盖 PDF 主源；Word 主源的附件 PDF 失败只记警告，仍以 Word 原文
-    # 处理（禁止用 OCR/PDF 覆盖 Word）。
+    # Preserve Word evidence but never deliver success while any PDF OCR failed.
     if ocr_report.get("status") == "failed":
-        message = _pdf_ocr_failure(ocr_report)
-        if source_path.suffix.lower() == '.docx':
-            result.setdefault('warnings', []).append(message + '；继续使用 Word 原文处理')
-        else:
-            result["passed"] = False
-            result["error"] = message
+        result["passed"] = False
+        result["error"] = _pdf_ocr_failure(ocr_report)
     # 材料分类（用户 2026-11 重设计）：逐份上传文件提取文字层后判定角色
     # （正文/答案/解析/混排/其他）。非阻断：模型不可用时用确定性兜底，只留证据。
     try:

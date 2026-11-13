@@ -6,7 +6,7 @@
 
 用户要求PDF上传直接调用OCR获取JSON和Markdown，尤其课时正文和答案会分别上传。旧实现虽整卷采集OCR，但PDF正文仍文字层优先，多个附件依文件名/扩展名临时分配角色且不能纠正；独立答案还可能被当副本排除。
 
-## 修改
+## 改了什么
 
 - `pdf_ocr.py` 每源保存 acquisition.json/acquisition.md，批次保存 pdf-ocr.json/pdf-ocr.md，报告记录Markdown路径；保持服务顺序、同SHA单次去重。
 - `extract._pdf` 全部采用已采集的OCR正文，原生文字/块/图片只作可选证据，原生解析失败不否定有效OCR；空OCR明确失败，不重复调用。

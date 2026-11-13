@@ -345,6 +345,107 @@ def ocr_wait_state(batch_dir: Path, manifest: dict, *, since=None) -> dict:
         return {}
 
 
+OCR_RECONCILE_MAX = 3
+
+
+def _ocr_reconciliation_state(batch_dir: Path, manifest: dict, *, since=None) -> dict:
+    """Unknown POST stays failed; only explicitly bound GET reconciliation may run."""
+    record = (manifest.get("stages") or {}).get("extract") or {}
+    accepted = record.get("ocr_reconciliation") or {}
+    if not isinstance(accepted, dict):
+        return {}
+    if since is None and (record.get("status") != mf.FAILED or not accepted):
+        return {}
+    try:
+        path = Path(batch_dir) / "01_source/pdf-ocr.json"
+        if path.is_symlink():
+            return {}
+        report = json.loads(path.read_text(encoding="utf-8-sig"))
+        updated = float(report["updated_at"])
+        if (report.get("version") != 2 or report.get("status") != "failed"
+                or not math.isfinite(updated) or updated > time.time() + 5
+                or (since is not None and updated < since)
+                or (since is None and updated != accepted.get("report_updated_at"))):
+            return {}
+        expected = {}
+        for key, entry in (manifest.get("inputs") or {}).items():
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                continue
+            source = Path(entry["path"]).expanduser()
+            if source.suffix.lower() != ".pdf":
+                continue
+            if not source.is_absolute():
+                source = Path(batch_dir) / source
+            digest = mf.sha256_file(source)
+            if not digest or digest != entry.get("sha256"):
+                return {}
+            expected[key] = (entry["path"], digest)
+        sources = report.get("sources")
+        if not expected or not isinstance(sources, list) or len(sources) != len(expected):
+            return {}
+        bindings, seen, delays = [], set(), []
+        for source in sources:
+            if not isinstance(source, dict):
+                return {}
+            key = source.get("input")
+            if not isinstance(key, str) or key in seen or key not in expected:
+                return {}
+            seen.add(key)
+            if (source.get("path"), source.get("sha256")) != expected[key]:
+                return {}
+            if source.get("status") == "completed":
+                continue
+            # Mixed submitted waits cannot permit unrelated new submissions.
+            if source.get("status") != "failed" or (source.get("error") or {}).get("code") != "submission_unknown":
+                return {}
+            marker, progress = source.get("reconciliation"), source.get("progress") or {}
+            if not isinstance(marker, dict) or not isinstance(progress, dict):
+                return {}
+            batch_id, fingerprint = marker.get("batch_id"), marker.get("fingerprint")
+            if (marker.get("eligible") is not True or marker.get("method") != "GET"
+                    or not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", batch_id)
+                    or not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+                    or progress.get("job_id") or progress.get("batch_id") != batch_id):
+                return {}
+            binding = {"sha256": source["sha256"], "batch_id": batch_id, "fingerprint": fingerprint}
+            if "config_sha256" in marker:
+                if not isinstance(marker["config_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", marker["config_sha256"]):
+                    return {}
+                binding["config_sha256"] = marker["config_sha256"]
+            bindings.append(binding)
+            delays.append(ocr_retry_after(marker.get("retry_after_seconds")))
+        if seen != set(expected) or not bindings:
+            return {}
+        identity = hashlib.sha256(json.dumps({"sources": expected, "bindings": bindings}, sort_keys=True).encode()).hexdigest()
+        # Config/source/receipt identity changes are not permission for another
+        # autonomous attempt. Keep the previous bounded claim fail-closed.
+        if accepted and accepted.get("identity") != identity:
+            return {}
+        attempts = accepted.get("attempts", 0)
+        if type(attempts) is not int or not 0 <= attempts <= OCR_RECONCILE_MAX:
+            return {}
+        delay = min(delays)
+        return {"identity": identity, "report_updated_at": updated, "bindings": bindings,
+                "attempts": attempts, "max_attempts": OCR_RECONCILE_MAX,
+                "retry_after": delay, "next_retry_at": updated + delay,
+                "exhausted": attempts >= OCR_RECONCILE_MAX}
+    except (OSError, ValueError, TypeError, KeyError, OverflowError):
+        return {}
+
+
+def ocr_reconciliation_state(batch_dir: Path, manifest: dict, *, since=None) -> dict:
+    state = _ocr_reconciliation_state(batch_dir, manifest, since=since)
+    if state or since is not None:
+        return state
+    # A started GET whose process crashed or whose receipt/config changed cannot
+    # become a fresh ordinary extraction. Retain a terminal failed claim.
+    record = (manifest.get("stages") or {}).get("extract") or {}
+    accepted = record.get("ocr_reconciliation")
+    if record.get("status") == mf.FAILED and isinstance(accepted, dict) and accepted:
+        return {**accepted, "exhausted": True, "invalidated": True}
+    return {}
+
+
 def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
                            timeout: int = 1800) -> int:
     rendered = _render(stage.command, batch_dir)
@@ -356,6 +457,15 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
     from .local_agent import _agent_lock
     with _agent_lock(timeout):
         current = mf.load(batch_dir)
+        env = _stage_env()
+        if stage.id == "extract" and current.get("stages", {}).get("extract", {}).get("ocr_reconciliation"):
+            reconciliation = ocr_reconciliation_state(batch_dir, current)
+            if not reconciliation or reconciliation["exhausted"]:
+                return 1  # No unbound retry, reset, POST or exhausted GET replay.
+            reconciliation["attempts"] += 1
+            current["stages"]["extract"]["ocr_reconciliation"] = reconciliation
+            env["MD_OCR_RECONCILE_ONLY"] = "1"
+            env["MD_OCR_RECONCILE_BINDINGS"] = json.dumps(reconciliation["bindings"], sort_keys=True)
         mf.touch_stage(current, stage.id, mf.RUNNING, log=str(log.relative_to(batch_dir)))
         mf.save(batch_dir, current)
         if current is not manifest:  # 同一对象时 clear+update 会把自己清空
@@ -365,7 +475,7 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
     try:
         proc = subprocess.run(argv, cwd=str(SKILL_ROOT), capture_output=True,
                               text=True, encoding="utf-8", errors="replace",
-                              timeout=timeout, env=_stage_env())
+                              timeout=timeout, env=env)
         code, out, err = proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired:
         code, out, err = 124, "", f"超时 {timeout}s"
@@ -434,6 +544,7 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
         if stage.id == "extract" and code == 6:
             waiting = ocr_wait_state(batch_dir, current, since=attempt_started)
             if waiting:
+                current["stages"][stage.id].pop("ocr_reconciliation", None)
                 mf.touch_stage(current, stage.id, mf.PENDING, exit_code=6,
                                notes=OCR_WAIT_NOTE, finished_at=None,
                                input_hashes={}, output_hashes={}, ocr_wait=waiting)
@@ -447,6 +558,12 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
             # a successful wait acknowledgement (especially unknown POST).
             code, err = 1, "OCR等待报告无效、陈旧、来源不匹配或包含失败；未交付提取结果"
         current.get("stages", {}).get(stage.id, {}).pop("ocr_wait", None)
+        if stage.id == "extract":
+            reconciliation = ocr_reconciliation_state(batch_dir, current, since=attempt_started) if code else {}
+            if reconciliation:
+                current["stages"][stage.id]["ocr_reconciliation"] = reconciliation
+            elif code == 0:
+                current["stages"][stage.id].pop("ocr_reconciliation", None)
         if code != 0:
             source_kind = contracts.STAGE_BY_ID.get(stage.id, stage).kind
             detail = (err or out).strip()
@@ -1445,7 +1562,9 @@ def cmd_run(args) -> int:
     except RuntimeError as exc:
         print(f"✗ {exc}")
         return 3
-    if code not in (0, 6) and not getattr(args, "dry_run", False):
+    managed_ocr = code != 0 and (bool(ocr_wait_state(batch_dir, mf.load(batch_dir)))
+                                or bool(ocr_reconciliation_state(batch_dir, mf.load(batch_dir))))
+    if code != 0 and not managed_ocr and not getattr(args, "dry_run", False):
         try:
             from . import operations
             operations.handoff_if_available(batch_dir)

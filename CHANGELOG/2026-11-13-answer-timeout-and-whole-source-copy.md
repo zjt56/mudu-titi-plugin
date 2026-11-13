@@ -1,6 +1,6 @@
 # 原生答案任务超时与无编号整串答案直抄
 
-## 触发与实际根因
+## 背景与触发根因
 
 12课时 Starter Unit3 第四课时 Project 的 answers 任务 eb446d6d423d41caab2bf7382b235084 报 Content task time budget exceeded。原任务保留 failed/accepted=false、attempts=[]、tool_calls=2，没有可导入候选。会话创建比任务创建晚约840ms，排除长队列等待作为本次直接原因。
 
@@ -8,7 +8,7 @@
 
 另有可复现的来源直抄缺陷：古诗合法无编号standalone来源已证明，附录RomanⅠ给出 one,two,...,ten 整串，原compact解析只认分号单字母串；该块invalid触发完整课时skeleton校验，连带其余7单元均无法直抄，于是进入不必要的模型任务。
 
-## 修复
+## 改了什么
 
 - upload_content仅对明确Roman前缀的英文逗号词列表识别literal；至少一个多字母词，A,B,C仍拒绝。无编号standalone须完整单课时skeleton、当前可信source span、number_binding=unnumbered_section、printed_numbers=[]、内部单题别名且没有真实印刷锚点等共同证明，整串原样一条答案，不拆题/不造号码。仍拒错课时、partial、跨section、同号歧义和任意无号自由文本。
 - agent_tasks抽出精确可信的离线传输前缀，native _child_prompt只替换该header为受控证据工具＋submit_candidate指令；保留所有阶段、来源与schema规则。解决native任务继承NO tools却需要read_source的冲突，不把该冲突冒称已证明的断流原因。

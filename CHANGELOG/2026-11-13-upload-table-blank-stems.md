@@ -1,10 +1,10 @@
 # 表格作答空位的最终上传副本题干适配
 
-## 触发
+## 背景与触发
 
 12课时Starter Unit3第四课时Project最终format_gate报sec-7f100795c4cef82a-u43/6–10 MISSING_STEM。原表格与子题均完整，本地来源证明已通过，但最终API映射仍要求结构化子题有非空stem。2026-11-13匿名GET当前公开developer.md：文档要求子题题号/题干/答案，但未规定空档stem具体写法。本补丁为来源保真的最小兼容适配，并无认证远端暂存实测结论。
 
-## 修复
+## 改了什么
 
 upload_payload在原始单元（编号/canonical转换前）执行完整table_blank_stem_numbers来源匹配，再只从对应原生table proof marker中唯一截取原题号+下划线作答空位，使用已有normalize_blank_text转换成6.______等。仅给API副本的空stem填此原文片段，非空stem不覆盖；不复制整cell、不生成题干或答案。本地batch与batch_meta只读。无proof、错scope/身份、缺表格/子题/空位或重复空档仍保留MISSING_STEM及原硬校验。
 

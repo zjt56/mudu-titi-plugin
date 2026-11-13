@@ -92,7 +92,7 @@ def _validate(receipt):
             or not DIGEST.fullmatch(str(receipt.get("fingerprint", "")))):
         raise StoreError()
     for key in ("job_id", "batch_id"):
-        if receipt.get(key) is not None and not ID.fullmatch(str(receipt[key])):
+        if receipt.get(key) is not None and (not isinstance(receipt[key], str) or not ID.fullmatch(receipt[key])):
             raise StoreError()
     if not ID.fullmatch(str(receipt.get("batch_id", ""))):
         raise StoreError()
@@ -106,6 +106,9 @@ def _validate(receipt):
             or set(config["options"]) != {"useDocOrientationClassify", "useDocUnwarping", "useChartRecognition"}
             or any(type(v) is not bool for v in config["options"].values())
             or (config["pages"] is not None and not re.fullmatch(r"[1-9]\d*(?:-[1-9]\d*)?", str(config["pages"])))):
+        raise StoreError()
+    expected_fingerprint = digest(_json({"schema": SCHEMA, "source": source, "config": config}).encode())
+    if receipt["fingerprint"] != expected_fingerprint:
         raise StoreError()
     if (not isinstance(receipt.get("attempts"), dict)
             or set(receipt["attempts"]) != {"submit", "get", "reconcile", "download"}
@@ -122,8 +125,20 @@ def _validate(receipt):
     for key in ("total_pages", "extracted_pages", "retry_after_seconds"):
         if key in receipt and (type(receipt[key]) is not int or not 0 <= receipt[key] <= 1000000000):
             raise StoreError()
-    if receipt["phase"] == "succeeded" and not receipt.get("job_id"):
+    if receipt["phase"] in {"submitted", "polling", "downloading", "succeeded"} and not receipt.get("job_id"):
         raise StoreError()
+    if receipt["phase"] == "prepared" and (receipt.get("job_id") or receipt["attempts"]["submit"] or "submitted_at" in receipt):
+        raise StoreError()
+    if "artifacts" in receipt:
+        artifacts = receipt["artifacts"]
+        if not isinstance(artifacts, dict):
+            raise StoreError()
+        for name, value in artifacts.items():
+            if (name not in {"result.json", "result.md", "raw-result.jsonl"}
+                    and not re.fullmatch(r"media/page-\d{4,}-[a-z]+-\d{3,}\.(?:png|jpg|jpeg|webp|gif|bmp|tif|tiff)", name)):
+                raise StoreError()
+            if not DIGEST.fullmatch(str(value)):
+                raise StoreError()
     return receipt
 
 
@@ -235,6 +250,7 @@ class JobStore:
             pages = result["pages"]
             if (not isinstance(pages, list) or not pages or result.get("job_id") != self.receipt["job_id"]
                     or any(not isinstance(page.get("text"), str) for page in pages)
+                    or not any(page["text"].strip() for page in pages)
                     or (self.directory / "result.md").read_text(encoding="utf-8") != "\n\n".join(page["text"] for page in pages)):
                 return None
             raw = (self.directory / "raw-result.jsonl").read_text(encoding="utf-8")
@@ -263,13 +279,18 @@ class JobStore:
 
 
 def _safe_progress(receipt):
-    value = {key: receipt[key] for key in ("fingerprint", "phase", "job_id", "created_at", "updated_at",
+    value = {key: receipt[key] for key in ("fingerprint", "phase", "job_id", "batch_id", "created_at", "updated_at",
              "submitted_at", "completed_at", "attempts", "last_error", "state", "source", "config",
              "retry_after_seconds", "total_pages", "extracted_pages") if key in receipt}
+    if isinstance(receipt.get("config"), dict):
+        value["config_sha256"] = digest(_json(receipt["config"]).encode())
+    elif isinstance(receipt.get("config_sha256"), str):
+        value["config_sha256"] = receipt["config_sha256"]
     if value["phase"] == "submitting" and not value.get("job_id"):
         value.update(phase="submission_unknown", last_error="submission_unknown")
     value["retryable"] = value["phase"] not in {"failed", "succeeded"}
-    return value
+    # Callbacks must never mutate the store's live binding or attempt counters.
+    return json.loads(_json(value))
 
 
 def progress(output_dir):

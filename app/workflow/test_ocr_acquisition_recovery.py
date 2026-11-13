@@ -64,6 +64,20 @@ class AcquisitionRecoveryTest(unittest.TestCase):
         self.assertEqual([s['status'] for s in report['sources']], ['waiting', 'waiting', 'failed'])
         self.assertEqual(report['sources'][1]['duplicate_of'], 'source')
 
+    def test_unknown_submission_retains_bound_get_only_reconciliation(self):
+        def recognize(source, output, **kwargs):
+            kwargs['progress_callback']({'phase': 'submission_unknown', 'batch_id': 'batch-123',
+                'fingerprint': 'a' * 64, 'config_sha256': 'b' * 64})
+            raise ocr_backend.OCRBackendError('private', code='submission_unknown')
+        with patch.object(ocr_backend, 'recognize', side_effect=recognize):
+            report = pdf_ocr.run(self.batch, self.manifest)
+        self.assertEqual(report['status'], 'failed')
+        task = report['sources'][0]['reconciliation']
+        self.assertEqual(task['method'], 'GET')
+        self.assertEqual(task['batch_id'], 'batch-123')
+        self.assertEqual(task['source_sha256'], self.entry(self.pdf)['sha256'])
+        self.assertEqual(task['fingerprint'], 'a' * 64)
+
     def test_unknown_submission_does_not_become_resumable_wait(self):
         error = ocr_backend.OCRBackendError('private', code='submission_unknown',
                                            details={'phase': 'submitting', 'retryable': False})

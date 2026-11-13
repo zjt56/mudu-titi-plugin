@@ -4,7 +4,7 @@
 
 用户反馈批次 `27七上人教版课时A计划Unit3MySchool第一课时SectionA(1a` 的“写出下面画线词的汉语意思”报 `QUESTION_BOUNDARY_MISSING` / `SOURCE_SECTION_UNCOVERED`，随后要求后续无题号、其他栏目板块均按通用规则处理。原卷有完整 Lang Lang / field 词义题及作答空位；“熟词生义”为图片标题，不是缺题。
 
-## 实现
+## 改了什么
 
 - `app/workflow/question_content.py`：`unnumbered_text_responses` 从当前来源段落重建完整作答窗口。单段真实正文加明确作答空位可证明一题；连续各有末尾作答区域的行分别建题；自然换行仅在唯一末尾作答区域及连续正文可证明时合窗。图片、表格、选项混入、多个歧义空位及缺正文不走该路径。
 - `app/workflow/structure_gate.py`：确定性生成各窗口独立来源身份；要求所有预期窗口恰有一个完整来源单元，拒绝只交第一题、跨题合并或改写边界。编号仍为内部兼容别名，`printed_numbers=[]`，不生成原卷没有的印刷题号。

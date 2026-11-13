@@ -758,7 +758,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     recovery_wait = {}
     # A submitted OCR job is ordinary external progress, never a repair target.
     # Inspect before recovery/handoff so waiting cannot spend a model budget.
-    external_wait = rn.ocr_wait_state(batch_dir, manifest)
+    external_wait = rn.ocr_wait_state(batch_dir, manifest) or rn.ocr_reconciliation_state(batch_dir, manifest)
     other_failure = any(value.get("status") in (mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW, mf.INVALIDATED)
                         for key, value in manifest.get("stages", {}).items() if key != "extract")
     # Reconcile the durable hand-off checklist before selecting work. This
@@ -1176,6 +1176,12 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
 
         if stage.kind == contracts.COMMAND:
             if stage.id == "extract":
+                reconciliation = rn.ocr_reconciliation_state(batch_dir, manifest)
+                if reconciliation and (reconciliation["exhausted"] or reconciliation["next_retry_at"] > time.time()):
+                    action = "reconciliation_exhausted" if reconciliation["exhausted"] else "reconciling_external"
+                    blocked(stage.id, "OCR提交结果未知；GET对账已达上限" if reconciliation["exhausted"] else "OCR提交结果未知；稍后仅GET对账",
+                            action, retry_after=reconciliation["retry_after"], next_retry_at=reconciliation["next_retry_at"])
+                    continue
                 waiting = rn.ocr_wait_state(batch_dir, manifest)
                 if waiting and waiting["next_retry_at"] > time.time():
                     blocked(stage.id, rn.OCR_WAIT_NOTE, "waiting_external",
@@ -1210,7 +1216,12 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
             executable = _bridge_stage(stage, bridge[stage.id]) if stage.id == "extract" and bridge.get(stage.id) else stage
             code = rn._execute_command(batch_dir, manifest, executable)
             waiting = rn.ocr_wait_state(batch_dir, manifest) if stage.id == "extract" and code == 6 else {}
-            if waiting:
+            reconciliation = rn.ocr_reconciliation_state(batch_dir, manifest) if stage.id == "extract" and code else {}
+            if reconciliation:
+                action = "reconciliation_exhausted" if reconciliation["exhausted"] else "reconciling_external"
+                blocked(stage.id, "OCR提交结果未知；GET对账已达上限" if reconciliation["exhausted"] else "OCR提交结果未知；稍后仅GET对账",
+                        action, retry_after=reconciliation["retry_after"], next_retry_at=reconciliation["next_retry_at"])
+            elif waiting:
                 blocked(stage.id, rn.OCR_WAIT_NOTE, "waiting_external",
                         retry_after=waiting["retry_after"], next_retry_at=waiting["next_retry_at"])
             elif code != 0:
@@ -1247,13 +1258,18 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     outcome = _result(batch_dir, manifest, first.get("stage"),
                       first.get("reason", "自动阶段已全部完成"), first.get("action", ""))
     # 等待只进入调度结果；不改写依赖状态，更不能把阻断闸门登记成完成或批准。
-    outcome["failed_stages"] = [item for item in blockers if item["action"] in ("failed", "gate")]
-    outcome["pending_stages"] = [item for item in blockers if item["action"] not in ("failed", "gate")]
+    failure_actions = ("failed", "gate", "reconciling_external", "reconciliation_exhausted")
+    outcome["failed_stages"] = [item for item in blockers if item["action"] in failure_actions]
+    outcome["pending_stages"] = [item for item in blockers if item["action"] not in failure_actions]
     outcome["cooldown_seconds"] = _read_cooldown(batch_dir)
     waits = [item for item in blockers if item["action"] == "waiting_external"]
     if waits and not outcome["failed_stages"]:
         outcome.update(action="waiting_external", retry_after=min(item["retry_after"] for item in waits),
                        next_retry_at=min(item["next_retry_at"] for item in waits))
+    reconciliations = [item for item in blockers if item["action"] in ("reconciling_external", "reconciliation_exhausted")]
+    if reconciliations:
+        outcome.update(action=reconciliations[0]["action"], retry_after=reconciliations[0]["retry_after"],
+                       next_retry_at=reconciliations[0]["next_retry_at"])
     if provisional_result is not None:
         outcome["provisional"] = provisional_result
     return outcome
@@ -1277,7 +1293,7 @@ def _result(batch_dir: Path, manifest: dict, stage_id, reason: str,
                 "reason": "另一个执行器正在处理该批次；稍后自动继续",
                 "failed_stages": [], "pending_stages": []}
     observed = {}
-    only_external_wait = bool(rn.ocr_wait_state(batch_dir, manifest)) and not any(
+    only_external_wait = bool(rn.ocr_wait_state(batch_dir, manifest) or rn.ocr_reconciliation_state(batch_dir, manifest)) and not any(
         value.get("status") in (mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW, mf.INVALIDATED)
         for key, value in manifest.get("stages", {}).items() if key != "extract")
     try:

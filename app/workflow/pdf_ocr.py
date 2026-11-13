@@ -173,9 +173,10 @@ def run(batch, manifest, config=None):
                     return
                 safe = {}
                 for field in ("phase", "state", "job_id", "batch_id", "created_at", "updated_at",
-                              "total_pages", "extracted_pages", "retry_after_seconds", "poll_attempts"):
+                              "total_pages", "extracted_pages", "retry_after_seconds", "poll_attempts",
+                              "fingerprint", "config_sha256"):
                     value = progress.get(field)
-                    if field in {"phase", "state", "job_id", "batch_id"}:
+                    if field in {"phase", "state", "job_id", "batch_id", "fingerprint", "config_sha256"}:
                         if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,256}", value):
                             safe[field] = value
                     elif type(value) in (int, float) and math.isfinite(value) and value >= 0:
@@ -194,12 +195,14 @@ def run(batch, manifest, config=None):
             if any(not isinstance(page, dict) or not isinstance(page.get("text"), str)
                    for page in result["pages"]):
                 raise ValueError("OCR returned malformed page text")
-            # 强制 OCR 不接受“原生文字层冒充识别结果”，也不接受整卷空文字：
-            # 这两种都证明识别没有真正完成，不能当通过（硬规则28）。
-            if any(page.get("method") == "text" for page in result["pages"]):
+            # Mandatory OCR rejects empty/native-only content before delivery.
+            if any(str(page.get("method", "")).lower() in {"text", "native", "pymupdf", "native_text"}
+                   for page in result["pages"]):
                 raise ValueError("OCR returned native text instead of recognition")
             if not any(page.get("text", "").strip() for page in result["pages"]):
                 raise ValueError("OCR returned empty document text")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise ValueError("registered SHA-256 does not match source")
             result_path = source_dir / "acquisition.json"
             markdown_path = source_dir / "acquisition.md"
             markdown = "\n\n".join(page["text"] for page in result["pages"])
@@ -232,6 +235,18 @@ def run(batch, manifest, config=None):
                                     "retry_after_seconds": 15}
             else:
                 item["status"] = "failed"
+                progress = item.get("progress", {})
+                if (item["error"].get("code") == "submission_unknown"
+                        and not progress.get("job_id")
+                        and isinstance(progress.get("fingerprint"), str)
+                        and re.fullmatch(r"[a-f0-9]{64}", progress["fingerprint"])
+                        and isinstance(progress.get("batch_id"), str)
+                        and re.fullmatch(r"[A-Za-z0-9_-]{1,256}", progress["batch_id"])):
+                    item["reconciliation"] = {"eligible": True, "method": "GET",
+                        "fingerprint": progress["fingerprint"], "batch_id": progress["batch_id"],
+                        "source_sha256": digest, "retry_after_seconds": 30}
+                    if re.fullmatch(r"[a-f0-9]{64}", str(progress.get("config_sha256", ""))):
+                        item["reconciliation"]["config_sha256"] = progress["config_sha256"]
         publish()
     if any(item["status"] == "failed" for item in report["sources"]):
         report["status"] = "failed"

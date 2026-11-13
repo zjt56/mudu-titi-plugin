@@ -51,9 +51,25 @@ OCR 坐标与可信度只保留服务实际提供的字段，不从原生文字�
 - 产物：`01_source/pdf-ocr.json`（每源状态、页码、文字、版面块、警告及 Markdown 路径）、`01_source/pdf-ocr.md`，以及每源独立目录中的 `source.pdf`、`acquisition.json`、`acquisition.md`；同一 SHA 一次运行只提交一次，按服务页序保存。聚合 Markdown 供查看，正文与答案绑定仍使用独立材料。
 - 消费方：`structure_ai` 结构归类提示词与 assemble/review 任务把该 JSON 当作层级/阅读顺序参考，并注明有 Word 时以 Word 原文为准。
 - 边界：同一正文有 Word/PDF 时仍用 Word 原文；PDF-only 正文直接消费 OCR，独立答案各自绑定。版面块存在不证明阅读顺序正确，顺序问题由识别服务侧排查，不在此处手工重排。
-- 失败：识别未配置、超时、整卷空文字、仅返回原生文字层，或缺少与当前原件 SHA 绑定的识别结果时，该 PDF 不满足必过条件；无论 Word/PDF 谁是主源，提取均不得通过。Word 原文继续保留，但不能用 Word 成功掩盖配套 PDF 的 OCR 失败；不自动重复提交、不制造成功产物。
+- 失败与等待：识别未配置、整卷空文字、仅返回原生文字层，或缺少与当前原件 SHA 绑定的识别结果时，该 PDF 不满足必过条件；无论 Word/PDF 谁是主源，提取均不得通过。已有远端任务的轮询/下载暂时超时进入等待续查，仍不交付提取成功；提交结果未知先按 batchId 对账，不能据超时重新 POST。Word 原文继续保留，但不能用 Word 成功掩盖配套 PDF 的 OCR 失败。
 - 重复上传：已完成提取的历史批次只有每份 PDF 都具备当前来源绑定且非空的 OCR 结果时才允许复用；不合格时为本次上传新建批次，不改写或重跑旧批次。处理中/待处理批次仍按原规则去重，避免重复提交识别。
 - 代价：整卷识别更慢并消耗识别额度，这是上述要求的已知成本。
+
+## 异步任务提交、等待与恢复（2026-11-13）
+
+Paddle jobs 的批次调用使用 `ocr_job_store` 持久回执，不依赖进程内变量保存任务身份：
+
+1. `pdf_ocr` 按当前 PDF SHA-256 使用稳定的 `01_source/pdf-ocr/<sha>/`。`paddle_jobs.recognize` 在其内按源字节、服务地址/模型摘要、识别选项、页范围和任务类型建立 `paddle-ocr-<fingerprint>/receipt.json`；令牌、超时和轮询间隔不改变语义指纹。缓存仅限当前批次，不跨批次共享。
+2. OS 文件锁保护同一任务；进程退出自动释放，不按锁文件年龄删锁。POST 前原子保存 `submitting` 和随机 `batch_id`；取得 `job_id` 后立即落盘，之后才查询或下载。
+3. POST 响应丢失或进程在提交中退出时记录 `submission_unknown`。后续调用只用 `GET /jobs/batch/{batchId}` 对账；唯一匹配任务恢复 job ID，空列表仍未知，多条为冲突，均不得盲目重新提交。这不构成远端 exactly-once 保证。
+4. 查询和结果下载分别有三次有界网络重试与退避，每次网络等待有上限。当前调用总等待预算耗尽且有 job ID 时返回 `waiting`，保留任务、阶段和页数进度。再次调用查询原任务，不重新 POST。401、明确任务失败、404/过期与损坏回执保留具体错误，不偷偷换任务。
+5. 完整结果先写 `result.json`、`result.md`、脱敏 `raw-result.jsonl` 和媒体，再核验内容及文件摘要，最后标记 `succeeded`。后续调用复验文件完整性后本地复用；文件坏但仍有原 job ID 时续查恢复，不重新提交。
+6. `pdf-ocr.json` version 2 保存每源安全 `progress`、状态和 `updated_at`；服务阅读顺序、块、method、images 不改写。等待中的多个附件全部登记，任何真实失败优先于等待，不能把部分结果交付下游。
+7. extract 等待退出码为 6；runner 必须验证本次报告时间、全部 PDF 输入和当前摘要、有 job ID 的等待证据，才能回到 pending。auto/supervisor 按 5–300 秒的有界间隔续查；等待不算普通失败、不消耗模型重试预算、不触发代码运维修复，也不是阶段完成。报告或原件变更会使旧等待证据失效。
+
+接口说明：`paddle_jobs.progress(output_dir)` 只读返回安全回执快照；`recognize(..., progress_callback=...)` 在回执原子保存后通知进度。回执与日志不保存令牌、签名结果 URL 或任意服务原始错误。下载链接从当前服务状态获取，不将过期签名链接持久化。
+
+官方异步接口说明：<https://ai.baidu.com/ai-doc/AISTUDIO/Mml7n69e7>。本机 CLI 后端仍保持既有进程执行行为；本节持久远端恢复适用于 Paddle jobs。
 
 ## 本机 OCR 配置
 

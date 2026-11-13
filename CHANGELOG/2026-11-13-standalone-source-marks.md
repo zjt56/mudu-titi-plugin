@@ -1,10 +1,10 @@
 # 无编号独立题的原卷提示标记保留
 
-## 触发
+## 背景与触发
 
 12课时Starter Unit3第四课时Project解除答案与表格A9卡点后，validate的audit_source_marks报[跨学科]缺失（D27/B9）。实际标记仅在古诗大题source_section标题，未进入题干/材料，不能按元数据存在就通过。
 
-## 修复与边界
+## 改了什么
 
 question_draft仅在已验证scoped来源、完整合法无编号standalone形态下，重建当前大题标题实际位置/文本/section身份；实际标题带来源标记时将整行原文前置到stem，原诗与表格完整保留。数字题已有题干不重复，普通标题不泛补；错行/错scope/借别节标记拒绝。未放宽audit_source_marks或原文审计。仅question_draft.py+新test_standalone_source_marks.py，未扩其它生产实现。
 

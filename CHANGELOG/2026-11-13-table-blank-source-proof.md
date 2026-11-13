@@ -1,10 +1,10 @@
 # 任务型阅读表格作答空位与A9来源证明
 
-## 触发
+## 背景与触发
 
 12课时Starter Unit3第四课时Project的答案超时卡点修复后，22条原答案已正式交付。继续汇总时sec-7f100795c4cef82a-u43的6–10被A9判为stem为空。只读核对：原文TABLE2中五个编号作答空位完整，当前题目的materialBlocks仍含完整表格，每个子题的答案、question_id和来源行号存在。不能凭stem空值推断丢题，也不能造题干放行。
 
-## 实施
+## 改了什么
 
 新增table_structure只读证明：当前确认结构、原文窗口、原生source_ref/table_number与question_id源行逐项一致，完整表格/编号唯一性/全部子题及选项保持原文才认可对应空stem。question_content返回精确空位集合，check_structure与publish_check共用；普通空题、缺答案、表格/正文丢失、错scope或裸候选保持严格阻断，不按题型或空printed_numbers猜豁免。
 

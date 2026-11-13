@@ -4,7 +4,7 @@
 
 目标批次为 `workflows/12七上人教版课时A计划StarterUnit3Welcome!第四课时Proj`。只读其正文、原始正文、结构候选与结构闸门报告，在系统临时目录复制文字/候选后运行真正的 `structure_gate.run_gate`，复现五项阻断：古诗无号节没有单元、正文年龄15误入声明题号、两个合法跨大题重号仍保留为阻断。本次没有写入或重跑该真实批次，没有操作运维修复 workspace。
 
-## 修改
+## 改了什么
 
 - `app/workflow/extract.py`：同行后续小题共用 `source_anchors.printed_tokens` 的真实列边界。普通正文空格后的 `15.She` 不再被当小题；保留原有答题空档与递增序列条件。
 - `app/workflow/question_content.py`：来源形态分类增加 `unnumbered_table_response`。仅认可完整节窗口、非空且闭合的表格、表格外明确答题线、无图片及无印刷锚点的来源，不认可纯空表格或残缺表格。
