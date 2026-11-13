@@ -291,7 +291,14 @@ CONTENT_OPTIONAL_INPUTS = frozenset({
 # 01_source/metadata.json is a required extract product, not optional content.
 
 
-def _repair_feedback(batch, stage, units, hashes):
+def _plausible_unit_id(value) -> bool:
+    """A retired feedback unit id must still look like a unit id, not a path."""
+    return (isinstance(value, str) and 0 < len(value) <= 200
+            and "/" not in value and "\\" not in value
+            and value not in (".", "..") and not value.startswith("."))
+
+
+def _repair_feedback(batch, stage, units, hashes, *, retire_stale=False, confirmed_at=None):
     relative = f"workflow/repair-feedback/{stage}.json"
     if relative not in REPAIR_FEEDBACK_INPUTS:
         raise ValueError("Unsupported repair feedback stage")
@@ -301,6 +308,7 @@ def _repair_feedback(batch, stage, units, hashes):
         return None
     raw = path.read_bytes()
     hashes[relative] = hashlib.sha256(raw).hexdigest()
+    retire, known = False, set()
     try:
         value = json.loads(raw.decode("utf-8-sig"))
         fields = {"version", "stage", "reason", "error", "unit_ids",
@@ -318,8 +326,17 @@ def _repair_feedback(batch, stage, units, hashes):
             raise ValueError("all_units must be a boolean")
         ids = _strings(value["unit_ids"], "repair unit_ids")
         known = {unit["unit_id"] for unit in units}
-        if not set(ids) <= known:
-            raise ValueError("Unknown confirmed unit in repair feedback")
+        unknown = [item for item in ids if item not in known]
+        if unknown:
+            # 结构重新确认会重写 unit_id：只有「反馈写在结构确认之前、且 id 形状
+            # 合法」才按旧绑定退役（留档，不放行任何单元）；结构确认之后写的反馈
+            # 仍引用了不存在的单元，说明是真实错误/路径注入，照旧拒绝。
+            stale = (retire_stale and confirmed_at is not None
+                     and all(_plausible_unit_id(item) for item in unknown)
+                     and path.stat().st_mtime <= float(confirmed_at))
+            if not stale:
+                raise ValueError("Unknown confirmed unit in repair feedback")
+            retire = True
         per_unit = value["feedback_by_unit"]
         if not isinstance(per_unit, dict) or set(per_unit) != set(ids):
             raise ValueError("feedback_by_unit must exactly match unit_ids")
@@ -333,7 +350,49 @@ def _repair_feedback(batch, stage, units, hashes):
                 raise ValueError("repair reason/error must be nonempty strings")
     except (UnicodeError, ValueError, TypeError, KeyError) as exc:
         raise ValueError(f"Invalid repair feedback for {stage}: {exc}") from exc
+    if retire:
+        retired = retire_stale_feedback(batch, sorted(known), stages=(stage,))
+        if retired:
+            from . import manifest as _manifest
+            _manifest.append_log(batch, {"event": "repair_feedback_stale",
+                                         "stage": stage, "files": retired})
+        hashes[relative] = MISSING_INPUT
+        return None
     return dict(_sanitized(value), usage=_REPAIR_FEEDBACK_USAGE)
+
+
+def retire_stale_feedback(batch, unit_ids, *, stages=None):
+    """把指向已不存在单元的修复反馈移出固定输入路径，留档保留。
+
+    结构重新确认（重算提取/重跑闸门）会重写 unit_id；旧反馈只描述旧绑定，猜映射
+    可能把修复强加到别的题上，硬拒又会把整个阶段卡死。这里按证据留档后退役，
+    后续任务重新生成反馈，候选仍须按当前确认结构重新校验，不放行任何单元。
+    """
+    root = Path(batch).resolve() / "workflow" / "repair-feedback"
+    if not root.is_dir():
+        return []
+    known = {str(unit_id) for unit_id in unit_ids}
+    wanted = set(stages) if stages else None
+    retired = []
+    for path in sorted(root.glob("*.json")):
+        if wanted is not None and path.stem not in wanted:
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError, UnicodeError):
+            continue
+        ids = value.get("unit_ids") if isinstance(value, dict) else None
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            continue
+        if set(ids) <= known:
+            continue
+        archive = root / "stale"
+        archive.mkdir(exist_ok=True)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+        target = archive / f"{path.stem}-{digest}.json"
+        path.replace(target)
+        retired.append(target.relative_to(Path(batch).resolve()).as_posix())
+    return retired
 
 
 def _collect(batch, stage, speculative=False):
@@ -419,7 +478,13 @@ def _collect(batch, stage, speculative=False):
             missing.append(f"Prepare {source_structure} before {stage}")
     structure = add("01_source/structure.confirmed.json", stage != "answers")
     units = confirmed_units(batch) if structure else []
-    feedback = _repair_feedback(batch, stage, units, hashes)
+    # 结构重新确认（重算提取/重跑闸门/自愈动作）会重写 unit_id；旧修复反馈只描述
+    # 旧绑定，猜映射可能把修复强加给别的题，但不能让整个阶段变成校验异常卡死。
+    # 只有写在本次确认之前的旧反馈才退役；确认之后的未知 id 仍按错误拒绝。
+    confirmed_path = _safe_path(batch, "01_source/structure.confirmed.json")
+    confirmed_at = confirmed_path.stat().st_mtime if confirmed_path.is_file() else None
+    feedback = _repair_feedback(batch, stage, units, hashes,
+                                retire_stale=bool(units), confirmed_at=confirmed_at)
     if stage == "types":
         # Both public assembly tasks and legacy type repairs use this model
         # implementation. Bind both inputs, including absence, so new feedback

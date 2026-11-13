@@ -1,5 +1,9 @@
 # RULES — 规则与强调台账
 
+## 2026-11-13：上传 PDF 必须完成 OCR，不能以 Word 成功或原生文字层代替
+
+用户强调：「当上传PDF时，要求必须OCR识别」。每份 PDF 都必须整卷识别；包括 Word 配套 PDF 在内，识别失败、当前来源绑定结果缺失、整卷空文字或仅原生文字层均不能让提取通过。强制识别参数由适配器自身保证，不受辅助开关影响；重复上传不能复用缺少有效 OCR 的已完成批次，本次创建新批次且不改历史数据。保留 Word 内容权威、JSON/Markdown 双格式及服务阅读顺序。落地：`app/workflow/pdf_ocr.py`、`ocr_backend.py`、`extract.py`、`contracts.py`、`app/workbench/server.py`；验证见 `CHANGELOG/2026-11-13-pdf-mandatory-ocr.md`。
+
 ## 2026-11-13：PDF直接OCR双格式交付，多附件先辨正文与答案
 
 用户要求：「如果我用PDF上传的话，请识别直接调用OCR，获取JSON和markdown文件，尤其是课时，当不止一份附件时，要识别是答案还是正文，因为我的答案会单独上传」。每份PDF整卷OCR并保存JSON与Markdown，PDF正文直接消费OCR，保留服务原顺序；多附件先内容分类再选正文，同角色Word优先，独立答案不因Word/PDF格式或上传顺序冒充正文或被过滤。课时答案匹配Unit、课时、板块、大题和题号；保留原文件名和原件摘要。落地：`pdf_ocr.py`、`extract.py`、`material_classify.py`、`source_policy.py`、`agent_tasks.py`、`upload_content.py`、`workbench/server.py`；详见同日 `pdf-ocr-material-roles` 变更记录。
@@ -501,3 +505,15 @@ content shape/catalog/media/table/schema 校验负责。**没有把内容、结�
 `assemble_precheck.py`、`format_gate.py::_run_final_format_checks`、`substeps.py`、
 `app/scripts/06-upload/audit_type_layout.py`、`app/docs/pipeline.md`、根 `AGENTS.md` 硬规则 33；
 验证见 `CHANGELOG/2026-11-12-early-content-late-format-gates.md`。
+
+## 2026-11-13：同一版面投影必须贯穿草稿、来源审计与装配回填
+
+用户原话（2026-11-13）：「后续还有类似的情况，没有题号，或者其他栏目板块，请做成通用的修复规则，解决这一类题」。
+规则：凡按识别服务坐标/版面证据归位过的题（双栏网格、图片题、栏目板块），草稿生成、来源审计、
+装配回填、上传来源比对必须读**同一份确定性投影**；禁止一步用线性行序、另一步用坐标归位——那样会把
+已归位的正确内容改回错位（本批表现为装配 SOURCE_STEM_MISSING u24 第 4 题，审计判对、回填改坏）。
+投影不可证明时（单栏/跨栏/未投影标记/题号集合不符）一律回退线性解析并留诊断，且**不得放宽审计**：
+SOURCE_STEM_MISSING/SOURCE_OPTIONS_INCOMPLETE 等判定逻辑不变，只让读写两侧对齐。落地：
+pp/workflow/ocr_grid.py::source_audit_items、question_content.py::_grid_source_audit、
+question_content.py::restore_source_stems（网格单元格不承载带字母选项，清掉线性错配选项）；
+验证见 CHANGELOG/2026-11-13-assemble-grid-projection-restore.md。

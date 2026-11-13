@@ -224,6 +224,49 @@ class StructureGateTest(unittest.TestCase):
         errors = sg._scoped_source_errors(units, sections, lines)
         self.assertNotIn("SOURCE_SECTION_UNCOVERED", [e["code"] for e in errors])
 
+    def test_option_letters_do_not_split_numbered_group_window(self):
+        # 阅读理解的选项单独成行（A. / B. / C. / D. + 图片）时，选项字母不能被
+        # 当成文章标签切开；否则题组只剩最后一个选项窗口，题号 1~3 与材料全丢。
+        from workflow import structure_gate as sg
+        lines = [
+            "七上 · 人教版 · 课时A计划",
+            "Starter Unit 2 Keep Tidy!",
+            "第二课时　Pronunciation",
+            "## B 能力提升",
+            "## 阅读理解",
+            "I'm Linda. In my home, there is a black and white thing.",
+            "( ) 1. What colour is Neo?",
+            "A. White and green. B. Red and black.",
+            "( ) 2. What does Neo say when you call its name?",
+            "A. I'm here! B. Hello!",
+            "( ) 3. [新考法·图片理解] What does Linda's brother think Neo is?",
+            "A.",
+            "[IMG imgs/img_in_image_box_640_1284_720_1381.jpg]",
+            "B.",
+            "[IMG imgs/img_in_image_box_854_1294_973_1370.jpg]",
+            "C.",
+            "[IMG imgs/img_in_image_box_639_1393_721_1483.jpg]",
+            "D.",
+            "[IMG imgs/img_in_image_box_855_1406_989_1466.jpg]",
+        ]
+        sections = [{"type": "阅读理解", "title": "## 阅读理解", "source_line": 5,
+                     "source_end_line": 19, "sync_occurrence": 1, "kind": "group",
+                     "questions": [1, 2, 3]}]
+        units = sg._build_units(sections, [{"questions": [1, 2, 3], "type": "阅读理解",
+                                           "boundary_method": "section_candidate"}], lines)
+        self.assertEqual(len(units), 1, [u.get("unit_id") for u in units])
+        unit = units[0]
+        self.assertEqual(unit["numbers"], [1, 2, 3])
+        span = unit["source_span"]
+        # 完整窗口：材料 + 三道题都在内，而不是只剩选项块
+        self.assertLessEqual(span["start_line"], 6)
+        self.assertEqual(span["end_line"], 19)
+        self.assertIn("I'm Linda", unit["stem"])
+        self.assertIn("What does Linda's brother think Neo is?", unit["stem"])
+        self.assertNotEqual(unit["stem"].strip(), "A.\n[IMG imgs/img_in_image_box_640_1284_720_1381.jpg]")
+        errors = sg._scoped_source_errors(units, sections, lines)
+        self.assertEqual([e["code"] for e in errors], [])
+
     def test_blank_group_window_still_reports_uncovered(self):
         from workflow import structure_gate as sg
         lines = [

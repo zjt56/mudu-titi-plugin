@@ -39,7 +39,7 @@ STAGES: tuple[Stage, ...] = (
                   "01_source/metadata.json", "07_review/extraction-report.json"),
         command=("workflow/extract.py", "--batch-dir", "{batch_dir}"),
         docs=("docs/extraction.md", "docs/structure.md"),
-        description="先从原卷卷头识别来源、年份、地区、来源类型；Word 原生提取，PDF 逐页选择文字层或 OCR；保留表格、图片、边界和位置证据。",
+        description="先从原卷卷头识别来源、年份、地区、来源类型；Word 原生提取，每份 PDF 必须整卷 OCR 并保存 JSON/Markdown；保留表格、图片、边界和位置证据，OCR 未完成时提取不通过。",
     ),
     Stage(
         id="structure_gate",

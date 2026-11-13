@@ -22,6 +22,58 @@ REPORT = "01_source/pdf-ocr.json"
 MARKDOWN = "01_source/pdf-ocr.md"
 
 
+def _load_report(path):
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def page_evidence(batch_dir, source_sha256=None):
+    """Recover per-page method/images from the retained service result.
+
+    Older ``pdf-ocr.json`` records kept only page text, so the projection treated
+    OCR pages as native text and left ``<div>/###/LaTeX`` in 正文. The acquisition
+    JSON next to the result is the service's own evidence, so re-reading it
+    repairs metadata without calling the service again.
+    """
+    batch = Path(batch_dir)
+    report = _load_report(batch / REPORT)
+    rows = {}
+    for item in report.get("sources") or []:
+        if not isinstance(item, dict) or item.get("status") != "completed":
+            continue
+        digest = str(item.get("sha256") or "")
+        if source_sha256 and digest and digest != source_sha256:
+            continue
+        stored = {}
+        result_path = item.get("result_path")
+        if isinstance(result_path, str):
+            try:
+                payload = json.loads((batch / result_path).read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError, TypeError):
+                payload = {}
+            result = payload.get("result") if isinstance(payload, dict) and isinstance(
+                payload.get("result"), dict) else payload
+            for page in (result.get("pages") or []) if isinstance(result, dict) else []:
+                if isinstance(page, dict) and isinstance(page.get("page"), int):
+                    stored[page["page"]] = page
+        for page in item.get("pages") or []:
+            if not isinstance(page, dict) or not isinstance(page.get("page"), int):
+                continue
+            evidence = stored.get(page["page"]) or {}
+            method = page.get("method") or evidence.get("method") or (
+                "ocr" if page.get("blocks") or page.get("images") else None)
+            images = page.get("images") or evidence.get("images") or {}
+            row = rows.setdefault(page["page"], {})
+            if method:
+                row["method"] = method
+            if images:
+                row["images"] = images
+    return rows
+
+
 def _write_report(path, report):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".pdf-ocr-", suffix=".tmp", dir=path.parent)
@@ -142,6 +194,12 @@ def run(batch, manifest, config=None):
             if any(not isinstance(page, dict) or not isinstance(page.get("text"), str)
                    for page in result["pages"]):
                 raise ValueError("OCR returned malformed page text")
+            # 强制 OCR 不接受“原生文字层冒充识别结果”，也不接受整卷空文字：
+            # 这两种都证明识别没有真正完成，不能当通过（硬规则28）。
+            if any(page.get("method") == "text" for page in result["pages"]):
+                raise ValueError("OCR returned native text instead of recognition")
+            if not any(page.get("text", "").strip() for page in result["pages"]):
+                raise ValueError("OCR returned empty document text")
             result_path = source_dir / "acquisition.json"
             markdown_path = source_dir / "acquisition.md"
             markdown = "\n\n".join(page["text"] for page in result["pages"])
@@ -151,7 +209,13 @@ def run(batch, manifest, config=None):
                                        "result": result})
             item.update(status="completed", result_path=result_path.relative_to(batch).as_posix(),
                         markdown_path=markdown_path.relative_to(batch).as_posix(),
+                        # method/images 是投影的必要证据：缺 method 时调用方会把
+                        # OCR 页当成原生文字层，跳过 <div>/###/$\underline$ 投影，
+                        # 正文里就会残留版面代码；缺 images 时图片无法落盘成 [IMG]。
                         pages=[{"page": page.get("page"), "text": page.get("text", ""),
+                                "method": page.get("method") or (
+                                    "ocr" if page.get("blocks") or page.get("images") else None),
+                                "images": page.get("images") or {},
                                 "blocks": page.get("blocks") or [],
                                 "warnings": page.get("warnings") or []}
                                for page in result["pages"]],

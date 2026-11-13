@@ -615,7 +615,9 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
     candidate = _load(structure_path) or {}
     raw = raw_path.read_text(encoding="utf-8-sig", errors="replace")
     from . import denoise
-    raw = denoise.clean_body(raw)[0]
+    cleaned = denoise.clean_body(raw)[0]
+    candidate = denoise.project_structure(candidate, raw, cleaned)
+    raw = cleaned
     raw_sha, candidate_sha = _sha(raw_path), _sha(structure_path)
     pdf_path = batch / '01_source/pdf-ocr.json'
     pdf_ocr = _load(pdf_path) if pdf_path.is_file() else None

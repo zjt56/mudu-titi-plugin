@@ -1446,6 +1446,30 @@ def _existing_upload_batch(source, answer, audio, extra_docs, extra_audio):
             actual["audio_extra"] = sorted(current_signature(item) for key, item in inputs.items()
                 if re.fullmatch(r"audio_\d{3,}", str(key)))
             if actual == expected:
+                # Completed legacy extraction may predate mandatory PDF OCR.
+                # Decline reuse without changing or rerunning the old batch;
+                # pending/running tasks retain their existing deduplication.
+                extraction = ((state.get("stages") or {}).get("extract") or {})
+                if extraction.get("status") == "completed":
+                    pdf_inputs = [record for record in inputs.values()
+                                  if isinstance(record, dict)
+                                  and Path(str(record.get("path") or "")).suffix.lower() == ".pdf"]
+                    if pdf_inputs:
+                        from workflow import extract
+                        report = load(folder / "01_source" / "pdf-ocr.json", {})
+                        usable = True
+                        for record in pdf_inputs:
+                            path = Path(record["path"]).expanduser()
+                            if not path.is_absolute():
+                                path = folder / path
+                            acquired, _ = extract._pdf_ocr_for_source(folder, path, report)
+                            pages = (acquired or {}).get("pages") or []
+                            if (not any(page["text"].strip() for page in pages)
+                                    or any(page.get("method") == "text" for page in pages)):
+                                usable = False
+                                break
+                        if not usable:
+                            continue
                 # Ensure the reused response can load the ledger as well.
                 wf_manifest.load(folder)
                 return folder

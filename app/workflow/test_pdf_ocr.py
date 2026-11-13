@@ -152,6 +152,18 @@ class PdfOcrTest(unittest.TestCase):
         self.assertEqual((self.batch / failed["markdown_path"]).read_text(), "")
         self.assertNotIn("markdown_path", failed["sources"][0])
 
+    def test_empty_or_native_only_results_cannot_satisfy_mandatory_ocr(self):
+        manifest = {'inputs': {'source': self.entry(self.word), 'attachment_001': self.entry(self.pdf)}}
+        for page, message in (({'page': 1, 'text': '  \n'}, 'empty document'),
+                              ({'page': 1, 'text': 'native', 'method': 'text'}, 'native text')):
+            with self.subTest(page=page), patch.object(pdf_ocr.ocr_backend, 'recognize',
+                                                       return_value={'pages': [page]}):
+                report = pdf_ocr.run(self.batch, manifest)
+            self.assertEqual(report['status'], 'failed')
+            self.assertIn(message, report['sources'][0]['error']['message'])
+            self.assertNotIn('result_path', report['sources'][0])
+            self.assertEqual((self.batch / report['markdown_path']).read_text(), '')
+
     def test_no_pdfs(self):
         report = pdf_ocr.run(self.batch, {"inputs": {"source": self.entry(self.word)}})
         self.assertEqual(report["status"], "no_pdfs")

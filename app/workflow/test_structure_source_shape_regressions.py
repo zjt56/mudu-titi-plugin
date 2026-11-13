@@ -183,9 +183,10 @@ class StructureSourceShapeRegressions(unittest.TestCase):
                 self.assertEqual(units, [])
 
     def test_extract_direct_script_entry_keeps_columns_without_prose_age(self):
-        # runner executes this file as a script, so __package__ is empty. Use
-        # that actual __main__ entry in a child process, with only model dispatch
-        # disabled; native Word extraction and the real parser still execute.
+        # The runner turns repo-package scripts into ``python -m`` module
+        # execution (see runner._stage_argv), so the real entry has a package
+        # parent. Execute that same module entry with model dispatch disabled;
+        # native Word extraction and the real parser still run.
         text = ('Unit 3\n第四课时 Project\nⅠ.任务型阅读\n'
                 '1.________ Sally.She is 15.She is not tidy.\n'
                 'Ⅱ.根据汉语意思完成句子\n1.Alpha ____\t2.Beta ____')
@@ -199,14 +200,13 @@ class StructureSourceShapeRegressions(unittest.TestCase):
                 archive.writestr('word/document.xml', xml)
             (root / 'workflow').mkdir()
             (root / 'workflow/manifest.json').write_text(json.dumps({'inputs': {'source': {'path': str(source)}}}))
-            script = Path(__file__).with_name('extract.py').resolve()
             code = ('import runpy,sys\nfrom unittest.mock import patch\n'
-                    'sys.argv=[sys.argv[1],"--batch-dir",sys.argv[2]]\n'
+                    'sys.argv=["workflow.extract","--batch-dir",sys.argv[1]]\n'
                     'with patch("workflow.agent.configured",return_value=False):\n'
-                    ' runpy.run_path(sys.argv[0],run_name="__main__")\n')
-            app = str(script.parents[1])
+                    ' runpy.run_module("workflow.extract",run_name="__main__")\n')
+            app = str(Path(__file__).parents[1])
             env = {**os.environ, 'PYTHONPATH': app, 'PYTHONDONTWRITEBYTECODE': '1', 'WF_STRUCTURE_AI': '0'}
-            result = subprocess.run([sys.executable, '-c', code, str(script), str(root)], env=env,
+            result = subprocess.run([sys.executable, '-c', code, str(root)], env=env, cwd=app,
                                     capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             structure = json.loads((root / '01_source/structure.json').read_text())

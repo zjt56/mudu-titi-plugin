@@ -32,6 +32,9 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-13 | [2026-11-13-lesson-scoped-anchor-band-options-fixes.md](2026-11-13-lesson-scoped-anchor-band-options-fixes.md) | 课时题号黏连/附录栏目主题/视觉预算/选项绑定的确定性修复 |
+| 2026-11-13 | [2026-11-13-all-missing-answers-not-input-error.md](2026-11-13-all-missing-answers-not-input-error.md) | 全量“无答案”决定不再被判成答案输入格式错误 |
+| 2026-11-13 | [2026-11-13-pdf-mandatory-ocr.md](2026-11-13-pdf-mandatory-ocr.md) | PDF 整卷 OCR 成为提取必过条件，拒绝空结果/原生层与无有效 OCR 的旧完成批次复用 |
 | 2026-11-13 | [2026-11-13-pdf-ocr-diagnostics.md](2026-11-13-pdf-ocr-diagnostics.md) | OCR受控错误透传与同源去重；指定八上03批次2页正式提取恢复 |
 | 2026-11-13 | [2026-11-13-host-inject-guard.md](2026-11-13-host-inject-guard.md) | 补 sessionQuery 注入并新增注入声明守卫（含跨模块 scope 读取），防未声明宿主服务复发 |
 | 2026-11-13 | [2026-11-13-sessions-inject-purge.md](2026-11-13-sessions-inject-purge.md) | 内容智能体注入 sessions 服务，修复删除批次时原生会话清理失败 |
@@ -256,3 +259,6 @@
 | 2026-11-11 | [2026-11-11-sheet-one-type-alignment.md](2026-11-11-sheet-one-type-alignment.md) | 表一改判 15 行落到同步练习规则：语法功能词/can-could 转选词填空·多句、看图补全句子转完成句子·补全句子、思维导图转阅读综合 |
 | 2026-11-11 | [2026-11-11-review-badge-binding-and-snapshot-cache.md](2026-11-11-review-badge-binding-and-snapshot-cache.md) | 待审核标签改按来源身份绑定（同号不同大题不再串标），审核投影按输入指纹缓存：切换题目 0.9s→0.07s |
 | 2026-11-11 | [2026-11-11-platform-catalog-sync.md](2026-11-11-platform-catalog-sync.md) | 平台题库目录补登记 `完成句子/补全句子`（改 static/filter-framework.json、docs/index.html、app.js 缓存戳，含备份与回退），插件本地目录与文档同步说明 |
+| 2026-11-13 | [2026-11-13-pdf-ocr-markup-projection.md](2026-11-13-pdf-ocr-markup-projection.md) | PDF OCR 版面 Markdown 未投影，正文/题干/审核预览显示 HTML 与 LaTeX 代码；新增确定性投影（图片落盘 [IMG]、画线 <u>、表格 [TABLE]），原始 Markdown 留证 |
+| 2026-11-13 | [2026-11-13-ocr-grid-item-binding.md](2026-11-13-ocr-grid-item-binding.md) | OCR 双栏网格题按行优先展平后题号与图文错位导致装配 A8/A9/E20 阻断；新增 ocr_grid 用版面块坐标把每张图片/每行词形绑定回各自小题，不改写正文 |
+| 2026-11-13 | [2026-11-13-assemble-grid-projection-restore.md](2026-11-13-assemble-grid-projection-restore.md) | 装配来源审计与回填共用同一版面投影：网格题不再被线性回填改回错位内容，SOURCE_STEM_MISSING/E20 消失 |

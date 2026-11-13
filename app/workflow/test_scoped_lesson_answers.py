@@ -275,5 +275,81 @@ class TestPointBannerAnswersTest(unittest.TestCase):
         self.assertIsNone(resolve_scoped_answer(self.batch, self.units[0], 1, 'Are;am'))
 
 
+class WholeBookCompanionWindowTest(unittest.TestCase):
+    """A whole-book answer key must be cut to the body's own lesson before proving.
+
+    Starter unit lesson titles repeat (`第二课时 Pronunciation` appears under
+    Starter Unit 1/2/3), so the enclosing unit named in the original source file
+    name is the only allowed discriminator. Without it the lesson stays unbound.
+    """
+
+    BODY = ('第一课时 Section A (1a-2d)\nⅠ.单项填空\n1. First?\n2. Second?\n'
+            'Ⅱ.根据首字母及汉语提示补全单词\n1. Spell?\n2. Spell again?\n'
+            'Ⅰ.单项填空\n1. Extension first?\n2. Extension second?\n')
+    APPENDIX = ('Starter Unit 1　Hello!\n第一课时 Section A (1a-2d)\nⅠ.1~2 AB\nⅡ.1.nice　2.Unit\nⅠ.1.C　2.D\n'
+                'Starter Unit 2　Keep Tidy!\n第一课时 Section A (1a-2d)\nⅠ.1~2 CD\nⅡ.1.other　2.word\nⅠ.1.X　2.Y\n')
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.batch = Path(tmp.name)
+        (self.batch / '01_source').mkdir()
+        (self.batch / 'workflow').mkdir()
+        self.units = assign_scoped([
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '单项填空',
+             'source_span': {'start_line': 3, 'end_line': 4}},
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '单词拼写',
+             'source_span': {'start_line': 6, 'end_line': 7}},
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '单项填空',
+             'source_span': {'start_line': 9, 'end_line': 10}},
+        ], self.BODY)
+        self.save()
+
+    def save(self, source_name='七上 人教版 课时A计划 Starter Unit 1 Hello! 第一课时 Section A.pdf'):
+        (self.batch / '01_source/正文.txt').write_text(self.BODY, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(self.APPENDIX, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': self.units}), encoding='utf-8')
+        manifest = {'inputs': {'source': {'original_filename': source_name}}} if source_name else {'inputs': {}}
+        (self.batch / 'workflow/manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+
+    def test_source_file_unit_selects_the_matching_lesson_block(self):
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[0], 1),
+                         {'answer': 'A', 'evidence': ['01_source/附录.txt:3']})
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[0], 2)['answer'], 'B')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[1], 1)['answer'], 'nice')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[2], 1)['answer'], 'C')
+
+    def test_repeated_lesson_without_source_unit_identity_stays_unbound(self):
+        self.save(source_name=None)
+        for unit in self.units:
+            self.assertIsNone(resolve_scoped_answer(self.batch, unit, 1))
+        self.save(source_name='26秋课时七上英语RJ答案.docx')  # answer file name proves nothing
+        for unit in self.units:
+            self.assertIsNone(resolve_scoped_answer(self.batch, unit, 1))
+
+    def test_other_unit_values_never_bind(self):
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[0], 1)['answer'], 'A')
+        self.assertIsNone(resolve_scoped_answer(self.batch, self.units[0], 1, 'C'))
+        self.assertIsNone(resolve_scoped_answer(self.batch, self.units[1], 1, 'other'))
+
+    def test_companion_unit_conflicting_with_body_unit_rejects(self):
+        body = 'Unit 2\n' + self.BODY
+        self.units = assign_scoped([
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '单项填空',
+             'source_span': {'start_line': 4, 'end_line': 5}},
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '单词拼写',
+             'source_span': {'start_line': 7, 'end_line': 8}},
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '单项填空',
+             'source_span': {'start_line': 10, 'end_line': 11}},
+        ], body)
+        (self.batch / '01_source/正文.txt').write_text(body, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': self.units}), encoding='utf-8')
+        self.save(source_name='七上 人教版 Starter Unit 1 Hello!.pdf')
+        (self.batch / '01_source/正文.txt').write_text(body, encoding='utf-8')
+        self.assertIsNone(resolve_scoped_answer(self.batch, self.units[0], 1))
+
+
 if __name__ == '__main__':
     unittest.main()

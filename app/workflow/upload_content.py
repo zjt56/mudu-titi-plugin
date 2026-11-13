@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -123,6 +124,11 @@ def _source_line(value, *, anchor_view=False):
     return re.sub(r'\*+|<[^>]+>', '', value).strip()
 
 
+def _structural_line(value):
+    """正文 OCR Markdown 标题前缀不参与结构身份比较（`### I. …` ≡ `I. …`）。"""
+    return re.sub(r'^\s*#{1,6}\s*', '', str(value or '').strip())
+
+
 def _printed_item_anchors(lines):
     """Printed per-item anchors for a bounded section.
 
@@ -133,6 +139,52 @@ def _printed_item_anchors(lines):
     """
     from .structure_gate import _scope_anchors
     return sorted(_scope_anchors(lines), key=lambda row: row[0])
+
+
+@lru_cache(maxsize=8)
+def _body_line_maps(body_lines: tuple[str, ...]):
+    """原文件行号与清洗正文行号的互查表（确认结构坐标在清洗后正文上）。"""
+    from . import denoise
+    return denoise.deletion_map(list(body_lines))
+
+
+def _heading_key(value):
+    """标题比较口径：忽略 Markdown 标题符、画线标记与加粗。"""
+    text = re.sub(r'</?(?:u|sup|sub)>', '', str(value or ''))
+    return _structural_line(text.replace('**', '')).strip()
+
+
+def _project_unit_to_body_file(unit, clean_to_raw, body):
+    """把清洗正文坐标的单位换回原文件行号。
+
+    确认结构通常由结构闸门在清洗后的正文上判定；但历史/直接写入的确认单元
+    也可能已经是原文件行号。两侧都用真实标题核验，只在「原文件坐标对不上、
+    清洗坐标对得上」时才换算，绝不按序号盲移。
+    """
+    if not clean_to_raw:
+        return unit
+    section = unit.get('source_section') or {}
+    start = section.get('start_line')
+    title = _heading_key(section.get('title'))
+    if type(start) is not int or not title or not 1 <= start <= len(body):
+        return unit
+    if _heading_key(body[start - 1]) == title:
+        return unit  # 已经是原文件行号
+    mapped = clean_to_raw.get(start)
+    if (type(mapped) is not int or not 1 <= mapped <= len(body)
+            or _heading_key(body[mapped - 1]) != title):
+        return unit
+
+    def move(row):
+        updated = dict(row or {})
+        for key in ('start_line', 'end_line'):
+            value = updated.get(key)
+            if type(value) is int:
+                updated[key] = clean_to_raw.get(value, value)
+        return updated
+
+    return dict(unit, source_span=move(unit.get('source_span')),
+                source_section=move(unit.get('source_section')))
 
 
 def _strip_answer_marker(value):
@@ -185,20 +237,24 @@ def _minor_edit(source, value, limit=2):
     return edits <= limit
 
 
-def scoped_source_matches(unit, number, path, line, source_lines, *, equivalent_answers=False):
+def scoped_source_matches(unit, number, path, line, source_lines, *, equivalent_answers=False,
+                         _file_coordinates=False):
     """Prove a printed number belongs to this unit at actual source coordinates.
 
     A title/type alone is never evidence. Companion excerpts need the complete
     section occurrence/context identity, independently found in both sources.
     """
     from .question_identity import VERSION
-    from .sync_practice import heading_candidates
+    from .sync_practice import heading_candidates, heading_candidates_of
     if unit.get('identity_version') != VERSION:
         return True
     if number not in (unit.get('numbers') or []):
         return False
     body_path = '01_source/正文.txt'
     body = source_lines.get(body_path, [])
+    if not _file_coordinates:
+        _, clean_to_raw = _body_line_maps(tuple(body))
+        unit = _project_unit_to_body_file(unit, clean_to_raw, body)
     lines = source_lines.get(path, [])
     span, section = unit.get('source_span') or {}, unit.get('source_section') or {}
     start, end = span.get('start_line'), span.get('end_line')
@@ -212,7 +268,7 @@ def scoped_source_matches(unit, number, path, line, source_lines, *, equivalent_
         title_text = re.sub(r"\s*\[IMG\s+[^\]]*\]", "", str(row.get('title') or '')).strip()
         return (_norm(title_text), _norm(str(row.get('context') or '')),
                 row.get('occurrence'))
-    body_sections = heading_candidates('\n'.join(body))
+    body_sections = heading_candidates_of(body)
     # The heading re-derivation ends a section on the next heading, so it may
     # greedily absorb trailing bare-image/material lines past the confirmed
     # span (e.g. a lone [IMG ...] after a cloze passage). Identity is proved by
@@ -227,6 +283,7 @@ def scoped_source_matches(unit, number, path, line, source_lines, *, equivalent_
     if len(owners) != 1:
         persisted_end = section.get('end_line')
         if (len(heading_owners) == 1 and type(persisted_end) is int
+                and type(start) is int and start <= persisted_end
                 and heading_owners[0]['start_line'] <= persisted_end <= heading_owners[0]['end_line']):
             owners = heading_owners
     if len(owners) != 1 or not owners[0]['start_line'] <= start <= end <= owners[0]['end_line']:
@@ -250,7 +307,7 @@ def scoped_source_matches(unit, number, path, line, source_lines, *, equivalent_
         section_anchors = _printed_item_anchors(body[owners[0]['start_line'] - 1:owners[0]['end_line']])
         if body_hits and sum(n == int(number) for _, n in section_anchors) != 1:
             return False
-        matches = [row for row in heading_candidates('\n'.join(lines))
+        matches = [row for row in heading_candidates_of(lines)
                    if signature(row) == signature(section)]
         if len(matches) != 1:
             return False
@@ -284,6 +341,9 @@ _LESSON_BAND = re.compile(rf'^\s*(?:{IMG}\s*)*(?:[ABＡＢ]\s*[.．、:：]?\s*)
 def _answer_band(text):
     """An explicit printed answer container; images alone prove no label."""
     text = _source_line(text)
+    # 正文来自 PDF 整卷 OCR 时板块横幅是 Markdown 标题（`## B 能力提升`），
+    # 与答案册的横幅写法（`[IMG …]能力提升[IMG …]`）必须按同一标签比较。
+    text = re.sub(r'^\s*#{1,6}\s*', '', text)
     from .lesson_bands import canonical_label
     label = canonical_label(text)
     if label:
@@ -507,17 +567,131 @@ def _compact_answer_blocks(lines, features=()):
     return blocks
 
 
-def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, features=()):
+def _answer_feature_topics(evidence):
+    """Verified visual column labels as answer-scope topics (label, start, end).
+
+    Lesson materials print 语法导图/语法精练/课时精练 as banner images, so the
+    body has no text marker and the answer key repeats Roman numerals inside each
+    banner. Only labels already proven on the current source by the visual pass
+    may act as a topic boundary; images alone still prove nothing by themselves.
+    """
+    rows = []
+    for row in ((evidence or {}).get('features') or []):
+        label = _norm(str(row.get('label') or ''))
+        start, end = row.get('start_line'), row.get('end_line')
+        if label and type(start) is int and type(end) is int and start <= end:
+            rows.append((label, start, end))
+    return rows
+
+
+def _feature_topic_at(features, line):
+    for label, start, end in features:
+        if start <= line <= end:
+            return label
+    return ''
+def _source_unit_hint(batch_dir):
+    """Unit identity is evidence: only the original source file name qualifies.
+
+    The batch name is never parsed (users may rename batches freely). The uploaded
+    source keeps its real file name in the manifest, so `Starter Unit 2 …` /
+    `Unit 3 …` can disambiguate lessons whose titles repeat across units of a
+    whole-book answer key. Anything ambiguous or missing yields None.
+    """
+    if not batch_dir:
+        return None
+    try:
+        manifest = json.loads((Path(batch_dir) / 'workflow' / 'manifest.json')
+                              .read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    inputs = manifest.get('inputs') if isinstance(manifest, dict) else None
+    source = inputs.get('source') if isinstance(inputs, dict) else None
+    name = source.get('original_filename') if isinstance(source, dict) else None
+    if not isinstance(name, str):
+        return None
+    match = re.search(r'(Starter\s+Unit|Unit)\s*([0-9]{1,2})', name, re.I)
+    if not match:
+        return None
+    return '{}{}'.format(match.group(1).replace(' ', '').lower(), match.group(2))
+
+
+def _unit_heading_key(text):
+    """Normalized unit heading identity for prefix comparison."""
+    return _norm(text or '').lower()
+
+
+def _enclosing_unit(lines: list[str], index: int):
+    """Nearest printed unit heading above a 1-based line index."""
+    from .sync_practice import plain_text, _UNIT
+    for cursor in range(index - 1, 0, -1):
+        visible = _structural_line(plain_text(lines[cursor - 1]).strip())
+        if _UNIT.match(visible):
+            return _unit_heading_key(visible)
+    return ''
+
+
+def _companion_lesson_window(path: str, lines: list[str], body: list[str],
+                             unit_hint: str | None = None):
+    """Cut a whole-book answer companion down to the body's single lesson.
+
+    The answer booklet covers the whole book, so the Roman-skeleton proof must
+    compare one lesson's body with that lesson's keys only. Only an explicit,
+    uniquely-named lesson heading may cut the window; a title repeated across
+    units is cut by the unit named in the original source file name. Anything
+    else keeps the old full-source behaviour (and therefore stays unbound).
+    """
+    from .sync_practice import plain_text, _LESSON, _UNIT
+    if path == '01_source/正文.txt' or not body:
+        return None
+    lessons = {_norm(_structural_line(plain_text(text).strip())) for text in body
+               if _LESSON.match(_structural_line(plain_text(text).strip()))}
+    lessons.discard('')
+    if len(lessons) != 1:
+        return None
+    target = next(iter(lessons))
+    hits = [index for index, text in enumerate(lines, 1)
+            if _LESSON.match(_structural_line(plain_text(text).strip()))
+            and _norm(_structural_line(plain_text(text).strip())) == target]
+    if len(hits) > 1 and unit_hint:
+        kept = []
+        for index in hits:
+            heading = _enclosing_unit(lines, index)
+            if not heading or not heading.startswith(unit_hint):
+                continue
+            if not unit_hint.startswith('starter') and heading.startswith('starter'):
+                continue
+            kept.append(index)
+        hits = kept
+    if len(hits) != 1:
+        return None
+    # A companion unit heading that contradicts the body's unit is never evidence:
+    # cutting at the lesson heading drops the unit line, so compare it before the cut.
+    body_units = {_unit_heading_key(_structural_line(plain_text(text).strip())) for text in body
+                  if _UNIT.match(_structural_line(plain_text(text).strip()))}
+    if body_units:
+        heading = _enclosing_unit(lines, hits[0])
+        if heading and heading not in body_units:
+            return None
+    start, end = hits[0], len(lines)
+    for index in range(start + 1, len(lines) + 1):
+        visible = plain_text(lines[index - 1]).strip()
+        if _LESSON.match(visible) or _UNIT.match(visible):
+            end = index - 1
+            break
+    return start, end
+
+
+def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, batch_dir=None, features=()):
     """Bind a complete single-lesson Roman skeleton, never a global number.
 
     The body may have image-only foundation/extension banners. A complete ordered
     skeleton is usable only within one nonempty lesson context, with every Roman
     section present on both sides. A partial key or a repeated lesson stays unbound.
     """
-    from .sync_practice import heading_candidates, plain_text, is_section_title, _LESSON, _UNIT
+    from .sync_practice import heading_candidates, heading_candidates_of, plain_text, is_section_title, _LESSON, _UNIT
     body_path = '01_source/正文.txt'
     body = source_lines.get(body_path, [])
-    sections = sections if sections is not None else heading_candidates('\n'.join(body))
+    sections = sections if sections is not None else heading_candidates_of(body)
     body_bands = _answer_section_bands(sections, body)
     if 'invalid' in body_bands:
         return []
@@ -530,15 +704,16 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, fea
             body_bands[index] = label
     contexts = {_norm(row.get('context') or '') for row in sections}
     topics = _answer_section_topics(sections, body, features)
-    lesson_markers = [text for text in body if _LESSON.match(plain_text(text).strip())]
-    lesson_contexts = {_norm(plain_text(text).strip()) for text in lesson_markers}
+    lesson_markers = [text for text in body
+                      if _LESSON.match(_structural_line(plain_text(text).strip()))]
+    lesson_contexts = {_norm(_structural_line(plain_text(text).strip())) for text in lesson_markers}
     topic_contexts = {topic for topic in topics if topic}
     if (len(lesson_markers) > 1 or not contexts
             or (len(contexts) != 1 and not (len(lesson_markers) == 1
                 and contexts <= lesson_contexts | topic_contexts))
             or not any(contexts)):
         return []
-    ordinals = [_ROMAN_TITLE.match(_source_line(row['title'])) for row in sections]
+    ordinals = [_ROMAN_TITLE.match(_structural_line(_source_line(row['title']))) for row in sections]
     if not sections:
         return []
     # One otherwise unnumbered final section can have its own extension key.
@@ -552,7 +727,8 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, fea
         return []
     # An unrecognized printed Roman heading must not silently disappear from the
     # skeleton and shift every later foundation/extension occurrence.
-    roman_lines = {line for line, text in enumerate(body, 1) if _ROMAN_TITLE.match(text)}
+    roman_lines = {line for line, text in enumerate(body, 1)
+                   if _ROMAN_TITLE.match(_structural_line(_source_line(text)))}
     if roman_lines != {row['start_line'] for row, ordinal in zip(sections, ordinals) if ordinal}:
         return []
     owner = unit.get('source_section') or {}
@@ -572,7 +748,8 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, fea
                  or (type(persisted_end) is int
                      and sections[i]['start_line'] <= persisted_end <= sections[i]['end_line'])]
     start = (unit.get('source_span') or {}).get('start_line')
-    if len(positions) != 1 or not scoped_source_matches(unit, number, body_path, start, source_lines):
+    if len(positions) != 1 or not scoped_source_matches(unit, number, body_path, start, source_lines,
+                                                        _file_coordinates=True):
         return []
     # A companion row cannot disambiguate repeated passage numbers in one section.
     section = sections[positions[0]]
@@ -594,15 +771,21 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, fea
     if whole and len(lesson_markers) != 1:
         return []  # A Unit heading alone cannot prove a whole unnumbered lesson task.
     result = []
+    unit_hint = _source_unit_hint(batch_dir)
     for path, lines in source_lines.items():
         if path == body_path:
             continue
-        explicit_lessons = {_norm(plain_text(text).strip()) for text in lines
-                            if _LESSON.match(plain_text(text).strip())}
-        explicit_units = {_norm(plain_text(text).strip()) for text in lines
-                          if _UNIT.match(plain_text(text).strip())}
-        body_units = {_norm(plain_text(text).strip()) for text in body
-                      if _UNIT.match(plain_text(text).strip())}
+        window = _companion_lesson_window(path, lines, body, unit_hint)
+        if window is not None:
+            start, end = window
+            # 保留绝对行号：引用必须是原答案册里的真实坐标。
+            lines = [''] * (start - 1) + lines[start - 1:end]
+        explicit_lessons = {_norm(_structural_line(plain_text(text).strip())) for text in lines
+                            if _LESSON.match(_structural_line(plain_text(text).strip()))}
+        explicit_units = {_norm(_structural_line(plain_text(text).strip())) for text in lines
+                          if _UNIT.match(_structural_line(plain_text(text).strip()))}
+        body_units = {_norm(_structural_line(plain_text(text).strip())) for text in body
+                      if _UNIT.match(_structural_line(plain_text(text).strip()))}
         if (explicit_lessons and explicit_lessons != (lesson_contexts or contexts)
                 or explicit_units and explicit_units != body_units):
             continue
@@ -718,10 +901,12 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, fea
 
 
 def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
-    from .sync_practice import heading_candidates
+    from .sync_practice import heading_candidates, heading_candidates_of
     body_path = '01_source/正文.txt'
     body = lines.get(body_path, [])
-    sections = heading_candidates('\n'.join(body))
+    _, clean_to_raw = _body_line_maps(tuple(body))
+    unit = _project_unit_to_body_file(unit, clean_to_raw, body)
+    sections = heading_candidates_of(body)
     features = ()
     if batch_dir is not None:
         from .lesson_bands import load_verified, annotate_sections
@@ -779,20 +964,22 @@ def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
             if path == '01_source/正文.txt' and not re.search(EXPLANATION_LABEL + r'|【答案】', text):
                 continue  # A stem/option line is not an independent answer.
             for n, value in _answer_items(text):
-                if n == int(number) and scoped_source_matches(unit, number, path, index, lines, equivalent_answers=True):
+                if n == int(number) and scoped_source_matches(unit, number, path, index, lines,
+                                                             equivalent_answers=True,
+                                                             _file_coordinates=True):
                     companion_band = _answer_section_bands([{'start_line': index}], rows)[0]
                     if path == body_path or not owner_band or companion_band == owner_band:
                         candidates.append((path, index, value))
     primary_lines = {path: rows for path, rows in lines.items() if path in SOURCES}
-    candidates.extend(_compact_scoped_candidates(unit, number, primary_lines,
-                                                 sections=sections, features=features))
+    candidates.extend(_compact_scoped_candidates(unit, number, primary_lines, sections=sections,
+                                                 batch_dir=batch_dir, features=features))
     primary = list(dict.fromkeys(row for row in candidates if row[0] in SOURCES))
     if primary:
         return primary  # Malformed fallback material cannot poison real Word content.
     fallback_lines = {path: rows for path, rows in lines.items()
                       if path == '01_source/正文.txt' or path not in SOURCES}
-    candidates.extend(_compact_scoped_candidates(unit, number, fallback_lines,
-                                                 sections=sections, features=features))
+    candidates.extend(_compact_scoped_candidates(unit, number, fallback_lines, sections=sections,
+                                                 batch_dir=batch_dir, features=features))
     return list(dict.fromkeys(candidates))
 
 

@@ -15,21 +15,21 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 - PNG/JPEG/WebP/BMP/TIFF：调用当前配置的 OCR（飞桨 jobs API 或兼容的本地 CLI）。
 - 旧 DOC 不直接支持，应先转为 DOCX。当前网页上传入口仍接收 DOCX/PDF，图片路径可通过批次 source 或 Python API 使用。
 
-## 来源优先级（Word > 带文字层 PDF > 扫描件）
+## 来源优先级（先辨材料角色，同角色 Word 优先）
 
 用户 2026-11-11 确认的口径，代码入口 `workflow/source_policy.py`（`select_primary` /
 `build_report` / `upload_notice`），三处共用同一实现，不得各写一套判断：
 
-1. **同一批上传同时含 `.docx` 与 `.pdf`**：`.docx` 一定是提取主源（`source`），PDF 只作附件
+1. **同一正文同时有 `.docx` 与 `.pdf`**：以 `.docx` 为提取主源（`source`），同正文 PDF 只作附件
    供版面/层级核对；`01_source/material-roles.json` 中它的 `role=structure_reference`、
-   `content_authority=false`，不参与唯一绑定竞争。
+   `content_authority=false`，不参与唯一绑定竞争。不同材料先按内容分辨角色，不能只凭扩展名选正文。
 2. **PDF 正文及 PDF 答案附件**：一律整卷 OCR，直接采用识别服务结果，不以文字层质量决定是否 OCR。多附件先按内容识别 paper/answers/explanations/mix，再选择正文；Word 优先只用于正文候选，独立 Word 答案不会压过 PDF 正文。答案保留独立来源，不混入正文切题。
 3. **扫描件/纯图片 Word**：只能走 OCR，属于最后手段，结果需核对题号、音标、画线、表格顺序。
 4. 旧版 `.doc` 需先转 `.docx`；转换可能丢图，提示用户另存后重传。
 
-为什么 Word 优先：`.docx` 由标准库直接解析 OOXML，段落、表格网格、合并跨度、画线、图片关系
-都是结构化数据，逐字位置可信且不需要 OCR 环境；文字层 PDF 依赖运行环境提供 PyMuPDF，页质量
-只能靠启发式路由；OCR 文字没有逐字坐标与可信度。
+为什么同正文 Word 优先：`.docx` 由标准库直接解析 OOXML，段落、表格网格、合并跨度、画线、图片关系
+都是结构化数据，逐字位置可信且不需要 OCR 环境；PDF 则必须依靠识别服务整卷 OCR，文字层不再用于决定是否识别。
+OCR 坐标与可信度只保留服务实际提供的字段，不从原生文字层借用。
 
 落地与证据：
 
@@ -51,7 +51,8 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 - 产物：`01_source/pdf-ocr.json`（每源状态、页码、文字、版面块、警告及 Markdown 路径）、`01_source/pdf-ocr.md`，以及每源独立目录中的 `source.pdf`、`acquisition.json`、`acquisition.md`；同一 SHA 一次运行只提交一次，按服务页序保存。聚合 Markdown 供查看，正文与答案绑定仍使用独立材料。
 - 消费方：`structure_ai` 结构归类提示词与 assemble/review 任务把该 JSON 当作层级/阅读顺序参考，并注明有 Word 时以 Word 原文为准。
 - 边界：同一正文有 Word/PDF 时仍用 Word 原文；PDF-only 正文直接消费 OCR，独立答案各自绑定。版面块存在不证明阅读顺序正确，顺序问题由识别服务侧排查，不在此处手工重排。
-- 失败：识别未配置、超时或空结果时该 PDF 记为 failed，不写伪 JSON。Word 为主源时只记 warning 继续用 Word；PDF 为主源时提取失败。
+- 失败：识别未配置、超时、整卷空文字、仅返回原生文字层，或缺少与当前原件 SHA 绑定的识别结果时，该 PDF 不满足必过条件；无论 Word/PDF 谁是主源，提取均不得通过。Word 原文继续保留，但不能用 Word 成功掩盖配套 PDF 的 OCR 失败；不自动重复提交、不制造成功产物。
+- 重复上传：已完成提取的历史批次只有每份 PDF 都具备当前来源绑定且非空的 OCR 结果时才允许复用；不合格时为本次上传新建批次，不改写或重跑旧批次。处理中/待处理批次仍按原规则去重，避免重复提交识别。
 - 代价：整卷识别更慢并消耗识别额度，这是上述要求的已知成本。
 
 ## 本机 OCR 配置
@@ -72,7 +73,7 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 
 也可以设置 `MUDU_OCR_CONFIG` 指向其他配置文件。相对路径以配置文件所在目录为基准。配置仅包含本地路径，不上传文件、不连接第三方 OCR。
 
-`ocr-config.json` 已被 Git 忽略；示例和适配器不写死某台电脑的路径。迁移时单独安装 OCR 环境和权重，再更新这两条路径。纯文字 Word 路径不需要 OCR 配置；PDF（即使有文字层）需要配置的环境提供 PyMuPDF，并且需要可用的 OCR 服务做整卷版面识别。
+`ocr-config.json` 已被 Git 忽略；示例和适配器不写死某台电脑的路径。迁移时单独安装 OCR 环境和权重，再更新这两条路径。纯文字 Word 路径不需要 OCR 配置；PDF（即使有文字层）必须有可用的 OCR 服务做整卷识别。PyMuPDF 仅用于可选的原生文字/图片证据，缺失时不否定有效的服务 OCR。
 
 沿用 OCR 现有独立虚拟环境，不向审核台环境安装 torch/transformers，也不升级模型依赖。OCR 命令以参数数组启动，不使用 shell。多个批次调用同一模型脚本时通过操作系统文件锁串行执行，避免同时加载多个模型；直接在工作流外调用原脚本不受此锁控制。
 

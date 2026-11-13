@@ -14,6 +14,9 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
+from copy import deepcopy
+from hashlib import sha256
 
 # 新旧卷头名称均属于中考：例如 2014 年的「初中毕业学业考试」。
 JUNIOR_EXAM = r"初中(?:毕业(?:生)?)?学业(?:水平)?考试"
@@ -200,3 +203,81 @@ def _strong_meta(stripped: str) -> bool:
 def _looks_like_question_line(stripped: str) -> bool:
     """带明确题号（`12.` 或 `( )12.`）的行属于题目，不当作元信息剔除。"""
     return bool(re.search(r"(?:[(（]\s*[)）]\s*)?\b\d{1,3}\s*[.．、]\s*\S", stripped))
+
+
+def deletion_map(lines: list[str]) -> tuple[dict[int, int], dict[int, int]]:
+    """正文去噪的 1 起行号映射 (raw→clean, clean→raw)。
+
+    结构单元与确认结构由 runs 在清洗后的正文上确认，而答案/证据按原文件行号
+    引用；两边必须用同一张删除表换算，不能假设序号一致。无删除时返回空表，
+    调用方按恒等处理。
+    """
+    text = "\n".join(lines)
+    cleaned, _, removed = clean_body(text)
+    removed_lines = {row["line_no"] for row in removed}
+    if not removed_lines:
+        return {}, {}
+    kept = [n for n in range(1, len(lines) + 1) if n not in removed_lines]
+    if len(kept) != len(cleaned.split("\n")):
+        return {}, {}
+    return ({n: i for i, n in enumerate(kept, 1)},
+            {i: n for i, n in enumerate(kept, 1)})
+
+
+def project_structure(structure: dict, raw_text: str, cleaned_text: str | None = None) -> dict:
+    """Project raw extraction coordinates through the exact denoising deletion map.
+
+    Only line coordinates change; printed numbers, evidence strings and source
+    content remain untouched. This is for structure.json, not AI/confirmed units
+    whose coordinates already refer to the cleaned body.
+    """
+    cleaned, _, removed = clean_body(raw_text)
+    if cleaned_text is not None and cleaned != cleaned_text:
+        raise ValueError("SOURCE_COORDINATE_MISMATCH: current cleaned body differs from denoising projection")
+    result = deepcopy(structure)
+    if not removed:
+        return result
+    proof = {"raw_sha256": sha256(raw_text.encode("utf-8")).hexdigest(),
+             "cleaned_sha256": sha256(cleaned.encode("utf-8")).hexdigest()}
+    if result.get("coordinate_projection") == proof:
+        return result
+    if result.get("coordinate_projection"):
+        raise ValueError("SOURCE_COORDINATE_MISMATCH: structure projection belongs to another body")
+    raw_lines = raw_text.splitlines()
+    removed_lines = {row["line_no"] for row in removed}
+    # splitlines() drops one trailing empty line while clean_body uses split("\n").
+    # Keep the mapping in the same coordinate system as all source consumers.
+    retained = [n for n in range(1, len(raw_lines) + 1) if n not in removed_lines][:len(cleaned.splitlines())]
+    direct = {n: i for i, n in enumerate(retained, 1)}
+    normalize = lambda text: re.sub(r"</?(?:u|sup|sub)>", "", str(text)).replace("**", "").strip()
+    for section in result.get("sections") or []:
+        at, title = section.get("source_line"), section.get("title")
+        if type(at) is int and title and (not 1 <= at <= len(raw_lines)
+                                          or normalize(raw_lines[at - 1]) != normalize(title)):
+            raise ValueError(f"SOURCE_COORDINATE_MISMATCH: section heading at raw line {at} does not match current body")
+    starts = {"source_line", "source_start_line", "start_line", "heading_line"}
+    ends = {"source_end_line", "end_line"}
+    points = {"line", "line_no"}
+
+    def project(value, key=""):
+        if isinstance(value, dict):
+            return {k: project(v, k) for k, v in value.items()}
+        if isinstance(value, list):
+            return [project(v) for v in value]
+        if type(value) is not int or key not in starts | ends | points:
+            return value
+        if not 1 <= value <= len(raw_lines):
+            raise ValueError(f"SOURCE_COORDINATE_MISMATCH: {key}={value} outside raw body 1..{len(raw_lines)}")
+        if value in direct:
+            return direct[value]
+        if key in ends:
+            mapped = bisect_right(retained, value)
+        else:
+            raise ValueError(f"SOURCE_COORDINATE_MISMATCH: {key}={value} points to a removed line; cannot move an anchor to another question")
+        if not 1 <= mapped <= len(retained):
+            raise ValueError(f"SOURCE_COORDINATE_MISMATCH: {key}={value} has no retained body boundary")
+        return mapped
+
+    result = project(result)
+    result["coordinate_projection"] = proof
+    return result

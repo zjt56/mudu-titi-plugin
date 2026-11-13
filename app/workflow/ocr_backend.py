@@ -37,6 +37,8 @@ ERROR_MESSAGES = {
     "source_digest_mismatch": "registered SHA-256 does not match source",
     "empty_pages": "OCR returned no pages",
     "malformed_page_text": "OCR returned malformed page text",
+    "native_text": "OCR returned native text instead of recognition",
+    "empty_document": "OCR returned empty document text",
     "waiting": "OCR task is waiting for its existing remote result; resume without resubmission.",
     "submission_unknown": "OCR submission outcome is unknown; reconcile the existing batch before any resubmission.",
     "receipt_corrupt": "OCR task receipt is invalid; automatic resubmission refused.",
@@ -44,7 +46,8 @@ ERROR_MESSAGES = {
     "submission_conflict": "Multiple OCR jobs match the submitted batch; automatic selection and resubmission refused.",
 }
 SAFE_VALUE_ERRORS = {ERROR_MESSAGES[code]: code for code in (
-    "source_digest_mismatch", "empty_pages", "malformed_page_text")}
+    "source_digest_mismatch", "empty_pages", "malformed_page_text",
+    "native_text", "empty_document")}
 
 
 def _safe_error_details(details, token=""):
@@ -365,6 +368,8 @@ def recognize(source: Path, output_dir: Path, *, force_ocr=False, pages=None,
     return success. Empty recognized text remains empty; no content is invented.
     """
     settings = _config(config)
+    if mandatory_pdf and Path(source).suffix.lower() == '.pdf':
+        force_ocr = True
     if not assist_enabled(settings) and not (mandatory_pdf and Path(source).suffix.lower() == '.pdf'):
         raise OCRBackendError(ASSIST_OFF_MESSAGE)
     if settings.get("backend") == "paddle_jobs":
@@ -418,6 +423,8 @@ def recognize(source: Path, output_dir: Path, *, force_ocr=False, pages=None,
         method = page.get("method")
         if method not in {"text", "ocr"}:
             raise OCRBackendError(f"Unsupported OCR result page method: {method!r}; log: {log}")
+        if force_ocr and method != 'ocr':
+            raise OCRBackendError(f"Forced OCR returned a native text page: {page['page']}; log: {log}")
         normalized.append({"page": page["page"], "text": page["text"], "method": method,
                            "seconds": page.get("seconds"), "blocks": [],
                            "warnings": ["coordinates_absent"]})
