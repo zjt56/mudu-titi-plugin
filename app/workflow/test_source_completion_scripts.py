@@ -313,6 +313,24 @@ class MissingAnswerIsNotAnInputErrorTest(unittest.TestCase):
         self.assertTrue(report["passed"], report)
         self.assertEqual(report["issues"], [])
 
+    def test_all_missing_decision_artifact_is_not_an_input_error(self):
+        """答案阶段产出的“全部无答案”决定（answers 空 + missing 全覆盖）必须可读。
+
+        课时卷确实没有答案区时，正式产物就是 answers={} 且 missing 覆盖每个确认题号；
+        把它当 ANSWER_INPUT_ERROR 会让体检失败，并把“原卷无答案”误报成格式故障。
+        """
+        module = self.answers_module()
+        decision = {"answers": {}, "evidence": {},
+                    "missing": {"q-1": ["未提供答案原文；按无答案占位继续"],
+                                "q-2": ["未提供答案原文；按无答案占位继续"]}}
+        self.assertEqual(module.collect_json(decision), {})
+        batch = {"items": [{"number": 1, "answer": "无答案"}, {"number": 2, "answer": ""}]}
+        report = module.inspect(batch, module.collect_json(decision))
+        self.assertTrue(report["passed"], report)
+        # 空 answers 但没有 missing 证据时仍按格式错误处理，不能静默放行。
+        with self.assertRaises(module.AnswerError):
+            module.collect_json({"answers": {}, "evidence": {}})
+
     def test_truly_blank_choice_answer_is_still_not_a_crash(self):
         module = self.answers_module()
         batch = {"items": [{"number": 2, "answer": ""}]}

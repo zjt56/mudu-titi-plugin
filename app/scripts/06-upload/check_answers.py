@@ -58,6 +58,12 @@ def normalize(value):
 
 def collect_json(data, *, scoped=False):
     answers = {}
+    # 正式“无答案”决定：原卷/答案材料确实没有答案时，答案阶段会为每个确认题号
+    # 写 missing，而 answers 为空。它不是输入格式错误（硬规则5 空白语义 + 规则22），
+    # 体检应据此判定“无独立答案可比”，不能报 ANSWER_INPUT_ERROR。
+    if (isinstance(data, dict) and not data.get("answers")
+            and isinstance(data.get("missing"), dict) and data["missing"]):
+        return {}
 
     def put(n, answer):
         key = str(n) if scoped else number(n)
