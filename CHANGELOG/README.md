@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-13 | [2026-11-13-host-inject-guard.md](2026-11-13-host-inject-guard.md) | 补 sessionQuery 注入并新增注入声明守卫（含跨模块 scope 读取），防未声明宿主服务复发 |
 | 2026-11-13 | [2026-11-13-sessions-inject-purge.md](2026-11-13-sessions-inject-purge.md) | 内容智能体注入 sessions 服务，修复删除批次时原生会话清理失败 |
 | 2026-11-13 | [2026-11-13-coalesced-image-marker.md](2026-11-13-coalesced-image-marker.md) | 证据中 [IMG 4/5/6.jpeg] 合并写法不再被当媒体路径拒绝；真实单图与越界仍分别绑定/拒绝 |
 | 2026-11-13 | [2026-11-13-extended-question-choice-count.md](2026-11-13-extended-question-choice-count.md) | 阅读理解选择N题不再把开放式拓展设问计入选项题数；题组仍保留该子题 |
