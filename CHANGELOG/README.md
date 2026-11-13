@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-13 | [2026-11-13-coalesced-image-marker.md](2026-11-13-coalesced-image-marker.md) | 证据中 [IMG 4/5/6.jpeg] 合并写法不再被当媒体路径拒绝；真实单图与越界仍分别绑定/拒绝 |
 | 2026-11-13 | [2026-11-13-extended-question-choice-count.md](2026-11-13-extended-question-choice-count.md) | 阅读理解选择N题不再把开放式拓展设问计入选项题数；题组仍保留该子题 |
 | 2026-11-13 | [2026-11-13-visual-column-ownership.md](2026-11-13-visual-column-ownership.md) | 新增整页视觉栏目归属证据与无号实际题链路；结构闸门缺栏目证据时阻断，视觉桥长度/诊断修复 |
 | 2026-11-13 | [2026-11-13-generic-unnumbered-features.md](2026-11-13-generic-unnumbered-features.md) | 通用无号作答窗口与任意栏目标题来源证明、完整覆盖和真实15单元复验 |
