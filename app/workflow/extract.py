@@ -690,8 +690,9 @@ def _pdf_ocr_for_source(batch, source, report):
             result = data["result"]
             if data.get("source_sha256") != digest or not isinstance(result.get("pages"), list):
                 raise ValueError("来源或页面无效")
-            if any(not isinstance(p, dict) or not isinstance(p.get("text"), str) for p in result["pages"]):
-                raise ValueError("页面文字无效")
+            if any(not isinstance(p, dict) or not isinstance(p.get("text"), str) or p.get('method') == 'text'
+                   for p in result["pages"]):
+                raise ValueError("页面文字无效或仅为原生文字层")
             return result, None
         except (OSError, ValueError, KeyError, TypeError) as exc:
             return None, f"PDF OCR 结果不可用：{exc}"
@@ -997,13 +998,6 @@ def run(batch_dir: Path) -> dict:
             raise
         ocr_report = future.result()
     result["pdf_ocr"] = ocr_report
-    if ocr_report.get("status") == "failed":
-        message = "PDF OCR 获取失败，请查看 pdf_ocr 报告：" + str(ocr_report.get("error", "部分来源获取失败"))
-        if source_path.suffix.lower() == '.docx':
-            result.setdefault('warnings', []).append(message + '；继续使用 Word 原文处理')
-        else:
-            result["passed"] = False
-            result["error"] = message
     # 材料分类（用户 2026-11 重设计）：逐份上传文件提取文字层后判定角色
     # （正文/答案/解析/混排/其他）。非阻断：模型不可用时用确定性兜底，只留证据。
     try:
@@ -1031,7 +1025,7 @@ def run(batch_dir: Path) -> dict:
                               and Path(str(row.get('path') or '')).suffix.lower() == '.pdf']
         if auxiliary_failures:
             names = '、'.join(row.get('input', 'unknown') for row in auxiliary_failures)
-            result.setdefault('warnings', []).append('PDF 材料提取失败：' + names + '；继续使用 Word 原文处理')
+            result.setdefault('warnings', []).append('PDF 材料提取失败：' + names + '；Word 原文已保留，PDF OCR 完成前提取不通过')
         failures = [row.get('input', 'unknown') for row in failed_rows if row not in auxiliary_failures]
         if failures:
             result['passed'] = False
@@ -1098,6 +1092,27 @@ def run(batch_dir: Path) -> dict:
         _write(batch_dir / "01_source" / "source-policy.json", policy)
     except Exception as exc:  # noqa: BLE001 - 证据记录失败不阻断提取
         result["source_policy"] = {"error": str(exc)}
+    # Every registered PDF must have current, usable OCR, including Word's
+    # companion references. A report status alone cannot prove source coverage.
+    pdf_failures = []
+    for key, entry in manifest.get('inputs', {}).items():
+        if not isinstance(entry, dict):
+            continue
+        path = Path(str(entry.get('path') or '')).expanduser()
+        if path.suffix.lower() != '.pdf':
+            continue
+        if not path.is_absolute():
+            path = batch_dir / path
+        try:
+            acquired, warning = _pdf_ocr_for_source(batch_dir, path, ocr_report)
+            if acquired is None or not any(page['text'].strip() for page in acquired['pages']):
+                pdf_failures.append(f'{key} ({path.name}): {warning or "PDF OCR 正文为空"}')
+        except (OSError, ValueError, KeyError, TypeError):
+            pdf_failures.append(f'{key} ({path.name}): PDF OCR 来源或结果不可用')
+    if pdf_failures:
+        result['passed'] = False
+        message = 'PDF OCR 必须完成，提取未通过：' + '；'.join(pdf_failures)
+        result['error'] = '；'.join(filter(None, [result.get('error'), message]))
     _write(batch_dir / "07_review" / "extraction-report.json", result)
     return result
 

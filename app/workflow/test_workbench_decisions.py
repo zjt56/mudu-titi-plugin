@@ -145,6 +145,81 @@ class UploadTest(unittest.TestCase):
         self.assertEqual(self.started, [first["name"]])
         self.assertEqual(len(list(server.WORKFLOWS.iterdir())), 1)
 
+    def _pdf_upload_with_stage(self, stage_status, *, companion=False):
+        pdf = {"filename": "paper.pdf", "data": b"%PDF mandatory OCR fixture"}
+        parts = [self._docx("paper.docx"), pdf] if companion else [pdf]
+        first = server.handle_upload({}, parts)
+        batch = server.WORKFLOWS / first["name"]
+        state = server.wf_manifest.load(batch)
+        state["stages"]["extract"]["status"] = stage_status
+        server.wf_manifest.save(batch, state)
+        record = next(row for row in state["inputs"].values()
+                      if pathlib.Path(row["path"]).suffix == ".pdf")
+        acquisition = {"source_sha256": record["sha256"], "result": {
+            "pages": [{"page": 1, "text": "OCR paper text", "method": "ocr"}]}}
+        report = {"status": "completed", "sources": [{
+            "path": record["path"], "sha256": record["sha256"], "status": "completed",
+            "result_path": "01_source/pdf-ocr/fixture/acquisition.json"}]}
+        return parts, first, batch, report, acquisition
+
+    def test_completed_pdf_upload_without_valid_ocr_creates_new_batch_readonly(self):
+        for companion in (False, True):
+            for defect in ("missing_report", "failed", "wrong_sha", "wrong_acquisition_sha",
+                           "missing_acquisition", "empty_text", "native_text"):
+                with self.subTest(companion=companion, defect=defect):
+                    parts, first, batch, report, acquisition = self._pdf_upload_with_stage(
+                        "completed", companion=companion)
+                    if defect == "failed":
+                        report["sources"][0]["status"] = "failed"
+                    elif defect == "wrong_sha":
+                        report["sources"][0]["sha256"] = "stale"
+                    elif defect == "wrong_acquisition_sha":
+                        acquisition["source_sha256"] = "stale"
+                    elif defect == "empty_text":
+                        acquisition["result"]["pages"][0]["text"] = " \n "
+                    elif defect == "native_text":
+                        acquisition["result"]["pages"][0]["method"] = "text"
+                    if defect != "missing_report":
+                        server.save_json(batch / "01_source/pdf-ocr.json", report)
+                    if defect != "missing_acquisition":
+                        server.save_json(batch / report["sources"][0]["result_path"], acquisition)
+                    before = {p.relative_to(batch): p.read_bytes() for p in batch.rglob("*") if p.is_file()}
+                    starts_before = len(self.started)
+                    second = server.handle_upload({}, parts)
+                    self.assertNotEqual(first["name"], second["name"])
+                    self.assertFalse(second.get("reused", False))
+                    self.assertEqual(self.started[starts_before:], [second["name"]])
+                    self.assertEqual(before, {p.relative_to(batch): p.read_bytes()
+                                             for p in batch.rglob("*") if p.is_file()})
+                    # Mark the new pending fixture as sent so later iterations
+                    # cannot reuse it; this touches only this temporary fixture.
+                    state = server.wf_manifest.load(server.WORKFLOWS / second["name"])
+                    state["stages"]["upload"]["status"] = "completed"
+                    server.wf_manifest.save(server.WORKFLOWS / second["name"], state)
+
+    def test_completed_pdf_upload_with_current_ocr_reuses_without_restart(self):
+        for companion in (False, True):
+            with self.subTest(companion=companion):
+                parts, first, batch, report, acquisition = self._pdf_upload_with_stage(
+                    "completed", companion=companion)
+                server.save_json(batch / "01_source/pdf-ocr.json", report)
+                server.save_json(batch / report["sources"][0]["result_path"], acquisition)
+                starts_before = list(self.started)
+                second = server.handle_upload({}, parts)
+                self.assertEqual(first["name"], second["name"])
+                self.assertTrue(second["reused"])
+                self.assertEqual(self.started, starts_before)
+
+    def test_pending_and_running_pdf_uploads_keep_existing_reuse_semantics(self):
+        for status in ("pending", "running"):
+            with self.subTest(status=status):
+                parts, first, batch, _, _ = self._pdf_upload_with_stage(status)
+                starts_before = list(self.started)
+                second = server.handle_upload({}, parts)
+                self.assertEqual(first["name"], second["name"])
+                self.assertTrue(second["reused"])
+                self.assertEqual(self.started, starts_before)
+
     def test_dedupe_requires_present_unchanged_local_inputs(self):
         document = self._docx("same-paper.docx")
         first = server.handle_upload({}, [document])

@@ -74,6 +74,25 @@ class OCRBackendTest(unittest.TestCase):
             with self.assertRaises(backend.OCRBackendError):
                 backend.recognize(self.source, self.output, config=self.config)
 
+    @patch.object(backend.subprocess, 'run')
+    def test_mandatory_pdf_forces_recognition_and_rejects_native_text(self, run):
+        run.side_effect = self.success
+        result = backend.recognize(self.source, self.output, config=self.config, mandatory_pdf=True)
+        self.assertTrue(result['provenance']['force_ocr'])
+        self.assertIn('--force-ocr', run.call_args.args[0])
+
+        def native_result(command, **kwargs):
+            completed = self.success(command, **kwargs)
+            output = Path(command[command.index('-o') + 1]).with_suffix('.json')
+            output.write_text(json.dumps({'pages': [{'page': 1, 'text': 'native', 'method': 'text'}]}),
+                              encoding='utf-8')
+            return completed
+        run.reset_mock()
+        run.side_effect = native_result
+        with self.assertRaisesRegex(backend.OCRBackendError, 'native text page'):
+            backend.recognize(self.source, self.output, config=self.config, mandatory_pdf=True)
+        self.assertEqual(run.call_count, 1)
+
     def test_config_precedence_relative_paths_and_defaults(self):
         path = self.root / "config.json"
         path.write_text(json.dumps({"python": sys.executable, "script": self.script.name}), encoding="utf-8")

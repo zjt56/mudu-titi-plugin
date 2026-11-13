@@ -102,6 +102,10 @@ def run(batch, manifest, config=None):
             if any(not isinstance(page, dict) or not isinstance(page.get("text"), str)
                    for page in result["pages"]):
                 raise ValueError("OCR returned malformed page text")
+            if any(page.get('method') == 'text' for page in result['pages']):
+                raise ValueError("OCR returned native text instead of recognition")
+            if not any(page['text'].strip() for page in result['pages']):
+                raise ValueError("OCR returned empty document text")
             result_path = source_dir / "acquisition.json"
             markdown_path = source_dir / "acquisition.md"
             markdown = "\n\n".join(page["text"] for page in result["pages"])
@@ -122,7 +126,8 @@ def run(batch, manifest, config=None):
             item["error"] = {"type": type(exc).__name__, "message": (
                 str(exc) if isinstance(exc, ValueError) and str(exc) in {
                     "registered SHA-256 does not match source", "OCR returned no pages",
-                    "OCR returned malformed page text"} else "PDF acquisition or OCR failed; inspect configuration and source")}
+                    "OCR returned malformed page text", "OCR returned empty document text",
+                    "OCR returned native text instead of recognition"} else "PDF acquisition or OCR failed; inspect configuration and source")}
     if any(item["status"] != "completed" for item in report["sources"]):
         report["status"] = "failed"
     elif not report["sources"]:

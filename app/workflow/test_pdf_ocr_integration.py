@@ -62,13 +62,15 @@ class PdfOcrIntegrationTest(unittest.TestCase):
              patch.object(pdf_ocr.ocr_backend, 'recognize', side_effect=RuntimeError('offline')) as calls, \
              patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=self.native):
             result = extract.run(self.batch)
-        self.assertTrue(result['passed'])
-        self.assertTrue(any('继续使用 Word' in warning for warning in result['warnings']))
+        self.assertFalse(result['passed'])
+        self.assertIn('PDF OCR 必须完成', result['error'])
+        self.assertIn('attachment_001 (paper.pdf)', result['error'])
+        self.assertFalse(json.loads((self.batch / '07_review/extraction-report.json').read_text())['passed'])
         self.assertEqual(calls.call_count, 1)
         self.assertEqual(result['pdf_ocr']['sources'][0]['status'], 'failed')
         self.assertIn('Word question', (self.batch / '01_source/原始正文.txt').read_text())
 
-    def test_word_pdf_role_failure_is_nonblocking_for_any_ocr_status(self):
+    def test_missing_pdf_acquisition_blocks_word_batch_for_any_report_status(self):
         manifest = {'inputs': {'source': self.entry(self.word),
                                'attachment_001': self.entry(self.pdf)}}
         word = {'text': '一、单项选择\n1. Word question?', 'media': [], 'warnings': []}
@@ -80,7 +82,9 @@ class PdfOcrIntegrationTest(unittest.TestCase):
                  patch.object(pdf_ocr, 'run', return_value={'status': status, 'sources': []}), \
                  patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=RuntimeError('native unavailable')):
                 result = extract.run(self.batch)
-            self.assertTrue(result['passed'])
+            self.assertFalse(result['passed'])
+            self.assertIn('attachment_001 (paper.pdf)', result['error'])
+            self.assertIn('PDF OCR 报告中没有此来源', result['error'])
             self.assertTrue(any('PDF 材料提取失败' in warning for warning in result['warnings']))
             rows = {row['input']: row for row in result['material_roles']['documents']}
             self.assertEqual(rows['attachment_001']['role'], 'structure_reference')
@@ -128,7 +132,7 @@ class PdfOcrIntegrationTest(unittest.TestCase):
             result = extract.run(self.batch)
         self.assertFalse(result['passed'])
         self.assertIn('attachment_002', result['error'])
-        self.assertNotIn('attachment_001', result['error'])
+        self.assertIn('attachment_001 (paper.pdf)', result['error'])
         self.assertTrue(any('attachment_001' in warning for warning in result['warnings']))
 
     def test_pdf_ocr_completes_before_optional_native_and_body_outputs(self):
@@ -155,19 +159,16 @@ class PdfOcrIntegrationTest(unittest.TestCase):
         self.assertIn('Paper question', (self.batch / '01_source/原始正文.txt').read_text())
         self.assertIn('Paper question', (self.batch / '01_source/pdf-ocr.md').read_text())
 
-    def test_word_extraction_overlaps_attachment_pdf_ocr(self):
+    def test_word_and_pdf_role_selection_waits_for_complete_ocr(self):
         manifest = {'inputs': {'source': self.entry(self.word), 'answers': self.entry(self.pdf)}}
-        native_started = threading.Event()
-        ocr_started = threading.Event()
+        ocr_finished = threading.Event()
 
         def word(source, evidence):
-            native_started.set()
-            self.assertTrue(ocr_started.wait(5), 'OCR did not start concurrently')
+            self.assertTrue(ocr_finished.is_set(), 'Role classification needs PDF OCR first')
             return {'text': '一、单项选择\n1. Word question?', 'media': [], 'warnings': []}
 
         def recognize(source, out, **kwargs):
-            ocr_started.set()
-            self.assertTrue(native_started.wait(5), 'Word extraction did not start concurrently')
+            ocr_finished.set()
             return self.recognize(source, out, **kwargs)
 
         with patch.object(extract.mf, 'load', return_value=manifest), \

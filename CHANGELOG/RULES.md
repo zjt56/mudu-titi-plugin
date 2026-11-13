@@ -1,5 +1,9 @@
 # RULES — 规则与强调台账
 
+## 2026-11-13：上传 PDF 必须完成 OCR，不能以 Word 成功或原生文字层代替
+
+用户强调：「当上传PDF时，要求必须OCR识别」。每份 PDF 都必须整卷识别；包括 Word 配套 PDF 在内，识别失败、当前来源绑定结果缺失、整卷空文字或仅原生文字层均不能让提取通过。强制识别参数由适配器自身保证，不受辅助开关影响；重复上传不能复用缺少有效 OCR 的已完成批次，本次创建新批次且不改历史数据。保留 Word 内容权威、JSON/Markdown 双格式及服务阅读顺序。落地：`app/workflow/pdf_ocr.py`、`ocr_backend.py`、`extract.py`、`contracts.py`、`app/workbench/server.py`；验证见 `CHANGELOG/2026-11-13-pdf-mandatory-ocr.md`。
+
 ## 2026-11-13：PDF直接OCR双格式交付，多附件先辨正文与答案
 
 用户要求：「如果我用PDF上传的话，请识别直接调用OCR，获取JSON和markdown文件，尤其是课时，当不止一份附件时，要识别是答案还是正文，因为我的答案会单独上传」。每份PDF整卷OCR并保存JSON与Markdown，PDF正文直接消费OCR，保留服务原顺序；多附件先内容分类再选正文，同角色Word优先，独立答案不因Word/PDF格式或上传顺序冒充正文或被过滤。课时答案匹配Unit、课时、板块、大题和题号；保留原文件名和原件摘要。落地：`pdf_ocr.py`、`extract.py`、`material_classify.py`、`source_policy.py`、`agent_tasks.py`、`upload_content.py`、`workbench/server.py`；详见同日 `pdf-ocr-material-roles` 变更记录。
