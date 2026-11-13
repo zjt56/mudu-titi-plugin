@@ -515,6 +515,14 @@ def diagnose(batch_dir) -> dict:
     items = []
     quality_notes = []
     first_blocked = None
+    # 输入缺失导致的跳过（缺 audio/answers 等可选输入）不是“待处理”，诊断不应
+    # 把它们当作卡点反复上报。跳过条件可能随后消失（补了音频），此时状态沿用
+    # pending 等待正常调度，也无需报卡点。
+    def _input_skip_reason(stage) -> str:
+        try:
+            return mf.skip_reason(manifest, stage)
+        except (KeyError, TypeError, ValueError, OSError):
+            return ""
     # 限流/额度冷却时，真正的卡点是“模型暂时不可用”，不是某个下游阶段的旧报错。
     # 把它放在最前面，避免用户看到一堆 failed/needs_review 却一直在重试模型。
     unfinished = any((record.get("status") or mf.PENDING) not in mf.TERMINAL_OK
@@ -539,6 +547,10 @@ def diagnose(batch_dir) -> dict:
         status = record.get("status") or mf.PENDING
         if status in mf.TERMINAL_OK:
             continue
+        # 用户明确“课时试卷允许没有听力/答案”等：仅在阶段尚未实际执行（pending）
+        # 且属可跳过输入时才视为正常可跳过；已 FAILED/needs_review/blocked 的阶段
+        # 是真实执行结果，不能被“历史批次”之类的跳过理由掩盖。
+        input_skip_reason = _input_skip_reason(stage) if status == mf.PENDING else ""
         # 只有 review_gate 会带 continue_unqualified；它是「审核已执行、差异待人工」
         # 的设计态，统一走下面的 review_differences 分支，不再因依赖复验结果不同
         # 而在“质量备注/卡点”两种展示间摇摆。
@@ -549,6 +561,10 @@ def diagnose(batch_dir) -> dict:
                           if not (inputs.get(k) or {}).get("exists")]
 
         reason, detail = "", ""
+        if input_skip_reason:
+            # 可跳过阶段不是卡点：给出正常说明，不当作“缺少必需输入”或失败。
+            reason = "可跳过（" + input_skip_reason + "）"
+            detail = input_skip_reason
         review_differences = stage.id == "review_gate" and _review_differences(record)
         if review_differences:
             # 差异是审核产出（AGENTS.md 硬规则 6）：保留在人工队列与 review-gate.json，
@@ -649,7 +665,7 @@ def diagnose(batch_dir) -> dict:
                     state_detail = "尚未完成执行"
                 dependency_details.append(f"{dep}（{state_detail}；status={dep_status}）")
             detail = (detail + "；" if detail else "") + "上游交付未满足：" + "、".join(dependency_details)
-        if missing_inputs:
+        if missing_inputs and not input_skip_reason:
             reason = reason or "缺少必需输入"
             detail = (detail + "；" if detail else "") + "缺少输入：" + "、".join(missing_inputs)
 
@@ -662,6 +678,7 @@ def diagnose(batch_dir) -> dict:
         # 缺必需输入且没有被上游挡住），而不是单纯被上游拖住等着的下游阶段。
         # 审核差异设计态虽然 status=needs_review，但属于已验证产出，不算卡点。
         own_problem = (not review_differences
+                       and not input_skip_reason
                        and (status in (mf.FAILED, mf.NEEDS_REVIEW, mf.BLOCKED, mf.INVALIDATED)
                             or (bool(missing_inputs) and not unmet)))
         failure_class = ""
@@ -680,9 +697,12 @@ def diagnose(batch_dir) -> dict:
                 failure_class = "deterministic_gate_failure"
             else:
                 failure_class = "blocked_dependency_or_evidence"
-        if missing_inputs and not review_differences:
+        if missing_inputs and not review_differences and not input_skip_reason:
             failure_class = "missing_required_input"
+        elif input_skip_reason and not review_differences:
+            failure_class = ""
         next_action = (
+            input_skip_reason if input_skip_reason else
             "人工判断审核差异；未放行但不阻断手动上传" if failure_class == "quality_differences" else
             "重新导出并重跑当前阶段" if failure_class == "stale_input" else
             "修正代理输出后重试" if failure_class == "agent_output_needs_retry" else

@@ -615,7 +615,32 @@ class DiagnoseTest(unittest.TestCase):
         # producer stage that must be resolved before its downstream.
         self.assertIn("blocking", item)
 
-    def test_active_cooldown_is_reported_as_the_first_blocker(self):
+    def test_skippable_audio_noise_batch_is_not_a_blocker(self):
+        # 课时试卷允许没有听力：结构确认全是非听力题时，audio 是可跳过阶段，
+        # 其缺 audio 输入不是“需处理”卡点，也不应进入诊断 items。
+        import json as _json
+        from workflow.question_identity import assign_scoped
+        units = assign_scoped(
+            [{"numbers": [1, 2, 3], "unit_kind": "group", "type": "阅读理解",
+              "source_span": {"start_line": 2, "end_line": 4}}],
+            "Ⅰ.阅读理解\n1. a\n2. b\n3. c\n")
+        manifest = self._load_manifest()
+        manifest["stages"]["audio"]["status"] = mf.PENDING
+        manifest["stages"]["audio"].pop("notes", None)
+        manifest["inputs"] = {"audio": {"exists": False}}
+        manifest["batch_dir"] = str(self.batch)
+        (self.batch / "01_source").mkdir(parents=True, exist_ok=True)
+        (self.batch / "01_source/structure.confirmed.json").write_text(
+            _json.dumps({"identity_version": "scoped-v1", "units": units}, ensure_ascii=False),
+            encoding="utf-8")
+        mf.save(self.batch, manifest)
+        result = diagnose.diagnose(self.batch)
+        audio = next(it for it in result["items"] if it["stage"] == "audio")
+        self.assertFalse(audio["blocking"])
+        self.assertIn("可跳过", audio["reason"])
+        self.assertNotEqual(audio.get("failure_class"), "missing_required_input")
+        self.assertNotEqual(result["blocked_at"], "audio")
+
         manifest = self._load_manifest()
         manifest["stages"]["answers"]["status"] = mf.PENDING
         manifest["stages"]["answers"]["notes"] = "限流/额度冷却中：rate_limit"
