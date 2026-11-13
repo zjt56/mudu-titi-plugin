@@ -225,7 +225,7 @@ def _set_section(text: str, heading: str, body: str) -> str:
     rebuilt = lines[:start + 1] + ["", *body.strip().splitlines(), ""]
     if end < len(lines):
         rebuilt += lines[end:]
-    return "\n".join(rebuilt) + "\n"
+    return "\n".join(rebuilt).rstrip("\n") + "\n"
 
 
 def _read(path: Path) -> dict:

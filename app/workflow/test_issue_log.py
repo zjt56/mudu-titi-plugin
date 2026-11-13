@@ -79,6 +79,11 @@ class IssueLogTest(unittest.TestCase):
         self.assertIn("q-81 报 EXPLANATION_SOURCE_UNVERIFIED", record["symptom"])
         self.assertEqual(record["occurrences"], 1)
         self.assertIn("剥离标题后复验通过", record["resolution"])
+        # 标记修复会重写已有“修复记录”段，文末必须只保留一个换行；
+        # 否则 git diff --check 会报 new blank line at EOF。
+        raw = path.read_text(encoding="utf-8")
+        self.assertTrue(raw.endswith("\n"))
+        self.assertFalse(raw.endswith("\n\n"))
 
     def test_fix_is_one_way_and_requires_known_issue(self):
         added = self.add()

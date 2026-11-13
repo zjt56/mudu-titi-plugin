@@ -30,4 +30,3 @@ self-heal 对 unit sec-0ed7068246aa3d4e-u21（第5题完成句子）标签「语
 - 修复提交：uncommitted-working-tree
 - 复验证据：PYTHONPATH=app python3 -m unittest workflow.test_self_heal ... test_agent_tasks => Ran 166 tests OK；新增回归 test_volatile_detail_does_not_reset_retry_budget 通过；现场模拟同预算 key attempts 1→2→3 第3次 retry_budget_exhausted
 - 标记时间：2026-11-11T21:41:05+08:00
-

@@ -30,4 +30,3 @@ format_gate 已 completed、flow_done=true，但 workflow/supervisor.json 仍是
 - 修复提交：e93ed4d
 - 复验证据：workflow.test_supervisor + test_supervisor_scheduling 47 项 OK（新增 test_idle_pause_settles_a_finished_batch_instead_of_leaving_it_scheduled）；真实 05/07 批次 settle 后 status=complete、attempts=0、next_retry_at=0、last_result.action=complete，/api/batches advance.supervisor.status=complete
 - 标记时间：2026-11-12T19:31:17+08:00
-

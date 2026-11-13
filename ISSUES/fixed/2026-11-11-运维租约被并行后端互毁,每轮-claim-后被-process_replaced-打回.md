@@ -29,4 +29,3 @@ AI运维面板反复出现 worker_busy: 批次执行锁已占用; name=Error。o
 - 修复提交：3480b1b
 - 复验证据：workflow.test_operations+workbench.test_health_busy 84项通过；宿主 operations-agent/ui/http 67项通过；现场 op.leased=false 且不再出现新的 process_replaced
 - 标记时间：2026-11-11T13:27:40+08:00
-

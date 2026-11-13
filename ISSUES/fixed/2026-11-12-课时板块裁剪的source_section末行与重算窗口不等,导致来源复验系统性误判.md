@@ -30,4 +30,3 @@ review-gate.json errors: REVIEW_SAMPLE_SOURCE_UNVERIFIED [sec-1de4ef313aac00fb-u
 - 修复提交：d9fe33d
 - 复验证据：workflow.test_review_child_source/test_review_local_reuse/test_review_rounds 等 157 项 OK；批次 05/07 失败单元 5/24→0/24、6/26→0/26；批次 07 review_gate 复跑 required_unchecked=0
 - 标记时间：2026-11-12T19:23:01+08:00
-

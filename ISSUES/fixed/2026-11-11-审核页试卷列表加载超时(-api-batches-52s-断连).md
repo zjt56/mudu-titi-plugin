@@ -30,4 +30,3 @@ GET /api/batches 52.4s 后 基础连接已经关闭: 接收时发生错误；前
 - 修复提交：eb34ccf
 - 复验证据：13 批串行冷投影 68s→8.88s，命中快照 3.40s；真实 GET /api/batches 200/1.03-1.46s、13 根 URL 批次、课时批次 open=13；workflow.test_review_rounds+test_review_local_reuse+test_review_child_import+test_ingest_binding_equivalence+test_review_binding_cache 115 tests OK；workbench.test_overview_snapshot 3 OK
 - 标记时间：2026-11-11T18:45:34+08:00
-

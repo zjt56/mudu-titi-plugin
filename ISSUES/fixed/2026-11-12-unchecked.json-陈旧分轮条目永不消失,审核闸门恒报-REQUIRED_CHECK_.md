@@ -30,4 +30,3 @@ review-gate.json errors: REQUIRED_CHECK_UNCHECKED ×2（来自 07_review/uncheck
 - 修复提交：d9fe33d
 - 复验证据：批次 07 复跑 review_gate：reconciled_unchecked=2、unchecked.json=[]、required_unchecked=0，仅剩 15 项人工差异
 - 标记时间：2026-11-12T19:23:01+08:00
-

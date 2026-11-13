@@ -16,7 +16,7 @@ class ContentAgentTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.base = Path(self.temp.name)
+        self.base = Path(self.temp.name).resolve()
         self.batch = self.base / "batch"
         self.batch.mkdir()
         self.source = self.batch / "01_source/source.txt"
@@ -149,7 +149,7 @@ class ContentAgentTests(unittest.TestCase):
         self.claim(task)
         value = self.finish(task, thread, result)
         self.assertEqual(value["response"], self.response)
-        self.accept.assert_called_once_with(self.batch.resolve(), "knowledge", self.response, validate_only=True)
+        self.accept.assert_called_once_with(self.batch, "knowledge", self.response, validate_only=True)
         self.assertFalse((self.batch / "04_knowledge").exists())
         self.assertFalse((self.batch / "workflow/manifest.json").exists())
         self.assertEqual(broker.dispatch("GET", "/api/content-agent/tasks"), {"tasks": []})
@@ -266,7 +266,7 @@ class ContentAgentTests(unittest.TestCase):
             task, thread, result = self.start()
             self.claim(task)
             self.finish(task, thread, result)
-            validate.assert_called_once_with(self.batch.resolve(), "knowledge", {"unit_ids": ["u-1"]}, self.response)
+            validate.assert_called_once_with(self.batch, "knowledge", {"unit_ids": ["u-1"]}, self.response)
             semantic.assert_called_once()
             self.assertEqual(semantic.call_args.args[1], "knowledge")
             self.assertEqual(semantic.call_args.args[4], self.units)

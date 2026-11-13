@@ -30,4 +30,3 @@
 - 修复提交：server-db repair (no repo commit)
 - 复验证据：paper_items覆盖1–80共80个唯一题号无缺号；backend.paper_detail复验q-21→21/21、q-81→None/None；备份backups/mudu-before-2024-paper-numbers-20261112T112643.sqlite3
 - 标记时间：2026-11-12T11:29:37+08:00
-

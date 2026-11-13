@@ -628,5 +628,3 @@ def _rows_from_batch(batch_dir: Path, review_rows: list[dict]) -> list[dict] | N
     if not any(r.get("identity_version") == "scoped-v1" for r in rows):
         rows.sort(key=lambda r: int(r["number"]) if r["number"].isdigit() else 10 ** 6)
     return rows
-
-

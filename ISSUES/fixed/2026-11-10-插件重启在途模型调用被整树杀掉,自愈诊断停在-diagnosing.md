@@ -30,4 +30,3 @@
 - 修复提交：4548f0f
 - 复验证据：workbench.test_health_busy 6 个用例通过；workbench.test_upload_status+health_busy 20 个用例通过；node --test backend/backend-watch.test.cjs 5 pass/0 fail；backend-lifecycle 与改动前基线同为 5 pass/8 fail（本机 python3 存根所致）
 - 标记时间：2026-11-10T16:22:21+08:00
-

@@ -30,4 +30,3 @@ sec-076b5ffbe6ff54f8-u9 七张音素归类表为空作答网格(答案在附录)
 - 修复提交：9c2e161
 - 复验证据：test_agent_tasks 61项、test_structure_gate 13项、相关回归128项通过；真实批次 preassemble 重跑 completed，批次进入 enriching
 - 标记时间：2026-11-11T19:57:46+08:00
-

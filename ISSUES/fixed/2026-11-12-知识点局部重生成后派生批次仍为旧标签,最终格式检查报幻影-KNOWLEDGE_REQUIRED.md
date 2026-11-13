@@ -30,4 +30,3 @@ knowledge 阶段重跑改写 04_knowledge/knowledge.json 后 assemble 已更新 
 - 修复提交：802499b
 - 复验证据：真实批次 07_review/upload-format.json status=passed、errors=[]、final_sha256 与当前 batch_meta 一致；test_stage_semantics 29 通过、test_review_rounds 90 通过、test_format_gate 23 通过、test_runner_auto 46 通过
 - 标记时间：2026-11-12T12:41:56+08:00
-

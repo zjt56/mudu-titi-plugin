@@ -218,4 +218,3 @@ PYTHONPATH=app python3 -m workflow.sync_practice "Ⅱ.完形填空"   # 单条�
 `sync-practice-rules.json` 的 `lesson_constraints` 是课时录入约束的唯一文字来源，同时用于：
 `prompt_block()` 的提示词条目（每个课时必须有单元名/至少一个大题/序号连续；版块与课时平级；材料带齐题号时不再重复生成同号子题；单元话题写作第1步词汇积累/思维导图不是题）。新增约束只改这份数组并补
 `app/workflow/test_sync_lesson_shape.py` 用例，不另写一份提示词，避免提示词与自检各说一套。
-
