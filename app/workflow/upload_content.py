@@ -561,10 +561,14 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
     for path, lines in source_lines.items():
         if path == body_path:
             continue
-        explicit_contexts = {_norm(plain_text(text).strip()) for text in lines
-                             if _LESSON.match(plain_text(text).strip())
-                             or _UNIT.match(plain_text(text).strip())}
-        if explicit_contexts and explicit_contexts != (lesson_contexts or contexts):
+        explicit_lessons = {_norm(plain_text(text).strip()) for text in lines
+                            if _LESSON.match(plain_text(text).strip())}
+        explicit_units = {_norm(plain_text(text).strip()) for text in lines
+                          if _UNIT.match(plain_text(text).strip())}
+        body_units = {_norm(plain_text(text).strip()) for text in body
+                      if _UNIT.match(plain_text(text).strip())}
+        if (explicit_lessons and explicit_lessons != (lesson_contexts or contexts)
+                or explicit_units and explicit_units != body_units):
             continue
         blocks = _compact_answer_blocks(lines)
         if [block['ordinal'] for block in blocks] != skeleton:

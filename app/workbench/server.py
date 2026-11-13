@@ -1486,9 +1486,9 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
                    main_candidates[0] if main_candidates else docs[0]))
     if answer is source:
         answer = None
-    if answer is None:
-        answer = next((f for f in docs if f is not source
-                       and Path(f['filename']).suffix.lower() == Path(source['filename']).suffix.lower()), None)
+    # Filename hints are provisional only. All unhinted documents remain
+    # attachments until extract classifies their actual content; a second file
+    # of the same format is not evidence that it is an answer booklet.
     year = str(fields.get("year") or "").strip()
     region = str(fields.get("region") or "").strip()
     title = str(fields.get("title") or "").strip()

@@ -47,11 +47,19 @@ class PdfOcrTest(unittest.TestCase):
         first, second, duplicate = report["sources"]
         self.assertEqual(duplicate["duplicate_of"], "answers")
         self.assertEqual(first["result_path"], duplicate["result_path"])
+        self.assertEqual(first["markdown_path"], duplicate["markdown_path"])
+        self.assertEqual(report["markdown_path"], "01_source/pdf-ocr.md")
+        self.assertEqual((self.batch / first["markdown_path"]).name, "acquisition.md")
+        self.assertEqual((self.batch / first["markdown_path"]).read_text(), "OCR text")
+        aggregate = (self.batch / report["markdown_path"]).read_text()
+        self.assertEqual(aggregate.count("OCR text"), 2)
+        self.assertNotIn("## alias", aggregate)
         self.assertNotEqual(first["result_dir"], second["result_dir"])
         self.pdf.unlink()
         self.assertEqual((self.batch / first["snapshot"]).read_bytes(), b"pdf one")
         stored = json.loads((self.batch / first["result_path"]).read_text())
         self.assertEqual(stored["source_sha256"], first["sha256"])
+        self.assertEqual(stored["markdown_path"], first["markdown_path"])
         self.assertEqual(stored["result"]["pages"][0]["blocks"][0]["bbox"], [1, 2, 3, 4])
         self.assertEqual(json.loads((self.batch / pdf_ocr.REPORT).read_text()), report)
 
@@ -89,6 +97,22 @@ class PdfOcrTest(unittest.TestCase):
             report = pdf_ocr.run(self.batch, manifest)
         self.assertEqual(report["status"], "completed")
         self.assertEqual(calls, [{"force_ocr": True, "config": None, "mandatory_pdf": True}])
+
+    def test_markdown_preserves_service_order_and_refreshes_aggregate(self):
+        manifest = {"inputs": {"source": self.entry(self.pdf)}}
+        pages = [{"page": 2, "text": "# second\n\n| x | y |\n|---|---|"},
+                 {"page": 1, "text": "first  \nline"}]
+        with patch.object(pdf_ocr.ocr_backend, "recognize", return_value={"pages": pages}):
+            report = pdf_ocr.run(self.batch, manifest)
+        expected = "\n\n".join(page["text"] for page in pages)
+        self.assertEqual((self.batch / report["sources"][0]["markdown_path"]).read_text(), expected)
+        self.assertEqual((self.batch / report["markdown_path"]).read_text(), "## source\n\n" + expected)
+        # A later failed acquisition must not expose a previous successful body.
+        with patch.object(pdf_ocr.ocr_backend, "recognize", side_effect=RuntimeError("private")):
+            failed = pdf_ocr.run(self.batch, manifest)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual((self.batch / failed["markdown_path"]).read_text(), "")
+        self.assertNotIn("markdown_path", failed["sources"][0])
 
     def test_no_pdfs(self):
         report = pdf_ocr.run(self.batch, {"inputs": {"source": self.entry(self.word)}})

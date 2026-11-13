@@ -11,7 +11,7 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 
 - DOCX：标准库直接解析文档 XML，按正文顺序读取段落、真实表格网格和图片关系。保留可解析的画线、加粗、上下标及样式继承。页眉、页脚不混入题面；显式分页线索保留在证据中，不猜物理页码。
 - 文字极少而含图片的 DOCX：保留原图，同时尝试用 OCR 补充图中文字。常规 Word 不整页转图片，避免丢失原生格式；图片、表格的归属仍需核对。
-- PDF：通过 OCR 独立环境中的 PyMuPDF 逐页读取文字、原生文字块坐标和嵌入图片。少于 80 个字符、出现替换字符或严重英文粘连的页转视觉 OCR，其余保留文字层。此检测只是路由启发式，不能证明文字质量或多栏顺序。
+- PDF：直接调用识别服务整卷 OCR，正文采用服务返回的页文字/Markdown；保存 JSON 和 Markdown。原生文字层、块坐标及嵌入图片仅作可选证据，原生解析失败不否定有效 OCR；识别服务顺序不重排。
 - PNG/JPEG/WebP/BMP/TIFF：调用当前配置的 OCR（飞桨 jobs API 或兼容的本地 CLI）。
 - 旧 DOC 不直接支持，应先转为 DOCX。当前网页上传入口仍接收 DOCX/PDF，图片路径可通过批次 source 或 Python API 使用。
 
@@ -23,7 +23,7 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 1. **同一批上传同时含 `.docx` 与 `.pdf`**：`.docx` 一定是提取主源（`source`），PDF 只作附件
    供版面/层级核对；`01_source/material-roles.json` 中它的 `role=structure_reference`、
    `content_authority=false`，不参与唯一绑定竞争。
-2. **只有 PDF（正文提取）**：文字层可用的页直接原生解析，只有质量不足的页用 OCR 文字替换；不因“是 PDF”就把 OCR 当作正文来源。版面证据另按下一节整卷采集，两者互不替代。
+2. **PDF 正文及 PDF 答案附件**：一律整卷 OCR，直接采用识别服务结果，不以文字层质量决定是否 OCR。多附件先按内容识别 paper/answers/explanations/mix，再选择正文；Word 优先只用于正文候选，独立 Word 答案不会压过 PDF 正文。答案保留独立来源，不混入正文切题。
 3. **扫描件/纯图片 Word**：只能走 OCR，属于最后手段，结果需核对题号、音标、画线、表格顺序。
 4. 旧版 `.doc` 需先转 `.docx`；转换可能丢图，提示用户另存后重传。
 
@@ -48,9 +48,9 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 用户 2026-11-12 要求：只要批次的输入里有 PDF，就调用 OCR 识别功能，产出 JSON 作为 Word 的版面参考辅助。落地为 `workflow/pdf_ocr.py::run` 对每个去重后的 PDF 一律 `force_ocr=True`、`mandatory_pdf=True`：
 
 - 触发条件与 OCR 总开关、文字层质量、Word 是否为主源都无关；Word + PDF 同批时配套 PDF 也整卷识别。
-- 产物：`01_source/pdf-ocr.json`（每源状态、页码、文字、版面块、警告），每源快照 `01_source/pdf-ocr/<摘要前缀>/source.pdf` 与完整原始结果 `<摘要前缀>/acquisition.json`；同一 SHA 只提交一次。
+- 产物：`01_source/pdf-ocr.json`（每源状态、页码、文字、版面块、警告及 Markdown 路径）、`01_source/pdf-ocr.md`，以及每源独立目录中的 `source.pdf`、`acquisition.json`、`acquisition.md`；同一 SHA 一次运行只提交一次，按服务页序保存。聚合 Markdown 供查看，正文与答案绑定仍使用独立材料。
 - 消费方：`structure_ai` 结构归类提示词与 assemble/review 任务把该 JSON 当作层级/阅读顺序参考，并注明有 Word 时以 Word 原文为准。
-- 边界：Word 仍是内容权威。`extract._pdf` 只在文字层质量不足的页用 OCR 文字替换，正文不被 OCR 覆盖；版面块存在不证明阅读顺序正确，顺序问题由识别服务侧排查，不在此处手工重排。
+- 边界：同一正文有 Word/PDF 时仍用 Word 原文；PDF-only 正文直接消费 OCR，独立答案各自绑定。版面块存在不证明阅读顺序正确，顺序问题由识别服务侧排查，不在此处手工重排。
 - 失败：识别未配置、超时或空结果时该 PDF 记为 failed，不写伪 JSON。Word 为主源时只记 warning 继续用 Word；PDF 为主源时提取失败。
 - 代价：整卷识别更慢并消耗识别额度，这是上述要求的已知成本。
 
@@ -80,11 +80,11 @@ python -m workflow.runner run --batch-dir workflows/<批次> --stage extract
 
 插件「模型与设置 → OCR 识别」里的「启用 OCR 辅助识别」默认关闭。上传的 PDF 不受此开关影响：只要批次里有 PDF，就整卷调用识别服务生成版面证据（见上一节）。开关只控制其余辅助识别，关闭时：
 
-- DOCX 与文字 PDF 的正文完全走原生解析；文字层质量不足的页保留原文字，只记录警告并交给结构闸门（版面 JSON 仍照常采集）。
+- DOCX 正文走原生解析；PDF 无论总开关状态都整卷 OCR，生成 JSON/Markdown 并以 OCR 为 PDF 正文。
 - 图片型 Word 不补充图中文字，只保留图片引用。
 - 没有 PDF 的扫描件/图片无法提取文字时明确失败并提示先开启开关，不会静默产出空正文。
 
-开启后文字提取仍是主路径：文字 PDF 的正文只对质量不足的页用 OCR 文字，整卷版面证据照常采集；扫描 PDF/图片由 OCR 识别，图片型 Word 补充图中文字。开关通过私有 `assist.json` 实时生效（`MUDU_OCR_ASSIST_STATE`），不需要重启后端；独立运行工作流而没有该状态文件时保持旧行为，也可用 `MUDU_OCR_ASSIST=0/1` 显式覆盖。
+开启后仍保持 Word 原生提取，PDF 仍直接整卷 OCR；扫描图片由 OCR 识别，图片型 Word 补充图中文字。开关通过私有 `assist.json` 实时生效（`MUDU_OCR_ASSIST_STATE`），不需要重启后端；独立运行工作流而没有该状态文件时保持旧行为，也可用 `MUDU_OCR_ASSIST=0/1` 显式覆盖。
 
 ## 产物与证据
 

@@ -377,6 +377,7 @@ def _collect(batch, stage, speculative=False):
     materials_dir = batch / '01_source/materials'
     roles_path = batch / '01_source/material-roles.json'
     failed_materials = set()
+    reference_materials = set()
     if roles_path.is_file():
         roles = add('01_source/material-roles.json', False)
         if isinstance(roles, dict):
@@ -384,6 +385,9 @@ def _collect(batch, stage, speculative=False):
             if not isinstance(rows, list):
                 missing.append('附件材料分类记录无效，需重新提取')
             else:
+                reference_materials = {row.get('input') for row in rows if isinstance(row, dict)
+                                       and row.get('content_authority') is False
+                                       and (row.get('content_role') or row.get('role')) not in ('answers', 'explanations')}
                 failed_materials = {row.get('input') for row in rows
                                     if isinstance(row, dict) and row.get('error')}
                 if failed_materials:
@@ -393,13 +397,12 @@ def _collect(batch, stage, speculative=False):
                     else:
                         missing.append('附件提取失败，需重试：' + ', '.join(sorted(str(x) for x in failed_materials)))
     if materials_dir.is_dir():
-        # Word 原文（source.txt）已存在时，PDF 提取文本对标注类阶段是重复内容：
-        # 整卷一次分析要控制提示词体积，只在装配/审核（需要版面证据）或没有 Word 时带上。
-        _word_source = (materials_dir / 'source.txt').is_file()
+        # Only role-verified structure references are duplicate content.
+        # Independent answer/explanation documents remain visible to label tasks.
         _label_stage = stage in ('types', 'answers', 'explanations', 'knowledge')
         for path in sorted(materials_dir.glob('attachment_*.txt')):
             if re.fullmatch(r'attachment_\d{3,}\.txt', path.name) and path.stem not in failed_materials:
-                if _word_source and _label_stage:
+                if path.stem in reference_materials and _label_stage:
                     hashes[path.relative_to(batch).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
                     continue
                 add(path.relative_to(batch).as_posix(), False)

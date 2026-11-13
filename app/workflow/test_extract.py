@@ -291,13 +291,15 @@ class StructureCandidateTest(unittest.TestCase):
 
 
 class CompositeExtractionTest(unittest.TestCase):
-    def test_pdf_only_ocr_for_bad_page_and_preserves_native_evidence(self):
+    def test_pdf_all_pages_use_existing_ocr_and_preserve_native_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); source = root / 'source.pdf'; source.write_bytes(b'PDF fixture')
             native = {'pages': [
                 {'page': 1, 'method': 'text', 'text': 'native page', 'needs_ocr': False},
                 {'page': 2, 'method': 'text', 'text': 'bad', 'needs_ocr': True}], 'warnings': []}
-            recognized = {'pages': [{'page': 2, 'method': 'ocr', 'text': 'Ⅰ.单项填空(共1小题)\n1. Read?'}], 'warnings': [], 'artifacts': {}}
+            recognized = {'pages': [
+                {'page': 1, 'method': 'ocr', 'text': 'OCR clean page'},
+                {'page': 2, 'method': 'ocr', 'text': 'Ⅰ.单项填空(共1小题)\n1. Read?'}], 'warnings': [], 'artifacts': {}}
             with patch.object(ocr_backend, 'read_pdf', return_value=native), \
                  patch.object(ocr_backend, 'recognize') as recognize:
                 report = extract.extract_source(source, root / 'out', ocr_result=recognized)
@@ -305,7 +307,9 @@ class CompositeExtractionTest(unittest.TestCase):
             recognize.assert_not_called()
             evidence = json.loads((root / 'out' / 'extraction.json').read_text())
             self.assertEqual(evidence['pages'][1]['native_text'], 'bad')
-            self.assertEqual(evidence['pages'][0]['text'], 'native page')
+            self.assertEqual(evidence['pages'][0]['text'], 'OCR clean page')
+            self.assertEqual(evidence['pages'][0]['native_text'], 'native page')
+            self.assertTrue(all(page['method'] == 'ocr' for page in evidence['pages']))
             structure = json.loads((root / 'out' / 'structure.json').read_text())
             self.assertIn('OCR_VISUAL_REVIEW', {i['code'] for i in structure['unresolved']})
             self.assertEqual(source.read_bytes(), b'PDF fixture')
@@ -336,24 +340,38 @@ class CompositeExtractionTest(unittest.TestCase):
             self.assertEqual(evidence['pdf_ocr']['pages'][0]['blocks'], page['blocks'])
             self.assertEqual(source.read_bytes(), b'PDF fixture')
 
-    def test_pdf_keeps_text_layer_and_skips_ocr_when_assist_disabled(self):
+    def test_pdf_uses_existing_ocr_with_assist_off_and_native_unavailable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); source = root / 'source.pdf'; source.write_bytes(b'PDF fixture')
-            native = {'pages': [
-                {'page': 1, 'method': 'text', 'text': 'Ⅰ.单项填空(共1小题)\n1. Read?', 'needs_ocr': False},
-                {'page': 2, 'method': 'text', 'text': 'short', 'needs_ocr': True}], 'warnings': []}
+            recognized = {'pages': [
+                {'page': 2, 'text': 'Ⅰ.单项填空(共1小题)\n1. Read?'},
+                {'page': 1, 'text': ''}], 'warnings': []}
             state = root / 'assist.json'; state.write_text('{"enabled": false}', encoding='utf-8')
             with patch.dict(os.environ, {'MUDU_OCR_ASSIST_STATE': str(state)}), \
-                 patch.object(ocr_backend, 'read_pdf', return_value=native), \
+                 patch.object(ocr_backend, 'read_pdf', side_effect=RuntimeError('private path')), \
                  patch.object(ocr_backend, 'recognize', side_effect=AssertionError('OCR must not run')):
-                report = extract.extract_source(source, root / 'out')
+                report = extract.extract_source(source, root / 'out',
+                    pdf_ocr_wait=lambda: (recognized, None))
             self.assertTrue(report['passed'])
             evidence = json.loads((root / 'out' / 'extraction.json').read_text())
-            self.assertTrue(evidence['pages'][1]['ocr_skipped'])
-            self.assertEqual(evidence['pages'][1]['text'], 'short')
+            self.assertEqual([page['page'] for page in evidence['pages']], [2, 1])
+            self.assertEqual(evidence['pages'][0]['text'], recognized['pages'][0]['text'])
             self.assertFalse(evidence['ocr_assist_enabled'])
-            structure = json.loads((root / 'out' / 'structure.json').read_text())
-            self.assertIn('EXTRACTION_WARNING', {i['code'] for i in structure['unresolved']})
+            self.assertEqual(evidence['native_error'], {'type': 'RuntimeError'})
+            self.assertNotIn('private path', json.dumps(evidence))
+
+    def test_pdf_missing_ocr_never_falls_back_to_native_or_resubmits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for result in (None, {'pages': []}, {'pages': [{'page': 1, 'text': ''}]},
+                           {'pages': [{'page': 1, 'text': None}]}):
+                with self.subTest(result=result), \
+                     patch.object(ocr_backend, 'read_pdf') as native, \
+                     patch.object(ocr_backend, 'recognize') as recognize:
+                    with self.assertRaisesRegex(ValueError, 'PDF OCR'):
+                        extract._pdf(root / 'source.pdf', root, None, ocr_result=result)
+                    native.assert_not_called()
+                    recognize.assert_not_called()
 
     def test_image_source_requires_ocr_assist_switch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -364,19 +382,21 @@ class CompositeExtractionTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'OCR 辅助已关闭'):
                     extract.extract_source(source, root / 'out')
 
-    def test_native_pdf_images_are_preserved_as_reviewable_page_candidates(self):
+    def test_native_pdf_images_remain_evidence_without_changing_ocr_body(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); source = root / 'source.pdf'; source.write_bytes(b'pdf')
             image = root / 'original.png'; image.write_bytes(b'original image')
             native = {'pages': [{'page': 1, 'method': 'text', 'needs_ocr': False,
                 'text': 'Ⅰ.单项填空(共1小题)\n1. What?',
                 'images': [{'path': str(image), 'bbox': [0, 0, 50, 50]}]}], 'warnings': []}
+            recognized = {'pages': [{'page': 1, 'text': 'Ⅰ.单项填空(共1小题)\n1. OCR question?'}]}
             with patch.object(ocr_backend, 'read_pdf', return_value=native):
-                extract.extract_source(source, root / 'out')
-            self.assertEqual((root / 'out' / 'media' / 'pdf-page-1-image-1.png').read_bytes(), b'original image')
-            self.assertIn('[IMG pdf-page-1-image-1.png]', (root / 'out' / '正文.txt').read_text())
-            structure = json.loads((root / 'out' / 'structure.json').read_text())
-            self.assertIn('EXTRACTION_WARNING', {x['code'] for x in structure['unresolved']})
+                extract.extract_source(source, root / 'out', ocr_result=recognized)
+            evidence = json.loads((root / 'out' / 'extraction.json').read_text())
+            self.assertEqual(evidence['pages'][0]['native_images'], native['pages'][0]['images'])
+            self.assertEqual(evidence['pages'][0]['text'], recognized['pages'][0]['text'])
+            self.assertNotIn('[IMG pdf-page-', (root / 'out' / '正文.txt').read_text())
+            self.assertEqual(image.read_bytes(), b'original image')
 
     def test_native_word_does_not_require_ocr_config_and_keeps_media(self):
         with tempfile.TemporaryDirectory() as tmp:

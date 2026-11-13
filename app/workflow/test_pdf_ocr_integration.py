@@ -103,9 +103,8 @@ class PdfOcrIntegrationTest(unittest.TestCase):
             result = extract.run(self.batch)
         self.assertTrue(result['passed'])
         answer = next(row for row in result['material_roles']['documents'] if row['input'] == 'answers')
-        self.assertEqual(answer['role'], 'structure_reference')
-        self.assertFalse(answer['content_authority'])
-        self.assertIn(answer['content_role'], material_classify.ROLES)
+        self.assertEqual(answer['role'], 'answers')
+        self.assertTrue(answer['content_authority'])
         text = (self.batch / answer['text_path']).read_text()
         self.assertIn('参考答案', text)
         self.assertEqual((self.batch / '01_source_ans/正文.txt').read_text(), text)
@@ -132,29 +131,29 @@ class PdfOcrIntegrationTest(unittest.TestCase):
         self.assertNotIn('attachment_001', result['error'])
         self.assertTrue(any('attachment_001' in warning for warning in result['warnings']))
 
-    def test_native_and_pdf_ocr_overlap_before_outputs_are_written(self):
+    def test_pdf_ocr_completes_before_optional_native_and_body_outputs(self):
         manifest = {'inputs': {'source': self.entry(self.pdf)}}
-        native_started = threading.Event()
-        ocr_started = threading.Event()
+        ocr_finished = threading.Event()
 
         def native(source, out, config=None):
-            native_started.set()
-            self.assertTrue(ocr_started.wait(5), 'OCR did not start concurrently')
-            return self.native(source, out, config)
+            self.assertTrue(ocr_finished.is_set())
+            self.assertFalse((self.batch / '01_source/原始正文.txt').exists())
+            raise RuntimeError('native environment unavailable')
 
         def recognize(source, out, **kwargs):
-            ocr_started.set()
-            self.assertTrue(native_started.wait(5), 'native extraction did not start concurrently')
             self.assertFalse((self.batch / '01_source/原始正文.txt').exists())
+            ocr_finished.set()
             return self.recognize(source, out, **kwargs)
 
         with patch.object(extract.mf, 'load', return_value=manifest), \
              patch('workflow.agent.configured', return_value=False), \
-             patch.object(pdf_ocr.ocr_backend, 'recognize', side_effect=recognize), \
+             patch.object(pdf_ocr.ocr_backend, 'recognize', side_effect=recognize) as calls, \
              patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=native):
             result = extract.run(self.batch)
         self.assertTrue(result['passed'])
+        self.assertEqual(calls.call_count, 1)
         self.assertIn('Paper question', (self.batch / '01_source/原始正文.txt').read_text())
+        self.assertIn('Paper question', (self.batch / '01_source/pdf-ocr.md').read_text())
 
     def test_word_extraction_overlaps_attachment_pdf_ocr(self):
         manifest = {'inputs': {'source': self.entry(self.word), 'answers': self.entry(self.pdf)}}
@@ -180,35 +179,28 @@ class PdfOcrIntegrationTest(unittest.TestCase):
         self.assertTrue(result['passed'])
         self.assertIn('Word question', (self.batch / '01_source/原始正文.txt').read_text())
 
-    def test_native_failure_waits_for_ocr_and_preserves_both_errors(self):
+    def test_pdf_ocr_failure_is_recorded_without_native_fallback_or_retry(self):
         manifest = {'inputs': {'source': self.entry(self.pdf)}}
-        native_started = threading.Event()
-        ocr_finished = threading.Event()
-
-        def native(source, out, config=None):
-            native_started.set()
-            raise ValueError('native failed')
-
-        def recognize(source, out, **kwargs):
-            self.assertTrue(native_started.wait(5))
-            ocr_finished.set()
-            raise RuntimeError('offline')
-
         with patch.object(extract.mf, 'load', return_value=manifest), \
-             patch.object(pdf_ocr.ocr_backend, 'recognize', side_effect=recognize), \
-             patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=native):
-            with self.assertRaisesRegex(ValueError, 'native failed.*PDF OCR'):
+             patch.object(pdf_ocr.ocr_backend, 'recognize', side_effect=RuntimeError('offline')) as calls, \
+             patch.object(pdf_ocr.ocr_backend, 'read_pdf') as native:
+            with self.assertRaisesRegex(ValueError, 'PDF OCR'):
                 extract.run(self.batch)
-        self.assertTrue(ocr_finished.is_set())
+        self.assertEqual(calls.call_count, 1)
+        native.assert_not_called()
         self.assertFalse((self.batch / '01_source/原始正文.txt').exists())
-        self.assertTrue((self.batch / '01_source/pdf-ocr.json').is_file())
+        report = json.loads((self.batch / '01_source/pdf-ocr.json').read_text())
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual((self.batch / report['markdown_path']).read_text(), '')
 
     def test_empty_scanned_pdf_does_not_become_page_marker_text(self):
         with patch.object(pdf_ocr.ocr_backend, 'read_pdf', side_effect=self.native):
-            with self.assertRaisesRegex(ValueError, '提取正文为空'):
-                extract.extract_source(self.pdf, self.batch / 'out', ocr_warning='OCR failed')
+            with self.assertRaisesRegex(ValueError, 'PDF OCR'):
+                extract.extract_source(self.pdf, self.batch / 'out',
+                                       ocr_result={'pages': [{'page': 1, 'text': ''}]})
+        self.assertFalse((self.batch / 'out/原始正文.txt').exists())
 
-    def test_native_text_wins_and_wrong_source_is_rejected(self):
+    def test_ocr_text_wins_and_wrong_source_is_rejected(self):
         manifest = {'inputs': {'source': self.entry(self.pdf)}}
         with patch.object(pdf_ocr.ocr_backend, 'recognize', side_effect=self.recognize):
             report = pdf_ocr.run(self.batch, manifest)
@@ -220,7 +212,9 @@ class PdfOcrIntegrationTest(unittest.TestCase):
         with patch.object(pdf_ocr.ocr_backend, 'read_pdf', return_value=native), \
              patch.object(pdf_ocr.ocr_backend, 'recognize') as calls:
             result = extract._pdf(self.pdf, self.batch, None, found, warning)
-        self.assertIn('native text', result['text'])
+        self.assertNotIn('native text', result['text'])
+        self.assertEqual(result['pages'][0]['native_text'], 'native text')
+        self.assertIn('Paper question', result['text'])
         self.assertIn('Paper question', result['pdf_ocr']['pages'][0]['text'])
         calls.assert_not_called()
         self.pdf.write_bytes(b'changed')

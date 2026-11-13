@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""提取来源优先级（Word > 带文字层 PDF > 扫描件）的回归测试。"""
+"""提取来源优先级（Word > PDF 整卷 OCR > 扫描件）的回归测试。"""
 from __future__ import annotations
 
 import hashlib
@@ -88,7 +88,11 @@ class TestBuildReport(unittest.TestCase):
     def test_pdf_only_ocr_is_flagged(self):
         report = sp.build_report("/tmp/卷.pdf", pages=[{"page": 1, "method": "ocr"}])
         self.assertEqual(report["extraction"], "pdf_ocr")
-        self.assertIn("OCR", report["note"])
+        self.assertIn("整卷 OCR", report["note"])
+        self.assertIn("JSON 与 Markdown", report["note"])
+        self.assertIn("服务阅读顺序", report["note"])
+        self.assertNotIn("质量不足", report["note"])
+        self.assertIn("不要求原生解析成功", report["recommendation"])
         self.assertIn("Word", report["recommendation"])
 
     def test_legacy_doc_warns_conversion(self):
@@ -106,7 +110,10 @@ class TestUploadNotice(unittest.TestCase):
 
     def test_pdf_only_mentions_ocr_and_word(self):
         notice = sp.upload_notice("卷.pdf", [])
-        self.assertIn("OCR", notice)
+        self.assertIn("整卷 OCR", notice)
+        self.assertIn("JSON 与 Markdown", notice)
+        self.assertIn("正文全部使用 OCR", notice)
+        self.assertNotIn("质量不足", notice)
         self.assertIn("Word", notice)
 
     def test_pdf_with_word_attachment_still_says_pdf_primary(self):

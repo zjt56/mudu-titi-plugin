@@ -49,6 +49,20 @@ class CompactLessonAnswersTest(unittest.TestCase):
                 validate_scoped_answer(self.batch, self.units[i], n, value, result['evidence'])
         self.assert_unbound(0, 1, 'C')
 
+    def test_matching_unit_and_lesson_headers_bind_but_other_unit_rejects(self):
+        self.body = 'Unit 1\n' + self.body
+        for unit in self.units:
+            unit['source_span']['start_line'] += 1
+            unit['source_span']['end_line'] += 1
+        self.units = assign_scoped(self.units, self.body)
+        self.appendix = 'Unit 1\n第一课时 Section A (1a-2d)\n' + self.appendix
+        self.write_sources()
+        result = resolve_scoped_answer(self.batch, self.units[0], 1, 'A')
+        self.assertEqual(result['answer'], 'A')
+        self.appendix = self.appendix.replace('Unit 1', 'Unit 2')
+        self.write_sources()
+        self.assert_unbound()
+
     def test_coordinates_and_retained_value_remain_mandatory(self):
         for value, evidence in (('A', []), ('A', ['附录:4']), ('C', ['附录:2'])):
             with self.subTest(value=value, evidence=evidence), self.assertRaises(ValueError):

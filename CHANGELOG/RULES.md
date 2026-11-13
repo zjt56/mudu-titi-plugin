@@ -1,5 +1,9 @@
 # RULES — 规则与强调台账
 
+## 2026-11-13：PDF直接OCR双格式交付，多附件先辨正文与答案
+
+用户要求：「如果我用PDF上传的话，请识别直接调用OCR，获取JSON和markdown文件，尤其是课时，当不止一份附件时，要识别是答案还是正文，因为我的答案会单独上传」。每份PDF整卷OCR并保存JSON与Markdown，PDF正文直接消费OCR，保留服务原顺序；多附件先内容分类再选正文，同角色Word优先，独立答案不因Word/PDF格式或上传顺序冒充正文或被过滤。课时答案匹配Unit、课时、板块、大题和题号；保留原文件名和原件摘要。落地：`pdf_ocr.py`、`extract.py`、`material_classify.py`、`source_policy.py`、`agent_tasks.py`、`upload_content.py`、`workbench/server.py`；详见同日 `pdf-ocr-material-roles` 变更记录。
+
 ## 2026-11-13：AI 运维必须自动接收报错并闭环处理
 
 用户明确要求：把批次报错交给 AI 运维后，运维应自动读取具体错误证据、分析原因、执行已授权的实际修复、运行原失败检查复验并续跑，不停在建议或等待用户重复点击。显式 `runner run` 的非零失败在执行锁释放后自动调用 `operations.handoff_if_available`；运维长测试/安装请求必须有动作级等待窗口但仍受会话硬截止、取消和未知回执保护；investigation 升级 repair 时重置调查读取预算。自治安装仅在用户通过可信本地配置接口明确授权且源码根匹配时启用，仍须隔离工作区、测试、计划、CAS 安装、重启及原检查复验；不自动上传、发布、改审核差异或改锁定控制面。流水线自行通过旧故障时可结案，但必须记录 `resolution_source=pipeline_progress` 且界面显示“流水线已复验”，不得冒称 AI 运维修复完成。落地：`app/workflow/runner.py`、`lib/operations-agent.js`、`app/workflow/operations_development.py`、`app/workflow/operations.py`、`lib/client.js`；验证见 `CHANGELOG/2026-11-13-ai-operations-autonomous-closure.md`。

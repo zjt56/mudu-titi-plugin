@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""提取来源优先级：Word(.docx) > 带文字层 PDF > 扫描件/图片。
+"""提取来源优先级：Word(.docx) > PDF 整卷 OCR > 扫描件/图片。
 
 用户 2026-11-11 确认的规则，落地为纯函数，供三处共用同一口径：
 
@@ -14,9 +14,9 @@
 为什么 Word 优先（不是偏好，是能力差异）：
 - .docx 由标准库直接解析 OOXML，段落/表格网格/合并跨度/画线/图片关系都是结构化
   数据，不需要 OCR 环境，逐字位置可信；
-- 文字层 PDF 需要运行环境提供 PyMuPDF，且文字层质量只能靠启发式判断
-  （`workflow/ocr_backend._quality_reasons`：短文本、可疑字符、长串粘连、
-  可打印比例过低），不合格页才转 OCR；OCR 文字没有逐字坐标与可信度；
+- 上传 PDF 一律直接整卷 OCR，保留 JSON 与 Markdown；正文按服务阅读顺序
+  消费已有 OCR，不依赖 PyMuPDF 或原生文字层成功，原生解析只作可选证据；
+  OCR 块坐标不等于逐字坐标或内容可靠性证明；
 - 扫描件/纯图片 Word 只能走 OCR，属于最后手段。
 
 本模块只做判定与记录，不读文件、不改批次数据。
@@ -28,7 +28,7 @@ import os
 from pathlib import Path
 
 RULE_ID = "source-priority-v1"
-RULE = "word > text_layer_pdf > scan_ocr"
+RULE = "word > pdf_ocr > scan_ocr"
 
 WORD_KIND = "word"
 LEGACY_WORD_KIND = "legacy_word"
@@ -87,7 +87,7 @@ def select_primary(candidates):
 
 
 def pdf_usage(pages) -> dict:
-    """统计 PDF 各页实际用法：原生文字层 / OCR 兜底 / OCR 缺失。"""
+    """统计 PDF 各页实际用法；保留旧报告文字层/混合模式的可读性。"""
     rows = [page for page in (pages or []) if isinstance(page, dict)]
     ocr_pages = [page for page in rows if str(page.get("method") or "") == "ocr"]
     skipped = [page for page in rows if page.get("ocr_skipped")]
@@ -125,13 +125,13 @@ def build_report(source, supporting=(), pages=None, visual_assist: bool | None =
         authority = "pdf"
         extraction = "pdf_" + (usage or {}).get("mode", _PDF_MODE_UNKNOWN)
         if (usage or {}).get("mode") == _PDF_MODE_TEXT:
-            note = "仅上传 PDF：文字层逐页直接解析，未触发 OCR。"
+            note = "历史 PDF 提取记录：正文使用原生文字层；当前上传 PDF 一律整卷 OCR 并保存 JSON 与 Markdown。"
         elif (usage or {}).get("mode") == _PDF_MODE_MIXED:
-            note = "仅上传 PDF：文字层可用页直接解析，质量不足页已转 OCR（OCR 无逐字坐标）。"
+            note = "历史 PDF 提取记录：文字层与 OCR 混合；当前上传 PDF 正文统一消费整卷 OCR，原生解析仅作可选证据。"
         elif (usage or {}).get("mode") == _PDF_MODE_OCR:
-            note = "仅上传 PDF 且逐页质量不足，全部按 OCR 结果解析，需核对题号、音标、画线与表格顺序。"
+            note = "仅上传 PDF：整卷 OCR 同时保存 JSON 与 Markdown，全部正文按服务阅读顺序消费 OCR；原生文字层仅作可选证据。"
         else:
-            note = "仅上传 PDF，逐页用法以 extraction.json 的 pages 记录为准。"
+            note = "仅上传 PDF：直接整卷 OCR 并保存 JSON 与 Markdown；实际页面以 extraction.json 的 pages 记录为准。"
     else:
         extraction = "unknown"
         authority = "unknown"
@@ -173,15 +173,15 @@ def recommendation(source_kind, usage, supporting_rows) -> str:
     """给工作台/日志的一句可执行提示，不改变任何提取结果。"""
     if source_kind == WORD_KIND:
         if any(row["kind"] == PDF_KIND for row in supporting_rows):
-            return "同时上传了 PDF：Word 为唯一提取主源，PDF 仅作版面/层级核对。"
+            return "同时上传了 PDF：Word 为唯一提取主源，PDF 整卷 OCR 保存 JSON 与 Markdown，供版面/层级核对。"
         return "Word 原生解析，无需 OCR。"
     if source_kind == LEGACY_WORD_KIND:
         return "旧版 .doc 已转 .docx 解析；如有图片请核对是否完整。"
     if source_kind == PDF_KIND:
         mode = (usage or {}).get("mode")
         if mode == _PDF_MODE_TEXT:
-            return "PDF 文字层可用；如另有 Word 原卷，上传 Word 可获得更完整的表格与画线。"
-        return "PDF 部分或全部页走了 OCR；如另有 Word 原卷，请上传 Word 以免 OCR 误差。"
+            return "历史记录使用 PDF 文字层；当前 PDF 一律整卷 OCR。如另有 Word 原卷，上传 Word 可获得更完整的表格与画线。"
+        return "PDF 整卷 OCR 直接提供正文与 JSON/Markdown，不要求原生解析成功；如另有 Word 原卷，请优先上传 Word。"
     return "来源格式未识别，请确认上传的是 .docx 或 .pdf。"
 
 
@@ -192,10 +192,10 @@ def upload_notice(primary, others=()) -> str:
     pdf_others = [item for item in others if kind(item) == PDF_KIND]
     if primary_kind == WORD_KIND:
         if pdf_others:
-            return "已用 Word 原卷作为提取主源，PDF 附件只作版面核对（不覆盖 Word 原文）。"
+            return "已用 Word 原卷作为提取主源，PDF 附件整卷 OCR 保存 JSON 与 Markdown 作版面核对（不覆盖 Word 原文）。"
         return "已用 Word 原卷作为提取主源：原生解析，无需 OCR。"
     if primary_kind == LEGACY_WORD_KIND:
         return "旧版 .doc 将先转 .docx 再解析；如含图片可能丢失，建议另存为 .docx 后重传。"
     if primary_kind == PDF_KIND:
-        return "仅上传 PDF：文字层可用的页直接解析，质量不足的页自动转 OCR；若另有 Word 原卷，上传 Word 更完整。"
+        return "仅上传 PDF：直接整卷 OCR，同时保存 JSON 与 Markdown，正文全部使用 OCR，不要求原生解析成功；若另有 Word 原卷，上传 Word 更完整。"
     return ""

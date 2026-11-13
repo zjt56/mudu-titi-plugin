@@ -700,37 +700,47 @@ def _pdf_ocr_for_source(batch, source, report):
 
 def _pdf(source, out, config, ocr_result=None, ocr_warning=None, ocr_wait=None):
     from workflow import ocr_backend
-    result = ocr_backend.read_pdf(source, out / "pdf", config=config)
     if ocr_wait is not None:
         ocr_result, ocr_warning = ocr_wait()
-    pages = result["pages"]
-    warnings = list(result.get("warnings", []))
+    recognized_pages = (ocr_result or {}).get("pages")
+    if (not isinstance(recognized_pages, list) or not recognized_pages or
+            any(not isinstance(page, dict) or not isinstance(page.get("text"), str)
+                for page in recognized_pages)):
+        raise ValueError(ocr_warning or "PDF OCR 正文不可用：缺少有效的整卷 OCR 页面")
+    if not any(page["text"].strip() for page in recognized_pages):
+        raise ValueError(ocr_warning or "PDF OCR 正文为空，不能用原生文字层冒充 OCR 交付")
+    warnings = list(ocr_result.get("warnings", []))
     if ocr_warning:
         warnings.append(ocr_warning)
-    if ocr_result is not None:
-        result["pdf_ocr"] = ocr_result
-        warnings.extend(ocr_result.get("warnings", []))
-    ocr_pages = {p.get("page"): p for p in (ocr_result or {}).get("pages", [])}
-    for page in pages:
-        if not page.get("needs_ocr"):
-            continue
-        recognized = ocr_pages.get(page.get("page"))
-        if not recognized or not recognized.get("text", "").strip():
-            page["ocr_skipped"] = True
-            warnings.append(f"第 {page['page']} 页文字层质量不足，且没有可用的 OCR 文字；已保留原文字层内容")
-            continue
-        page["native_text"] = page.get("text", "")
-        page["native_blocks"] = page.get("blocks", [])
-        # OCR boxes belong to the OCR image coordinate system, never to the
-        # native PDF points. Preserve both sources without relabeling boxes.
+    # Native extraction is optional evidence only. An unavailable PyMuPDF/runtime
+    # cannot invalidate already acquired OCR or cause another OCR submission.
+    try:
+        native = ocr_backend.read_pdf(source, out / "pdf", config=config)
+        native_pages = {page.get("page"): page for page in native.get("pages", [])}
+        result = dict(native)
+        warnings.extend(native.get("warnings", []))
+    except Exception as exc:  # noqa: BLE001 - native evidence is explicitly optional
+        native_pages = {}
+        result = {"native_error": {"type": type(exc).__name__}}
+        warnings.append("PDF 原生证据不可用，正文已使用整卷 OCR 结果")
+    pages = []
+    # Keep the service's page and block order; never sort by page number/bbox.
+    for recognized in recognized_pages:
+        page = dict(recognized)
+        native_page = native_pages.get(page.get("page"))
+        if native_page is not None:
+            page["native_text"] = native_page.get("text", "")
+            page["native_blocks"] = native_page.get("blocks", [])
+            page["native_images"] = native_page.get("images", [])
+        # OCR coordinates belong to the OCR image, never to native PDF points.
         page["blocks"] = recognized.get("blocks") or []
         page["ocr_coordinate_system"] = recognized.get("coordinate_system", "unspecified")
         for key in ("layout", "outputImages", "warnings"):
             if key in recognized:
                 page["ocr_" + key] = recognized[key]
-        page["text"] = recognized["text"]
         page["method"] = "ocr"
-    result["warnings"] = warnings
+        pages.append(page)
+    result.update(method="pdf-ocr", pages=pages, pdf_ocr=ocr_result, warnings=warnings)
     result["text"] = "\n\n".join(f"[PAGE {p['page']}]\n{p.get('text', '')}" for p in pages)
     return result
 
@@ -915,6 +925,14 @@ def extract_source(source: Path, destination: Path, config=None, ocr_result=None
             "unresolved": structure["unresolved"], "evidence_dir": result["evidence_dir"]}
 
 
+def _material_classifier():
+    from . import agent, local_agent
+    if agent.configured():
+        config = local_agent.load_config()
+        return (lambda prompt, run_dir, cfg: local_agent.invoke(prompt, run_dir, cfg)['response']), config
+    return None, None
+
+
 def run(batch_dir: Path) -> dict:
     batch_dir = Path(batch_dir)
     manifest = mf.load(batch_dir)
@@ -932,10 +950,37 @@ def run(batch_dir: Path) -> dict:
         except Exception as exc:  # acquisition failure must remain visible; do not retry
             return {"status": "failed", "sources": [], "error": str(exc)}
 
-    # Acquisition and native extraction write to distinct evidence directories.
-    # Only the main thread merges PDF pages and writes the extraction outputs.
+    # Multiple documents must be classified BEFORE choosing the paper. Upload
+    # names/order are only provisional hints; an answer Word must not outrank a
+    # PDF question paper. All PDFs share this one acquisition result.
+    from . import material_classify
+    input_docs = {str((row or {}).get('path')) for row in manifest.get('inputs', {}).values()
+                  if isinstance(row, dict) and Path(str(row.get('path') or '')).suffix.lower() in ('.pdf', '.docx', '.doc')}
+    prepared_ocr = None
+    provisional = None
+    if len(input_docs) > 1:
+        prepared_ocr = acquire()
+        invoke, cfg = _material_classifier()
+        provisional = material_classify.classify_documents(batch_dir, invoke_fn=invoke, config=cfg,
+                                                           ocr_report=prepared_ocr, manifest=manifest)
+        selected = material_classify.select_document_roles(batch_dir, manifest, provisional)
+        if selected['inputs'] != manifest['inputs']:
+            # Persist through manifest's atomic writer only while extraction owns
+            # the input binding; do not manufacture any completed stage status.
+            from .local_agent import _agent_lock
+            with _agent_lock(1500):
+                current = mf.load(batch_dir)
+                if current.get('inputs') != manifest.get('inputs'):
+                    raise ValueError('附件角色识别期间输入发生变化，请重试')
+                current['inputs'] = selected['inputs']
+                mf.save(batch_dir, current)
+                manifest = current
+        source_path = Path(manifest['inputs']['source']['path']).expanduser()
+        if not source_path.is_absolute():
+            source_path = batch_dir / source_path
+    # Acquisition and extraction use distinct evidence directories.
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(acquire)
+        future = executor.submit(acquire) if prepared_ocr is None else executor.submit(lambda: prepared_ocr)
         def pdf_ocr_wait():
             return _pdf_ocr_for_source(batch_dir, source_path, future.result())
 
@@ -977,7 +1022,7 @@ def run(batch_dir: Path) -> dict:
         except Exception:  # noqa: BLE001
             invoke = None
         roles = material_classify.classify_documents(batch_dir, invoke_fn=invoke, config=cfg,
-                                                     ocr_report=ocr_report)
+                                                     ocr_report=ocr_report, manifest=manifest, classified=provisional)
         result["material_roles"] = roles
         failed_rows = [row for row in roles.get('documents', [])
                        if isinstance(row, dict) and row.get('error')]
@@ -996,7 +1041,7 @@ def run(batch_dir: Path) -> dict:
         ans_item = (manifest.get("inputs", {}).get("answers") or {})
         ans_path = str(ans_item.get("path") or "")
         ans_text = batch_dir / "01_source_ans" / "正文.txt"
-        if ans_path and not ans_text.is_file():
+        if ans_path:
             try:
                 if Path(ans_path).suffix.lower() == ".pdf":
                     answer = next((row for row in roles.get("documents", [])
@@ -1044,6 +1089,11 @@ def run(batch_dir: Path) -> dict:
         policy = source_policy.build_report(source_path, [path for path in supporting if path],
                                             pages=page_evidence.get("pages"),
                                             visual_assist=visual_assist)
+        policy['documents'] = (result.get('material_roles') or {}).get('documents') or []
+        for row in policy['supporting']:
+            matched = [doc for doc in policy['documents'] if Path(doc.get('path') or '').name == row['name']]
+            if len(matched) == 1:
+                row.update({key: matched[0][key] for key in ('role', 'content_authority', 'source_sha256') if key in matched[0]})
         result["source_policy"] = policy
         _write(batch_dir / "01_source" / "source-policy.json", policy)
     except Exception as exc:  # noqa: BLE001 - 证据记录失败不阻断提取

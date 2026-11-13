@@ -102,7 +102,7 @@ def _parse_json(reply):
 # ---------------------------------------------------------------------------
 # 文档角色分类
 # ---------------------------------------------------------------------------
-def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=None) -> dict:
+def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=None, *, manifest=None, classified=None) -> dict:
     """对批次里每份上传文件判定角色，结果写到 01_source/material-roles.json。
 
     文档来源：manifest.inputs 中 source / answers / explanations / docx，以及
@@ -110,11 +110,14 @@ def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=
     规则兜底（检测题号+答案标记）。返回 {documents:[{path, role, source, ...}]}。
     """
     batch = Path(batch_dir)
-    manifest = mf.load(batch)
+    manifest = mf.load(batch) if manifest is None else manifest
     inputs = manifest.get("inputs", {})
     authority_path = str((inputs.get("source") or {}).get("path") or "")
     word_authority = Path(authority_path).suffix.lower() == ".docx"
     seen = {}
+    prior_texts = {row['path']: (batch / row['text_path']).read_text(encoding='utf-8')
+                   for row in (classified or {}).get('documents', [])
+                   if row.get('text_path') and (batch / row['text_path']).is_file()}
     docs = []
     # 优先收集显式声明的答案/解析，再是正文，最后是其它文档。
     extra_keys = sorted(key for key in inputs if re.fullmatch(r'attachment_\d{3,}', key))
@@ -133,23 +136,33 @@ def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=
         source_path = Path(path).expanduser()
         if not source_path.is_absolute():
             source_path = batch / source_path
-        text = (_document_text(batch, str(source_path)) if ocr_report is None else
-                _document_text(batch, str(source_path), ocr_report=ocr_report))
+        prior = next((row for row in (classified or {}).get('documents', [])
+                      if Path(row['path']).expanduser().resolve() == source_path.resolve()
+                      and row.get('source_sha256') == mf.sha256_file(source_path)
+                      and row.get('text_path') and (batch / row['text_path']).is_file()), None)
+        text = (prior_texts[prior['path']] if prior else
+                (_document_text(batch, str(source_path)) if ocr_report is None else
+                 _document_text(batch, str(source_path), ocr_report=ocr_report)))
         # Input authority is independent of the detected text role. Keep answer
         # text available by input/text_path while PDF wording cannot replace Word.
         reference = word_authority and source_path.suffix.lower() == ".pdf"
-        authority = ({"content_authority": key == "source", "authority_input": "source"}
-                     if word_authority else {})
+        authority = {'content_authority': False, 'authority_input': key}
         if text is None:
             results.append({"input": key, "path": path,
                             "role": "structure_reference" if reference else "other",
                             "source": "unavailable", **authority,
                             "error": "文档文字提取失败，原附件已保留，不能视为已完成解析"})
             continue
-        role, source = _classify_one(text, invoke_fn, config)
-        if reference:
-            authority["content_role"] = role
-            role = "structure_reference"
+        role, source = ((prior.get('content_role') or prior['role'], prior['source']) if prior else
+                        _classify_one(text, invoke_fn, config))
+        authority = {'content_authority': role in ('paper', 'mix', 'answers', 'explanations'),
+                     'authority_input': key}
+        if word_authority and role in ('paper', 'mix'):
+            authority['content_authority'] = key == 'source'
+        if reference and role not in ('answers', 'explanations'):
+            authority['content_role'] = role
+            authority['content_authority'] = False
+            role = 'structure_reference'
         # Preserve every uploaded document's complete text layer as an independent
         # hand-off. It must not be reduced to the current confirmed question range.
         material_dir = batch / "01_source" / "materials"
@@ -160,8 +173,63 @@ def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=
                         "chars": len(text), "source_sha256": mf.sha256_file(source_path),
                         "text_sha256": mf.sha256_file(material_path),
                         "text_path": material_path.relative_to(batch).as_posix()})
+    if classified:
+        current_paths = {row.get('text_path') for row in results}
+        # These are only the provisional material projections created earlier in
+        # this same extraction, never originals or historical batch artifacts.
+        for prior in classified.get('documents') or []:
+            relative = prior.get('text_path')
+            target = batch / str(relative or '')
+            if (relative and relative not in current_paths and target.parent == batch / '01_source/materials'
+                    and target.is_file()):
+                target.unlink()
     _write(batch / "01_source" / ROLE_FILE, {"documents": results})
     return {"documents": results}
+
+
+def select_document_roles(batch, manifest, roles):
+    """Choose paper by content role, then Word priority within paper candidates.
+
+    Preserve every original input record and file; ambiguous paper/answer identity
+    fails rather than consuming an answer booklet as the exam. Only extract's
+    controlled caller persists these input bindings before its delivery exists.
+    """
+    from copy import deepcopy
+    from . import source_policy
+    inputs = deepcopy(manifest.get('inputs') or {})
+    descriptor = _load(Path(batch) / 'attachments/batch.json') or {}
+    original_names = descriptor.get('original_filenames') or {}
+    named = {descriptor.get(key): original_names.get(key) for key in ('source', 'answers', 'audio')}
+    named.update({row.get('path'): row.get('original_filename') for row in descriptor.get('extra_documents') or []})
+    for key, entry in inputs.items():
+        name = named.get(Path(str(entry.get('path') or '')).name)
+        if name and not entry.get('original_filename'):
+            entry['original_filename'] = name
+    docs = roles.get('documents') or []
+    detected = lambda row: row.get('content_role') or row.get('role')
+    papers = [row for row in docs if detected(row) in ('paper', 'mix') and not row.get('error')]
+    if not papers:
+        raise ValueError('MATERIAL_PAPER_UNIDENTIFIED: 多附件未识别到试卷正文；不得使用答案卷代替正文')
+    chosen = min(papers, key=lambda row: source_policy.rank(row['path']))
+    same_rank = [row for row in papers if source_policy.rank(row['path']) == source_policy.rank(chosen['path'])]
+    hashes = {row.get('source_sha256') for row in same_rank}
+    if len(same_rank) > 1 and len(hashes) > 1:
+        raise ValueError('MATERIAL_MULTIPLE_PAPERS: 识别到多份不同正文，需保持独立批次，不能按附件顺序合并')
+    answer_rows = [row for row in docs if detected(row) in ('answers', 'explanations') and not row.get('error')]
+    mapped = {key: deepcopy(value) for key, value in inputs.items()
+              if key not in {row['input'] for row in docs} and key != 'docx'}
+    mapped['source'] = deepcopy(inputs[chosen['input']])
+    remaining = [row for row in docs if row['input'] != chosen['input']]
+    if answer_rows:
+        mapped['answers'] = deepcopy(inputs[answer_rows[0]['input']])
+    extras = [row for row in remaining if not answer_rows or row['input'] != answer_rows[0]['input']]
+    for index, row in enumerate(extras, 1):
+        mapped[f'attachment_{index:03d}'] = deepcopy(inputs[row['input']])
+    if Path(chosen['path']).suffix.lower() == '.docx':
+        mapped['docx'] = deepcopy(mapped['source'])
+    updated = deepcopy(manifest)
+    updated['inputs'] = mapped
+    return updated
 
 
 def _document_text(batch: Path, source: str, ocr_report=None) -> str | None:
@@ -212,9 +280,23 @@ def _classify_deterministic(text: str) -> str:
     question_rows = sum(1 for line in lines
                         if re.match(r"^\s*(?:[（(]\s*[）)]\s*)?\d{1,4}\s*[.．、)]\s*\S", line))
     option_rows = sum(1 for line in lines if len(re.findall(r"[A-H][.．]\s*\S", line)) >= 2)
+    from .source_answer_only import detect_source_answer_only
+    diagnostic = detect_source_answer_only(text)
+    if diagnostic['classification'] == 'source_answer_only':
+        return 'answers'
+    # Lesson answer sheets often contain word answers rather than A/B/C keys.
+    # Require an explicit answer heading and locally dense numbered entries,
+    # without question marks, answering blanks or full option rows.
+    plain = [re.sub(r'<[^>]+>|\*\*|^\s*#+\s*', '', line).strip() for line in lines]
+    heading = any(re.search(r'参考答案|答案(?:与|及)解析|答案速查|answer\s*key', line, re.I) for line in plain)
+    numbered = sum(bool(re.search(r'(?<!\d)\d{1,3}\s*[.．、]\s*\S', line)) for line in plain)
+    question_signals = any(re.search(r'[?？]|<u>[\s\u3000_]*</u>|_{3,}', line) for line in lines)
+    if heading and numbered >= 1 and option_rows == 0 and not question_signals:
+        return 'answers'
     if answer_rows >= max(3, question_rows // 2) and option_rows < answer_rows:
         return "answers"
-    if question_rows >= 3 or option_rows >= 2:
+    if question_rows >= 3 or option_rows >= 2 or (question_rows and re.search(
+            r'单项选择|单项填空|完形填空|阅读理解|根据.*填|完成句子|补全单词', text)):
         return "paper"
     return "other"
 

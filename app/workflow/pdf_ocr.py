@@ -15,6 +15,7 @@ import tempfile
 from . import ocr_backend
 
 REPORT = "01_source/pdf-ocr.json"
+MARKDOWN = "01_source/pdf-ocr.md"
 
 
 def _write_report(path, report):
@@ -24,6 +25,19 @@ def _write_report(path, report):
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(report, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def _write_markdown(path, text):
+    """Persist service-ordered Markdown atomically, without rewriting its content."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".pdf-ocr-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
         os.replace(name, path)
     finally:
         if os.path.exists(name):
@@ -44,7 +58,7 @@ def run(batch, manifest, config=None):
     root = batch / "01_source" / "pdf-ocr"
     root.mkdir(parents=True, exist_ok=True)
     report = {"version": 1, "status": "completed", "report_path": REPORT,
-              "sources": []}
+              "markdown_path": MARKDOWN, "sources": []}
     seen = {}
     for key, entry in manifest["inputs"].items():
         if not isinstance(entry, dict):
@@ -77,12 +91,10 @@ def run(batch, manifest, config=None):
             snapshot.write_bytes(data)
             item["snapshot"] = snapshot.relative_to(batch).as_posix()
             item["result_dir"] = source_dir.relative_to(batch).as_posix()
-            # Every uploaded PDF is OCR'd in full, including a companion PDF whose
-            # batch also has a Word original. The resulting JSON (pages, blocks,
-            # reading order) is the layout reference for the Word text, so it must
-            # exist even when the global OCR assist switch is off or the PDF has a
-            # clean text layer. Word stays the content authority: extract._pdf only
-            # replaces pages whose native text layer fails the quality check.
+            # Every uploaded PDF is OCR'd in full. JSON and service-ordered
+            # Markdown are acquired even with OCR assist off or a clean text
+            # layer. Word stays authoritative when supplied; PDF-only extraction
+            # consumes this OCR body without requiring native PDF parsing.
             result = ocr_backend.recognize(snapshot, source_dir, force_ocr=True,
                                            config=config, mandatory_pdf=True)
             if not isinstance(result, dict) or not isinstance(result.get("pages"), list) or not result["pages"]:
@@ -91,8 +103,14 @@ def run(batch, manifest, config=None):
                    for page in result["pages"]):
                 raise ValueError("OCR returned malformed page text")
             result_path = source_dir / "acquisition.json"
-            _write_report(result_path, {"source_sha256": digest, "result": result})
+            markdown_path = source_dir / "acquisition.md"
+            markdown = "\n\n".join(page["text"] for page in result["pages"])
+            _write_markdown(markdown_path, markdown)
+            _write_report(result_path, {"source_sha256": digest,
+                                       "markdown_path": markdown_path.relative_to(batch).as_posix(),
+                                       "result": result})
             item.update(status="completed", result_path=result_path.relative_to(batch).as_posix(),
+                        markdown_path=markdown_path.relative_to(batch).as_posix(),
                         pages=[{"page": page.get("page"), "text": page.get("text", ""),
                                 "blocks": page.get("blocks") or [],
                                 "warnings": page.get("warnings") or []}
@@ -109,5 +127,13 @@ def run(batch, manifest, config=None):
         report["status"] = "failed"
     elif not report["sources"]:
         report["status"] = "no_pdfs"
+    # Aggregate only successful, distinct sources in manifest/service order.
+    # Failed sources stay explicit in JSON rather than masquerading as OCR text.
+    sections = []
+    for item in report["sources"]:
+        if item["status"] == "completed" and "duplicate_of" not in item:
+            markdown = (batch / item["markdown_path"]).read_text(encoding="utf-8")
+            sections.append(f"## {item['input']}\n\n{markdown}")
+    _write_markdown(batch / MARKDOWN, "\n\n".join(sections))
     _write_report(batch / REPORT, report)
     return report

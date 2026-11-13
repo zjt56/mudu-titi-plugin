@@ -58,6 +58,18 @@ class AgentTasksTest(unittest.TestCase):
     def accept(self, stage, payload):
         return tasks.accept_result(self.batch, stage, self.result(stage, payload))
 
+    def test_independent_answer_attachment_is_in_context_with_word_source(self):
+        self.write('01_source/materials/source.txt', 'Word paper')
+        self.write('01_source/materials/attachment_001.txt', 'Unit 1\n第一课时\n参考答案\nⅠ.1.A')
+        self.write('01_source/materials/attachment_002.txt', 'Duplicate PDF paper')
+        self.write('01_source/material-roles.json', {'documents': [
+            {'input': 'attachment_001', 'role': 'answers', 'content_authority': True},
+            {'input': 'attachment_002', 'role': 'structure_reference', 'content_role': 'paper', 'content_authority': False}]})
+        context, hashes, _, _ = tasks._collect(self.batch, 'answers')
+        self.assertIn('01_source/materials/attachment_001.txt', context)
+        self.assertNotIn('01_source/materials/attachment_002.txt', context)
+        self.assertIn('01_source/materials/attachment_002.txt', hashes)
+
     def test_validate_only_does_not_install_candidate(self):
         artifact = self.batch / tasks.ARTIFACTS["types"]
         original = artifact.read_bytes()
