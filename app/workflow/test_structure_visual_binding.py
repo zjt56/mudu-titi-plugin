@@ -119,14 +119,17 @@ class StructureVisualBindingTest(unittest.TestCase):
 
     def test_failed_band_builder_does_not_skip_other_visual_builders(self):
         with patch('workflow.lesson_bands.build', side_effect=RuntimeError('band failed')), \
+             patch('workflow.visual_columns.build') as columns, \
              patch('workflow.visual_review.build') as review, \
              patch('workflow.visual_crosscheck.build') as cross:
             runner._ensure_visual_evidence(self.batch)
+        columns.assert_called_once_with(self.batch)
         review.assert_called_once_with(self.batch)
         cross.assert_called_once_with(self.batch)
 
     def test_failed_image_review_does_not_skip_crosscheck(self):
         with patch('workflow.lesson_bands.build') as bands, \
+             patch('workflow.visual_columns.build'), \
              patch('workflow.visual_review.build', side_effect=RuntimeError('image review failed')), \
              patch('workflow.visual_crosscheck.build') as cross:
             runner._ensure_visual_evidence(self.batch)
@@ -137,6 +140,7 @@ class StructureVisualBindingTest(unittest.TestCase):
         for name in ('image_semantics.json', 'source_crosscheck.json'):
             (self.batch / '01_source' / name).write_text('{}', encoding='utf-8')
         with patch('workflow.lesson_bands.build') as bands, \
+             patch('workflow.visual_columns.build'), \
              patch('workflow.visual_review.build') as review, \
              patch('workflow.visual_crosscheck.build') as cross:
             runner._ensure_visual_evidence(self.batch)

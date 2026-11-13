@@ -666,10 +666,29 @@ def _candidate_options(options) -> list[dict]:
 
 def _rebuild_source_units(root, structure, cleaned):
     """Every source consumer uses the same current verified container windows."""
-    from . import lesson_bands, structure_gate
+    from . import lesson_bands, structure_gate, structure_ai, visual_columns
     evidence = lesson_bands.for_text(root, cleaned)
-    sections = lesson_bands.annotate_sections(structure.get("sections") or [], evidence)
-    units = structure_gate._build_units(sections, structure.get("groups") or [], cleaned.splitlines())
+    candidate = visual_columns.annotate_candidate(root, cleaned, structure)
+    columns = candidate.get("visual_columns") or []
+    sections = lesson_bands.annotate_sections(candidate.get("sections") or [], evidence)
+    lines = cleaned.splitlines()
+    units = structure_gate._build_units(sections, structure.get("groups") or [], lines, columns)
+    if columns:
+        # Revalidate retained candidates locally against current source-bound
+        # proof. Never call a model or trust a marker's accepted/status flag here.
+        marker_path = Path(root) / structure_ai.CLASSIFY_MARKER
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            response = marker.get("candidate_response") or {"units": marker.get("units") or []}
+            valid = structure_ai._sanitize_classified(response, cleaned, dict(candidate, sections=sections))
+        except (OSError, ValueError, TypeError):
+            valid = []
+        units = structure_gate._merge_visual_units(units, valid, columns, lines, sections)
+        # A deterministic fallback cannot turn a verified guidance/extension
+        # region into an uploadable task when the AI candidate was rejected.
+        units = [u for u in units if not any(c.get("role") in {"guidance", "extension"}
+                 and c["start_line"] <= u["source_span"]["start_line"] <= u["source_span"]["end_line"] <= c["end_line"]
+                 for c in columns)]
     # Match the gate's final canonical annotation, including its verified stop.
     for unit in units:
         section = unit.get("source_section") or {}

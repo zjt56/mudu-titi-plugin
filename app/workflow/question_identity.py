@@ -98,7 +98,7 @@ def _anchor(unit, lines):
     raise ValueError("scoped identity requires a printed question anchor")
 
 
-def assign_scoped(units, source_lines, sections=None, previous=None) -> list[dict]:
+def assign_scoped(units, source_lines, sections=None, previous=None, visual_columns=None) -> list[dict]:
     from .sync_practice import heading_candidates, plain_text
     lines = source_lines.splitlines() if isinstance(source_lines, str) else list(source_lines)
     candidates = heading_candidates("\n".join(lines))
@@ -132,7 +132,21 @@ def assign_scoped(units, source_lines, sections=None, previous=None) -> list[dic
     for original in units:
         row = deepcopy(original)
         anchor = _anchor(row, lines)
-        owners = [c for c in candidates if c["start_line"] <= anchor <= c.get("end_line", len(lines))]
+        # A verified visual question window can own a task directly, without a
+        # printed heading. Its label is metadata, never invented Word content.
+        column_id = row.get("column_id")
+        visual = [c for c in visual_columns or [] if c.get("column_id") == column_id
+                  and c.get("role") == "question"
+                  and (c.get("start_line"), c.get("end_line")) == _range(row)] if column_id else []
+        if len(visual) == 1:
+            column = visual[0]
+            owner = {"title": column.get("label") or "", "context": "visual-column:" + column_id,
+                     "start_line": column.get("heading_line") or column["start_line"],
+                     "end_line": column["end_line"], "occurrence": 1,
+                     "visual_column_id": column_id, "visual_column": deepcopy(column)}
+            owners = [owner]
+        else:
+            owners = [c for c in candidates if c["start_line"] <= anchor <= c.get("end_line", len(lines))]
         if len(owners) != 1:
             raise ValueError(f"question at source line {anchor} has no unique section")
         owner = owners[0]
@@ -156,6 +170,23 @@ def assign_scoped(units, source_lines, sections=None, previous=None) -> list[dic
                                    "start_line": owner["start_line"], "end_line": owner.get("end_line", len(lines))})
         if owner.get("lesson_band"):
             row["source_section"]["lesson_band"] = deepcopy(owner["lesson_band"])
+        if owner.get("visual_column_id"):
+            row["source_section"]["visual_column_id"] = owner["visual_column_id"]
+            row["source_section"]["visual_column"] = deepcopy(owner["visual_column"])
+        start, end = _range(row)
+        covering = [c for c in visual_columns or []
+                    if c.get("role") != "extension"
+                    and c.get("start_line", 0) <= start <= end <= c.get("end_line", 0)]
+        if covering:
+            narrowest = min(covering, key=lambda c: (c["end_line"] - c["start_line"],
+                                                   0 if c.get("role") == "question" else 1))
+            by_id = {c["column_id"]: c for c in visual_columns}
+            path, current, visited = [], narrowest, set()
+            while current and current["column_id"] not in visited:
+                visited.add(current["column_id"])
+                path.append({k: current[k] for k in ("column_id", "label", "role")})
+                current = by_id.get(current.get("parent_id"))
+            row["source_section"]["column_path"] = list(reversed(path))
         existing = row.get("question_ids") or old.get("question_ids") or {}
         start, end = _range(row)
         qids = {}

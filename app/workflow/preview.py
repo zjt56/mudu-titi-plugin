@@ -64,6 +64,10 @@ def _strong_number(line: str) -> int | None:
 #      空档标记（全角空格/下划线/__），才不会吞掉普通句号后的数字（如 "No.5"）。
 _BLANK_BEFORE_NUMBER = re.compile(r"(?:\u3000|__|_{1,})\s*(\d{1,3})(?!\d)")
 _NUMBER_BEFORE_BLANK = re.compile(r"(?<!\d)(\d{1,3})\s*[.．]\s*(?=\u3000|__|_)")
+# 图注空：`N.[IMG …](提示)`。图片紧跟括号提示才是一个需要填写的空；孤立
+# `N.[IMG …]`（选项图/引用）不算小题号——与 extract.IMAGE_HINT_BLANK 同源。
+_IMAGE_HINT_BLANK = re.compile(
+    r"(?<![\d.．])(\d{1,3})\s*[.．]\s*\[IMG\s+[^\]\r\n]+\]\s*[（(]\s*[^）)\r\n]+?\s*[）)]")
 
 
 def _weak_numbers(line: str) -> list[int]:
@@ -71,6 +75,8 @@ def _weak_numbers(line: str) -> list[int]:
     plain = _plain(line)
     found = [int(m.group(1)) for m in _BLANK_BEFORE_NUMBER.finditer(plain)]
     found += [int(m.group(1)) for m in _NUMBER_BEFORE_BLANK.finditer(plain)]
+    # 图注空（图片+紧随括号提示）是合法子题号，与文本空一致参与锚点。
+    found += [int(m.group(1)) for m in _IMAGE_HINT_BLANK.finditer(plain)]
     if re.match(r'^\s*[A-Za-z][A-Za-z .-]*[:：]', plain):
         # A dialogue may print the answer line as an embedded image. Require a
         # speaker and an adjacent printed number; an arbitrary image proves none.
@@ -299,6 +305,11 @@ def _scoped_source_slice(unit: dict, lines: list[str], *, batch_dir=None) -> lis
     if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
         return []
     window = lines[start - 1:end]
+    if unit.get('column_id') and batch_dir is not None:
+        from . import visual_columns, structure_gate
+        proof = visual_columns.load_verified(batch_dir, text='\n'.join(lines))
+        if not structure_gate._visual_column_for_unit(unit, proof.get('columns') or [], lines):
+            return []
     if "start_offset" in span or "end_offset" in span:
         left, right = span.get("start_offset"), span.get("end_offset")
         if (start != end or type(left) is not int or type(right) is not int

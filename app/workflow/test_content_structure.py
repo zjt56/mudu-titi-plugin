@@ -39,6 +39,157 @@ class AdapterTest(unittest.TestCase):
     def prepare(self, raw=RAW, candidate=None, pdf=None):
         return adapter.prepare(batch_dir=self.batch, raw=raw, candidate=candidate or {"sections": []}, pdf_ocr=pdf)
 
+    def visual_fixture(self, *, role="question", raw=None, heading=None):
+        from workflow import source_pages, visual_columns
+        from workflow.test_source_pages import png
+        raw = raw or "第一课时 Section A\n陌生栏目名称\nFill in the blank.\nI ____ a student."
+        (self.source / "正文.txt").write_text(raw, encoding="utf-8")
+        (self.batch / "attachments").mkdir(exist_ok=True)
+        original = self.batch / "attachments/source.docx"
+        original.write_bytes(b"Word source visual fixture")
+        (self.batch / "workflow").mkdir(exist_ok=True)
+        (self.batch / "workflow/manifest.json").write_text(json.dumps({"inputs": {
+            "source": {"path": "attachments/source.docx"}}}), encoding="utf-8")
+        def render(source, output, config):
+            output.mkdir()
+            (output / "page-1.png").write_bytes(png())
+            (output / "manifest.json").write_text(json.dumps({"source_sha256": source_pages._sha(source.read_bytes()),
+                "full_page": True, "page_count": 1, "pages": [{"page": 1, "path": "page-1.png"}]}))
+            return "test-command"
+        with patch.object(source_pages, "_render", side_effect=render):
+            source_pages.prepare(self.batch)
+        lines = raw.splitlines()
+        result = {"columns": [{"id": "c1", "label": lines[1], "role": role, "parent_id": None,
+                  "heading_line": heading, "start_line": 3, "end_line": len(lines),
+                  "start_text": lines[2], "end_text": lines[-1], "printed_numbers": [],
+                  "boxes": [{"page": 1, "bbox": [0.1, 0.2, 0.9, 0.8]}], "reason": "完整页边框与真实作答窗口"}], "issues": []}
+        route = {"provider": "test", "model": "m", "profile": "p"}
+        with patch("workflow.visual_transport.route_identity", return_value=route):
+            response = visual_columns.build(self.batch, identify=lambda *a, **k: {**route, "text": json.dumps(result)})
+        self.assertEqual(response["status"], "verified", response)
+        row = {"unit_kind": "standalone", "type": "单词拼写", "numbers": [1], "column_id": "c1",
+               "stem": "\n".join(lines[2:]), "source_span": {"start_line": 3, "end_line": len(lines),
+               "number_binding": "unnumbered_section", "printed_numbers": []}}
+        return raw, row
+
+    def test_visual_direct_unnumbered_task_roundtrips_gate_rebuild_and_null_range(self):
+        from workflow import structure_gate, question_content, upload_numbering
+        raw, row = self.visual_fixture()
+        prepared = self.prepare(raw=raw)
+        checked = adapter.validate(prepared, envelope([row]))
+        self.assertTrue(checked["passed"], checked)
+        unit = checked["units"][0]
+        self.assertEqual(unit["source_span"]["printed_numbers"], [])
+        self.assertIsNone(unit["original_number"])
+        self.assertFalse(unit["printed_number"])
+        self.assertEqual(unit["source_section"]["column_path"], [{"column_id": "c1", "label": "陌生栏目名称", "role": "question"}])
+        (self.batch / structure_ai.CLASSIFY_MARKER).write_text(json.dumps({"candidate_response": {"units": [row]}}))
+        with patch.object(structure_ai, "auto_classify", return_value={"units": [unit]}):
+            report = structure_gate.run_gate(self.batch)
+        self.assertTrue(report["passed"], report)
+        rebuilt = question_content._rebuild_source_units(self.batch, {"sections": []}, raw)
+        self.assertEqual([u["unit_id"] for u in rebuilt], [unit["unit_id"]])
+        projection = upload_numbering.project_batch({"items": [dict(unit, id=unit["unit_id"])]}, self.batch)
+        self.assertEqual(projection["errors"], [], projection["errors"])
+        self.assertIsNone(projection["items"][0]["numberStart"])
+        self.assertIsNone(projection["items"][0]["numberEnd"])
+        self.assertEqual(projection["evidence"]["units"][0]["state"], "proven-unnumbered")
+        from workflow import preview
+        from workbench import server
+        selected = preview.source_slice(self.batch, [1], raw.splitlines(), unit_id=unit['unit_id'])
+        self.assertEqual(selected, raw.splitlines()[2:])
+        blocks = server.source_blocks(selected)
+        self.assertEqual('\n'.join(b['text'] for b in blocks if b['type'] == 'text'), '\n'.join(raw.splitlines()[2:]))
+        (self.source / 'visual-columns.json').write_text('{}')
+        self.assertEqual(preview.source_slice(self.batch, [1], raw.splitlines(), unit_id=unit['unit_id']), [])
+
+    def test_visual_direct_task_does_not_extend_preceding_numbered_section(self):
+        from workflow import structure_gate, visual_columns, question_content
+        raw = ("第一课时 Section A\nⅠ.单词拼写\n1. Apple a____.\n"
+               "陌生栏目\nFill in the blank.\nI ____ a student.")
+        # Prepare source-bound whole-page evidence, then move the exact task
+        # coordinates to its real location in the longer Word view.
+        _, _ = self.visual_fixture(raw=raw)
+        path = self.source / "visual-columns.json"
+        proof = json.loads(path.read_text())
+        row = proof["response"]["columns"][0]
+        row.update(start_line=5, start_text=raw.splitlines()[4], heading_line=4)
+        proof["columns"] = visual_columns._columns(proof["response"], raw, proof["pages"])
+        path.write_text(json.dumps(proof))
+        candidate = {"sections": [{"title": "Ⅰ.单词拼写", "type": "单词拼写", "questions": [1],
+                                    "source_line": 2, "source_end_line": 6}]}
+        (self.source / "structure.json").write_text(json.dumps(candidate))
+        rows = [{"unit_kind": "standalone", "type": "单词拼写", "numbers": [1], "stem": raw.splitlines()[2],
+                 "source_span": {"start_line": 3, "end_line": 3}},
+                {"unit_kind": "standalone", "type": "单词拼写", "numbers": [1], "column_id": "c1",
+                 "stem": "\n".join(raw.splitlines()[4:]), "source_span": {"start_line": 5, "end_line": 6,
+                 "number_binding": "unnumbered_section", "printed_numbers": []}}]
+        checked = adapter.validate(self.prepare(raw=raw, candidate=candidate), envelope(rows))
+        self.assertTrue(checked["passed"], checked)
+        candidate = visual_columns.annotate_candidate(self.batch, raw, candidate)
+        fresh = structure_gate._build_units(candidate["sections"], [], raw.splitlines(), candidate["visual_columns"])
+        self.assertEqual(fresh[0]["stem"], "1. Apple a____.")
+        merged = structure_gate._merge_visual_units(fresh, checked["units"], candidate["visual_columns"], raw.splitlines(), candidate["sections"])
+        self.assertEqual(len(merged), 2)
+        self.assertIsNotNone(question_content._validated_ai_units(checked["units"], merged, raw.splitlines()))
+        errors = structure_gate._scoped_source_errors(checked["units"][:1], candidate["sections"], raw.splitlines(), candidate["visual_columns"])
+        self.assertIn("VISUAL_QUESTION_UNCOVERED", {e["code"] for e in errors})
+
+    def test_failed_visual_ownership_cannot_pass_by_numbered_fallback(self):
+        from workflow import structure_gate
+        raw, row = self.visual_fixture()
+        (self.source / 'visual-columns.json').write_text(json.dumps({'status': 'unavailable', 'reason': 'EMPTY_RESPONSE'}))
+        with patch.object(structure_ai, 'auto_classify', return_value={'ran': False}):
+            report = structure_gate.run_gate(self.batch)
+        self.assertFalse(report['passed'])
+        self.assertIn('COLUMN_OWNERSHIP_UNRESOLVED', [r['code'] for r in report['blockers']])
+
+    def test_visual_guidance_never_becomes_question_even_with_familiar_label(self):
+        raw, row = self.visual_fixture(role="guidance", raw="第一课时 Section A\n基础巩固\nTip about words.\nRead carefully.")
+        checked = adapter.validate(self.prepare(raw=raw), envelope([row]))
+        self.assertFalse(checked["passed"])
+        self.assertIn("COLUMN_ROLE_INVALID", {r["check"] for r in checked["diagnostics"]})
+
+    def test_visual_no_number_claim_cannot_hide_printed_question(self):
+        raw, row = self.visual_fixture(raw="第一课时 Section A\n创新训练\n1. Fill in the blank.\nI ____ a student.")
+        checked = adapter.validate(self.prepare(raw=raw), envelope([row]))
+        self.assertFalse(checked["passed"])
+        self.assertIn("UNNUMBERED_BINDING_INVALID", {r["check"] for r in checked["diagnostics"]})
+
+    def test_visual_task_requires_complete_word_window_and_no_rewrite(self):
+        raw, row = self.visual_fixture()
+        for change in ({"stem": "I am a student."},
+                       {"stem": "I ____ a student.", "source_span": {"start_line": 4, "end_line": 4, "number_binding": "unnumbered_section"}}):
+            bad = dict(row, **change)
+            checked = adapter.validate(self.prepare(raw=raw), envelope([bad]))
+            self.assertFalse(checked["passed"], checked)
+
+    def test_visual_pages_and_column_proofs_are_native_snapshot_bound(self):
+        raw, row = self.visual_fixture()
+        prepared = self.prepare(raw=raw)
+        self.assertEqual(len(prepared["context"]["media"]), 1)
+        image = prepared["context"]["media"][0]["path"]
+        self.assertTrue(image.startswith("01_source/visual-pages/"))
+        self.assertIn("01_source/visual-columns.json", prepared["input_binding"])
+        self.assertIn("01_source/visual-pages/manifest.json", prepared["input_binding"])
+        self.assertTrue(adapter.verify_binding(prepared, self.batch))
+        (self.batch / image).write_bytes(b"changed page")
+        with self.assertRaises(ValueError):
+            adapter.verify_binding(prepared, self.batch)
+        # A forged candidate cannot turn an unavailable proof back into trusted columns.
+        forged = self.prepare(raw=raw, candidate=prepared["context"]["content_structure"]["candidate"])
+        self.assertFalse(forged["context"]["content_structure"]["candidate"]["visual_columns"])
+        self.assertFalse(adapter.validate(forged, envelope([row]))["passed"])
+
+    def test_late_visual_task_missing_from_submission_is_not_covered_by_previous_unit(self):
+        from workflow import visual_columns
+        raw, row = self.visual_fixture()
+        candidate = visual_columns.annotate_candidate(self.batch, raw, {"sections": []})
+        cols = candidate["visual_columns"]
+        from workflow.structure_gate import _scoped_source_errors
+        errors = _scoped_source_errors([], [], raw.splitlines(), cols)
+        self.assertIn("VISUAL_QUESTION_UNCOVERED", {r["code"] for r in errors})
+
     def test_frame_and_hashes_cover_full_snapshot(self):
         candidate = {"sections": [{"title": "last heading", "source_line": 4}]}
         prepared = self.prepare(candidate=candidate, pdf={"pages": [{"order": [2, 1], "bbox": [1, 2, 3, 4]}]})

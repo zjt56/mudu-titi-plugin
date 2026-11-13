@@ -42,6 +42,16 @@ class VisualTransportTests(unittest.TestCase):
 
     @patch("workflow.visual_transport.shutil.which", return_value="node")
     @patch("workflow.visual_transport.subprocess.run")
+    def test_optional_reasoning_hint_reaches_bridge_without_switching_route(self, run, _which):
+        run.return_value = self.run_result({'provider': 'chosen', 'model': 'm', 'text': '{}'})
+        identify([{'id': 'page-1', 'path': 'page.png'}], '核对栏目', reasoning='low')
+        payload = json.loads(run.call_args.kwargs['input'])
+        self.assertEqual(payload['reasoning'], 'low')
+        self.assertNotIn('provider', payload)
+        self.assertNotIn('model', payload)
+
+    @patch("workflow.visual_transport.shutil.which", return_value="node")
+    @patch("workflow.visual_transport.subprocess.run")
     def test_route_only_does_not_send_images(self, run, _which):
         run.return_value = self.run_result({"provider": "chosen", "model": "m", "profile": "p"})
         self.assertEqual(route_identity()["provider"], "chosen")

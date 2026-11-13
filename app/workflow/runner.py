@@ -650,7 +650,7 @@ def _structure_inputs(batch_dir: Path, manifest: dict) -> tuple:
     source = manifest.get("inputs", {}).get("source", {})
     original = source.get("path") or ""
     paths = ("01_source/正文.txt", "01_source/structure.json", "01_source/原始正文.txt",
-             "01_source/lesson-bands.json")
+             "01_source/lesson-bands.json", "01_source/visual-columns.json")
     return (json.dumps(source, sort_keys=True, ensure_ascii=False),
             tuple(mf.sha256_file(batch_dir / path) for path in paths),
             mf.sha256_file(original) if original else "")
@@ -666,6 +666,11 @@ def _ensure_visual_evidence(batch_dir: Path) -> None:
         from . import lesson_bands
         lesson_bands.build(batch_dir)
     except Exception:  # noqa: BLE001 - 可选板块识别失败不得跳过其它视觉检查
+        pass
+    try:
+        from . import visual_columns
+        visual_columns.build(batch_dir)
+    except Exception:  # noqa: BLE001 - 失败保留明确证据缺失，不伪称看过整页
         pass
     try:
         sem = batch_dir / "01_source" / "image_semantics.json"
@@ -686,6 +691,9 @@ def _ensure_visual_evidence(batch_dir: Path) -> None:
 @activity.observed("structure_gate", "正在确认题目结构与来源边界")
 def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
     """Check the immutable extraction delivery and publish only a gate result."""
+    # Auto/supervisor call this directly, not the CLI stage-dispatch branch.
+    # Gather complete page/column evidence before freezing gate inputs.
+    _ensure_visual_evidence(batch_dir)
     from .local_agent import _agent_lock
     with _agent_lock(1500):
         current = mf.load(batch_dir)
@@ -1465,7 +1473,6 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
                 # 结构化判断前确保视觉理解已就绪（用户 2026-11-11：提取后做视觉理解、
                 # 为后续结构判断做铺垫）。存量批次或非 extract 路径未生成 image_semantics
                 # 时补跑一次；网关不可用/任何异常只跳过、不阻断。
-                _ensure_visual_evidence(batch_dir)
                 code = do_structure_gate(batch_dir, manifest)
             elif stage.id == "validate":
                 code = do_validate(batch_dir, manifest)

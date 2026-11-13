@@ -43,15 +43,26 @@ def _plain(line):
     return re.sub(r"</?(?:u|sup|sub)>", "", line).replace("**", "")
 
 
+# 图注空：`N.[IMG …](提示)` 或 `N.[IMG …]（提示）`。原卷短文填空/选词填空里，
+# 需要填写的空有时用「图片 + 紧随其后的括号提示」表达（如 `1.[IMG image.jpeg](tree)`、
+# `2.[IMG image.jpeg](/aːnt/)`）。括号提示是关键证据：只有图片紧跟括号提示时才是
+# 图注空；孤立 `N.[IMG …]`（如选项图/题号引用）不计为小题号，避免误判。
+IMAGE_HINT_BLANK = re.compile(
+    r"(?<![\d.．])(\d{1,3})\s*[.．]\s*\[IMG\s+[^\]\r\n]+\]\s*[（(]\s*[^）)\r\n]+?\s*[）)]")
+
+
 def blank_numbers(line: str) -> list[int]:
     """Read numbers that sit inside an underline/blank, tolerating NBSP padding.
 
     Word exports sometimes pad the blank with ``\xa0`` instead of the ideographic
     space, so a blank like ``<u>\u300066\xa0</u>`` must still be recognized.
+    ``N.[IMG …](提示)`` 图注空（图片+括号提示）同样是一个需要填写的小题号。
     """
     normalized = line.replace("\xa0", "\u3000")
-    return [int(n) for n in re.findall(
+    numbers = [int(n) for n in re.findall(
         r"(?:_{2,}|\u3000+)\s*(\d{1,3})\s*(?=_{2,}|\u3000)", normalized)]
+    numbers.extend(int(n) for n in IMAGE_HINT_BLANK.findall(normalized))
+    return numbers
 
 
 # 对话补全题的小题号常带说话人前缀（`C:1.<u>…`），行首不是数字。

@@ -41,6 +41,25 @@ class StructureAiClassifyTest(unittest.TestCase):
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["subtype"], "汉语及首字母")
 
+    def test_unnumbered_text_group_uses_same_full_section_proof_as_gate(self):
+        raw = "第一课时 Section A\nⅠ.按照字母表顺序,写出下面英文字母歌中所缺的大写字母\nA,B,____,D"
+        candidate = {"sections": [{"title": raw.splitlines()[1], "type": "语音题", "source_line": 2,
+                                    "source_end_line": 3, "questions": []}]}
+        row = {"unit_kind": "group", "type": "语音题", "numbers": [1], "stem": raw.splitlines()[2],
+               "source_span": {"start_line": 3, "end_line": 3, "number_binding": "unnumbered_section"}}
+        diagnostics = []
+        got = structure_ai._sanitize_classified({"units": [row]}, raw, candidate, diagnostics=diagnostics)
+        self.assertEqual(len(got), 1, diagnostics)
+        self.assertEqual(got[0]["source_span"]["printed_numbers"], [])
+        self.assertFalse(got[0]["printed_number"])
+
+    def test_column_prompt_requires_role_and_internal_alias_without_name_rules(self):
+        prompt = structure_ai._classify_prompt("1. question", {"visual_columns": []})
+        self.assertIn("column_id", prompt)
+        self.assertIn("role=guidance/container不独立成题", prompt)
+        self.assertIn("numbers=[1]仅为内部兼容别名", prompt)
+        self.assertIn("不凭栏目名称猜题型或组单", prompt)
+
     def test_unnumbered_text_requires_exact_complete_rebuilt_window(self):
         from workflow.extract import infer_structure
         raw = ('Unit 3\n第一课时 Section A\n写出下面画线词的汉语意思\n'

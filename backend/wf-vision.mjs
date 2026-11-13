@@ -13,7 +13,33 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const script = fileURLToPath(import.meta.url);
 const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-function problem(code, message) { const error = new Error(message); error.code = code; throw error; }
+function problem(code, message, diagnostics) { const error = new Error(message); error.code = code; if (diagnostics) error.diagnostics = diagnostics; throw error; }
+/** Only caller-selected, catalog-supported thinking levels; never silently clamp. */
+export function requestReasoning(model, requested, configured) {
+  if (requested !== undefined) {
+    const levels = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    const mapped = model.thinkingLevelMap?.[requested];
+    if (typeof requested !== 'string' || !levels.includes(requested) || !model.reasoning
+      || mapped === null || (['xhigh', 'max'].includes(requested) && mapped === undefined)) {
+      problem('INVALID_REQUEST', 'reasoning must be a supported catalog thinking level; off and implicit clamping are not permitted');
+    }
+    if (configured !== undefined && requested !== configured) problem('INVALID_REQUEST', 'reasoning conflicts with explicitly configured provider reasoning');
+  }
+  return configured ?? requested;
+}
+/** Response diagnostics deliberately exclude text, thinking, arguments and raw errors. */
+export function responseDiagnostics(answer) {
+  const stops = new Set(['stop', 'length', 'toolUse', 'error', 'aborted', 'pending', 'tool_calls', 'function_call', 'end', 'content_filter', 'network_error']);
+  const types = new Set(['text', 'thinking', 'toolCall', 'image']);
+  const usage = {};
+  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning', 'totalTokens']) {
+    if (Number.isFinite(answer.usage?.[key]) && answer.usage[key] >= 0) usage[key] = answer.usage[key];
+  }
+  return { stop_reason: stops.has(answer.stopReason) ? answer.stopReason : 'unknown',
+    ...(answer.rawStopReason !== undefined ? { raw_stop_reason: stops.has(answer.rawStopReason) ? answer.rawStopReason : 'unknown' } : {}),
+    content_types: Array.isArray(answer.content) ? answer.content.map(b => types.has(b.type) ? b.type : 'unknown') : [], usage,
+    ...(Number.isFinite(answer.durationMs) && answer.durationMs >= 0 ? { duration_ms: answer.durationMs } : {}) };
+}
 function entry(value, label) {
   if (value === undefined || value === null || (object(value) && !Object.keys(value).length)) return null;
   if (!object(value) || typeof value.provider !== 'string' || !value.provider.trim()
@@ -150,6 +176,7 @@ export async function runVision(input, { root, env = process.env } = {}) {
     model.reasoning = true;
     model.thinkingLevelMap = Object.fromEntries(['off','minimal','low','medium','high','xhigh','max'].map(level => [level, configured.reasoningEfforts[level] ?? null]));
   }
+  const reasoning = requestReasoning(model, input.reasoning, spec.reasoning);
   let provider;
   if (catalog && spec.api === undefined) provider = { ...catalog, getModels: () => [model] };
   else {
@@ -177,16 +204,17 @@ export async function runVision(input, { root, env = process.env } = {}) {
   try {
     answer = await models.completeSimple(model, { messages: [{ role: 'user', content: [{ type: 'text', text: input.prompt }, ...images.content], timestamp: Date.now() }] }, {
       ...(apiKey ? { apiKey } : {}), ...(spec.headers ? { headers: spec.headers } : {}), maxTokens,
-      ...(spec.reasoning ? { reasoning: spec.reasoning } : {}), sessionId: `wf-vision-${randomUUID()}`, signal: AbortSignal.timeout(timeout), maxRetries: 0,
+      ...(reasoning ? { reasoning } : {}), sessionId: `wf-vision-${randomUUID()}`, signal: AbortSignal.timeout(timeout), maxRetries: 0,
     });
   } catch (error) {
     // Provider diagnostics can contain request headers. Never serialize raw errors.
     problem('PROVIDER_CALL_FAILED', `selected provider ${selected.provider}/${selected.model} call failed (${error.code || error.name || 'error'}); no fallback attempted`);
   }
-  if (['error', 'aborted'].includes(answer.stopReason)) problem('PROVIDER_CALL_FAILED', `selected provider ${selected.provider}/${selected.model} returned ${answer.stopReason}; no fallback attempted`);
+  const diagnostics = responseDiagnostics(answer);
+  if (['error', 'aborted'].includes(answer.stopReason)) problem('PROVIDER_CALL_FAILED', `selected provider ${selected.provider}/${selected.model} returned ${answer.stopReason}; no fallback attempted`, diagnostics);
+  if (answer.stopReason === 'length') problem('TRUNCATED_RESPONSE', 'selected model reached max_tokens; response is incomplete', diagnostics);
   const text = answer.content.filter(b => b.type === 'text').map(b => b.text).join('');
-  if (!text.trim()) problem('EMPTY_RESPONSE', `selected model ${selected.provider}/${selected.model} returned no text`);
-  if (answer.stopReason === 'length') problem('TRUNCATED_RESPONSE', 'selected model reached max_tokens; response is incomplete');
+  if (!text.trim()) problem('EMPTY_RESPONSE', `selected model ${selected.provider}/${selected.model} returned no text`, diagnostics);
   return { provider: selected.provider, model: selected.model, text, stop_reason: answer.stopReason, usage: answer.usage,
     images: images.metadata, transport: 'pi-ai', adapter_version: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version };
 }
@@ -214,6 +242,6 @@ async function main() {
 }
 if (process.argv[1] && resolve(process.argv[1]) === script) main().catch(error => {
   const safe = new Set(['INVALID_ROUTE','MISSING_ROUTE','PI_AI_UNAVAILABLE','YAML_UNAVAILABLE','INVALID_IMAGES','UNSUPPORTED_IMAGE','INVALID_REQUEST','INVALID_PROFILE','NO_ADAPTER','INVALID_PROVIDER','UNKNOWN_MODEL','INCOMPLETE_PROVIDER','UNSUPPORTED_CONTENT','UNSUPPORTED_API','INVALID_CREDENTIAL_REF','MISSING_CREDENTIAL','INVALID_TIMEOUT','PROVIDER_CALL_FAILED','EMPTY_RESPONSE','TRUNCATED_RESPONSE','RUNTIME_START_FAILED']);
-  process.stdout.write(JSON.stringify({ error: { code: error.code || 'VISION_FAILED', message: safe.has(error.code) ? error.message : 'vision transport failed while reading input/configuration; no fallback attempted' } }) + '\n');
+  process.stdout.write(JSON.stringify({ error: { code: error.code || 'VISION_FAILED', message: safe.has(error.code) ? error.message : 'vision transport failed while reading input/configuration; no fallback attempted', ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}) } }) + '\n');
   process.exitCode = 1;
 });

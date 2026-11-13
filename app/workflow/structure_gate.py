@@ -83,7 +83,7 @@ def _section_numbers(section: dict) -> list[int]:
     return sorted(set(nums))
 
 
-def _scope_windows(sections: list[dict], source_lines: list[str]) -> list[dict]:
+def _scope_windows(sections: list[dict], source_lines: list[str], visual_columns=None) -> list[dict]:
     """Resolve section occurrences by source position, never by printed numbers."""
     from . import sync_practice
     headings = sync_practice.heading_candidates("\n".join(source_lines))
@@ -110,6 +110,11 @@ def _scope_windows(sections: list[dict], source_lines: list[str]) -> list[dict]:
             end = min(end, section["lesson_container_end_line"])
         if section.get("lesson_band"):
             end = min(end, section.get("source_end_line") or end, section["lesson_band"]["end_line"])
+        stops = [(c.get("heading_line") or c["start_line"]) - 1 for c in visual_columns or []
+                 if c.get("role") == "question" and c.get("printed_numbers") == []
+                 and c["start_line"] > start and c.get("column_id") != section.get("visual_column_id")]
+        if stops:
+            end = min(end, min(stops))
         rows.append({**section, **heading, "source_line": start, "source_end_line": end,
                      "type": section.get("type") or heading.get("type"),
                      "questions": section.get("questions") or []})
@@ -174,7 +179,55 @@ def _material_windows(lines: list[str], start: int, end: int) -> list[tuple[int,
             for index, boundary in enumerate(merged)]
 
 
-def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[str]) -> list[dict]:
+def _visual_column_for_unit(unit, columns, lines):
+    """Match one whole unnumbered task against already source-verified evidence.
+
+    Callers load columns through visual_columns.load_verified/annotate_candidate;
+    model-provided column records are never passed as the trusted collection.
+    """
+    span = unit.get("source_span") or {}
+    matches = [c for c in columns or [] if c.get("column_id") == unit.get("column_id")
+               and c.get("role") == "question" and c.get("printed_numbers") == []
+               and type(c.get("start_line")) is int and type(c.get("end_line")) is int
+               and 1 <= c["start_line"] <= c["end_line"] <= len(lines)
+               and (span.get("start_line"), span.get("end_line")) == (c["start_line"], c["end_line"])]
+    if len(matches) != 1 or unit.get("numbers") != [1]:
+        return None
+    column = matches[0]
+    chunk = lines[column["start_line"] - 1:column["end_line"]]
+    if (_source_members(chunk) or not any(line.strip() for line in chunk)
+            or unit.get("stem") != "\n".join(chunk).strip()):
+        return None
+    return column
+
+
+def _merge_visual_units(fresh, units, columns, lines, sections=None):
+    """Keep printed sources; replace only fully proven visual task windows."""
+    from .question_identity import assign_scoped
+    visual = [u for u in units or [] if _visual_column_for_unit(u, columns, lines)]
+    if not visual:
+        return fresh
+    ranges = [(u["source_span"]["start_line"], u["source_span"]["end_line"]) for u in visual]
+    retained = []
+    for unit in fresh:
+        span = unit.get("source_span") or {}
+        lo, hi = span.get("start_line", 0), span.get("end_line", 0)
+        overlaps = [(a, b) for a, b in ranges if max(lo, a) <= min(hi, b)]
+        if overlaps:
+            # Existing numbered content cannot disappear behind a new no-number
+            # claim. An enclosing unnumbered fallback may be refined by evidence.
+            if _source_members(lines[lo - 1:hi]) or not all(lo <= a <= b <= hi for a, b in overlaps):
+                return fresh
+        else:
+            retained.append(unit)
+    rows = sorted(retained + visual, key=lambda u: (u["source_span"]["start_line"], u["source_span"].get("start_offset", 0)))
+    try:
+        return assign_scoped(rows, lines, sections=sections, visual_columns=columns)
+    except ValueError:
+        return fresh
+
+
+def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[str], visual_columns=None) -> list[dict]:
     """Reconcile each printed occurrence with exactly one local source owner."""
     from .question_identity import validate_units
     errors, anchors = [], []
@@ -194,7 +247,7 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
                for prior, (lo, hi) in enumerate(spans[:index])):
             errors.append({"code": "SOURCE_WINDOWS_OVERLAP", "source_line": start,
                            "message": "不同来源单元窗口重叠，无法证明重复题号各自独立"})
-    windows = _scope_windows(sections, lines)
+    windows = _scope_windows(sections, lines, visual_columns)
     for section in windows:
         start, end = section["source_line"], section["source_end_line"]
         group = section.get("kind") == "group" if section.get("kind") else is_group_type(_section_type_label(section.get("type")))
@@ -260,22 +313,55 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
     for unit in units:
         span = unit.get("source_span") or {}
         lo, hi = span.get("start_line", 0), span.get("end_line", 0)
+        if any(c.get("role") in {"guidance", "extension"}
+               and c["start_line"] <= lo <= hi <= c["end_line"] for c in visual_columns or []):
+            errors.append({"code": "COLUMN_ROLE_INVALID", "source_line": lo,
+                           "message": "栏目提示或父题附属设问不得作为独立来源单元"})
+        for column in visual_columns or []:
+            if (column.get("role") == "question" and column.get("printed_numbers") == []
+                    and max(lo, column["start_line"]) <= min(hi, column["end_line"])
+                    and not _visual_column_for_unit(unit, [column], lines)):
+                errors.append({"code": "VISUAL_QUESTION_BOUNDARY_INVALID", "source_line": lo,
+                               "column_id": column["column_id"],
+                               "message": "来源单元跨入或截断了整页已证明的独立无号题窗口"})
         for number in unit.get("numbers", []):
             if span.get("number_binding") in ("single_writing_section", "unnumbered_section"):
+                if unit.get("column_id") and not _visual_column_for_unit(unit, visual_columns, lines):
+                    errors.append({"code": "UNNUMBERED_BINDING_INVALID", "source_line": lo,
+                                   "message": "无号栏目题缺少当前整页视觉来源证明"})
                 continue
             if sum(1 for at, n in anchors if n == number and lo <= at <= hi) != 1:
                 errors.append({"code": "QUESTION_NOT_FOUND", "number": number, "source_line": lo,
                                "message": f"单元题号{number}在本来源窗口没有唯一实际位置"})
-        if not any(s["source_line"] < lo <= hi <= s["source_end_line"] for s in windows):
+        if (not _visual_column_for_unit(unit, visual_columns, lines)
+                and not any(s["source_line"] < lo <= hi <= s["source_end_line"] for s in windows)):
             errors.append({"code": "GROUP_CROSSES_SECTION", "source_line": lo,
                            "message": "单元未绑定唯一大题来源窗口"})
+    for column in visual_columns or []:
+        if column.get("role") != "question" or column.get("printed_numbers") != []:
+            continue
+        owners = [u for u in units if _visual_column_for_unit(u, [column], lines)]
+        if len(owners) != 1:
+            errors.append({"code": "VISUAL_QUESTION_UNCOVERED", "source_line": column["start_line"],
+                           "column_id": column["column_id"],
+                           "message": "整页证实的无号作答单元必须唯一完整归属，不能漏题或借相邻题覆盖"})
     return errors
 
 
-def _proven_unnumbered_scope(unit: dict, sections: list[dict], lines: list[str]) -> bool:
+def _proven_unnumbered_scope(unit: dict, sections: list[dict], lines: list[str], visual_columns=None) -> bool:
     from .question_identity import assign_scoped, validate_units
     if unit.get("identity_version") != "scoped-v1" or not validate_units([unit]):
         return False
+    if unit.get("column_id"):
+        if not _visual_column_for_unit(unit, visual_columns, lines):
+            return False
+        bare = {k: v for k, v in unit.items() if k not in
+                {"identity_version", "section_id", "unit_id", "question_ids", "source_section"}}
+        try:
+            expected = assign_scoped([bare], lines, sections=sections, visual_columns=visual_columns)[0]
+        except ValueError:
+            return False
+        return unit.get("section_id") == expected["section_id"] and unit.get("source_section") == expected["source_section"]
     bare = {k: v for k, v in unit.items() if k not in
             {"identity_version", "section_id", "unit_id", "question_ids", "source_section"}}
     try:
@@ -329,12 +415,16 @@ def _proven_scoped_restart(at: int, units: list[dict], sections: list[dict], lin
     return True
 
 
-def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: list[str]) -> list[dict]:
+def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: list[str], visual_columns=None) -> list[dict]:
     from .question_content import question_parts
     from .question_identity import assign_scoped
     from .preview import _strong_number
     units = []
-    for section in _scope_windows(sections, source_lines):
+    for section in _scope_windows(sections, source_lines, visual_columns):
+        if section.get("visual_column_id"):
+            # The visual model proves a real task, not its catalog type or kind.
+            # Those come from the independent whole-paper structure response.
+            continue
         start, end = section["source_line"], section["source_end_line"]
         type_name = _section_type_label(section.get("type"))
         local = source_lines[start:end]
@@ -438,17 +528,17 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
             unit["source_expected_options"] = (max([len(question_parts(unit["stem"].splitlines(), n)["options"])
                                                     for n in unit["numbers"]] or [0]) if group_flag else peer_options)
     try:
-        return assign_scoped(units, source_lines, sections=sections) if units else []
+        return assign_scoped(units, source_lines, sections=sections, visual_columns=visual_columns) if units else []
     except ValueError:
         # Preserve invalid candidates for a diagnostic report; never confirm them.
         return units
 
 
-def _build_units(sections: list[dict], groups: list[dict], source_lines: list[str]) -> list[dict]:
+def _build_units(sections: list[dict], groups: list[dict], source_lines: list[str], visual_columns=None) -> list[dict]:
     """把 section / group 信息组织成入库单元：独立题逐题，组合题成组。"""
     from . import sync_practice
-    if sync_practice.looks_like_sync_practice("\n".join(source_lines)):
-        return _build_scoped_units(sections, groups, source_lines)
+    if visual_columns or sync_practice.looks_like_sync_practice("\n".join(source_lines)):
+        return _build_scoped_units(sections, groups, source_lines, visual_columns)
     group_of: dict[int, list[int]] = {}
     for group in groups:
         nums = _section_numbers({"questions": group.get("questions") or []})
@@ -757,7 +847,11 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     model_structure_only = False
     visual_notes: list[dict] = []
     from . import sync_practice
-    scoped = sync_practice.looks_like_sync_practice(cleaned_text)
+    from . import visual_columns
+    structure = visual_columns.annotate_candidate(batch_dir, cleaned_text, structure)
+    columns = structure.get("visual_columns") or []
+    sections = structure.get("sections") or []
+    scoped = bool(columns) or sync_practice.looks_like_sync_practice(cleaned_text)
     from . import lesson_bands
     band_evidence = lesson_bands.for_text(batch_dir, cleaned_text) if scoped else {}
     if band_evidence.get("bands") or band_evidence.get("features"):
@@ -772,11 +866,25 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         pass
     hashes = {"source_sha256": mf.sha256_file(source_path) if source_path.is_file() else None,
               "structure_sha256": mf.sha256_file(structure_path) if structure_path.is_file() else None,
-              "original_sha256": mf.sha256_file(original_path) if original_path and original_path.is_file() else None}
+              "original_sha256": mf.sha256_file(original_path) if original_path and original_path.is_file() else None,
+              "visual_columns_sha256": mf.sha256_file(batch_dir / visual_columns.ARTIFACT)
+                  if (batch_dir / visual_columns.ARTIFACT).is_file() else None}
     blockers: list[dict] = []
     checks: dict[str, str] = {}
     resolved_notes: list[dict] = []
     warnings: list[dict] = []
+    from . import source_pages
+    page_proof = source_pages.load_verified(batch_dir)
+    if page_proof.get('status') == 'verified' and (batch_dir / visual_columns.ARTIFACT).is_file():
+        checks['column_ownership'] = 'passed' if structure.get('visual_columns_status') == 'verified' else 'failed'
+        if checks['column_ownership'] == 'failed':
+            blockers.append({'code': 'COLUMN_OWNERSHIP_UNRESOLVED',
+                             'batch_name': batch_dir.name, 'batch_dir': str(batch_dir),
+                             'artifact': visual_columns.ARTIFACT,
+                             'issues': structure.get('visual_column_issues') or [],
+                             'message': '完整页已准备但栏目视觉归属未完成；数字题号覆盖不能证明无号题完整，须补齐当前原件整页的栏目归属证据'})
+    else:
+        checks['column_ownership'] = 'not_required'
     ai_classified = None
     try:
         from . import structure_ai
@@ -840,7 +948,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     else:
         checks["source_present"] = "passed"
 
-    if not sections:
+    if not sections and not any(c.get("role") == "question" for c in columns):
         blockers.append({"code": "NO_SECTIONS", "message": "structure.json 缺少 sections，无法拆分题组"})
         checks["sections_present"] = "failed"
         sections = []
@@ -856,7 +964,9 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                 warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
             else:
                 blockers.append(issue)
-    units = _build_units(sections, groups, source_lines) if sections else []
+    units = _build_units(sections, groups, source_lines, columns) if sections else []
+    if isinstance(ai_classified, dict) and ai_classified.get("units"):
+        units = _merge_visual_units(units, ai_classified["units"], columns, source_lines, sections)
     # A stale candidate group may differ from the final AI grouping. Only the
     # same complete Word-bound proof used by the downstream source audit can
     # make that candidate boundary comparison obsolete.
@@ -881,7 +991,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     if scoped:
         from . import question_content
         from .question_content import audit_source_unit
-        scoped_problems = _scoped_source_errors(units, sections, source_lines)
+        scoped_problems = _scoped_source_errors(units, sections, source_lines, columns)
         blockers.extend(scoped_problems)
         checks["coverage"] = checks["source_number_coverage"] = checks["grouping"] = "failed" if scoped_problems else "passed"
         content_problems = []
@@ -929,7 +1039,8 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                               and _proven_unnumbered_scope(u, sections, source_lines) for u in owned)
                     and not any(type(p.get("source_line")) is int
                                 and at <= p["source_line"] <= max(u["source_span"]["end_line"] for u in owned)
-                                for p in scoped_problems)):
+                                for p in scoped_problems)
+                    and all(_proven_unnumbered_scope(u, sections, source_lines, columns) for u in owned)):
                 unnumbered_boundaries.append(issue)
         # Full reconciliation above still retains every other section's errors.
         blockers[:] = [b for b in blockers if b not in unnumbered_boundaries]
@@ -1178,6 +1289,8 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     confirmed = {
         "version": "1.0",
         "lesson_bands": band_evidence,
+        "visual_columns": columns,
+        "visual_columns_sha256": hashes.get("visual_columns_sha256"),
         "meta": meta,
         "units": units,
         "image_questions": image_questions,

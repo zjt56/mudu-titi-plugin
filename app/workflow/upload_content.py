@@ -209,10 +209,22 @@ def scoped_source_matches(unit, number, path, line, source_lines, *, equivalent_
         return (_norm(str(row.get('title') or '')), _norm(str(row.get('context') or '')),
                 row.get('occurrence'))
     body_sections = heading_candidates('\n'.join(body))
-    owners = [row for row in body_sections
-              if row['start_line'] == section.get('start_line')
-              and row['end_line'] == section.get('end_line')
-              and signature(row) == signature(section)]
+    # The heading re-derivation ends a section on the next heading, so it may
+    # greedily absorb trailing bare-image/material lines past the confirmed
+    # span (e.g. a lone [IMG ...] after a cloze passage). Identity is proved by
+    # the start line + full signature; the persisted end may sit anywhere inside
+    # the uniquely-derived section window, and the confirmed span must stay
+    # within it. A section is only accepted when exactly one heading matches.
+    heading_owners = [row for row in body_sections
+                      if row['start_line'] == section.get('start_line')
+                      and signature(row) == signature(section)]
+    owners = [row for row in heading_owners
+              if row['end_line'] == section.get('end_line')]
+    if len(owners) != 1:
+        persisted_end = section.get('end_line')
+        if (len(heading_owners) == 1 and type(persisted_end) is int
+                and heading_owners[0]['start_line'] <= persisted_end <= heading_owners[0]['end_line']):
+            owners = heading_owners
     if len(owners) != 1 or not owners[0]['start_line'] <= start <= end <= owners[0]['end_line']:
         return False
     local_anchors = _printed_item_anchors(body[start - 1:end])
@@ -505,10 +517,17 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
         return []
     owner = unit.get('source_section') or {}
     positions = [i for i, row in enumerate(sections) if row['start_line'] == owner.get('start_line')
-                 and row['end_line'] == owner.get('end_line')
                  and _norm(row['title']) == _norm(owner.get('title') or '')
                  and _norm(row.get('context') or '') == _norm(owner.get('context') or '')
                  and row['occurrence'] == owner.get('occurrence')]
+    # Same trailing-line tolerance as scoped_source_matches: a heading window may
+    # absorb bare image/material lines past the confirmed section end, so the
+    # persisted end only needs to sit inside the uniquely-derived section window.
+    persisted_end = owner.get('end_line')
+    positions = [i for i in positions
+                 if sections[i]['end_line'] == persisted_end
+                 or (type(persisted_end) is int
+                     and sections[i]['start_line'] <= persisted_end <= sections[i]['end_line'])]
     start = (unit.get('source_span') or {}).get('start_line')
     if len(positions) != 1 or not scoped_source_matches(unit, number, body_path, start, source_lines):
         return []

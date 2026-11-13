@@ -32,7 +32,7 @@ class RunnerAutoTest(unittest.TestCase):
         offline.start()
         self.addCleanup(offline.stop)
         for target in ('workflow.metadata_ai.auto_identify', 'workflow.lesson_bands.build',
-                       'workflow.visual_review.build'):
+                       'workflow.visual_review.build', 'workflow.visual_columns.build'):
             offline_model = patch(target, return_value={'status': 'unavailable', 'model_calls': 0})
             offline_model.start()
             self.addCleanup(offline_model.stop)

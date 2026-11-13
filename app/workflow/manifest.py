@@ -281,6 +281,16 @@ def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use
                     json.dumps(band_binding, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
             except (OSError, ValueError, AttributeError):
                 hashes['direct:01_source/lesson-bands.json'] = _fp(band_path)
+        column_path = Path(batch_dir) / '01_source/visual-columns.json'
+        if column_path.is_file():
+            try:
+                column_data = json.loads(column_path.read_text(encoding='utf-8'))
+                column_binding = {k: column_data.get(k) for k in
+                                  ('version', 'source_sha256', 'text_sha256', 'pages', 'columns', 'issues', 'status')}
+                hashes['direct:01_source/visual-columns.json'] = hashlib.sha256(
+                    json.dumps(column_binding, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            except (OSError, ValueError, AttributeError):
+                hashes['direct:01_source/visual-columns.json'] = _fp(column_path)
     if stage.id in ('answers', 'types', 'explanations', 'knowledge', 'assemble', 'review', 'review_gate'):
         roles_path = Path(batch_dir) / '01_source/material-roles.json'
         hashes['material:roles'] = _fp(roles_path)

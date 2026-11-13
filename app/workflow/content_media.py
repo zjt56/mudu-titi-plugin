@@ -106,7 +106,12 @@ def _candidate(value, directory, root):
     relative = _relative(value)
     if Path(relative).suffix.lower() not in IMAGE_SUFFIXES:
         return None
-    if not any(relative.startswith(d + "/") for d in MEDIA_DIRS):
+    if relative.startswith('01_source/visual-pages/'):
+        from . import source_pages
+        pages = source_pages.load_verified(root)
+        if pages.get('status') != 'verified' or relative not in {p['path'] for p in pages.get('pages', [])}:
+            raise MediaError('MEDIA_FULL_PAGE_NOT_VERIFIED')
+    elif not any(relative.startswith(d + "/") for d in MEDIA_DIRS):
         raise MediaError("MEDIA_DIRECTORY_NOT_ALLOWED")
     return relative
 
@@ -175,6 +180,12 @@ def build_snapshot(batch_dir, context, input_hashes):
         media.append({"media_id": "media-" + _sha(relative.encode())[:24],
                       "path": relative, "sha256": digest, "kind": "image", "source": source})
         hashes[relative] = digest
+    if any(relative.startswith('01_source/visual-pages/') for relative in declared):
+        proof = '01_source/visual-pages/manifest.json'
+        digest = _sha(_read(root, proof))
+        if proof in input_hashes and input_hashes[proof] != digest:
+            raise MediaError('MEDIA_INPUT_HASH_CHANGED: ' + proof)
+        hashes[proof] = digest
     return {"version": VERSION, "batch_dir": str(root), "media": media, "input_hashes": hashes}
 
 

@@ -66,6 +66,33 @@ class ExtractSyncDialogueBlanksTest(unittest.TestCase):
         structure, _, _ = infer_structure(text)
         self.assertEqual(structure['sections'][0]['questions'], [])
 
+    # 短文填空段落里的图注空：`N.[IMG …](提示)`（图片+紧随括号提示）是合法小题号，
+    # 与 `<u></u>` 文本空一起构成完整题号序列；孤立 `N.[IMG …]`（无括号提示）不算。
+    CLOZE = ('Unit 1\n第一课时 Section B\nⅣ.根据短文内容或所给提示填空\n'
+             'My uncle is a farmer.He has ninety apple 1.[IMG image10.jpeg](tree) on his farm.'
+             'My uncle and my 2.[IMG image10.jpeg](/aːnt/) can’t pick all the apples by themselves. '
+             '3.<u>　　　　</u> they ask my parents and me. It is 4.<u>　　　　</u>early in the morning.\n'
+             '参考答案\nⅣ.1.trees　2.aunt　3.So　4.at\n')
+
+    def test_passage_image_hint_blanks_are_numbered_slots(self):
+        from workflow.preview import _weak_numbers
+        from workflow.extract import blank_numbers
+        from workflow.structure_gate import _scope_anchors
+        line = self.CLOZE.splitlines()[3]
+        self.assertEqual(blank_numbers(line), [1, 2])
+        self.assertEqual(_weak_numbers(line), [1, 2, 3, 4])
+        self.assertEqual(sorted({n for _, n in _scope_anchors([line])}), [1, 2, 3, 4])
+        structure, _, _ = infer_structure(self.CLOZE)
+        self.assertEqual(structure['sections'][0]['questions'], [1, 2, 3, 4])
+
+    def test_bare_number_then_image_without_hint_is_not_a_slot(self):
+        from workflow.preview import _weak_numbers
+        from workflow.extract import blank_numbers
+        for text in ('1.[IMG option.png]', 'A.2.[IMG option.png]',
+                     'See picture 3.[IMG photo.jpeg] here'):
+            self.assertEqual(_weak_numbers(text), [], text)
+            self.assertEqual(blank_numbers(text), [], text)
+
 
 if __name__ == '__main__':
     unittest.main()

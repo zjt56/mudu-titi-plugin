@@ -60,7 +60,11 @@ def prepare(*, batch_dir, raw, candidate, pdf_ocr=None, prompt=None):
     if not isinstance(candidate, dict):
         raise ValueError("Structure candidate must be an object")
     batch = Path(batch_dir)
-    snapshot = json.loads(_json({"raw": raw, "candidate": candidate, "pdf_ocr": pdf_ocr}))
+    from . import visual_columns, source_pages
+    candidate = visual_columns.annotate_candidate(batch, raw, candidate)
+    page_proof = source_pages.load_verified(batch)
+    snapshot = json.loads(_json({"raw": raw, "candidate": candidate, "pdf_ocr": pdf_ocr,
+                                "source_pages": page_proof if page_proof.get("status") == "verified" else None}))
     directory = []
     for key in ("units", "sections", "groups"):
         for index, row in enumerate(snapshot["candidate"].get(key) or [], 1):
@@ -70,14 +74,22 @@ def prepare(*, batch_dir, raw, candidate, pdf_ocr=None, prompt=None):
     snapshot["directory"] = directory
     snapshot["scope"] = "whole_paper"
     paths = ("01_source/正文.txt", "01_source/structure.json", "01_source/pdf-ocr.json",
-             "01_source/source-policy.json", "01_source/lesson-bands.json", "01_source/extraction.json")
+             "01_source/source-policy.json", "01_source/lesson-bands.json", "01_source/extraction.json",
+             visual_columns.ARTIFACT, source_pages.MANIFEST)
     snapshot["file_binding"] = {relative: (hashlib.sha256((batch / relative).read_bytes()).hexdigest()
                                          if (batch / relative).is_file() else None) for relative in paths}
     declarations, extraction_sha = _extraction_media(batch)
+    if page_proof.get("status") == "verified":
+        declarations.extend({"path": row["path"], "declaration": "source_pages.full_page",
+                             "page": row["page"], "full_page": True} for row in page_proof.get("pages") or [])
+        snapshot["file_binding"].update({row["path"]: row["image_sha256"] for row in page_proof.get("pages") or []})
+        for key in ("source_snapshot", "text_snapshot"):
+            relative = source_pages.ROOT + "/" + page_proof[key]
+            snapshot["file_binding"][relative] = hashlib.sha256((batch / relative).read_bytes()).hexdigest()
     if extraction_sha != snapshot["file_binding"]["01_source/extraction.json"]:
         raise ValueError("Extraction media inventory changed during snapshot")
     from . import content_media
-    media_snapshot = content_media.build_snapshot(batch, {"media": declarations}, {})
+    media_snapshot = content_media.build_snapshot(batch, {"media": declarations}, snapshot["file_binding"])
     media = media_snapshot["media"]
     snapshot["file_binding"].update(media_snapshot["input_hashes"])
     snapshot["media"] = media
@@ -99,6 +111,8 @@ def prepare(*, batch_dir, raw, candidate, pdf_ocr=None, prompt=None):
     header = ("Stage: structure_gate\nAgent: structure_gate\n" + rules +
               "\n原生取证规则：content_structure 是不可变整卷快照。目录仅是候选，不是全集或已确认单元。"
               "read_source 可读取任意原文行及相邻行、pdf_ocr 完整版面JSON；read_unit 仅辅助定位。"
+              "source_pages列明绑定原件的完整页图，需通过list_media/inspect_media结合整页和相邻页核对栏目归属；"
+              "嵌入题图不等于整页。visual_columns只证明当前页上角色、归属及原文窗口，不提供题型答案。"
               "所有窗口使用全卷1基行号，只限制一次读取大小，不能局部交付或局部通过。"
               "必须核对全卷每个大题、全部题号与共享材料，最后一次 submit_candidate 提交整卷 units。"
               "有Word时正文文字权威，PDF仅核对版面，保留服务顺序与原始块，不重排或补写。"
@@ -123,6 +137,12 @@ def verify_binding(prepared, batch_dir):
     """Reject any changed, removed, or newly appearing structural evidence."""
     snapshot = _snapshot(prepared)
     batch = Path(batch_dir)
+    from . import source_pages, visual_columns
+    if snapshot.get("source_pages") is not None and source_pages.load_verified(batch) != snapshot["source_pages"]:
+        raise ValueError("Structure full-page source evidence changed")
+    current_columns = visual_columns.load_verified(batch, text=snapshot["raw"]).get("columns") or []
+    if current_columns != (snapshot["candidate"].get("visual_columns") or []):
+        raise ValueError("Structure visual column evidence changed")
     media_paths = {row["path"] for row in snapshot.get("media", [])}
     for relative, expected in snapshot["file_binding"].items():
         path = batch / relative
@@ -145,6 +165,10 @@ def read_source(prepared, source="body", start_line=1, end_line=None, around=0):
         text = json.dumps(snapshot.get("pdf_ocr"), ensure_ascii=False, indent=2)
     elif source in ("candidate", "01_source/structure.json"):
         text = json.dumps(snapshot["candidate"], ensure_ascii=False, indent=2)
+    elif source in ("visual_columns", "01_source/visual-columns.json"):
+        text = json.dumps(snapshot["candidate"].get("visual_columns") or [], ensure_ascii=False, indent=2)
+    elif source in ("source_pages", "01_source/visual-pages/manifest.json"):
+        text = json.dumps(snapshot.get("source_pages"), ensure_ascii=False, indent=2)
     else:
         raise ValueError("Unknown structure source")
     lines = text.splitlines()
@@ -233,7 +257,7 @@ def validate(prepared, response):
         diagnostics.append({"check": "RESPONSE_INCOMPLETE", "message": "结构响应未完成"})
     units = structure_ai._sanitize_classified(structured, snapshot["raw"], snapshot["candidate"],
                                               diagnostics=diagnostics, quarantine=quarantine)
-    if units and not sync_practice.looks_like_sync_practice(snapshot["raw"]):
+    if units and not snapshot["candidate"].get("visual_columns") and not sync_practice.looks_like_sync_practice(snapshot["raw"]):
         diagnostics.extend(_ordinary_coverage(units, snapshot["candidate"], snapshot["raw"].splitlines()))
     passed = bool(units) and not diagnostics
     return {"passed": passed, "structured": copy.deepcopy(structured),

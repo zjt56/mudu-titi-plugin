@@ -42,6 +42,24 @@ class ContentMediaTests(unittest.TestCase):
         self.assertEqual(snapshot["input_hashes"], self.hashes)
         self.assertEqual(len(snapshot["media"]), 1)
 
+    def test_full_pages_require_current_verified_inventory(self):
+        relative = '01_source/visual-pages/page-1.png'
+        path = self.root / relative
+        path.parent.mkdir()
+        path.write_bytes(PNG)
+        manifest = path.parent / 'manifest.json'
+        manifest.write_text('{}')
+        proof = {'status': 'verified', 'pages': [{'page': 1, 'path': relative}]}
+        with patch('workflow.source_pages.load_verified', return_value=proof):
+            snapshot = cm.build_snapshot(self.root, {'media': [{'path': relative}]}, {})
+            self.assertEqual(snapshot['media'][0]['path'], relative)
+            self.assertIn('01_source/visual-pages/manifest.json', snapshot['input_hashes'])
+            with self.assertRaisesRegex(cm.MediaError, 'NOT_VERIFIED'):
+                cm.build_snapshot(self.root, {'media': [{'path': '01_source/visual-pages/unlisted.png'}]}, {})
+        with patch('workflow.source_pages.load_verified', return_value={'status': 'unavailable'}):
+            with self.assertRaisesRegex(cm.MediaError, 'NOT_VERIFIED'):
+                cm.build_snapshot(self.root, {'media': [{'path': relative}]}, {})
+
     def test_marker_alone_is_not_evidence(self):
         snapshot = cm.build_snapshot(self.root, {"text": "[IMG a.png]"}, {})
         self.assertEqual(snapshot["media"], [])

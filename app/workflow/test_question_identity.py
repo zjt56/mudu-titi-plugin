@@ -49,6 +49,34 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(assign_scoped(units, self.lines)[0]['unit_id'], 'persisted-unit')
         self.assertEqual(question_key(assign_scoped(units, self.lines)[0], 1), 'persisted-question')
 
+    def test_numbered_question_gets_column_path_without_changing_identity(self):
+        before = assign_scoped(self.units(), self.lines)
+        columns = [{"column_id": "root", "label": "基础巩固", "role": "container", "parent_id": None,
+                    "start_line": 3, "end_line": 7},
+                   {"column_id": "leaf", "label": "熟词生义", "role": "question", "parent_id": "root",
+                    "start_line": 4, "end_line": 4, "printed_numbers": [1]}]
+        after = assign_scoped(self.units(), self.lines, visual_columns=columns)
+        self.assertEqual([u["unit_id"] for u in before], [u["unit_id"] for u in after])
+        self.assertEqual(after[0]["source_section"]["column_path"], [
+            {"column_id": "root", "label": "基础巩固", "role": "container"},
+            {"column_id": "leaf", "label": "熟词生义", "role": "question"}])
+        self.assertEqual(after[1]["source_section"]["column_path"][-1]["column_id"], "root")
+
+    def test_two_unnumbered_tasks_with_same_label_have_distinct_stable_source_identity(self):
+        lines = ["Fill ____.", "Fill ____."]
+        columns = [{"column_id": f"c{i}", "label": "创新训练", "role": "question", "parent_id": None,
+                    "start_line": i, "end_line": i, "printed_numbers": [], "heading_line": None}
+                   for i in (1, 2)]
+        rows = [{"numbers": [1], "unit_kind": "standalone", "type": "完成句子", "column_id": f"c{i}",
+                 "stem": lines[i - 1], "source_span": {"start_line": i, "end_line": i,
+                 "number_binding": "unnumbered_section", "printed_numbers": []}} for i in (1, 2)]
+        result = assign_scoped(rows, lines, visual_columns=columns)
+        self.assertTrue(validate_units(result))
+        self.assertNotEqual(result[0]["unit_id"], result[1]["unit_id"])
+        rows[0]["type"] = "单词拼写"
+        self.assertEqual(result[0]["unit_id"], assign_scoped(rows, lines, visual_columns=columns)[0]["unit_id"])
+        self.assertEqual([u["numbers"] for u in result], [[1], [1]])
+
     def test_partial_or_duplicate_identity_fails_closed(self):
         units = assign_scoped(self.units(), self.lines)
         broken = copy.deepcopy(units)
