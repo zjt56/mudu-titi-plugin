@@ -1068,11 +1068,17 @@ def _request_code_repair(folder, incident, data):
     from . import operations_development as dev
     _check_budget(incident, "repair")
     existing = _code_record(folder)
-    if existing and existing.get("status") not in {"failed", "verified", "needs_human", "rolled_back"}:
-        record, job = _code_job(folder)
-        return {"reused": True, "job_id": job["job_id"], "status": record.get("status"),
-                "workspace": job["workspace"], "base": job["base"].get("code_fingerprint"),
-                "instructions": "复用现有工作区；不得并行创建第二个。"}
+    if existing:
+        try:
+            existing_job = dev.load(existing["path"])
+            stale_workspace = existing.get("status") in {"failed", "verified", "needs_human", "rolled_back", "tests_failed"} or existing_job.get("status") in {"failed", "verified", "needs_human", "tests_failed", "rolled_back"}
+        except (OSError, ValueError, KeyError):
+            stale_workspace = True
+        if not stale_workspace:
+            record, job = _code_job(folder)
+            return {"reused": True, "job_id": job["job_id"], "status": record.get("status"),
+                    "workspace": job["workspace"], "base": job["base"].get("code_fingerprint"),
+                    "instructions": "复用现有工作区；不得并行创建第二个。"}
     root = _source_root()
     parent = _code_root(folder)
     job = dev.create(root, parent)
@@ -1099,22 +1105,43 @@ def _code_repair(folder, incident, data):
     from . import operations_development as dev
     record, job = _code_job(folder)
     operation = data.get("operation")
+
+    # Search returns a real workspace-relative path and a continuation cursor.
+    # Accepting that cursor directly for read_lines keeps the intended
+    # search -> read_lines flow deterministic while still delegating strict
+    # path/link/allowlist checks to operations_development.
+    cursor = data.get("cursor")
+    if cursor is not None and (not isinstance(cursor, dict)
+                               or set(cursor) != {"path", "start_line"}
+                               or not isinstance(cursor.get("path"), str)
+                               or not isinstance(cursor.get("start_line"), int)):
+        raise ValueError("search_cursor_invalid")
+    path = data.get("path")
+    if path == "":
+        path = None
+    if operation == "read_lines" and path is None and cursor is not None:
+        path = cursor["path"]
+    start_line = data.get("start_line", 1)
+    if operation == "read_lines" and "start_line" not in data and cursor is not None:
+        start_line = cursor["start_line"]
+    if operation in {"read", "read_lines", "write"} and not isinstance(path, str):
+        raise ValueError("source_path_required")
     if operation == "status":
         return _code_status(record, job)
     if record.get("status") in {"installed_pending_restart", "restarted_pending_verify", "failed", "verified", "needs_human"}:
         raise ValueError("code_repair_closed_or_pending_restart: 先重启后端并复验，再 request_code_repair")
     result = {}
     if operation == "read":
-        result = dev.read(job, data.get("path"), offset=data.get("offset", 0), limit=data.get("limit", 12000))
+        result = dev.read(job, path, offset=data.get("offset", 0), limit=data.get("limit", 12000))
     elif operation == "read_lines":
-        result = dev.read_lines(job, data.get("path"), start_line=data.get("start_line", 1),
+        result = dev.read_lines(job, path, start_line=start_line,
                                 limit=data.get("limit", 80))
     elif operation == "search":
-        result = dev.search(job, data.get("query"), relative=data.get("path"),
-                            start_line=data.get("start_line", 1), max_matches=data.get("max_matches", 20),
-                            context=data.get("context", 2), cursor=data.get("cursor"))
+        result = dev.search(job, data.get("query"), relative=path,
+                            start_line=start_line, max_matches=data.get("max_matches", 20),
+                            context=data.get("context", 2), cursor=cursor)
     elif operation == "write":
-        result = dev.write(job, data.get("path"), data.get("content"), expected_sha=data.get("expected_sha"))
+        result = dev.write(job, path, data.get("content"), expected_sha=data.get("expected_sha"))
     elif operation == "test":
         evidence = _hash({"code": dev.fingerprint(job), "tests": data.get("tests")})
         _block_repeat(incident, "code_test", "isolated_tests", evidence)

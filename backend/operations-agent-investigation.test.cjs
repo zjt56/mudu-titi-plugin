@@ -141,14 +141,29 @@ test('backend-bound ready finding skips another investigation model turn', async
   assert.equal(r.calls.find(c => c.body?.action === 'verify').body.attempt_id, 'write-fence');
 });
 
-test('changed snapshot refused by a durable receipt releases investigation without repair', async () => {
-  const r = await scenario({ backend: (_path, init) => init.body?.action === 'promote'
-    ? { request_id: init.body.request_id, status: 'failed', evidence: { code: 'inputs_changed', error: 'inputs_changed: reclaim fresh snapshot' } } : undefined,
-  program: async ({ call }) => { await call('record_finding', { summary: 'old evidence' }); } });
-  assert.equal(r.turns, 1);
-  assert.equal(r.calls.filter(c => c.body?.action === 'promote').length, 1);
+test('inputs_changed releases and reclaims a fresh investigation fence before repair', async () => {
+  let claims = 0;
+  const r = await scenario({ backend: (_path, init, state) => {
+    if (_path.endsWith('/claim')) {
+      const attempt_id = claims++ === 0 ? 'read-fence' : 'fresh-read-fence';
+      Object.assign(state.incident, { mode: 'investigation', attempt_id, session_id: init.body.session_id });
+      return { ...state.incident, mode: 'investigation', investigation_ready: false, attempt_id, session_id: init.body.session_id };
+    }
+    if (init.body?.action === 'promote' && claims === 1 && !state.promotedOnce) {
+      state.promotedOnce = true;
+      return { request_id: init.body.request_id, status: 'failed', evidence: { code: 'inputs_changed', error: 'inputs_changed: reclaim fresh snapshot' } };
+    }
+    if (init.body?.action === 'promote') return { request_id: init.body.request_id, status: 'completed', evidence: { incident: { ...state.incident, mode: 'repair', attempt_id: 'fresh-write-fence' } } };
+  }, program: async ({ turns, call }) => {
+    if (turns === 1) await call('record_finding', { summary: 'old evidence' });
+    else { await call('verify'); await call('finish', { outcome: 'resolved', summary: 'fresh snapshot verified' }); }
+  } });
+  assert.equal(r.turns, 2);
+  assert.equal(r.calls.filter(c => c.path.endsWith('/claim')).length, 2);
   assert.equal(r.calls.filter(c => c.body?.action === 'release').length, 1);
-  assert.ok(!r.events.some(e => e.state === 'repairing' || e.state === 'resolved'));
+  assert.equal(r.calls.filter(c => c.body?.action === 'promote').length, 2);
+  assert.equal(r.calls.find(c => c.body?.action === 'verify').body.attempt_id, 'fresh-write-fence');
+  assert.ok(r.events.some(e => e.state === 'resolved'));
 });
 
 test('investigation heartbeat failure cancels before any model or promotion', async () => {

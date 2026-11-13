@@ -181,6 +181,18 @@ class SourceToolActionTests(unittest.TestCase):
         self.assertEqual(len(persisted), 2)
         self.assertEqual((Path(self.job["workspace"]) / self.relative).read_text(encoding="utf-8"), self.text)
 
+    def test_repair_line_read_accepts_search_cursor_without_repeating_path(self):
+        claim = self.claim("repair")
+        searched = op.action(self.root, self.folder, self.request(
+            claim, "cursor-search", operation="search", query="needle.*", max_matches=1, context=0))
+        cursor = searched["evidence"]["next_cursor"]
+        page = op.action(self.root, self.folder, self.request(
+            claim, "cursor-lines", operation="read_lines", cursor=cursor, limit=1))
+        self.assertEqual(page["status"], "completed")
+        self.assertEqual(page["evidence"]["path"], self.relative)
+        self.assertEqual(page["evidence"]["start_line"], cursor["start_line"])
+        self.assertEqual(page["evidence"]["lines"][0]["line"], cursor["start_line"])
+
     def test_repair_line_read_preserves_line_numbers_and_continuation_through_action(self):
         claim = self.claim("repair")
         first = op.action(self.root, self.folder, self.request(
