@@ -206,7 +206,11 @@ def scoped_source_matches(unit, number, path, line, source_lines, *, equivalent_
             or type(line) is not int or not 1 <= line <= len(lines)):
         return False
     def signature(row):
-        return (_norm(str(row.get('title') or '')), _norm(str(row.get('context') or '')),
+        # 标题里的装饰性题图引用（`Ⅱ.阅读理解[IMG image46.jpeg]`）不是标题文字，
+        # 确认结构的 source_section.title 已去掉该装饰；比较时同源剥离，其余
+        # context/occurrence 仍严格参与身份判定。
+        title_text = re.sub(r"\s*\[IMG\s+[^\]]*\]", "", str(row.get('title') or '')).strip()
+        return (_norm(title_text), _norm(str(row.get('context') or '')),
                 row.get('occurrence'))
     body_sections = heading_candidates('\n'.join(body))
     # The heading re-derivation ends a section on the next heading, so it may
@@ -516,8 +520,11 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
     if roman_lines != {row['start_line'] for row, ordinal in zip(sections, ordinals) if ordinal}:
         return []
     owner = unit.get('source_section') or {}
+    def _title_eq(a, b):
+        strip = lambda s: _norm(re.sub(r"\s*\[IMG\s+[^\]]*\]", "", str(s or '')).strip())
+        return strip(a) == strip(b)
     positions = [i for i, row in enumerate(sections) if row['start_line'] == owner.get('start_line')
-                 and _norm(row['title']) == _norm(owner.get('title') or '')
+                 and _title_eq(row['title'], owner.get('title'))
                  and _norm(row.get('context') or '') == _norm(owner.get('context') or '')
                  and row['occurrence'] == owner.get('occurrence')]
     # Same trailing-line tolerance as scoped_source_matches: a heading window may

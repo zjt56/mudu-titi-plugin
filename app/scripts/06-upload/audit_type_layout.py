@@ -135,6 +135,22 @@ def _check_shell_subquestions(problems, uid, qt, kind, mat_numbers, subs):
                 f"不应重复整句「{stem[:20]}…」")
 
 
+def _is_short_answer_sub(c):
+    """A sub-question that is a written/short answer, not multiple choice.
+
+    Reading groups can attach a `☆拓展设问` (e.g. 「…（不超过15个词）」) that is
+    answerable in words, not an A–D option. Such a sub legitimately has 0 options
+    and must not be judged by the multiple-choice option-count baseline (E20).
+    Identify it only when it has no options AND its stem carries a word-limit /
+    short-answer cue — a genuinely-missing-options MC sub (stem without such a
+    cue, or answered by a letter) is still flagged.
+    """
+    if c.get("options"):
+        return False
+    stem = plain(c.get("stem") or "")
+    return bool(re.search(r"(?:不超过|不多于|不超过|低于|少于|以内|词以内|个词|用一句|一句话|概括|简答|写出|回答|陈述)", stem))
+
+
 def _check_option_count(problems, uid, qt, kind, u, subs, want, where):
     """按 (期望条数, 位置) 检查 options 数量。"""
     def _unit_count():
@@ -147,6 +163,8 @@ def _check_option_count(problems, uid, qt, kind, u, subs, want, where):
             n = c.get("number")
             cn = len(c.get("options") or [])
             if cn != want:
+                if _is_short_answer_sub(c):
+                    continue  # 拓展设问/简答子题不适配选择题选项基准
                 problems.append(f"[E20] {uid} ({qt}) 子题 {n}: 选项应为 {want} 条，现有 {cn} 条")
 
     if where == "unit":

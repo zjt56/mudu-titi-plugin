@@ -381,10 +381,10 @@ def _proven_unnumbered_scope(unit: dict, sections: list[dict], lines: list[str],
                (section["start_line"] + lo + 1, section["start_line"] + hi + 1) for lo, hi in windows)
 
 
-def _proven_scoped_restart(at: int, units: list[dict], sections: list[dict], lines: list[str], problems: list[dict]) -> bool:
+def _proven_scoped_restart(at: int, units: list[dict], sections: list[dict], lines: list[str], problems: list[dict], visual_columns=None) -> bool:
     """Resolve only a restart whose current section occurrences have local proof."""
     from .question_identity import assign_scoped, validate_units
-    windows = _scope_windows(sections, lines)
+    windows = _scope_windows(sections, lines, visual_columns)
     target = next((s for s in windows if s["source_line"] == at), None)
     if target is None:
         return False
@@ -406,7 +406,7 @@ def _proven_scoped_restart(at: int, units: list[dict], sections: list[dict], lin
         bare = [{k: v for k, v in u.items() if k not in
                  {"identity_version", "section_id", "unit_id", "question_ids", "source_section"}} for u in local]
         try:
-            expected = assign_scoped(bare, lines, sections=sections)
+            expected = assign_scoped(bare, lines, sections=sections, visual_columns=visual_columns)
         except ValueError:
             return False
         if any(u.get("identity_version") != "scoped-v1" or u.get("section_id") != proof["section_id"]
@@ -1046,7 +1046,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         blockers[:] = [b for b in blockers if b not in unnumbered_boundaries]
         resolved_notes.extend({**b, "resolution": "完整无编号来源窗口及合法原卷作答形态已验证，内部别名不作为印刷题号"} for b in unnumbered_boundaries)
         restarts = [b for b in blockers if b.get("code") == "NUMBERING_RESTART"
-                    and _proven_scoped_restart(b.get("source_line"), units, sections, source_lines, scoped_problems)]
+                    and _proven_scoped_restart(b.get("source_line"), units, sections, source_lines, scoped_problems, columns)]
         blockers[:] = [b for b in blockers if b not in restarts]
         resolved_notes.extend({**b, "resolution": "当前大题及前序同号大题的来源位置、出现序次和身份均已独立重建验证"} for b in restarts)
         # Only positional source proof can resolve extraction's global-number assumptions.

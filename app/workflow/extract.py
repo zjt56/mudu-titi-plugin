@@ -58,12 +58,16 @@ def blank_numbers(line: str) -> list[int]:
     space, so a blank like ``<u>\u300066\xa0</u>`` must still be recognized.
     ``N.[IMG …](提示)`` 图注空（图片+括号提示）同样是一个需要填写的小题号。
     """
-    normalized = line.replace("\xa0", "\u3000")
+    # Word 空位常包在 <u>…</u> 里；先去标签/加粗（与 preview._plain 同源），再按
+    # 「空位在前」合法写法收号：「　31　」「__31__」「____31」+ 图注空「1.[IMG…](提示)」。
+    # 题号在前（「3.<u></u>」）属同步练习材料行，只在该题组类型下由 infer_structure
+    # 的 _weak_numbers 合并收集，避免非同步卷把材料行普通数字误当题号。
+    plain = _plain(line)
+    normalized = plain.replace("\xa0", "\u3000")
     numbers = [int(n) for n in re.findall(
-        r"(?:_{2,}|\u3000+)\s*(\d{1,3})\s*(?=_{2,}|\u3000)", normalized)]
+        r"(?:_{2,}|\u3000|__|_)\s*(\d{1,3})(?!\d)", normalized)]
     numbers.extend(int(n) for n in IMAGE_HINT_BLANK.findall(normalized))
-    return numbers
-
+    return sorted(set(numbers))
 
 # 对话补全题的小题号常带说话人前缀（`C:1.<u>…`），行首不是数字。
 DIALOGUE_QUESTION = re.compile(r"^\s*[A-Z]{1,2}\s*[:：]\s*(\d{1,4})\s*[.．、)]")
@@ -466,10 +470,13 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
         # 表格/文章里的空位题号：只认明确下划线或全角空格边界，不扫普通数字。
         if not numbers:
             numbers = blank_numbers(plain_line)
-        if (not numbers and is_sync and active.get('candidate_unit_kind') == 'group'
+        # 同步练习的组题材料（短文填空/完形/选词/补全对话等）一行可能同时含两类空：
+        # ①空位在前（`　3　`，blank_numbers）；②题号在前（`3.<u></u>`、`1.[IMG](提示)`，
+        # _weak_numbers）。两类都要收全，否则图注空/题号在前的空会被漏掉。
+        if (is_sync and active.get('candidate_unit_kind') == 'group'
                 and active['type'] in {'补全对话', '完形填空', '选词填空', '短文填空', '教材语篇填空', '听力信息转换'}):
             from workflow.preview import _weak_numbers
-            numbers = _weak_numbers(raw)
+            numbers = sorted(set(numbers) | set(_weak_numbers(raw)))
         for number in numbers:
             active["questions"].append(number)
             active["question_locations"].append({"number": number, "line": index + 1,

@@ -156,5 +156,29 @@ class TestCleanBatch(unittest.TestCase):
         self.assertEqual(_run(batch), 0)
 
 
+class TestReadingShortAnswerExtension(unittest.TestCase):
+    def test_reading_extension_short_answer_exempt_from_e20(self):
+        # 阅读理解题组末尾附 `☆拓展设问`，用文字回答（无 A–D 选项），不应被 E20 判错。
+        batch = {"items": [{
+            "unit_id": "U7", "question_type": "阅读理解", "unit_kind": "group",
+            "stem": "读短文", "material": "Passage text.",
+            "options": [],
+            "subquestions": [
+                {"number": 1, "stem": "What does it mean?", "options": ["A. x", "B. y", "C. z", "D. w"], "answer": "A"},
+                {"number": 2, "stem": "What does Wu find about the fruits?（不超过15个词）",
+                 "options": [], "answer": "Many of them are very small."},
+            ]}]}
+        self.assertEqual(_run(batch), 0)
+
+    def test_reading_mc_sub_missing_options_still_flagged(self):
+        # 没有简答/词数提示的阅读理解子题缺选项仍应报 E20，不当简答豁免。
+        batch = {"items": [{
+            "unit_id": "U8", "question_type": "阅读理解", "unit_kind": "group",
+            "stem": "读短文", "material": "Passage text.", "options": [],
+            "subquestions": [
+                {"number": 1, "stem": "What is the main idea?", "options": [], "answer": "A"}]}]}
+        self.assertNotEqual(_run(batch), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

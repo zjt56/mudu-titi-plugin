@@ -138,7 +138,14 @@ def assign_scoped(units, source_lines, sections=None, previous=None, visual_colu
         visual = [c for c in visual_columns or [] if c.get("column_id") == column_id
                   and c.get("role") == "question"
                   and (c.get("start_line"), c.get("end_line")) == _range(row)] if column_id else []
-        if len(visual) == 1:
+        heading_owner = [c for c in candidates if c["start_line"] <= anchor <= c.get("end_line", len(lines))]
+        if len(visual) == 1 and not heading_owner:
+            # A verified visual question window can own a task directly only when
+            # it has NO printed heading. For numbered sections that DO have a
+            # heading, the heading identity (real lesson context + occurrence)
+            # must win so answer binding — which re-derives via heading_candidates —
+            # agrees; the column is then attached as extra metadata, not a
+            # `visual-column:` pseudo-context that would diverge from the source.
             column = visual[0]
             owner = {"title": column.get("label") or "", "context": "visual-column:" + column_id,
                      "start_line": column.get("heading_line") or column["start_line"],
@@ -146,11 +153,19 @@ def assign_scoped(units, source_lines, sections=None, previous=None, visual_colu
                      "visual_column_id": column_id, "visual_column": deepcopy(column)}
             owners = [owner]
         else:
-            owners = [c for c in candidates if c["start_line"] <= anchor <= c.get("end_line", len(lines))]
+            owners = heading_owner
         if len(owners) != 1:
             raise ValueError(f"question at source line {anchor} has no unique section")
         owner = owners[0]
+        # Keep the visual column as evidence metadata even when the heading owns
+        # the identity (numbered section).
+        if len(visual) == 1 and column_id and not owner.get("visual_column_id"):
+            owner = dict(owner, visual_column_id=column_id, visual_column=deepcopy(visual[0]))
         title = str(owner.get("title") or "")
+        # 大题标题行可能带装饰性题图引用（`Ⅱ.阅读理解[IMG image46.jpeg]`）。题目身份里
+        # 标题只应是文字；IMG 是版面装饰。保留 raw title 参与 section_id 摘要稳定，
+        # 但 source_section 存储的标题去掉尾部 [IMG …]，使与视觉栏目 label / 组装草稿一致。
+        display_title = re.sub(r"\s*\[IMG\s+[^\]]*\]", "", title).strip() or title
         context = str(owner.get("context") or "")
         occurrence = owner.get("occurrence") or candidates.index(owner) + 1
         plain = plain_text(title).strip()
@@ -165,7 +180,7 @@ def assign_scoped(units, source_lines, sections=None, previous=None, visual_colu
         column_suffix = f"-c{offset}" if type(offset) is int else ""
         uid = uid or old.get("unit_id") or f"{sid}-u{anchor}{column_suffix}"
         row.update(identity_version=VERSION, section_id=sid, unit_id=uid,
-                   source_section={"title": title, "ordinal": ordinal.group(1) if ordinal else "",
+                   source_section={"title": display_title, "ordinal": ordinal.group(1) if ordinal else "",
                                    "context": context, "occurrence": occurrence,
                                    "start_line": owner["start_line"], "end_line": owner.get("end_line", len(lines))})
         if owner.get("lesson_band"):

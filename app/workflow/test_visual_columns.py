@@ -113,6 +113,49 @@ class VisualColumnsTest(unittest.TestCase):
         self.assertEqual(vc.build(self.root)['status'], 'verified')
         self.assertEqual(self.identify.call_count, 2)
 
+    def test_reference_answer_region_note_is_benign_not_ownership_failure(self):
+        # A compliant model reports that the reference-answer page was
+        # deliberately not turned into a question ("参考答案区，非作答单元，未建题").
+        # The answer region contains no question; this note must not void the
+        # whole-page ownership proof. The text carries a real answer-key heading.
+        self.text = self.text + '参考答案\n1. A　2. B\n'
+        self.path.write_text(self.text, encoding='utf-8')
+        self.response['issues'] = [{'page': 2, 'reason': '参考答案区，非作答单元，未建题'}]
+        self.assertEqual(vc.build(self.root)['status'], 'verified')
+        self.assertEqual(len(vc.load_verified(self.root)['columns']), 3)
+
+    def test_genuine_uncovered_issue_still_rejects(self):
+        # An actual uncovered/uncertain question window is not a benign note.
+        self.response['issues'] = [{'page': 1, 'reason': '此处有三道题但无法确定是否独立'}]
+        self.assertEqual(vc.build(self.root, force=True)['status'], 'unavailable')
+
+    def test_trailing_nbsp_and_string_numbers_are_normalized(self):
+        # Word source ends lines with NBSP; the model may echo without it and may
+        # write printed numbers as digit strings. Both are layout-only and must
+        # not invalidate the proof, while the interior/coverage checks still hold.
+        self.text = 'Unit 9\nⅠ.根据首字母补全单词\n' + '1.Apple\u00a0\n2.Banana\u00a0\n'
+        self.path.write_text(self.text, encoding='utf-8')
+        self.response = {'columns': [self.row('q', 'Ⅰ.根据首字母补全单词', 'question', 3, 4, 2)],
+                         'issues': []}
+        self.response['columns'][0]['start_text'] = '1.Apple'   # dropped trailing NBSP
+        self.response['columns'][0]['end_text'] = '2.Banana'
+        self.response['columns'][0]['printed_numbers'] = ['1', '2']  # strings
+        self.assertEqual(vc.build(self.root, force=True)['status'], 'verified')
+        cols = vc.load_verified(self.root)['columns']
+        self.assertEqual(cols[0]['printed_numbers'], [1, 2])
+
+    def test_interior_quote_change_and_non_numeric_number_still_reject(self):
+        base = deepcopy(self.response)
+        for mutation in ('interior', 'nonnum'):
+            with self.subTest(mutation=mutation):
+                self.response = deepcopy(base)
+                q = self.response['columns'][1]
+                if mutation == 'interior':
+                    q['end_text'] = q['end_text'][:-1] + 'X'  # interior char changes
+                else:
+                    q['printed_numbers'] = ['1a']
+                self.assertEqual(vc.build(self.root, force=True)['status'], 'unavailable')
+
 
 if __name__ == '__main__':
     unittest.main()
