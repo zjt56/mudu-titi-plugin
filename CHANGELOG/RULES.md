@@ -514,6 +514,22 @@ content shape/catalog/media/table/schema 校验负责。**没有把内容、结�
 已归位的正确内容改回错位（本批表现为装配 SOURCE_STEM_MISSING u24 第 4 题，审计判对、回填改坏）。
 投影不可证明时（单栏/跨栏/未投影标记/题号集合不符）一律回退线性解析并留诊断，且**不得放宽审计**：
 SOURCE_STEM_MISSING/SOURCE_OPTIONS_INCOMPLETE 等判定逻辑不变，只让读写两侧对齐。落地：
-pp/workflow/ocr_grid.py::source_audit_items、question_content.py::_grid_source_audit、
+app/workflow/ocr_grid.py::source_audit_items、question_content.py::_grid_source_audit、
 question_content.py::restore_source_stems（网格单元格不承载带字母选项，清掉线性错配选项）；
 验证见 CHANGELOG/2026-11-13-assemble-grid-projection-restore.md。
+
+## 2026-11-13：审核引证按真实原文范围判定，差异仍只交人工
+
+用户流程要求（2026-11-13 真实批次审核两轮被判「无可核验来源」后确认）：审核引证的可核验范围是
+**课时/大题题干 + 单元题干 + 该单元真实正文窗口**，不能只拿 `unit.stem` 比对——组题的 stem 常只有
+答案空位，作答指令在大题题干、材料在正文窗口里，只比 stem 会把模型引用的真实原文误判成编造。
+二审按小题抽中组题时：小题窗口的结尾若只差板块横幅（`A 基础巩固`/`B 能力提升`）且等于课时容器末行，
+可以按「截断在板块边界」解释；引证逐字命中小题原文或同组大题题干都算来源归属，但**不能替代小题本身
+的存在性证明**（仍由 `review_child_source.prove_child` 给出）。编造引文、拿别的单元/年份充数一律拒绝。
+审核闸门不得改写 `07_review/` 里的交付物指纹（否则 review→gate→失效→重跑死循环）：陈旧 unchecked 行
+只做只读重判。一审/二审与原标签不一致仍是**差异产出**，进 `07_review/manual-review-queue.json` 与
+`review-gate.json` 的 `rounds.errors`，不算卡点、不自动 resolve、不阻断用户手动上传。
+落地：`app/workflow/review.py::_unit_review_text`/`_sample_source_binding`/`_narrow_sampled_group_subquestions`/
+`_prune_stale_round_unchecked`、`app/workflow/review_child_source.py::_section_end_matches`、
+`app/workflow/review_rounds.py`（二审抽样提示词）、`app/workflow/runner.py::do_review_gate`；
+验证见 `CHANGELOG/2026-11-13-review-evidence-scope-and-binding.md`。

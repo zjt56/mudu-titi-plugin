@@ -1012,13 +1012,12 @@ def unreviewed_summary(batch_dir: Path, manifest: dict) -> dict:
 
 
 def do_review_gate(batch_dir: Path, manifest: dict, *, lock_held=False) -> int:
-    reconciled = review.reconcile_unchecked(batch_dir)
-    if reconciled:
-        print(f"  复核已解决的必检项 {len(reconciled)} 条（分轮记录已重新验证，不再阻断）")
+    # 只读复核：不复写 07_review/ 里的任何交付物。陈旧的分轮 unchecked 行由
+    # review.evaluate 按当前分轮记录重新判定（review._prune_stale_round_unchecked），
+    # 否则闸门的写入会改掉 review 阶段自己的产物指纹，导致「审核已完成 → 闸门写
+    # 文件 → 监督器判 review 过期 → 重跑」的死循环。
     evidence_before = _review_inputs(batch_dir, manifest)
     result = review.evaluate(batch_dir)
-    if reconciled:
-        result["reconciled_unchecked"] = reconciled
     # 放行时重新检查实际批次，不能仅凭旧审核文件宣称标签正确。
     from workflow.label_audit import inspect_file
     labels = inspect_file(batch_dir / "06_batch" / "batch_meta.json")

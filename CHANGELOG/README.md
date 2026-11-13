@@ -263,3 +263,4 @@
 | 2026-11-13 | [2026-11-13-pdf-ocr-markup-projection.md](2026-11-13-pdf-ocr-markup-projection.md) | PDF OCR 版面 Markdown 未投影，正文/题干/审核预览显示 HTML 与 LaTeX 代码；新增确定性投影（图片落盘 [IMG]、画线 <u>、表格 [TABLE]），原始 Markdown 留证 |
 | 2026-11-13 | [2026-11-13-ocr-grid-item-binding.md](2026-11-13-ocr-grid-item-binding.md) | OCR 双栏网格题按行优先展平后题号与图文错位导致装配 A8/A9/E20 阻断；新增 ocr_grid 用版面块坐标把每张图片/每行词形绑定回各自小题，不改写正文 |
 | 2026-11-13 | [2026-11-13-assemble-grid-projection-restore.md](2026-11-13-assemble-grid-projection-restore.md) | 装配来源审计与回填共用同一版面投影：网格题不再被线性回填改回错位内容，SOURCE_STEM_MISSING/E20 消失 |
+| 2026-11-13 | [2026-11-13-review-evidence-scope-and-binding.md](2026-11-13-review-evidence-scope-and-binding.md) | 审核引证只看 stem 导致组题真实引证被判无来源、二审图片选项/板块边界被判未验证；引证范围扩到课时/大题题干+正文窗口并统一坐标投影，差异照旧交人工 |

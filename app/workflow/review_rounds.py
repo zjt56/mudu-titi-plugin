@@ -132,7 +132,7 @@ def _round_prompt(round_id, targets, context):
     instruction = ("【执行状态与质量分开】全部TARGETS都已逐项检查并给出check后，顶层status=completed，哪怕某条check因图片未见、答案冲突或证据不足而verdict=uncertain/error。这表示本轮执行完毕，不表示质量通过；保留真实疑点，绝不能改成ok来过关。只有尚未执行/未覆盖目标时顶层status=needs_review，并在notes说明未覆盖目标。"
                    "独立盲判统一标签：依据原卷、材料、选项、答案与解析判断主类、子类、组级知识点；难度、来源、地区、年份及分类元数据不参与审核；整组题型不判子题知识点（子题 knowledge=[]），独立单题才判自身知识点。"
                    "assessment={type:string,subtypes:[string],knowledge:[full paths],subquestions:[{number:string,knowledge:[full paths]}]}。"
-                   "单题 subquestions=[]；整篇题组列出目标子题且其 knowledge=[]。一审覆盖单元全部小题；二审对整组题只做组级核对（整组抽取、不拆小题），对独立单题仅列抽中小题，不宣称同组其他小题已审核。"
+                   "单题 subquestions=[]；整篇题组按目标列出子题且其 knowledge=[]（二审按小题抽中时只列该小题）。一审覆盖单元全部小题；二审对整组题只做组级核对（整组抽取、不拆小题），对独立单题仅列抽中小题，不宣称同组其他小题已审核。"
                    "knowledge 路径必须逐字取自供给目录（references/knowledge-catalog.json），不得自造更深的子级：目录里 '语用/情景交际' 已是叶子时只能写它，不能写 '语用/情景交际/询问目的'；某维度没有合法叶子就不写该维度。"
                    "【叶子即终点·必须遵守】供给目录每个节点都带 leaf 与 leafTerminal：leaf=true（『叶子：到此为止』）表示该路径就是可选的最终知识点，必须原样照抄、绝不能再往后拼接任何子级；leaf=false（非叶子）必须继续往下选到某个 leaf=true 的叶子。注意同名为不同层级的情况：例如『电子邮件』是『语篇体裁/新媒体语篇/电子邮件』这一片的叶子，不是『语篇体裁/应用文/电子邮件』——照抄目录中真实存在的完整路径，不得把不同分支的词拼在一起。"
                    "assessment.knowledge 还必须遵守 references/type-knowledge-map.json 的题型维度：例如听力长对话理解只允许主题、设题角度/听力，不得写语篇体裁；路径不在目录或超出允许维度会让整轮校验失败。"
@@ -153,6 +153,7 @@ def _round_prompt(round_id, targets, context):
                       "请整组核对、只给组级标签，subquestions 逐小题列出但 knowledge=[]，check 省略 number，不拆成逐小题 check；"
                       "TARGETS 中带 number 的目标（包括单词拼写、完成句子等组题按小题抽中的情况，如 单词拼写组 抽中第 2 小题）"
                       "必须在该条 check 原样写回同一个 number，只核对这一小题，不得省略 number、不得改成整组核对、不得拆成或合并成多条 check；"
+                      "assessment.subquestions 只列出这个 number 本身（knowledge=[]），不得把同组其他子题一并列入；"
                       "每条 check 的 unit_id+number 必须与 TARGETS 一一对应，覆盖全部目标恰好一次。"
                       if round_id == 'sample' else ""))
     check_shape = ("{unit_id,number?,verdict:ok|error|uncertain,rationale,evidence:[{path,locator,quote}],assessment:{type:string,subtypes:[string],knowledge:[string],subquestions:[{number:string,knowledge:[string]}],source_comparison:string}}"

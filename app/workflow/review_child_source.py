@@ -59,6 +59,12 @@ def _section_end_matches(lines, section, owner):
             continue
         if _LESSON.match(plain) or _UNIT.match(plain) or is_section_title(plain):
             continue
+        # 板块横幅（A 基础巩固 / B 能力提升）是容器边界，不是上一个大题的内容。
+        # 只能作为「截断在板块边界」的解释，且已要求 end == lesson_container_end_line；
+        # 真实内容行仍然必须拒绝。
+        from .lesson_bands import canonical_label
+        if canonical_label(plain):
+            continue
         return False
     return True
 

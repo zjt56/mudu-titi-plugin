@@ -290,7 +290,7 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(child.get('minItems', 0), 0)
         self.assertEqual(assessment['knowledge']['minItems'], 1)
         task = json.loads((Path(exported['package_dir']) / 'task.json').read_text())
-        self.assertIn('整篇题组列出目标子题且其 knowledge=[]', task['prompt'])
+        self.assertIn('整篇题组按目标列出子题且其 knowledge=[]', task['prompt'])
 
     def test_sample_selects_whole_target_unit_before_partition(self):
         units = [{'unit_id': 'group-1-6', 'unit_kind': 'group', 'numbers': [1, 2, 3, 4, 5, 6]},

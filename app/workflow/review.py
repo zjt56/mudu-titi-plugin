@@ -63,37 +63,28 @@ OPEN = {"open", "pending", "needs_review", "blocked", "proposed", "unchecked", "
 ROUND_UNCHECKED_CODES = ("REVIEW_ROUND_UNCHECKED", "REVIEW_SAMPLE_SOURCE_UNVERIFIED")
 
 
-def reconcile_unchecked(batch_dir) -> list:
-    """Drop round "unchecked" rows that the current rounds already prove resolved.
+def _prune_stale_round_unchecked(rows: list, rounds: dict) -> list:
+    """Ignore round "unchecked" rows the live rounds already re-verified.
 
     A source-binding upgrade can leave a stale sample/round row in
     ``07_review/unchecked.json``: the rounds now re-verify their targets, but the
-    old file still blocks the gate. ``evaluate_rounds`` is the authority — only
-    rows whose round item is no longer reported are dropped; anything still
-    unresolved (or non-round: AI execution, media) stays untouched.
+    old row still blocks the gate. ``evaluate_rounds`` is the authority — rows
+    whose (unit, field) is no longer reported as unchecked are skipped; anything
+    still unresolved (or non-round: AI execution, media) stays untouched.
+
+    This is deliberately read-only. Rewriting ``unchecked.json`` from the gate
+    changes the review stage's own deliverable fingerprint, which makes the
+    supervisor invalidate the review it just verified — an endless
+    review→gate→invalidate loop. The file is left as evidence; only the verdict
+    is recomputed.
     """
-    from . import review_rounds
-    batch = Path(batch_dir)
-    path = batch / REVIEW_DIR / "unchecked.json"
-    if not path.is_file():
-        return []
-    rows = _load(path)
-    if not isinstance(rows, list) or not rows:
-        return []
-    rounds = evaluate_rounds(batch)
-    if not rounds.get("execution_completed"):
-        return []
+    if rounds.get("execution_completed") is not True:
+        return rows
     live = {(row.get("unit_id"), row.get("field"))
             for row in rounds.get("unchecked") or [] if isinstance(row, dict)}
-    dropped = [row for row in rows
-               if isinstance(row, dict) and row.get("code") in ROUND_UNCHECKED_CODES
-               and (row.get("unit_id"), row.get("field")) not in live]
-    if not dropped:
-        return []
-    dropped_ids = {id(row) for row in dropped}
-    review_rounds._save(batch, "07_review/unchecked.json",
-                        [row for row in rows if id(row) not in dropped_ids])
-    return dropped
+    return [row for row in rows
+            if not (isinstance(row, dict) and row.get("code") in ROUND_UNCHECKED_CODES
+                    and (row.get("unit_id"), row.get("field")) not in live)]
 
 
 def compact_knowledge_catalog(types, catalog=None):
@@ -310,6 +301,8 @@ def _evaluate_uncached(batch_dir) -> dict:
             })
 
     unchecked_items = unchecked if isinstance(unchecked, list) else _findings(unchecked)
+    rounds = evaluate_rounds(batch_dir)
+    unchecked_items = _prune_stale_round_unchecked(unchecked_items, rounds)
     required_unchecked = [u for u in unchecked_items
                           if isinstance(u, dict) and (u.get("required") is True
                                                       or str(u.get("severity", "")).lower() in ("blocker", "major"))]
@@ -329,7 +322,6 @@ def _evaluate_uncached(batch_dir) -> dict:
             warnings.append({"code": "REVIEW_EMPTY", "file": name,
                              "message": "没有记录问题；完成情况由绑定当前输入的分轮记录判断"})
 
-    rounds = evaluate_rounds(batch_dir)
     _counts_blocking = len(blocking_findings)
     _counts_open = len(open_items)
     _counts_required = len(required_unchecked)
@@ -420,6 +412,48 @@ def _quote_matches(quote: str, text: str) -> bool:
         return s.casefold()
     q = norm(quote)
     return bool(q) and q in norm(text)
+
+
+def _unit_review_text(unit, bound_texts):
+    """该单元可核验的原文范围：题干 + 课时/大题题干 + 当前正文窗口。
+
+    题组单元的 stem 常常只有答案空位或小题行，大题作答指令在
+    ``source_section.title``，共享材料在正文窗口里；审核证据只要命中这些真实
+    原文就应算可核验。只拿 stem 比对会把「引用了同题组真实题干」的引证误判成
+    「没有可核验来源」，属于校验口径缺陷而不是模型编造。
+
+    正文窗口按产物的真实坐标取：确认单元是清洗后坐标，``01_source/正文.txt``
+    可能仍含被去噪的行，因此先用与其它消费者相同的删除表把单元坐标投影回
+    该文件行号，再切窗口。
+    """
+    section = dict(unit.get("source_section") or {})
+    span = dict(unit.get("source_span") or {})
+    lines = str(bound_texts.get("01_source/正文.txt") or "").splitlines()
+    start = section.get("start_line", span.get("start_line"))
+    end = section.get("end_line", span.get("end_line"))
+    if lines and isinstance(span.get("start_line"), int) and not isinstance(span.get("start_line"), bool):
+        try:
+            from .upload_content import _body_line_maps, _project_unit_to_body_file
+
+            _, clean_to_raw = _body_line_maps(tuple(lines))
+            projected = _project_unit_to_body_file(unit, clean_to_raw, lines)
+            section = projected.get("source_section") or section
+            span = projected.get("source_span") or span
+            start = section.get("start_line", span.get("start_line"))
+            end = span.get("end_line", section.get("end_line"))
+        except Exception:  # noqa: BLE001 - 投影不可证明时退回标题+stem，不猜坐标
+            pass
+    parts = [
+        str(section.get("context") or ""),
+        str(section.get("title") or ""),
+        str(unit.get("stem") or ""),
+    ]
+    if lines and isinstance(start, int) and isinstance(end, int):
+        low = max(1, start)
+        high = min(len(lines), end)
+        if low <= high:
+            parts.append("\n".join(lines[low - 1:high]))
+    return "\n".join(part for part in parts if part.strip())
 
 
 def _bound_source_texts(batch, plan):
@@ -1120,12 +1154,23 @@ def _sample_source_binding(batch, plan, check):
     if proof['status'] == 'proven':
         quotes = [item.get('quote') for item in check.get('evidence', [])
                   if isinstance(item, dict) and item.get('path') == '01_source/正文.txt']
+        section = unit.get('source_section') if isinstance(unit.get('source_section'), dict) else {}
+        rubric = [value for value in (section.get('title'), section.get('context'))
+                  if isinstance(value, str) and value.strip()]
         methods = []
         for quote in quotes:
             if quote_belongs_to_child(text, unit, number, quote):
                 methods.append('child-verbatim')
             elif quote_belongs_to_child_loose(text, unit, number, quote):
                 methods.append('child-normalized')
+            elif _quote_matches(quote, str(proof.get('text') or '')):
+                # 证明确认小题原文已逐字命中（上方 prove_child），引证与它完全一致即可归属。
+                methods.append('child-verbatim-binding')
+            elif any(_quote_matches(quote, value) for value in rubric):
+                # 组题的小题常只显示空位，作答指令写在大题题干里；大题题干属于同题组
+                # 共享原文，逐字命中确认单元小节标题即可作为该小题的来源引证。
+                # 这是来源归属，不替代小题本身的存在性证明（已由 prove_child 给出）。
+                methods.append('section-rubric-verbatim')
             elif quote_belongs_to_unit_material(text, unit, quote):
                 methods.append('group-material-verbatim')
         if not methods:
@@ -1297,6 +1342,32 @@ def _canonical_check_sources(checks, plan, bound_texts):
     return result
 
 
+def _narrow_sampled_group_subquestions(assessment, unit, number, round_id):
+    """二审按小题抽中组题时，只保留被抽中那一小题的知识点声明。
+
+    模型经常把整组小题都列进 ``assessment.subquestions``（协议要求这些子题的
+    knowledge 必须为空）。这不是标签差异，而是抽样口径的确定性投影：把
+    「整组、每个子题知识点都为空」的列表收窄到被抽中的题号，既不改变任何
+    标签判断，也不必让同样的响应反复重跑模型。子题带真实非空知识点时仍然
+    视为独立声明，交由覆盖校验报错，不静默丢弃。
+    """
+    if round_id != "sample" or number is None or unit.get("unit_kind") != "group":
+        return
+    children = assessment.get("subquestions")
+    if not isinstance(children, list) or not children:
+        return
+    if any(not isinstance(child, dict) for child in children):
+        return
+    numbers = [str(child.get("number")) for child in children]
+    expected = [str(item) for item in (unit.get("numbers") or [])]
+    if len(numbers) != len(set(numbers)) or set(numbers) != set(expected):
+        return
+    if any(child.get("knowledge") for child in children):
+        return
+    assessment["subquestions"] = [child for child in children
+                                  if str(child.get("number")) == str(number)]
+
+
 def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage=False):
     """收集每轮逐题判断，把与原标注的差异/问题转成人工 finding。
 
@@ -1348,8 +1419,8 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
         if not isinstance(evidence, list) or not evidence:
             raise ValueError("Every target needs verifiable source evidence")
         unit = units.get(uid) or {}
-        unit_text = unit.get("stem")
-        if not isinstance(unit_text, str) or not unit_text.strip():
+        unit_text = _unit_review_text(unit, bound_texts)
+        if not unit_text.strip():
             raise ValueError("Target has no confirmed source text; review remains unchecked")
         has_source = False
         for item in evidence:
@@ -1405,6 +1476,9 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
                 or not assessment["knowledge"] or not isinstance(assessment.get("subquestions"), list)):
             raise ValueError("Every review needs knowledge and subquestions")
         if True:
+            # 二审按小题抽中组题时，把「整组且子题知识点全为空」的确定性投影
+            # 收窄到被抽中的题号；真实非空子题知识点不在此处丢弃。
+            _narrow_sampled_group_subquestions(assessment, unit, number, round_id)
             children = assessment["subquestions"]
             if any(not isinstance(c, dict) or c.get("number") is None
                    or not valid_strings(c.get("knowledge")) for c in children):
