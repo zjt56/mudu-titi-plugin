@@ -127,6 +127,10 @@ class LessonBandsTest(unittest.TestCase):
             self.assertEqual(bands.canonical_feature(text, visual=True), '', text)
         self.assertEqual(bands.canonical_feature('SomePlainProse'), '')
         self.assertEqual(bands.canonical_feature('【文化拾趣】'), '文化拾趣')
+        for marker in ('[TABLE 1]', '[/TABLE]', '[PAGE 2]', '[table 23]'):
+            self.assertEqual(bands.canonical_feature(marker), '', marker)
+        text = '教材语篇回顾\n[TABLE 1]\n1.<u>　</u>\n[/TABLE]\nⅠ.单项填空'
+        self.assertEqual(bands._boundaries(text, {}, feature=True), [])
 
     def test_feature_cannot_be_claimed_from_wrong_visible_text(self):
         def identify(images, prompt, **kwargs):

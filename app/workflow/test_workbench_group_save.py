@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workbench.server import Handler, load_unit_labels, merged_rows, report_for
+from workbench.server import Handler, label_payload, load_unit_labels, merged_rows, report_for
 
 
 def make_batch(root: Path) -> Path:
@@ -60,6 +60,17 @@ class GroupSaveTest(unittest.TestCase):
             rows = merged_rows(folder, report_for(folder))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["numbers"], [31, 32])
+
+    def test_saved_knowledge_is_exposed_as_manual_after_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = make_batch(Path(tmp))
+            row = {"unit_id": "FX-001", "type": "完形填空"}
+            self.assertFalse(label_payload(row, {}, [], folder, "FX-001")["knowledge_manually_saved"])
+            path = "主题/人与自我/生活与学习/日常起居"
+            Handler.save_units(folder, "FX-001", [], {"knowledge": [path]})
+            labels = label_payload(row, {}, [], folder, "FX-001")
+            self.assertTrue(labels["knowledge_manually_saved"])
+            self.assertEqual(labels["knowledge"], [path])
 
     def test_clearing_knowledge_clears_previous_ids(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3073,6 +3073,7 @@ def label_payload(row, batch_item, subs, folder, unit_id=None):
     values["unit_id"] = str(unit_id or row.get("unit_id") or "")
     values["subquestion_count"] = len([s for s in subs if s.get("stem") or s.get("options")])
     values["knowledge_editable"] = True
+    values["knowledge_manually_saved"] = explicit_knowledge
     values["stored_in"] = (str(unit_label_path(folder, unit_id or row.get("unit_id")).relative_to(folder))
                            if (unit_id or row.get("unit_id")) else None)
     values["resolvedKnowledge"] = [{"path": p["path"], "id": p["id"], "name": p["name"]}

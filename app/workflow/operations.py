@@ -620,7 +620,18 @@ def _discover(folder):
     incident = state.get("incident")
     if incident:
         _expire(incident)
-        if incident.get("status") not in {"resolved", "cancelled", "quality_differences"} and _review_differences(folder, incident):
+        # Old versions admitted purely transient failures before the current
+        # filter existed. Retire only parked/queued incidents, never a live
+        # lease or an in-flight execution. Unknown receipts and outboxes remain
+        # untouched and continue to quarantine any later operation.
+        if (incident.get("status") in {"queued", "waiting_evidence", "waiting_external"}
+                and _only_transient_detail(incident.get("detail"))):
+            prior = incident["status"]
+            incident.update(status="transient_deferred", eligible=False, attempt_id=None,
+                            lease_expires_at=0, not_before=0, prior_disposition=prior)
+            _event(incident, "reconcile", "transient_deferred",
+                   "历史纯瞬时故障退出运维队列；未判定故障已修复，未知回执保留且不重放")
+        if incident.get("status") not in {"resolved", "cancelled", "quality_differences", "transient_deferred"} and _review_differences(folder, incident):
             incident.update(status="quality_differences", eligible=False, attempt_id=None, lease_expires_at=0,
                             failure_class="quality_differences")
             _event(incident, "reconcile", "quality_differences", "当前审核已执行且仅有差异，保留审核产出，不触发修复")
@@ -739,7 +750,10 @@ def _discover(folder):
                  and incident.get('stage') == stage and incident.get('detail') == _redact(detail)):
         evidence = json.dumps(self_heal._retry_evidence(folder, manifest, stage), sort_keys=True)
         signature = hashlib.sha256((stage + '\n' + detail + '\n' + evidence).encode('utf-8')).hexdigest()[:16]
-    if (count or early) and not (incident and incident.get("signature") == signature):
+    if (count or early) and not (incident and incident.get("status") != "transient_deferred"
+                                  and incident.get("signature") == signature):
+        if incident and incident.get("status") == "transient_deferred":
+            state.setdefault("incident_history", []).append(incident)
         state["incident"] = {"incident_id": uuid.uuid4().hex, "batch_name": folder.name,
             "batch_dir": str(folder), "status": "queued", "eligible": True, "stage": stage,
             "signature": signature, "detail": _redact(detail), "self_heal_failures": count,
@@ -765,7 +779,14 @@ def handoff_if_available(folder):
 def _handoff_locked(folder):
     state = _discover(folder)
     incident = state.get('incident') or {}
+    # Discovery can retire an old incident even when no handoff is needed.
+    _save(folder, state)
     if not incident or incident.get('status') not in {'queued', 'claimed', 'waiting_evidence'}:
+        return None
+    # An unknown request prevents a new claim; do not park ordinary work behind
+    # an operations handoff that cannot be admitted. Never replay the request.
+    if (incident.get('status') != 'claimed'
+            and any(row.get('status') == 'unknown' for row in state.get('receipts', []))):
         return None
     stage, _ = self_heal._candidate(folder, mf.load(folder))
     if stage != incident.get('stage'):

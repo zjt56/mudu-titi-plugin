@@ -119,6 +119,17 @@ test('完整路径集合相同，顺序和重复项不产生差异', () => {
   assert.deepEqual(Array.from(auditNotes(d)), []);
 });
 
+test('人工修改后原标签行显示当前标签及已修改，审核仍对比原始快照', () => {
+  const d = detail([], '未覆盖');
+  d.labels = { knowledge: ['主题/修改后'], knowledge_manually_saved: true };
+  const rendered = text(labelAuditPanels(d));
+  assert.match(rendered, /原标签 修改后 已修改/);
+  assert.doesNotMatch(rendered, /当前标签/);
+  assert.equal(hasKnowledgeDiff(d), false);
+  d.labels.knowledge = ['主题/原标签'];
+  assert.doesNotMatch(text(labelAuditPanels(d)), /已修改/);
+});
+
 test('本轮已提供空知识点是差异，不伪装成待审核', () => {
   const d = detail([],'未覆盖');
   d.comparison.rounds[0].checks[0].assessment.knowledge = [];

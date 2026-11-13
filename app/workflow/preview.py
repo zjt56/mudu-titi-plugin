@@ -63,7 +63,7 @@ def _strong_number(line: str) -> int | None:
 #   ② 题号在空位前（补全对话/信息转换）：「2.　　」「Tony.1.____」，题号后必须确有
 #      空档标记（全角空格/下划线/__），才不会吞掉普通句号后的数字（如 "No.5"）。
 _BLANK_BEFORE_NUMBER = re.compile(r"(?:\u3000|__|_{1,})\s*(\d{1,3})(?!\d)")
-_NUMBER_BEFORE_BLANK = re.compile(r"(?<!\d)(\d{1,3})\s*[.．]\s*(?=\u3000|__|_)")
+_NUMBER_BEFORE_BLANK = re.compile(r"(?<!\d)(\d{1,3})\s*[.．]\s*(?=(?:[A-Za-z])?(?:\u3000|__|_))")
 # 图注空：`N.[IMG …](提示)`。图片紧跟括号提示才是一个需要填写的空；孤立
 # `N.[IMG …]`（选项图/引用）不算小题号——与 extract.IMAGE_HINT_BLANK 同源。
 _IMAGE_HINT_BLANK = re.compile(

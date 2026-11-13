@@ -260,6 +260,18 @@ class StructureGateTest(unittest.TestCase):
         self.assertEqual(sorted(numbers), [1, 2, 9, 10], numbers)
         self.assertEqual(len(numbers), len(set(numbers)), numbers)
 
+    def test_table_numbered_blanks_with_initials_cover_every_slot(self):
+        from workflow import extract, structure_gate as sg
+        lines = ["Unit 2 第四课时", "[IMG header.jpeg]教材语篇回顾[IMG end.jpeg]", "[TABLE 1]",
+                 "One 1.<u>　　</u> and 2.<u>h　　</u>; then 3.<u>　　</u>",
+                 "Her 4.<u>l　　</u>, 5.<u>　　</u> and 6.<u>　　</u>",
+                 "7.<u>　　</u>, 8.<u>　　</u>, 9.<u>　　</u>,10.<u>b　　</u>", "[/TABLE]",
+                 "Ⅰ.根据首字母及汉语提示补全单词", "1.A <u>h　　</u> (帽子)"]
+        self.assertEqual(sorted(n for _, n in sg._scope_anchors(lines[2:7])), list(range(1, 11)))
+        structure, _, _ = extract.infer_structure("七上 · 人教版 · 课时A计划\n**Unit 2　We’re Family!**\n**第四课时** Section B\n" + "\n".join(lines[1:]))
+        self.assertEqual(structure['sections'][0]['questions'], list(range(1, 11)))
+        self.assertEqual(sg._scope_anchors(['Age 12.5, section 3.Home, number 4.hat']), [])
+
     def test_table_image_coordinates_are_not_printed_anchors(self):
         # OCR/Word 表格里 img_in_image_box_<x>_<y>_<w>_<h>.jpg 的坐标数字和温度数字
         # 是版面数据，不是小题号。实际批次因此把 563/566/…/995 误当问答题号，

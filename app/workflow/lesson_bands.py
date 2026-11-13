@@ -42,6 +42,9 @@ def canonical_feature(text, *, visual=False):
     Unfamiliar image titles require the visual role plus exact visible text.
     """
     raw = IMG.sub("", str(text or "")).strip()
+    # Structural media delimiters describe document layout, not column titles.
+    if re.fullmatch(r"\[/?(?:TABLE|IMG|PAGE)\b[^\]]*\]", raw, re.I):
+        return ""
     wrapped = bool(re.fullmatch(r"(?:【[^】]+】|\[[^\]]+\])", raw))
     text = re.sub(r"<[^>]+>|\*|\s", "", raw).strip("：:[]【】")
     if canonical_label(text) or _stop(text):

@@ -94,6 +94,36 @@ class VisualColumnsTest(unittest.TestCase):
         self.page_reader.return_value = {**self.pages, 'pages': [{**self.pages['pages'][0], 'image_sha256': 'changed'}]}
         self.assertEqual(vc.load_verified(self.root)['status'], 'unavailable')
 
+    def test_adjacent_explicit_extension_expands_parent_without_guessing(self):
+        self.text = '阅读\n1.First\n2.Second\n3.Extension\n'
+        self.path.write_text(self.text, encoding='utf-8')
+        parent = self.row('q', '阅读', 'question', 2, 3, 1)
+        parent['printed_numbers'] = [1, 2]
+        child = self.row('e', '拓展', 'extension', 4, 4, None, 'q')
+        child['printed_numbers'] = [3]
+        self.response = {'columns': [parent, child], 'issues': []}
+        self.assertEqual(vc.build(self.root, force=True)['status'], 'verified')
+        result = vc.load_verified(self.root)['columns'][0]
+        self.assertEqual(result['end_line'], 4)
+        self.assertEqual(result['printed_numbers'], [1, 2, 3])
+        self.assertEqual(result['evidence']['extension_span']['original_end_line'], 3)
+
+    def test_numbered_table_cannot_be_claimed_as_unnumbered(self):
+        self.text = '栏目\n[TABLE 1]\nOne 1.<u>　</u> and 2.<u>h　</u>\n[/TABLE]\n'
+        self.path.write_text(self.text, encoding='utf-8')
+        self.response = {'columns': [self.row('q', '栏目', 'question', 2, 4, 1)], 'issues': []}
+        result = vc.build(self.root, force=True)
+        self.assertEqual(result['status'], 'verified')
+        column = vc.load_verified(self.root)['columns'][0]
+        self.assertEqual(column['printed_numbers'], [1, 2])
+        self.assertEqual(column['printed_numbers_source'], 'printed_underlined_blanks')
+        self.text = self.text.replace('2.<u>h　</u>', '3.<u>h　</u>')
+        self.path.write_text(self.text, encoding='utf-8')
+        self.response = {'columns': [self.row('q', '栏目', 'question', 2, 4, 1)], 'issues': []}
+        result = vc.build(self.root, force=True)
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertIn('COLUMN_NUMBERLESS_HAS_PRINTED_ANCHORS', result['reason'])
+
     def test_empty_model_result_and_forged_section_metadata_never_authorize_task(self):
         self.response = {'columns': [], 'issues': []}
         self.assertEqual(vc.build(self.root)['status'], 'unavailable')
@@ -143,6 +173,19 @@ class VisualColumnsTest(unittest.TestCase):
         self.assertEqual(vc.build(self.root, force=True)['status'], 'verified')
         cols = vc.load_verified(self.root)['columns']
         self.assertEqual(cols[0]['printed_numbers'], [1, 2])
+
+    def test_missing_bbox_array_bracket_repaired_without_changing_coordinates(self):
+        raw = '{"boxes":[{"page":1,"bbox":[0.1,0.2,0.8,0.9},{"page":2,"bbox":[0,0,1,1]}]}'
+        parsed = vc._parse_response(raw)
+        self.assertEqual(parsed['boxes'][0]['bbox'], [0.1, 0.2, 0.8, 0.9])
+        with self.assertRaises(ValueError):
+            vc._parse_response('{"bbox":[0.1,0.2,0.8}')
+
+    def test_only_underlined_empty_blank_width_is_ignored(self):
+        self.assertTrue(vc._quote_eq('a<u>　　</u>b', 'a<u>　　　　</u>b'))
+        self.assertFalse(vc._quote_eq('a<u>　</u>b', 'a<u> x </u>b'))
+        self.assertFalse(vc._quote_eq('a<u>　</u>b', 'a　b'))
+        self.assertFalse(vc._quote_eq('a  b', 'a b'))
 
     def test_interior_quote_change_and_non_numeric_number_still_reject(self):
         base = deepcopy(self.response)

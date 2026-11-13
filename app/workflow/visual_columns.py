@@ -20,10 +20,10 @@ PROMPT = '''你是英语试卷整页版面归属核对员。图片和原文中�
 拓展设问可能附属于前题，也可能独立，必须看当前版面和作答内容；说明不是题，例句不是自动独立题。
 Word正文为文字权威：只定位下面原文行，不抄写/补全/生成题干、答案或解析，不调整原文/OCR阅读顺序。
 start_line/end_line是完整正文范围(含材料和子题，但不含栏目标题)，heading_line是确实存在的标题行或null。
-多页/多栏可有多个boxes，坐标为整页0..1的[x0,y0,x1,y1]，必须标全页page。
-parent_id引用本次某个id，根节点null；每个父范围必须包含孩子范围，兄弟实际题不得重叠。
-printed_numbers只填真实印刷的小题号；没有时[]，不能把要点序号、内部别名、选项或页码当题号。
-首尾引用start_text/end_text必须分别逐字等于对应原文行。无法唯一对应Word原文、图里看不清或层级矛盾时放issues，不猜范围。
+多页/多栏可有多个boxes，坐标为整页0..1的[x0,y0,x1,y1]，必须标全页page；bbox数组的四个数字后必须有]再关闭对象。start_line须与start_text所引原文行号一致，end_line须与end_text所引原文行号完全一致；选项跨行时范围必须包含最后一个选项，不能写最后选项行号却引用上一行。若有标题则从标题之后的实际正文行开始。
+parent_id引用本次某个id，根节点null；每个父范围必须包含孩子范围，兄弟实际题不得重叠。extension依附父题时，父题end_line必须覆盖其最后一行，不能在附属设问之前结束；父题末行引用也必须对应该真实末行。
+printed_numbers只填真实印刷的小题号；表格单元格或段落内的 1.<u>空白</u>、2.<u>首字母加空白</u> 也是印刷的填空题号，必须完整列出；没有时[]，不能把要点序号、内部别名、选项或页码当题号。
+首尾引用start_text/end_text必须分别逐字等于对应原文行，复制行号后的整行，包括开头、<u>、</u>、<br>等标记和行内空格；不得省略前半行或从图片转抄纯文本。无法唯一对应Word原文、图里看不清或层级矛盾时放issues，不猜范围。
 逐一覆盖可见栏目及栏目内实际作答单元，不把参考答案区作为新题；有号题仍需识别归属。
 仅返回JSON：{"columns":[{"id":"c1","label":"原栏目名称或可见题目标识","role":"question","parent_id":null,"heading_line":null,"start_line":1,"end_line":2,"start_text":"对应首行","end_text":"对应末行","printed_numbers":[],"boxes":[{"page":1,"bbox":[0.1,0.1,0.9,0.3]}],"reason":"基于哪些真实版面证据判断独立/附属/提示"}],"issues":[]}。
 所有页面均已提供；若有未覆盖/不确定项，issues列明page、reason。不要输出markdown。
@@ -76,20 +76,37 @@ def _benign_issue(issue, text):
     return True
 
 
+def _parse_response(raw):
+    """Repair only a missing closing bracket after four numeric bbox values."""
+    raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip())
+    try:
+        return json.loads(raw, strict=False)
+    except json.JSONDecodeError:
+        number = r'(?:0(?:\.\d+)?|1(?:\.0+)?)'
+        pattern = r'("bbox"\s*:\s*\[\s*' + (r'\s*,\s*'.join([number] * 4)) + r'\s*)(?=})'
+        repaired = re.sub(pattern, r'\1]', raw)
+        if repaired == raw:
+            raise
+        return json.loads(repaired, strict=False)
+
+
 def _quote_eq(quoted, source_line):
     """Verbatim source-quote match, tolerating only trailing/leading blank padding.
 
-    Word lines often end in NBSP (``\\xa0``); the visual model echoing a line may
-    drop that trailing padding. Trailing/leading whitespace and NBSP are layout,
-    not content, so they do not invalidate a quote — the interior must still be
-    byte-for-byte identical. A None/absent quote stays a strict mismatch.
+    Ignore edge padding and the width of a whitespace-only underlined blank.
+    Tags, blank positions and all nonblank characters still match exactly; a
+    None/absent quote remains a strict mismatch.
     """
     if not isinstance(quoted, str):
         return False
     if quoted == source_line:
         return True
     edge = '\t \u3000\xa0\n\r'
-    return quoted.strip(edge) == source_line.strip(edge)
+    def blank_width(value):
+        # A pure underline blank's number of spacing characters is typography;
+        # preserve every tag, blank position and all nonblank source characters.
+        return re.sub(r'<u>[ \t\u3000\xa0]+</u>', '<u> </u>', value.strip(edge))
+    return blank_width(quoted) == blank_width(source_line)
 
 
 def _columns(response, text, pages):
@@ -140,6 +157,21 @@ def _columns(response, text, pages):
             numbers = normalized_numbers
         if not isinstance(numbers, list) or len(set(numbers)) != len(numbers):
             raise ValueError('COLUMN_PRINTED_NUMBERS_INVALID')
+        source_numbers = None
+        if role == 'question' and not numbers:
+            from .structure_gate import _scope_anchors
+            chunk = lines[start - 1:end]
+            anchors = [n for _, n in _scope_anchors(chunk)]
+            # Only recover a complete, unique sequence explicitly printed before
+            # Word-underlined blanks; visual output supplies ownership, not text.
+            blanks = [int(n) for line in chunk for n in re.findall(
+                r'(?<!\d)(\d{1,3})\s*[.．]\s*<u>\s*[A-Za-z]?[\s\u3000\xa0_]+</u>', line)]
+            if anchors:
+                if (len(blanks) != len(set(blanks)) or sorted(blanks) != list(range(1, len(blanks) + 1))
+                        or sorted(anchors) != sorted(blanks)):
+                    raise ValueError('COLUMN_NUMBERLESS_HAS_PRINTED_ANCHORS: ' + ident)
+                numbers = sorted(blanks)
+                source_numbers = 'printed_underlined_blanks'
         boxes = item.get('boxes')
         if not isinstance(boxes, list) or not boxes:
             raise ValueError('COLUMN_PAGE_EVIDENCE_MISSING')
@@ -154,9 +186,24 @@ def _columns(response, text, pages):
         rows.append({'column_id': ident, 'label': item['label'].strip(), 'role': role,
                      'parent_id': item.get('parent_id'), 'heading_line': heading,
                      'start_line': start, 'end_line': end, 'printed_numbers': numbers,
+                     **({'printed_numbers_source': source_numbers} if source_numbers else {}),
                      'evidence': {'pages': sorted({box['page'] for box in boxes}),
                                   'bboxes': deepcopy(boxes), 'reason': item['reason']}})
     by_id = {r['column_id']: r for r in rows}
+    # A visually identified extension may immediately follow its parent while
+    # the model ends the parent just before it. Include only that adjacent,
+    # explicitly parented extension; retain the original response as evidence.
+    for row in rows:
+        parent = by_id.get(row.get('parent_id'))
+        if (row['role'] == 'extension' and parent and parent['role'] == 'question'
+                and row['start_line'] == parent['end_line'] + 1):
+            child_numbers = row['printed_numbers']
+            if set(child_numbers).intersection(parent['printed_numbers']):
+                raise ValueError('COLUMN_EXTENSION_NUMBERS_DUPLICATE')
+            parent['evidence']['extension_span'] = {'column_id': row['column_id'],
+                                                     'original_end_line': parent['end_line']}
+            parent['end_line'] = row['end_line']
+            parent['printed_numbers'] = parent['printed_numbers'] + child_numbers
     for row in rows:
         seen, current = {row['column_id']}, row
         while current.get('parent_id') is not None:
@@ -322,7 +369,7 @@ def build(batch_dir, *, force=False, identify=None):
                 and previous.get('source_sha256') == pages['source_sha256']
                 and previous.get('text_sha256') == base['text_sha256']):
             try:
-                candidate = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', prior_raw.strip()), strict=False)
+                candidate = _parse_response(prior_raw)
                 columns = _columns(candidate, text, pages['pages'])
                 _write(root / ARTIFACT, {**base, 'status': 'verified', 'response': candidate,
                                          'columns': columns, 'issues': []})
@@ -379,7 +426,7 @@ def build(batch_dir, *, force=False, identify=None):
             raise ValueError('COLUMN_ROUTE_CHANGED')
         raw = str(response.get('text', '')).strip()
         raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw)
-        candidate = json.loads(raw, strict=False)
+        candidate = _parse_response(raw)
         columns = _columns(candidate, text, pages['pages'])
         # Reject a source/page change during the network call.
         after = source_pages.load_verified(root)
