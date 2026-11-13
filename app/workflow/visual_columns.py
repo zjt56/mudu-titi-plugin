@@ -388,9 +388,13 @@ def build(batch_dir, *, force=False, identify=None):
             f'{n}: {line}' for n, line in enumerate(text.splitlines(), 1))
         calls = 1
         try:
-            vision_timeout = float(os.environ.get('WF_VISUAL_TIMEOUT') or 180)
+            # 整卷多页栏目归属必须在一次调用里覆盖全部页面并逐条给出首尾引用，
+            # 输出天然比单图识别大：模型实测约 6k tokens、耗时约 170s。默认 180s
+            # 会恰好在生成途中超时/截断，因此这里给足生成预算（仍受所选模型的
+            # maxTokens 约束，超限会由桥直接报 INVALID_REQUEST，不做静默降级）。
+            vision_timeout = float(os.environ.get('WF_VISUAL_TIMEOUT') or 600)
         except (TypeError, ValueError):
-            vision_timeout = 180.0
+            vision_timeout = 600.0
         try:
             vision_retries = max(1, int(os.environ.get('WF_VISUAL_RETRIES') or 3))
         except (TypeError, ValueError):
@@ -404,7 +408,8 @@ def build(batch_dir, *, force=False, identify=None):
                      'VISION_TIMEOUT', 'timed out')
         response = None
         last_exc = None
-        max_tokens = 16000
+        # 16k 对整卷栏目枚举不足（实测 32000 才能完整返回）。截断时仍按步进上调。
+        max_tokens = 32000
         for attempt in range(1, vision_retries + 1):
             calls = attempt
             try:
@@ -416,7 +421,7 @@ def build(batch_dir, *, force=False, identify=None):
                 last_exc = exc
                 if attempt < vision_retries and any(token in str(exc) for token in transient):
                     if 'TRUNCATED_RESPONSE' in str(exc):
-                        max_tokens = min(32000, max_tokens + 4000)
+                        max_tokens = min(64000, max_tokens + 8000)
                     time.sleep(min(8, 2 * attempt))
                     continue
                 raise

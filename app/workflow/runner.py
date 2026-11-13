@@ -329,9 +329,21 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
             return code
         if code != 0:
             source_kind = contracts.STAGE_BY_ID.get(stage.id, stage).kind
+            detail = (err or out).strip()
+            # 429/额度是“稍后可用”，不是确定性失败：与网页后台同一口径回到 pending
+            # 并登记冷却，避免 CLI 把外部额度问题写成 failed 让下游误判为内容缺陷。
+            from workflow import auto as auto_flow
+            if source_kind == contracts.AGENT and auto_flow._is_rate_limited(detail):
+                auto_flow._set_cooldown(batch_dir, auto_flow.RATE_LIMIT_BACKOFF_SECONDS)
+                mf.touch_stage(current, stage.id, mf.PENDING, exit_code=code,
+                               notes="限流/额度冷却中，稍后自动续跑：" + (detail.splitlines()[-1][:200] if detail else ""))
+                print(f"  ⏳ 限流/额度冷却（exit {code}），已回到待执行；日志：{log.relative_to(batch_dir)}")
+                manifest.clear()
+                manifest.update(current)
+                return 4
             failed_status = mf.NEEDS_REVIEW if code == 3 and source_kind == contracts.AGENT else mf.FAILED
             mf.touch_stage(current, stage.id, failed_status, exit_code=code,
-                           notes=(err or out).strip().splitlines()[-1][:300] if (err or out) else "执行失败")
+                           notes=detail.splitlines()[-1][:300] if detail else "执行失败")
             label = "待复核" if failed_status == mf.NEEDS_REVIEW else "失败"
             print(f"  {'⏸' if failed_status == mf.NEEDS_REVIEW else '✗'} {label}（exit {code}），日志：{log.relative_to(batch_dir)}")
         else:

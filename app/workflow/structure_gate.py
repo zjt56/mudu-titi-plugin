@@ -456,8 +456,22 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                 units.append(unit)
         else:
             from .source_anchors import printed_tokens
+            from .preview import _strong_number
+
+            def _line_tokens(line):
+                # A workbook item like "4.30 <u>…</u>" glues the printed number
+                # to answer content, so printed_tokens (which rejects "N." before
+                # a digit to avoid decimals) returns empty. The leading-item rule
+                # _strong_number owns that case; union it in (strong only, never
+                # weak blank-slot numbers) so the item still gets an anchor.
+                tokens = printed_tokens(line)
+                leading = _strong_number(line)
+                if leading is not None and not any(n == leading for _o, n in tokens):
+                    tokens = [(0, leading), *tokens]
+                return tokens
+
             anchors = [(i, number, offset, tokens) for i in range(start, end)
-                       for tokens in [printed_tokens(source_lines[i])]
+                       for tokens in [_line_tokens(source_lines[i])]
                        for offset, number in tokens if number in numbers]
             image_only = (section.get("image_only") and any("[IMG " in line for line in local)
                           and all(not _plain(line).strip() or "[IMG " in line or "[TABLE" in line for line in local))

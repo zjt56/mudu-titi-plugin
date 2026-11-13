@@ -299,6 +299,22 @@ def _bound_source(unit, source, cleaned, fresh):
         if located is None:
             return "", {"reason": "确认结构的行范围与当前Word正文不一致"}
         first, last, skipped = located
+        # 独立选择题的 stem 只是题干行，选项在其后的 source_parts 行里。若只绑
+        # stem，选项会被整段丢掉，组装/审计必然报 OPTIONS_MISMATCH。按已声明的
+        # source_parts（stem/option/material）把同一题的完整窗口绑定回来，只允许
+        # 向确认 span 内延伸，绝不越过 span 去吞下一题。
+        window_end = last
+        parts = [p for p in (unit.get("source_parts") or []) if isinstance(p, dict)]
+        if unit.get("unit_kind") != "group" and parts:
+            starts = [p.get("start_line") for p in parts if type(p.get("start_line")) is int]
+            ends = [p.get("end_line") for p in parts if type(p.get("end_line")) is int]
+            if starts and ends and first == min(starts):
+                declared_end = max(ends)
+                if last <= declared_end <= end:
+                    window_end = declared_end
+        if window_end != last:
+            last = window_end
+            text = "\n".join(lines[first - 1:last]).strip()
         proof = {"basis": "confirmed_source_span",
                  "line_basis": "denoise.clean_body(01_source/正文.txt)",
                  "start_line": first, "end_line": last}

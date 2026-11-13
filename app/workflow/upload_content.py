@@ -389,7 +389,31 @@ def _answer_items(text):
     return items
 
 
-def _answer_section_topics(sections, lines):
+def _answer_feature_topics(evidence):
+    """Verified visual column labels as answer-scope topics (label, start, end).
+
+    Lesson materials print 语法导图/语法精练/课时精练 as banner images, so the
+    body has no text marker and the answer key repeats Roman numerals inside each
+    banner. Only labels already proven on the current source by the visual pass
+    may act as a topic boundary; images alone still prove nothing by themselves.
+    """
+    rows = []
+    for row in ((evidence or {}).get('features') or []):
+        label = _norm(str(row.get('label') or ''))
+        start, end = row.get('start_line'), row.get('end_line')
+        if label and type(start) is int and type(end) is int and start <= end:
+            rows.append((label, start, end))
+    return rows
+
+
+def _feature_topic_at(features, line):
+    for label, start, end in features:
+        if start <= line <= end:
+            return label
+    return ''
+
+
+def _answer_section_topics(sections, lines, features=()):
     from .sync_practice import _LESSON, _UNIT, is_section_title, plain_text
     result, active, cursor = [], '', 0
     for section in sections:
@@ -400,11 +424,13 @@ def _answer_section_topics(sections, lines):
             elif is_section_title(text):
                 active = _norm(text)
             cursor += 1
-        result.append(active)
+        # A verified banner container owns its sections more strongly than an
+        # unrelated prose heading: same Roman numerals repeat inside each banner.
+        result.append(_feature_topic_at(features, section['start_line']) or active)
     return result
 
 
-def _compact_answer_blocks(lines):
+def _compact_answer_blocks(lines, features=()):
     blocks, active, band, topic = [], None, '', ''
     from .sync_practice import _LESSON, _UNIT, is_section_title, plain_text
     for line, text in enumerate(lines, 1):
@@ -412,6 +438,16 @@ def _compact_answer_blocks(lines):
         marker = _LESSON_BAND.fullmatch(text)
         if _LESSON.match(visible) or _UNIT.match(visible):
             topic, band, active = '', '', None
+            continue
+        # A verified banner label in the key (usually wrapped in decorative
+        # images) opens a new answer topic and closes the previous block; without
+        # this the banner line looked like unattached prose and poisoned the
+        # preceding multi-line block. Match the verified label TEXT only: the
+        # feature windows are body coordinates and must not be read as key lines.
+        feature_topic = next(
+            (label for label, _s, _e in features if visible and visible == label), '')
+        if feature_topic:
+            topic, band, active = feature_topic, '', None
             continue
         if is_section_title(visible):
             topic, band, active = _norm(visible), '', None
@@ -471,7 +507,7 @@ def _compact_answer_blocks(lines):
     return blocks
 
 
-def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
+def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, features=()):
     """Bind a complete single-lesson Roman skeleton, never a global number.
 
     The body may have image-only foundation/extension banners. A complete ordered
@@ -493,7 +529,7 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
                 return []  # Printed text and verified visual evidence disagree.
             body_bands[index] = label
     contexts = {_norm(row.get('context') or '') for row in sections}
-    topics = _answer_section_topics(sections, body)
+    topics = _answer_section_topics(sections, body, features)
     lesson_markers = [text for text in body if _LESSON.match(plain_text(text).strip())]
     lesson_contexts = {_norm(plain_text(text).strip()) for text in lesson_markers}
     topic_contexts = {topic for topic in topics if topic}
@@ -570,7 +606,7 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
         if (explicit_lessons and explicit_lessons != (lesson_contexts or contexts)
                 or explicit_units and explicit_units != body_units):
             continue
-        blocks = _compact_answer_blocks(lines)
+        blocks = _compact_answer_blocks(lines, features)
         if [block['ordinal'] for block in blocks] != skeleton:
             continue
         # Explicit body/verified banners are stronger than the Roman sequence.
@@ -686,6 +722,7 @@ def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
     body_path = '01_source/正文.txt'
     body = lines.get(body_path, [])
     sections = heading_candidates('\n'.join(body))
+    features = ()
     if batch_dir is not None:
         from .lesson_bands import load_verified, annotate_sections
         # Hash verification must use the untouched text, not the stripped answer
@@ -697,6 +734,9 @@ def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
                      or any(row.get('code') in {'BAND_EVIDENCE_STALE', 'BAND_MEDIA_STALE', 'BAND_BOUNDARY_INVALID'}
                             for row in evidence.get('issues') or []))):
             return []  # A known stale/failed proof cannot fall back to Roman guessing.
+        # Verified banner containers become the answer-scope topic on both sides,
+        # so 语法精练/课时精练 cannot lend each other the same Roman numbers.
+        features = tuple(_answer_feature_topics(evidence))
         annotated = annotate_sections(sections, evidence)
         # Accept a confirmed window tightened exactly to a current verified band
         # boundary. Keep old identities valid too; never expand a unit span.
@@ -710,6 +750,17 @@ def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
         sections = [dict(section, **({'lesson_band': tagged['lesson_band']}
                                     if tagged.get('lesson_band') else {}))
                     for section, tagged in zip(sections, annotated)]
+        # 确认窗口不得短于已验证板块边界。短了就等于把本板块的答案区间让给相邻
+        # 板块（或让越界候选显得合法），必须直接拒绝而不是退回数字猜配。
+        owner_span = unit.get('source_section') or {}
+        for tagged in annotated:
+            band = tagged.get('lesson_band') or {}
+            band_start, band_end = band.get('start_line'), band.get('end_line')
+            if (type(owner_span.get('start_line')) is int and type(owner_span.get('end_line')) is int
+                    and type(band_start) is int and type(band_end) is int
+                    and band_start <= owner_span['start_line'] <= band_end
+                    and owner_span['end_line'] < band_end):
+                return []
     owners = [row for row in sections
               if row['start_line'] == (unit.get('source_section') or {}).get('start_line')]
     bands = _answer_section_bands(sections, body)
@@ -733,13 +784,15 @@ def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
                     if path == body_path or not owner_band or companion_band == owner_band:
                         candidates.append((path, index, value))
     primary_lines = {path: rows for path, rows in lines.items() if path in SOURCES}
-    candidates.extend(_compact_scoped_candidates(unit, number, primary_lines, sections=sections))
+    candidates.extend(_compact_scoped_candidates(unit, number, primary_lines,
+                                                 sections=sections, features=features))
     primary = list(dict.fromkeys(row for row in candidates if row[0] in SOURCES))
     if primary:
         return primary  # Malformed fallback material cannot poison real Word content.
     fallback_lines = {path: rows for path, rows in lines.items()
                       if path == '01_source/正文.txt' or path not in SOURCES}
-    candidates.extend(_compact_scoped_candidates(unit, number, fallback_lines, sections=sections))
+    candidates.extend(_compact_scoped_candidates(unit, number, fallback_lines,
+                                                 sections=sections, features=features))
     return list(dict.fromkeys(candidates))
 
 

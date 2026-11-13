@@ -926,7 +926,7 @@ def extract_source(source: Path, destination: Path, config=None, ocr_result=None
 
 
 def _material_classifier():
-    from . import agent, local_agent
+    from workflow import agent, local_agent
     if agent.configured():
         config = local_agent.load_config()
         return (lambda prompt, run_dir, cfg: local_agent.invoke(prompt, run_dir, cfg)['response']), config
@@ -953,7 +953,7 @@ def run(batch_dir: Path) -> dict:
     # Multiple documents must be classified BEFORE choosing the paper. Upload
     # names/order are only provisional hints; an answer Word must not outrank a
     # PDF question paper. All PDFs share this one acquisition result.
-    from . import material_classify
+    from workflow import material_classify
     input_docs = {str((row or {}).get('path')) for row in manifest.get('inputs', {}).values()
                   if isinstance(row, dict) and Path(str(row.get('path') or '')).suffix.lower() in ('.pdf', '.docx', '.doc')}
     prepared_ocr = None
@@ -967,7 +967,7 @@ def run(batch_dir: Path) -> dict:
         if selected['inputs'] != manifest['inputs']:
             # Persist through manifest's atomic writer only while extraction owns
             # the input binding; do not manufacture any completed stage status.
-            from .local_agent import _agent_lock
+            from workflow.local_agent import _agent_lock
             with _agent_lock(1500):
                 current = mf.load(batch_dir)
                 if current.get('inputs') != manifest.get('inputs'):
@@ -1008,13 +1008,13 @@ def run(batch_dir: Path) -> dict:
     # （正文/答案/解析/混排/其他）。非阻断：模型不可用时用确定性兜底，只留证据。
     try:
         try:
-            from . import material_classify, local_agent
+            from workflow import material_classify, local_agent
         except ImportError:
             from workflow import material_classify, local_agent
         invoke = None
         cfg = None
         try:
-            from . import agent
+            from workflow import agent
             if agent.configured():
                 cfg = local_agent.load_config()
                 invoke = lambda prompt, run_dir, config: local_agent.invoke(
@@ -1059,7 +1059,7 @@ def run(batch_dir: Path) -> dict:
                             "extraction_report": {"source": "material_classify"}})
                 else:
                     try:
-                        from . import agent_prepare
+                        from workflow import agent_prepare
                     except ImportError:
                         from workflow import agent_prepare
                     agent_prepare.prepare_answers(batch_dir)
