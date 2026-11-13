@@ -1,0 +1,219 @@
+{
+  "version": "1.0",
+  "stages": {
+    "extract": {
+      "status": "delivered",
+      "artifacts": [
+        {
+          "path": "01_source/正文.txt",
+          "sha256": "ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+          "size": 5259,
+          "required": true,
+          "exists": true
+        },
+        {
+          "path": "01_source/structure.json",
+          "sha256": "5c31b76408e5332f38870df468353097d31c6396a7cc1c3c92875d846096e5bf",
+          "size": 11939,
+          "required": true,
+          "exists": true
+        },
+        {
+          "path": "01_source/extraction.json",
+          "sha256": "65785a2f10bfcbd4625b6ebb2123256e568631f8cb4669f65a9da0e10c1857db",
+          "size": 72084,
+          "required": true,
+          "exists": true
+        },
+        {
+          "path": "01_source/metadata.json",
+          "sha256": "a0aff228e924637de8603caa5c1a0abe207913dac44285329cdf588bc22693ae",
+          "size": 2544,
+          "required": true,
+          "exists": true
+        },
+        {
+          "path": "07_review/extraction-report.json",
+          "sha256": "d75739edb392d46f239e49322ec77aad5fd6e780510fa116c937dc3599caf6fd",
+          "size": 2951,
+          "required": true,
+          "exists": true
+        }
+      ],
+      "consumed_by": [
+        "structure_gate"
+      ],
+      "updated_at": "2026-11-13T09:38:13+08:00"
+    },
+    "structure_gate": {
+      "status": "delivered",
+      "artifacts": [
+        {
+          "path": "01_source/structure.confirmed.json",
+          "sha256": "23b087b7f4b105db266ab1cce5cfe94e3ec0c5fb348c7c76e4348fddaa9994c4",
+          "size": 25957,
+          "required": true,
+          "exists": true
+        },
+        {
+          "path": "07_review/structure-gate.json",
+          "sha256": "118dfea6c4ccc5e3e2e5533d6d962b43b8cbaca6cb08572fd33b348866b80e38",
+          "size": 5788,
+          "required": true,
+          "exists": true
+        }
+      ],
+      "consumed_by": [
+        "preassemble",
+        "types"
+      ],
+      "updated_at": "2026-11-13T09:41:04+08:00"
+    },
+    "preassemble": {
+      "status": "delivered",
+      "artifacts": [
+        {
+          "path": "06_batch/batch.base.json",
+          "sha256": "ef0ec3c238e4402987e859b43f886d8bc8e563c4a1468de8c0bf97ef11816e34",
+          "size": 57903,
+          "required": true,
+          "exists": true
+        },
+        {
+          "path": "03_types/types.json",
+          "sha256": "03c83b6ad419c5ccb135691a01112abb3f3da2398a44488eb5ea6f806fccbb8e",
+          "size": 7728,
+          "required": true,
+          "exists": true
+        }
+      ],
+      "consumed_by": [
+        "types"
+      ],
+      "updated_at": "2026-11-13T09:42:48+08:00"
+    },
+    "types": {
+      "status": "delivered",
+      "artifacts": [
+        {
+          "path": "03_types/types.json",
+          "sha256": "03c83b6ad419c5ccb135691a01112abb3f3da2398a44488eb5ea6f806fccbb8e",
+          "size": 7728,
+          "required": true,
+          "exists": true
+        }
+      ],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:42:48+08:00"
+    },
+    "answers": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    },
+    "audio": {
+      "status": "skipped",
+      "artifacts": [
+        {
+          "path": "02_audio/audio_map.json",
+          "sha256": "",
+          "size": 0,
+          "required": true,
+          "exists": false
+        }
+      ],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T10:11:51+08:00"
+    },
+    "explanations": {
+      "status": "skipped",
+      "artifacts": [
+        {
+          "path": "04_knowledge/explanations.json",
+          "sha256": "1ac4e64e09fa921971fcf528dddab67cff606724b107d4edec82a800a4b96b0c",
+          "size": 6210,
+          "required": true,
+          "exists": true
+        }
+      ],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T10:11:51+08:00"
+    },
+    "knowledge": {
+      "status": "delivered",
+      "artifacts": [
+        {
+          "path": "04_knowledge/knowledge.json",
+          "sha256": "97cbb88574e97af8052632c72e6a8bb8cba2c65ab63beb27c792705accf4d91d",
+          "size": 13568,
+          "required": true,
+          "exists": true
+        }
+      ],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:45:55+08:00"
+    },
+    "assemble": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    },
+    "meta": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    },
+    "underlines": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    },
+    "validate": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    },
+    "review": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    },
+    "review_gate": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    },
+    "format_gate": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    },
+    "upload_gate": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    },
+    "upload": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    },
+    "publish_gate": {
+      "status": "pending",
+      "artifacts": [],
+      "consumed_by": [],
+      "updated_at": "2026-11-13T09:37:38+08:00"
+    }
+  },
+  "workflow_id": "11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect"
+}

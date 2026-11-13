@@ -1,0 +1,1852 @@
+{
+  "items": [
+    {
+      "number": 1,
+      "stem": "What <u>e______</u>(别的) can I do for you?",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-928d0636b3171ee6-u7",
+      "unit_id": "sec-928d0636b3171ee6-u7",
+      "unit_kind": "standalone",
+      "numbers": [
+        1
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-928d0636b3171ee6",
+      "source_section": {
+        "title": "Ⅰ.根据首字母及汉语提示补全单词",
+        "ordinal": "Ⅰ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 1,
+        "start_line": 6,
+        "end_line": 11,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 11
+      },
+      "question_ids": {
+        "1": "sec-928d0636b3171ee6-l7-q1"
+      },
+      "question_id": "sec-928d0636b3171ee6-l7-q1",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 2,
+      "stem": "Walk along the river,and you can see a <u>f______</u>(农场) on your left.",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-928d0636b3171ee6-u8",
+      "unit_id": "sec-928d0636b3171ee6-u8",
+      "unit_kind": "standalone",
+      "numbers": [
+        2
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-928d0636b3171ee6",
+      "source_section": {
+        "title": "Ⅰ.根据首字母及汉语提示补全单词",
+        "ordinal": "Ⅰ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 1,
+        "start_line": 6,
+        "end_line": 11,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 11
+      },
+      "question_ids": {
+        "2": "sec-928d0636b3171ee6-l8-q2"
+      },
+      "question_id": "sec-928d0636b3171ee6-l8-q2",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 3,
+      "stem": "We need to <u>c______</u>(圈出) the key words when doing some reading.",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-928d0636b3171ee6-u9",
+      "unit_id": "sec-928d0636b3171ee6-u9",
+      "unit_kind": "standalone",
+      "numbers": [
+        3
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-928d0636b3171ee6",
+      "source_section": {
+        "title": "Ⅰ.根据首字母及汉语提示补全单词",
+        "ordinal": "Ⅰ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 1,
+        "start_line": 6,
+        "end_line": 11,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 11
+      },
+      "question_ids": {
+        "3": "sec-928d0636b3171ee6-l9-q3"
+      },
+      "question_id": "sec-928d0636b3171ee6-l9-q3",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 4,
+      "stem": "Linda and her sister like to take a walk by the <u>l______</u>(湖) in the park.",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-928d0636b3171ee6-u10",
+      "unit_id": "sec-928d0636b3171ee6-u10",
+      "unit_kind": "standalone",
+      "numbers": [
+        4
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-928d0636b3171ee6",
+      "source_section": {
+        "title": "Ⅰ.根据首字母及汉语提示补全单词",
+        "ordinal": "Ⅰ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 1,
+        "start_line": 6,
+        "end_line": 11,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 11
+      },
+      "question_ids": {
+        "4": "sec-928d0636b3171ee6-l10-q4"
+      },
+      "question_id": "sec-928d0636b3171ee6-l10-q4",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 5,
+      "stem": "Our school has a <u>b______</u>(大的) library with many books.",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-928d0636b3171ee6-u11",
+      "unit_id": "sec-928d0636b3171ee6-u11",
+      "unit_kind": "standalone",
+      "numbers": [
+        5
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-928d0636b3171ee6",
+      "source_section": {
+        "title": "Ⅰ.根据首字母及汉语提示补全单词",
+        "ordinal": "Ⅰ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 1,
+        "start_line": 6,
+        "end_line": 11,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 11
+      },
+      "question_ids": {
+        "5": "sec-928d0636b3171ee6-l11-q5"
+      },
+      "question_id": "sec-928d0636b3171ee6-l11-q5",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 1,
+      "stem": "你在那家书店里可以看到许多种书。\nYou can see______ ______books in that bookshop.",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-8d67361b5032653a-u13",
+      "unit_id": "sec-8d67361b5032653a-u13",
+      "unit_kind": "standalone",
+      "numbers": [
+        1
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-8d67361b5032653a",
+      "source_section": {
+        "title": "Ⅱ.根据汉语意思完成句子,每空一词",
+        "ordinal": "Ⅱ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 2,
+        "start_line": 12,
+        "end_line": 26,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 26
+      },
+      "question_ids": {
+        "1": "sec-8d67361b5032653a-l13-q1"
+      },
+      "question_id": "sec-8d67361b5032653a-l13-q1",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 2,
+      "stem": "我可以看一下你的新书包吗?\nCan I ______your new schoolbag?",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-8d67361b5032653a-u15",
+      "unit_id": "sec-8d67361b5032653a-u15",
+      "unit_kind": "standalone",
+      "numbers": [
+        2
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-8d67361b5032653a",
+      "source_section": {
+        "title": "Ⅱ.根据汉语意思完成句子,每空一词",
+        "ordinal": "Ⅱ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 2,
+        "start_line": 12,
+        "end_line": 26,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 26
+      },
+      "question_ids": {
+        "2": "sec-8d67361b5032653a-l15-q2"
+      },
+      "question_id": "sec-8d67361b5032653a-l15-q2",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 3,
+      "stem": "这张老照片是黑白的。\nThis old picture is ______.",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-8d67361b5032653a-u17",
+      "unit_id": "sec-8d67361b5032653a-u17",
+      "unit_kind": "standalone",
+      "numbers": [
+        3
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-8d67361b5032653a",
+      "source_section": {
+        "title": "Ⅱ.根据汉语意思完成句子,每空一词",
+        "ordinal": "Ⅱ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 2,
+        "start_line": 12,
+        "end_line": 26,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 26
+      },
+      "question_ids": {
+        "3": "sec-8d67361b5032653a-l17-q3"
+      },
+      "question_id": "sec-8d67361b5032653a-l17-q3",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 4,
+      "stem": "你的新眼镜是什么颜色?\n______ ______your new glasses?",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-8d67361b5032653a-u19",
+      "unit_id": "sec-8d67361b5032653a-u19",
+      "unit_kind": "standalone",
+      "numbers": [
+        4
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-8d67361b5032653a",
+      "source_section": {
+        "title": "Ⅱ.根据汉语意思完成句子,每空一词",
+        "ordinal": "Ⅱ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 2,
+        "start_line": 12,
+        "end_line": 26,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 26
+      },
+      "question_ids": {
+        "4": "sec-8d67361b5032653a-l19-q4"
+      },
+      "question_id": "sec-8d67361b5032653a-l19-q4",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 5,
+      "stem": "韩林通常走路去他的叔叔家。\nHan Lin usually walks to ______.",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-8d67361b5032653a-u21",
+      "unit_id": "sec-8d67361b5032653a-u21",
+      "unit_kind": "standalone",
+      "numbers": [
+        5
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-8d67361b5032653a",
+      "source_section": {
+        "title": "Ⅱ.根据汉语意思完成句子,每空一词",
+        "ordinal": "Ⅱ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 2,
+        "start_line": 12,
+        "end_line": 26,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 26
+      },
+      "question_ids": {
+        "5": "sec-8d67361b5032653a-l21-q5"
+      },
+      "question_id": "sec-8d67361b5032653a-l21-q5",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 6,
+      "stem": "——你的爷爷有多少匹马?\n——我看到(有)二十匹。\n—______ ______horses does your grandfather have?\n—______ ______twenty.",
+      "material": "",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-8d67361b5032653a-u23",
+      "unit_id": "sec-8d67361b5032653a-u23",
+      "unit_kind": "standalone",
+      "numbers": [
+        6
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-8d67361b5032653a",
+      "source_section": {
+        "title": "Ⅱ.根据汉语意思完成句子,每空一词",
+        "ordinal": "Ⅱ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 2,
+        "start_line": 12,
+        "end_line": 26,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 26
+      },
+      "question_ids": {
+        "6": "sec-8d67361b5032653a-l23-q6"
+      },
+      "question_id": "sec-8d67361b5032653a-l23-q6",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 1,
+      "stem": "—The cake tastes(尝起来) good.I want to have ______one.",
+      "material": "",
+      "options": [
+        "A. some",
+        "B. any",
+        "C. another",
+        "D. other"
+      ],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-4a0104c03b02ba2c-u28",
+      "unit_id": "sec-4a0104c03b02ba2c-u28",
+      "unit_kind": "standalone",
+      "numbers": [
+        1
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-4a0104c03b02ba2c",
+      "source_section": {
+        "title": "Ⅲ.单项填空",
+        "ordinal": "Ⅲ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 3,
+        "start_line": 27,
+        "end_line": 45,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 45
+      },
+      "question_ids": {
+        "1": "sec-4a0104c03b02ba2c-l28-q1"
+      },
+      "question_id": "sec-4a0104c03b02ba2c-l28-q1",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 2,
+      "stem": "—I don’t like this cap.It’s too big.\n—Well,here is a______one for you.",
+      "material": "",
+      "options": [
+        "A. small",
+        "B. short",
+        "C. long",
+        "D. tidy"
+      ],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-4a0104c03b02ba2c-u31",
+      "unit_id": "sec-4a0104c03b02ba2c-u31",
+      "unit_kind": "standalone",
+      "numbers": [
+        2
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-4a0104c03b02ba2c",
+      "source_section": {
+        "title": "Ⅲ.单项填空",
+        "ordinal": "Ⅲ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 3,
+        "start_line": 27,
+        "end_line": 45,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 45
+      },
+      "question_ids": {
+        "2": "sec-4a0104c03b02ba2c-l31-q2"
+      },
+      "question_id": "sec-4a0104c03b02ba2c-l31-q2",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 3,
+      "stem": "—Alan,can you ______from 1 to 100 in English?\n—Of course!One,two,three...",
+      "material": "",
+      "options": [
+        "A. speak",
+        "B. tell",
+        "C. count",
+        "D. see"
+      ],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-4a0104c03b02ba2c-u35",
+      "unit_id": "sec-4a0104c03b02ba2c-u35",
+      "unit_kind": "standalone",
+      "numbers": [
+        3
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-4a0104c03b02ba2c",
+      "source_section": {
+        "title": "Ⅲ.单项填空",
+        "ordinal": "Ⅲ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 3,
+        "start_line": 27,
+        "end_line": 45,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 45
+      },
+      "question_ids": {
+        "3": "sec-4a0104c03b02ba2c-l35-q3"
+      },
+      "question_id": "sec-4a0104c03b02ba2c-l35-q3",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 4,
+      "stem": "—What animals can you find on the farm?\n—I can find many ______and cows.",
+      "material": "",
+      "options": [
+        "A. rabbit",
+        "B. chicken",
+        "C. goose",
+        "D. sheep"
+      ],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-4a0104c03b02ba2c-u39",
+      "unit_id": "sec-4a0104c03b02ba2c-u39",
+      "unit_kind": "standalone",
+      "numbers": [
+        4
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-4a0104c03b02ba2c",
+      "source_section": {
+        "title": "Ⅲ.单项填空",
+        "ordinal": "Ⅲ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 3,
+        "start_line": 27,
+        "end_line": 45,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 45
+      },
+      "question_ids": {
+        "4": "sec-4a0104c03b02ba2c-l39-q4"
+      },
+      "question_id": "sec-4a0104c03b02ba2c-l39-q4",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 5,
+      "stem": "Which picture shows the dog is behind the house?",
+      "material": "",
+      "options": [
+        "A.",
+        "B.",
+        "C.",
+        "D."
+      ],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [],
+      "id": "sec-4a0104c03b02ba2c-u43",
+      "unit_id": "sec-4a0104c03b02ba2c-u43",
+      "unit_kind": "standalone",
+      "numbers": [
+        5
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "attachments": [
+        {
+          "kind": "image",
+          "url": "01_source/media/image42.jpeg",
+          "name": "image42.jpeg",
+          "placement": "option",
+          "optionKey": "A"
+        },
+        {
+          "kind": "image",
+          "url": "01_source/media/image43.jpeg",
+          "name": "image43.jpeg",
+          "placement": "option",
+          "optionKey": "B"
+        },
+        {
+          "kind": "image",
+          "url": "01_source/media/image44.jpeg",
+          "name": "image44.jpeg",
+          "placement": "option",
+          "optionKey": "C"
+        },
+        {
+          "kind": "image",
+          "url": "01_source/media/image45.jpeg",
+          "name": "image45.jpeg",
+          "placement": "option",
+          "optionKey": "D"
+        }
+      ],
+      "identity_version": "scoped-v1",
+      "section_id": "sec-4a0104c03b02ba2c",
+      "source_section": {
+        "title": "Ⅲ.单项填空",
+        "ordinal": "Ⅲ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 3,
+        "start_line": 27,
+        "end_line": 45,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 45
+      },
+      "question_ids": {
+        "5": "sec-4a0104c03b02ba2c-l43-q5"
+      },
+      "question_id": "sec-4a0104c03b02ba2c-l43-q5",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 3,
+      "stem": "",
+      "material": "My uncle is a farmer.He has ninety apple 1.(tree) on his farm.My uncle and my 2.(/aːnt/) can’t pick all the apples by themselves(他们自己).3.______they ask my parents and me to help them today.We get up early 4.______ 5 o’clock in the morning.My mother is in her 5.______(旧的) clothes.My father buys many 6.______(kind) of food for breakfast in a shop.Then we start to pick apples together.When it is time to go home,my uncle 7.______(give) us many apples.I like to work on the 8.______(美丽的) farm.",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [
+        {
+          "number": 3,
+          "stem": "______",
+          "material": "",
+          "options": [],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-03770200d1ca1625-l47-q3",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 4,
+          "stem": "______",
+          "material": "",
+          "options": [],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-03770200d1ca1625-l47-q4",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 5,
+          "stem": "______",
+          "material": "",
+          "options": [],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-03770200d1ca1625-l47-q5",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 6,
+          "stem": "______",
+          "material": "",
+          "options": [],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-03770200d1ca1625-l47-q6",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 7,
+          "stem": "______",
+          "material": "",
+          "options": [],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-03770200d1ca1625-l47-q7",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 8,
+          "stem": "______",
+          "material": "",
+          "options": [],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-03770200d1ca1625-l47-q8",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        }
+      ],
+      "id": "sec-03770200d1ca1625-u47",
+      "unit_id": "sec-03770200d1ca1625-u47",
+      "unit_kind": "group",
+      "numbers": [
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "attachments": [
+        {
+          "kind": "image",
+          "url": "01_source/media/image10.jpeg",
+          "name": "image10.jpeg",
+          "placement": "question"
+        }
+      ],
+      "identity_version": "scoped-v1",
+      "section_id": "sec-03770200d1ca1625",
+      "source_section": {
+        "title": "Ⅳ.根据短文内容或所给提示填空",
+        "ordinal": "Ⅳ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 4,
+        "start_line": 46,
+        "end_line": 47,
+        "lesson_band": {
+          "band_id": "band-0eb1cdf95ba5c0af",
+          "label": "基础巩固",
+          "start_line": 5,
+          "end_line": 47,
+          "image_name": "image1.jpeg",
+          "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691"
+        },
+        "lesson_container_end_line": 47
+      },
+      "question_ids": {
+        "3": "sec-03770200d1ca1625-l47-q3",
+        "4": "sec-03770200d1ca1625-l47-q4",
+        "5": "sec-03770200d1ca1625-l47-q5",
+        "6": "sec-03770200d1ca1625-l47-q6",
+        "7": "sec-03770200d1ca1625-l47-q7",
+        "8": "sec-03770200d1ca1625-l47-q8"
+      },
+      "question_id": "",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 1,
+      "stem": "",
+      "material": "Little Mary’s grandparents have a farm.On the farm there are many kinds of __1__,like dogs and cats.She likes to play with them because they can make her __2__.On the farm there __3__ also a little elephant.It has no mother.It always walks around by itself.And Mary is really sorry for the death(死亡) of its __4__.Mary always gives some __5__ to it.Bananas are its favourite.Sometimes Mary walks into a wood(树林) __6__ the little elephant.There Mary sits on the ground(地面) and __7__ a book;the little elephant stands by Mary.Her grandfather always asks her,“__8__ does the elephant like you so much?” “Oh,because I love it,Grandpa,” Mary answers.Grandpa thinks Mary is __9__.Animals are our __10__.We should love them.",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [
+        {
+          "number": 1,
+          "stem": "______",
+          "material": "",
+          "options": [
+            "A. houses",
+            "B. trees",
+            "C. animals",
+            "D. colours"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-1ecc72ba50a90dfa-l51-q1",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 2,
+          "stem": "______",
+          "material": "",
+          "options": [
+            "A. sad",
+            "B. happy",
+            "C. sorry",
+            "D. tidy"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-1ecc72ba50a90dfa-l53-q2",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 3,
+          "stem": "______",
+          "material": "",
+          "options": [
+            "A. is",
+            "B. am",
+            "C. are",
+            "D. be"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-1ecc72ba50a90dfa-l55-q3",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 4,
+          "stem": "______",
+          "material": "",
+          "options": [
+            "A. friend",
+            "B. mother",
+            "C. teacher",
+            "D. brother"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-1ecc72ba50a90dfa-l57-q4",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 5,
+          "stem": "______",
+          "material": "",
+          "options": [
+            "A. time",
+            "B. names",
+            "C. food",
+            "D. boxes"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-1ecc72ba50a90dfa-l59-q5",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 6,
+          "stem": "______",
+          "material": "",
+          "options": [
+            "A. under",
+            "B. for",
+            "C. of",
+            "D. with"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-1ecc72ba50a90dfa-l61-q6",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 7,
+          "stem": "______",
+          "material": "",
+          "options": [
+            "A. reads",
+            "B. buys",
+            "C. sees",
+            "D. draws"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-1ecc72ba50a90dfa-l63-q7",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 8,
+          "stem": "______",
+          "material": "",
+          "options": [
+            "A. What",
+            "B. How",
+            "C. Why",
+            "D. When"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-1ecc72ba50a90dfa-l65-q8",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 9,
+          "stem": "______",
+          "material": "",
+          "options": [
+            "A. quiet",
+            "B. right",
+            "C. shy",
+            "D. old"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-1ecc72ba50a90dfa-l67-q9",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 10,
+          "stem": "______",
+          "material": "",
+          "options": [
+            "A. students",
+            "B. children",
+            "C. parents",
+            "D. friends"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-1ecc72ba50a90dfa-l69-q10",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        }
+      ],
+      "id": "sec-1ecc72ba50a90dfa-u50",
+      "unit_id": "sec-1ecc72ba50a90dfa-u50",
+      "unit_kind": "group",
+      "numbers": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-1ecc72ba50a90dfa",
+      "source_section": {
+        "title": "Ⅰ.完形填空",
+        "ordinal": "Ⅰ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 5,
+        "start_line": 49,
+        "end_line": 70,
+        "lesson_band": {
+          "band_id": "band-a67b66f39cc5e198",
+          "label": "能力提升",
+          "start_line": 48,
+          "end_line": 89,
+          "image_name": "image4.jpeg",
+          "image_sha256": "3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c"
+        },
+        "lesson_container_end_line": 70
+      },
+      "question_ids": {
+        "1": "sec-1ecc72ba50a90dfa-l51-q1",
+        "2": "sec-1ecc72ba50a90dfa-l53-q2",
+        "3": "sec-1ecc72ba50a90dfa-l55-q3",
+        "4": "sec-1ecc72ba50a90dfa-l57-q4",
+        "5": "sec-1ecc72ba50a90dfa-l59-q5",
+        "6": "sec-1ecc72ba50a90dfa-l61-q6",
+        "7": "sec-1ecc72ba50a90dfa-l63-q7",
+        "8": "sec-1ecc72ba50a90dfa-l65-q8",
+        "9": "sec-1ecc72ba50a90dfa-l67-q9",
+        "10": "sec-1ecc72ba50a90dfa-l69-q10"
+      },
+      "question_id": "",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    },
+    {
+      "number": 1,
+      "stem": "",
+      "material": "Wu Zeyin,14,comes from Hubei,China.He finds that many fruits and vegetables(蔬菜) in Botswana are very small.And some of them are not good.The carrots are small and the tomatoes are green.But the price(价格) is very <u>high</u>.And he learns that Botswana has to buy many fruits and vegetables from other places.Wu wants to do something to help.\nHe made an app(应用程序) for agriculture(农业)—Farm Assistant.With the help of the app,farmers can know the vegetables’ planting time,watering needs and ripening(成熟) time.\nWu says,“<u>It is better to teach a man to fish than to give him fish.</u>”",
+      "options": [],
+      "knowledge": [],
+      "knowledgeIds": [],
+      "knowledge_ids": [],
+      "answer": "",
+      "explanation": "",
+      "articleSummary": "",
+      "subquestions": [
+        {
+          "number": 1,
+          "stem": "What does the underlined word “high” mean?",
+          "material": "",
+          "options": [
+            "A. 实惠的",
+            "B. 稳定的",
+            "C. 高的",
+            "D. 低的"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-59ddc72436ce2ed0-l75-q1",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 2,
+          "stem": "[**新考法**·**细节多选**]What can farmers know about the vegetables by using the app?\n①The watering needs.②The selling price.③The planting time.④The ripening time.",
+          "material": "",
+          "options": [
+            "A. ①②③",
+            "B. ①②④",
+            "C. ①③④",
+            "D. ②③④"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-59ddc72436ce2ed0-l78-q2",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 3,
+          "stem": "[**新考法**·**跨学科设问**]What do Wu’s words mean?",
+          "material": "",
+          "options": [
+            "A. 鱼和熊掌不可兼得。",
+            "B. 授人以鱼,不如授人以渔。",
+            "C. 三天打鱼,两天晒网。",
+            "D. 临渊羡鱼,不如退而结网。\n☆拓展设问"
+          ],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-59ddc72436ce2ed0-l82-q3",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        },
+        {
+          "number": 4,
+          "stem": "What does Wu find about the fruits and vegetables in Botswana?(不超过15个词)",
+          "material": "",
+          "options": [],
+          "knowledge": [],
+          "knowledgeIds": [],
+          "knowledge_ids": [],
+          "answer": "",
+          "explanation": "",
+          "articleSummary": "",
+          "subquestions": [],
+          "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+          "source_type": "同步练习",
+          "question_id": "sec-59ddc72436ce2ed0-l88-q4",
+          "filterMetadata": {
+            "subtypes": [],
+            "region": "",
+            "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+            "source_type": "同步练习"
+          },
+          "year": "",
+          "location": "",
+          "version": "",
+          "authorization": "",
+          "institution": "",
+          "school": "",
+          "regional_version": ""
+        }
+      ],
+      "id": "sec-59ddc72436ce2ed0-u75",
+      "unit_id": "sec-59ddc72436ce2ed0-u75",
+      "unit_kind": "group",
+      "numbers": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "question_type": "",
+      "filterMetadata": {
+        "subtypes": [],
+        "region": "",
+        "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+        "source_type": "同步练习"
+      },
+      "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+      "source_type": "同步练习",
+      "identity_version": "scoped-v1",
+      "section_id": "sec-59ddc72436ce2ed0",
+      "source_section": {
+        "title": "Ⅱ.阅读理解[IMG image46.jpeg]",
+        "ordinal": "Ⅱ.",
+        "context": "第三课时　Section B (1a-1e)",
+        "occurrence": 6,
+        "start_line": 71,
+        "end_line": 89,
+        "lesson_band": {
+          "band_id": "band-a67b66f39cc5e198",
+          "label": "能力提升",
+          "start_line": 48,
+          "end_line": 89,
+          "image_name": "image4.jpeg",
+          "image_sha256": "3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c"
+        },
+        "lesson_container_end_line": 89
+      },
+      "question_ids": {
+        "1": "sec-59ddc72436ce2ed0-l75-q1",
+        "2": "sec-59ddc72436ce2ed0-l78-q2",
+        "3": "sec-59ddc72436ce2ed0-l82-q3",
+        "4": "sec-59ddc72436ce2ed0-l88-q4"
+      },
+      "question_id": "",
+      "year": "",
+      "location": "",
+      "version": "",
+      "authorization": "",
+      "institution": "",
+      "school": "",
+      "regional_version": ""
+    }
+  ],
+  "name": "七上人教版课时A计划 Starter Unit 3 课时3"
+}

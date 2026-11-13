@@ -1,0 +1,27 @@
+{
+  "stage": "answers",
+  "validated_units": [],
+  "failed_units": {
+    "sec-928d0636b3171ee6-u7": "Content task time budget exceeded",
+    "sec-928d0636b3171ee6-u8": "Content task time budget exceeded",
+    "sec-928d0636b3171ee6-u9": "Content task time budget exceeded",
+    "sec-928d0636b3171ee6-u10": "Content task time budget exceeded",
+    "sec-928d0636b3171ee6-u11": "Content task time budget exceeded",
+    "sec-8d67361b5032653a-u13": "Content task time budget exceeded",
+    "sec-8d67361b5032653a-u15": "Content task time budget exceeded",
+    "sec-8d67361b5032653a-u17": "Content task time budget exceeded",
+    "sec-8d67361b5032653a-u19": "Content task time budget exceeded",
+    "sec-8d67361b5032653a-u21": "Content task time budget exceeded",
+    "sec-8d67361b5032653a-u23": "Content task time budget exceeded",
+    "sec-4a0104c03b02ba2c-u28": "Content task time budget exceeded",
+    "sec-4a0104c03b02ba2c-u31": "Content task time budget exceeded",
+    "sec-4a0104c03b02ba2c-u35": "Content task time budget exceeded",
+    "sec-4a0104c03b02ba2c-u39": "Content task time budget exceeded",
+    "sec-4a0104c03b02ba2c-u43": "Content task time budget exceeded",
+    "sec-03770200d1ca1625-u47": "Content task time budget exceeded",
+    "sec-1ecc72ba50a90dfa-u50": "Content task time budget exceeded",
+    "sec-59ddc72436ce2ed0-u75": "Content task time budget exceeded"
+  },
+  "deterministic_failures": {},
+  "calls": []
+}

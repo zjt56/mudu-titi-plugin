@@ -1,0 +1,1 @@
+{"status":"completed","artifacts":{"metadata":{"paper_title":"七上 · 人教版 · 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e)","source":"七上 · 人教版 · 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e)","source_type":"同步练习","region":"","year":""}},"notes":["卷头未印地区与年份，region 与 year 留空。"],"findings":[]}

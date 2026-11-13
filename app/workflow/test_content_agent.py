@@ -567,6 +567,30 @@ class ContentAgentTests(unittest.TestCase):
         self.assertEqual(len(broker.dispatch("GET", "/api/content-agent/purges")["purges"]), 1)
         self.purge_ack(self.batch)
 
+    def test_failed_purge_is_reissued_only_on_later_delete_attempt(self):
+        task, thread, result = self.start()
+        self.claim(task)
+        self.finish(task, thread, result)
+        def fail_ticket():
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                jobs = broker.dispatch("GET", "/api/content-agent/purges")["purges"]
+                if jobs:
+                    broker.dispatch("POST", "/api/content-agent/purges/" + jobs[0]["purge_id"],
+                                    {"status": "failed", "error": "missing injection"})
+                    return
+                time.sleep(.01)
+        worker = threading.Thread(target=fail_ticket)
+        worker.start()
+        with self.assertRaisesRegex(local_agent.AgentError, "missing injection"):
+            broker.purge_batch(self.batch, wait_seconds=2)
+        worker.join(3)
+        old = next((broker.QUEUE_ROOT.parent / "purges").glob("*.json"))
+        self.assertTrue(broker._task_path(task["task_id"]).exists())
+        self.assertEqual(self.purge_ack(self.batch), {"removed": 1})
+        self.assertFalse(old.exists())
+        self.assertEqual(list((broker.QUEUE_ROOT.parent / "purges").glob("*.json")), [])
+
     def test_concurrent_claims_have_one_persisted_owner(self):
         task, thread, result = self.start()
         gate = threading.Barrier(3)

@@ -1,0 +1,194 @@
+{
+  "passed": true,
+  "input_hashes": {
+    "01_source/正文.txt": "ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+    "01_source/structure.json": "5c31b76408e5332f38870df468353097d31c6396a7cc1c3c92875d846096e5bf",
+    "01_source/structure.confirmed.json": "23b087b7f4b105db266ab1cce5cfe94e3ec0c5fb348c7c76e4348fddaa9994c4"
+  },
+  "source_sha256": "ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+  "structure_sha256": "5c31b76408e5332f38870df468353097d31c6396a7cc1c3c92875d846096e5bf",
+  "original_sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+  "metadata_missing": [
+    "year",
+    "region"
+  ],
+  "warnings": [
+    {
+      "code": "SOURCE_METADATA_MISSING",
+      "blocking": false,
+      "status": "placeholder",
+      "fields": [
+        "year",
+        "region"
+      ],
+      "message": "试卷来源信息未可靠识别，缺失文本字段使用「未提供」占位；继续后续打标签和审核。"
+    }
+  ],
+  "source_diagnostic": {
+    "classification": "undetermined",
+    "evidence": {
+      "answer_heading_lines": [
+        91
+      ],
+      "answer_index_lines": [
+        51,
+        53,
+        55,
+        57,
+        59,
+        61,
+        63,
+        65,
+        67,
+        69,
+        96,
+        100,
+        101
+      ],
+      "answer_index_count": 10,
+      "supplement_lines": [],
+      "question_prompt_lines": [
+        7,
+        9,
+        15,
+        19,
+        23,
+        35,
+        39,
+        43,
+        75,
+        78,
+        82,
+        88,
+        95
+      ],
+      "option_lines": [
+        29,
+        30,
+        33,
+        34,
+        37,
+        38,
+        41,
+        42,
+        44,
+        45,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        76,
+        77,
+        80,
+        81,
+        83,
+        84,
+        85,
+        86
+      ]
+    },
+    "message": "文字证据不足以判定仅有答案；这不代表试题完整。",
+    "scope": "full_extracted_text_only; not visual verification",
+    "source_sha256": "927631f3c93736c7a060be2c8a1bcc91e82906f0f9fc621050ad6e682d75f452"
+  },
+  "layout_required": true,
+  "layout_review_command": "python -m workflow.layout_review --help",
+  "checks": {
+    "extraction_evidence": "passed",
+    "source_present": "passed",
+    "sections_present": "passed",
+    "coverage": "passed",
+    "source_number_coverage": "passed",
+    "grouping": "passed",
+    "source_content": "passed",
+    "group_guides": "passed",
+    "denoise": "passed",
+    "source_metadata": "placeholder"
+  },
+  "blockers": [],
+  "unit_counts": {
+    "total": 19,
+    "standalone": 16,
+    "group": 3
+  },
+  "removed_count": 0,
+  "resolved_evidence": [
+    {
+      "code": "ANSWER_APPENDIX_DETECTED",
+      "message": "文末参考答案已按课时来源边界分离，答案题号不参与正文统计",
+      "resolution": "文末重复标题之后按题号+答案字母/解析判定为答案册，保留为答案附录候选"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并",
+      "source_line": 12,
+      "resolution": "当前大题及前序同号大题的来源位置、出现序次和身份均已独立重建验证"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并",
+      "source_line": 27,
+      "resolution": "当前大题及前序同号大题的来源位置、出现序次和身份均已独立重建验证"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并",
+      "source_line": 46,
+      "resolution": "当前大题及前序同号大题的来源位置、出现序次和身份均已独立重建验证"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并",
+      "source_line": 49,
+      "resolution": "当前大题及前序同号大题的来源位置、出现序次和身份均已独立重建验证"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并",
+      "source_line": 71,
+      "resolution": "当前大题及前序同号大题的来源位置、出现序次和身份均已独立重建验证"
+    },
+    {
+      "code": "GROUP_BOUNDARY_REVIEW",
+      "message": "Ⅰ.完形填空 的材料/对话分组需要核验，未将分区等同于最终题组",
+      "source_line": 49,
+      "resolution": "每个原题位置已唯一绑定到本大题/材料局部窗口"
+    },
+    {
+      "code": "GROUP_BOUNDARY_REVIEW",
+      "message": "Ⅱ.阅读理解[IMG image46.jpeg] 的材料/对话分组需要核验，未将分区等同于最终题组",
+      "source_line": 71,
+      "resolution": "每个原题位置已唯一绑定到本大题/材料局部窗口"
+    }
+  ],
+  "meta": {
+    "paper_title": "七上人教版课时A计划 Starter Unit 3 课时3",
+    "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+    "source_type": "同步练习"
+  },
+  "confirmed_sha256": "23b087b7f4b105db266ab1cce5cfe94e3ec0c5fb348c7c76e4348fddaa9994c4",
+  "visual_evidence": {
+    "note": "图片语义候选证据，仅供核对；不影响结构放行",
+    "by_unit": {},
+    "unreferenced_images": [
+      "image158.jpeg",
+      "image159.jpeg"
+    ]
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "version": "lesson-bands-v1",
+  "source_sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+  "text_sha256": "ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+  "input_images": {
+    "image1.jpeg": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691",
+    "image4.jpeg": "3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c"
+  },
+  "retry_after": 0,
+  "bands": [
+    {
+      "label": "基础巩固",
+      "marker": "A",
+      "start_line": 5,
+      "image_name": "image1.jpeg",
+      "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691",
+      "evidence": {
+        "method": "harness_visual",
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "visible_text": "A 基础巩固"
+      },
+      "end_line": 47,
+      "band_id": "band-0eb1cdf95ba5c0af"
+    },
+    {
+      "label": "能力提升",
+      "marker": "B",
+      "start_line": 48,
+      "image_name": "image4.jpeg",
+      "image_sha256": "3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c",
+      "evidence": {
+        "method": "harness_visual",
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "visible_text": "B 能力提升"
+      },
+      "end_line": 89,
+      "band_id": "band-a67b66f39cc5e198"
+    }
+  ],
+  "issues": [],
+  "status": "verified",
+  "provider_route": {
+    "provider": "opencode-go",
+    "model": "deepseek-v4.1-flash",
+    "profile": "wf-deepseek-fast"
+  },
+  "model_calls": 1,
+  "unique_images": 2,
+  "elapsed_seconds": 6.078
+}

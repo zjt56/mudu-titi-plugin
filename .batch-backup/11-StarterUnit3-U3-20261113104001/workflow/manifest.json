@@ -1,0 +1,634 @@
+{
+  "workflow_id": "11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect",
+  "manifest_version": "1.0",
+  "created_at": "2026-11-13T09:06:59+08:00",
+  "updated_at": "2026-11-13T10:11:51+08:00",
+  "status": "failed",
+  "batch_dir": "/Users/zjt/Desktop/上传插件版/workflows/11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect",
+  "meta": {
+    "year": null,
+    "region": "安徽",
+    "subject": "english",
+    "grade": "七年级",
+    "book": "七上",
+    "textbook_version": "人教版",
+    "series": "课时A计划",
+    "source_type": "同步练习",
+    "unit": "Starter Unit 3",
+    "lesson": "课时3",
+    "section": "Section B",
+    "source_scope": "lesson",
+    "paper_title": "七上人教版课时A计划 Starter Unit 3 课时3",
+    "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+    "source_evidence": {
+      "grade": {
+        "origin": "filename",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+      },
+      "book": {
+        "origin": "filename",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+      },
+      "textbook_version": {
+        "origin": "filename",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+      },
+      "series": {
+        "origin": "filename",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+      },
+      "source_type": {
+        "origin": "filename",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+      },
+      "unit": {
+        "origin": "body",
+        "text": "**Starter Unit 3　Welcome!**"
+      },
+      "lesson": {
+        "origin": "body",
+        "text": "**第三课时**　Section** **B** **(1a-1e)"
+      },
+      "section": {
+        "origin": "body",
+        "text": "**第三课时**　Section** **B** **(1a-1e)"
+      },
+      "source_scope": {
+        "origin": "body",
+        "text": "**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)"
+      },
+      "paper_title": {
+        "origin": "filename/body",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)"
+      },
+      "source": {
+        "origin": "filename/body",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)"
+      }
+    }
+  },
+  "inputs": {
+    "source": {
+      "path": "/Users/zjt/Desktop/上传插件版/workflows/11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect/attachments/source.docx",
+      "sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+      "required": true,
+      "exists": true
+    },
+    "docx": {
+      "path": "/Users/zjt/Desktop/上传插件版/workflows/11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect/attachments/source.docx",
+      "sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+      "required": false,
+      "exists": true
+    }
+  },
+  "rules": {
+    "skill_version": "unknown",
+    "constraints": "references/constraints.md"
+  },
+  "stages": {
+    "extract": {
+      "status": "completed",
+      "started_at": "2026-11-13T09:37:38+08:00",
+      "finished_at": "2026-11-13T09:38:13+08:00",
+      "input_hashes": {
+        "input:source": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "input:answers": "missing"
+      },
+      "output_hashes": {
+        "01_source/正文.txt": "ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+        "01_source/structure.json": "5c31b76408e5332f38870df468353097d31c6396a7cc1c3c92875d846096e5bf",
+        "01_source/extraction.json": "65785a2f10bfcbd4625b6ebb2123256e568631f8cb4669f65a9da0e10c1857db",
+        "01_source/metadata.json": "a0aff228e924637de8603caa5c1a0abe207913dac44285329cdf588bc22693ae",
+        "07_review/extraction-report.json": "d75739edb392d46f239e49322ec77aad5fd6e780510fa116c937dc3599caf6fd"
+      },
+      "exit_code": 0,
+      "log": "workflow/logs/extract.log",
+      "notes": "",
+      "kind": "command",
+      "history": [
+        {
+          "from": "pending",
+          "to": "running",
+          "at": "2026-11-13T09:37:38+08:00"
+        },
+        {
+          "from": "running",
+          "to": "completed",
+          "at": "2026-11-13T09:38:13+08:00"
+        }
+      ],
+      "semantic_version": 1,
+      "semantic_inputs": {
+        "input:source": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "input:answers": "missing"
+      },
+      "semantic_outputs": {
+        "01_source/正文.txt": "3d5dd3e7a59174fd5ada30467ff664c4ce2ac68f2c410856f6232005f362f962",
+        "01_source/structure.json": "e13378ed5f3acaa822e8d1a9a3214bc490e03d4d204d83c32fa48e0a05d101b3",
+        "01_source/extraction.json": "d0dd911a17cc23f5811339c8111956748c844cd07e0349bef52a8fba8768c491",
+        "01_source/metadata.json": "69cd9a22b449c5b76e784cce3a2d3baef9946d3bee96c97f4308a86560ed4121",
+        "07_review/extraction-report.json": "36f4f5f81deb059f6339e1296bb1c25a9f1ae2e533c1472974a5b2b17c5391f2"
+      }
+    },
+    "structure_gate": {
+      "status": "completed",
+      "started_at": null,
+      "finished_at": "2026-11-13T09:41:04+08:00",
+      "input_hashes": {
+        "direct:01_source/pdf-ocr.json": "json:ac3b9f3f5eeff1602c5be9d1dd1929870cb1d014c04d70a004baba4c2b90fd47",
+        "direct:01_source/lesson-bands.json": "a3483eb42f74e877df42477eb3b86f27feb1636f8ec03ebec7b255d0c6ca7f16",
+        "artifact:01_source/正文.txt": "raw:ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+        "artifact:01_source/structure.json": "json:aad1a9ed2390b1d52c98b8ce2d54b666b5acf9605980e3c97143be8f3a9a669a",
+        "artifact:01_source/extraction.json": "json:feb4bd26127d687465d6b2ed7baf33a6f73bdce3fab2df7621b329c5fe6914a7",
+        "artifact:01_source/metadata.json": "json:3e54e21b60b8025b5df3f3a7aa265b3dafafca7af73e8c6122f8187cbad189e5",
+        "artifact:07_review/extraction-report.json": "json:780ae2bb31af9165aca3ad586eb1f252dc3bfcc640229ffc81264a8d8da60351"
+      },
+      "output_hashes": {
+        "01_source/structure.confirmed.json": "23b087b7f4b105db266ab1cce5cfe94e3ec0c5fb348c7c76e4348fddaa9994c4",
+        "07_review/structure-gate.json": "118dfea6c4ccc5e3e2e5533d6d962b43b8cbaca6cb08572fd33b348866b80e38"
+      },
+      "exit_code": 0,
+      "log": null,
+      "notes": "自动确认：19 单元（独立16/组合3）",
+      "kind": "gate",
+      "history": [
+        {
+          "from": "pending",
+          "to": "completed",
+          "at": "2026-11-13T09:41:04+08:00"
+        }
+      ],
+      "semantic_version": 1,
+      "semantic_inputs": {
+        "direct:01_source/pdf-ocr.json": "json:ac3b9f3f5eeff1602c5be9d1dd1929870cb1d014c04d70a004baba4c2b90fd47",
+        "direct:01_source/lesson-bands.json": "a3483eb42f74e877df42477eb3b86f27feb1636f8ec03ebec7b255d0c6ca7f16",
+        "artifact:01_source/正文.txt": "raw:ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+        "artifact:01_source/structure.json": "json:aad1a9ed2390b1d52c98b8ce2d54b666b5acf9605980e3c97143be8f3a9a669a",
+        "artifact:01_source/extraction.json": "json:feb4bd26127d687465d6b2ed7baf33a6f73bdce3fab2df7621b329c5fe6914a7",
+        "artifact:01_source/metadata.json": "json:3e54e21b60b8025b5df3f3a7aa265b3dafafca7af73e8c6122f8187cbad189e5",
+        "artifact:07_review/extraction-report.json": "json:780ae2bb31af9165aca3ad586eb1f252dc3bfcc640229ffc81264a8d8da60351"
+      },
+      "semantic_outputs": {
+        "01_source/structure.confirmed.json": "58ce64fb25fff0e1f4ffa1f650edc6b6a5448d11f699f2b632ba996c4514a593",
+        "07_review/structure-gate.json": "7b06de7f305546fbe2ec048352e83530a1ade0935c17c7b95ec12887161d711e"
+      }
+    },
+    "preassemble": {
+      "status": "completed",
+      "started_at": "2026-11-13T09:41:04+08:00",
+      "finished_at": "2026-11-13T09:42:48+08:00",
+      "input_hashes": {
+        "artifact:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+        "artifact:07_review/structure-gate.json": "json:7aab66b42531207c55e6db91cc11e5257198a58dd22981fc23a4f7a3cea3483a"
+      },
+      "output_hashes": {
+        "06_batch/batch.base.json": "ef0ec3c238e4402987e859b43f886d8bc8e563c4a1468de8c0bf97ef11816e34",
+        "03_types/types.json": "03c83b6ad419c5ccb135691a01112abb3f3da2398a44488eb5ea6f806fccbb8e"
+      },
+      "exit_code": 0,
+      "log": "workflow/logs/preassemble.log",
+      "notes": "",
+      "kind": "agent",
+      "history": [
+        {
+          "from": "pending",
+          "to": "running",
+          "at": "2026-11-13T09:41:04+08:00"
+        },
+        {
+          "from": "running",
+          "to": "completed",
+          "at": "2026-11-13T09:42:48+08:00"
+        }
+      ],
+      "semantic_version": 1,
+      "semantic_inputs": {
+        "artifact:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+        "artifact:07_review/structure-gate.json": "json:7aab66b42531207c55e6db91cc11e5257198a58dd22981fc23a4f7a3cea3483a"
+      },
+      "semantic_outputs": {
+        "06_batch/batch.base.json": "fa9f1a03ffd5f2320cc9ce4f09388c631868d9befe550495e34d0c2a9bb4da64",
+        "03_types/types.json": "02b57332580aa667debbcacf5190af0e5dfc2cd17655e76bd17d457e38d8f0c4"
+      }
+    },
+    "types": {
+      "status": "completed",
+      "started_at": "2026-11-13T09:42:48+08:00",
+      "finished_at": "2026-11-13T09:42:48+08:00",
+      "input_hashes": {
+        "direct:01_source/pdf-ocr.json": "json:ac3b9f3f5eeff1602c5be9d1dd1929870cb1d014c04d70a004baba4c2b90fd47",
+        "direct:01_source/lesson-bands.json": "a3483eb42f74e877df42477eb3b86f27feb1636f8ec03ebec7b255d0c6ca7f16",
+        "material:roles": "json:f3631f47832d8c72c3128157f3b7794bc760d674e84fb9a2d3f310d4b43e66e9",
+        "artifact:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+        "artifact:07_review/structure-gate.json": "json:7aab66b42531207c55e6db91cc11e5257198a58dd22981fc23a4f7a3cea3483a",
+        "artifact:06_batch/batch.base.json": "json:7b44d345b7f0834271e14913eb052189623cb6208624398705ddf80a8fe85eb3",
+        "artifact:03_types/types.json": "json:a0bb4d7972d62fe191996985cdb9de05d0c84ee775f8914d77320efc27750cc6",
+        "source:01_source/正文.txt": "raw:ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+        "source:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+        "source_input:docx": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "source_input:source": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "source:01_source/media/image1.jpeg": "raw:49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691",
+        "source:01_source/media/image10.jpeg": "raw:d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+        "source:01_source/media/image10.jpeg.bak": "raw:d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+        "source:01_source/media/image158.jpeg": "raw:b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+        "source:01_source/media/image158.jpeg.bak": "raw:b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+        "source:01_source/media/image159.jpeg": "raw:66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+        "source:01_source/media/image159.jpeg.bak": "raw:66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+        "source:01_source/media/image4.jpeg": "raw:3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c",
+        "source:01_source/media/image42.jpeg": "raw:922af1cb4f3d3efa19584b086d425f51a17d45341132e59e83f403d747edce1d",
+        "source:01_source/media/image43.jpeg": "raw:d4c2e221613c5a742180d51cf48b7d0bb466e089b3d104c15d8d1ff10255bef7",
+        "source:01_source/media/image44.jpeg": "raw:a35b921a8c67f26257ab0616bdd5868d47768e4d2f8be3d52fd116220e919195",
+        "source:01_source/media/image45.jpeg": "raw:b298998a35208340f83906b279107f7ddf9332512f9e32de7794ef00d57ac6f0",
+        "source:01_source/media/image46.jpeg": "raw:99c9c387d9cd8aa72bc68bfebe30741bcc7089f97f5d7390608b29af6f97c10d"
+      },
+      "output_hashes": {
+        "03_types/types.json": "03c83b6ad419c5ccb135691a01112abb3f3da2398a44488eb5ea6f806fccbb8e"
+      },
+      "exit_code": 0,
+      "log": "workflow/logs/types.log",
+      "notes": "",
+      "kind": "command",
+      "history": [
+        {
+          "from": "pending",
+          "to": "running",
+          "at": "2026-11-13T09:42:48+08:00"
+        },
+        {
+          "from": "running",
+          "to": "completed",
+          "at": "2026-11-13T09:42:48+08:00"
+        }
+      ],
+      "semantic_version": 1,
+      "semantic_inputs": {
+        "direct:01_source/pdf-ocr.json": "json:ac3b9f3f5eeff1602c5be9d1dd1929870cb1d014c04d70a004baba4c2b90fd47",
+        "direct:01_source/lesson-bands.json": "a3483eb42f74e877df42477eb3b86f27feb1636f8ec03ebec7b255d0c6ca7f16",
+        "material:roles": "json:f3631f47832d8c72c3128157f3b7794bc760d674e84fb9a2d3f310d4b43e66e9",
+        "artifact:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+        "artifact:07_review/structure-gate.json": "json:7aab66b42531207c55e6db91cc11e5257198a58dd22981fc23a4f7a3cea3483a",
+        "artifact:06_batch/batch.base.json": "json:7b44d345b7f0834271e14913eb052189623cb6208624398705ddf80a8fe85eb3",
+        "artifact:03_types/types.json": "json:a0bb4d7972d62fe191996985cdb9de05d0c84ee775f8914d77320efc27750cc6",
+        "source:01_source/正文.txt": "raw:ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+        "source:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+        "source_input:docx": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "source_input:source": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "source:01_source/media/image1.jpeg": "raw:49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691",
+        "source:01_source/media/image10.jpeg": "raw:d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+        "source:01_source/media/image10.jpeg.bak": "raw:d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+        "source:01_source/media/image158.jpeg": "raw:b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+        "source:01_source/media/image158.jpeg.bak": "raw:b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+        "source:01_source/media/image159.jpeg": "raw:66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+        "source:01_source/media/image159.jpeg.bak": "raw:66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+        "source:01_source/media/image4.jpeg": "raw:3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c",
+        "source:01_source/media/image42.jpeg": "raw:922af1cb4f3d3efa19584b086d425f51a17d45341132e59e83f403d747edce1d",
+        "source:01_source/media/image43.jpeg": "raw:d4c2e221613c5a742180d51cf48b7d0bb466e089b3d104c15d8d1ff10255bef7",
+        "source:01_source/media/image44.jpeg": "raw:a35b921a8c67f26257ab0616bdd5868d47768e4d2f8be3d52fd116220e919195",
+        "source:01_source/media/image45.jpeg": "raw:b298998a35208340f83906b279107f7ddf9332512f9e32de7794ef00d57ac6f0",
+        "source:01_source/media/image46.jpeg": "raw:99c9c387d9cd8aa72bc68bfebe30741bcc7089f97f5d7390608b29af6f97c10d"
+      },
+      "semantic_outputs": {
+        "03_types/types.json": "02b57332580aa667debbcacf5190af0e5dfc2cd17655e76bd17d457e38d8f0c4"
+      }
+    },
+    "answers": {
+      "status": "failed",
+      "started_at": "2026-11-13T09:56:44+08:00",
+      "finished_at": "2026-11-13T10:03:23+08:00",
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": 2,
+      "log": "workflow/logs/answers.log",
+      "notes": "{\"error\": \"sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用\", \"code\": \"validation_no_progress\", \"artifacts\": {\"task\": \"/Users/zjt/Desktop/上传插件版/.content-agent/tasks/1e0fb086680e48b8abf135f89afe7d1d/task.json\", \"attempt_dir\": \"/Users/zjt/Deskto",
+      "kind": "agent",
+      "history": [
+        {
+          "from": "pending",
+          "to": "running",
+          "at": "2026-11-13T09:42:48+08:00"
+        },
+        {
+          "from": "running",
+          "to": "failed",
+          "at": "2026-11-13T09:52:49+08:00"
+        },
+        {
+          "from": "failed",
+          "to": "invalidated",
+          "at": "2026-11-13T09:56:44+08:00"
+        },
+        {
+          "from": "invalidated",
+          "to": "pending",
+          "at": "2026-11-13T09:56:44+08:00"
+        },
+        {
+          "from": "pending",
+          "to": "running",
+          "at": "2026-11-13T09:56:44+08:00"
+        },
+        {
+          "from": "running",
+          "to": "failed",
+          "at": "2026-11-13T10:03:23+08:00"
+        }
+      ],
+      "rebuild_required": true,
+      "invalidation": {
+        "scope": "stage",
+        "reason": "AI自动修复第1次：19 个受影响的 unit（sec-928d0636b3171ee6-u7…u11、sec-8d67361b5032653a-u13…u23、sec-4a0104c03b02ba2c-u28…u43、sec-03770200d1ca1625-u47、sec-1ecc72ba50a90dfa-u50、sec-59ddc72436ce2ed0-u75）的报错都是“Content task time budget exceeded”，属于代理执行超时造成的暂时失败，不是 source_binding 或 validator_fault 这类确定性数据错误；recent_attempts 只有一次 diagnosing，没有在同一输入上反复出现同一错误；source 与 docx 登记项和实际文件都存在，input_inventory 中已确认。因此，只对上述已定位的受影响 unit 局部重跑 answers，范围限定在该清单内的受影响 unit，保留已经成功的单元，不整卷重跑。",
+        "at": "2026-11-13T09:56:44+08:00"
+      }
+    },
+    "audio": {
+      "status": "skipped",
+      "started_at": null,
+      "finished_at": "2026-11-13T09:06:59+08:00",
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "缺少可选输入：audio",
+      "kind": "agent",
+      "history": [
+        {
+          "from": "pending",
+          "to": "skipped",
+          "at": "2026-11-13T09:06:59+08:00"
+        }
+      ]
+    },
+    "explanations": {
+      "status": "skipped",
+      "started_at": null,
+      "finished_at": "2026-11-13T09:52:49+08:00",
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "未提供原解析/文章大意；按空值继续，不调用解析提取",
+      "kind": "agent",
+      "history": [
+        {
+          "from": "pending",
+          "to": "skipped",
+          "at": "2026-11-13T09:52:49+08:00"
+        }
+      ]
+    },
+    "knowledge": {
+      "status": "completed",
+      "started_at": "2026-11-13T09:42:48+08:00",
+      "finished_at": "2026-11-13T09:45:54+08:00",
+      "input_hashes": {
+        "direct:01_source/pdf-ocr.json": "json:ac3b9f3f5eeff1602c5be9d1dd1929870cb1d014c04d70a004baba4c2b90fd47",
+        "direct:01_source/lesson-bands.json": "a3483eb42f74e877df42477eb3b86f27feb1636f8ec03ebec7b255d0c6ca7f16",
+        "material:roles": "json:f3631f47832d8c72c3128157f3b7794bc760d674e84fb9a2d3f310d4b43e66e9",
+        "artifact:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+        "artifact:07_review/structure-gate.json": "json:7aab66b42531207c55e6db91cc11e5257198a58dd22981fc23a4f7a3cea3483a",
+        "artifact:06_batch/batch.base.json": "json:7b44d345b7f0834271e14913eb052189623cb6208624398705ddf80a8fe85eb3",
+        "artifact:03_types/types.json": "json:a0bb4d7972d62fe191996985cdb9de05d0c84ee775f8914d77320efc27750cc6",
+        "source:01_source/正文.txt": "raw:ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+        "source:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+        "source_input:docx": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "source_input:source": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "source:01_source/media/image1.jpeg": "raw:49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691",
+        "source:01_source/media/image10.jpeg": "raw:d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+        "source:01_source/media/image10.jpeg.bak": "raw:d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+        "source:01_source/media/image158.jpeg": "raw:b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+        "source:01_source/media/image158.jpeg.bak": "raw:b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+        "source:01_source/media/image159.jpeg": "raw:66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+        "source:01_source/media/image159.jpeg.bak": "raw:66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+        "source:01_source/media/image4.jpeg": "raw:3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c",
+        "source:01_source/media/image42.jpeg": "raw:922af1cb4f3d3efa19584b086d425f51a17d45341132e59e83f403d747edce1d",
+        "source:01_source/media/image43.jpeg": "raw:d4c2e221613c5a742180d51cf48b7d0bb466e089b3d104c15d8d1ff10255bef7",
+        "source:01_source/media/image44.jpeg": "raw:a35b921a8c67f26257ab0616bdd5868d47768e4d2f8be3d52fd116220e919195",
+        "source:01_source/media/image45.jpeg": "raw:b298998a35208340f83906b279107f7ddf9332512f9e32de7794ef00d57ac6f0",
+        "source:01_source/media/image46.jpeg": "raw:99c9c387d9cd8aa72bc68bfebe30741bcc7089f97f5d7390608b29af6f97c10d"
+      },
+      "output_hashes": {
+        "04_knowledge/knowledge.json": "97cbb88574e97af8052632c72e6a8bb8cba2c65ab63beb27c792705accf4d91d"
+      },
+      "exit_code": null,
+      "log": null,
+      "notes": "通用 Agent 任务 d71cf82b-a0d1-4ad6-b810-e2e049380364: 教材匹配暂停，按用户要求仅输出知识点叶子路径与证据，不输出 textbook。; 整组题型（完形填空 sec-1ecc72ba50a90dfa-u50、短文填空 sec-03770200d1ca1625-u47、阅读理解 sec-59ddc72436ce2ed0-u75）只在组级打标，子题 knowledge=[]。; knowledgeIds 未填写：随附 references/knowledge-catalog.json 只提供路径列表，未提供可核对的目录 ID。; 知识点产物已删除代理重复回显的上游字段（自动修复）：articleSummary, explanation",
+      "kind": "agent",
+      "history": [
+        {
+          "from": "pending",
+          "to": "running",
+          "at": "2026-11-13T09:42:48+08:00"
+        },
+        {
+          "from": "running",
+          "to": "completed",
+          "at": "2026-11-13T09:45:54+08:00"
+        }
+      ],
+      "semantic_version": 1,
+      "semantic_inputs": {
+        "direct:01_source/pdf-ocr.json": "json:ac3b9f3f5eeff1602c5be9d1dd1929870cb1d014c04d70a004baba4c2b90fd47",
+        "direct:01_source/lesson-bands.json": "a3483eb42f74e877df42477eb3b86f27feb1636f8ec03ebec7b255d0c6ca7f16",
+        "material:roles": "json:f3631f47832d8c72c3128157f3b7794bc760d674e84fb9a2d3f310d4b43e66e9",
+        "artifact:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+        "artifact:07_review/structure-gate.json": "json:7aab66b42531207c55e6db91cc11e5257198a58dd22981fc23a4f7a3cea3483a",
+        "artifact:06_batch/batch.base.json": "json:7b44d345b7f0834271e14913eb052189623cb6208624398705ddf80a8fe85eb3",
+        "artifact:03_types/types.json": "json:a0bb4d7972d62fe191996985cdb9de05d0c84ee775f8914d77320efc27750cc6",
+        "source:01_source/正文.txt": "raw:ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+        "source:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+        "source_input:docx": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "source_input:source": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "source:01_source/media/image1.jpeg": "raw:49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691",
+        "source:01_source/media/image10.jpeg": "raw:d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+        "source:01_source/media/image10.jpeg.bak": "raw:d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+        "source:01_source/media/image158.jpeg": "raw:b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+        "source:01_source/media/image158.jpeg.bak": "raw:b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+        "source:01_source/media/image159.jpeg": "raw:66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+        "source:01_source/media/image159.jpeg.bak": "raw:66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+        "source:01_source/media/image4.jpeg": "raw:3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c",
+        "source:01_source/media/image42.jpeg": "raw:922af1cb4f3d3efa19584b086d425f51a17d45341132e59e83f403d747edce1d",
+        "source:01_source/media/image43.jpeg": "raw:d4c2e221613c5a742180d51cf48b7d0bb466e089b3d104c15d8d1ff10255bef7",
+        "source:01_source/media/image44.jpeg": "raw:a35b921a8c67f26257ab0616bdd5868d47768e4d2f8be3d52fd116220e919195",
+        "source:01_source/media/image45.jpeg": "raw:b298998a35208340f83906b279107f7ddf9332512f9e32de7794ef00d57ac6f0",
+        "source:01_source/media/image46.jpeg": "raw:99c9c387d9cd8aa72bc68bfebe30741bcc7089f97f5d7390608b29af6f97c10d"
+      },
+      "semantic_outputs": {
+        "04_knowledge/knowledge.json": "e2e04143a1d747c6cac29261f86a498d41a1dbebd4153893c5057066ee0ffe15"
+      }
+    },
+    "assemble": {
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "",
+      "kind": "agent"
+    },
+    "meta": {
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "",
+      "kind": "command"
+    },
+    "underlines": {
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "",
+      "kind": "command"
+    },
+    "validate": {
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "",
+      "kind": "gate"
+    },
+    "review": {
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "",
+      "kind": "agent"
+    },
+    "review_gate": {
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "",
+      "kind": "gate"
+    },
+    "format_gate": {
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "",
+      "kind": "command"
+    },
+    "upload_gate": {
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "",
+      "kind": "human"
+    },
+    "upload": {
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "",
+      "kind": "command"
+    },
+    "publish_gate": {
+      "status": "pending",
+      "started_at": null,
+      "finished_at": null,
+      "input_hashes": {},
+      "output_hashes": {},
+      "exit_code": null,
+      "log": null,
+      "notes": "",
+      "kind": "human"
+    }
+  },
+  "human_decisions": [],
+  "side_effects": [],
+  "submitted_meta": {
+    "year": null,
+    "region": "安徽",
+    "subject": "english",
+    "grade": "七年级",
+    "book": "七上",
+    "textbook_version": "人教版",
+    "series": "课时A计划",
+    "source_type": "同步练习",
+    "unit": "Starter Unit 3",
+    "lesson": "课时3",
+    "section": "Section B",
+    "source_scope": "lesson",
+    "paper_title": "七上人教版课时A计划 Starter Unit 3 课时3",
+    "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+    "source_evidence": {
+      "grade": {
+        "origin": "filename",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+      },
+      "book": {
+        "origin": "filename",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+      },
+      "textbook_version": {
+        "origin": "filename",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+      },
+      "series": {
+        "origin": "filename",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+      },
+      "source_type": {
+        "origin": "filename",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+      },
+      "unit": {
+        "origin": "body",
+        "text": "**Starter Unit 3　Welcome!**"
+      },
+      "lesson": {
+        "origin": "body",
+        "text": "**第三课时**　Section** **B** **(1a-1e)"
+      },
+      "section": {
+        "origin": "body",
+        "text": "**第三课时**　Section** **B** **(1a-1e)"
+      },
+      "source_scope": {
+        "origin": "body",
+        "text": "**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)"
+      },
+      "paper_title": {
+        "origin": "filename/body",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)"
+      },
+      "source": {
+        "origin": "filename/body",
+        "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)"
+      }
+    }
+  }
+}

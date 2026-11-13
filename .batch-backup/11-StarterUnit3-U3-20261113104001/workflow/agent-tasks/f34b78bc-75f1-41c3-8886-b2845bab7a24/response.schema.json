@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "protocol": {
+      "const": "upload-workflow.agent/v1"
+    },
+    "result": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "additionalProperties": false,
+          "properties": {
+            "01_source_ans/answers.json": {
+              "description": "Use this stage's payload shape and full coverage rules in task.json prompt; import performs semantic validation.",
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "findings": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "notes": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "needs_review"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "artifacts",
+        "notes",
+        "findings"
+      ],
+      "type": "object"
+    },
+    "task_id": {
+      "const": "f34b78bc-75f1-41c3-8886-b2845bab7a24"
+    }
+  },
+  "required": [
+    "protocol",
+    "task_id",
+    "result"
+  ],
+  "type": "object"
+}

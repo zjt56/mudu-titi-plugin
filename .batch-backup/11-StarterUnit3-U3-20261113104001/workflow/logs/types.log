@@ -1,0 +1,6 @@
+$ /Users/zjt/.local/bin/python3.12 -m workflow.preassembly check --batch-dir /Users/zjt/Desktop/上传插件版/workflows/11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect
+
+{"passed": true, "errors": []}
+
+
+[stderr]

@@ -1,0 +1,6 @@
+{
+  "action": "operations_pending",
+  "status": "failed",
+  "reason": "异常已交 AI 运维分析，等待接手或查看已记录的修复建议",
+  "cooldown_seconds": 0.0
+}

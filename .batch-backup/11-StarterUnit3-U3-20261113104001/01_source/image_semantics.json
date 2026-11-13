@@ -1,0 +1,171 @@
+{
+  "version": "visual-review-routed-v1",
+  "provider": "opencode-go",
+  "model": "deepseek-v4.1-flash",
+  "route": {
+    "provider": "opencode-go",
+    "model": "deepseek-v4.1-flash",
+    "profile": "wf-deepseek-fast"
+  },
+  "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0",
+  "image_count": 10,
+  "items": [
+    {
+      "path": "01_source/media/image1.jpeg",
+      "kind": "band",
+      "title": "基础巩固",
+      "contains_text": true,
+      "readable_text": "A 基础巩固",
+      "summary": "原件栏目横幅",
+      "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691",
+      "route": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "profile": "wf-deepseek-fast"
+      },
+      "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0",
+      "evidence_from": "lesson_bands"
+    },
+    {
+      "path": "01_source/media/image10.jpeg",
+      "kind": "other",
+      "title": "白底下方带一条粗黑横线",
+      "contains_text": false,
+      "readable_text": "",
+      "summary": "白底下方有一条粗黑横线，无文字。",
+      "image_sha256": "d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+      "route": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "profile": "wf-deepseek-fast"
+      },
+      "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0"
+    },
+    {
+      "path": "01_source/media/image158.jpeg",
+      "kind": "other",
+      "title": "细长黑色竖向痕迹",
+      "contains_text": false,
+      "readable_text": "",
+      "summary": "细长黑色竖向痕迹，无文字。",
+      "image_sha256": "b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+      "route": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "profile": "wf-deepseek-fast"
+      },
+      "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0"
+    },
+    {
+      "path": "01_source/media/image159.jpeg",
+      "kind": "other",
+      "title": "细长黑色竖向痕迹",
+      "contains_text": false,
+      "readable_text": "",
+      "summary": "细长黑色竖向痕迹，无文字。",
+      "image_sha256": "66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+      "route": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "profile": "wf-deepseek-fast"
+      },
+      "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0"
+    },
+    {
+      "path": "01_source/media/image4.jpeg",
+      "kind": "band",
+      "title": "能力提升",
+      "contains_text": true,
+      "readable_text": "B 能力提升",
+      "summary": "原件栏目横幅",
+      "image_sha256": "3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c",
+      "route": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "profile": "wf-deepseek-fast"
+      },
+      "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0",
+      "evidence_from": "lesson_bands"
+    },
+    {
+      "path": "01_source/media/image42.jpeg",
+      "kind": "illustration",
+      "title": "小狗站在狗屋屋顶上的插图",
+      "contains_text": false,
+      "readable_text": "",
+      "summary": "卡通小狗站在狗屋屋顶上。",
+      "image_sha256": "922af1cb4f3d3efa19584b086d425f51a17d45341132e59e83f403d747edce1d",
+      "route": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "profile": "wf-deepseek-fast"
+      },
+      "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0"
+    },
+    {
+      "path": "01_source/media/image43.jpeg",
+      "kind": "illustration",
+      "title": "小狗在狗屋内的插图",
+      "contains_text": false,
+      "readable_text": "",
+      "summary": "卡通小狗趴卧在狗屋门口内。",
+      "image_sha256": "d4c2e221613c5a742180d51cf48b7d0bb466e089b3d104c15d8d1ff10255bef7",
+      "route": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "profile": "wf-deepseek-fast"
+      },
+      "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0"
+    },
+    {
+      "path": "01_source/media/image44.jpeg",
+      "kind": "illustration",
+      "title": "小狗站在狗屋旁的插图",
+      "contains_text": false,
+      "readable_text": "",
+      "summary": "卡通小狗站在狗屋右侧。",
+      "image_sha256": "a35b921a8c67f26257ab0616bdd5868d47768e4d2f8be3d52fd116220e919195",
+      "route": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "profile": "wf-deepseek-fast"
+      },
+      "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0"
+    },
+    {
+      "path": "01_source/media/image45.jpeg",
+      "kind": "illustration",
+      "title": "小狗坐在狗屋前的插图",
+      "contains_text": false,
+      "readable_text": "",
+      "summary": "卡通小狗坐在狗屋前方。",
+      "image_sha256": "b298998a35208340f83906b279107f7ddf9332512f9e32de7794ef00d57ac6f0",
+      "route": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "profile": "wf-deepseek-fast"
+      },
+      "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0"
+    },
+    {
+      "path": "01_source/media/image46.jpeg",
+      "kind": "band",
+      "title": "时文阅读栏目横幅",
+      "contains_text": true,
+      "readable_text": "时文阅读",
+      "summary": "灰底白字“时文阅读”栏目标签。",
+      "image_sha256": "99c9c387d9cd8aa72bc68bfebe30741bcc7089f97f5d7390608b29af6f97c10d",
+      "route": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "profile": "wf-deepseek-fast"
+      },
+      "prompt_sha256": "6bd5cff6076eca95bc5d936609dba587a5762f2b3e28abfa23bd1cb3e27f22b0"
+    }
+  ],
+  "skipped": [],
+  "unprocessed": [],
+  "status": "built",
+  "model_calls": 1,
+  "note": "视觉复核仅作原卷图片语义候选证据；正式题干/答案/解析仍以原卷原文为准，不据此放行闸门。"
+}

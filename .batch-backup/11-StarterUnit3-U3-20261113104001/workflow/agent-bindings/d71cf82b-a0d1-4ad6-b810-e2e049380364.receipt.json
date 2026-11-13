@@ -1,0 +1,18 @@
+{
+  "artifacts": [
+    "04_knowledge/knowledge.json"
+  ],
+  "completed": true,
+  "findings": [],
+  "notes": [
+    "教材匹配暂停，按用户要求仅输出知识点叶子路径与证据，不输出 textbook。",
+    "整组题型（完形填空 sec-1ecc72ba50a90dfa-u50、短文填空 sec-03770200d1ca1625-u47、阅读理解 sec-59ddc72436ce2ed0-u75）只在组级打标，子题 knowledge=[]。",
+    "knowledgeIds 未填写：随附 references/knowledge-catalog.json 只提供路径列表，未提供可核对的目录 ID。",
+    "知识点产物已删除代理重复回显的上游字段（自动修复）：articleSummary, explanation"
+  ],
+  "protocol": "upload-workflow.agent/v1",
+  "result_sha256": "a4c5bb81bc48f0e07ad39955e2c3fc7be6f63dc8378ca2424812c56cb9daae55",
+  "stage": "knowledge",
+  "status": "completed",
+  "task_id": "d71cf82b-a0d1-4ad6-b810-e2e049380364"
+}

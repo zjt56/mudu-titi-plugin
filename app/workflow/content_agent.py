@@ -329,6 +329,12 @@ def purge_batch(batch_dir, *, wait_seconds=20):
         purge_root = QUEUE_ROOT.parent / "purges"
         purge = next(((_read(path), path) for path in purge_root.glob("*.json")
                       if _read(path).get("batch_dir") == str(batch)), None)
+        # A failed receipt belongs to the previous explicit deletion attempt.
+        # Issue a fresh ticket on a later attempt so the host revalidates every
+        # session; never turn the old failure into a successful acknowledgement.
+        if purge is not None and purge[0].get("status") == "failed":
+            purge[1].unlink()
+            purge = None
         if sessions and purge is None:
             job = {"purge_id": uuid.uuid4().hex, "batch_dir": str(batch), "sessions": sessions,
                    "status": "pending", "created_at": time.time()}

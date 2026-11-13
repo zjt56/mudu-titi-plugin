@@ -1,0 +1,75 @@
+{
+  "fingerprints": [
+    {
+      "path": "01_source/material-roles.json",
+      "scope": "batch",
+      "sha256": "a747657101aa8e9768ca7bb44534d7dfdcf3ec62f5f5f8407d68bbb97dc9ba3a"
+    },
+    {
+      "path": "01_source/metadata.json",
+      "scope": "batch",
+      "sha256": "a0aff228e924637de8603caa5c1a0abe207913dac44285329cdf588bc22693ae"
+    },
+    {
+      "path": "01_source/structure.confirmed.json",
+      "scope": "batch",
+      "sha256": "23b087b7f4b105db266ab1cce5cfe94e3ec0c5fb348c7c76e4348fddaa9994c4"
+    },
+    {
+      "path": "01_source/正文.txt",
+      "scope": "batch",
+      "sha256": "ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271"
+    },
+    {
+      "path": "01_source/附录.txt",
+      "scope": "batch",
+      "sha256": "8f3ac3f42b7bc68805660e4bf66a1473ac5f70e9a123b7136be234550a2c1a4d"
+    },
+    {
+      "exists": false,
+      "path": "01_source_ans/正文.txt",
+      "scope": "batch"
+    },
+    {
+      "path": "06_batch/question-draft.json",
+      "scope": "batch",
+      "sha256": "378368787e67b4c25b173d4a30a5e6d58fe077769d5ff5f680bba2f65b2af3e5"
+    },
+    {
+      "exists": false,
+      "path": "workflow/repair-feedback/answers.json",
+      "scope": "batch"
+    },
+    {
+      "path": "docx",
+      "scope": "input",
+      "sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d"
+    },
+    {
+      "path": "source",
+      "scope": "input",
+      "sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d"
+    },
+    {
+      "path": "semantic",
+      "scope": "manifest",
+      "sha256": "095ebc0471f6738fb457a2a8ffc9c41e90c69da135911d8f5c78802c049dec4a"
+    },
+    {
+      "path": "references/filter-framework.json",
+      "scope": "repository",
+      "sha256": "f14d9bd374c442bfd4ba4ebe25d67949096fe560a0927c8847b5652548c2ec1f"
+    },
+    {
+      "path": "skills-reference/README.md",
+      "scope": "repository",
+      "sha256": "eb9fb76d40f2eb3b3ca8d29e34db4b86475379ba8b1feef0f221fe963b67c4eb"
+    }
+  ],
+  "max_input_chars": 9223372036854775807,
+  "protocol": "upload-workflow.agent/v1",
+  "stage": "answers",
+  "status": "pending",
+  "task_id": "f34b78bc-75f1-41c3-8886-b2845bab7a24",
+  "task_sha256": "e8dfad0d4a88fcb2c6f3094748d8677cf0c2619d2b5c9434497f3df46d55cce6"
+}

@@ -1,0 +1,19 @@
+{
+  "01_source/正文.txt": "ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+  "07_review/structure-gate.json": "118dfea6c4ccc5e3e2e5533d6d962b43b8cbaca6cb08572fd33b348866b80e38",
+  "01_source/metadata.json": "a0aff228e924637de8603caa5c1a0abe207913dac44285329cdf588bc22693ae",
+  "01_source/material-roles.json": "a747657101aa8e9768ca7bb44534d7dfdcf3ec62f5f5f8407d68bbb97dc9ba3a",
+  "01_source/structure.confirmed.json": "23b087b7f4b105db266ab1cce5cfe94e3ec0c5fb348c7c76e4348fddaa9994c4",
+  "workflow/repair-feedback/types.json": "missing",
+  "workflow/repair-feedback/preassemble.json": "missing",
+  "06_batch/question-draft.json": "378368787e67b4c25b173d4a30a5e6d58fe077769d5ff5f680bba2f65b2af3e5",
+  "/Users/zjt/Desktop/上传插件版/app/references/sync-practice-rules.json": "562857911d21402438f8355475953670a8527f331694c5dc19b2aac41f385b1c",
+  "/Users/zjt/Desktop/上传插件版/app/workflow/sync_practice.py": "54a06bc10713348c94cc2a807545b6abb954c62045d498122ef160ad861c1ba3",
+  "/Users/zjt/Desktop/上传插件版/app/skills-reference/README.md": "eb9fb76d40f2eb3b3ca8d29e34db4b86475379ba8b1feef0f221fe963b67c4eb",
+  "/Users/zjt/Desktop/上传插件版/app/skills-reference/type-taxonomy.md": "93c397597736b4dab08a8a3c920671617efb5ae6014c7b770139240abadd6840",
+  "/Users/zjt/Desktop/上传插件版/app/skills-reference/constraints.md": "4c01d3d27a7f90a605ce28ac866cc2be27f56b0590d2dc825fbdb523ebcddc03",
+  "/Users/zjt/Desktop/上传插件版/app/skills-reference/lessons-learned.md": "a54f8098b818b30156f1bd9e990ca9614a86f07e2e52ea47e40ef75e8d6085a9",
+  "/Users/zjt/Desktop/上传插件版/app/references/filter-framework.json": "f14d9bd374c442bfd4ba4ebe25d67949096fe560a0927c8847b5652548c2ec1f",
+  "06_batch/batch.base.json": "ef0ec3c238e4402987e859b43f886d8bc8e563c4a1468de8c0bf97ef11816e34",
+  "/Users/zjt/Desktop/上传插件版/workflows/11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect/attachments/source.docx": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d"
+}

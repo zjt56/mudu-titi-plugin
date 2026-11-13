@@ -1,0 +1,129 @@
+{
+  "fingerprints": [
+    {
+      "path": "01_source/material-roles.json",
+      "scope": "batch",
+      "sha256": "a747657101aa8e9768ca7bb44534d7dfdcf3ec62f5f5f8407d68bbb97dc9ba3a"
+    },
+    {
+      "path": "01_source/metadata.json",
+      "scope": "batch",
+      "sha256": "a0aff228e924637de8603caa5c1a0abe207913dac44285329cdf588bc22693ae"
+    },
+    {
+      "path": "01_source/structure.confirmed.json",
+      "scope": "batch",
+      "sha256": "23b087b7f4b105db266ab1cce5cfe94e3ec0c5fb348c7c76e4348fddaa9994c4"
+    },
+    {
+      "path": "01_source/structure.json",
+      "scope": "batch",
+      "sha256": "5c31b76408e5332f38870df468353097d31c6396a7cc1c3c92875d846096e5bf"
+    },
+    {
+      "path": "01_source/正文.txt",
+      "scope": "batch",
+      "sha256": "ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271"
+    },
+    {
+      "path": "03_types/types.json",
+      "scope": "batch",
+      "sha256": "03c83b6ad419c5ccb135691a01112abb3f3da2398a44488eb5ea6f806fccbb8e"
+    },
+    {
+      "path": "06_batch/question-draft.json",
+      "scope": "batch",
+      "sha256": "378368787e67b4c25b173d4a30a5e6d58fe077769d5ff5f680bba2f65b2af3e5"
+    },
+    {
+      "path": "07_review/structure-gate.json",
+      "scope": "batch",
+      "sha256": "118dfea6c4ccc5e3e2e5533d6d962b43b8cbaca6cb08572fd33b348866b80e38"
+    },
+    {
+      "exists": false,
+      "path": "workflow/repair-feedback/knowledge.json",
+      "scope": "batch"
+    },
+    {
+      "path": "docx",
+      "scope": "input",
+      "sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d"
+    },
+    {
+      "path": "source",
+      "scope": "input",
+      "sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d"
+    },
+    {
+      "path": "semantic",
+      "scope": "manifest",
+      "sha256": "095ebc0471f6738fb457a2a8ffc9c41e90c69da135911d8f5c78802c049dec4a"
+    },
+    {
+      "path": "docs/content-labeling.md",
+      "scope": "repository",
+      "sha256": "a651df135989a72b2c5d44dbd9d9b01ab3c79b58eb6e70c679283814032dee60"
+    },
+    {
+      "path": "docs/knowledge-tagging.md",
+      "scope": "repository",
+      "sha256": "a850788ec7cae9e12afdf343a3af9ae4da1da49212adde914da7ea856fd7ad54"
+    },
+    {
+      "path": "references/filter-framework.json",
+      "scope": "repository",
+      "sha256": "f14d9bd374c442bfd4ba4ebe25d67949096fe560a0927c8847b5652548c2ec1f"
+    },
+    {
+      "path": "references/knowledge-catalog.json",
+      "scope": "repository",
+      "sha256": "7f5f45a90f3f9b22f1486f94933bf6d0976ffb5baceb5650d9efdec8064a21eb"
+    },
+    {
+      "path": "references/type-knowledge-map.json",
+      "scope": "repository",
+      "sha256": "060eac02bd0a799ef519cd67979bcd81fdaae3060c2c4b4d60436069ffbfc5c1"
+    },
+    {
+      "path": "skills-reference/README.md",
+      "scope": "repository",
+      "sha256": "eb9fb76d40f2eb3b3ca8d29e34db4b86475379ba8b1feef0f221fe963b67c4eb"
+    },
+    {
+      "path": "skills-reference/knowledge-matching-rules.md",
+      "scope": "repository",
+      "sha256": "cc76916e739ba614441e930d89e525682934095d1e033cf05f5f1dde31ef31c0"
+    },
+    {
+      "path": "skills-reference/type-knowledge-map.md",
+      "scope": "repository",
+      "sha256": "329b04fdc4e9b5c087f34dcbfeeaa9af5e6f55902d7dd5ef6818b9d1c22d1a29"
+    }
+  ],
+  "max_input_chars": 900000,
+  "protocol": "upload-workflow.agent/v1",
+  "receipt": {
+    "artifacts": [
+      "04_knowledge/knowledge.json"
+    ],
+    "completed": true,
+    "findings": [],
+    "notes": [
+      "教材匹配暂停，按用户要求仅输出知识点叶子路径与证据，不输出 textbook。",
+      "整组题型（完形填空 sec-1ecc72ba50a90dfa-u50、短文填空 sec-03770200d1ca1625-u47、阅读理解 sec-59ddc72436ce2ed0-u75）只在组级打标，子题 knowledge=[]。",
+      "knowledgeIds 未填写：随附 references/knowledge-catalog.json 只提供路径列表，未提供可核对的目录 ID。",
+      "知识点产物已删除代理重复回显的上游字段（自动修复）：articleSummary, explanation"
+    ],
+    "protocol": "upload-workflow.agent/v1",
+    "result_sha256": "a4c5bb81bc48f0e07ad39955e2c3fc7be6f63dc8378ca2424812c56cb9daae55",
+    "stage": "knowledge",
+    "status": "completed",
+    "task_id": "d71cf82b-a0d1-4ad6-b810-e2e049380364"
+  },
+  "result_sha256": "a4c5bb81bc48f0e07ad39955e2c3fc7be6f63dc8378ca2424812c56cb9daae55",
+  "stage": "knowledge",
+  "status": "accepted",
+  "task_id": "d71cf82b-a0d1-4ad6-b810-e2e049380364",
+  "task_sha256": "0c4fb23bf87b6b81d96dcfa603bb2eaa7fcef444606e968e6132e50c7ce9ba78"
+}

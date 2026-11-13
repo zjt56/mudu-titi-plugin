@@ -1,0 +1,72 @@
+{
+  "active_signature": "answers:2521aa59f3bc5f25",
+  "attempts": {
+    "answers:2521aa59f3bc5f25": 1
+  },
+  "escalated": {},
+  "events": [
+    {
+      "at": "2026-11-13T09:56:30+08:00",
+      "attempt": 1,
+      "cycle": 0,
+      "detail": "sec-928d0636b3171ee6-u7：Content task time budget exceeded；sec-928d0636b3171ee6-u8：Content task time budget exceeded；sec-928d0636b3171ee6-u9：Content task time budget exceeded；sec-928d0636b3171ee6-u10：Content task time budget exceeded；sec-928d0636b3171ee6-u11：Content task time budget exceeded；sec-8d67361b5032653a-u13：Content task time budget exceeded；sec-8d67361b5032653a-u15：Content task time budget exceeded；sec-8d67361b5032653a-u17：Content task time budget exceeded；sec-8d67361b5032653a-u19：Content task time budget exceeded；sec-8d67361b5032653a-u21：Content task time budget exceeded；sec-8d67361b5032653a-u23：Content task time budget exceeded；sec-4a0104c03b02ba2c-u28：Content task time budget exceeded；sec-4a0104c03b02ba2c-u31：Content task time budget exceeded；sec-4a0104c03b02ba2c-u35：Content task time budget exceeded；sec-4a0104c03b02ba2c-u39：Content task time budget exceeded；sec-4a0104c03b02ba2c-u43：Content task time budget exceeded；sec-03770200d1ca1625-u47：Content task time budget exceeded；sec-1ecc72ba50a90dfa-u50：Content task time budget exceeded；sec-59ddc72436ce2ed0-u75：Content task time budget exceeded",
+      "feedback_path": "workflow/repair-feedback/answers.json",
+      "finished_at": "2026-11-13T09:56:44+08:00",
+      "origin_stage": "answers",
+      "outcome": "retry_scheduled",
+      "plan": {
+        "action": "retry_stage",
+        "reason": "19 个受影响的 unit（sec-928d0636b3171ee6-u7…u11、sec-8d67361b5032653a-u13…u23、sec-4a0104c03b02ba2c-u28…u43、sec-03770200d1ca1625-u47、sec-1ecc72ba50a90dfa-u50、sec-59ddc72436ce2ed0-u75）的报错都是“Content task time budget exceeded”，属于代理执行超时造成的暂时失败，不是 source_binding 或 validator_fault 这类确定性数据错误；recent_attempts 只有一次 diagnosing，没有在同一输入上反复出现同一错误；source 与 docx 登记项和实际文件都存在，input_inventory 中已确认。因此，只对上述已定位的受影响 unit 局部重跑 answers，范围限定在该清单内的受影响 unit，保留已经成功的单元，不整卷重跑。",
+        "stage": "answers"
+      },
+      "signature": "2521aa59f3bc5f25",
+      "stage": "answers",
+      "status": "requeued",
+      "target_stage": "answers",
+      "verification": {
+        "origin_before": {
+          "history_count": 2,
+          "started_at": "2026-11-13T09:42:48+08:00"
+        },
+        "target_before": {
+          "history_count": 2,
+          "started_at": "2026-11-13T09:42:48+08:00"
+        },
+        "version": 1
+      },
+      "verification_status": "pending",
+      "verified": false
+    }
+  ],
+  "last_inputs": {
+    "answers": {
+      "artifact:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+      "artifact:03_types/types.json": "json:a0bb4d7972d62fe191996985cdb9de05d0c84ee775f8914d77320efc27750cc6",
+      "artifact:06_batch/batch.base.json": "json:7b44d345b7f0834271e14913eb052189623cb6208624398705ddf80a8fe85eb3",
+      "artifact:07_review/structure-gate.json": "json:7aab66b42531207c55e6db91cc11e5257198a58dd22981fc23a4f7a3cea3483a",
+      "direct:01_source/lesson-bands.json": "a3483eb42f74e877df42477eb3b86f27feb1636f8ec03ebec7b255d0c6ca7f16",
+      "direct:01_source/pdf-ocr.json": "json:ac3b9f3f5eeff1602c5be9d1dd1929870cb1d014c04d70a004baba4c2b90fd47",
+      "material:roles": "json:f3631f47832d8c72c3128157f3b7794bc760d674e84fb9a2d3f310d4b43e66e9",
+      "source:01_source/media/image1.jpeg": "raw:49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691",
+      "source:01_source/media/image10.jpeg": "raw:d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+      "source:01_source/media/image10.jpeg.bak": "raw:d4e0b502f7001eaac933d2b714b4b263e7f6fbe991e96316cbb05a2954e127f8",
+      "source:01_source/media/image158.jpeg": "raw:b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+      "source:01_source/media/image158.jpeg.bak": "raw:b749055e00acde543633e85df325f2cd0df29fd42d0580482386f8fc11c5d1a7",
+      "source:01_source/media/image159.jpeg": "raw:66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+      "source:01_source/media/image159.jpeg.bak": "raw:66f90cb760837a036839de013a0076be761caef961c1f939042c841221c9c7c8",
+      "source:01_source/media/image4.jpeg": "raw:3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c",
+      "source:01_source/media/image42.jpeg": "raw:922af1cb4f3d3efa19584b086d425f51a17d45341132e59e83f403d747edce1d",
+      "source:01_source/media/image43.jpeg": "raw:d4c2e221613c5a742180d51cf48b7d0bb466e089b3d104c15d8d1ff10255bef7",
+      "source:01_source/media/image44.jpeg": "raw:a35b921a8c67f26257ab0616bdd5868d47768e4d2f8be3d52fd116220e919195",
+      "source:01_source/media/image45.jpeg": "raw:b298998a35208340f83906b279107f7ddf9332512f9e32de7794ef00d57ac6f0",
+      "source:01_source/media/image46.jpeg": "raw:99c9c387d9cd8aa72bc68bfebe30741bcc7089f97f5d7390608b29af6f97c10d",
+      "source:01_source/structure.confirmed.json": "json:635840f3b9b8327958dc245d6c642af26aa3e10d5ce0a70f157b527405468a1e",
+      "source:01_source/正文.txt": "raw:ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+      "source_input:docx": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+      "source_input:source": "raw:b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d"
+    }
+  },
+  "last_stage": "answers",
+  "last_status": "requeued",
+  "next_retry_at": 0
+}

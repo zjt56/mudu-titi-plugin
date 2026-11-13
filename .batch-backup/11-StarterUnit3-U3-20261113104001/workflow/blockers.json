@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "blockers": {
+    "answers|no_progress_exhausted|725c21c3619b": {
+      "key": "answers|no_progress_exhausted|725c21c3619b",
+      "first_seen": "2026-11-13T10:27:12+08:00",
+      "occurrences": 1,
+      "stage": "answers",
+      "check": "no_progress_exhausted",
+      "symptom": "连续调度无有效本地进展；已降频，保留质量阻断，等待输入/配置修正或长冷却探测",
+      "why": "连续 5 次调度未产生有效本地进展（attempts=5）",
+      "how": "检查该阶段输入/产物与自愈动作；修正后点继续处理或等冷却探测",
+      "error_code": "exhausted",
+      "source": "supervisor",
+      "last_seen": "2026-11-13T10:27:12+08:00"
+    }
+  }
+}

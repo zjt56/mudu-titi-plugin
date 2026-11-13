@@ -1,0 +1,6 @@
+$ /Users/zjt/.local/bin/python3.12 -m workflow.agent run --stage answers --batch-dir /Users/zjt/Desktop/上传插件版/workflows/11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect
+
+
+
+[stderr]
+{"error": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用", "code": "validation_no_progress", "artifacts": {"task": "/Users/zjt/Desktop/上传插件版/.content-agent/tasks/1e0fb086680e48b8abf135f89afe7d1d/task.json", "attempt_dir": "/Users/zjt/Desktop/上传插件版/workflows/11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect/workflow/agent-runs/answers-ptxw59hk/round-00-part-0000", "candidate": "/Users/zjt/Desktop/上传插件版/workflows/11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect/workflow/agent-runs/answers-ptxw59hk/round-00-part-0000/candidate.json"}}

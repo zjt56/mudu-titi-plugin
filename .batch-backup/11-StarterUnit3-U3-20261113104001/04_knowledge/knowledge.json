@@ -1,0 +1,410 @@
+{
+  "items": [
+    {
+      "evidence": [
+        "正文 L6 大题指令：Ⅰ.根据首字母及汉语提示补全单词",
+        "正文 L7：1.What e______(别的) can I do for you?（首字母 e 提示，答案 else 为副词，考查单词拼写/词义）"
+      ],
+      "knowledge": [
+        "词汇/拼写与词形",
+        "词汇/词汇辨析/副词辨析"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-928d0636b3171ee6-u7",
+      "knowledgeIds": [
+        "KP-abbdc04a38354ac9a772",
+        "EN-KP-8122e436ecbff948b4b9"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L6 大题指令：Ⅰ.根据首字母及汉语提示补全单词",
+        "正文 L8：2.Walk along the river,and you can see a f______(农场) on your left.（答案 farm 为名词）"
+      ],
+      "knowledge": [
+        "词汇/拼写与词形",
+        "词汇/词汇辨析/名词辨析"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-928d0636b3171ee6-u8",
+      "knowledgeIds": [
+        "KP-abbdc04a38354ac9a772",
+        "EN-KP-a8643086ed7132745568"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L6 大题指令：Ⅰ.根据首字母及汉语提示补全单词",
+        "正文 L9：3.We need to c______(圈出) the key words when doing some reading.（答案 circle 为动词）"
+      ],
+      "knowledge": [
+        "词汇/拼写与词形",
+        "词汇/词汇辨析/动词辨析"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-928d0636b3171ee6-u9",
+      "knowledgeIds": [
+        "KP-abbdc04a38354ac9a772",
+        "EN-KP-4922a006ff9d2edec168"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L6 大题指令：Ⅰ.根据首字母及汉语提示补全单词",
+        "正文 L10：4.Linda and her sister like to take a walk by the l______(湖) in the park.（答案 lake 为名词）"
+      ],
+      "knowledge": [
+        "词汇/拼写与词形",
+        "词汇/词汇辨析/名词辨析"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-928d0636b3171ee6-u10",
+      "knowledgeIds": [
+        "KP-abbdc04a38354ac9a772",
+        "EN-KP-a8643086ed7132745568"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L6 大题指令：Ⅰ.根据首字母及汉语提示补全单词",
+        "正文 L11：5.Our school has a b______(大的) library with many books.（答案 big 为形容词）"
+      ],
+      "knowledge": [
+        "词汇/拼写与词形",
+        "词汇/词汇辨析/形容词辨析"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-928d0636b3171ee6-u11",
+      "knowledgeIds": [
+        "KP-abbdc04a38354ac9a772",
+        "EN-KP-3cc8851940bde54ecb84"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L12 大题指令：Ⅱ.根据汉语意思完成句子,每空一词",
+        "正文 L13-14：1.你在那家书店里可以看到许多种书。You can see______ ______books in that bookshop.（两空填 many kinds of，含 kind 的规则复数）"
+      ],
+      "knowledge": [
+        "词汇/短语与固定搭配/名词短语",
+        "语法/名词/名词的数/可数名词复数规则变化"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-8d67361b5032653a-u13",
+      "knowledgeIds": [
+        "EN-KP-27c7e282291e8b02fc36",
+        "EN-KP-44ccc3dd1d3d9073ff2d"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L12 大题指令：Ⅱ.根据汉语意思完成句子,每空一词",
+        "正文 L15-16：2.我可以看一下你的新书包吗? Can I ______your new schoolbag?（整空为 have a look at 类动词短语）"
+      ],
+      "knowledge": [
+        "词汇/短语与固定搭配/动词短语"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-8d67361b5032653a-u15",
+      "knowledgeIds": [
+        "EN-KP-a20e730c687359ba1003"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L12 大题指令：Ⅱ.根据汉语意思完成句子,每空一词",
+        "正文 L17-18：3.这张老照片是黑白的。This old picture is ______.（表语为空，填 black and white 形容词性短语）"
+      ],
+      "knowledge": [
+        "词汇/短语与固定搭配/形容词短语"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-8d67361b5032653a-u17",
+      "knowledgeIds": [
+        "EN-KP-6888047fdca79874fac0"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L12 大题指令：Ⅱ.根据汉语意思完成句子,每空一词",
+        "正文 L19-20：4.你的新眼镜是什么颜色? ______ ______your new glasses?（问句为 What colour/color 引导的特殊疑问句，glasses 复数需 are）"
+      ],
+      "knowledge": [
+        "语法/句子的种类/疑问句/特殊疑问句",
+        "语法/主谓一致/语法一致"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-8d67361b5032653a-u19",
+      "knowledgeIds": [
+        "EN-KP-80ce297c86181f2bc742",
+        "EN-KP-cecc3b3dcb4b1dbd473c"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L12 大题指令：Ⅱ.根据汉语意思完成句子,每空一词",
+        "正文 L21-22：5.韩林通常走路去他的叔叔家。Han Lin usually walks to ______.（空处需 his uncle's 类名词所有格）"
+      ],
+      "knowledge": [
+        "语法/名词/名词所有格/'s所有格"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-8d67361b5032653a-u21",
+      "knowledgeIds": [
+        "EN-KP-0d9d4906041616e9e640"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L12 大题指令：Ⅱ.根据汉语意思完成句子,每空一词",
+        "正文 L23-26：6.——你的爷爷有多少匹马? ——我看到(有)二十匹。—______ ______horses does your grandfather have? —______ ______twenty.（How many 引导特殊疑问句）"
+      ],
+      "knowledge": [
+        "语法/句子的种类/疑问句/特殊疑问句"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-8d67361b5032653a-u23",
+      "knowledgeIds": [
+        "EN-KP-80ce297c86181f2bc742"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L27 大题指令：Ⅲ.单项填空",
+        "正文 L28-30：1.—The cake tastes(尝起来) good.I want to have ______one. 选项 A.some B.any C.another D.other（考查 another/other 等不定代词辨析）"
+      ],
+      "knowledge": [
+        "语法/代词/不定代词/普通不定代词/other/another/the other/others/the others"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-4a0104c03b02ba2c-u28",
+      "knowledgeIds": [
+        "EN-KP-b173cfb9d4672551cb51"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L27 大题指令：Ⅲ.单项填空",
+        "正文 L31-34：2.—I don't like this cap.It's too big. —Well,here is a______one for you. 选项 A.small B.short C.long D.tidy（四选项同为形容词，按语境辨析）"
+      ],
+      "knowledge": [
+        "词汇/词汇辨析/形容词辨析"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-4a0104c03b02ba2c-u31",
+      "knowledgeIds": [
+        "EN-KP-3cc8851940bde54ecb84"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L27 大题指令：Ⅲ.单项填空",
+        "正文 L35-38：3.—Alan,can you ______from 1 to 100 in English? 选项 A.speak B.tell C.count D.see（四选项同为动词，按语境辨析）"
+      ],
+      "knowledge": [
+        "词汇/词汇辨析/动词辨析"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-4a0104c03b02ba2c-u35",
+      "knowledgeIds": [
+        "EN-KP-4922a006ff9d2edec168"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L27 大题指令：Ⅲ.单项填空",
+        "正文 L39-42：4.—What animals can you find on the farm? —I can find many ______and cows. 选项 A.rabbit B.chicken C.goose D.sheep（many 后需复数，sheep 为不规则复数）"
+      ],
+      "knowledge": [
+        "语法/名词/名词的数/可数名词复数不规则变化",
+        "词汇/词汇辨析/名词辨析"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-4a0104c03b02ba2c-u39",
+      "knowledgeIds": [
+        "EN-KP-12d2afd9bdd32ad439bc",
+        "EN-KP-a8643086ed7132745568"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L27 大题指令：Ⅲ.单项填空",
+        "正文 L43-45：5.Which picture shows the dog is behind the house? A.[IMG image42.jpeg] …D.[IMG image45.jpeg]（考查 behind 等地点方位介词）"
+      ],
+      "knowledge": [
+        "语法/介词/地点方位介词"
+      ],
+      "subquestions": [],
+      "unit_id": "sec-4a0104c03b02ba2c-u43",
+      "knowledgeIds": [
+        "EN-KP-997647a13b57c3e7d7a1"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L46 大题指令：Ⅳ.根据短文内容或所给提示填空（整组题型，仅组级打标）",
+        "正文 L47：My uncle is a farmer…We get up early…we start to pick apples together…I like to work on the…farm.（记叙一家人到农场摘苹果，属故事类记叙文，主题为劳动实践）",
+        "正文 L47：ninety apple 1.(tree)…many 6.(kind) of food（考点含名词规则复数）"
+      ],
+      "knowledge": [
+        "语篇体裁/记叙文/故事",
+        "主题/人与自我/做人与做事/劳动实践与创新",
+        "语法/名词/名词的数/可数名词复数规则变化"
+      ],
+      "subquestions": [
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 3
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 4
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 5
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 6
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 7
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 8
+        }
+      ],
+      "unit_id": "sec-03770200d1ca1625-u47",
+      "knowledgeIds": [
+        "EN-KP-2fbd890c63cb33660d6a",
+        "EN-KP-7b68dd5f695996376fbe",
+        "EN-KP-44ccc3dd1d3d9073ff2d"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L49 大题指令：Ⅰ.完形填空（整组题型，仅组级打标）",
+        "正文 L50：Little Mary's grandparents have a farm…many kinds of animals…a little elephant…Animals are our friends.（记叙玛丽的农场动物故事，属记叙文/故事；主题为动物与植物）"
+      ],
+      "knowledge": [
+        "语篇体裁/记叙文/故事",
+        "主题/人与自然/自然生态/动物与植物"
+      ],
+      "subquestions": [
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 1
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 2
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 3
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 4
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 5
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 6
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 7
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 8
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 9
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 10
+        }
+      ],
+      "unit_id": "sec-1ecc72ba50a90dfa-u50",
+      "knowledgeIds": [
+        "EN-KP-2fbd890c63cb33660d6a",
+        "EN-KP-d6e74cf06ea587d6b832"
+      ]
+    },
+    {
+      "evidence": [
+        "正文 L71 大题指令：Ⅱ.阅读理解[IMG image46.jpeg]（整组题型，仅组级打标）",
+        "正文 L72-74：介绍吴泽银为博茨瓦纳农业制作 Farm Assistant 应用程序（介绍类说明文；主题为发明与创新）",
+        "正文 L75：1.What does the underlined word “high” mean?（划线猜测词义）",
+        "正文 L78-79：2.[新考法·细节多选]What can farmers know about the vegetables by using the app?（细节多选）",
+        "正文 L82：3.[新考法·跨学科设问]What do Wu's words mean?（跨学科设问）",
+        "正文 L87-88：☆拓展设问 4.What does Wu find about the fruits and vegetables in Botswana?（不超过15个词）（细节理解）"
+      ],
+      "knowledge": [
+        "语篇体裁/说明文/介绍类短文",
+        "主题/人与社会/科学与技术/发明与创新",
+        "设题角度/阅读/猜测词义",
+        "设题角度/阅读/细节理解",
+        "设题角度/阅读/细节多选",
+        "设题角度/阅读/跨学科设问"
+      ],
+      "subquestions": [
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 1
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 2
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 3
+        },
+        {
+          "knowledge": [],
+          "knowledgeIds": [],
+          "number": 4
+        }
+      ],
+      "unit_id": "sec-59ddc72436ce2ed0-u75",
+      "knowledgeIds": [
+        "EN-KP-236854592586a3f7daa0",
+        "EN-KP-0e3bee45ffc64c6093a7",
+        "EN-KP-c287207000c2e88d622c",
+        "EN-KP-5215221f9119f618ef83",
+        "EN-KP-2bee98610bada42f897f",
+        "EN-KP-4da1c96e2d37306ddb10"
+      ]
+    }
+  ]
+}

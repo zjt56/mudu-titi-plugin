@@ -1,0 +1,140 @@
+{
+  "version": "visual-crosscheck-v1",
+  "note": "Word 原文为文字权威来源；视觉语义仅解释 [IMG] 占位内容并交叉印证，冲突只留痕不自动修改、不据此放行任何闸门。",
+  "image_refs": 9,
+  "unreferenced_images": [
+    "image158.jpeg",
+    "image159.jpeg"
+  ],
+  "verdicts": {
+    "note": 9
+  },
+  "rows": [
+    {
+      "img": "image1.jpeg",
+      "file": "image1.jpeg",
+      "line": 5,
+      "unit_id": null,
+      "numbers": null,
+      "unit_type": null,
+      "visual_kind": "band",
+      "visual_title": "基础巩固",
+      "visual_has_text": true,
+      "line_has_text": false,
+      "verdict": "note",
+      "note": "供参考"
+    },
+    {
+      "img": "image42.jpeg",
+      "file": "image42.jpeg",
+      "line": 44,
+      "unit_id": null,
+      "numbers": null,
+      "unit_type": null,
+      "visual_kind": "illustration",
+      "visual_title": "小狗站在狗屋屋顶上的插图",
+      "visual_has_text": false,
+      "line_has_text": true,
+      "verdict": "note",
+      "note": "供参考"
+    },
+    {
+      "img": "image43.jpeg",
+      "file": "image43.jpeg",
+      "line": 44,
+      "unit_id": null,
+      "numbers": null,
+      "unit_type": null,
+      "visual_kind": "illustration",
+      "visual_title": "小狗在狗屋内的插图",
+      "visual_has_text": false,
+      "line_has_text": true,
+      "verdict": "note",
+      "note": "供参考"
+    },
+    {
+      "img": "image44.jpeg",
+      "file": "image44.jpeg",
+      "line": 45,
+      "unit_id": null,
+      "numbers": null,
+      "unit_type": null,
+      "visual_kind": "illustration",
+      "visual_title": "小狗站在狗屋旁的插图",
+      "visual_has_text": false,
+      "line_has_text": true,
+      "verdict": "note",
+      "note": "供参考"
+    },
+    {
+      "img": "image45.jpeg",
+      "file": "image45.jpeg",
+      "line": 45,
+      "unit_id": null,
+      "numbers": null,
+      "unit_type": null,
+      "visual_kind": "illustration",
+      "visual_title": "小狗坐在狗屋前的插图",
+      "visual_has_text": false,
+      "line_has_text": true,
+      "verdict": "note",
+      "note": "供参考"
+    },
+    {
+      "img": "image10.jpeg",
+      "file": "image10.jpeg",
+      "line": 47,
+      "unit_id": null,
+      "numbers": null,
+      "unit_type": null,
+      "visual_kind": "other",
+      "visual_title": "白底下方带一条粗黑横线",
+      "visual_has_text": false,
+      "line_has_text": true,
+      "verdict": "note",
+      "note": "视觉未给出明确类别，需人工/后续核对"
+    },
+    {
+      "img": "image10.jpeg",
+      "file": "image10.jpeg",
+      "line": 47,
+      "unit_id": null,
+      "numbers": null,
+      "unit_type": null,
+      "visual_kind": "other",
+      "visual_title": "白底下方带一条粗黑横线",
+      "visual_has_text": false,
+      "line_has_text": true,
+      "verdict": "note",
+      "note": "视觉未给出明确类别，需人工/后续核对"
+    },
+    {
+      "img": "image4.jpeg",
+      "file": "image4.jpeg",
+      "line": 48,
+      "unit_id": null,
+      "numbers": null,
+      "unit_type": null,
+      "visual_kind": "band",
+      "visual_title": "能力提升",
+      "visual_has_text": true,
+      "line_has_text": false,
+      "verdict": "note",
+      "note": "供参考"
+    },
+    {
+      "img": "image46.jpeg",
+      "file": "image46.jpeg",
+      "line": 71,
+      "unit_id": null,
+      "numbers": null,
+      "unit_type": null,
+      "visual_kind": "band",
+      "visual_title": "时文阅读栏目横幅",
+      "visual_has_text": true,
+      "line_has_text": true,
+      "verdict": "note",
+      "note": "供参考"
+    }
+  ]
+}

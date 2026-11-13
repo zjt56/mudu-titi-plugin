@@ -1,0 +1,535 @@
+{
+  "version": "composite-extract-1",
+  "status": "candidate",
+  "sections": [
+    {
+      "type": "单词拼写",
+      "title": "Ⅰ.根据首字母及汉语提示补全单词",
+      "source_line": 6,
+      "questions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "question_locations": [
+        {
+          "number": 1,
+          "line": 7,
+          "kind": "question"
+        },
+        {
+          "number": 2,
+          "line": 8,
+          "kind": "question"
+        },
+        {
+          "number": 3,
+          "line": 9,
+          "kind": "question"
+        },
+        {
+          "number": 4,
+          "line": 10,
+          "kind": "question"
+        },
+        {
+          "number": 5,
+          "line": 11,
+          "kind": "question"
+        }
+      ],
+      "declared_count": null,
+      "material_boundaries": [],
+      "sync_occurrence": 1,
+      "source_context": "第三课时　Section B (1a-1e)",
+      "candidate_unit_kind": "standalone",
+      "source_end_line": 11
+    },
+    {
+      "type": "完成句子",
+      "title": "Ⅱ.根据汉语意思完成句子,每空一词",
+      "source_line": 12,
+      "questions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "question_locations": [
+        {
+          "number": 1,
+          "line": 13,
+          "kind": "question"
+        },
+        {
+          "number": 2,
+          "line": 15,
+          "kind": "question"
+        },
+        {
+          "number": 3,
+          "line": 17,
+          "kind": "question"
+        },
+        {
+          "number": 4,
+          "line": 19,
+          "kind": "question"
+        },
+        {
+          "number": 5,
+          "line": 21,
+          "kind": "question"
+        },
+        {
+          "number": 6,
+          "line": 23,
+          "kind": "question"
+        }
+      ],
+      "declared_count": null,
+      "material_boundaries": [],
+      "sync_occurrence": 2,
+      "source_context": "第三课时　Section B (1a-1e)",
+      "candidate_unit_kind": "standalone",
+      "source_end_line": 26
+    },
+    {
+      "type": "单项填空",
+      "title": "Ⅲ.单项填空",
+      "source_line": 27,
+      "questions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "question_locations": [
+        {
+          "number": 1,
+          "line": 28,
+          "kind": "question"
+        },
+        {
+          "number": 2,
+          "line": 31,
+          "kind": "question"
+        },
+        {
+          "number": 3,
+          "line": 35,
+          "kind": "question"
+        },
+        {
+          "number": 4,
+          "line": 39,
+          "kind": "question"
+        },
+        {
+          "number": 5,
+          "line": 43,
+          "kind": "question"
+        }
+      ],
+      "declared_count": null,
+      "material_boundaries": [],
+      "sync_occurrence": 3,
+      "source_context": "第三课时　Section B (1a-1e)",
+      "candidate_unit_kind": "standalone",
+      "source_end_line": 45
+    },
+    {
+      "type": "短文填空",
+      "title": "Ⅳ.根据短文内容或所给提示填空",
+      "source_line": 46,
+      "questions": [
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "question_locations": [
+        {
+          "number": 3,
+          "line": 47,
+          "kind": "blank"
+        },
+        {
+          "number": 4,
+          "line": 47,
+          "kind": "blank"
+        },
+        {
+          "number": 5,
+          "line": 47,
+          "kind": "blank"
+        },
+        {
+          "number": 6,
+          "line": 47,
+          "kind": "blank"
+        },
+        {
+          "number": 7,
+          "line": 47,
+          "kind": "blank"
+        },
+        {
+          "number": 8,
+          "line": 47,
+          "kind": "blank"
+        }
+      ],
+      "declared_count": null,
+      "material_boundaries": [],
+      "sync_occurrence": 4,
+      "source_context": "第三课时　Section B (1a-1e)",
+      "candidate_unit_kind": "group",
+      "source_end_line": 48
+    },
+    {
+      "type": "完形填空",
+      "title": "Ⅰ.完形填空",
+      "source_line": 49,
+      "questions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "question_locations": [
+        {
+          "number": 1,
+          "line": 50,
+          "kind": "blank"
+        },
+        {
+          "number": 2,
+          "line": 50,
+          "kind": "blank"
+        },
+        {
+          "number": 3,
+          "line": 50,
+          "kind": "blank"
+        },
+        {
+          "number": 4,
+          "line": 50,
+          "kind": "blank"
+        },
+        {
+          "number": 5,
+          "line": 50,
+          "kind": "blank"
+        },
+        {
+          "number": 6,
+          "line": 50,
+          "kind": "blank"
+        },
+        {
+          "number": 7,
+          "line": 50,
+          "kind": "blank"
+        },
+        {
+          "number": 8,
+          "line": 50,
+          "kind": "blank"
+        },
+        {
+          "number": 9,
+          "line": 50,
+          "kind": "blank"
+        },
+        {
+          "number": 10,
+          "line": 50,
+          "kind": "blank"
+        },
+        {
+          "number": 1,
+          "line": 51,
+          "kind": "question"
+        },
+        {
+          "number": 2,
+          "line": 53,
+          "kind": "question"
+        },
+        {
+          "number": 3,
+          "line": 55,
+          "kind": "question"
+        },
+        {
+          "number": 4,
+          "line": 57,
+          "kind": "question"
+        },
+        {
+          "number": 5,
+          "line": 59,
+          "kind": "question"
+        },
+        {
+          "number": 6,
+          "line": 61,
+          "kind": "question"
+        },
+        {
+          "number": 7,
+          "line": 63,
+          "kind": "question"
+        },
+        {
+          "number": 8,
+          "line": 65,
+          "kind": "question"
+        },
+        {
+          "number": 9,
+          "line": 67,
+          "kind": "question"
+        },
+        {
+          "number": 10,
+          "line": 69,
+          "kind": "question"
+        }
+      ],
+      "declared_count": null,
+      "material_boundaries": [],
+      "sync_occurrence": 5,
+      "source_context": "第三课时　Section B (1a-1e)",
+      "candidate_unit_kind": "group",
+      "source_end_line": 70
+    },
+    {
+      "type": "阅读理解",
+      "title": "Ⅱ.阅读理解[IMG image46.jpeg]",
+      "source_line": 71,
+      "questions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "question_locations": [
+        {
+          "number": 1,
+          "line": 75,
+          "kind": "question"
+        },
+        {
+          "number": 2,
+          "line": 78,
+          "kind": "question"
+        },
+        {
+          "number": 3,
+          "line": 82,
+          "kind": "question"
+        },
+        {
+          "number": 4,
+          "line": 88,
+          "kind": "question"
+        }
+      ],
+      "declared_count": null,
+      "material_boundaries": [],
+      "sync_occurrence": 6,
+      "source_context": "第三课时　Section B (1a-1e)",
+      "candidate_unit_kind": "group",
+      "source_end_line": 90
+    }
+  ],
+  "groups": [
+    {
+      "questions": [
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "type": "短文填空",
+      "boundary_method": "section_candidate"
+    },
+    {
+      "questions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "type": "完形填空",
+      "boundary_method": "section_candidate"
+    },
+    {
+      "questions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "type": "阅读理解",
+      "boundary_method": "section_candidate"
+    }
+  ],
+  "image_questions": [
+    5,
+    8
+  ],
+  "unresolved": [
+    {
+      "code": "ANSWER_APPENDIX_DETECTED",
+      "line": 91,
+      "message": "文末参考答案已按课时来源边界分离，答案题号不参与正文统计"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "line": 12,
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "line": 27,
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "line": 46,
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "line": 49,
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并"
+    },
+    {
+      "code": "GROUP_BOUNDARY_REVIEW",
+      "line": 49,
+      "message": "Ⅰ.完形填空 的材料/对话分组需要核验，未将分区等同于最终题组"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "line": 71,
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并"
+    },
+    {
+      "code": "GROUP_BOUNDARY_REVIEW",
+      "line": 71,
+      "message": "Ⅱ.阅读理解[IMG image46.jpeg] 的材料/对话分组需要核验，未将分区等同于最终题组"
+    }
+  ],
+  "requires_visual_review": true,
+  "coverage_verified": false,
+  "sync_practice": {
+    "headings": [
+      {
+        "occurrence": 1,
+        "start_line": 6,
+        "title": "Ⅰ.根据首字母及汉语提示补全单词",
+        "context": "第三课时　Section B (1a-1e)",
+        "type": "单词拼写",
+        "subtype": "汉语及首字母",
+        "kind": "standalone",
+        "rule": "spell-initial",
+        "end_line": 11
+      },
+      {
+        "occurrence": 2,
+        "start_line": 12,
+        "title": "Ⅱ.根据汉语意思完成句子,每空一词",
+        "context": "第三课时　Section B (1a-1e)",
+        "type": "完成句子",
+        "subtype": "汉语提示",
+        "kind": "standalone",
+        "rule": "sentence-chinese",
+        "end_line": 26
+      },
+      {
+        "occurrence": 3,
+        "start_line": 27,
+        "title": "Ⅲ.单项填空",
+        "context": "第三课时　Section B (1a-1e)",
+        "type": "单项填空",
+        "subtype": "四个选项",
+        "kind": "standalone",
+        "rule": "single-choice",
+        "end_line": 45
+      },
+      {
+        "occurrence": 4,
+        "start_line": 46,
+        "title": "Ⅳ.根据短文内容或所给提示填空",
+        "context": "第三课时　Section B (1a-1e)",
+        "type": "短文填空",
+        "subtype": null,
+        "kind": "group",
+        "rule": "passage-fill",
+        "end_line": 48
+      },
+      {
+        "occurrence": 5,
+        "start_line": 49,
+        "title": "Ⅰ.完形填空",
+        "context": "第三课时　Section B (1a-1e)",
+        "type": "完形填空",
+        "subtype": null,
+        "kind": "group",
+        "rule": "cloze",
+        "end_line": 70
+      },
+      {
+        "occurrence": 6,
+        "start_line": 71,
+        "title": "Ⅱ.阅读理解[IMG image46.jpeg]",
+        "context": "第三课时　Section B (1a-1e)",
+        "type": "阅读理解",
+        "subtype": null,
+        "kind": "group",
+        "rule": "reading",
+        "end_line": 90
+      }
+    ],
+    "numbering_scope": "section_occurrence",
+    "lesson_audit": [
+      {
+        "code": "LESSON_NUMBER_GAP",
+        "line": 3,
+        "title": "第三课时　Section B (1a-1e)",
+        "problems": [
+          "课时序号不连续：第 1 个课时位置是「第三课时　Section B (1a-1e)」"
+        ]
+      }
+    ],
+    "confirmed": false
+  },
+  "source_sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+  "layout_required": true,
+  "layout_review_command": "python -m workflow.layout_review --help"
+}

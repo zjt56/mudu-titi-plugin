@@ -1,0 +1,12 @@
+{
+  "provider": "command",
+  "status": "completed",
+  "wall_start": "2026-11-13T01:56:30.794797+00:00",
+  "wall_end": "2026-11-13T01:56:44.717610+00:00",
+  "prompt_bytes": 10487,
+  "error_code": null,
+  "error_category": null,
+  "exit_code": 0,
+  "duration": 13.922710832994198,
+  "total_duration": 13.92402058299922
+}

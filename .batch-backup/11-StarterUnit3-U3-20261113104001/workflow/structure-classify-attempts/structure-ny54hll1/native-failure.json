@@ -1,0 +1,88 @@
+{
+ "check": "NATIVE_STRUCTURE_FAILED",
+ "message": "Whole-paper structure validation failed: [{\"check\":\"QUESTION_NOT_FOUND\",\"message\":\"题号未在本窗口定位：[1, 2]\",\"numbers\":[1,2,3,4,5,6,7,8],\"source_span\":{\"end_line\":47,\"start_line\":47},\"unit_index\":17},{\"check\":\"SOURCE_SECTION_UNCOVERED\",\"code\":\"SOURCE_SECTION_UNCOVERED\",\"message\":\"原文大题窗口未产生任何来源单元\",\"source_line\":46,\"source_spans\":[],\"unit_indices\":[]},{\"check\":\"SOURCE_NUMBERS_UNDECLARED\",\"code\":\"SOURCE_NUMBERS_UNDECLARED\",\"message\":\"原文第47行题号3须唯一归属，当前0个单元\",\"number\":3,\"source_line\":47,\"source_spans\":[],\"unit_indices\":[]},{\"check\":\"SOURCE_NUMBERS_UNDECLARED\",\"code\":\"SOURCE_NUMBERS_UNDECLARED\",\"message\":\"原文第47行题号4须唯一归属，当前0个单元\",\"number\":4,\"source_line\":47,\"source_spans\":[],\"unit_indices\":[]},{\"check\":\"SOURCE_NUMBERS_UNDECLARED\",\"code\":\"SOURCE_NUMBERS_UNDECLARED\",\"message\":\"原文第47行题号5须唯一归属，当前0个单元\",\"number\":5,\"source_line\":47,\"source_spans\":[],\"unit_indices\":[]},{\"check\":\"SOURCE_NUMBERS_UNDECLARED\",\"code\":\"SOURCE_NUMBERS_UNDECLARED\",\"message\":\"原文第47行题号6须唯一归属，当前0个单元\",\"number\":6,\"source_line\":47,\"source_spans\":[],\"unit_indices\":[]},{\"check\":\"SOURCE_NUMBERS_UNDECLARED\",\"code\":\"SOURCE_NUMBERS_UNDECLARED\",\"message\":\"原文第47行题号7须唯一归属，当前0个单元\",\"number\":7,\"source_line\":47,\"source_spans\":[],\"unit_indices\":[]},{\"check\":\"SOURCE_NUMBERS_UNDECLARED\",\"code\":\"SOURCE_NUMBERS_UNDECLARED\",\"message\":\"原文第47行题号8须唯一归属，当前0个单元\",\"number\":8,\"source_line\":47,\"source_spans\":[],\"unit_indices\":[]}]",
+ "code": "validation",
+ "diagnostics": [
+  {
+   "check": "QUESTION_NOT_FOUND",
+   "message": "题号未在本窗口定位：[1, 2]",
+   "numbers": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+   ],
+   "source_span": {
+    "end_line": 47,
+    "start_line": 47
+   },
+   "unit_index": 17
+  },
+  {
+   "check": "SOURCE_SECTION_UNCOVERED",
+   "code": "SOURCE_SECTION_UNCOVERED",
+   "message": "原文大题窗口未产生任何来源单元",
+   "source_line": 46,
+   "source_spans": [],
+   "unit_indices": []
+  },
+  {
+   "check": "SOURCE_NUMBERS_UNDECLARED",
+   "code": "SOURCE_NUMBERS_UNDECLARED",
+   "message": "原文第47行题号3须唯一归属，当前0个单元",
+   "number": 3,
+   "source_line": 47,
+   "source_spans": [],
+   "unit_indices": []
+  },
+  {
+   "check": "SOURCE_NUMBERS_UNDECLARED",
+   "code": "SOURCE_NUMBERS_UNDECLARED",
+   "message": "原文第47行题号4须唯一归属，当前0个单元",
+   "number": 4,
+   "source_line": 47,
+   "source_spans": [],
+   "unit_indices": []
+  },
+  {
+   "check": "SOURCE_NUMBERS_UNDECLARED",
+   "code": "SOURCE_NUMBERS_UNDECLARED",
+   "message": "原文第47行题号5须唯一归属，当前0个单元",
+   "number": 5,
+   "source_line": 47,
+   "source_spans": [],
+   "unit_indices": []
+  },
+  {
+   "check": "SOURCE_NUMBERS_UNDECLARED",
+   "code": "SOURCE_NUMBERS_UNDECLARED",
+   "message": "原文第47行题号6须唯一归属，当前0个单元",
+   "number": 6,
+   "source_line": 47,
+   "source_spans": [],
+   "unit_indices": []
+  },
+  {
+   "check": "SOURCE_NUMBERS_UNDECLARED",
+   "code": "SOURCE_NUMBERS_UNDECLARED",
+   "message": "原文第47行题号7须唯一归属，当前0个单元",
+   "number": 7,
+   "source_line": 47,
+   "source_spans": [],
+   "unit_indices": []
+  },
+  {
+   "check": "SOURCE_NUMBERS_UNDECLARED",
+   "code": "SOURCE_NUMBERS_UNDECLARED",
+   "message": "原文第47行题号8须唯一归属，当前0个单元",
+   "number": 8,
+   "source_line": 47,
+   "source_spans": [],
+   "unit_indices": []
+  }
+ ]
+}

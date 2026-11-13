@@ -1,0 +1,81 @@
+{
+ "source_sha256": "ef6ed760d61321005b94204c11a830cf026890e6130e3f2d905567e759007271",
+ "cache_key": "3bba7a5980a01500286896321e8c9438aeb154f27cc62666e1efe98ba5fdb330",
+ "filename": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx",
+ "rules_version": "sync-source-v1",
+ "model_completed": true,
+ "identified": {
+  "grade": "七年级",
+  "book": "七上",
+  "textbook_version": "人教版",
+  "series": "课时A计划",
+  "source_type": "同步练习",
+  "unit": "Starter Unit 3",
+  "lesson": "课时3",
+  "section": "Section B",
+  "source_scope": "lesson",
+  "paper_title": "七上人教版课时A计划 Starter Unit 3 课时3",
+  "source": "七上人教版课时A计划 Starter Unit 3 课时3",
+  "source_evidence": {
+   "grade": {
+    "origin": "filename",
+    "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+   },
+   "book": {
+    "origin": "filename",
+    "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+   },
+   "textbook_version": {
+    "origin": "filename",
+    "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+   },
+   "series": {
+    "origin": "filename",
+    "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+   },
+   "source_type": {
+    "origin": "filename",
+    "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"
+   },
+   "unit": {
+    "origin": "body",
+    "text": "**Starter Unit 3　Welcome!**"
+   },
+   "lesson": {
+    "origin": "body",
+    "text": "**第三课时**　Section** **B** **(1a-1e)"
+   },
+   "section": {
+    "origin": "body",
+    "text": "**第三课时**　Section** **B** **(1a-1e)"
+   },
+   "source_scope": {
+    "origin": "body",
+    "text": "**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)"
+   },
+   "paper_title": {
+    "origin": "filename/body",
+    "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)"
+   },
+   "source": {
+    "origin": "filename/body",
+    "text": "11 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)\n**Starter Unit 3　Welcome!**\n**第三课时**　Section** **B** **(1a-1e)"
+   }
+  }
+ },
+ "applied": [
+  "grade",
+  "book",
+  "textbook_version",
+  "series",
+  "source_type",
+  "unit",
+  "lesson",
+  "section",
+  "source_scope",
+  "paper_title",
+  "source"
+ ],
+ "kept": [],
+ "attempt": "workflow/metadata-attempts/meta-n23w4qzu"
+}

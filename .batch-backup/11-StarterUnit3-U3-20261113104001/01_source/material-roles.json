@@ -1,0 +1,16 @@
+{
+ "documents": [
+  {
+   "input": "source",
+   "path": "/Users/zjt/Desktop/上传插件版/workflows/11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect/attachments/source.docx",
+   "role": "paper",
+   "source": "fallback",
+   "content_authority": true,
+   "authority_input": "source",
+   "chars": 4678,
+   "source_sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+   "text_sha256": "927631f3c93736c7a060be2c8a1bcc91e82906f0f9fc621050ad6e682d75f452",
+   "text_path": "01_source/materials/source.txt"
+  }
+ ]
+}

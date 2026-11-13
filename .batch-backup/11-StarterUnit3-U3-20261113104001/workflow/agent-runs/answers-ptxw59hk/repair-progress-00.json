@@ -1,0 +1,27 @@
+{
+  "stage": "answers",
+  "validated_units": [],
+  "failed_units": {
+    "sec-928d0636b3171ee6-u7": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-928d0636b3171ee6-u8": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-928d0636b3171ee6-u9": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-928d0636b3171ee6-u10": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-928d0636b3171ee6-u11": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-8d67361b5032653a-u13": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-8d67361b5032653a-u15": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-8d67361b5032653a-u17": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-8d67361b5032653a-u19": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-8d67361b5032653a-u21": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-8d67361b5032653a-u23": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-4a0104c03b02ba2c-u28": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-4a0104c03b02ba2c-u31": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-4a0104c03b02ba2c-u35": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-4a0104c03b02ba2c-u39": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-4a0104c03b02ba2c-u43": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-03770200d1ca1625-u47": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-1ecc72ba50a90dfa-u50": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用",
+    "sec-59ddc72436ce2ed0-u75": "sec-03770200d1ca1625-u47/题3: scoped answer source is not uniquely bound; 答案来源缺少可核验的大题scope/原文坐标，禁止按全局题号借用"
+  },
+  "deterministic_failures": {},
+  "calls": []
+}

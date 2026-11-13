@@ -1,0 +1,1 @@
+wf-router: stage=? agent=? round=? -> provider=opencode-go model=deepseek-v4.1-flash (base=wf-plugin-route-c20435f96280dd69e1a727e3)

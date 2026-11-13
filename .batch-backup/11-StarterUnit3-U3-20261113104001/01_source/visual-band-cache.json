@@ -1,0 +1,30 @@
+{
+  "version": "lesson-bands-v1",
+  "route": {
+    "provider": "opencode-go",
+    "model": "deepseek-v4.1-flash",
+    "profile": "wf-deepseek-fast"
+  },
+  "items": {
+    "1ef1a60dfacc3532a35a9648644dd2d31e4eae18eb576966ece0641cfc64a097": {
+      "label": "基础巩固",
+      "image_sha256": "49eee7a143415d798f937da7ff8eecfbd039a1058d84167e75d607533ac3c691",
+      "evidence": {
+        "method": "harness_visual",
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "visible_text": "A 基础巩固"
+      }
+    },
+    "40dd666d87ab05476dc04568733ac809ff9f9ab064c5b9eb7775b5cb315f1447": {
+      "label": "能力提升",
+      "image_sha256": "3b56d52e4518d224dc84d68d3d5bf7b464de45e8232f199b4b6297c2c13cec9c",
+      "evidence": {
+        "method": "harness_visual",
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "visible_text": "B 能力提升"
+      }
+    }
+  }
+}

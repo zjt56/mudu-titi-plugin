@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "status": "exhausted",
+  "progress": "9df226fd4862c3e74b00895280c49881bb56636fb2e4737e23e44d26f8f2bc73",
+  "no_progress_attempts": 5,
+  "next_retry_at": 1794537732.1242938,
+  "retry_reservation_at": 1794537732.1242938,
+  "last_dispatched_at": 1794535911.296949,
+  "updated_at": 1794536832.1242938,
+  "error_signature": "a3ff658a79e27571",
+  "last_result": {
+    "action": "operations_pending",
+    "status": "failed",
+    "reason": "异常已交 AI 运维分析，等待接手或查看已记录的修复建议",
+    "cooldown_seconds": 0.0
+  },
+  "escalation": "连续调度无有效本地进展；已降频，保留质量阻断，等待输入/配置修正或长冷却探测"
+}

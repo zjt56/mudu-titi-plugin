@@ -1,0 +1,12 @@
+{
+  "protocol": "upload-workflow.agent/v1",
+  "result": {
+    "artifacts": {},
+    "findings": [],
+    "notes": [
+      "Replace this template with evidence-backed results or precise blockers."
+    ],
+    "status": "needs_review"
+  },
+  "task_id": "d71cf82b-a0d1-4ad6-b810-e2e049380364"
+}

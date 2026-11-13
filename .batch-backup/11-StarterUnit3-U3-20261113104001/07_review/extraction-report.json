@@ -1,0 +1,86 @@
+{
+  "passed": true,
+  "version": "composite-extract-1",
+  "source_sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+  "characters": 4272,
+  "sections": 6,
+  "questions": 36,
+  "unresolved": [
+    {
+      "code": "ANSWER_APPENDIX_DETECTED",
+      "line": 91,
+      "message": "文末参考答案已按课时来源边界分离，答案题号不参与正文统计"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "line": 12,
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "line": 27,
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "line": 46,
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "line": 49,
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并"
+    },
+    {
+      "code": "GROUP_BOUNDARY_REVIEW",
+      "line": 49,
+      "message": "Ⅰ.完形填空 的材料/对话分组需要核验，未将分区等同于最终题组"
+    },
+    {
+      "code": "NUMBERING_RESTART",
+      "line": 71,
+      "message": "题号跨大题重置或重复；需要按原卷分区定位，不能自动按全卷题号合并"
+    },
+    {
+      "code": "GROUP_BOUNDARY_REVIEW",
+      "line": 71,
+      "message": "Ⅱ.阅读理解[IMG image46.jpeg] 的材料/对话分组需要核验，未将分区等同于最终题组"
+    }
+  ],
+  "evidence_dir": "extract-98_ob4_d",
+  "pdf_ocr": {
+    "version": 1,
+    "status": "no_pdfs",
+    "report_path": "01_source/pdf-ocr.json",
+    "sources": []
+  },
+  "material_roles": {
+    "documents": [
+      {
+        "input": "source",
+        "path": "/Users/zjt/Desktop/上传插件版/workflows/11七上人教版课时A计划StarterUnit3Welcome!第三课时Sect/attachments/source.docx",
+        "role": "paper",
+        "source": "fallback",
+        "content_authority": true,
+        "authority_input": "source",
+        "chars": 4678,
+        "source_sha256": "b570659bdde86f9323190daba7318311911aa4099809a813c5316e71c342c67d",
+        "text_sha256": "927631f3c93736c7a060be2c8a1bcc91e82906f0f9fc621050ad6e682d75f452",
+        "text_path": "01_source/materials/source.txt"
+      }
+    ]
+  },
+  "source_policy": {
+    "version": 1,
+    "rule": "word > text_layer_pdf > scan_ocr",
+    "rule_id": "source-priority-v1",
+    "source": "source.docx",
+    "source_kind": "word",
+    "authority": "word",
+    "extraction": "docx_native",
+    "note": "Word 原卷用标准库原生解析，逐字位置与表格网格可信，不经过 OCR。",
+    "supporting": [],
+    "recommendation": "Word 原生解析，无需 OCR。",
+    "visual_structure_assist": true
+  }
+}

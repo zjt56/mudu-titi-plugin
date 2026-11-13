@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rule": "word > text_layer_pdf > scan_ocr",
+  "rule_id": "source-priority-v1",
+  "source": "source.docx",
+  "source_kind": "word",
+  "authority": "word",
+  "extraction": "docx_native",
+  "note": "Word 原卷用标准库原生解析，逐字位置与表格网格可信，不经过 OCR。",
+  "supporting": [],
+  "recommendation": "Word 原生解析，无需 OCR。",
+  "visual_structure_assist": true
+}
