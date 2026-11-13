@@ -160,11 +160,16 @@ _UNITS_CACHE = {}
 
 def _units_revision(batch):
     source = Path(batch) / '01_source/structure.confirmed.json'
+    # Windows/NTFS 的 mtime/ctime 更新是惰性的：同尺寸原地改写后 stat 版本可能
+    # 完全不变（实测同一毫秒内内容不同的两次写入得到相同 st_mtime_ns），只按
+    # stat 做跨请求缓存会把旧单元解析结果一直喂给审核。结构确认文件只有几十 KB，
+    # 按内容摘要判版本，成本远低于解析单元/绑定来源。
+    import hashlib
     try:
-        stat = source.stat()
+        raw = source.read_bytes()
     except OSError:
         return ('missing', str(source))
-    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, str(source))
+    return ('sha256', hashlib.sha256(raw).hexdigest(), str(source))
 
 
 def _units_cached(batch):

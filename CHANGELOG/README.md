@@ -264,3 +264,4 @@
 | 2026-11-13 | [2026-11-13-ocr-grid-item-binding.md](2026-11-13-ocr-grid-item-binding.md) | OCR 双栏网格题按行优先展平后题号与图文错位导致装配 A8/A9/E20 阻断；新增 ocr_grid 用版面块坐标把每张图片/每行词形绑定回各自小题，不改写正文 |
 | 2026-11-13 | [2026-11-13-assemble-grid-projection-restore.md](2026-11-13-assemble-grid-projection-restore.md) | 装配来源审计与回填共用同一版面投影：网格题不再被线性回填改回错位内容，SOURCE_STEM_MISSING/E20 消失 |
 | 2026-11-13 | [2026-11-13-review-evidence-scope-and-binding.md](2026-11-13-review-evidence-scope-and-binding.md) | 审核引证只看 stem 导致组题真实引证被判无来源、二审图片选项/板块边界被判未验证；引证范围扩到课时/大题题干+正文窗口并统一坐标投影，差异照旧交人工 |
+| 2026-11-13 | [2026-11-13-review-units-cache-content-digest.md](2026-11-13-review-units-cache-content-digest.md) | 审核单元缓存改用内容摘要判版本：NTFS 同尺寸原地改写后 stat 时间戳可能不变，跨请求会复用旧单元解析；正文变化不重解析结构，结构确认变化必须重解析 |

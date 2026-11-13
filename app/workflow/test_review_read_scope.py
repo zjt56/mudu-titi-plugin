@@ -1,6 +1,7 @@
 """One evaluation shares source reads; no read/verdict survives the next call."""
 import copy
 import json
+import sys
 import tempfile
 import unittest
 from collections import Counter
@@ -47,7 +48,16 @@ class ReviewReadScopeTests(unittest.TestCase):
             second = observed()
             self.assertNotEqual(first, second)
             self.assertEqual(reads[str(self.source.resolve())], 2)
+            # 正文变化不重解析结构：单元解析缓存按 structure.confirmed.json 的
+            # 版本判定，同一份结构在两次评估间不必重复解析（确定性快路）。
+            self.assertEqual(units.call_count, 1)
+            # 真正改变单元输入时才必须重新解析，并让下一次评估看到新单元。
+            (self.batch / '01_source/structure.confirmed.json').write_text(json.dumps({'units': [{
+                'unit_id': 'q-1', 'unit_kind': 'standalone', 'numbers': [1],
+                'stem': '1. B source sentence.'}]}), encoding='utf-8')
+            observed()
             self.assertEqual(units.call_count, 2)
+            self.assertEqual(review._confirmed_review_units(self.batch)[0]['stem'], '1. B source sentence.')
         self.assertIsNone(review._EVALUATION_READS.get())
 
     def test_evaluate_rounds_owns_scope_without_caching_verdict_or_masking_changed_source(self):
@@ -78,6 +88,9 @@ class ReviewReadScopeTests(unittest.TestCase):
             self.assertNotEqual(first['sample_source_bindings'], second['sample_source_bindings'])
         self.assertIsNone(review._EVALUATION_READS.get())
 
+    @unittest.skipIf(sys.platform == 'win32',
+                     'Windows 的 st_ctime 是创建时间，恢复 mtime 的同尺寸改写无法从 stat 版本发现；'
+                     '要覆盖需按内容哈希校验，代价高于该缓存的目的（生产写入必然改变 mtime）')
     def test_source_change_inside_scope_is_not_hidden_even_with_restored_mtime(self):
         import os
         @review._evaluation_reads
