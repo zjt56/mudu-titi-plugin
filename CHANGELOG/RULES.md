@@ -1,5 +1,9 @@
 # RULES — 规则与强调台账
 
+## 2026-11-13：AI 运维必须自动接收报错并闭环处理
+
+用户明确要求：把批次报错交给 AI 运维后，运维应自动读取具体错误证据、分析原因、执行已授权的实际修复、运行原失败检查复验并续跑，不停在建议或等待用户重复点击。显式 `runner run` 的非零失败在执行锁释放后自动调用 `operations.handoff_if_available`；运维长测试/安装请求必须有动作级等待窗口但仍受会话硬截止、取消和未知回执保护；investigation 升级 repair 时重置调查读取预算。自治安装仅在用户通过可信本地配置接口明确授权且源码根匹配时启用，仍须隔离工作区、测试、计划、CAS 安装、重启及原检查复验；不自动上传、发布、改审核差异或改锁定控制面。流水线自行通过旧故障时可结案，但必须记录 `resolution_source=pipeline_progress` 且界面显示“流水线已复验”，不得冒称 AI 运维修复完成。落地：`app/workflow/runner.py`、`lib/operations-agent.js`、`app/workflow/operations_development.py`、`app/workflow/operations.py`、`lib/client.js`；验证见 `CHANGELOG/2026-11-13-ai-operations-autonomous-closure.md`。
+
 ## 2026-11-13：短文填空图注空与视觉栏目身份一致性
 
 批次11（StarterUnit3Welcome第三课时）答案填充卡点修复的经验固化：①短文填空/选词填空材料行里

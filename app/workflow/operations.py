@@ -622,11 +622,12 @@ def _discover(folder):
                                    if row.get("status") == "unknown" and row.get("request_id")]
                     prior = incident["status"]
                     incident.update(status="resolved", eligible=False, attempt_id=None,
-                                    lease_expires_at=0, not_before=0, prior_disposition=prior)
+                                    lease_expires_at=0, not_before=0, prior_disposition=prior,
+                                    resolution_source="pipeline_progress", resolved_by_operations=False)
                     if quarantined:
                         incident["quarantined_receipts"] = quarantined
                     _settle_code_repair(folder, incident, "resolved")
-                    detail = "原阶段已由当前消费者复验通过；保留历史发现，不再调查旧卡点"
+                    detail = "流水线自行推进后，原阶段经当前消费者复验通过；标记 resolution_source=pipeline_progress，不代表 AI 运维执行了修复"
                     if quarantined:
                         detail += ("；历史未确认请求保持隔离、不重放：" + "、".join(quarantined[:3]))
                     _event(incident, "reconcile", "resolved", detail, checked)

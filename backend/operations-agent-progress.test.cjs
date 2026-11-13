@@ -184,6 +184,68 @@ test('ordinary model thinking is not interrupted by heartbeat or a short no-prog
   thinking.resolve(); await f.manager.drain(); await f.manager.dispose();
 });
 
+test('long test and install requests outlive the ordinary HTTP window and keep final receipts', async () => {
+  for (const action of ['code_repair', 'install_code_repair']) {
+    const f = await fixture({ managerOptions: { requestTimeoutMs: 10, codeTestRequestTimeoutMs: 150,
+      installRequestTimeoutMs: 150, heartbeatMs: 60000, maxAttemptMs: 500 },
+    backend: (_path, init) => {
+      if (init.body?.action === action) return new Promise(resolve => setTimeout(() => resolve({
+        request_id: init.body.request_id, status: 'completed', evidence: action === 'code_repair'
+          ? { passed: true, status: 'tests_passed' } : { restart_required: true },
+      }), 35));
+    }, program: async ({ call }) => {
+      const result = await call(action, action === 'code_repair' ? { operation: 'test', tests: ['workflow.test_mock'] } : { confirm: true });
+      assert.equal(action === 'code_repair' ? result.passed : result.restart_required, true);
+    } });
+    await f.run();
+    assert.equal(f.calls.filter(c => c.body?.action === action).length, 1);
+    assert.ok(!f.calls.some(c => c.body?.input?.state === 'outcome_unknown'));
+    assert.ok(!f.events.some(e => e.state === 'backend_disconnected'));
+    await f.manager.dispose();
+  }
+});
+
+test('session deadline still cancels extended test and install requests without replay', async () => {
+  for (const action of ['code_repair', 'install_code_repair']) {
+    const f = await fixture({ managerOptions: { requestTimeoutMs: 10, codeTestRequestTimeoutMs: 200,
+      installRequestTimeoutMs: 200, maxAttemptMs: 35 },
+    backend: (_path, init) => init.body?.action === action ? never() : undefined,
+    program: async ({ call }) => { await assert.rejects(call(action,
+      action === 'code_repair' ? { operation: 'test', tests: ['workflow.test_mock'] } : { confirm: true })); } });
+    await f.run();
+    assert.equal(f.calls.filter(c => c.body?.action === action).length, 1);
+    assert.ok(f.calls.find(c => c.body?.action === action).signal.aborted);
+    assert.ok(f.calls.some(c => c.body?.input?.state === 'outcome_unknown'));
+    assert.ok(!f.calls.some(c => c.body?.action === 'release'));
+    await f.manager.dispose();
+  }
+});
+
+test('confirmed promotion gives repair a fresh read budget after investigation reaches its cap', async () => {
+  const f = await fixture({ managerOptions: { maxReadOnlyActions: 2 },
+    backend: (path, init) => {
+      if (path.endsWith('/claim')) return { mode: 'investigation', attempt_id: 'read-fence', session_id: init.body.session_id };
+      if (init.body?.action === 'promote') return { request_id: init.body.request_id, status: 'completed', evidence: {
+        incident_id: 'incident', mode: 'repair', attempt_id: 'write-fence', session_id: init.body.session_id,
+      } };
+    }, program: async ({ turns, call }) => {
+      if (turns === 1) {
+        await call('diagnose'); await call('read_evidence', { path: 'report.json' });
+        await call('record_finding', { summary: 'specific parser evidence' });
+      } else {
+        const result = await call('code_repair', { operation: 'read_lines', path: 'app/workflow/mock.py' });
+        assert.notEqual(result.code, 'no_substantive_progress');
+        assert.equal(result.host_progress.reads_without_progress, 1);
+        await call('verify'); await call('finish', { outcome: 'resolved', summary: 'original check verified' });
+      }
+    } });
+  await f.run();
+  assert.equal(f.turns, 2);
+  assert.equal(f.calls.find(c => c.body?.action === 'code_repair').body.attempt_id, 'write-fence');
+  assert.ok(f.events.some(e => e.state === 'resolved'));
+  await f.manager.dispose();
+});
+
 test('tool schema exposes bounded code search and line reads', async () => {
   const f = await fixture({ program: async ({ tools }) => {
     const schema = tools.get('operations_code_repair').parameters;

@@ -45,6 +45,9 @@ LOCKED = frozenset((
 ))
 PRODUCTION = re.compile(r"app/workflow/[a-z][a-z0-9_]*\.py")
 TEST = re.compile(r"app/workflow/test_[a-z0-9_]*\.py")
+# Python scripts use numbered/hyphenated stage directories; their regressions
+# remain ordinary workflow unittest modules with the existing test/install semantics.
+SCRIPT = re.compile(r"app/scripts/(?:[a-z0-9_][a-z0-9_-]*/)*[a-z_][a-z0-9_]*\.py")
 UNIT_TEST = re.compile(r"workflow\.[a-z][a-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){0,2}")
 SKIP_DIRS = frozenset(("__pycache__", ".git", ".mypy_cache", ".pytest_cache",
                        "node_modules", "workflows", ".venv", "venv", ".learnings"))
@@ -148,7 +151,9 @@ def _regular(path):
 
 def allowed(relative):
     relative = str(relative).replace("\\", "/")
-    if relative in LOCKED or not (PRODUCTION.fullmatch(relative) or TEST.fullmatch(relative)):
+    if (relative in LOCKED
+            or any(marker in relative.lower() for marker in SECRET_MARKERS)
+            or not (PRODUCTION.fullmatch(relative) or TEST.fullmatch(relative) or SCRIPT.fullmatch(relative))):
         return False
     return True
 
@@ -157,10 +162,12 @@ def classify(relative):
     relative = str(relative).replace("\\", "/")
     if relative in LOCKED:
         return "locked"
-    if PRODUCTION.fullmatch(relative):
-        return "production"
+    if not allowed(relative):
+        return "other"
     if TEST.fullmatch(relative):
         return "test"
+    if PRODUCTION.fullmatch(relative) or SCRIPT.fullmatch(relative):
+        return "production"
     return "other"
 
 
@@ -221,14 +228,24 @@ def _copy(source, destination):
 def files(root):
     """Allowlisted source files currently present in ``root`` (repo root)."""
     result = {}
-    base = Path(root) / "app" / "workflow"
-    if not base.is_dir():
-        return result
-    for path in sorted(base.glob("*.py")):
-        relative = "app/workflow/" + path.name
-        if allowed(relative) and path.is_file() and not path.is_symlink():
-            result[relative] = path
-    return result
+    root = Path(root)
+    for prefix, recursive in (("app/workflow", False), ("app/scripts", True)):
+        try:
+            base = _safe(root, prefix)
+        except ValueError:
+            continue
+        if not base.is_dir():
+            continue
+        for current, dirs, names in os.walk(base):
+            current = Path(current)
+            dirs[:] = [name for name in dirs if recursive and name not in SKIP_DIRS
+                       and not name.startswith(".") and not (current / name).is_symlink()]
+            for name in sorted(names):
+                path = current / name
+                relative = prefix + "/" + path.relative_to(base).as_posix()
+                if allowed(relative) and _regular(path) is not None:
+                    result[relative] = path
+    return dict(sorted(result.items()))
 
 
 def capture(root, *, head=None):
@@ -306,13 +323,11 @@ def _workspace(job):
 def fingerprint(job):
     workspace = _workspace(job)
     entries = {}
-    for path in sorted((workspace / "app" / "workflow").glob("*.py")):
-        relative = "app/workflow/" + path.name
-        if allowed(relative):
-            try:
-                entries[relative] = _sha(path.read_bytes())
-            except OSError:
-                entries[relative] = "missing"
+    for relative, path in files(workspace).items():
+        try:
+            entries[relative] = _sha(path.read_bytes())
+        except OSError:
+            entries[relative] = "missing"
     return _sha(json.dumps(entries, sort_keys=True).encode())
 
 
@@ -616,6 +631,9 @@ def install(job, *, backup_dir, allow=False):
         if not authorization["allowed"]:
             raise ValueError("install_disabled")
     plan = job.get("plan")
+    if plan:
+        for change in plan.get("changes", []):
+            _safe(_workspace(job), change["path"])
     if not plan or plan.get("code_fingerprint") != fingerprint(job):
         raise ValueError("current_install_plan_required")
     if authorization["autonomous"]:

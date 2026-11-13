@@ -300,6 +300,9 @@ class OperationsTests(unittest.TestCase):
             self.assertEqual(result["incident"]["findings"], original["incident"]["findings"])
             if passed:
                 self.assertEqual(result["incident"]["prior_disposition"], "needs_deep_repair")
+                self.assertEqual(result["incident"]["resolution_source"], "pipeline_progress")
+                self.assertFalse(result["incident"]["resolved_by_operations"])
+                self.assertIn("不代表 AI 运维执行了修复", result["incident"]["events"][-1]["detail"])
 
     def test_legacy_answers_prewrite_refusal_reconciles_without_replay(self):
         claim = self.claim()

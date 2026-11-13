@@ -1265,11 +1265,25 @@ def _skip_agent_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
 def cmd_run(args) -> int:
     batch_dir = Path(args.batch_dir).expanduser().resolve()
     try:
+        # Keep the explicit runner's execution lock until the stage driver has
+        # finished, then publish the first deterministic blocker only after the
+        # lock is released so Harness can safely claim the batch.  This mirrors
+        # auto._result's safe handoff and leaves the optional operations service
+        # unable to interfere with ordinary runner execution.
         with _single_run_lock(batch_dir):
-            return _cmd_run_locked(batch_dir, args)
+            code = _cmd_run_locked(batch_dir, args)
     except RuntimeError as exc:
         print(f"✗ {exc}")
         return 3
+    if code != 0 and not getattr(args, "dry_run", False):
+        try:
+            from . import operations
+            operations.handoff_if_available(batch_dir)
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+            # Operations is an additive capability; a missing/stale Host must
+            # never change the explicit runner's original result.
+            pass
+    return code
 
 
 def _cmd_run_locked(batch_dir: Path, args) -> int:
