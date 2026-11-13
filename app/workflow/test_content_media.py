@@ -60,6 +60,21 @@ class ContentMediaTests(unittest.TestCase):
             with self.assertRaisesRegex(cm.MediaError, 'NOT_VERIFIED'):
                 cm.build_snapshot(self.root, {'media': [{'path': relative}]}, {})
 
+    def test_coalesced_image_marker_binds_nothing_but_real_refs_still_do(self):
+        # Evidence prose may merge images as `[IMG image4/5/6.jpeg]`; that is not
+        # a real path and must not reject the artifact. Individual files bind.
+        self.assertEqual(cm._candidate('image4/5/6.jpeg', '01_source/media', self.root), None)
+        self.assertEqual(cm._candidate('[IMG image7/8/9.jpeg]'.replace('[IMG ', '').replace(']', ''),
+                                       '01_source/media', self.root), None)
+        self.assertEqual(cm._candidate('image4.jpeg', '01_source/media', self.root),
+                         '01_source/media/image4.jpeg')
+        with self.assertRaises(cm.MediaError):
+            cm._candidate('01_source/other/image4.jpeg', '01_source/media', self.root)
+        context = dict(self.context, types={"items": [{"evidence": ["[IMG image4/5/6.jpeg]"]}]})
+        snapshot = cm.build_snapshot(self.root, context, self.hashes)
+        self.assertEqual(len(snapshot["media"]), 1)
+        self.assertEqual(snapshot["media"][0]["path"], "01_source/media/a.png")
+
     def test_marker_alone_is_not_evidence(self):
         snapshot = cm.build_snapshot(self.root, {"text": "[IMG a.png]"}, {})
         self.assertEqual(snapshot["media"], [])

@@ -103,6 +103,17 @@ def _candidate(value, directory, root):
         raise MediaError("MEDIA_PATH_INVALID")
     if "/" not in value:
         value = directory + "/" + value
+    # An evidence/caption may merge several images into one marker such as
+    # `[IMG image4/5/6.jpeg]` or `[IMG image7/8/9.jpeg]`. That is descriptive
+    # prose, not a path to a real file: bind no media rather than reject the
+    # whole artifact for a non-existent directory. Real individual references
+    # (image4.jpeg …) still bind normally and keep their hash proof.
+    # Only the coalesced `[IMG 4/5/6.jpeg]` form is prose. A real path segment
+    # such as `2024/25.pdf` (year/"25") must not be silently dropped, so require
+    # the whole value to end in one image suffix after the merged numbers.
+    if re.search(r"(?<![A-Za-z])\d\s*/\s*\d", value) and re.search(
+            r"(?<![A-Za-z])\d\s*/\s*\d[^/]*\.(?:png|jpe?g|gif|webp|bmp|tiff?)$", value, re.I):
+        return None
     relative = _relative(value)
     if Path(relative).suffix.lower() not in IMAGE_SUFFIXES:
         return None
