@@ -663,6 +663,10 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
                     return {"ran": False, "reason": "结构归类响应未完成"}
                 native_failure = {"check": "NATIVE_RESPONSE_INCOMPLETE", "message": "结构原生响应未完成"}
         except Exception as exc:  # noqa: BLE001 - native failures retain evidence, never fallback
+            from .model_admission import deferral
+            waiting = deferral(exc)
+            if waiting:
+                return {"ran": False, "reason": str(exc), **waiting}
             if not native_selected:
                 return {"ran": False, "reason": "结构归类调用失败：" + str(exc)[:160]}
             native_failure = {"check": "NATIVE_STRUCTURE_FAILED", "message": str(exc)[:2400],
@@ -779,7 +783,8 @@ def auto_review(batch_dir, invoke_fn=None, config=None, *, force: bool = False) 
         response = invoke_fn(prompt, run_dir, config)
         reply = response.get("response") if isinstance(response, dict) else response
     except Exception as exc:  # noqa: BLE001 - AI 失败不得阻断结构闸门
-        return {"ran": False, "reason": "复核调用失败：" + str(exc)[:160]}
+        from .model_admission import deferral
+        return {"ran": False, "reason": "复核调用失败：" + str(exc)[:160], **deferral(exc)}
     accepted = sanitize(reply, raw_lines, nums)
     ranges = sanitize_ranges(reply, raw_lines)
     if not accepted and not ranges:

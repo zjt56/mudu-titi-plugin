@@ -57,6 +57,9 @@ def main(argv=None):
 
     from workflow.phonetic_structure import verified_groups, shape
     verified = verified_groups(args.batch)
+    from workflow.table_structure import verified_groups as verified_tables
+    from workflow.question_content import table_blank_stem_numbers
+    table_verified = verified_tables(args.batch)
     problems = []
     for unit in units(batch):
         if not isinstance(unit, dict):
@@ -85,6 +88,7 @@ def main(argv=None):
 
         if kind == "group":
             phonetic_material, phonetic_alias = shape(unit, verified)
+            table_blanks = table_blank_stem_numbers(unit, table_verified)
             # A8：题组必须有 material 与 subquestions
             # 听力组题的材料是音频，跳过听力时允许 material 为空（不伪造文本）。
             # 「每小题目包含内容、无共享材料」的合法形态（四线三格空白网格/看图题）不要求
@@ -101,7 +105,7 @@ def main(argv=None):
                     problems.append(f"{uid}: 存在非对象子题（A9）")
                     continue
                 num = sub.get("number")
-                if _is_blank(sub.get("stem")) and not phonetic_alias:
+                if _is_blank(sub.get("stem")) and not phonetic_alias and num not in table_blanks:
                     problems.append(f"{uid} 第{num}题: 子题 stem 为空（A9）")
                 if _is_blank(sub.get("answer")):
                     problems.append(f"{uid} 第{num}题: 子题 answer 为空（A9）")

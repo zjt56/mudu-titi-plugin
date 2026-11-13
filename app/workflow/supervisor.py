@@ -392,6 +392,35 @@ def _healing_input_change(folder, manifest, healing):
         [stage_id, recorded, current], sort_keys=True).encode()).hexdigest()
 
 
+def _new_local_work(folder, manifest, healing, state):
+    """One local opportunity per ready input binding, never a model exemption.
+
+    auto owns the local preflight and enforces provider limits at actual model
+    entrypoints. Merely being an unfinished agent stage is not sufficient here.
+    """
+    from . import auto, manifest as mf
+    diagnosed = healing.get("last_stage")
+    if not diagnosed:
+        events = healing.get("events") or []
+        latest = events[-1] if isinstance(events, list) and events else None
+        diagnosed = latest.get("stage") if isinstance(latest, dict) else None
+    seen = state.get("cooldown_work")
+    seen = dict(seen) if isinstance(seen, dict) else {}
+    new_work = False
+    for stage_id in auto.local_ready_stages(folder, manifest):
+        record = (manifest.get("stages") or {}).get(stage_id) or {}
+        if (stage_id not in LOCAL_STAGES or stage_id == diagnosed
+                or record.get("status") not in {"pending", "invalidated"}):
+            continue
+        inputs = mf.input_hashes(folder, manifest, contracts.STAGE_BY_ID[stage_id])
+        binding = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+        if seen.get(stage_id) != binding:
+            seen[stage_id] = binding
+            new_work = True
+    state["cooldown_work"] = seen
+    return new_work
+
+
 def _new_deferred_work(folder, manifest, deferred, state):
     """Grant one opportunity per newly ready independent stage/input binding."""
     from . import manifest as mf
@@ -559,10 +588,15 @@ class WorkflowSupervisor:
             state.update(no_progress_attempts=0, status="progress",
                          healing_inputs_rechecked=inputs_changed)
             state.pop("escalation", None)
-        # Progress metadata alone cannot cancel a self-heal diagnosis, and a
-        # provider rate limit always wins, even when actual input bytes changed.
-        retry_at = max(reservation, _cooldown(folder), healing_retry)
-        if retry_at > now:
+        # Keep external deadlines visible even when independent local preflight
+        # can run. Each ready binding gets one opportunity across restarts; it
+        # must not clear a provider limit or replenish the no-progress budget.
+        provider_retry = _cooldown(folder)
+        retry_at = max(reservation, provider_retry, healing_retry)
+        local_opportunity = (max(provider_retry, healing_retry) > now
+                             and _new_local_work(folder, manifest,
+                                                 healing if healing_retry > now else {}, state))
+        if retry_at > now and not local_opportunity:
             if (retry_at != state.get("next_retry_at") or state.get("progress") != progress
                     or reservation != state.get("retry_reservation_at") or new_input_evidence):
                 state.update(progress=progress, next_retry_at=retry_at,
@@ -573,7 +607,7 @@ class WorkflowSupervisor:
         # New independent ready work gets one chance per actual input binding.
         deferred = _deferred_stages(manifest)
         new_work = _new_deferred_work(folder, manifest, deferred, state) if deferred else False
-        if new_work and state.get("status") in {"exhausted", "waiting_external"}:
+        if new_work and not local_opportunity and state.get("status") in {"exhausted", "waiting_external"}:
             state.update(status="scheduled", no_progress_attempts=0,
                          escalation="被延后的阶段：%s；新增独立工作继续推进" % "、".join(sorted(deferred)),
                          updated_at=now)
@@ -582,7 +616,7 @@ class WorkflowSupervisor:
         result = _read(folder / "workflow" / RESULT)
         temporary_failure = _transient(result, healing)
         exhausted = attempts >= self.config.max_no_progress and not temporary_failure
-        if exhausted and state.get("status") != "exhausted":
+        if exhausted and not local_opportunity and state.get("status") != "exhausted":
             state.update(status="exhausted", next_retry_at=now + self.config.exhausted_cooldown,
                          retry_reservation_at=now + self.config.exhausted_cooldown,
                          escalation="连续调度无有效本地进展；已降频，保留质量阻断，等待输入/配置修正或长冷却探测",
@@ -595,7 +629,8 @@ class WorkflowSupervisor:
         state.update(version=1,
                      status="exhausted" if exhausted else ("waiting_external" if temporary_failure else "scheduled"),
                      progress=progress, no_progress_attempts=attempts + 1,
-                     next_retry_at=now + delay, retry_reservation_at=now + delay,
+                     next_retry_at=max(retry_at, now + delay),
+                     retry_reservation_at=max(reservation, now + delay),
                       last_dispatched_at=now, updated_at=now)
         detail = json.dumps(result, sort_keys=True, ensure_ascii=False)[:2000]
         state["error_signature"] = hashlib.sha256(detail.encode()).hexdigest()[:16]
@@ -613,8 +648,8 @@ class WorkflowSupervisor:
                 return "removed"
             if isinstance(dispatched, dict) and dispatched.get("started") is False:
                 state.update(status="active", no_progress_attempts=attempts,
-                             next_retry_at=now + self.config.interval,
-                             retry_reservation_at=now + self.config.interval)
+                             next_retry_at=max(retry_at, now + self.config.interval),
+                             retry_reservation_at=max(reservation, now + self.config.interval))
                 _write_existing(folder, LEDGER, state)
                 return "active"
         except Exception as exc:  # a single broken batch must not kill supervision
@@ -693,6 +728,9 @@ class WorkflowSupervisor:
         def watch():
             while not self._stop.is_set():
                 try:
+                    # Clear before inspecting work: a wake arriving during the
+                    # scan/settle must remain set until wait observes it.
+                    self._wake.clear()
                     if not self._has_work():
                         # No paper task needs automatic driving: pause instead of
                         # polling everything forever. Resume on wake() or any of
@@ -702,7 +740,11 @@ class WorkflowSupervisor:
                             self.settle()
                         except Exception:
                             LOGGER.exception("Workflow supervisor settle failed")
-                        self._wake.clear()
+                        if self._has_work():
+                            self._paused = False
+                            continue
+                        if self._stop.is_set():
+                            break
                         if self._wake.wait(self.config.pause_poll):
                             self._paused = False
                             continue
@@ -719,6 +761,7 @@ class WorkflowSupervisor:
 
     def stop(self, timeout=5.0):
         self._stop.set()
+        self._wake.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=timeout)

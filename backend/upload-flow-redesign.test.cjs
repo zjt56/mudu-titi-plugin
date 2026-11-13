@@ -43,13 +43,13 @@ test('当前试卷内容审核与上传格式检查结束后自动切到下一�
   assert.match(client, /const queue = h\('div', \{ style: \{ flex: 1, minHeight: 190/);
   assert.match(client, /pendingBatches\.length === 0\s*\n?\s*\? h\(EmptyState/);
   assert.doesNotMatch(client, /没有任何处理中试卷时整块排队区收起/);
-  // 无阶段时不显示「0 / 0 阶段」进度条。
-  assert.match(client, /items\.length \? h\('div', \{ style: \{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7/);
+  // 主图保留真实节点状态，头部不再重复进度条与更新时间。
+  assert.doesNotMatch(client, /pctAll|进度更新：|setLastRefresh/);
 });
 
-test('流程图精修：紧凑两行节点名、方向箭头、已完成段用中性色、阶段进度', () => {
+test('流程图精修：紧凑两行节点名、方向箭头、已完成段用中性色、无重复阶段进度', () => {
   assert.match(client, /const DONE = \{ completed: true, approved: true, skipped: true, completed_with_findings: true \}/);
-  assert.match(client, /doneN \+ ' \/ ' \+ items\.length\)/);
+  assert.doesNotMatch(client, /doneN \+ ' \/ ' \+ items\.length\)/);
   assert.match(client, /arrows\.map/);   // 方向箭头消除蛇形回绕的阅读歧义
   assert.match(client, /s\.line/); // 连线按状态取色：已走过/运行中/未走
   assert.match(client, /--wf-flow-line-live/); // 运行中连线流动虚线

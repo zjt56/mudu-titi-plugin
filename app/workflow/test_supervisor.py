@@ -171,6 +171,90 @@ class SupervisorTest(SupervisorFixture):
         self.make_supervisor(dispatch).one_tick()
         dispatch.assert_called_once_with("active")
 
+    def test_new_local_ready_binding_runs_once_during_external_cooldown(self):
+        folder = self.make_batch(stages={"answers": {"status": "failed"},
+                                         "validate": {"status": "pending"}})
+        put(folder / "workflow/self-heal.json", {"last_stage": "answers", "next_retry_at": 1800})
+        cooldown = folder / "workflow/agent-runs/.rate-limit-cooldown"
+        cooldown.parent.mkdir()
+        cooldown.write_text("2000")
+        manifest = supervisor._read(folder / "workflow/manifest.json")
+        put(folder / "workflow" / supervisor.LEDGER, {
+            "status": "exhausted", "no_progress_attempts": 9,
+            "progress": supervisor._progress(manifest),
+            "next_retry_at": 2100, "retry_reservation_at": 2100})
+        dispatch = Mock(return_value={"started": True})
+        with patch.object(auto, "local_ready_stages", return_value=("validate",)), \
+             patch("workflow.manifest.input_hashes", return_value={"input": "one"}):
+            watch = self.make_supervisor(dispatch)
+            self.assertEqual(watch.one_tick()["batches"]["active"], "dispatched")
+            first = self.state(folder)
+            self.assertEqual(first["no_progress_attempts"], 10)
+            self.assertGreaterEqual(first["next_retry_at"], 2100)
+            self.assertEqual(self.make_supervisor(dispatch).one_tick()["batches"]["active"], "cooldown")
+            self.assertEqual(dispatch.call_count, 1)
+            self.assertEqual(self.state(folder)["no_progress_attempts"], 10)
+        with patch.object(auto, "local_ready_stages", return_value=("validate",)), \
+             patch("workflow.manifest.input_hashes", return_value={"input": "two"}):
+            self.assertEqual(self.make_supervisor(dispatch).one_tick()["batches"]["active"], "dispatched")
+        self.assertEqual(dispatch.call_count, 2)
+        self.assertEqual(cooldown.read_text(), "2000")
+        self.assertEqual(supervisor._read(folder / "workflow/self-heal.json")["next_retry_at"], 1800)
+
+    def test_self_heal_cooldown_allows_only_independent_new_local_work(self):
+        folder = self.make_batch(stages={"validate": {"status": "pending"},
+                                         "underlines": {"status": "pending"}})
+        put(folder / "workflow/self-heal.json", {
+            "events": [{"stage": "validate"}], "next_retry_at": 1900})
+        dispatch = Mock(return_value={"started": True})
+        watch = self.make_supervisor(dispatch)
+        with patch.object(auto, "local_ready_stages", return_value=("validate",)):
+            self.assertEqual(watch.one_tick()["batches"]["active"], "cooldown")
+            dispatch.assert_not_called()
+        with patch.object(auto, "local_ready_stages", return_value=("validate", "underlines")):
+            self.assertEqual(watch.one_tick()["batches"]["active"], "dispatched")
+            self.assertEqual(watch.one_tick()["batches"]["active"], "cooldown")
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertGreaterEqual(self.state(folder)["next_retry_at"], 1900)
+
+    def test_real_local_ready_probe_dispatches_no_audio_skip_during_provider_wait(self):
+        folder = self.make_batch(stages={"answers": {"status": "failed"},
+                                         "audio": {"status": "pending"}})
+        put(folder / "workflow/self-heal.json", {"last_stage": "answers", "next_retry_at": 1900})
+        cooldown = folder / "workflow/agent-runs/.rate-limit-cooldown"
+        cooldown.parent.mkdir()
+        cooldown.write_text("2000")
+        dispatch = Mock(return_value={"started": True})
+        # The helper still owns candidate selection; stand in only for the
+        # upstream consumer proof, which this tiny manifest does not fabricate.
+        with patch.object(auto, "load_bridge", return_value={}), \
+             patch("workflow.manifest.dependency_satisfied", return_value=True):
+            watch = self.make_supervisor(dispatch)
+            self.assertEqual(watch.one_tick()["batches"]["active"], "dispatched")
+            self.assertEqual(self.make_supervisor(dispatch).one_tick()["batches"]["active"], "cooldown")
+        dispatch.assert_called_once_with("active")
+        self.assertEqual(self.state(folder)["next_retry_at"], 2000)
+        self.assertEqual(self.state(folder)["no_progress_attempts"], 1)
+
+    def test_local_dispatch_refusal_keeps_external_retry_deadline(self):
+        folder = self.make_batch(stages={"validate": {"status": "pending"}})
+        put(folder / "workflow/self-heal.json", {"last_stage": "answers", "next_retry_at": 1900})
+        dispatch = Mock(return_value={"started": False})
+        with patch.object(auto, "local_ready_stages", return_value=("validate",)):
+            self.assertEqual(self.make_supervisor(dispatch).one_tick()["batches"]["active"], "active")
+        self.assertEqual(self.state(folder)["no_progress_attempts"], 0)
+        self.assertEqual(self.state(folder)["next_retry_at"], 1900)
+
+    def test_provider_cooldown_does_not_grant_model_only_stage_a_dispatch(self):
+        folder = self.make_batch(stages={"tag": {"status": "pending"}})
+        cooldown = folder / "workflow/agent-runs/.rate-limit-cooldown"
+        cooldown.parent.mkdir()
+        cooldown.write_text("2000")
+        dispatch = Mock()
+        with patch.object(auto, "local_ready_stages", return_value=()):
+            self.assertEqual(self.make_supervisor(dispatch).one_tick()["batches"]["active"], "cooldown")
+        dispatch.assert_not_called()
+
     def test_active_thread_has_no_retry_consumption(self):
         folder = self.make_batch(stages={"extract": {"status": "running"}})
         dispatch = Mock()
@@ -621,6 +705,52 @@ class IdlePauseTest(SupervisorFixture):
         self.assertFalse(supervisor.has_pending_work(self.workflows, busy=lambda folder: False))
         self.make_batch("waiting", stages={"review": {"status": "pending"}})
         self.assertTrue(supervisor.has_pending_work(self.workflows, busy=lambda folder: False))
+
+    def test_wake_during_idle_scan_is_not_lost(self):
+        watch = self.make_supervisor(busy=lambda folder: False)
+        ticked = threading.Event()
+        scans = []
+        def has_work():
+            scans.append(True)
+            if len(scans) == 1:
+                # Reproduce a producer waking after the scan read no work but
+                # before the idle branch starts waiting. No timing sleeps.
+                watch.wake()
+            return len(scans) >= 3
+        def tick():
+            ticked.set()
+            watch._stop.set()
+        with patch.object(watch, "_has_work", side_effect=has_work), \
+             patch.object(watch, "settle"), patch.object(watch, "one_tick", side_effect=tick):
+            watch.start()
+            try:
+                self.assertTrue(ticked.wait(2), "idle transition swallowed wake")
+            finally:
+                self.assertTrue(watch.stop(timeout=2))
+
+    def test_idle_recheck_finds_work_appearing_during_settle_without_wake(self):
+        watch = self.make_supervisor(busy=lambda folder: False)
+        ready, ticked = threading.Event(), threading.Event()
+        def tick():
+            ticked.set()
+            watch._stop.set()
+        with patch.object(watch, "_has_work", side_effect=ready.is_set), \
+             patch.object(watch, "settle", side_effect=ready.set), \
+             patch.object(watch, "one_tick", side_effect=tick):
+            watch.start()
+            try:
+                self.assertTrue(ticked.wait(2))
+            finally:
+                self.assertTrue(watch.stop(timeout=2))
+
+    def test_stop_wakes_parked_watchdog(self):
+        watch = self.make_supervisor(busy=lambda folder: False)
+        settled = threading.Event()
+        with patch.object(watch, "_has_work", return_value=False), \
+             patch.object(watch, "settle", side_effect=settled.set):
+            watch.start()
+            self.assertTrue(settled.wait(2))
+            self.assertTrue(watch.stop(timeout=2))
 
     def test_watch_loop_parks_on_wake_while_nothing_needs_work(self):
         done = self.make_batch("done")

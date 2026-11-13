@@ -312,7 +312,8 @@ def inspect_media(task, args, *, identify=None, route_identity=None, cache=None,
                 copied.write_bytes(raw)
                 calls = 1
                 response = (identify or visual_transport.identify)(
-                    [{"id": mid, "path": str(copied)}], prompt, stage=task["stage"], max_tokens=1200, timeout=timeout)
+                    [{"id": mid, "path": str(copied)}], prompt, stage=task["stage"], max_tokens=1200, timeout=timeout,
+                    **({"batch_dir": root} if identify is None else {}))
             if not isinstance(response, dict) or not isinstance(response.get("text"), str) or not response["text"].strip():
                 raise RuntimeError("MEDIA_VISION_EMPTY_RESPONSE")
             if any(response.get(k) != expected[k] for k in ("provider", "model")):
@@ -326,7 +327,11 @@ def inspect_media(task, args, *, identify=None, route_identity=None, cache=None,
             description = response["text"].strip()
         except MediaError:
             raise
-        except (OSError, RuntimeError, ValueError, TypeError):
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            from .model_admission import deferral
+            waiting = deferral(exc)
+            if waiting:
+                return {**base, "cached": False, "model_calls": 0, **waiting}
             retry_after = stamp + 60
             _cache_put(cache, key, {"key": key, "status": "deferred", "retry_after": retry_after})
             return {**base, "status": "deferred", "code": "MEDIA_VISION_UNAVAILABLE",

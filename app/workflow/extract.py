@@ -70,9 +70,11 @@ def same_line_numbers(line: str, first: int) -> list[int]:
     """
     if not re.search(r"(?:_{2,}|\u3000{2,}|[(（]\s*[)）])", line):
         return []
+    # Match the same real column boundaries as scoped source reconciliation.
+    # A single prose space before an age (``She is 15.She ...``) is not a column.
+    from workflow.source_anchors import printed_tokens
     extra: list[int] = []
-    for match in INLINE_ITEM.finditer(line):
-        number = int(match.group(1))
+    for _offset, number in printed_tokens(line):
         if number in extra or number == first and not extra:
             continue
         if number <= 0:

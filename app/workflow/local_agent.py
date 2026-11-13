@@ -590,6 +590,9 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False, co
                 # None remains valid for Windows and mock/no-op lock contexts.
                 inherited_lock = ({"pass_fds": (lock_handle.fileno(),)}
                                   if os.name != "nt" and lock_handle is not None else {})
+                from .model_admission import resolve_batch, require_model_call
+                require_model_call(resolve_batch(batch_dir=settings.get("_content_batch_dir"), run_dir=root),
+                                   error_type=AgentError)
                 call_started = time.monotonic()
                 metadata["wall_start"] = datetime.now(timezone.utc).isoformat()
                 process = None

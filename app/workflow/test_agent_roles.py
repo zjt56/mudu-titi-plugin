@@ -1,5 +1,7 @@
 """内置子 Agent 角色必须与阶段契约一一对应，且真正进入提示词。"""
+import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from workflow import agent_roles, agent_tasks, contracts
@@ -50,6 +52,46 @@ class AgentRoleContractTest(unittest.TestCase):
         self.assertIn('审核差异是产出，不是执行故障', task['prompt'])
         self.assertIn('request upstream regeneration', agent_tasks.RULES['review'])
         self.assertIn('not execution failures', agent_tasks.RULES['review'])
+
+    def test_actual_prompt_fields_and_hierarchy_follow_authoritative_contracts(self):
+        from workbench import taxonomy
+        unit = {"unit_id": "q-1", "numbers": [1], "unit_kind": "standalone"}
+        for stage in ("answers", "knowledge"):
+            task = agent_tasks._build_task_template(stage, 200000, {}, {}, [], [unit])
+            role = task["prompt"].split("[子 Agent]", 1)[1].split("Complete valid JSON", 1)[0]
+            self.assertNotIn("{{", role)
+            for heading in ("## 职责", "## 权限边界", "脑子检查", "## 出问题怎么办"):
+                self.assertIn(heading, role)
+            if stage == "answers":
+                for key in agent_tasks.ANSWERS_ALLOWED:
+                    self.assertIn(f"`{key}`", role)
+                self.assertIn("Word", role)
+                self.assertIn("PDF/OCR", role)
+                self.assertIn("逐字保留", role)
+            else:
+                for kind in taxonomy.WHOLE_UNIT_TYPES:
+                    self.assertIn(kind, role)
+                self.assertIn("子题 `knowledge=[]`", role)
+                self.assertNotIn("每道子题都要有一个", role)
+                self.assertIn("教材匹配暂停", role)
+        # 常量改变即进入真实 prompt，角色 Markdown 无第二份题型列表。
+        with patch.object(taxonomy, "WHOLE_UNIT_TYPES", frozenset({"测试整组题型"})):
+            prompt = agent_tasks._build_task_template("knowledge", 200000, {}, {}, [], [unit])["prompt"]
+            self.assertIn("整组题型（测试整组题型）", prompt)
+        with patch.dict(agent_tasks.EXAMPLE_REQUIRED, answers=("answers", "evidence")):
+            role = agent_roles.section("answers")
+            self.assertIn("产物必填字段：`answers`、`evidence`；", role)
+
+    def test_task_build_rejects_missing_duplicate_or_unknown_role_slots(self):
+        unit = {"unit_id": "q-1", "numbers": [1], "unit_kind": "standalone"}
+        for stage, token in (("answers", "{{answers_fields}}"), ("knowledge", "{{knowledge_hierarchy}}")):
+            original = (agent_roles.ROLES_DIR / f"{stage}.md").read_text(encoding="utf-8")
+            for replacement in ("旧字段/层级说明", token + token, token + "{{unknown_contract}}"):
+                with self.subTest(stage=stage, replacement=replacement), tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / f"{stage}.md").write_text(original.replace(token, replacement), encoding="utf-8")
+                    with patch.object(agent_roles, "ROLES_DIR", Path(tmp)):
+                        with self.assertRaises(agent_roles.RoleError):
+                            agent_tasks._build_task_template(stage, 200000, {}, {}, [], [unit])
 
     def test_header_is_machine_readable_for_routing(self):
         for stage in agent_tasks.ARTIFACTS:

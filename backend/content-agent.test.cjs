@@ -172,7 +172,7 @@ test('media inspection remains bounded by task deadline and explicit cancellatio
     assert.match(mediaSignal.reason.message, stop ? /stopped/ : /time budget exceeded/);
     assert.equal(f.calls.filter(call => call.body?.action === 'inspect_media').length, 1);
     assert.equal(f.calls.some(call => call.body?.action === 'submit_candidate'), false);
-    assert.equal(f.manager.status().tasks[0].status, 'outcome_unknown');
+    assert.equal(f.manager.status().tasks[0].status, stop ? 'outcome_unknown' : 'reconcile_exhausted');
     assert.deepEqual(states(f), ['running']);
     assert.equal(f.agents[0].disposed, true);
     await f.manager.dispose();
@@ -248,7 +248,7 @@ test('claim failure or mismatched identity never creates a session or sends life
     } });
     await f.run(); await f.manager.tick(); await f.manager.drain();
     assert.equal(f.agents.length, 0); assert.equal(f.calls.filter(call => call.path.endsWith('/claim')).length, 1);
-    assert.deepEqual(states(f), []); assert.equal(f.manager.status().tasks[0].status, 'failed'); await f.manager.dispose();
+    assert.deepEqual(states(f), []); assert.equal(f.manager.status().tasks[0].status, 'outcome_unknown'); await f.manager.dispose();
   }
 });
 
@@ -346,6 +346,65 @@ test('uncertain committed submission reconciles acceptance without overwriting b
   assert.equal(f.manager.status().tasks[0].status, 'completed'); await f.manager.dispose();
 });
 
+test('committed claim and submit recover after consecutive failed receipt GETs with one side effect', async () => {
+  for (const phase of ['claim', 'malformed', 'submit']) {
+    let claims = 0, submits = 0, reads = 0, committed = false;
+    const f = await fixture({ managerOptions: { makeSessionId: () => 'exact-session', intervalMs: 1 },
+      backend: (path, init) => {
+        if (path.endsWith('/claim')) {
+          claims++;
+          if (phase === 'malformed') { committed = true; return {}; }
+          if (phase === 'claim') { committed = true; throw new Error('claim persisted, response lost'); }
+        }
+        if (init.body?.action === 'submit_candidate') {
+          submits++;
+          if (phase === 'submit') { committed = true; throw new Error('candidate persisted, response lost'); }
+        }
+        if (path === '/api/content-agent/tasks/' + encodeURIComponent(task().task_id) && committed) {
+          if (++reads <= 3) throw new Error('temporary receipt outage');
+          return { task: task({ session_id: 'exact-session', status: phase !== 'submit' ? 'claimed' : 'completed', accepted: phase === 'submit' }) };
+        }
+      }, program: a => a.call('submit_candidate', { candidate: {} }) });
+    await f.run();
+    for (let i = 0; i < 5; i++) { await new Promise(resolve => setTimeout(resolve, 10)); await f.manager.tick(); await f.manager.drain(); }
+    assert.equal(claims, 1); assert.equal(submits, 1, JSON.stringify({ phase, status: f.manager.status(), events: f.events }));
+    assert.equal(f.agents.length, 1); assert.equal(f.agents[0].init.sessionId, 'exact-session');
+    assert.equal(f.manager.status().tasks[0].status, 'completed');
+    assert.equal(f.calls.some(call => call.body?.status === 'failed'), false);
+    await f.manager.dispose();
+  }
+});
+
+test('unknown claim reconciliation is finite and cannot revive stopped, deleted, cancelled or foreign tasks', async () => {
+  for (const scenario of ['finite', 'stop', 'deleted', 'cancelled', 'foreign', 'queued', 'deadline']) {
+    let reads = 0;
+    const f = await fixture({ managerOptions: { makeSessionId: () => 'exact-session', ...(scenario === 'deadline' ? { maxAttemptMs: 15 } : {}) },
+      backend: path => {
+        if (path.endsWith('/claim')) throw new Error('claim response lost');
+        if (path === '/api/content-agent/tasks/' + encodeURIComponent(task().task_id)) {
+          reads++;
+          if (scenario === 'deleted') return { code: 'not_found' };
+          if (scenario === 'cancelled') return { task: task({ session_id: 'exact-session', status: 'cancelled', accepted: true }) };
+          if (scenario === 'queued') return { task: task({ session_id: 'exact-session', status: 'queued' }) };
+          if (scenario === 'foreign') return { task: task({ session_id: 'foreign', status: 'claimed', accepted: true }) };
+          throw new Error('receipt unavailable');
+        }
+      } });
+    await f.run();
+    if (scenario === 'stop') { await f.manager.stop(); f.manager.start(); await f.manager.tick(); }
+    if (scenario === 'deadline') await new Promise(resolve => setTimeout(resolve, 25));
+    for (let i = 0; i < 12; i++) await f.manager.tick();
+    await f.manager.drain();
+    assert.equal(f.agents.length, 0); assert.equal(f.calls.filter(call => call.path.endsWith('/claim')).length, 1);
+    assert.ok(reads <= 8);
+    if (scenario === 'deleted' || scenario === 'cancelled') assert.equal(reads, 1);
+    if (scenario === 'stop' || scenario === 'deadline') assert.equal(reads, 0);
+    if (scenario === 'deadline') assert.equal(f.manager.status().tasks[0].status, 'reconcile_exhausted');
+    assert.notEqual(f.manager.status().tasks[0].status, 'completed');
+    await f.manager.dispose();
+  }
+});
+
 test('semantic state rejection in HTTP 200 stops before creating a model', async () => {
   const f = await fixture({ backend: path => path.endsWith('/state') ? { error: 'owner invalid', accepted: false, retryable: false } : undefined });
   await f.run(); assert.equal(f.agents.length, 0);
@@ -428,7 +487,7 @@ test('unavailable or disabled manager never claims, construction is inert, effec
 });
 
 async function storedFixture(t, options = {}) {
-  const root = await fs.mkdtemp(join(tmpdir(), 'content-agent-purge-'));
+  const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'content-agent-purge-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const cwd = join(root, 'plugin'), sessionId = options.sessionId || 'stored-session';
   const owned = join(root, 'sessions', 'project', sessionId), artifact = join(owned, 'session.v4.jsonl' + (options.zstd ? '.zstd' : ''));

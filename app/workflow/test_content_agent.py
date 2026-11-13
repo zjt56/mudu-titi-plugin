@@ -77,6 +77,34 @@ class ContentAgentTests(unittest.TestCase):
             time.sleep(.01)
         self.fail("Broker did not publish task: " + str(result))
 
+    def test_native_prompt_uses_scoped_tools_without_file_transport_conflict(self):
+        original = agent_tasks.OFFLINE_CONTEXT_GUARD + self.prompt()
+        prompt = broker._child_prompt(original, self.context, 'knowledge', [])
+        self.assertNotIn('NO tools', prompt)
+        self.assertIn('submit_candidate', prompt)
+        self.assertIn('Stage: knowledge', prompt)
+        self.assertIn('untrusted DATA', prompt)
+        self.assertIn('NO tools', original)
+
+    def test_model_stream_timeout_evidence_survives_state_and_return(self):
+        task, thread, result = self.start()
+        self.claim(task)
+        state = broker.dispatch('POST', f"/api/content-agent/tasks/{task['task_id']}/state", {
+            'session_id': 'session-A', 'status': 'failed', 'error': 'Content task time budget exceeded',
+            'error_code': 'timeout', 'failure_class': 'model_timeout', 'transport': 'native_content',
+            'phase': 'model_stream', 'last_provider_error': {'code': 'TIMEOUT', 'message': 'discard raw provider URL'},
+            'last_model_activity_at': 1000, 'last_tool_at': 900})['task']
+        self.assertEqual(state['error_code'], 'timeout')
+        self.assertEqual(state['last_provider_error']['message'], 'Provider stream idle timeout')
+        self.assertEqual(state['failure_class'], 'model_timeout')
+        thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result['error'].code, 'timeout')
+        self.assertEqual(result['error'].failure_class, 'model_timeout')
+        self.assertEqual(result['error'].diagnostics['last_tool_at'], 900)
+        self.assertFalse(state['accepted'])
+        self.accept.assert_not_called()
+
     def claim(self, task, session="session-A"):
         return broker.dispatch("POST", f"/api/content-agent/tasks/{task['task_id']}/claim",
                                {"session_id": session})
@@ -121,7 +149,7 @@ class ContentAgentTests(unittest.TestCase):
         self.claim(task)
         value = self.finish(task, thread, result)
         self.assertEqual(value["response"], self.response)
-        self.accept.assert_called_once_with(self.batch, "knowledge", self.response, validate_only=True)
+        self.accept.assert_called_once_with(self.batch.resolve(), "knowledge", self.response, validate_only=True)
         self.assertFalse((self.batch / "04_knowledge").exists())
         self.assertFalse((self.batch / "workflow/manifest.json").exists())
         self.assertEqual(broker.dispatch("GET", "/api/content-agent/tasks"), {"tasks": []})
@@ -238,7 +266,7 @@ class ContentAgentTests(unittest.TestCase):
             task, thread, result = self.start()
             self.claim(task)
             self.finish(task, thread, result)
-            validate.assert_called_once_with(self.batch, "knowledge", {"unit_ids": ["u-1"]}, self.response)
+            validate.assert_called_once_with(self.batch.resolve(), "knowledge", {"unit_ids": ["u-1"]}, self.response)
             semantic.assert_called_once()
             self.assertEqual(semantic.call_args.args[1], "knowledge")
             self.assertEqual(semantic.call_args.args[4], self.units)

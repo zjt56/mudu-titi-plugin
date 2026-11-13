@@ -14,7 +14,7 @@ class VisualTransportError(RuntimeError):
 
 
 def identify(images: list[dict], prompt: str, *, stage: str = "extract",
-             max_tokens: int = 1200, timeout: float = 90) -> dict:
+             max_tokens: int = 1200, timeout: float = 90, batch_dir=None) -> dict:
     """Send all image bytes in one native pi-ai call and return route + text.
 
     Images have ``id`` and ``path`` keys. The caller owns output-schema parsing
@@ -28,6 +28,8 @@ def identify(images: list[dict], prompt: str, *, stage: str = "extract",
         {"id": image["id"], "path": str(Path(image["path"]).resolve())}
         for image in images
     ], "max_tokens": max_tokens}
+    from .model_admission import require_model_call
+    require_model_call(batch_dir, error_type=VisualTransportError)
     result = _call(payload, timeout)
     if not all(isinstance(result.get(key), str) and result[key].strip()
                for key in ("provider", "model", "text")):

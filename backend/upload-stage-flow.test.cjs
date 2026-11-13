@@ -275,11 +275,9 @@ test('late polling responses cannot overwrite newer progress and errors remain v
   assert.ok(f.updates.some(x => typeof x.value === 'string' && x.value.includes('进度刷新失败')));
 });
 
-test('repair feedback preserves twelve classes and never claims success before verification', () => {
+test('flow omits redundant repair copy while preserving twelve classes and verification semantics', () => {
   const { tree, context } = renderFlow(stages(), null, { advance: { running: true, self_heal: { status: 'diagnosing', stage: 'format_gate' } } });
-  const status = walk(tree, node => node.props.role === 'status')[0];
-  assert.match(text(status), /AI 自动修复：正在判断卡点原因/);
-  assert.equal(status.props['aria-live'], 'polite');
+  assert.doesNotMatch(text(tree), /AI 自动修复：正在判断卡点原因|进度更新：/);
   assert.equal(nodesOf(tree).length, 12);
   assert.match(context.recoveryProgressText({ self_heal: { status: 'repaired' } }), /局部修复，继续校验/);
   assert.match(context.recoveryProgressText({ self_heal: { status: 'failed' } }), /尚未修复/);

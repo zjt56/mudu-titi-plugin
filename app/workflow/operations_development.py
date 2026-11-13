@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import codecs
 import difflib
 import hashlib
 import json
@@ -315,7 +316,10 @@ def fingerprint(job):
     return _sha(json.dumps(entries, sort_keys=True).encode())
 
 
-def read(job, relative, *, offset=0, limit=24000):
+READ_CHARS = 12000
+
+
+def _read_source(job, relative):
     relative = str(relative or "").replace("\\", "/")
     path = _safe(_workspace(job), relative)
     if not allowed(relative):
@@ -323,12 +327,109 @@ def read(job, relative, *, offset=0, limit=24000):
     path = _regular(path)
     if path is None:
         raise ValueError("file_missing")
-    offset = max(0, min(int(offset), 10_000_000))
-    limit = max(1, min(int(limit), 24000))
-    with path.open("r", encoding="utf-8", errors="replace") as stream:
-        stream.seek(offset)
-        return {"path": str(relative).replace("\\", "/"), "offset": offset,
-                "text": stream.read(limit), "limit": limit}
+    if path.stat().st_size > MAX_FILE_BYTES:
+        raise ValueError("source_too_large")
+    raw = path.read_bytes()
+    if len(raw) > MAX_FILE_BYTES:
+        raise ValueError("source_too_large")
+    return relative, raw
+
+
+def read(job, relative, *, offset=0, limit=READ_CHARS):
+    """Legacy offsets are bytes; continuation offsets always end on UTF-8 boundaries."""
+    relative, raw = _read_source(job, relative)
+    requested = max(0, min(int(offset), 10_000_000))
+    start = min(requested, len(raw))
+    # Old callers may seek into a multibyte character. Skip its remaining bytes
+    # rather than introduce a replacement character into valid source code.
+    while start < len(raw) and raw[start] & 0xC0 == 0x80:
+        start += 1
+    limit = max(1, min(int(limit), READ_CHARS))
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    chunks, count, end = [], 0, start
+    while end < len(raw) and count < limit:
+        piece = decoder.decode(raw[end:end + 1])
+        end += 1
+        if piece:
+            chunks.append(piece)
+            count += len(piece)
+    if end == len(raw):
+        chunks.append(decoder.decode(b"", final=True))
+    text = "".join(chunks)
+    return {"path": relative, "requested_offset": requested, "offset": start,
+            "offset_unit": "bytes", "next_offset": end, "text": text,
+            "limit": limit, "eof": end == len(raw), "truncated": end < len(raw),
+            "sha256": _sha(raw)}
+
+
+def read_lines(job, relative, *, start_line=1, limit=80):
+    """Read numbered lines with an explicit continuation and a bounded response."""
+    relative, raw = _read_source(job, relative)
+    lines = raw.decode("utf-8", "replace").splitlines(keepends=True)
+    start = max(1, int(start_line))
+    limit = max(1, min(int(limit), 400))
+    selected, size = [], 0
+    for index in range(start - 1, min(len(lines), start - 1 + limit)):
+        line = lines[index]
+        if size + len(line) > READ_CHARS:
+            if not selected:
+                raise ValueError("line_exceeds_read_limit: use read with byte offsets")
+            break
+        selected.append({"line": index + 1, "text": line})
+        size += len(line)
+    next_line = start + len(selected)
+    eof = next_line > len(lines)
+    return {"path": relative, "start_line": start, "lines": selected,
+            "text": "".join(row["text"] for row in selected), "limit": limit,
+            "next_line": next_line, "eof": eof, "truncated": not eof,
+            "total_lines": len(lines), "sha256": _sha(raw)}
+
+
+def search(job, query, *, relative=None, cursor=None, start_line=1,
+           max_matches=20, context=2):
+    """Bounded literal source search; never evaluate patterns or execute commands."""
+    if not isinstance(query, str) or not query or len(query) > 500 or "\n" in query:
+        raise ValueError("search_query_invalid")
+    if cursor is not None and (not isinstance(cursor, dict)
+                               or set(cursor) != {"path", "start_line"}):
+        raise ValueError("search_cursor_invalid")
+    if relative is not None:
+        name, _ = _read_source(job, relative)
+        names = [name]
+    else:
+        names = sorted(files(_workspace(job)))
+    begin = max(1, int(start_line))
+    if cursor:
+        name, _ = _read_source(job, cursor["path"])
+        if name not in names:
+            raise ValueError("search_cursor_invalid")
+        names = names[names.index(name):]
+        begin = max(1, int(cursor["start_line"]))
+    maximum = max(1, min(int(max_matches), 80))
+    context = max(0, min(int(context), 3))
+    matches, used, scanned = [], 0, 0
+    for file_index, name in enumerate(names):
+        name, raw = _read_source(job, name)
+        if scanned + len(raw) > 16_000_000:
+            return {"query": query, "matches": matches, "truncated": True,
+                    "next_cursor": {"path": name, "start_line": begin if file_index == 0 else 1}}
+        scanned += len(raw)
+        lines = raw.decode("utf-8", "replace").splitlines()
+        for index in range(begin - 1 if file_index == 0 else 0, len(lines)):
+            if query not in lines[index]:
+                continue
+            # Clip unusually long individual lines explicitly, preserving line location.
+            lo, hi = max(0, index - context), min(len(lines), index + context + 1)
+            rows = [{"line": at + 1, "text": lines[at][:1000],
+                     "truncated": len(lines[at]) > 1000} for at in range(lo, hi)]
+            cost = sum(len(row["text"]) for row in rows)
+            if len(matches) >= maximum or used + cost > READ_CHARS:
+                return {"query": query, "matches": matches, "truncated": True,
+                        "next_cursor": {"path": name, "start_line": index + 1}}
+            matches.append({"path": name, "line": index + 1,
+                            "context": rows, "sha256": _sha(raw)})
+            used += cost
+    return {"query": query, "matches": matches, "truncated": False, "next_cursor": None}
 
 
 def write(job, relative, content, *, expected_sha=None):

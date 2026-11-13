@@ -209,6 +209,11 @@ def build(batch_dir, *, endpoint: str | None = None, model: str | None = None,
     if limit and limit > 0:
         images = images[:limit]
     for path, rel in images:
+        from .model_admission import require_model_call, deferral, ModelCooldownError
+        try:
+            require_model_call(root)
+        except ModelCooldownError as exc:
+            return {"artifact": None, "model_calls": 0, "reason": str(exc), **deferral(exc)}
         try:
             info = _identify(path, rel, endpoint, model, key)
         except VisualReviewError as exc:
@@ -337,7 +342,8 @@ def _build_routed(root, *, limit=0, force=False):
         try:
             calls += 1
             response = visual_transport.identify([{k: r[k] for k in ("id", "path")} for r in chunk],
-                                                  BATCH_PROMPT, stage="extract", max_tokens=2400, timeout=90)
+                                                  BATCH_PROMPT, stage="extract", max_tokens=2400, timeout=90,
+                                                  batch_dir=root)
             if any(response.get(k) != route[k] for k in ("provider", "model")):
                 raise VisualReviewError("视觉调用期间模型路由已变化，拒绝缓存旧路由结果")
             result = _parse_json(response.get("text", "")) or {}
@@ -363,6 +369,10 @@ def _build_routed(root, *, limit=0, force=False):
                 found[source["id"]] = record
                 cache[source["cache_key"]] = record
         except (RuntimeError, OSError, ValueError, VisualReviewError) as exc:
+            from .model_admission import deferral
+            waiting = deferral(exc)
+            if waiting:
+                return {"artifact": None, "model_calls": calls - 1, "reason": str(exc), **waiting}
             failures.append({"images": [r["id"] for r in chunk], "reason": str(exc)[:220]})
             break
     _write_candidate(root / ROUTED_CACHE, {"version": ROUTED_VERSION, "items": cache})

@@ -253,8 +253,9 @@ def _media_path(url):
 
 
 class _Builder:
-    def __init__(self, media_map=None, verified=None):
+    def __init__(self, media_map=None, verified=None, table_stems=None):
         self.verified_phonetic = verified or {}
+        self.table_stems = table_stems or {}
         self.media_map = media_map if isinstance(media_map, dict) else None
         self.media_sources = {}
         self.errors = []
@@ -628,6 +629,13 @@ class _Builder:
         from .phonetic_structure import shape
         phonetic_material, alias_children = shape(raw, self.verified_phonetic) if not child else (False, False)
         data = self.canonical(raw, uid)
+        if child and not _nonempty(data.get('stem')) and uid in self.table_stems:
+            projection = self.table_stems[uid]
+            data['stem'] = projection['stem']
+            self.warnings.append({
+                'code': 'TABLE_BLANK_STEM_PROJECTED', 'unit_id': uid,
+                'message': '仅上传副本使用当前原表格的原题号作答空档；本地题目未改写',
+                **{key: projection[key] for key in ('source_ref', 'table_number', 'source_line')}})
         # 服务端接受旧称/简称；本地在映射入口就归一，后续标签校验与落库都用正式名。
         if isinstance(data.get("type"), str):
             data["type"] = TYPE_ALIASES.get(data["type"], data["type"])
@@ -888,6 +896,41 @@ class _Builder:
         return output
 
 
+def _source_table_stems(batch, batch_dir):
+    """Transport-only nonempty stems from uniquely proven printed table blanks.
+
+    Compare the untouched local unit before numbering/canonical projection. A
+    source marker supplies the exact token; never manufacture text from a number.
+    """
+    if batch_dir is None or not isinstance(batch, dict) or not isinstance(batch.get('items'), list):
+        return {}
+    from .table_structure import verified_groups
+    from .question_content import table_blank_stem_numbers
+    from .wire_format import normalize_blank_text
+    verified = verified_groups(Path(batch_dir) / '06_batch/batch_meta.json')
+    result = {}
+    for unit in batch['items']:
+        if not isinstance(unit, dict):
+            continue
+        uid = str(unit.get('unit_id') or unit.get('id') or '')
+        proof = verified.get(uid) or {}
+        for number in table_blank_stem_numbers(unit, verified):
+            ref = (proof.get('blanks') or {}).get(number) or {}
+            marker = ref.get('marker')
+            if not isinstance(marker, str):
+                continue
+            pattern = rf'(?<!\d){re.escape(str(number))}[.．][\s\u3000\xa0]*(?:<u>[\s\u3000\xa0]*</u>)+'
+            matches = list(re.finditer(pattern, marker))
+            if len(matches) != 1:
+                continue
+            stem = normalize_blank_text(matches[0].group(0))
+            if re.fullmatch(rf'{number}[.．]\s*_{{2,}}', stem) is None:
+                continue
+            result[f'{uid}/{number}'] = {'stem': stem, **{key: ref[key] for key in
+                ('source_ref', 'table_number', 'source_line')}}
+    return result
+
+
 def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, name=None,
                   upload_mode=None, upload_target=None, media_map=None,
                   id_prefix=None, batch_dir=None) -> dict:
@@ -902,7 +945,7 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
     """
     from .phonetic_structure import verified_groups
     verified = verified_groups(Path(batch_dir) / '06_batch/batch_meta.json') if batch_dir is not None else {}
-    builder = _Builder(media_map, verified)
+    builder = _Builder(media_map, verified, _source_table_stems(batch, batch_dir))
     if id_prefix is not None:
         if not isinstance(id_prefix, str) or (id_prefix and not re.fullmatch(
                 r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}", id_prefix)):

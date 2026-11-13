@@ -73,7 +73,7 @@ class CandidateEvidenceTests(unittest.TestCase):
         (outside / 'response.json').write_text(json.dumps({'leak': 'other batch'}), encoding='utf-8')
         runs = self.folder / 'workflow' / 'agent-runs'
         runs.mkdir(parents=True)
-        if not hasattr(Path, 'is_junction'):
+        if __import__('os').name != 'nt' or not hasattr(Path, 'is_junction'):
             self.skipTest('junction detection is Windows-only')
         import subprocess
         made = subprocess.run(['cmd', '/c', 'mklink', '/J',

@@ -18,6 +18,12 @@ class RunnerAutoTest(unittest.TestCase):
         self.batch = Path(self.temp.name) / "batch"
         self.manifest = mf.new_manifest("batch", self.batch, {}, {})
         mf.save(self.batch, self.manifest)
+        # Scheduler fixtures must stay offline even when this host has a real
+        # model configured. Recovery-specific tests override this nested patch.
+        recovery = patch('workflow.self_heal.recover',
+                         return_value={'changed': False, 'status': 'offline'})
+        recovery.start()
+        self.addCleanup(recovery.stop)
         # 结构闸门的 AI 归类是生产路径；这些用例只验证调度/闸门语义，
         # 不能因为本机配置了模型路由就发起真实调用（曾把并发用例拖过 5 秒）。
         from workflow import structure_ai
@@ -25,6 +31,136 @@ class RunnerAutoTest(unittest.TestCase):
                                return_value={"ran": False, "reason": "测试离线，未调用模型"})
         offline.start()
         self.addCleanup(offline.stop)
+        for target in ('workflow.metadata_ai.auto_identify', 'workflow.lesson_bands.build',
+                       'workflow.visual_review.build'):
+            offline_model = patch(target, return_value={'status': 'unavailable', 'model_calls': 0})
+            offline_model.start()
+            self.addCleanup(offline_model.stop)
+
+    def test_cooldown_local_answers_and_managed_assemble_continue_to_validate(self):
+        self._ready_parallel_labels()
+        from workflow import batch_fill
+        (self.batch / batch_fill.STATE).write_text('{}', encoding='utf-8')
+        for stage_id in ('knowledge', 'explanations'):
+            mf.touch_stage(self.manifest, stage_id, mf.COMPLETED)
+        mf.save(self.batch, self.manifest)
+        calls, local_calls = [], []
+        def preflight(batch, stage):
+            local_calls.append(stage)
+            if stage != 'answers':
+                return None
+            current = mf.load(batch)
+            mf.touch_stage(current, stage, mf.COMPLETED)
+            mf.save(batch, current)
+            return 0, {'completed': True}
+        def assembled(batch):
+            target = batch / '06_batch/batch.json'
+            target.parent.mkdir(exist_ok=True)
+            target.write_text('{"items": []}', encoding='utf-8')
+            return 0
+        def record(batch, current, stage):
+            mf.touch_stage(current, stage.id, mf.COMPLETED)
+            return True
+        def validate(batch, current):
+            calls.append('validate')
+            mf.touch_stage(current, 'validate', mf.COMPLETED)
+            mf.save(batch, current)
+            return 0
+        auto._set_cooldown(self.batch, 300)
+        with patch('workflow.stage_preflight.run', side_effect=preflight), \
+             patch('workflow.assemble_local.try_assemble', side_effect=assembled) as assemble, \
+             patch.object(runner, '_record_success', side_effect=record), \
+             patch.object(runner, '_execute_command', side_effect=self._execute_offline({}, calls)), \
+             patch.object(runner, 'do_validate', side_effect=validate), \
+             patch.object(auto, '_parallel_ready_agents') as parallel, \
+             patch('workflow.local_agent.invoke') as invoke, \
+             patch.object(auto, '_auto_prepare_audio') as audio:
+            result = auto.advance(self.batch, auto.load_bridge(), stop_at='review')
+        self.assertEqual(local_calls, ['answers'])
+        assemble.assert_called_once_with(self.batch)
+        self.assertEqual(calls, ['meta', 'underlines', 'validate'])
+        self.assertEqual(mf.load(self.batch)['stages']['validate']['status'], mf.COMPLETED)
+        self.assertEqual(mf.load(self.batch)['stages']['audio']['status'], mf.SKIPPED)
+        self.assertFalse(result['failed_stages'])
+        self.assertGreater(auto._read_cooldown(self.batch), 0)
+        invoke.assert_not_called()
+        parallel.assert_not_called()
+        audio.assert_not_called()
+
+    def test_cooldown_unhandled_or_failed_local_candidate_never_dispatches_model(self):
+        self._ready_parallel_labels()
+        auto._set_cooldown(self.batch, 300)
+        with patch('workflow.stage_preflight.run', side_effect=lambda b, s: (
+                (3, {'reason': 'candidate rejected'}) if s == 'answers' else None)), \
+             patch.object(runner, '_execute_command') as execute, \
+             patch.object(auto, '_parallel_ready_agents') as parallel, \
+             patch('workflow.local_agent.invoke') as invoke:
+            result = auto.advance(self.batch, auto.load_bridge(), stop_at='assemble')
+        self.assertEqual(mf.load(self.batch)['stages']['answers']['status'], mf.PENDING)
+        self.assertTrue(any(row['stage'] == 'answers' and row['action'] == 'review'
+                            for row in result['pending_stages']))
+        self.assertTrue(any(row['stage'] == 'knowledge' and row['action'] == 'cooldown'
+                            for row in result['pending_stages']))
+        execute.assert_not_called()
+        parallel.assert_not_called()
+        invoke.assert_not_called()
+
+    def test_self_heal_wait_keeps_failed_stage_out_of_independent_dispatch(self):
+        self._ready_parallel_labels()
+        calls = []
+        with patch('workflow.self_heal.recover', return_value={
+                'stage': 'knowledge', 'status': 'cooldown', 'next_retry_at': 9999999999}), \
+             patch('workflow.self_heal._load', return_value={}), \
+             patch.object(auto, 'PARALLEL_AGENTS_ENABLED', False), \
+             patch.object(runner, '_execute_command', side_effect=self._execute_offline({}, calls)):
+            result = auto.advance(self.batch, auto.load_bridge(), stop_at='assemble')
+        self.assertIn('answers', calls)
+        self.assertNotIn('knowledge', calls)
+        self.assertEqual(mf.load(self.batch)['stages']['knowledge']['status'], mf.PENDING)
+        wait = next(row for row in result['pending_stages'] if row['stage'] == 'knowledge')
+        self.assertEqual(wait['action'], 'cooldown')
+        self.assertEqual(wait['next_retry_at'], 9999999999)
+
+    def test_cooldown_managed_assemble_decline_does_not_mark_success_or_fallback(self):
+        from workflow import batch_fill
+        (self.batch / batch_fill.STATE).write_text('{}', encoding='utf-8')
+        with patch('workflow.assemble_local.try_assemble', return_value=None) as assemble, \
+             patch.object(runner, '_record_success') as record, \
+             patch('workflow.local_agent.invoke') as invoke:
+            code, report = auto._cooldown_preflight(self.batch, contracts.STAGE_BY_ID['assemble'])
+        self.assertEqual(code, 3)
+        self.assertEqual(report['model_calls'], 0)
+        self.assertEqual(mf.load(self.batch)['stages']['assemble']['status'], mf.PENDING)
+        assemble.assert_called_once_with(self.batch)
+        record.assert_not_called()
+        invoke.assert_not_called()
+
+    def test_cooldown_does_not_replace_custom_bridge_with_local_preflight(self):
+        self._ready_parallel_labels()
+        auto._set_cooldown(self.batch, 300)
+        with patch('workflow.stage_preflight.run') as preflight, \
+             patch.object(runner, '_execute_command') as execute:
+            result = auto.advance(self.batch, {'answers': ['custom']}, stop_at='audio')
+        preflight.assert_not_called()
+        execute.assert_not_called()
+        self.assertEqual(result['action'], 'cooldown')
+
+    def test_local_ready_candidates_are_read_only_and_respect_bridge_and_dependencies(self):
+        self._ready_parallel_labels()
+        from workflow import batch_fill
+        (self.batch / batch_fill.STATE).write_text('{}', encoding='utf-8')
+        before = mf.manifest_path(self.batch).read_bytes()
+        with patch('workflow.answers_direct.build_payload', return_value={'answers': {'q': 'A'}}), \
+             patch('workflow.explanations_direct.build_payload', return_value=None), \
+             patch('workflow.stage_preflight.run') as run:
+            ready = auto.local_ready_stages(self.batch, self.manifest, auto.load_bridge())
+            custom = auto.local_ready_stages(self.batch, self.manifest, {'answers': ['custom']})
+        self.assertIn('answers', ready)
+        self.assertIn('audio', ready)
+        self.assertNotIn('assemble', ready)
+        self.assertNotIn('answers', custom)
+        self.assertEqual(mf.manifest_path(self.batch).read_bytes(), before)
+        run.assert_not_called()
 
     def test_second_run_is_rejected_while_one_holds_the_batch(self):
         from workflow import runner as runner_mod
@@ -292,6 +428,86 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertLess(calls.index('validate'), calls.index('audio'))
         self.assertEqual(mf.load(self.batch)['stages']['review']['status'], mf.PENDING)
 
+    def test_audio_model_does_not_hold_text_chain_but_review_joins_delivery(self):
+        self._exercise_audio_model_delivery(True)
+
+    def test_unaccepted_audio_model_does_not_release_review(self):
+        self._exercise_audio_model_delivery(False)
+
+    def _exercise_audio_model_delivery(self, audio_completed):
+        from workflow import agent, agent_protocol, agent_tasks, local_agent
+        self._ready_parallel_labels()
+        self.manifest = mf.load(self.batch)
+        self.manifest['inputs']['audio'] = {'exists': True, 'path': str(self.batch / 'audio.mp3')}
+        mf.save(self.batch, self.manifest)
+        audio_started, validated, audio_imported = (threading.Event() for _ in range(3))
+        calls = []
+        def export(batch, stage, **kw):
+            package = batch / 'model-packages' / stage
+            package.mkdir(parents=True)
+            (package / 'task.json').write_text(json.dumps({'prompt': stage + '\nFILE PROTOCOL: test'}))
+            return {'status': 'ready', 'task_id': stage, 'package_dir': str(package)}
+        def invoke(prompt, *args, **kw):
+            if prompt == 'audio':
+                audio_started.set()
+                self.assertTrue(validated.wait(5), 'Audio model blocked text validation')
+            return {'response': {'status': 'completed'}}
+        def install(batch, task_id, path):
+            if task_id == 'audio':
+                self.assertTrue(validated.is_set())
+                audio_imported.set()
+            calls.append(task_id)
+            state = mf.load(batch)
+            accepted = task_id != 'audio' or audio_completed
+            mf.touch_stage(state, task_id, mf.COMPLETED if accepted else mf.NEEDS_REVIEW)
+            mf.save(batch, state)
+            return {'completed': accepted}
+        def command(batch, state, stage):
+            if stage.id == 'assemble':
+                self.assertTrue(audio_started.wait(2))
+                self.assertFalse(audio_imported.is_set())
+                target = batch / '06_batch/batch.json'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('{}')
+            if stage.id == 'review':
+                self.assertTrue(audio_imported.is_set(), 'Review ran before audio delivery')
+            calls.append(stage.id)
+            mf.touch_stage(state, stage.id, mf.COMPLETED)
+            mf.save(batch, state)
+            return 0
+        def validate(batch, state):
+            self.assertFalse(audio_imported.is_set())
+            calls.append('validate')
+            mf.touch_stage(state, 'validate', mf.COMPLETED)
+            mf.save(batch, state)
+            validated.set()
+            return 0
+        bridge = auto.load_bridge()
+        bridge['assemble'] = bridge['review'] = ['offline']
+        with patch.object(auto, 'PARALLEL_AGENTS_ENABLED', True), \
+             patch.object(auto, '_auto_prepare_audio', return_value={'status': 'ready'}), \
+             patch.object(agent, 'configured', return_value=True), \
+             patch.object(local_agent, 'load_config', return_value={'max_input_chars': 10000, 'retries': 0}), \
+             patch('workflow.stage_preflight.run', return_value=None), \
+             patch('workflow.agent_prepare.prepare_answers'), \
+             patch.object(agent_protocol, 'export_task', side_effect=export), \
+             patch.object(agent_tasks, 'build_task', side_effect=lambda b, s, **kw: {'status': 'ready', 'prompt': s}), \
+             patch.object(agent_tasks, 'accept_result'), \
+             patch.object(local_agent, 'invoke', side_effect=invoke), \
+             patch('workflow.label_execution.run', side_effect=lambda b, s, c, r, **kw: invoke(s)), \
+             patch.object(agent_protocol, 'import_result', side_effect=install), \
+             patch.object(runner, '_execute_command', side_effect=command), \
+             patch.object(runner, 'do_validate', side_effect=validate):
+            auto.advance(self.batch, bridge, stop_at='review_gate')
+        self.assertLess(calls.index('assemble'), calls.index('audio'))
+        self.assertLess(calls.index('validate'), calls.index('audio'))
+        if audio_completed:
+            self.assertLess(calls.index('audio'), calls.index('review'))
+        else:
+            self.assertNotIn('review', calls)
+            self.assertEqual(mf.load(self.batch)['stages']['review']['status'], mf.PENDING)
+        self.assertEqual(calls.count('audio'), 1)
+
     def test_parallel_rejects_workers_without_validated_types_delivery(self):
         self._ready_after_structure()
         with patch('workflow.agent_protocol.export_task') as export:
@@ -306,6 +522,28 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertTrue(auto._is_rate_limited(
             'wf-agent-result: {"error_code": "rate_limit", "http_status": 429}'))
         self.assertFalse(auto._is_rate_limited("validation failed: rate_limit is not a field"))
+
+    def test_parallel_admission_cooldown_preserves_existing_deadline(self):
+        from workflow import agent_protocol, agent_tasks, local_agent
+        self._ready_parallel_labels()
+        auto._set_cooldown(self.batch, 300)
+        marker = auto._cooldown_path(self.batch).read_bytes()
+        class AdmissionWait(RuntimeError):
+            code = 'model_cooldown'
+        def export(batch, stage, **kw):
+            package = batch / 'cooldown-packages' / stage
+            package.mkdir(parents=True)
+            (package / 'task.json').write_text(json.dumps({'prompt': stage + '\nFILE PROTOCOL: test'}))
+            return {'status': 'ready', 'task_id': stage, 'package_dir': str(package)}
+        with patch('workflow.stage_preflight.run', return_value=None), \
+             patch.object(agent_protocol, 'export_task', side_effect=export), \
+             patch.object(agent_tasks, 'build_task', return_value={'status': 'ready', 'prompt': 'knowledge'}), \
+             patch.object(local_agent, 'invoke', side_effect=AdmissionWait('MODEL_COOLDOWN')):
+            result = auto._parallel_ready_agents(self.batch, [contracts.STAGE_BY_ID['knowledge']],
+                                                 {'max_input_chars': 10000, 'retries': 0})
+        self.assertEqual(result, {'knowledge': 4})
+        self.assertEqual(auto._cooldown_path(self.batch).read_bytes(), marker)
+        self.assertEqual(mf.load(self.batch)['stages']['knowledge']['status'], mf.PENDING)
 
     def test_parallel_rate_limit_becomes_cooldown_not_failed(self):
         from workflow import agent_protocol, agent_tasks, local_agent
@@ -365,6 +603,38 @@ class RunnerAutoTest(unittest.TestCase):
         pending = {row["stage"]: row for row in outcome["pending_stages"]}
         self.assertEqual(pending["review"]["action"], "cooldown")
         self.assertEqual(pending["review_gate"]["unmet_dependencies"], ["review"])
+
+    def test_new_blocker_is_published_before_next_independent_stage(self):
+        self._isolate_scheduler()
+        for spec in contracts.STAGES:
+            mf.touch_stage(self.manifest, spec.id, mf.COMPLETED)
+        for sid in ('meta', 'underlines'):
+            mf.touch_stage(self.manifest, sid, mf.PENDING)
+        mf.save(self.batch, self.manifest)
+        (self.batch / '06_batch').mkdir(parents=True, exist_ok=True)
+        (self.batch / '06_batch/batch.json').write_text('{}', encoding='utf-8')
+        events = []
+        def execute(batch, state, stage):
+            if stage.id == 'meta':
+                mf.touch_stage(state, 'meta', mf.FAILED)
+                mf.save(batch, state)
+                events.append('failed')
+                return 1
+            events.append('independent')
+            self.assertIn('published', events)
+            return 0
+        def handoff(batch):
+            if mf.load(batch)['stages']['meta']['status'] == mf.FAILED:
+                events.append('published')
+            return None
+        # Treat the second synthetic command as independent; this test isolates
+        # publication order, not the production meta -> underlines dependency.
+        with patch('workflow.operations.handoff_if_available', side_effect=handoff), \
+             patch.object(mf, 'dependency_satisfied', return_value=True), \
+             patch.object(runner, '_execute_command', side_effect=execute):
+            auto.advance(self.batch, {}, stop_at='validate')
+        self.assertLess(events.index('failed'), events.index('published'))
+        self.assertLess(events.index('published'), events.index('independent'))
 
     @unittest.skipIf(__import__("os").name == "nt", "Windows byte locks have different thread semantics")
     def test_auto_serializes_two_schedulers_for_same_batch(self):
@@ -975,7 +1245,7 @@ class RunnerAutoTest(unittest.TestCase):
         from workflow import agent, local_agent
         self._ready_parallel_labels()
         dispatched = []
-        def dispatch(batch, stages, config):
+        def dispatch(batch, stages, config, **kwargs):
             dispatched.extend(stage.id for stage in stages)
             state = mf.load(batch)
             for stage in stages:

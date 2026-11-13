@@ -14,7 +14,7 @@ function harness(fetch = async () => { throw new Error('unexpected request'); })
 
 test('all operation states are distinct from workflow quality and model claims', () => {
   const ctx = harness();
-  for (const [status, label] of Object.entries({ unclaimed: '未接手', queued: '排队', investigating: '调查', repairing: '修复', verifying: '复验', waiting_external: '待外部条件', cancelled: '已取消' })) {
+  for (const [status, label] of Object.entries({ unclaimed: '已触发', queued: '已触发', investigating: '调查中', repairing: '修复中', verifying: '复验中', waiting_external: '待外部条件', cancelled: '已取消' })) {
     assert.equal(ctx.operationsView({ status }).label, label);
   }
   assert.equal(ctx.operationsView(null).label, '未接手');
@@ -23,7 +23,7 @@ test('all operation states are distinct from workflow quality and model claims',
     assert.equal(ctx.operationsView({ status: 'recovered', verification }).label, '复验待确认');
   }
   assert.equal(ctx.operationsView({ status: 'recovered', verification: { passed: true, evidence_id: 'gate-receipt' } }).label, '已恢复');
-  assert.equal(ctx.operationsView({ status: 'repairing', verification: { passed: true } }).label, '修复');
+  assert.equal(ctx.operationsView({ status: 'repairing', verification: { passed: true } }).label, '修复中');
 });
 
 test('backend incident shapes require recorded evidence before resolved means recovered', () => {
@@ -37,8 +37,8 @@ test('backend incident shapes require recorded evidence before resolved means re
   assert.equal(ctx.operationsView({ ...incident, verification: { verified: 'true', evidence_id: 'r' } }).label, '复验待确认');
   assert.equal(ctx.operationsView({ ...incident, status: 'needs_deep_repair' }).label, '自动升级修复');
   assert.equal(ctx.operationsView({ status: 'waiting_evidence' }).label, '等待新证据');
-  assert.equal(ctx.operationsView({ ...incident, status: 'claimed', events: [{ action: 'apply_repair' }] }).label, '修复');
-  assert.equal(ctx.operationsView({ ...incident, status: 'claimed', events: [{ action: 'verify' }] }).label, '复验');
+  assert.equal(ctx.operationsView({ ...incident, status: 'claimed', events: [{ action: 'apply_repair' }] }).label, '修复中');
+  assert.equal(ctx.operationsView({ ...incident, status: 'claimed', events: [{ action: 'verify' }] }).label, '复验中');
 });
 
 test('unavailable host preserves confirmed enabled state and its readable reason', async () => {
@@ -95,7 +95,7 @@ test('heartbeat does not replace repair phase and unknown receipts are explicit'
     { action: 'heartbeat', timestamp: '2026-11-10T01:00:15Z', outcome: 'completed' },
   ] };
   const view = ctx.operationsView(item);
-  assert.equal(view.label, '修复');
+  assert.equal(view.label, '修复中');
   assert.equal(view.action, 'code_repair');
   assert.equal(view.heartbeat, '2026-11-10T01:00:15Z');
   const quarantined = ctx.operationsView({ ...item, status: 'queued' }, { receipts: [{ status: 'unknown' }] });
@@ -115,56 +115,98 @@ test('host attempt error and real recovery evidence remain separate', () => {
   assert.equal(view.verified, false);
 });
 
-test('operations toolbar keeps title and controls together with status on the next row', () => {
-  const toolbarStart = client.indexOf("className: 'wf-operations-toolbar'");
-  const statusStart = client.indexOf("className: 'wf-operations-status'", toolbarStart);
-  assert.ok(toolbarStart > 0 && statusStart > toolbarStart);
-  const toolbar = client.slice(toolbarStart, statusStart);
-  assert.match(toolbar, /flexWrap: 'nowrap'/);
-  assert.match(toolbar, /'AI运维'/);
-  assert.match(toolbar, /host\.enabled \? '关闭运维' : '启动运维'/);
-  assert.match(toolbar, /setRefresh\(\(n\) => n \+ 1\)/);
-  assert.match(toolbar, /'刷新'/);
-  assert.doesNotMatch(toolbar, /OperationsStatus|T\.hint \}, service/);
-  assert.match(client.slice(statusStart, statusStart + 750), /T\.hint \}, service/);
-  assert.match(client.slice(statusStart, statusStart + 750), /OperationsStatus/);
+
+function renderPanel({ host = {}, incident = null, batchName = 'fixture', hostError = '', recordError = '' } = {}) {
+  const states = [host, { batchName, incident, receipts: [] }, hostError, recordError, false, 0];
+  let index = 0;
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat().filter(v => v !== null && v !== undefined) }),
+    useState: () => [states[index++], () => {}], useRef: () => ({ current: null }), useEffect: () => {},
+  };
+  const ctx = harness();
+  ctx.require = () => React;
+  ctx.T = { hint: { color: 'var(--dsw-alias-label-secondary)' }, statusErr: { color: 'var(--dsw-alias-state-error-primary)' }, sectionTitle: {}, miniBtn: {} };
+  return ctx.OperationsPanel({ batchName });
+}
+function nodes(tree) { return [tree, ...(tree.children || []).flatMap(v => typeof v === 'object' ? nodes(v) : [])]; }
+function text(tree) { return (tree.children || []).map(v => typeof v === 'object' ? text(v) : String(v)).join(' '); }
+function healthy(overrides = {}) { return { loaded: true, enabled: true, available: true, running: true, loopAlive: true, lastPollAt: new Date().toISOString(), ...overrides }; }
+
+test('compact panel renders one status with necessary controls and no event log or session details', () => {
+  const tree = renderPanel({ host: healthy(), incident: { status: 'investigating', detail: 'validate: QUESTION_NOT_FOUND，缺少第3题', session_id: 'private-session' } });
+  const all = nodes(tree), content = text(tree);
+  assert.match(content, /AI运维 调查中 关闭运维 刷新/);
+  assert.match(content, /批次「fixture」（workflows\/fixture）：validate: QUESTION_NOT_FOUND，缺少第3题/);
+  assert.equal(all.filter(n => n.props.className === 'wf-operations-status').length, 1);
+  assert.equal(all.filter(n => n.type === 'button').length, 2);
+  assert.equal(tree.props.style.flexShrink, 0);
+  assert.equal(tree.props.style.paddingTop, 8);
+  assert.equal(all.find(n => n.props.className === 'wf-operations-hint').props.style.WebkitLineClamp, 2);
+  assert.ok(!all.some(n => ['details', 'summary', 'input'].includes(n.type) || n.props.role === 'log'));
+  assert.doesNotMatch(content, /private-session|最近扫描|暂无运维消息|最近运维事件|verification/);
+  assert.ok(all.every(n => n.props.style?.height !== 132));
 });
 
-test('panel omits analysis advice and shows automatic repair progress', () => {
-  const panel = client.slice(start, end);
-  assert.doesNotMatch(panel, /分析与建议|current\.incident\.findings/);
-  assert.match(panel, /首个阻断异常在安全检查点接手/);
-  assert.doesNotMatch(panel, /卡点自动接管、修复、复验并续跑/);
-  assert.doesNotMatch(panel, /仅在普通自愈失败后接手|个批次，自愈进行中/);
+test('closed, disconnected and stale services never render continuous monitoring', () => {
+  for (const [host, hostError, label] of [
+    [healthy({ enabled: false }), '', '已关闭'],
+    [healthy({ loaded: false, available: false }), 'Failed to fetch', '服务失联'],
+    [healthy({ available: false }), '', '服务不可用'],
+    [healthy({ running: false }), '', '监测已停止'],
+    [healthy({ loopAlive: false }), '', '监测已停止'],
+    [healthy({ pollStale: true }), '', '服务失联'],
+    [healthy({ lastPollAt: new Date(Date.now() - 30000).toISOString() }), '', '服务失联'],
+    [healthy({ lastPollError: '后端连接失败' }), '', '扫描异常'],
+  ]) {
+    const tree = renderPanel({ host, hostError });
+    assert.match(text(tree), new RegExp(label));
+    assert.doesNotMatch(text(tree), /持续监测中/);
+  }
 });
 
-test('panel is isolated beside diagnostics and has no repair or invented session navigation', () => {
-  const panel = client.slice(start, end);
+test('normal monitoring shows no invented anomaly, incident or historical attempts', () => {
+  const tree = renderPanel({ host: healthy({ healingCount: 2, attempts: [{ active: false, batch_name: 'old', state: 'session_failed', error: 'old error' }] }) });
+  assert.match(text(tree), /持续监测中/);
+  assert.doesNotMatch(text(tree), /异常|故障|未接手|old error|推进中|待命/);
+  assert.equal(nodes(tree).filter(n => n.props.className === 'wf-operations-hint').length, 0);
+  const pending = renderPanel({ host: healthy({ lastPollAt: '' }) });
+  assert.match(text(pending), /监测待确认/);
+  assert.equal(harness().operationsSummary(healthy(), null, { batchName: 'fixture' }).label, '记录读取中');
+});
+
+test('investigation and repair mode render their real phase rather than old action prose', () => {
+  for (const [mode, state, label] of [['investigation', 'investigating', '调查中'], ['repair', 'repairing', '修复中'], ['repair', 'waiting_repair', '等待修复锁']]) {
+    const host = healthy({ attempts: [{ batch_name: 'fixture', incident_id: 'i', active: true, mode, state }] });
+    const incident = { incident_id: 'i', status: 'claimed', mode, detail: 'answers：第2题来源绑定失败', events: [{ action: 'apply_repair' }] };
+    assert.match(text(renderPanel({ host, incident })), new RegExp(label));
+  }
+  const ctx = harness();
+  assert.equal(ctx.operationsView({ status: 'claimed', mode: 'investigation', events: [{ action: 'verify' }] }).label, '调查中');
+  assert.equal(ctx.operationsView({ status: 'claimed', mode: 'repair' }).label, '准备修复');
+  for (const [phase, label] of [['evidence_read', '定位代码'], ['code_write', '修改中'], ['code_test', '测试中'], ['no_substantive_progress', '修复无进展']]) {
+    assert.equal(ctx.operationsView({ incident_id: 'i', status: 'claimed', mode: 'repair', repair_progress: { phase } }).label, label);
+    const host = healthy({ attempts: [{ batch_name: 'fixture', incident_id: 'i', active: true, mode: 'repair', state: 'repairing', phase }] });
+    assert.match(text(renderPanel({ host, incident: { incident_id: 'i', status: 'claimed', mode: 'repair' } })), new RegExp(label));
+  }
+  assert.equal(ctx.operationsView({ status: 'claimed', mode: 'repair', lease_expires_at: 1, repair_progress: { phase: 'code_write' } }).label, '接手已过期');
+  assert.match(text(renderPanel({ host: healthy(), incident: { status: 'verifying' } })), /复验中/);
+  assert.match(text(renderPanel({ host: healthy(), incident: { status: 'recovered', verification: { passed: true, evidence_id: 'gate-1' } } })), /已恢复/);
+});
+
+test('record failures preserve exact batch and error without showing stale recovered status', () => {
+  const tree = renderPanel({ host: healthy(), incident: { status: 'recovered', verification: { passed: true, evidence_id: 'old' } }, recordError: 'HTTP 503' });
+  assert.match(text(tree), /记录不可用/);
+  assert.match(text(tree), /批次「fixture」（workflows\/fixture）：运维记录读取失败：HTTP 503/);
+  assert.doesNotMatch(text(tree), /已恢复|持续监测中/);
+  assert.equal(nodes(tree).find(n => n.props.className === 'wf-operations-hint').props.role, 'alert');
+});
+
+test('flow removes redundant progress copy while preserving true errors and native hover graph', () => {
+  assert.doesNotMatch(client, /进度更新：|正在读取进度…|pctAll|setLastRefresh/);
+  assert.ok(client.includes("refreshError ? h('p', { role: 'alert'"));
+  assert.ok(client.includes('flowFeedback.error && flowFeedback.message'));
+  assert.ok(client.includes("h('title', null, nodeLabel)"));
   assert.match(client, /diagBanner\(selBatch, stage\),\s*h\(OperationsPanel/);
-  assert.match(panel, /jget\('\/batches\/' \+ encodeURIComponent\(batchName\) \+ '\/operations'/);
-  assert.doesNotMatch(panel, /\/repair|jpost\(|window\.open|href:|location\./);
-  assert.match(panel, /enabled: true, available: false, loaded: false/);
-  assert.doesNotMatch(panel, /原有自愈不受影响/);
-  assert.match(panel, /clipboard\.writeText\(view\.sessionId\)/);
-  assert.match(panel, /generation\.current\+\+; controller\.abort\(\); clearTimeout\(timer\)/);
-});
-
-test('operations messages stay in a fixed bottom log instead of pushing the page up', () => {
-  const panel = client.slice(start, end);
-  // 消息必须收进独立滚动容器：容器限高 + 内部滚动，面板自身固定高度。
-  const logStart = client.indexOf("className: 'wf-operations-log wf-scroll'", start);
-  assert.ok(logStart > start && logStart < end, 'AI运维消息应渲染在独立的消息容器里');
-  const log = client.slice(logStart, logStart + 900);
-  assert.match(log, /flex: '0 0 132px', height: 132, minHeight: 132, maxHeight: 132/);
-  assert.match(log, /overflowY: 'auto'/);
-  assert.match(log, /overscrollBehavior: 'contain'/);
-  assert.match(log, /role: 'log'/);
-  assert.match(log, /aria-live': 'polite'/);
-  assert.match(panel, /flexShrink: 0, display: 'flex', flexDirection: 'column'/);
-  // 同一批次的重复接手只保留最新一条，最多 5 条，避免释放/过期循环把版面顶高。
-  assert.match(panel, /rows\.length < 5/);
-  assert.match(panel, /seen\.has\(key\)/);
-  // 新消息贴底；用户手动上滑后不被轮询拽回底部。
-  assert.match(panel, /scrollTop = node\.scrollHeight/);
-  assert.match(panel, /stickToBottom\.current = node\.scrollHeight - node\.scrollTop - node\.clientHeight < 24/);
+  assert.ok(client.includes("jget('/batches/' + encodeURIComponent(batchName) + '/operations'"));
+  assert.ok(client.includes('generation.current++; controller.abort(); clearTimeout(timer)'));
 });

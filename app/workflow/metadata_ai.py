@@ -334,7 +334,8 @@ def auto_identify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
         response = invoke_fn(prompt, run_dir, config)
         reply = response.get("response") if isinstance(response, dict) else response
     except Exception as exc:  # noqa: BLE001 - 识别失败不得阻断主流程
-        return local_only("识别调用失败：" + str(exc)[:160])
+        from .model_admission import deferral
+        return {**local_only("识别调用失败：" + str(exc)[:160]), **deferral(exc)}
     found = sanitize(extract_metadata(reply), source_types)
     if deterministic:
         # 同步材料的来源和题内考试引用不能由模型改写已确定的册/课时范围。

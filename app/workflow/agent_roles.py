@@ -45,6 +45,28 @@ def load(stage: str, artifact: str | None = None) -> dict:
         raise RoleError(f"{path.name}: stage 声明为 {role['stage']}，与文件名的阶段 {stage} 不一致")
     if artifact is not None and role["artifact"] != artifact:
         raise RoleError(f"{path.name}: artifact 声明为 {role['artifact']}，与阶段产物 {artifact} 不一致")
+    # 角色只声明插入位置；字段/层级从消费者的现有契约生成，不在 Markdown 复制键集或题型清单。
+    replacements = {}
+    if stage == "answers":
+        from .agent_tasks import ANSWERS_ALLOWED, EXAMPLE_REQUIRED
+        required = EXAMPLE_REQUIRED[stage]
+        optional = tuple(key for key in ANSWERS_ALLOWED if key not in required)
+        keys = lambda values: "、".join(f"`{key}`" for key in values)
+        replacements["answers_fields"] = (
+            f"- 产物必填字段：{keys(required)}；可选字段：{keys(optional)}。只写这些字段。"
+            "`missing` 记录确认缺失的答案，不得省略；即使没有缺失也返回空对象。")
+    elif stage == "knowledge":
+        from workbench.taxonomy import WHOLE_UNIT_TYPES
+        replacements["knowledge_hierarchy"] = (
+            "- [ ] 整组题型（" + "、".join(sorted(WHOLE_UNIT_TYPES))
+            + "）只在组级打标；每个确认子题仍须覆盖，子题 `knowledge=[]`，不逐题打设题角度或其他标签。")
+    for name, value in replacements.items():
+        token = "{{" + name + "}}"
+        if role["body"].count(token) != 1:
+            raise RoleError(f"{path.name}: 必须且只能声明一次契约占位符 {token}")
+        role["body"] = role["body"].replace(token, value)
+    if re.search(r"\{\{[a-z_]+\}\}", role["body"]):
+        raise RoleError(f"{path.name}: 未知角色契约占位符")
     return role
 
 

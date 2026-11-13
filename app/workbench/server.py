@@ -757,6 +757,8 @@ _advance_state: dict[str, dict] = {}
 _advance_queue: list[str] = []
 _advance_queue_lock = threading.Lock()
 _advance_worker_running = False
+_advance_worker_thread = None
+_advance_worker_start_error = None
 
 
 QUEUE_REMOVED = "workflow/.queue-removed"
@@ -1058,7 +1060,7 @@ def _advance_worker_loop():
     parallel. When the queue empties the worker exits; the next enqueue restarts
     it. The queue itself survives between passes.
     """
-    global _advance_worker_running
+    global _advance_worker_running, _advance_worker_thread
     while True:
         # Dequeue, validate and mark running under the mutation lock so purge
         # cannot delete a popped entry before the worker registers ownership.
@@ -1066,25 +1068,29 @@ def _advance_worker_loop():
             with _advance_queue_lock:
                 if not _advance_queue:
                     _advance_worker_running = False
+                    # Relinquish ownership under the same lock as enqueue/start;
+                    # a thread still unwinding its return cannot strand new work.
+                    _advance_worker_thread = None
                     return
                 entry = _advance_queue.pop(0)
                 name = entry["name"] if isinstance(entry, dict) else entry
                 expectation = entry.get("operations_expectation") if isinstance(entry, dict) else None
-        try:
-            folder = batch_dir(name)
-        except (ValueError, OSError):
-            with _lock:
+            try:
+                folder = batch_dir(name)
+            except (ValueError, OSError):
                 _advance_state.pop(name, None)
-            continue
-        # Even if a later batch was queued, it must not run ahead of an earlier
-        # unfinished batch still in 排队区.
-        predecessor = _waiting_for_predecessor(name)
-        if predecessor is not None:
-            with _lock:
+                continue
+            # Deletion/removal may have cancelled the queued batch. Never
+            # recreate its state or let a recovered worker revive it.
+            if queue_removed(folder) or (folder / "workflow/.delete-requested").exists():
+                _advance_state.pop(name, None)
+                continue
+            # Even a later queued batch cannot pass an unfinished predecessor.
+            predecessor = _waiting_for_predecessor(name)
+            if predecessor is not None:
                 _advance_state[name] = {"running": False, "waiting": True,
                                         "waiting_for": predecessor, "finished_at": now()}
-            continue
-        with _lock:
+                continue
             _advance_state[name] = {"running": True, "started_at": now()}
         try:
             if expectation is None:
@@ -1096,13 +1102,62 @@ def _advance_worker_loop():
                 _advance_state[name] = {"running": False, "result": {"error": str(exc)}, "finished_at": now()}
 
 
+@serialized
 def _ensure_advance_worker():
-    global _advance_worker_running
+    """Reconcile queued work with a real thread, never restart an executing task."""
+    global _advance_worker_running, _advance_worker_thread, _advance_worker_start_error
+    # Start while holding the queue lock: another caller cannot mistake a
+    # constructed-but-not-started thread for a dead worker and create a second.
+    # The serialized wrapper preserves the worker's _lock -> queue-lock order.
     with _advance_queue_lock:
-        if _advance_worker_running:
-            return
-        _advance_worker_running = True
-    threading.Thread(target=_advance_worker_loop, daemon=True, name="workbench-advance-worker").start()
+        if _advance_worker_thread is not None and _advance_worker_thread.is_alive():
+            _advance_worker_running = True
+            return True
+        _advance_worker_running = False
+        if not _advance_queue:
+            return False
+        if any(state.get("running") for state in _advance_state.values()):
+            # A dead thread with a recorded owner is ambiguous: expose it for
+            # diagnosis, never replay it or let another batch overtake it.
+            return False
+        try:
+            worker = threading.Thread(target=_advance_worker_loop, daemon=True,
+                                      name="workbench-advance-worker")
+            _advance_worker_thread = worker
+            _advance_worker_running = True
+            worker.start()
+        except Exception as exc:  # noqa: BLE001 - retain queue for the next reconciliation
+            _advance_worker_running = False
+            _advance_worker_thread = None
+            _advance_worker_start_error = str(exc)
+            return False
+        _advance_worker_start_error = None
+        return True
+
+
+def advance_worker_health() -> dict:
+    """Cheap queue reconciliation/health; no disk scan or task cancellation."""
+    _ensure_advance_worker()
+    with _lock:
+        with _advance_queue_lock:
+            names = [entry.get("name") if isinstance(entry, dict) else entry
+                     for entry in _advance_queue]
+            ages = []
+            current = datetime.now().astimezone()
+            for name in names:
+                try:
+                    queued = datetime.fromisoformat((_advance_state.get(name) or {}).get("queued_at", ""))
+                    ages.append(max(0.0, (current - queued.astimezone()).total_seconds()))
+                except (ValueError, TypeError, OverflowError):
+                    continue
+            alive = bool(_advance_worker_thread is not None and _advance_worker_thread.is_alive())
+            running = [name for name, state in _advance_state.items() if state.get("running")]
+            return {"worker_alive": alive,
+                    "running_batches": running,
+                    "running_without_worker": bool(running and not alive),
+                    "queue_length": len(names),
+                    "queue_oldest_age_seconds": round(max(ages), 3) if ages else None,
+                    "worker_start_error": _advance_worker_start_error}
 
 
 def _operations_leased() -> bool:
@@ -1141,6 +1196,7 @@ def work_in_flight() -> bool:
     return _operations_leased()
 
 
+@serialized
 def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expectation=None,
                     reset_budget=False, **details) -> dict:
     """Enqueue one batch; only an explicit user action resets retry accounting."""
@@ -1152,6 +1208,8 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
             return {"started": False, "error": "stale_operations_identity"}
     # A batch the user explicitly removed must not be restarted by the supervisor
     # or operations loop. Only an explicit 继续处理 (reset_budget) restores it.
+    if (folder / "workflow/.delete-requested").exists() or not folder.is_dir():
+        return {"started": False, "removed": True, "reason": "批次已删除或正在删除"}
     if not reset_budget and (folder / QUEUE_REMOVED).is_file():
         return {"started": False, "removed": True,
                 "reason": "批次已由用户移出排队区；点继续处理才会恢复"}
@@ -1167,8 +1225,12 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
     if (_advance_state.get(name) or {}).get("running"):
         return {"started": False, "running": True}
     with _advance_queue_lock:
-        if any((entry.get("name") if isinstance(entry, dict) else entry) == name for entry in _advance_queue):
-            return {"started": False, "running": True, "queued": True}
+        queued = any((entry.get("name") if isinstance(entry, dict) else entry) == name
+                     for entry in _advance_queue)
+    if queued:
+        _ensure_advance_worker()
+        _wake_supervisor()
+        return {"started": False, "running": True, "queued": True}
     # Preparation writes must participate in the same lock/lease as execution.
     with wf_supervisor.advance_claim(folder) as acquired:
         if not acquired:
@@ -3483,6 +3545,7 @@ class Handler(BaseHTTPRequestHandler):
             if decoded_path == "/api/health":
                 return self.send_json({"ok": True, "instance_id": os.environ.get("WF_BACKEND_INSTANCE_ID", ""),
                                        "busy": work_in_flight(),
+                                       "advance_worker": advance_worker_health(),
                                        "workflow_runtime_version": wf_execution_state.RUNTIME_VERSION if wf_execution_state else None,
                                        "self_heal_supervisor": _workflow_supervisor.health() if _workflow_supervisor else {"running": False}})
             if decoded_path.startswith("/api/content-agent/"):

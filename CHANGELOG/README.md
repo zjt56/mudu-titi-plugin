@@ -32,6 +32,15 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-13 | [2026-11-13-upload-table-blank-stems.md](2026-11-13-upload-table-blank-stems.md) | 当前来源证明的表格空位仅API副本投影非空stem，正式format通过且原题与审核差异不变 |
+| 2026-11-13 | [2026-11-13-standalone-source-marks.md](2026-11-13-standalone-source-marks.md) | 无编号独立题补回同节原卷提示标记，标签和原生表格保留，真实体检复验 |
+| 2026-11-13 | [2026-11-13-table-blank-source-proof.md](2026-11-13-table-blank-source-proof.md) | 任务型阅读表格编号空位的来源证明与A9逐空验收 |
+| 2026-11-13 | [2026-11-13-answer-timeout-and-whole-source-copy.md](2026-11-13-answer-timeout-and-whole-source-copy.md) | 原生模型断流诊断、传输提示词冲突修复及合法无号整串原答案直抄；本批22答案零模型交付 |
+| 2026-11-12 | [2026-11-12-operations-repair-stall.md](2026-11-12-operations-repair-stall.md) | 运维取消等待、真实进展与源码分页修复，12课时原结构卡点复验并恢复推进 |
+| 2026-11-12 | [2026-11-12-operations-investigation-and-compact-status.md](2026-11-12-operations-investigation-and-compact-status.md) | 运维只读调查与独占修复分离、节点及时触发、独立性能报告及紧凑状态卡片 |
+| 2026-11-12 | [2026-11-12-model-admission-and-audio-scheduling.md](2026-11-12-model-admission-and-audio-scheduling.md) | 实际模型入口共享冷却准入；音频模型异步交付，文字汇总体检不等慢音频 |
+| 2026-11-12 | [2026-11-12-workflow-runtime-reliability.md](2026-11-12-workflow-runtime-reliability.md) | 成熟工作流理念落地：队列与执行器对账、原生任务回执恢复、可靠唤醒、阶段等待隔离及角色契约 |
+| 2026-11-12 | [2026-11-12-workflow-learning-from-incidents.md](2026-11-12-workflow-learning-from-incidents.md) | 从历史卡点对照成熟项目：调度、资源预算、角色契约、保真/差异评测与最小实施顺序；仅研究文档 |
 | 2026-11-12 | [2026-11-12-supervisor-settle-complete.md](2026-11-12-supervisor-settle-complete.md) | 本地阶段跑完的批次台账收敛为 complete：暂停前 settle 清掉陈旧重试/失败快照，不再常显「排队中」 |
 | 2026-11-12 | [2026-11-12-review-gate-source-window-and-unchecked.md](2026-11-12-review-gate-source-window-and-unchecked.md) | 审核闸门确定性阻断：课时板块尾裁剪不再误判来源、绑定升级用 strict_end 重放旧轮次不重跑模型、陈旧 unchecked 条目按分轮记录清理 |
 | 2026-11-12 | [2026-11-12-harness-content-agents.md](2026-11-12-harness-content-agents.md) | 运行时原生内容子智能体：受控取证、结构整卷校验、来源/知识点匹配、图片辅助、恢复预算与删除会话闭环 |

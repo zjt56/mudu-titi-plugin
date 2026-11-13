@@ -543,6 +543,38 @@ def _section_rubric(lines, unit):
                           unit.get("type") or "")
 
 
+def _standalone_marked_heading(unit, proof, source, cleaned_lines, fresh):
+    """Recover a marked heading only for a fully rebuilt unnumbered section."""
+    from .question_identity import VERSION as IDENTITY_VERSION
+    from .sync_practice import source_marks
+    span = unit.get("source_span") or {}
+    if (unit.get("identity_version") != IDENTITY_VERSION
+            or span.get("number_binding") not in {"unnumbered_section", "single_writing_section"}
+            or span.get("printed_numbers") != []):
+        return ""
+    peers = [row for row in fresh if row.get("unit_id") == unit.get("unit_id")
+             and row.get("section_id") == unit.get("section_id")
+             and row.get("unit_kind") == "standalone"]
+    if len(peers) != 1:
+        return ""
+    peer = peers[0]
+    section = unit.get("source_section") or {}
+    if (section != peer.get("source_section") or span != peer.get("source_span")
+            or str(unit.get("stem") or "").strip() != str(peer.get("stem") or "").strip()):
+        return ""
+    rows = source.splitlines() if proof.get("line_basis") == "01_source/正文.txt" else cleaned_lines
+    start, end = proof.get("start_line"), proof.get("end_line")
+    heading_line, section_end = section.get("start_line"), section.get("end_line")
+    if (not all(type(value) is int for value in (start, end, heading_line, section_end))
+            or not 1 <= heading_line <= start <= end <= section_end <= len(rows)
+            or (start, end) != (span.get("start_line"), span.get("end_line"))):
+        return ""
+    heading = rows[heading_line - 1].strip()
+    if heading != str(section.get("title") or "").strip() or not source_marks(heading):
+        return ""
+    return heading
+
+
 def _empty(number):
     return {"number": int(number), "stem": "", "material": "", "options": [],
             "knowledge": [], "knowledgeIds": [], "knowledge_ids": [],
@@ -606,6 +638,10 @@ def build(batch_dir, *, units=None):
                     # Keep unsplit source rather than losing a nonstandard numbered task.
                     if not part["stem"] and not part["options"]:
                         row["stem"] = text
+                heading = _standalone_marked_heading(unit, proof, source, cleaned_lines, fresh)
+                if heading and heading not in row["stem"].splitlines():
+                    row["stem"] = heading + "\n" + row["stem"]
+                    proof["section_heading_rubric"] = heading
             else:
                 first = min((i for i, line in enumerate(lines) if _strong_number(line) is not None), default=len(lines))
                 option_start = question_content.option_block_start(lines) if audit["shared_options"] else None

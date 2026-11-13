@@ -16,7 +16,9 @@
 | [workflow-regressions.md](workflow-regressions.md) | 本轮切题、来源、目录、审核问题及强制回归约束 | 所有执行者 |
 | [upload-api.md](upload-api.md) | 安全连接、当前目录、API 字段映射、冻结/批准/暂存、防重复 | 对接远端上传的使用者 |
 | [layout-review.md](layout-review.md) | 整页版面 OCR 提交、续查、失败处理及证据边界 | 复核复杂版面的人 |
-| [pipeline.md](pipeline.md) | 16 个阶段、批次目录、自动驱动、代理桥、禁止事项 | 要把一批卷子从头跑到尾的人 |
+| [pipeline.md](pipeline.md) | 18 个阶段、批次目录、自动驱动、代理桥、禁止事项 | 要把一批卷子从头跑到尾的人 |
+| [workflow-optimization-plan.md](workflow-optimization-plan.md) | 成熟工作流理念落地：可靠队列、回执对账、唤醒、冷却与角色契约的实施方案 | 改进调度与运行可靠性的人 |
+| [workflow-borrowing.md](workflow-borrowing.md) | 对照历史卡点研究 Coze/Eino/LangGraph/Coze Loop/Temporal：流程、效率、分工、质量与最小实施顺序 | 改进工作流执行、验收和恢复的人 |
 | [constraints.md](constraints.md) | 会直接导致返工或入库失败的硬约束（A–G 子集） | 正在录题、写 `batch.json` 的人 |
 | [structure.md](structure.md) | 逐题内容边界、题组、表格、七项结构判定 | 切题、建单元、做结构确认的人 |
 | [knowledge-tagging.md](knowledge-tagging.md) | 知识点只写叶子、按题型的维度表、组题标签 | 打标签、审标签的人 |

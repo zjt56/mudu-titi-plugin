@@ -39,7 +39,7 @@ def _has_prefix(knowledge, prefix):
     return False
 
 
-def _check_unit(u, verified=None):
+def _check_unit(u, verified=None, table_verified=None):
     problems = []
     uid = u.get("unit_id") or u.get("id") or "?"
     qt = (u.get("question_type") or "").strip()
@@ -68,11 +68,13 @@ def _check_unit(u, verified=None):
         if not subs:
             problems.append(f"[A8] {uid} ({qt}): 题组 unit_kind=group 但 subquestions 为空")
 
+    # Current native-table response blanks have their stem in the retained table.
+    table_blanks = question_content.table_blank_stem_numbers(u, table_verified)
     # A9：group 每个子题 stem 非空、answer 非空
     if kind == "group":
         for c in subs:
             n = c.get("number")
-            if not plain(c.get("stem") or "").strip() and not phonetic_alias:
+            if not plain(c.get("stem") or "").strip() and not phonetic_alias and n not in table_blanks:
                 problems.append(f"[A9] {uid} 子题 {n}: stem 为空")
             if not str(c.get("answer") or "").strip():
                 problems.append(f"[A9] {uid} 子题 {n}: answer 为空")
@@ -148,13 +150,15 @@ def main(argv=None):
     from workflow.phonetic_structure import verified_groups
     source_path = Path(args.source_batch_dir) / "06_batch/batch.json" if args.source_batch_dir else args.batch
     verified = verified_groups(source_path)
+    from workflow.table_structure import verified_groups as verified_tables
+    table_verified = verified_tables(source_path)
     problems = []
     for u in units(batch):
         if not isinstance(u, dict):
             problems.append(f"[格式] 非对象单元被忽略：{type(u).__name__}")
             continue
         try:
-            problems.extend(_check_unit(u, verified))
+            problems.extend(_check_unit(u, verified, table_verified))
         except Exception as exc:  # 单个单元异常不中断整批
             uid = u.get("unit_id") or u.get("id") or "?"
             problems.append(f"[ERROR] 单元 {uid} 体检异常：{exc}")

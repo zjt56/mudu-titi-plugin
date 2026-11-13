@@ -261,6 +261,57 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
     return errors
 
 
+def _proven_unnumbered_scope(unit: dict, sections: list[dict], lines: list[str]) -> bool:
+    from .question_identity import assign_scoped, validate_units
+    if unit.get("identity_version") != "scoped-v1" or not validate_units([unit]):
+        return False
+    bare = {k: v for k, v in unit.items() if k not in
+            {"identity_version", "section_id", "unit_id", "question_ids", "source_section"}}
+    try:
+        expected = assign_scoped([bare], lines, sections=sections)[0]
+    except ValueError:
+        return False
+    span, section = unit.get("source_span") or {}, expected["source_section"]
+    return (unit.get("section_id") == expected["section_id"] and unit.get("source_section") == section
+            and span.get("start_line") == section["start_line"] + 1
+            and span.get("end_line") == section["end_line"]
+            and unit.get("stem") == "\n".join(lines[span["start_line"] - 1:span["end_line"]]).strip())
+
+
+def _proven_scoped_restart(at: int, units: list[dict], sections: list[dict], lines: list[str], problems: list[dict]) -> bool:
+    """Resolve only a restart whose current section occurrences have local proof."""
+    from .question_identity import assign_scoped, validate_units
+    windows = _scope_windows(sections, lines)
+    target = next((s for s in windows if s["source_line"] == at), None)
+    if target is None:
+        return False
+    members = _source_members(lines[at:target["source_end_line"]])
+    peers = [s for s in windows if s["source_line"] < at
+             and members.intersection(_source_members(lines[s["source_line"]:s["source_end_line"]]))]
+    if not members or not peers:
+        return False
+    for section in [*peers, target]:
+        start, end = section["source_line"], section["source_end_line"]
+        local = [u for u in units if start < (u.get("source_span") or {}).get("start_line", 0)
+                 <= (u.get("source_span") or {}).get("end_line", 0) <= end]
+        if not local or not validate_units(local):
+            return False
+        if any(type(p.get("source_line")) is int and start <= p["source_line"] <= end for p in problems):
+            return False
+        # Reconstruct occurrence/context from current headings, without trusting
+        # the retained IDs or a stale source_section supplied by a candidate.
+        bare = [{k: v for k, v in u.items() if k not in
+                 {"identity_version", "section_id", "unit_id", "question_ids", "source_section"}} for u in local]
+        try:
+            expected = assign_scoped(bare, lines, sections=sections)
+        except ValueError:
+            return False
+        if any(u.get("identity_version") != "scoped-v1" or u.get("section_id") != proof["section_id"]
+               or u.get("source_section") != proof["source_section"] for u, proof in zip(local, expected)):
+            return False
+    return True
+
+
 def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: list[str]) -> list[dict]:
     from .question_content import question_parts
     from .question_identity import assign_scoped
@@ -303,7 +354,25 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                        for offset, number in tokens if number in numbers]
             image_only = (section.get("image_only") and any("[IMG " in line for line in local)
                           and all(not _plain(line).strip() or "[IMG " in line or "[TABLE" in line for line in local))
-            if not anchors and not numbers and image_only:
+            unnumbered_text = None
+            if not anchors and not numbers and local:
+                from .question_content import legitimate_source_shape
+                candidate = _make_unit("standalone", type_name, [1], local)
+                candidate["stem"] = "\n".join(local).strip()
+                candidate["source_span"] = {"start_line": start + 1, "end_line": end,
+                                            "basis": "cleaned_source", "number_binding": "unnumbered_section",
+                                            "printed_numbers": []}
+                candidate["source_section"] = {"start_line": start, "end_line": end}
+                # An absent number alone proves nothing: retain a full real body
+                # with an explicit response blank, using the common shape rule.
+                readable = re.sub(r"<[^>]*>|\[/?TABLE[^\]]*\]|\s|_", "", candidate["stem"])
+                if (readable and re.search(r"<u>\s*</u>|_{2,}", candidate["stem"])
+                        and legitimate_source_shape(candidate) == "unnumbered_table_response"):
+                    candidate.update(original_number=None, printed_number=False)
+                    unnumbered_text = candidate
+            if unnumbered_text is not None:
+                units.append(unnumbered_text)
+            elif not anchors and not numbers and image_only:
                 # 没有可读印刷题号时只保留整节一个来源对象，不猜图片里的题数。
                 # [1] 是兼容字段内部别名，不能展示成原卷第 1 题。
                 unit = _make_unit("standalone", type_name, [1], local)
@@ -818,9 +887,32 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         checks["source_content"] = "failed" if content_problems else "passed"
         checks["group_guides"] = "failed" if any(p["code"] == "GUIDE_GROUP_MISMATCH" for p in scoped_problems) else "passed"
         checks["denoise"] = "passed"
+        # A valid section restart is independent of an unrelated section's
+        # failure. Each participating occurrence must still prove its own scope.
+        from .question_content import legitimate_source_shape
+        unnumbered_boundaries = []
+        for issue in blockers:
+            if issue.get("code") != "QUESTION_BOUNDARY_MISSING":
+                continue
+            at = issue.get("source_line")
+            owned = [u for u in units if (u.get("source_section") or {}).get("start_line") == at]
+            if (len(owned) == 1 and legitimate_source_shape(owned[0])
+                    and owned[0].get("source_span", {}).get("number_binding") == "unnumbered_section"
+                    and not any(type(p.get("source_line")) is int
+                                and at <= p["source_line"] <= owned[0]["source_span"]["end_line"]
+                                for p in scoped_problems)
+                    and _proven_unnumbered_scope(owned[0], sections, source_lines)):
+                unnumbered_boundaries.append(issue)
+        # Full reconciliation above still retains every other section's errors.
+        blockers[:] = [b for b in blockers if b not in unnumbered_boundaries]
+        resolved_notes.extend({**b, "resolution": "完整无编号来源窗口及合法原卷作答形态已验证，内部别名不作为印刷题号"} for b in unnumbered_boundaries)
+        restarts = [b for b in blockers if b.get("code") == "NUMBERING_RESTART"
+                    and _proven_scoped_restart(b.get("source_line"), units, sections, source_lines, scoped_problems)]
+        blockers[:] = [b for b in blockers if b not in restarts]
+        resolved_notes.extend({**b, "resolution": "当前大题及前序同号大题的来源位置、出现序次和身份均已独立重建验证"} for b in restarts)
         # Only positional source proof can resolve extraction's global-number assumptions.
         if not scoped_problems and not content_problems:
-            positional_codes = {"NUMBERING_RESTART", "DUPLICATE_QUESTION_NUMBER", "GROUP_BOUNDARY_REVIEW", "QUESTION_BOUNDARY_MISSING"}
+            positional_codes = {"DUPLICATE_QUESTION_NUMBER", "GROUP_BOUNDARY_REVIEW", "QUESTION_BOUNDARY_MISSING"}
             resolved = [b for b in blockers if b.get("code") in positional_codes]
             blockers[:] = [b for b in blockers if b.get("code") not in positional_codes]
             resolved_notes.extend({**b, "resolution": "每个原题位置已唯一绑定到本大题/材料局部窗口"} for b in resolved)

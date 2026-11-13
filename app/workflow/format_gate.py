@@ -26,7 +26,8 @@ RULE_FILES = (Path(__file__), Path(upload_payload.__file__),
               Path(metadata_policy.__file__), Path(phonetic_structure.__file__),
               Path(shared_rubric.__file__), Path(upload_numbering.__file__),
               Path(__file__).with_name("source_objects.py"),
-              Path(__file__).with_name("question_draft.py"), *LABEL_RULE_FILES)
+              Path(__file__).with_name("question_draft.py"), Path(__file__).with_name('table_structure.py'),
+               Path(__file__).with_name('question_content.py'), *LABEL_RULE_FILES)
 DEFERRED_CODES = frozenset({"CATALOG_REQUIRED", "TEXTBOOK_CATALOG_UNSUPPORTED",
                             "TEXTBOOK_KNOWLEDGE_INVALID"})
 

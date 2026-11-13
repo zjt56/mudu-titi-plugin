@@ -42,19 +42,21 @@ def _blank_table_grids(text: str) -> int:
 
 # 原卷“合法的空/图形态”统一分类。凡属这里任一形态，都不表示题目内容缺失，
 # 不得阻断结构确认或前置组装；真实截断/缺选项/题干错配仍按原校验阻断。
-LEGITIMATE_SHAPES = ("image_only", "blank_answer_grid", "unnumbered_no_image")
+LEGITIMATE_SHAPES = ("image_only", "blank_answer_grid", "unnumbered_no_image", "unnumbered_table_response")
 
 
 def legitimate_source_shape(unit: dict, appendix_text: str | None = None) -> str | None:
     """Classify a legitimate source shape that must not be treated as missing content.
 
     Returns one of LEGITIMATE_SHAPES, or None when the unit is ordinary text (no
-    excuse) / genuinely incomplete. Covers exactly three recurring patterns:
+    excuse) / genuinely incomplete. Covers these recurring source patterns:
     1. ``image_only``: only image/table markers, no readable text stem (图片题);
     2. ``blank_answer_grid``: every table is an empty student answer grid and the
        unit's numbers appear in the answer appendix (答案见卷末);
     3. ``unnumbered_no_image``: a whole source section with no printed child
        number and no image (e.g. 字母歌补全), which still owns real body text.
+    4. ``unnumbered_table_response``: a complete unnumbered section with a
+       populated table and explicit answer lines outside that table.
     """
     stem = str(unit.get("stem") or "")
     numbers = [str(n) for n in (unit.get("numbers") or [])]
@@ -73,6 +75,23 @@ def legitimate_source_shape(unit: dict, appendix_text: str | None = None) -> str
     if non_image and not table_count and unit.get("numbers") == [1] and \
             (unit.get("source_span") or {}).get("number_binding") == "unnumbered_section":
         return "unnumbered_no_image"
+    # A populated source table followed by unnumbered answer lines (e.g. a poem)
+    # is real content. Require the complete bound section, balanced table markers,
+    # actual table text and an explicit blank; empty grids keep their own rule.
+    span, section = unit.get("source_span") or {}, unit.get("source_section") or {}
+    if (table_count and not has_image and unit.get("numbers") == [1]
+            and span.get("number_binding") == "unnumbered_section"
+            and span.get("printed_numbers") == []
+            and type(section.get("start_line")) is int
+            and span.get("start_line") == section["start_line"] + 1
+            and span.get("end_line") == section.get("end_line")):
+        tables = list(re.finditer(r"\[TABLE(?:\s+\d+)?\](.*?)\[/TABLE\]", stem, re.S))
+        if (len(tables) == table_count == len(re.findall(r"\[/TABLE\]", stem))
+                and all(re.sub(r"<[^>]*>|\s|&nbsp;", "", table.group(1)) for table in tables)
+                and re.search(r"<u>\s*</u>|_{2,}", re.sub(r"\[TABLE(?:\s+\d+)?\].*?\[/TABLE\]", "", stem, flags=re.S))):
+            from .structure_gate import _scope_anchors
+            if not _scope_anchors(lines):
+                return "unnumbered_table_response"
     return None
 
 
@@ -84,6 +103,60 @@ def capability_limited_source(unit: dict, appendix_text: str | None = None) -> b
     the appendix) are legitimate, everything else stays a real completeness block.
     """
     return legitimate_source_shape(unit, appendix_text) in ("image_only", "blank_answer_grid")
+
+
+def table_blank_stem_numbers(unit: dict, verified: dict | None = None) -> set[int]:
+    """Allow empty child stems only for retained, current-source native table blanks.
+
+    This is a presence proof, not a semantic audit of the reconstructed layout.
+    Answers, labels, and all other structure checks remain independently required.
+    """
+    proof = (verified or {}).get(unit.get("unit_id"))
+    if not isinstance(proof, dict) or unit.get("unit_kind") != "group":
+        return set()
+    expected = proof.get("item") or {}
+    for key in ("identity_version", "section_id", "source_section", "source_span",
+                "question_ids", "numbers", "stem", "material", "materialBlocks"):
+        if unit.get(key) != expected.get(key):
+            return set()
+    def options(value):
+        # Assembly restores source <br> while the draft skeleton uses line feeds.
+        # Reject malformed entries rather than silently dropping them as the
+        # general legacy option reader does. Keep all words, punctuation and order.
+        if value is None:
+            value = []
+        if not isinstance(value, list):
+            return None
+        result = []
+        for item in value:
+            if isinstance(item, str):
+                match = re.fullmatch(r"\s*([A-H])[.．、]\s*(.+)", item, re.S)
+                if not match:
+                    return None
+                label, text = match.groups()
+            elif isinstance(item, dict):
+                label, text = item.get("label", item.get("key")), item.get("text")
+                if label not in list("ABCDEFGH") or not isinstance(text, str) or not text.strip():
+                    return None
+            else:
+                return None
+            result.append({"label": label, "text": re.sub(r"<br\s*/?>", "\n", text.strip(), flags=re.I)})
+        return result
+
+    actual_options, source_options = options(unit.get("options")), options(expected.get("options"))
+    if actual_options is None or source_options is None or actual_options != source_options:
+        return set()
+    actual, wanted = unit.get("subquestions"), expected.get("subquestions")
+    if not isinstance(actual, list) or not isinstance(wanted, list) or len(actual) != len(wanted):
+        return set()
+    for child, source in zip(actual, wanted):
+        if not isinstance(child, dict) or any(child.get(k) != source.get(k)
+                                             for k in ("number", "question_id", "stem", "material")):
+            return set()
+        actual_options, source_options = options(child.get("options")), options(source.get("options"))
+        if actual_options is None or source_options is None or actual_options != source_options:
+            return set()
+    return set(proof.get("blanks") or {})
 
 
 def self_contained_group(unit: dict) -> bool:

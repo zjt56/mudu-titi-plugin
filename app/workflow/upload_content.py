@@ -298,6 +298,9 @@ def _answer_section_bands(sections, lines):
 # Bands that introduce the extension (trailing) block of an otherwise-Roman key.
 _EXTENSION_BANDS = ('能力提升', '创新阅读专练')
 _LETTER_SEQUENCE = re.compile(r'[A-Za-z](?:\s*[;；]\s*[A-Za-z])+\s*')
+# A printed whole-task word list (e.g. one,two,...,ten), not free-form prose.
+# Ownership is proved later by the complete lesson skeleton and source span.
+_WORD_SEQUENCE = re.compile(r'(?=.*[A-Za-z]{2})[A-Za-z]+(?:\s*[,，]\s*[A-Za-z]+)+\s*')
 # A parenthesized (1)/(2) sub-blank marker that continues the preceding numbered
 # answer item's material (multi-line task-reading / cloze keys).
 _SUBITEM_CONT = re.compile(r'^[(（]\s*\d{1,3}\s*[)）]')
@@ -439,9 +442,11 @@ def _compact_answer_blocks(lines):
                 active['rows'][-1] = (n0, l0, v0 + '\n' + text.strip())
                 active['coverage'].setdefault(n0, [l0]).append(line)
             active['raw'].append((line, text.strip()))
-        elif (heading or not active['raw']) and _LETTER_SEQUENCE.fullmatch(text.strip()):
-            # A printed Roman section may give one whole-task letter sequence.
-            # Never interpret arbitrary headings/prose as an unnumbered answer.
+        elif ((heading or not active['raw']) and
+              (_LETTER_SEQUENCE.fullmatch(text.strip())
+               or heading and _WORD_SEQUENCE.fullmatch(text.strip()))):
+            # A Roman whole-task letter/word list is one literal answer. A word
+            # list requires the printed Roman prefix; bare prose remains invalid.
             active['literal'] = True
             active['raw'].append((line, text.strip()))
         elif text.strip():
@@ -514,9 +519,16 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
         return []
     skeleton = [_norm(match[1]) if match else None for match in ordinals]
     span = unit.get('source_span') or {}
+    # An explicitly source-bound standalone may also represent one whole task
+    # without printed child numbers. Keep the older group path, and require the
+    # stronger span/printed-number proof plus a narrow word-list value below for
+    # standalone tasks; an empty number list or absent anchor alone is no proof.
+    whole_standalone = (unit.get('unit_kind') == 'standalone'
+                        and span.get('basis') in {'ai_classified', 'cleaned_source'}
+                        and span.get('printed_numbers') == [])
     whole = (span.get('number_binding') == 'unnumbered_section'
              and unit.get('numbers') == [1] and int(number) == 1
-             and unit.get('unit_kind') == 'group' and not anchors)
+             and (unit.get('unit_kind') == 'group' or whole_standalone) and not anchors)
     if whole and len(lesson_markers) != 1:
         return []  # A Unit heading alone cannot prove a whole unnumbered lesson task.
     result = []
@@ -616,6 +628,8 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
             if any(re.search(EXPLANATION_LABEL + '|' + IMG, text) for _, text in block['raw']):
                 continue  # Whole-task copying cannot swallow explanations/images.
             value = '\n'.join(text for _, text in block['raw'])
+            if whole_standalone and not (block['literal'] and _WORD_SEQUENCE.fullmatch(value)):
+                continue  # Do not generalize standalone aliases to arbitrary free answers.
             if value:
                 result.extend((path, line, value) for line, _ in block['raw'])
         elif not block['literal'] and anchors:

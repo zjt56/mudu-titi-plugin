@@ -251,7 +251,8 @@ def build(root, *, force=False, identify=None):
         try:
             fn = identify or visual_transport.identify
             response = fn([{k: r[k] for k in ("id", "path")} for r in chunk], prompt,
-                          stage="extract", max_tokens=1600, timeout=90)
+                          stage="extract", max_tokens=1600, timeout=90,
+                          **({"batch_dir": root} if identify is None else {}))
             calls += 1
             from .visual_review import _parse_json
             parsed = _parse_json(response.get("text", "")) or {}
@@ -283,6 +284,11 @@ def build(root, *, force=False, identify=None):
                 if label:
                     recognized[source["id"]] = value
         except (OSError, ValueError, RuntimeError) as exc:
+            from .model_admission import deferral
+            waiting = deferral(exc)
+            if waiting:
+                return {"bands": _boundaries(text, recognized), "issues": issues,
+                        "provider_route": route, "model_calls": calls, **waiting}
             issues.append({"code": "BAND_VISUAL_UNAVAILABLE", "images": [r["id"] for r in chunk], "message": str(exc)[:220]})
             break  # one failure cannot cause a serial per-image retry storm
     bands = _boundaries(text, recognized)

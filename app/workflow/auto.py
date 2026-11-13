@@ -261,9 +261,70 @@ def _bridge_stage(stage: contracts.Stage, command: list) -> contracts.Stage:
     return dataclasses.replace(stage, kind=contracts.COMMAND, command=tuple(command))
 
 
+def _default_agent_bridge(stage_id, bridge):
+    return bridge.get(stage_id) == ["{python}", "-m", "workflow.agent", "run", "--stage", stage_id,
+                                    "--batch-dir", "{batch_dir}"]
+
+
+def local_ready_stages(batch_dir, manifest, bridge=None):
+    """Read-only local candidates, not proof of successful delivery.
+
+    The supervisor may grant one dispatch per input binding during cooldown.
+    Execution still rechecks dependencies, cancellation and importer contracts.
+    Custom agent bridges are never replaced by a built-in local path.
+    """
+    from . import answers_direct, explanations_direct, batch_fill
+    batch = Path(batch_dir)
+    bridge = load_bridge() if bridge is None else bridge
+    ready = []
+    for stage in contracts.STAGES:
+        if manifest.get('stages', {}).get(stage.id, {}).get('status') in mf.TERMINAL_OK:
+            continue
+        if not all(mf.dependency_satisfied(manifest, dep, allow_unqualified=ZERO_TOUCH)
+                   for dep in stage.depends_on):
+            continue
+        if stage.id == 'audio' and (mf.skip_reason(manifest, stage)
+                                    or not ((manifest.get('inputs') or {}).get('audio') or {}).get('exists')):
+            ready.append(stage.id)
+            continue
+        if stage.id in {'types', 'meta', 'underlines', 'validate', 'format_gate'}:
+            ready.append(stage.id)
+        elif stage.kind == contracts.AGENT and _default_agent_bridge(stage.id, bridge):
+            try:
+                available = (
+                    stage.id == 'assemble' and (batch / batch_fill.STATE).is_file()
+                    or stage.id == 'audio' and (batch / '02_audio/segment-evidence.json').is_file()
+                    or stage.id == 'answers' and answers_direct.build_payload(batch) is not None
+                    or stage.id == 'explanations' and explanations_direct.build_payload(batch) is not None)
+                if available:
+                    ready.append(stage.id)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+    return tuple(ready)
+
+
+def _cooldown_preflight(batch_dir, stage):
+    """Run only known model-free paths; never dispatch/fall back to a model."""
+    from . import stage_preflight, batch_fill, assemble_local
+    if stage.id != 'assemble':
+        return stage_preflight.run(batch_dir, stage.id)
+    if not (Path(batch_dir) / batch_fill.STATE).is_file():
+        return None
+    code = assemble_local.try_assemble(batch_dir)
+    if code == 0:
+        from .local_agent import _agent_lock
+        with _agent_lock(1500):
+            current = mf.load(batch_dir)
+            if not rn._record_success(batch_dir, current, stage):
+                code = 3
+            current['status'] = mf.derive_status(current)
+            mf.save(batch_dir, current)
+    return (code if code is not None else 3), {'stage': stage.id, 'model_calls': 0}
+
+
 # ---------------------------------------------------------------- 推进
 
-def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
+def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pending_audio=None) -> dict:
     """Export and import serially; only read-only model calls overlap."""
     from . import agent_protocol, agent_tasks, local_agent, stage_preflight
     from .agent_prepare import prepare_answers
@@ -376,14 +437,16 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
         if code and not imported:
             # Coordinate with protocol imports and do not overwrite a stage another
             # participant completed while the model call was running.
-            limited = _is_rate_limited(str(value))
+            limited = code == 4 or _is_rate_limited(str(value))
+            admission_cooldown = code == 4
             with bookkeeping_lock, agent_protocol._agent_lock(5):
                 manifest = mf.load(batch_dir)
                 if manifest["stages"].get(stage.id, {}).get("status") not in mf.TERMINAL_OK:
                     if limited:
                         # 429/额度是“稍后可用”，不是永久失败：回到 pending 并登记冷却，
                         # 避免 UI 上出现一片 failed、也避免自动循环立刻再撞限额。
-                        _set_cooldown(batch_dir, RATE_LIMIT_BACKOFF_SECONDS)
+                        if not admission_cooldown:
+                            _set_cooldown(batch_dir, RATE_LIMIT_BACKOFF_SECONDS)
                         mf.touch_stage(manifest, stage.id, mf.PENDING,
                                        notes="限流/额度冷却中：" + str(value)[:200])
                     else:
@@ -397,25 +460,52 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict) -> dict:
 
     from concurrent.futures import as_completed
     by_id = {stage.id: stage for stage in stages}
-    with ThreadPoolExecutor(max_workers=min(4, max(1, len(prepared)))) as executor:
-        futures = {executor.submit(invoke, (sid, item)): sid for sid, item in prepared.items()}
-        for future in as_completed(futures):
-            sid = futures[future]
-            exported, _, run_dir = prepared[sid]
+    executor = ThreadPoolExecutor(max_workers=min(4, max(1, len(prepared))))
+    futures = {executor.submit(invoke, (sid, item)): sid for sid, item in prepared.items()}
+
+    def collect(future):
+        sid = futures[future]
+        exported, _, run_dir = prepared[sid]
+        try:
+            response = future.result()["response"]
+            envelope = {"protocol": agent_protocol.PROTOCOL, "task_id": exported["task_id"],
+                        "result": response}
+            result_path = run_dir / "portable-result.json"
+            result_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
+            outcomes[sid] = (0, result_path)
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+            outcomes[sid] = (4 if getattr(exc, 'code', '') == 'model_cooldown' else 1, str(exc))
+        import_outcome(by_id[sid])
+
+    audio = next((future for future, sid in futures.items() if sid == 'audio'), None)
+    deferred = pending_audio is not None and audio is not None
+    if deferred:
+        collected = False
+
+        def collect_audio(wait=False):
+            nonlocal collected
+            if collected or not wait and not audio.done():
+                return {}
             try:
-                response = future.result()["response"]
-                envelope = {"protocol": agent_protocol.PROTOCOL, "task_id": exported["task_id"],
-                            "result": response}
-                result_path = run_dir / "portable-result.json"
-                result_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
-                outcomes[sid] = (0, result_path)
-            except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
-                outcomes[sid] = (1, str(exc))
-            import_outcome(by_id[sid])
-    for stage in stages:
-        if stage.id not in prepared:
-            import_outcome(stage)
-    return outcomes
+                collect(audio)
+                return {'audio': outcomes['audio']}
+            finally:
+                collected = True
+                executor.shutdown(wait=True)
+
+        # Retain the exact exported task and its importer, not just a stage ID.
+        # Only the lock-owning scheduler calls this closure and writes delivery.
+        pending_audio.append(collect_audio)
+    try:
+        for future in as_completed([f for f in futures if not deferred or f is not audio]):
+            collect(future)
+        for stage in stages:
+            if stage.id not in prepared:
+                import_outcome(stage)
+        return {sid: code for sid, code in outcomes.items() if not deferred or sid != 'audio'}
+    finally:
+        if not deferred:
+            executor.shutdown(wait=True)
 
 
 @contextmanager
@@ -636,11 +726,20 @@ def _refresh_completed_review(batch_dir, manifest):
 def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -> dict:
     # Web calls this lock-owned entry directly. Every entry therefore owns the
     # same bounded worker lifetime; no caller can accidentally use sync cuts.
+    pending_audio = []
     with ThreadPoolExecutor(max_workers=1) as audio_worker:
-        return _advance_impl(batch_dir, bridge, stop_at, audio_worker=audio_worker)
+        try:
+            return _advance_impl(batch_dir, bridge, stop_at, audio_worker=audio_worker,
+                                 pending_audio=pending_audio)
+        finally:
+            # Cancellation/stop/error cannot release the batch execution lock
+            # while its model still owns an exported task or can write a result.
+            for collect in pending_audio:
+                collect(wait=True)
 
 
-def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, audio_worker) -> dict:
+def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, audio_worker,
+                  pending_audio=None) -> dict:
     from . import operations
     if operations.lease_active(batch_dir):
         return {"action": "operations_leased", "status": "waiting", "reason": "Harness 运维修复租约生效中"}
@@ -696,6 +795,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     audio_prep = {"status": "waiting"}
     audio_future = None
     deferred_audio = False
+    deferred_audio_model = False
     audio_allowed = (stop_at is None or stop_at in contracts.STAGE_ORDER
                      and contracts.STAGE_ORDER.index(stop_at) > contracts.STAGE_ORDER.index("audio"))
     stages = list(contracts.STAGES)
@@ -705,12 +805,29 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
         if cancel_requested(batch_dir):
             return _result(batch_dir, manifest, stage.id,
                            "用户请求删除批次，已在阶段边界停止", "cancelled")
+        # Publish a blocker at the next safe node boundary, before a slow
+        # independent branch is joined. Investigation may read frozen evidence;
+        # artifact repair still requires exclusive admission in operations.
+        if blockers:
+            try:
+                operations.handoff_if_available(batch_dir)
+            except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+                pass  # Optional operations must never stop ordinary execution.
+        if pending_audio:
+            for collect in pending_audio:
+                parallel_done.update(collect(wait=stage.id == 'audio' and deferred_audio_model))
+            manifest = mf.load(batch_dir)
+        if stage.id == 'audio' and pending_audio and 'audio' not in parallel_done:
+            review_index = stages.index(contracts.STAGE_BY_ID['review'])
+            stages.insert(review_index, stage)
+            deferred_audio_model = True
+            continue
         # Defer only the audio stage, preserving the existing consumer/import
         # checks. A slow cutter joins immediately before review, after validate.
         if stage.id == 'audio' and deferred_audio:
             audio_prep = audio_future.result()
             deferred_audio = False
-        if audio_allowed and audio_future is None and audio_prep.get("status") == "waiting":
+        if cooldown <= 0 and audio_allowed and audio_future is None and audio_prep.get("status") == "waiting":
             deps = contracts.STAGE_BY_ID["audio"].depends_on
             if all(dep_ready(d) for d in deps):
                 if audio_worker is None:
@@ -850,6 +967,28 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
 
         if stage.kind == contracts.AGENT:
             if cooldown > 0:
+                if stage.id == 'audio' and not ((manifest.get('inputs') or {}).get('audio') or {}).get('exists'):
+                    # Match the existing no_audio preparation decision without
+                    # starting transcription or invoking an overridden bridge.
+                    mf.touch_stage(manifest, 'audio', mf.SKIPPED,
+                                   notes='未提供音频，按无音频继续（audio_absent）')
+                    mf.save(batch_dir, manifest)
+                    continue
+                local = None
+                if _default_agent_bridge(stage.id, bridge):
+                    try:
+                        local = _cooldown_preflight(batch_dir, stage)
+                    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+                        local = (3, {'reason': str(exc)})
+                # The local importer owns its manifest writes. Never save the
+                # scheduler's pre-import snapshot over a new delivery.
+                manifest = mf.load(batch_dir)
+                if local is not None:
+                    code, report = local
+                    if code or not mf.dependency_satisfied(manifest, stage.id, allow_unqualified=False):
+                        blocked(stage.id, str(report.get('reason') or report.get('detail')
+                                              or '本地候选尚未通过交付校验'), 'review')
+                    continue
                 blocked(stage.id, f"模型限流/额度冷却中，约 {int(cooldown)}s 后重试", "cooldown",
                         retry_after=cooldown)
                 continue
@@ -913,7 +1052,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                         continue
                     if stop_at and contracts.STAGE_ORDER.index(candidate.id) >= contracts.STAGE_ORDER.index(stop_at):
                         continue
-                    if candidate.id == "audio" and audio_prep.get("status") not in {"ready", "evidence", "done"}:
+                    if candidate.id == "audio" and (pending_audio or audio_prep.get("status") not in {"ready", "evidence", "done"}):
                         continue
                     default = ["{python}", "-m", "workflow.agent", "run", "--stage", candidate.id,
                                "--batch-dir", "{batch_dir}"]
@@ -924,10 +1063,14 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                             and not mf.skip_reason(manifest, candidate)
                             and all(dep_ready(dep) for dep in candidate.depends_on)):
                         eligible.append(candidate)
-                if len(eligible) > 1 and agent.configured():
+                if (len(eligible) > 1 or stage.id == 'audio' and eligible) and agent.configured():
                     config = local_agent.load_config()
                     try:
-                        results = _parallel_ready_agents(batch_dir, eligible, config)
+                        if any(item.id == 'audio' for item in eligible):
+                            results = _parallel_ready_agents(batch_dir, eligible, config,
+                                                             pending_audio=pending_audio)
+                        else:
+                            results = _parallel_ready_agents(batch_dir, eligible, config)
                     except Exception as exc:  # lock contention is "busy", not a failure
                         if getattr(exc, "code", "") != "lock_timeout":
                             raise
@@ -935,6 +1078,11 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                                        "另一个执行器正在处理该批次；稍后自动继续", "busy")
                     parallel_done.update(results)
                     manifest = mf.load(batch_dir)
+                    if stage.id == 'audio' and pending_audio and 'audio' not in results:
+                        review_index = stages.index(contracts.STAGE_BY_ID['review'])
+                        stages.insert(review_index, stage)
+                        deferred_audio_model = True
+                        continue
                     if stage.id in results:
                         code = results[stage.id]
                         if code == 4:
@@ -1038,8 +1186,8 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
 
     manifest = mf.load(batch_dir)
     first = blockers[0] if blockers else {}
-    # 本轮若没有任何限流/额度冷却阻断就说明已恢复，清掉旧冷却标记（成功推进后不残留）。
-    if not any(item["action"] == "cooldown" for item in blockers):
+    # 本地推进不代表模型已恢复；只有原冷却到期后才清掉旧标记。
+    if cooldown <= 0 and not any(item["action"] == "cooldown" for item in blockers):
         _clear_cooldown(batch_dir)
     outcome = _result(batch_dir, manifest, first.get("stage"),
                       first.get("reason", "自动阶段已全部完成"), first.get("action", ""))
@@ -1079,7 +1227,14 @@ def _result(batch_dir: Path, manifest: dict, stage_id, reason: str,
         operations.handoff_if_available(batch_dir)
     except (OSError, ValueError, KeyError, TypeError):
         pass
+    performance = {}
+    try:
+        from . import operations_performance
+        performance = operations_performance.observe(batch_dir, mf.load(batch_dir))
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+        pass  # A read-only performance report cannot block normal delivery.
     return {
+        "performance_observation": performance,
         "self_heal_verification": observed,
         "batch": manifest.get("workflow_id", batch_dir.name),
         "batch_dir": str(batch_dir),

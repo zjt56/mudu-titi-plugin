@@ -8,7 +8,7 @@ artifact: 01_source_ans/answers.json
 来源优先级：**Word 原卷/答案材料 > 随附 PDF/OCR 提取原文 > 缺失留空**。Word 有答案一律以 Word 为准；Word 确实没有某题答案时，先去 PDF/OCR 提取文本找同一题并逐字保留（evidence 注明 PDF）；都没有才记为缺失，绝不猜答案或跨材料借用。
 
 ## 权限边界
-- 只写 `answers` 阶段产物里的 `answers`、`evidence`、`difficulty` 三个字段。
+{{answers_fields}}
 - 不判断题型、不写知识点、不写解析正文、不改题号范围。
 - 不读、不改其他阶段的产物。
 

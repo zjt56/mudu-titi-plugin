@@ -1,4 +1,4 @@
-"""Durable local operations incidents. All mutations share auto's OS lock.
+"""Durable operations incidents with separate investigation and repair admission.
 
 No model or remote service is invoked here. A receipt is written *before* an
 operation; an interrupted request remains unknown and must never be replayed.
@@ -39,7 +39,9 @@ def service_available():
 ACTIONS = frozenset(("diagnose", "read_evidence", "preview_repair", "apply_repair",
                      "verify", "resume", "regenerate_units", "record_finding", "finish", "heartbeat",
                      "progress", "release", "cancel", "request_code_repair",
-                     "code_repair", "install_code_repair"))
+                     "code_repair", "install_code_repair", "promote"))
+INVESTIGATION_ACTIONS = frozenset(("diagnose", "read_evidence", "record_finding",
+                                   "heartbeat", "progress", "release"))
 REGENERABLE = frozenset(("answers", "explanations", "types", "knowledge", "audio"))
 REPAIRS = {"repair_source_tables": "apply_source_table_repair",
            "repair_source_options": "apply_source_option_repair",
@@ -74,6 +76,21 @@ class OperationsBusy(ValueError):
 
 
 @contextmanager
+def _metadata_locked(root, folder):
+    """Short ledger-only lock. Never acquires an execution/model lock inside it."""
+    root, folder = Path(root), Path(folder)
+    _active(root, folder)
+    identity = _identity(folder)
+    with supervisor._try_file_lock(folder / "workflow/.operations.lock") as acquired:
+        if not acquired:
+            raise OperationsBusy("worker_busy: 运维事件台账正在更新")
+        _active(root, folder)
+        if _identity(folder) != identity:
+            raise ValueError("identity_changed: 批次身份已变化")
+        yield
+
+
+@contextmanager
 def _locked(root, folder, *, execution=False, runner=False):
     root, folder = Path(root), Path(folder)
     _active(root, folder)
@@ -98,7 +115,8 @@ def _locked(root, folder, *, execution=False, runner=False):
                     if exc.code == "lock_timeout":
                         raise OperationsBusy("worker_busy: live model/import worker") from exc
                     raise
-                yield
+                with _metadata_locked(root, folder):
+                    yield
 
 
 def _load(folder):
@@ -456,7 +474,8 @@ def lease_active(folder):
     """Read-only guard, called under auto lock BEFORE reconciliation or writes."""
     state = _load(Path(folder))
     incident = state.get("incident") or {}
-    return (incident.get("status") == "claimed" and incident.get("lease_expires_at", 0) > time.time()
+    return (incident.get("status") == "claimed" and incident.get("mode", "repair") == "repair"
+            and incident.get("lease_expires_at", 0) > time.time()
             and incident.get("execution_process") in (None, _process_identity()))
 
 
@@ -716,6 +735,11 @@ def handoff_if_available(folder):
     if not service_available():
         return None
     folder = Path(folder)
+    with _metadata_locked(folder.parent, folder):
+        return _handoff_locked(folder)
+
+
+def _handoff_locked(folder):
     state = _discover(folder)
     incident = state.get('incident') or {}
     if not incident or incident.get('status') not in {'queued', 'claimed', 'waiting_evidence'}:
@@ -746,7 +770,7 @@ def pending_incident(folder):
 def view(root, folder, *, discover=True):
     folder = Path(folder)
     try:
-        with _locked(root, folder):
+        with _metadata_locked(root, folder):
             state = _discover(folder) if discover else _load(folder)
             if state:
                 _save(folder, state)
@@ -773,9 +797,7 @@ def incidents(root):
             if (incident and incident.get("status") == "queued"
                     and incident.get("not_before", 0) <= time.time()
                     and not any(row.get("status") == "unknown" for row in _load(folder).get("receipts", []))):
-                with supervisor._try_file_lock(folder / "workflow/.run.lock") as available:
-                    if available:
-                        found.append(incident)
+                found.append(incident)
         except (ValueError, OSError):
             continue
     return {"incidents": found}
@@ -790,7 +812,13 @@ def _text(value, label):
 def claim(root, folder, payload):
     folder = Path(folder)
     session = _text(payload.get("session_id"), "session_id")
-    with _locked(root, folder, runner=True):
+    mode = payload.get("mode", "repair")
+    if mode == "investigate":
+        mode = "investigation"
+    if mode not in {"investigation", "repair"}:
+        raise ValueError("invalid_claim_mode")
+    guard = _metadata_locked(root, folder) if mode == "investigation" else _locked(root, folder, runner=True)
+    with guard:
         state = _discover(folder)
         incident = state.get("incident") or {}
         if incident.get("incident_id") != payload.get("incident_id"):
@@ -803,6 +831,8 @@ def claim(root, folder, payload):
             incident.update(status="queued", attempt_id=None, lease_expires_at=0, not_before=0,
                             queue_generation=incident.get("queue_generation", 0) + 1)
         if incident.get("status") == "claimed" and incident.get("session_id") == session:
+            if incident.get("mode", "repair") != mode:
+                raise ValueError("explicit_promotion_required")
             return dict(incident)
         if incident.get("status") != "queued" or incident.get("not_before", 0) > time.time():
             raise ValueError("incident_not_claimable")
@@ -810,23 +840,37 @@ def claim(root, folder, payload):
             _event(incident, "claim", "unknown_quarantine", "未确定动作结果，禁止自动重试")
             _save(folder, state)
             raise ValueError("unknown_receipt_quarantine")
-        incident.update(status="claimed", eligible=False, session_id=session,
+        incident.update(status="claimed", mode=mode, eligible=False, session_id=session,
                         attempt_id=uuid.uuid4().hex, fence=incident.get("fence", 0) + 1,
                         lease_expires_at=time.time() + LEASE_SECONDS,
                         snapshot=_snapshot(folder, incident["stage"]), execution_process=process)
-        record = _code_record(folder)
-        if (record and record.get("status") == "installed_pending_restart"
-                and record.get("install_process") and record["install_process"] != process
-                and record.get("install_attempt_id") != incident["attempt_id"]):
-            record.update(status="restarted_pending_verify", restart_process=process,
-                          restart_attempt_id=incident["attempt_id"], restarted_at=mf.now_iso())
-            _save_code_record(folder, record)
-            incident["code_repair"] = {**(incident.get("code_repair") or {}),
-                                       "status": record["status"], "restarted_at": record["restarted_at"]}
-            _event(incident, "restart", "acknowledged", "新执行进程已重新认领；仍须原检查复验")
+        if mode == "investigation":
+            incident["investigation_code"] = _code_fingerprint()
+        incident["investigation_ready"] = any(
+            finding.get("code_fingerprint") == incident.get("investigation_code")
+            and finding.get("snapshot") == incident["snapshot"]
+            and finding.get("observed_snapshot") == incident["snapshot"]
+            and finding.get("incident_id") == incident["incident_id"]
+            for finding in incident.get("findings", []))
+        if mode == "repair":
+            _acknowledge_restart(folder, incident)
         _event(incident, "claim", "claimed", session)
         _save(folder, state)
         return dict(incident)
+
+
+def _acknowledge_restart(folder, incident):
+    process = _process_identity()
+    record = _code_record(folder)
+    if (record and record.get("status") == "installed_pending_restart"
+            and record.get("install_process") and record["install_process"] != process
+            and record.get("install_attempt_id") != incident["attempt_id"]):
+        record.update(status="restarted_pending_verify", restart_process=process,
+                      restart_attempt_id=incident["attempt_id"], restarted_at=mf.now_iso())
+        _save_code_record(folder, record)
+        incident["code_repair"] = {**(incident.get("code_repair") or {}),
+                                   "status": record["status"], "restarted_at": record["restarted_at"]}
+        _event(incident, "restart", "acknowledged", "新执行进程已重新认领；仍须原检查复验")
 
 
 def _read_evidence(folder, data):
@@ -1061,7 +1105,13 @@ def _code_repair(folder, incident, data):
     result = {}
     if operation == "read":
         result = dev.read(job, data.get("path"), offset=data.get("offset", 0), limit=data.get("limit", 12000))
-        result["text"] = result["text"][:12000]
+    elif operation == "read_lines":
+        result = dev.read_lines(job, data.get("path"), start_line=data.get("start_line", 1),
+                                limit=data.get("limit", 80))
+    elif operation == "search":
+        result = dev.search(job, data.get("query"), relative=data.get("path"),
+                            start_line=data.get("start_line", 1), max_matches=data.get("max_matches", 20),
+                            context=data.get("context", 2), cursor=data.get("cursor"))
     elif operation == "write":
         result = dev.write(job, data.get("path"), data.get("content"), expected_sha=data.get("expected_sha"))
     elif operation == "test":
@@ -1147,10 +1197,18 @@ def action(root, folder, payload, *, enqueue=None):
     resume = False
     writes_artifacts = name in {"apply_repair", "install_code_repair", "regenerate_units"} or (
         name == "resume" and bool(data.get("strategy")))
-    with _locked(root, folder, execution=writes_artifacts,
-                 runner=name in {"preview_repair", "verify", "finish"}):
+    # Read-only tools may run alongside the batch. Any repair admission obtains
+    # execution locks first, then the short ledger lock (never the reverse).
+    metadata_only = (name in INVESTIGATION_ACTIONS
+                     and ((_load(folder).get("incident") or {}).get("mode") == "investigation"))
+    guard = (_metadata_locked(root, folder) if metadata_only else
+             _locked(root, folder, execution=writes_artifacts,
+                     runner=name in {"preview_repair", "verify", "finish", "promote"}))
+    with guard:
         state = _load(folder)
         incident = state.get("incident") or {}
+        if metadata_only and incident.get("mode", "repair") != "investigation":
+            raise OperationsBusy("worker_busy: 调查已升级，须按当前修复身份重新准入")
         if incident.get("incident_id") != payload.get("incident_id"):
             raise ValueError("incident_mismatch")
         # Receipt lookup precedes lease checks: completed/unknown requests never run twice.
@@ -1168,7 +1226,10 @@ def action(root, folder, payload, *, enqueue=None):
                 or (incident.get("execution_process") and incident["execution_process"] != _process_identity())):
             _save(folder, state)
             raise ValueError("stale_lease")
-        if name not in {"release", "cancel"} and incident.get("snapshot") != _snapshot(folder, incident["stage"]):
+        investigation = incident.get("mode", "repair") == "investigation"
+        if investigation and name not in INVESTIGATION_ACTIONS | {"promote"}:
+            raise ValueError("repair_claim_required")
+        if not investigation and name not in {"release", "cancel"} and incident.get("snapshot") != _snapshot(folder, incident["stage"]):
             raise ValueError("inputs_changed: release then claim a fresh snapshot")
         recovery = data.get("session_corruption")
         if "session_corruption" in data:
@@ -1191,7 +1252,22 @@ def action(root, folder, payload, *, enqueue=None):
         mutating = False
         try:
             result = {}
-            if name == "diagnose":
+            if name == "promote":
+                if not investigation:
+                    raise ValueError("investigation_claim_required")
+                if (incident.get("snapshot") != _snapshot(folder, incident["stage"])
+                        or incident.get("investigation_code") != _code_fingerprint()):
+                    raise ValueError("inputs_changed: release then claim a fresh snapshot")
+                if incident.get("kind") == "performance" or incident.get("trigger") == "performance":
+                    raise ValueError("performance_investigation_read_only")
+                mutating = True  # A lost promotion result must be reconciled, never replayed.
+                incident.update(mode="repair", attempt_id=uuid.uuid4().hex,
+                                fence=incident.get("fence", 0) + 1)
+                incident.pop("preview", None)
+                incident.pop("verification", None)
+                _acknowledge_restart(folder, incident)
+                result = {"incident": dict(incident), "promoted": True}
+            elif name == "diagnose":
                 result = {"stage": incident["stage"], "detail": incident["detail"],
                           "repairs": list(REPAIRS), "evidence_paths": sorted(set(self_heal.SOURCE_FILES) | set(self_heal.REPORTS)),
                           "packet": _packet(folder, incident)}
@@ -1320,6 +1396,15 @@ def action(root, folder, payload, *, enqueue=None):
                     incident["queue_generation"] = incident.get("queue_generation", 0) + 1
                     incident["release_count"] = incident.get("release_count", 0) + 1
                     incident["not_before"] = time.time() + min(900, 60 * 3 ** min(incident["release_count"] - 1, 3))
+                    if data.get("state") == "no_substantive_progress":
+                        # A bounded host attempt exhausted read-only navigation.
+                        # Preserve findings/workspace and wait for new evidence,
+                        # rather than re-buying the same investigation each minute.
+                        plan = _recovery_plan(folder, incident)
+                        incident.update(status="waiting_evidence", eligible=False, not_before=0)
+                        incident["recovery"] = {**plan, "state": "waiting_evidence",
+                            "reason": "相同证据下未产生新的修改或复验，保留隔离工作区等待真实证据变化",
+                            "at": mf.now_iso()}
                 result = {**result, "released": True, "reclaim_required": True}
                 if isinstance(data.get("reason"), str):
                     result["detail"] = _redact(data["reason"])[:2000]
@@ -1333,6 +1418,11 @@ def action(root, folder, payload, *, enqueue=None):
                 # there is an ordinary failure that stays retryable. Only the
                 # production install marks the receipt unknown (see below).
                 result = _code_repair(folder, incident, data)
+                phase = {'read': 'evidence_read', 'read_lines': 'evidence_read', 'search': 'evidence_read',
+                         'write': 'code_write', 'test': 'code_test', 'prepare': 'code_prepare'}.get(data.get('operation'))
+                if phase:
+                    incident['repair_progress'] = {'phase': phase, 'at': mf.now_iso(),
+                        'operation': data.get('operation'), 'passed': result.get('passed')}
             elif name == "install_code_repair":
                 result = _install_code_repair(folder, incident, data)
                 mutating = True
@@ -1340,6 +1430,10 @@ def action(root, folder, payload, *, enqueue=None):
             elif name == "record_finding":
                 result = {key: _redact(str(data.get(key) or ""))[:4000]
                           for key in ("summary", "repro", "expected", "actual", "paths")}
+                if investigation:
+                    result.update(incident_id=incident["incident_id"], attempt_id=incident["attempt_id"],
+                                  snapshot=incident["snapshot"], observed_snapshot=_snapshot(folder, incident["stage"]),
+                                  code_fingerprint=incident.get("investigation_code"))
                 incident.setdefault("findings", []).append(result)
                 incident["findings"] = incident["findings"][-30:]
             else:
@@ -1356,7 +1450,10 @@ def action(root, folder, payload, *, enqueue=None):
                 incident["lease_expires_at"] = time.time() + LEASE_SECONDS
                 if name == "heartbeat":
                     result["lease_expires_at"] = incident["lease_expires_at"]
-            incident["snapshot"] = _snapshot(folder, incident["stage"])
+            if not investigation or name == "promote":
+                incident["snapshot"] = _snapshot(folder, incident["stage"])
+            if name == "promote":
+                result["incident"] = dict(incident)
             receipt.update(status="unknown" if resume else "completed", evidence=result)
             _event(incident, name, "completed", result.get("detail") or result.get("summary") or "", result if name == "verify" else None)
         except Exception as exc:
@@ -1364,7 +1461,10 @@ def action(root, folder, payload, *, enqueue=None):
             # before any write is a normal failure and must stay retryable.
             status = "unknown" if (mutating or incident.pop("_install_started", False)
                                    or incident.pop("_regenerate_started", False)) else "failed"
-            receipt.update(status=status, evidence={"error": _redact(str(exc))[:1000]})
+            evidence = {"error": _redact(str(exc))[:1000]}
+            if name == "promote" and str(exc).startswith("inputs_changed:"):
+                evidence["code"] = "inputs_changed"
+            receipt.update(status=status, evidence=evidence)
             _event(incident, name, status, str(exc))
         _save(folder, state)
     if resume:
@@ -1374,6 +1474,11 @@ def action(root, folder, payload, *, enqueue=None):
         latest = _load(folder)
         receipt = next((r for r in latest.get("receipts", []) if r["request_id"] == request), receipt)
     return dict(receipt)
+
+
+def promote(root, folder, payload):
+    """Explicit host handoff; a successful receipt carries the replacement attempt."""
+    return action(root, folder, {**payload, "action": "promote"})
 
 
 def _dispatch_resume(root, folder, enqueue):
@@ -1429,6 +1534,11 @@ def _settle_regenerations(folder, incident):
 def observe_execution(folder):
     """Called by the FIFO worker while it still holds the original auto lock."""
     folder = Path(folder)
+    with _metadata_locked(folder.parent, folder):
+        return _observe_execution_locked(folder)
+
+
+def _observe_execution_locked(folder):
     state = _load(folder)
     incident = state.get("incident") or {}
     _settle_regenerations(folder, incident)

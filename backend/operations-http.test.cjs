@@ -155,8 +155,10 @@ test('manager tools round-trip real Python receipts, preserve failure truth and 
       followup: message => messages.push(message),
       cancel: () => {},
       whenIdle: async () => {
-        assert.equal(messages.length, 1);
-        assert.deepEqual([...tools.keys()].sort(), [...OPERATIONS_TOOL_NAMES].sort());
+        assert.ok(messages.length === 1 || messages.length === 2);
+        assert.deepEqual([...tools.keys()].sort(), messages.length === 1
+          ? ['operations_diagnose', 'operations_read_evidence', 'operations_record_finding']
+          : [...OPERATIONS_TOOL_NAMES].sort());
         assert.deepEqual(restrictions, [{ allow: [] }]);
         assert.match(guards[0]({ name: 'upload' }), /Only incident-scoped/);
         assert.equal(guards[0]({ name: 'operations_read_evidence' }), undefined);
@@ -165,20 +167,24 @@ test('manager tools round-trip real Python receipts, preserve failure truth and 
           results.push({ name, value });
           return value;
         };
+        if (messages.length === 2) {
+          const finished = await call('operations_finish', { outcome: 'recovery_queued', summary: 'paper: fixture_format remains unresolved; original evidence retained' });
+          assert.equal(finished.outcome, 'recovery_queued');
+          assert.equal(finished.verified, false);
+          return;
+        }
+        assert.ok(guards[0]({ name: 'operations_finish' }));
         const diagnosis = await call('operations_diagnose');
         assert.equal(diagnosis.stage, 'format_gate');
         assert.ok(diagnosis.evidence_paths.includes('01_source/正文.txt'));
         const evidence = await call('operations_read_evidence', { path: '01_source/正文.txt' });
         assert.equal(evidence.text, sourceText);
-        await assert.rejects(call('operations_finish', { outcome: 'resolved', summary: 'Cannot claim success' }), { code: 'VERIFICATION_REQUIRED' });
+        assert.equal(tools.has('operations_finish'), false);
         await call('operations_record_finding', {
           summary: `paper (${f.folder}): fixture_format requires deep repair; original evidence retained`,
           repro: 'Read 07_review/upload-format.json', expected: 'format_gate passes genuine checks',
           actual: 'fixture_format failed', paths: ['01_source/正文.txt', '07_review/upload-format.json'],
         });
-        const finished = await call('operations_finish', { outcome: 'recovery_queued', summary: 'paper: fixture_format remains unresolved; original evidence retained' });
-        assert.equal(finished.outcome, 'recovery_queued');
-        assert.equal(finished.verified, false);
       },
     };
     await init.setup({
@@ -231,7 +237,7 @@ test('manager tools round-trip real Python receipts, preserve failure truth and 
   assert.match(state.incident.findings[0].summary, /fixture_format/);
   assert.equal(state.incident.findings[0].actual, 'fixture_format failed');
   const actionCalls = f.calls.filter(row => row.body?.action);
-  assert.deepEqual(actionCalls.map(row => row.body.action), ['progress', 'heartbeat', 'diagnose', 'read_evidence', 'record_finding', 'finish']);
+  assert.deepEqual(actionCalls.map(row => row.body.action), ['progress', 'heartbeat', 'diagnose', 'read_evidence', 'record_finding', 'progress', 'promote', 'heartbeat', 'finish']);
   assert.equal(new Set(actionCalls.map(row => row.body.request_id)).size, actionCalls.length);
   assert.equal(state.receipts.length, actionCalls.length);
   for (const row of actionCalls) {
