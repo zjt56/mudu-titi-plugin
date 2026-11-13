@@ -459,6 +459,82 @@ test('task budgets lower manager caps but cannot raise them', async () => {
   await malformed.run(); assert.equal(malformed.agents.length, 0); assert.deepEqual(states(malformed), ['failed']); await malformed.manager.dispose();
 });
 
+test('explicit task time budget survives ten minutes and expires at its bound deadline', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000000 });
+  const entered = deferred();
+  const f = await fixture({ rows: [task({ budgets: { max_attempt_ms: 1500000 } })],
+    hangIdle: true, program: () => entered.resolve() });
+  t.after(() => f.manager.dispose());
+  f.manager.start(); await f.manager.tick(); await entered.promise;
+  assert.equal(f.manager.status().tasks[0].attemptMs, 1500000);
+  assert.equal(f.manager.status().tasks[0].maxAttemptMs, 3600000);
+  t.mock.timers.tick(600000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(states(f), ['running']);
+  assert.equal(f.agents[0].cancelCount, 0);
+  t.mock.timers.tick(899999);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.agents[0].cancelCount, 0);
+  t.mock.timers.tick(1); await f.manager.drain();
+  assert.deepEqual(states(f), ['running', 'failed']);
+  assert.match(f.calls.at(-1).body.error, /time budget exceeded/);
+  assert.equal(f.calls.filter(call => call.path.endsWith('/claim')).length, 1);
+});
+
+test('task time budget preserves legacy fallback, host hard cap and backend deadline', async t => {
+  for (const scenario of [
+    { name: 'legacy fallback', extra: {}, expected: 600000 },
+    { name: 'short task', extra: { budgets: { max_attempt_ms: 120000 } }, expected: 120000 },
+    { name: 'absolute host cap', extra: { budgets: { max_attempt_ms: Number.MAX_SAFE_INTEGER } }, expected: 3600000 },
+    { name: 'explicit lower host cap', extra: { budgets: { max_attempt_ms: 1500000 } }, cap: 700000, expected: 700000 },
+    { name: 'backend deadline', extra: { budgets: { max_attempt_ms: 1500000 }, deadline: 1300 }, expected: 300000 },
+  ]) await t.test(scenario.name, async sub => {
+    sub.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000000 });
+    const entered = deferred();
+    const f = await fixture({ rows: [task(scenario.extra)], hangIdle: true,
+      managerOptions: scenario.cap ? { maxAttemptMs: scenario.cap } : {}, program: () => entered.resolve() });
+    sub.after(() => f.manager.dispose());
+    f.manager.start(); await f.manager.tick(); await entered.promise;
+    assert.equal(f.manager.status().tasks[0].deadlineAt, 1000000 + scenario.expected);
+    sub.mock.timers.tick(scenario.expected - 1);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.agents[0].cancelCount, 0);
+    sub.mock.timers.tick(1); await f.manager.drain();
+    assert.deepEqual(states(f), ['running', 'failed']);
+  });
+});
+
+test('claimed task time budget is authoritative and claim time does not renew the attempt', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000000 });
+  const entered = deferred(), claiming = deferred(), claimed = deferred();
+  const f = await fixture({ hangIdle: true, backend: async (path, init) => {
+    if (!path.endsWith('/claim')) return;
+    claiming.resolve(); await claimed.promise;
+    return { task: task({ session_id: init.body.session_id, budgets: { max_attempt_ms: 1500000 } }) };
+  }, program: () => entered.resolve() });
+  t.after(() => f.manager.dispose());
+  f.manager.start(); await f.manager.tick(); await claiming.promise;
+  t.mock.timers.tick(100); claimed.resolve(); await entered.promise;
+  assert.equal(f.manager.status().tasks[0].deadlineAt, 2500000);
+  t.mock.timers.tick(1499899);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.agents[0].cancelCount, 0);
+  t.mock.timers.tick(1); await f.manager.drain();
+  assert.deepEqual(states(f), ['running', 'failed']);
+});
+
+test('invalid task time budgets fail before model creation and host cap cannot exceed one hour', async () => {
+  for (const value of [0, -1, 1.5, '1500000', null, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    const f = await fixture({ rows: [task({ budgets: { max_attempt_ms: value } })] });
+    await f.run();
+    assert.equal(f.agents.length, 0);
+    assert.deepEqual(states(f), ['failed']);
+    assert.match(f.calls.at(-1).body.error, /max_attempt_ms must be a positive integer/);
+    await f.manager.dispose();
+  }
+  await assert.rejects(fixture({ managerOptions: { maxAttemptMs: 3600001 } }), /host hard limit/);
+});
+
 test('task time budget and live disable cancel pending native sessions', async () => {
   const timed = await fixture({ rows: [task({ budgets: { max_attempt_ms: 15 } })], hangIdle: true });
   await timed.run(); assert.deepEqual(states(timed), ['running', 'failed']); await timed.manager.dispose();

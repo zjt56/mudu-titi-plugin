@@ -461,7 +461,27 @@ def _submit(task, candidate):
         elif feedback["retryable"] is False:
             task["status"] = "failed"
             task["error_code"] = "validation"
+        # A changed JSON spelling must not buy unlimited retries of the same
+        # deterministic rejection. Scope the streak to the validator identity:
+        # a code repair gets a fresh local validation, not another model call.
+        rejection_key = _digest({"validator": task["validator_identity"],
+                                 "error": feedback["error"],
+                                 "diagnostics": feedback.get("diagnostics")})
+        previous = task.get("validation_rejection") or {}
+        repeated = previous.get("count", 0) + 1 if previous.get("key") == rejection_key else 1
+        total = (previous.get("total", 0) + 1
+                 if previous.get("validator_identity") == task["validator_identity"] else 1)
+        task["validation_rejection"] = {"key": rejection_key, "count": repeated,
+                                        "total": total, "validator_identity": task["validator_identity"]}
+        if feedback["retryable"] and (repeated >= 3 or total >= 6):
+            feedback.update(retryable=False, failure_class="validation_no_progress",
+                            repeated_validation_errors=repeated, rejected_candidates=total)
+            task.update(status="failed", error_code="validation_no_progress",
+                        failure_class="validation_no_progress")
         task.update(feedback=feedback, accepted=False)
+        _write(candidate_path, {"candidate": candidate, "received_at": time.time(),
+                                "validator_identity": task["validator_identity"],
+                                "feedback": feedback})
         if task["status"] in TERMINAL:
             task.update(error=feedback["error"], retryable=False)
         _save(task)
@@ -470,6 +490,11 @@ def _submit(task, candidate):
                 feedback={"accepted": True, "retryable": False}, retryable=False)
     task.pop("error", None)
     task.pop("error_code", None)
+    task.pop("validation_rejection", None)
+    task.pop("failure_class", None)
+    _write(candidate_path, {"candidate": candidate, "received_at": time.time(),
+                            "validator_identity": task["validator_identity"],
+                            "feedback": task["feedback"]})
     _save(task)
     return task["feedback"]
 

@@ -231,6 +231,56 @@ class ContentAgentTests(unittest.TestCase):
         self.finish(task, thread, result)
         self.assertTrue(candidate.with_name("candidate-0002.json").is_file())
 
+    def test_repeated_validation_error_stops_without_burning_time_budget(self):
+        self.accept.side_effect = ValueError("Missing answer q1 needs source evidence")
+        task, thread, result = self.start()
+        self.claim(task)
+        for attempt in range(3):
+            candidate = copy.deepcopy(self.response)
+            candidate["notes"] = [f"Reformatted candidate {attempt}"]
+            denied = self.tool(task, "submit_candidate", {"candidate": candidate})
+            self.assertEqual(denied["retryable"], attempt < 2)
+        self.assertEqual(denied["failure_class"], "validation_no_progress")
+        self.assertIn("Missing answer q1", denied["error"])
+        thread.join(2)
+        self.assertIn("error", result)
+        saved = broker._read(broker._task_path(task["task_id"]))
+        self.assertEqual(saved["status"], "failed")
+        self.assertEqual(saved["validation_rejection"]["count"], 3)
+        receipt = broker._read(broker._task_path(task["task_id"]).parent / "candidate-0003.json")
+        self.assertEqual(receipt["feedback"]["failure_class"], "validation_no_progress")
+        with self.assertRaises(local_agent.AgentError):
+            broker.invoke(self.prompt(), self.base / "retry", self.config)
+        self.assertEqual(self.accept.call_count, 3)
+        # A real validator repair rechecks the preserved candidate locally.
+        self.validator.return_value = "validator-v2"
+        self.accept.side_effect = None
+        self.accept.return_value = {"completed": True}
+        recovered = broker.invoke(self.prompt(), self.base / "repaired", self.config)
+        self.assertEqual(recovered["task_id"], task["task_id"])
+        self.assertEqual(len(list(broker._tasks())), 1)
+
+    def test_changed_validation_error_resets_no_progress_streak(self):
+        self.accept.side_effect = [ValueError("error A"), ValueError("error A"),
+                                   ValueError("error B"), {"completed": True}]
+        task, thread, result = self.start()
+        self.claim(task)
+        for _ in range(3):
+            self.assertTrue(self.tool(task, "submit_candidate", {"candidate": self.response})["retryable"])
+        self.finish(task, thread, result)
+
+    def test_alternating_validation_errors_still_have_a_candidate_limit(self):
+        self.accept.side_effect = [ValueError(f"error {i % 2}") for i in range(6)]
+        task, thread, result = self.start()
+        self.claim(task)
+        for attempt in range(6):
+            denied = self.tool(task, "submit_candidate", {"candidate": self.response})
+            self.assertEqual(denied["retryable"], attempt < 5)
+        self.assertEqual(denied["rejected_candidates"], 6)
+        self.assertEqual(denied["failure_class"], "validation_no_progress")
+        thread.join(2)
+        self.assertIn("error", result)
+
     def test_deterministic_failure_reuses_receipt_and_code_change_revalidates(self):
         error = ValueError('Content source/ownership check failed: [{"retryable":false,"failure_class":"validator_fault"}]')
         self.accept.side_effect = error

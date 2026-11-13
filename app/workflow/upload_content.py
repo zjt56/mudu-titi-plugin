@@ -462,7 +462,7 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
     skeleton is usable only within one nonempty lesson context, with every Roman
     section present on both sides. A partial key or a repeated lesson stays unbound.
     """
-    from .sync_practice import heading_candidates, plain_text, _LESSON, _UNIT
+    from .sync_practice import heading_candidates, plain_text, is_section_title, _LESSON, _UNIT
     body_path = '01_source/正文.txt'
     body = source_lines.get(body_path, [])
     sections = sections if sections is not None else heading_candidates('\n'.join(body))
@@ -546,7 +546,20 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None):
         # Explicit body/verified banners are stronger than the Roman sequence.
         # Even identical values cannot borrow another foundation/extension band.
         if any(topic != block['topic'] for topic, block in zip(topics, blocks)):
-            continue  # A topic such as Pronunciation needs explicit appendix proof.
+            # A whole-topic paper may print its sole topic only in the body and
+            # start the appendix directly with the Roman keys. The complete
+            # skeleton and all printed numbers below can prove that omission;
+            # they cannot choose between multiple/repeated topics or override an
+            # explicitly different appendix topic. Never erase topic boundaries
+            # from a mixed lesson (e.g. a later Pronunciation section).
+            sole_topics = set(topics)
+            omitted_sole_topic = (len(sole_topics) == 1 and all(topics)
+                and not any(block['topic'] for block in blocks)
+                and sum(is_section_title(plain_text(text).strip())
+                        and _norm(plain_text(text).strip()) in sole_topics
+                        for text in body) == 1)
+            if not omitted_sole_topic:
+                continue
         if (any(block['band'] == 'invalid' for block in blocks)
                 or any(band and band != 'pronunciation' and _answer_band(block['band']) != band
                        for band, block in zip(body_bands, blocks))):
