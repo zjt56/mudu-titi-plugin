@@ -438,7 +438,11 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
             # Coordinate with protocol imports and do not overwrite a stage another
             # participant completed while the model call was running.
             limited = code == 4 or _is_rate_limited(str(value))
+            if not limited and code == 5 and stage.id in prepared:
+                limited = not _has_deterministic_partition_failure(prepared[stage.id][2])
             admission_cooldown = code == 4
+            if code == 5:
+                code = 1
             with bookkeeping_lock, agent_protocol._agent_lock(5):
                 manifest = mf.load(batch_dir)
                 if manifest["stages"].get(stage.id, {}).get("status") not in mf.TERMINAL_OK:
@@ -448,7 +452,7 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
                         if not admission_cooldown:
                             _set_cooldown(batch_dir, RATE_LIMIT_BACKOFF_SECONDS)
                         mf.touch_stage(manifest, stage.id, mf.PENDING,
-                                       notes="限流/额度冷却中：" + str(value)[:200])
+                                       notes="限流/额度或模型调用异常冷却中：" + str(value)[:200])
                     else:
                         mf.touch_stage(manifest, stage.id, mf.NEEDS_REVIEW if code == 3 else mf.FAILED,
                                        exit_code=code, notes=str(value)[:300])
@@ -474,7 +478,12 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
             result_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
             outcomes[sid] = (0, result_path)
         except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
-            outcomes[sid] = (4 if getattr(exc, 'code', '') == 'model_cooldown' else 1, str(exc))
+            code = (4 if getattr(exc, 'code', '') == 'model_cooldown' else
+                    5 if isinstance(exc, local_agent.AgentError) and (
+                        exc.code == 'exit' and _is_upstream_call_failure(str(exc))
+                        or _is_native_upstream_failure(exc.code, str(exc), exc.artifacts,
+                                                       batch_dir, sid, run_dir)) else 1)
+            outcomes[sid] = (code, str(exc))
         import_outcome(by_id[sid])
 
     audio = next((future for future, sid in futures.items() if sid == 'audio'), None)
@@ -877,7 +886,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
             if code == 4:
                 cooldown = _read_cooldown(batch_dir)
                 blocked(stage.id,
-                        "限流/额度冷却中，约 " + str(int(cooldown or RATE_LIMIT_BACKOFF_SECONDS)) + "s 后重试",
+                        "模型调用冷却中，约 " + str(int(cooldown or RATE_LIMIT_BACKOFF_SECONDS)) + "s 后重试",
                         "cooldown", retry_after=cooldown)
             elif code:
                 blocked(stage.id, "代理任务等待接单、补充证据或处理" if code == 3 else "代理桥执行失败",
@@ -989,7 +998,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                         blocked(stage.id, str(report.get('reason') or report.get('detail')
                                               or '本地候选尚未通过交付校验'), 'review')
                     continue
-                blocked(stage.id, f"模型限流/额度冷却中，约 {int(cooldown)}s 后重试", "cooldown",
+                blocked(stage.id, f"模型调用冷却中，约 {int(cooldown)}s 后重试", "cooldown",
                         retry_after=cooldown)
                 continue
             if stage.id == "audio":
@@ -1088,7 +1097,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                         if code == 4:
                             cooldown = _read_cooldown(batch_dir)
                             blocked(stage.id,
-                                    "限流/额度冷却中，约 " + str(int(cooldown or RATE_LIMIT_BACKOFF_SECONDS)) + "s 后重试",
+                                    "模型调用冷却中，约 " + str(int(cooldown or RATE_LIMIT_BACKOFF_SECONDS)) + "s 后重试",
                                     "cooldown", retry_after=cooldown)
                             continue
                         if code:
@@ -1101,6 +1110,8 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                 continue
             print(f"  · {stage.id} 通过代理桥执行")
             executable = _bridge_stage(stage, command)
+            attempts = batch_dir / 'workflow' / 'agent-runs'
+            prior_runs = set(attempts.glob(stage.id + '-*')) if attempts.is_dir() else set()
             code = rn._execute_command(batch_dir, manifest, executable)
             if code != 0:
                 pending = code == 3 and manifest["stages"][stage.id].get("status") == mf.NEEDS_REVIEW
@@ -1109,11 +1120,34 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                     note = str(mf.load(batch_dir)["stages"].get(stage.id, {}).get("notes", ""))
                 except (OSError, KeyError, ValueError):
                     note = ""
-                if not pending and _is_rate_limited(note):
+                new_runs = set(attempts.glob(stage.id + '-*')) - prior_runs if attempts.is_dir() else set()
+                native_upstream = False
+                if not pending and _default_agent_bridge(stage.id, bridge) and new_runs:
+                    try:
+                        stderr = rn._log_path(batch_dir, stage.id).read_text(encoding='utf-8').rsplit('[stderr]\n', 1)[1]
+                        payload = json.loads(stderr.strip().splitlines()[-1])
+                        native_upstream = any(_is_native_upstream_failure(
+                            payload.get('code'), payload.get('error'), payload.get('artifacts'),
+                            batch_dir, stage.id, path) for path in new_runs)
+                    except (OSError, ValueError, IndexError, AttributeError, TypeError):
+                        pass
+                upstream = (not pending and _default_agent_bridge(stage.id, bridge)
+                            and (_is_upstream_call_failure(note) or native_upstream)
+                            and not any(_has_deterministic_partition_failure(path) for path in new_runs))
+                if not pending and (_is_rate_limited(note) or upstream):
                     delay = RATE_LIMIT_BACKOFF_SECONDS
                     _set_cooldown(batch_dir, delay)
                     cooldown = delay
-                    blocked(stage.id, f"限流/额度冷却中，约 {int(delay)}s 后重试", "cooldown",
+                    if upstream:
+                        from .agent_protocol import _agent_lock
+                        with _agent_lock(5):
+                            current = mf.load(batch_dir)
+                            if current['stages'].get(stage.id, {}).get('status') not in mf.TERMINAL_OK:
+                                mf.touch_stage(current, stage.id, mf.PENDING,
+                                               notes='模型调用暂时不可用，冷却中：' + note[:200])
+                                mf.save(batch_dir, current)
+                            manifest = current
+                    blocked(stage.id, f"模型调用暂时不可用，约 {int(delay)}s 后重试", "cooldown",
                             retry_after=delay)
                 else:
                     blocked(stage.id, "代理任务等待接单、补充证据或处理" if pending else "代理桥执行失败",
@@ -1267,6 +1301,67 @@ def _is_rate_limited(text: str) -> bool:
     # this machine-generated wrapper is still authoritative, unlike arbitrary
     # model text.
     return bool(re.search(r"\(exit -?\d+, (?:rate_limit|quota)\)", text or ""))
+
+
+def _is_upstream_call_failure(text: str) -> bool:
+    """Recognize only the local agent's failed subprocess wrapper and stderr line."""
+    text = text or ''
+    # The CLI serializes AgentError as a JSON object; unwrap only its error field.
+    try:
+        obj = json.loads(text)
+    except (TypeError, ValueError):
+        obj = None
+    if isinstance(obj, dict):
+        if obj.get('code') != 'exit' or not isinstance(obj.get('error'), str):
+            return False
+        text = obj['error']
+    match = re.match(r'^Agent subprocess failed \(exit -?\d+, exit\)：', text)
+    if not match:
+        return False
+    detail = text[match.end():].split('；完整日志见 stderr.log', 1)[0]
+    return any(re.fullmatch(r'(?:Error: )?(?:Upstream HTTP/2 stream failed|Upstream service temporarily unavailable)[.!]?',
+                            line.strip()) for line in detail.splitlines())
+
+
+def _is_native_upstream_failure(code, message, artifacts, batch_dir, stage_id, run_dir):
+    """Authenticate the native host's failed task, never its candidate text."""
+    from . import content_agent
+    if (code != 'failed' or message not in ('Upstream HTTP/2 stream failed',
+                                            'Upstream service temporarily unavailable')
+            or not isinstance(artifacts, dict) or 'candidate' in artifacts):
+        return False
+    try:
+        attempt = Path(artifacts['attempt_dir']).resolve(strict=True)
+        attempt.relative_to(Path(run_dir).resolve(strict=True))
+        binding = json.loads((attempt / 'content-task.json').read_text(encoding='utf-8'))
+        task_id = binding['task_id']
+        if not isinstance(task_id, str) or not re.fullmatch(r'[0-9a-f]{32}', task_id):
+            return False
+        task_path = content_agent._task_path(task_id).resolve(strict=True)
+        if task_path != Path(artifacts['task']).resolve(strict=True):
+            return False
+        task = json.loads(task_path.read_text(encoding='utf-8'))
+        return (task.get('protocol') == content_agent.PROTOCOL
+                and task.get('task_id') == task_id and task.get('identity') == binding.get('identity')
+                and task.get('batch_dir') == str(Path(batch_dir).resolve())
+                and task.get('stage') == stage_id and task.get('status') == 'failed'
+                and task.get('error') == message and 'candidate' not in task)
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+
+def _has_deterministic_partition_failure(run_dir: Path) -> bool:
+    """Partition checkpoints are authoritative; unreadable evidence fails closed."""
+    for path in Path(run_dir).glob('repair-progress*.json'):
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(data, dict) or not isinstance(data.get('deterministic_failures'), dict):
+                return True
+            if data['deterministic_failures']:
+                return True
+        except (OSError, ValueError, TypeError):
+            return True
+    return False
 
 
 def _cooldown_path(batch_dir: Path) -> Path:

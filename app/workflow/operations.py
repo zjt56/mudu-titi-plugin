@@ -50,6 +50,27 @@ TRANSIENT = re.compile(r"(?i)\b(rate[_ -]?limit|timeout|timed out|busy|locked|un
                        r"temporar|connection|network|cooldown)\b")
 
 
+def _only_transient_detail(detail):
+    # Diagnoses aggregate independent unit failures with a Chinese semicolon.
+    # Each item must itself identify a transient failure; mixed reports remain blockers.
+    parts = [part.strip() for part in str(detail or "").split("；") if part.strip()]
+    # An arbitrary mention of timeout/network is insufficient: it can appear
+    # alongside a validator or source error in the very same unit message.
+    transient = re.compile(
+        r"(?i)(?:(?:upstream\s+)?http/2\s+stream\s+failed|upstream service temporarily unavailable|"
+        r"(?:request\s+)?(?:timeout|timed out|rate[_ -]?limit(?:ed)?(?:\s+429)?|"
+        r"temporarily unavailable|connection (?:failed|reset|error)|"
+        r"network (?:error|unavailable)|model[_ -]?cooldown|"
+        r"quota (?:exceeded|exhausted)|429|限流|额度不足|额度冷却|冷却中|等待外部))"
+        r"[.!。]?")
+    for part in parts:
+        # Unit diagnostics use a full-width colon between identity and error.
+        message = part.split("：", 1)[-1].strip()
+        if not transient.fullmatch(message):
+            return False
+    return bool(parts)
+
+
 def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
@@ -500,7 +521,7 @@ def _recovery_plan(folder, incident):
     """Offer bounded, unspent strategies; a disposition is never a human queue."""
     evidence = _evidence(folder, incident)
     budgets = _budgets(incident)
-    record = _code_record(folder) or {}
+    record = _incident_code_record(folder, incident) or {}
     actions = []
     if budgets["attempts"] < budgets["attempts_limit"]:
         if record.get("status") == "installed_pending_restart":
@@ -687,6 +708,8 @@ def _discover(folder):
     # 预算耗尽）。运维只接管这些，不接管仍在推进的 retry_scheduled/upstream_escalated；
     # 旧实现只认 repair_failed/retry_failed，导致 retry_budget_exhausted 这类真正的卡点
     # 永远建不出运维单（面板只显示“待命”）。
+    if _only_transient_detail(detail):
+        return state
     blocker_outcomes = set(self_heal.BLOCKER_OUTCOMES) | {"retry_failed"}
     failed = []
     for event in self_heal._load(folder).get("events", []):
@@ -711,8 +734,7 @@ def _discover(folder):
                           and bool(self_heal._structure_unusable(folder)))
     early = (service_available()
              and (record.get('status') in {mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW} or unusable_structure)
-             and not TRANSIENT.search(detail) and not re.search(
-                 r'(?i)429|quota|rate[_ -]?limit|额度|限流|冷却|等待外部', detail))
+             and not _only_transient_detail(detail))
     if early or (incident and incident.get('trigger') == 'first_blocker'
                  and incident.get('stage') == stage and incident.get('detail') == _redact(detail)):
         evidence = json.dumps(self_heal._retry_evidence(folder, manifest, stage), sort_keys=True)
@@ -862,7 +884,7 @@ def claim(root, folder, payload):
 
 def _acknowledge_restart(folder, incident):
     process = _process_identity()
-    record = _code_record(folder)
+    record = _incident_code_record(folder, incident)
     if (record and record.get("status") == "installed_pending_restart"
             and record.get("install_process") and record["install_process"] != process
             and record.get("install_attempt_id") != incident["attempt_id"]):
@@ -944,15 +966,20 @@ def _save_code_record(folder, record):
     os.replace(temporary, path)
 
 
+def _incident_code_record(folder, incident):
+    record = _code_record(folder)
+    incident_id = incident.get("incident_id")
+    return record if incident_id and record and record.get("incident_id") == incident_id else None
+
+
 def _settle_code_repair(folder, incident, outcome):
     """Close the repair record with the incident's final disposition.
 
     An install stays `installed_pending_restart` until the incident is really
     settled, so a missing verification cannot silently look like a fixed batch.
     """
-    record = _code_record(folder)
-    if not record or record.get("status") not in {"workspace_ready", "tests_passed", "prepared",
-                                                  "installed_pending_restart", "restarted_pending_verify", "tests_failed"}:
+    record = _incident_code_record(folder, incident)
+    if not record or record.get("status") != "restarted_pending_verify":
         return
     status = {"resolved": "verified", "needs_human": "needs_human",
               "needs_deep_repair": "failed"}.get(outcome)
@@ -973,8 +1000,8 @@ def _settle_code_repair(folder, incident, outcome):
     incident["code_repair"] = repair
 
 
-def _code_job(folder):
-    record = _code_record(folder)
+def _code_job(folder, incident):
+    record = _incident_code_record(folder, incident)
     if not record:
         raise ValueError("code_repair_not_requested")
     from . import operations_development
@@ -1071,11 +1098,14 @@ def _request_code_repair(folder, incident, data):
     if existing:
         try:
             existing_job = dev.load(existing["path"])
-            stale_workspace = existing.get("status") in {"failed", "verified", "needs_human", "rolled_back", "tests_failed"} or existing_job.get("status") in {"failed", "verified", "needs_human", "tests_failed", "rolled_back"}
+            stale_workspace = (existing.get("incident_id") != incident.get("incident_id")
+                               or not incident.get("incident_id")
+                               or existing.get("status") in {"failed", "verified", "needs_human", "rolled_back", "tests_failed"}
+                               or existing_job.get("status") in {"failed", "verified", "needs_human", "tests_failed", "rolled_back"})
         except (OSError, ValueError, KeyError):
             stale_workspace = True
         if not stale_workspace:
-            record, job = _code_job(folder)
+            record, job = _code_job(folder, incident)
             return {"reused": True, "job_id": job["job_id"], "status": record.get("status"),
                     "workspace": job["workspace"], "base": job["base"].get("code_fingerprint"),
                     "instructions": "复用现有工作区；不得并行创建第二个。"}
@@ -1103,7 +1133,7 @@ def _request_code_repair(folder, incident, data):
 
 def _code_repair(folder, incident, data):
     from . import operations_development as dev
-    record, job = _code_job(folder)
+    record, job = _code_job(folder, incident)
     operation = data.get("operation")
 
     # Search returns a real workspace-relative path and a continuation cursor.
@@ -1189,7 +1219,7 @@ def _install_code_repair(folder, incident, data):
             raise ValueError("install_confirmation_required")
         raise ValueError("install_disabled: 缺少受控宿主安装授权")
     _check_budget(incident, "install")
-    record, job = _code_job(folder)
+    record, job = _code_job(folder, incident)
     if record.get("status") != "prepared":
         raise ValueError("current_install_plan_required")
     plan = job.get("plan") or {}
@@ -1334,7 +1364,7 @@ def action(root, folder, payload, *, enqueue=None):
                              "applied" if result.get("installed") or result.get("passed") else "refused")
                     incident.pop("verification", None)
             elif name == "verify":
-                record = _code_record(folder)
+                record = _incident_code_record(folder, incident)
                 if record and record.get("status") == "installed_pending_restart":
                     raise ValueError("code_repair_installed_pending_restart: 必须真实重启并重新认领")
                 result = _verify(folder, incident)
@@ -1348,7 +1378,7 @@ def action(root, folder, payload, *, enqueue=None):
                 if outcome not in {"resolved", "needs_deep_repair", "needs_human", "recovery_queued"} or not isinstance(data.get("summary"), str) or not data["summary"].strip():
                     raise ValueError("invalid_finish")
                 previous = incident.get("verification") or {}
-                repair_record = _code_record(folder) or {}
+                repair_record = _incident_code_record(folder, incident) or {}
                 if outcome == "resolved" and repair_record.get("status") in {"installed_pending_restart", "restarted_pending_verify"}:
                     raise ValueError("restart_and_verification_required")
                 if outcome == "resolved" and not (previous.get("verified") is True and previous.get("evidence_id")
@@ -1584,7 +1614,7 @@ def _observe_execution_locked(folder):
         incident.update(status="quality_differences", failure_class="quality_differences", eligible=False,
                         attempt_id=None, lease_expires_at=0)
     else:
-        record = _code_record(folder) or {}
+        record = _incident_code_record(folder, incident) or {}
         if record.get("status") == "restarted_pending_verify":
             _settle_code_repair(folder, incident, "needs_deep_repair")
         incident.update(status="queued", eligible=True,

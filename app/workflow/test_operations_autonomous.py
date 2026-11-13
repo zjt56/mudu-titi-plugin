@@ -152,7 +152,8 @@ class AutonomousOperationsTests(unittest.TestCase):
 
     def test_verify_before_original_execution_does_not_discard_installed_fix(self):
         claimed = self.claim()
-        record = {'job_id': 'job', 'path': 'unused', 'status': 'restarted_pending_verify'}
+        record = {'job_id': 'job', 'path': 'unused', 'status': 'restarted_pending_verify',
+                  'incident_id': claimed['incident_id']}
         with patch.object(op, '_code_record', return_value=record), \
              patch.object(op, '_verify', return_value={'verified': False}), \
              patch.object(op, '_settle_code_repair') as settle:
