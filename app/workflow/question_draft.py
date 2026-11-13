@@ -712,6 +712,37 @@ def build(batch_dir, *, units=None):
                         issues.append({"unit_id": uid, "number": number, "code": "CHILD_CONTENT_UNRESOLVED",
                                        "reason": "保留子题身份；当前原文不能可靠拆出独立题干"})
                     row["subquestions"].append(child)
+                from . import ocr_grid
+                grid = ocr_grid.section_items(
+                    root,
+                    section_title=str((unit.get("source_section") or {}).get("title") or ""),
+                    numbers=[int(number) for number in unit["numbers"]])
+                current = {int(child["number"]): child["stem"] for child in row["subquestions"]}
+                if grid and ocr_grid.needs_repair(current, grid):
+                    # 识别服务的阅读顺序把双栏网格题展平后，题号与图文会在窗口里错位
+                    # （规则 28 不许自行重排正文）。这里只按服务给出的页面坐标把每张
+                    # 图片/每行词形落到它自己的小题上，并留取证；改不动就不动。
+                    for child in row["subquestions"]:
+                        item = grid["items"].get(int(child["number"]))
+                        if item:
+                            child["stem"] = ocr_grid.item_stem(item)
+                            child["options"] = []
+                    repaired = {int(number) for number in grid["items"]}
+                    issues[:] = [issue for issue in issues
+                                 if not (issue.get("unit_id") == uid
+                                         and issue.get("code") in {"CHILD_CONTENT_UNRESOLVED",
+                                                                   "CHILD_STEM_EMPTY"}
+                                         and int(issue.get("number") or 0) in repaired)]
+                    proof["layout_items"] = {
+                        "version": ocr_grid.VERSION, "basis": grid["basis"],
+                        "page": grid["page"], "section": grid["section"],
+                        "items": {str(number): {"images": item["images"], "texts": item["texts"],
+                                                "bbox": item["bbox"]}
+                                  for number, item in grid["items"].items()}}
+                    layout_diagnostics.append({
+                        "unit_id": uid, "code": "GRID_ITEMS_REBOUND",
+                        "reason": "按 OCR 版面块坐标把网格题的小题图文绑定回各自小题",
+                        "basis": grid["basis"], "page": grid["page"]})
             table_refs = []
             blocks = _table_blocks(text, extraction, issues, uid, unit.get("type") or "",
                                    references=table_refs, layout_diagnostics=layout_diagnostics)
@@ -748,6 +779,10 @@ def build(batch_dir, *, units=None):
                 else:
                     issues.append({"unit_id": uid, "code": "MEDIA_MISSING", "reason": "原文图片文件缺失：" + name})
             row = wire_format.normalize_item(row, media_map=media_map, meta=confirmed.get("meta") or {})
+            if proof.get("layout_items"):
+                # 图片引用移到附件的占位会留下换行；网格归属重绑后的题干只保留自己的词形行。
+                for child in row["subquestions"]:
+                    child["stem"] = str(child.get("stem") or "").strip()
         # Cover every child even when its source scope is unresolved.
         if unit["unit_kind"] == "group" and not row["subquestions"]:
             row["subquestions"] = [_empty(n) for n in unit["numbers"]]

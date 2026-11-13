@@ -257,3 +257,4 @@
 | 2026-11-11 | [2026-11-11-review-badge-binding-and-snapshot-cache.md](2026-11-11-review-badge-binding-and-snapshot-cache.md) | 待审核标签改按来源身份绑定（同号不同大题不再串标），审核投影按输入指纹缓存：切换题目 0.9s→0.07s |
 | 2026-11-11 | [2026-11-11-platform-catalog-sync.md](2026-11-11-platform-catalog-sync.md) | 平台题库目录补登记 `完成句子/补全句子`（改 static/filter-framework.json、docs/index.html、app.js 缓存戳，含备份与回退），插件本地目录与文档同步说明 |
 | 2026-11-13 | [2026-11-13-pdf-ocr-markup-projection.md](2026-11-13-pdf-ocr-markup-projection.md) | PDF OCR 版面 Markdown 未投影，正文/题干/审核预览显示 HTML 与 LaTeX 代码；新增确定性投影（图片落盘 [IMG]、画线 <u>、表格 [TABLE]），原始 Markdown 留证 |
+| 2026-11-13 | [2026-11-13-ocr-grid-item-binding.md](2026-11-13-ocr-grid-item-binding.md) | OCR 双栏网格题按行优先展平后题号与图文错位导致装配 A8/A9/E20 阻断；新增 ocr_grid 用版面块坐标把每张图片/每行词形绑定回各自小题，不改写正文 |
