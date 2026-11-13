@@ -624,14 +624,36 @@ def _discover(folder):
         # filter existed. Retire only parked/queued incidents, never a live
         # lease or an in-flight execution. Unknown receipts and outboxes remain
         # untouched and continue to quarantine any later operation.
+        current_stage, current_detail, current_record = None, "", {}
         if (incident.get("status") in {"queued", "waiting_evidence", "waiting_external"}
                 and _only_transient_detail(incident.get("detail"))):
+            manifest = mf.load(folder)
+            current_stage, current_detail = self_heal._candidate(folder, manifest)
+            current_detail = str(current_detail or "")
+            current_record = manifest.get("stages", {}).get(current_stage) or {}
+        if (incident.get("status") in {"queued", "waiting_evidence", "waiting_external"}
+                and not state.get("resume_outbox")
+                and not any(row.get("status") == "unknown" for row in state["receipts"])
+                and current_stage == incident.get("stage")
+                and current_record.get("status") in {mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW}
+                and _redact(current_detail) == incident.get("detail")
+                and _only_transient_detail(current_detail)):
             prior = incident["status"]
             incident.update(status="transient_deferred", eligible=False, attempt_id=None,
                             lease_expires_at=0, not_before=0, prior_disposition=prior)
             _event(incident, "reconcile", "transient_deferred",
-                   "历史纯瞬时故障退出运维队列；未判定故障已修复，未知回执保留且不重放")
-        if incident.get("status") not in {"resolved", "cancelled", "quality_differences", "transient_deferred"} and _review_differences(folder, incident):
+                   "历史纯瞬时故障退出运维队列；未判定故障已修复")
+        elif (incident.get("status") in {"queued", "waiting_evidence", "waiting_external"}
+              and _only_transient_detail(incident.get("detail"))
+              and not state.get("resume_outbox")
+              and not any(row.get("status") == "unknown" for row in state["receipts"])
+              and current_stage and current_record.get("status") in {mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW}
+              and (current_stage != incident.get("stage") or _redact(current_detail) != incident.get("detail"))
+              and not _only_transient_detail(current_detail)):
+            incident.update(status="superseded", eligible=False, attempt_id=None, lease_expires_at=0,
+                            not_before=0)
+            _event(incident, "reconcile", "superseded", "当前出现不同的真实阻断；保留旧事件，未声称故障已恢复")
+        if incident.get("status") not in {"resolved", "cancelled", "quality_differences", "transient_deferred", "superseded"} and _review_differences(folder, incident):
             incident.update(status="quality_differences", eligible=False, attempt_id=None, lease_expires_at=0,
                             failure_class="quality_differences")
             _event(incident, "reconcile", "quality_differences", "当前审核已执行且仅有差异，保留审核产出，不触发修复")
@@ -750,9 +772,9 @@ def _discover(folder):
                  and incident.get('stage') == stage and incident.get('detail') == _redact(detail)):
         evidence = json.dumps(self_heal._retry_evidence(folder, manifest, stage), sort_keys=True)
         signature = hashlib.sha256((stage + '\n' + detail + '\n' + evidence).encode('utf-8')).hexdigest()[:16]
-    if (count or early) and not (incident and incident.get("status") != "transient_deferred"
+    if (count or early) and not (incident and incident.get("status") not in {"transient_deferred", "superseded"}
                                   and incident.get("signature") == signature):
-        if incident and incident.get("status") == "transient_deferred":
+        if incident and incident.get("status") in {"transient_deferred", "superseded"}:
             state.setdefault("incident_history", []).append(incident)
         state["incident"] = {"incident_id": uuid.uuid4().hex, "batch_name": folder.name,
             "batch_dir": str(folder), "status": "queued", "eligible": True, "stage": stage,
@@ -786,7 +808,8 @@ def _handoff_locked(folder):
     # An unknown request prevents a new claim; do not park ordinary work behind
     # an operations handoff that cannot be admitted. Never replay the request.
     if (incident.get('status') != 'claimed'
-            and any(row.get('status') == 'unknown' for row in state.get('receipts', []))):
+            and (state.get('resume_outbox')
+                 or any(row.get('status') == 'unknown' for row in state.get('receipts', [])))):
         return None
     stage, _ = self_heal._candidate(folder, mf.load(folder))
     if stage != incident.get('stage'):

@@ -26,6 +26,10 @@ PROTOCOL = "upload-workflow.content-agent/v1"
 TERMINAL = frozenset(("completed", "failed", "cancelled"))
 CATALOG = "references/knowledge-catalog.json"
 SERVICE_TTL = 15
+UPSTREAM_RETRY_COOLDOWN = 60
+UPSTREAM_MAX_REDISPATCHES = 3
+_UPSTREAM_TRANSIENT_ERRORS = frozenset(("Upstream HTTP/2 stream failed",
+                                         "Upstream service temporarily unavailable"))
 _THREAD_LOCK = threading.RLock()
 SUPPORTED_STAGES = frozenset(("knowledge", "answers", "explanations", "types", "preassemble", "structure_gate"))
 
@@ -747,11 +751,58 @@ def dispatch(method, path, payload=None):
                 "code": getattr(exc, "code", "invalid_request")}
 
 
+def _retryable_upstream_task(task):
+    """Only a claimed host's exact failed transport receipt may buy a retry."""
+    stamp = task.get("updated_at")
+    if (task.get("protocol") != PROTOCOL or task.get("status") != "failed"
+            or not isinstance(task.get("session_id"), str) or not task["session_id"].strip()
+            or task.get("error") not in _UPSTREAM_TRANSIENT_ERRORS
+            or task.get("error_code") not in (None, "failed")
+            or task.get("failure_class") is not None
+            or task.get("accepted") is not False or task.get("attempts") != []
+            or any(key in task for key in ("candidate", "response", "feedback", "validation_rejection"))
+            or isinstance(stamp, bool) or not isinstance(stamp, (int, float))
+            or not math.isfinite(stamp) or stamp <= 0):
+        return False
+    try:
+        directory = _task_path(task["task_id"]).parent
+        return not any(directory.glob("candidate*")) and not any(directory.glob("response*"))
+    except (KeyError, OSError, local_agent.AgentError):
+        return False
+
+
+def _identity_receipt(identity):
+    """Resolve a single intact retry chain; ambiguity preserves the old receipt."""
+    rows = [item for item in _tasks() if item.get("identity") == identity]
+    if not rows:
+        return None, 0
+    roots = [item for item in rows if "redispatch_of" not in item]
+    if len(roots) != 1:
+        return rows[0], UPSTREAM_MAX_REDISPATCHES
+    current = roots[0]
+    count = 0
+    seen = {current.get("task_id")}
+    while True:
+        children = [item for item in rows if item.get("redispatch_of") == current.get("task_id")]
+        if len(children) != 1:
+            if children or len(seen) != len(rows):
+                return current, UPSTREAM_MAX_REDISPATCHES
+            return current, count
+        if not _retryable_upstream_task(current):
+            return current, UPSTREAM_MAX_REDISPATCHES
+        current = children[0]
+        task_id = current.get("task_id")
+        if task_id in seen:
+            return current, UPSTREAM_MAX_REDISPATCHES
+        seen.add(task_id)
+        count += 1
+
+
 def invoke(prompt, run_dir, config, *, permit_parallel=False):
     """Queue one bound content task and await a validated native candidate.
 
     No subprocess or fallback is used. Identical prompt/input/route/config tasks
-    reuse their persisted receipt, including failed/cancelled terminal tasks.
+    reuse their persisted receipt, except for bounded, cooled-down upstream failures.
     """
     if not isinstance(permit_parallel, bool):
         raise local_agent.AgentError("permit_parallel must be boolean", "input")
@@ -790,7 +841,13 @@ def invoke(prompt, run_dir, config, *, permit_parallel=False):
                                        "rules": agent_tasks.RULES[selected_stage]})})
     root.mkdir(parents=True, exist_ok=True)
     with _lock():
-        task = next((item for item in _tasks() if item["identity"] == identity), None)
+        task, redispatches = _identity_receipt(identity)
+        previous_task_id = None
+        if (task is not None and redispatches < UPSTREAM_MAX_REDISPATCHES
+                and _retryable_upstream_task(task)
+                and time.time() - task["updated_at"] >= UPSTREAM_RETRY_COOLDOWN):
+            previous_task_id = task["task_id"]
+            task = None
         if task is None:
             from .model_admission import require_model_call
             require_model_call(batch, error_type=local_agent.AgentError)
@@ -810,6 +867,8 @@ def invoke(prompt, run_dir, config, *, permit_parallel=False):
                     "input_hashes": hashes, "route": route, "status": "queued", "created_at": created,
                     "deadline": created + settings["timeout_seconds"], "tool_calls": 0,
                     "max_tool_calls": settings["max_tool_calls"], "attempts": [], "accepted": False}
+            if previous_task_id is not None:
+                task["redispatch_of"] = previous_task_id
             _save(task)
         elif (task["status"] in ("failed", "completed") and "candidate" in task
               and task.get("error_code") not in ("context_changed", "route_changed", "cancelled")

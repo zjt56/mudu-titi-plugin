@@ -21,6 +21,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import dataclasses
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -760,6 +761,9 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     mf.reconcile_deliveries(batch_dir, manifest)
     mf.save(batch_dir, manifest)
     manifest = mf.load(batch_dir)
+    if _requeue_historical_upstream(batch_dir, manifest, bridge):
+        cooldown = _read_cooldown(batch_dir)
+        manifest = mf.load(batch_dir)
     # 卡点自愈：先收集诊断证据，再由已配置模型选择受限的重试动作。
     # 模型不可用或返回非法计划时只留痕，不阻断本轮自动调度。
     try:
@@ -1347,6 +1351,79 @@ def _is_native_upstream_failure(code, message, artifacts, batch_dir, stage_id, r
                 and task.get('stage') == stage_id and task.get('status') == 'failed'
                 and task.get('error') == message and 'candidate' not in task)
     except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+
+def _requeue_historical_upstream(batch_dir, manifest, bridge):
+    """Requeue only an exactly bound, wholly failed native answers attempt.
+
+    Legacy attempts have no stage input snapshot; the native task's own strict
+    input hashes, unit scope and timestamps are therefore all mandatory.
+    Ambiguous, partial, active or unreadable evidence is left untouched.
+    """
+    from . import content_agent, local_agent, operations
+    batch = Path(batch_dir).resolve()
+    stage = contracts.STAGE_BY_ID['answers']
+    record = manifest.get('stages', {}).get('answers', {})
+    if (record.get('status') != mf.FAILED or operations.lease_active(batch)
+            or not _default_agent_bridge('answers', bridge)):
+        return False
+    try:
+        started = datetime.fromisoformat(record['started_at']).timestamp()
+        finished = datetime.fromisoformat(record['finished_at']).timestamp()
+        if finished < started:
+            return False
+        runs = list((batch / 'workflow' / 'agent-runs').glob('answers-*'))
+        # A single attempt is required: filesystem order does not prove which of
+        # multiple historical attempts produced the current manifest failure.
+        if len(runs) != 1 or not runs[0].is_dir():
+            return False
+        run = runs[0]
+        progress_paths = list(run.glob('repair-progress*.json'))
+        bindings = list(run.glob('round-*-part-*/content-task.json'))
+        if len(progress_paths) != 1 or len(bindings) != 1:
+            return False
+        progress = json.loads(progress_paths[0].read_text(encoding='utf-8'))
+        binding = json.loads(bindings[0].read_text(encoding='utf-8'))
+        task_id = binding['task_id']
+        task_path = content_agent._task_path(task_id)
+        task = json.loads(task_path.read_text(encoding='utf-8'))
+        errors = ('Upstream HTTP/2 stream failed', 'Upstream service temporarily unavailable')
+        failed = progress['failed_units']
+        ids = task['unit_ids']
+        if (progress.get('stage') != 'answers' or progress.get('validated_units') != []
+                or progress.get('deterministic_failures') != {} or progress.get('calls') != []
+                or not isinstance(failed, dict) or not failed
+                or not isinstance(ids, list) or not ids or len(ids) != len(set(ids))
+                or set(ids) != set(failed) or any(value != task.get('error') for value in failed.values())
+                or task.get('protocol') != content_agent.PROTOCOL or task.get('task_id') != task_id
+                or task.get('identity') != binding.get('identity') or not binding.get('identity')
+                or task.get('batch_dir') != str(batch) or task.get('stage') != 'answers'
+                or task.get('status') != 'failed' or task.get('error') not in errors
+                or task.get('accepted') is not False or not task.get('session_id')
+                or any(key in task for key in ('candidate', 'response', 'feedback', 'result'))
+                or task.get('attempts') != [] or not isinstance(task.get('input_hashes'), dict)
+                or not task['input_hashes']
+                or not (started <= float(task['created_at']) < finished + 1
+                        and started <= float(task['updated_at']) < finished + 1)):
+            return False
+        local_agent._check_input_hashes(batch, task['input_hashes'])
+        # Another active or newer task can still write, or supersede this attempt.
+        for other in content_agent._tasks():
+            if (other.get('batch_dir') == str(batch) and other.get('stage') == 'answers'
+                    and other.get('task_id') != task_id
+                    and (other.get('status') in ('queued', 'running')
+                         or float(other.get('created_at', 0)) >= started)):
+                return False
+        if operations.lease_active(batch):
+            return False
+        if _read_cooldown(batch) <= 0:
+            _set_cooldown(batch, RATE_LIMIT_BACKOFF_SECONDS)
+        mf.touch_stage(manifest, stage.id, mf.PENDING,
+                       notes='已核验原生任务上游瞬时故障，冷却后按正常调度续跑')
+        mf.save(batch_dir, manifest)
+        return True
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError):
         return False
 
 
