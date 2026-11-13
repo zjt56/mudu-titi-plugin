@@ -24,8 +24,92 @@ import tempfile
 import time
 
 
+ERROR_MESSAGES = {
+    "invalid_config": "Invalid OCR settings or source.",
+    "missing_token": "An OCR token is required.",
+    "http_error": "OCR server rejected the request.",
+    "unsafe_redirect": "OCR redirect refused; use the final endpoint.",
+    "network_error": "Cannot connect to OCR server.",
+    "timeout": "OCR job deadline exceeded; submission is not retried.",
+    "job_failed": "OCR job failed.",
+    "invalid_result": "OCR server returned an invalid or empty result.",
+    "ocr_failed": "PDF acquisition or OCR failed; inspect configuration and source",
+    "source_digest_mismatch": "registered SHA-256 does not match source",
+    "empty_pages": "OCR returned no pages",
+    "malformed_page_text": "OCR returned malformed page text",
+    "waiting": "OCR task is waiting for its existing remote result; resume without resubmission.",
+    "submission_unknown": "OCR submission outcome is unknown; reconcile the existing batch before any resubmission.",
+    "receipt_corrupt": "OCR task receipt is invalid; automatic resubmission refused.",
+    "job_not_found": "The existing OCR task is missing or expired; automatic resubmission refused.",
+    "submission_conflict": "Multiple OCR jobs match the submitted batch; automatic selection and resubmission refused.",
+}
+SAFE_VALUE_ERRORS = {ERROR_MESSAGES[code]: code for code in (
+    "source_digest_mismatch", "empty_pages", "malformed_page_text")}
+
+
+def _safe_error_details(details, token=""):
+    """Only remote diagnostics already redacted by the jobs adapter may cross."""
+    if not isinstance(details, dict):
+        return {}
+    from .paddle_jobs import _safe_message
+    safe = {}
+    status = details.get("http_status")
+    if type(status) is int and 100 <= status <= 599:
+        safe["http_status"] = status
+    job_id = details.get("job_id")
+    if isinstance(job_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,256}", job_id):
+        safe["job_id"] = job_id
+    phase = details.get("phase")
+    if isinstance(phase, str) and phase in {"prepared", "submitting", "submitted", "pending", "running", "polling", "downloading", "normalizing", "completed", "waiting", "submission_unknown", "failed", "reconciling", "rejected"}:
+        safe["phase"] = phase
+    if type(details.get("retryable")) is bool:
+        safe["retryable"] = details["retryable"]
+    for key, limit in (("error_code", 128), ("error_message", 500)):
+        value = _safe_message(details.get(key), token, limit=limit)
+        if value:
+            value = re.sub(r"(?i)((?:password|secret|signature|credential|cookie)\s*[=:]\s*)[^\s,;\"'<>]+",
+                           r"\1[REDACTED]", value)
+            safe[key] = value
+    return safe
+
+
 class OCRBackendError(RuntimeError):
-    """Terminal configuration, execution or result failure; safe to report."""
+    """Internal failure; only safe_error(), never str(exc), is public evidence."""
+
+    def __init__(self, message, *, code="ocr_failed", details=None):
+        self.code = code if isinstance(code, str) and code in ERROR_MESSAGES else "ocr_failed"
+        self.details = _safe_error_details(details) if self.code != "ocr_failed" else {}
+        super().__init__(message)
+
+
+def safe_error(error):
+    """Project an exception or stored diagnostic onto the public allowlist."""
+    if isinstance(error, OCRBackendError):
+        code, details = error.code, error.details
+    elif isinstance(error, ValueError) and str(error) in SAFE_VALUE_ERRORS:
+        code, details = SAFE_VALUE_ERRORS[str(error)], None
+    elif isinstance(error, dict):
+        code, details = error.get("code"), error.get("details")
+        if code is None and isinstance(error.get("message"), str) and error["message"] in SAFE_VALUE_ERRORS:
+            code = SAFE_VALUE_ERRORS[error["message"]]
+    else:
+        code, details = None, None
+    if not isinstance(code, str) or code not in ERROR_MESSAGES:
+        code = "ocr_failed"
+    result = {"type": "OCRBackendError", "code": code, "message": ERROR_MESSAGES[code]}
+    if code != "ocr_failed":
+        safe = _safe_error_details(details)
+        if safe:
+            result["details"] = safe
+    return result
+
+
+def _paddle_error(error, config):
+    # Do not copy the exception text or arbitrary config/remote response fields.
+    token = config.get("token") or os.environ.get("MUDU_OCR_TOKEN", "")
+    details = _safe_error_details(error.details, token if isinstance(token, str) else "")
+    safe = safe_error({"code": error.code, "details": details})
+    return OCRBackendError(safe["message"], code=safe["code"], details=safe.get("details"))
 
 
 ASSIST_OFF_MESSAGE = (
@@ -123,7 +207,7 @@ def _validate_config(data, base):
         try:
             return validate_config(config)
         except PaddleJobsError as exc:
-            raise OCRBackendError(str(exc)) from None
+            raise _paddle_error(exc, config) from None
     for key in ("python", "script"):
         value = config.get(key)
         if not isinstance(value, str) or not value.strip():
@@ -170,7 +254,7 @@ def load_config(config_path=None) -> dict:
                 return _validate_config(fallback, Path(__file__).resolve().parent)
             except OCRBackendError:
                 pass
-        raise OCRBackendError(f"Cannot load OCR configuration {path}: {exc}") from exc
+        raise OCRBackendError(f"Cannot load OCR configuration {path}: {exc}", code="invalid_config") from exc
     return _validate_config(data, path.parent)
 
 
@@ -274,7 +358,7 @@ def _read_result(path):
 
 
 def recognize(source: Path, output_dir: Path, *, force_ocr=False, pages=None,
-              task="ocr", config=None, mandatory_pdf=False) -> dict:
+              task="ocr", config=None, mandatory_pdf=False, progress_callback=None) -> dict:
     """Run local CLI once under a shared model lock, returning pages/artifacts.
 
     Failure and timeout raise OCRBackendError (with log path), never retry or
@@ -293,9 +377,9 @@ def recognize(source: Path, output_dir: Path, *, force_ocr=False, pages=None,
                 raise OCRBackendError("pages must be a positive page or ascending inclusive range")
         try:
             return recognize_jobs(_source(source), output_dir, config=settings, pages=pages,
-                                  task=task, force_ocr=force_ocr)
+                                  task=task, force_ocr=force_ocr, progress_callback=progress_callback)
         except PaddleJobsError as exc:
-            raise OCRBackendError(str(exc)) from None
+            raise _paddle_error(exc, settings) from None
     if settings.get("fallback"):
         raise OCRBackendError(
             "OCR 识别未配置：当前只有 PDF 文本解析可用（未找到 ocr-config.json）。"

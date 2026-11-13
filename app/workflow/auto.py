@@ -756,6 +756,11 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     manifest = mf.load(batch_dir)
     cooldown = _read_cooldown(batch_dir)
     recovery_wait = {}
+    # A submitted OCR job is ordinary external progress, never a repair target.
+    # Inspect before recovery/handoff so waiting cannot spend a model budget.
+    external_wait = rn.ocr_wait_state(batch_dir, manifest)
+    other_failure = any(value.get("status") in (mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW, mf.INVALIDATED)
+                        for key, value in manifest.get("stages", {}).items() if key != "extract")
     # Reconcile the durable hand-off checklist before selecting work. This
     # migrates valid legacy outputs and invalidates only stale descendants.
     mf.reconcile_deliveries(batch_dir, manifest)
@@ -768,7 +773,8 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     # 模型不可用或返回非法计划时只留痕，不阻断本轮自动调度。
     try:
         from . import self_heal
-        healed = operations.handoff_if_available(batch_dir)
+        healed = ({"changed": False, "status": "waiting_external"}
+                  if external_wait and not other_failure else operations.handoff_if_available(batch_dir))
         if healed is None:
             healed = (self_heal.recover(batch_dir) if cooldown <= 0 else
                       {"changed": False, "status": "model_cooldown"})
@@ -821,7 +827,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
         # Publish a blocker at the next safe node boundary, before a slow
         # independent branch is joined. Investigation may read frozen evidence;
         # artifact repair still requires exclusive admission in operations.
-        if blockers:
+        if any(item["action"] in ("failed", "gate", "review") for item in blockers):
             try:
                 operations.handoff_if_available(batch_dir)
             except (OSError, ValueError, RuntimeError, KeyError, TypeError):
@@ -1169,6 +1175,13 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
             continue
 
         if stage.kind == contracts.COMMAND:
+            if stage.id == "extract":
+                waiting = rn.ocr_wait_state(batch_dir, manifest)
+                if waiting and waiting["next_retry_at"] > time.time():
+                    blocked(stage.id, rn.OCR_WAIT_NOTE, "waiting_external",
+                            retry_after=rn.ocr_retry_after(waiting["next_retry_at"] - time.time()),
+                            next_retry_at=waiting["next_retry_at"])
+                    continue
             from .agent_protocol import _agent_lock
             with _agent_lock(1500):
                 manifest = mf.load(batch_dir)
@@ -1196,7 +1209,11 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
             print(f"  · {stage.id} 执行脚本")
             executable = _bridge_stage(stage, bridge[stage.id]) if stage.id == "extract" and bridge.get(stage.id) else stage
             code = rn._execute_command(batch_dir, manifest, executable)
-            if code != 0:
+            waiting = rn.ocr_wait_state(batch_dir, manifest) if stage.id == "extract" and code == 6 else {}
+            if waiting:
+                blocked(stage.id, rn.OCR_WAIT_NOTE, "waiting_external",
+                        retry_after=waiting["retry_after"], next_retry_at=waiting["next_retry_at"])
+            elif code != 0:
                 blocked(stage.id, "脚本执行失败", "failed")
             continue
 
@@ -1233,6 +1250,10 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     outcome["failed_stages"] = [item for item in blockers if item["action"] in ("failed", "gate")]
     outcome["pending_stages"] = [item for item in blockers if item["action"] not in ("failed", "gate")]
     outcome["cooldown_seconds"] = _read_cooldown(batch_dir)
+    waits = [item for item in blockers if item["action"] == "waiting_external"]
+    if waits and not outcome["failed_stages"]:
+        outcome.update(action="waiting_external", retry_after=min(item["retry_after"] for item in waits),
+                       next_retry_at=min(item["next_retry_at"] for item in waits))
     if provisional_result is not None:
         outcome["provisional"] = provisional_result
     return outcome
@@ -1256,13 +1277,16 @@ def _result(batch_dir: Path, manifest: dict, stage_id, reason: str,
                 "reason": "另一个执行器正在处理该批次；稍后自动继续",
                 "failed_stages": [], "pending_stages": []}
     observed = {}
+    only_external_wait = bool(rn.ocr_wait_state(batch_dir, manifest)) and not any(
+        value.get("status") in (mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW, mf.INVALIDATED)
+        for key, value in manifest.get("stages", {}).items() if key != "extract")
     try:
         from . import self_heal
-        observed = self_heal.observe_outcomes(batch_dir, manifest)
         from . import operations
-        # Publish a new blocker before releasing the execution claim. The Host
-        # can claim on its next scan instead of waiting through a heal-model turn.
-        operations.handoff_if_available(batch_dir)
+        if not only_external_wait:
+            observed = self_heal.observe_outcomes(batch_dir, manifest)
+            # Publish a new blocker before releasing the execution claim.
+            operations.handoff_if_available(batch_dir)
     except (OSError, ValueError, KeyError, TypeError):
         pass
     performance = {}

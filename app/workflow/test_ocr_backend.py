@@ -74,6 +74,64 @@ class OCRBackendTest(unittest.TestCase):
             with self.assertRaises(backend.OCRBackendError):
                 backend.recognize(self.source, self.output, config=self.config)
 
+    def test_paddle_errors_keep_only_controlled_redacted_diagnostics(self):
+        from workflow import paddle_jobs
+        token = "private-test-token"
+        config = {"backend": "paddle_jobs", "token": token}
+        remote = paddle_jobs.PaddleJobsError("http_error", http_status=429,
+            error_code="QuotaExceeded", error_message=(
+                "quota exhausted " + token + " Bearer secret "
+                "https://remote.invalid/file?signature=private password=hidden"))
+        remote.details["config"] = {"token": token}
+        with patch.object(paddle_jobs, "recognize", side_effect=remote) as recognize:
+            with self.assertRaises(backend.OCRBackendError) as raised:
+                backend.recognize(self.source, self.output, config=config, mandatory_pdf=True)
+        self.assertEqual(recognize.call_count, 1)
+        error = raised.exception
+        self.assertEqual(error.code, "http_error")
+        self.assertEqual(error.details["http_status"], 429)
+        self.assertEqual(error.details["error_code"], "QuotaExceeded")
+        self.assertIn("quota exhausted", error.details["error_message"])
+        serialized = json.dumps(backend.safe_error(error))
+        for private in (token, "Bearer secret", "remote.invalid", "signature=private", "password=hidden", "config"):
+            self.assertNotIn(private, serialized)
+        self.assertEqual(str(error), backend.ERROR_MESSAGES["http_error"])
+
+    def test_paddle_config_errors_keep_controlled_code(self):
+        for invalid in ({"endpoint": "bad-secret-endpoint"}, {"token": ["private"]}):
+            with self.subTest(invalid=invalid), self.assertRaises(backend.OCRBackendError) as raised:
+                backend.recognize(self.source, self.output, config={"backend": "paddle_jobs", **invalid})
+            self.assertEqual(raised.exception.code, "invalid_config")
+            self.assertEqual(raised.exception.details, {})
+            self.assertEqual(str(raised.exception), backend.ERROR_MESSAGES["invalid_config"])
+
+    def test_script_entry_can_construct_errors_without_package_import(self):
+        code = ("import runpy,sys; module=runpy.run_path(sys.argv[1]); "
+                "error=module['OCRBackendError']('native failure'); "
+                "assert error.code == 'ocr_failed'; print(str(error))")
+        result = subprocess.run([sys.executable, "-c", code, str(Path(backend.__file__).resolve())],
+                                capture_output=True, text=True, timeout=5, cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("native failure", result.stdout)
+
+    def test_unknown_error_codes_and_fields_are_not_public(self):
+        from workflow import paddle_jobs
+        remote = paddle_jobs.PaddleJobsError("secret-code", error_message="private text")
+        with patch.object(paddle_jobs, "recognize", side_effect=remote):
+            with self.assertRaises(backend.OCRBackendError) as raised:
+                backend.recognize(self.source, self.output, config={"backend": "paddle_jobs"})
+        self.assertEqual(raised.exception.code, "ocr_failed")
+        self.assertEqual(raised.exception.details, {})
+        for error in (RuntimeError("private text"), backend.OCRBackendError("private text"),
+                      {"code": "secret-code", "message": "private text", "details": {"token": "secret"}}):
+            safe = backend.safe_error(error)
+            self.assertEqual(safe["code"], "ocr_failed")
+            self.assertNotIn("private", json.dumps(safe))
+            self.assertNotIn("details", safe)
+        safe = backend.safe_error({"code": "http_error", "details": {
+            "http_status": True, "error_message": {"token": "private"}, "error_code": ["private"]}})
+        self.assertNotIn("details", safe)
+
     def test_config_precedence_relative_paths_and_defaults(self):
         path = self.root / "config.json"
         path.write_text(json.dumps({"python": sys.executable, "script": self.script.name}), encoding="utf-8")

@@ -666,6 +666,35 @@ def _write(path: Path, value):
     path.write_text(data, encoding="utf-8")
 
 
+class OCRAcquisitionPending(RuntimeError):
+    """A persisted remote job is still active; no extraction was delivered."""
+
+
+def _require_pdf_acquisition(report):
+    if isinstance(report, dict) and report.get("status") == "waiting":
+        raise OCRAcquisitionPending("OCR 任务等待结果，稍后续查原任务；本轮未交付提取产物")
+
+
+def _pdf_ocr_failure(report, sources=None):
+    """Summarize safe failures once per PDF, including manifest aliases."""
+    from workflow import ocr_backend
+    messages, seen = [], set()
+    for item in sources if sources is not None else (report or {}).get("sources", []):
+        if item.get("status") == "completed":
+            continue
+        identity = item.get("sha256") or item.get("duplicate_of") or item.get("path") or item.get("input")
+        if identity in seen:
+            continue
+        seen.add(identity)
+        error = ocr_backend.safe_error(item.get("error"))
+        detail = "; ".join(f"{key}={value}" for key, value in error.get("details", {}).items())
+        messages.append(f"[{error['code']}] {error['message']}" + (f" ({detail})" if detail else ""))
+    if not messages:
+        error = ocr_backend.safe_error((report or {}).get("error"))
+        messages.append(f"[{error['code']}] {error['message']}")
+    return "PDF OCR 获取失败：" + "；".join(messages)
+
+
 def _pdf_ocr_for_source(batch, source, report):
     """Load only a completed acquisition bound to these exact source bytes."""
     batch, source = Path(batch).resolve(), Path(source).resolve()
@@ -679,8 +708,7 @@ def _pdf_ocr_for_source(batch, source, report):
         if path != source:
             continue
         if item.get("status") != "completed":
-            error = item.get("error") or {}
-            return None, f"PDF OCR 获取失败：{error.get('message', '未知错误')}"
+            return None, _pdf_ocr_failure(report, [item])
         if item.get("sha256") != digest:
             return None, "PDF OCR 来源摘要不匹配"
         try:
@@ -693,8 +721,8 @@ def _pdf_ocr_for_source(batch, source, report):
             if any(not isinstance(p, dict) or not isinstance(p.get("text"), str) for p in result["pages"]):
                 raise ValueError("页面文字无效")
             return result, None
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            return None, f"PDF OCR 结果不可用：{exc}"
+        except (OSError, ValueError, KeyError, TypeError):
+            return None, "PDF OCR 结果不可用：来源或页面证据无效"
     return None, "PDF OCR 报告中没有此来源"
 
 
@@ -948,7 +976,8 @@ def run(batch_dir: Path) -> dict:
         try:
             return pdf_ocr.run(batch_dir, manifest)
         except Exception as exc:  # acquisition failure must remain visible; do not retry
-            return {"status": "failed", "sources": [], "error": str(exc)}
+            from workflow import ocr_backend
+            return {"status": "failed", "sources": [], "error": ocr_backend.safe_error(exc)}
 
     # Multiple documents must be classified BEFORE choosing the paper. Upload
     # names/order are only provisional hints; an answer Word must not outrank a
@@ -960,6 +989,7 @@ def run(batch_dir: Path) -> dict:
     provisional = None
     if len(input_docs) > 1:
         prepared_ocr = acquire()
+        _require_pdf_acquisition(prepared_ocr)
         invoke, cfg = _material_classifier()
         provisional = material_classify.classify_documents(batch_dir, invoke_fn=invoke, config=cfg,
                                                            ocr_report=prepared_ocr, manifest=manifest)
@@ -982,23 +1012,28 @@ def run(batch_dir: Path) -> dict:
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(acquire) if prepared_ocr is None else executor.submit(lambda: prepared_ocr)
         def pdf_ocr_wait():
-            return _pdf_ocr_for_source(batch_dir, source_path, future.result())
+            report = future.result()
+            _require_pdf_acquisition(report)
+            return _pdf_ocr_for_source(batch_dir, source_path, report)
 
         try:
             if source_path.suffix.lower() == ".pdf":
                 result = extract_source(source_path, batch_dir / "01_source", pdf_ocr_wait=pdf_ocr_wait)
             else:
                 result = extract_source(source_path, batch_dir / "01_source")
+        except OCRAcquisitionPending:
+            raise
         except Exception as exc:
             ocr_report = future.result()
             ocr_warning = pdf_ocr_wait()[1] if source_path.suffix.lower() == ".pdf" else None
             if ocr_warning or ocr_report.get("status") == "failed":
-                raise ValueError(f"{exc}；PDF OCR 获取失败：{ocr_warning or ocr_report.get('error', '详见 PDF OCR 报告')}") from exc
+                raise ValueError(ocr_warning or _pdf_ocr_failure(ocr_report)) from None
             raise
         ocr_report = future.result()
+        _require_pdf_acquisition(ocr_report)
     result["pdf_ocr"] = ocr_report
     if ocr_report.get("status") == "failed":
-        message = "PDF OCR 获取失败，请查看 pdf_ocr 报告：" + str(ocr_report.get("error", "部分来源获取失败"))
+        message = _pdf_ocr_failure(ocr_report)
         if source_path.suffix.lower() == '.docx':
             result.setdefault('warnings', []).append(message + '；继续使用 Word 原文处理')
         else:
@@ -1108,6 +1143,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         report = run(args.batch_dir)
+    except OCRAcquisitionPending as exc:
+        _write(args.batch_dir / "07_review" / "extraction-report.json",
+               {"passed": False, "status": "waiting", "error": str(exc),
+                "ocr_report": "01_source/pdf-ocr.json"})
+        print(str(exc), file=sys.stderr)
+        return 6
     except Exception as exc:
         _write(args.batch_dir / "07_review" / "extraction-report.json", {"passed": False, "error": str(exc)})
         print(f"原卷提取失败：{exc}", file=sys.stderr)

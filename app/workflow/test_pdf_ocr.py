@@ -42,6 +42,7 @@ class PdfOcrTest(unittest.TestCase):
         # Word-primary batch: their JSON is the Word layout reference and must
         # exist even when the OCR assist switch is off.
         for _, _, kwargs in calls:
+            self.assertTrue(callable(kwargs.pop("progress_callback")))
             self.assertEqual(kwargs, {"force_ocr": True, "config": config, "mandatory_pdf": True})
         self.assertEqual(report['sources'][0]['pages'][0]['text'], 'OCR text')
         first, second, duplicate = report["sources"]
@@ -74,6 +75,41 @@ class PdfOcrTest(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertNotIn("secret", json.dumps(report))
 
+    def test_controlled_backend_failure_is_persisted_without_private_text(self):
+        error = pdf_ocr.ocr_backend.OCRBackendError("config=/private token=secret",
+            code="job_failed", details={"http_status": 503, "error_code": "CapacityExceeded",
+                "error_message": "capacity exhausted https://remote.invalid/file?signature=secret",
+                "token": "secret", "config": "private"})
+        manifest = {"inputs": {"source": self.entry(self.pdf), "alias": self.entry(self.pdf)}}
+        with patch.object(pdf_ocr.ocr_backend, "recognize", side_effect=error) as recognize:
+            report = pdf_ocr.run(self.batch, manifest)
+        self.assertEqual(recognize.call_count, 1)
+        first, alias = report["sources"]
+        self.assertEqual(first["error"]["code"], "job_failed")
+        self.assertEqual(first["error"]["message"], "OCR job failed.")
+        self.assertEqual(first["error"]["details"]["http_status"], 503)
+        self.assertEqual(first["error"]["details"]["error_code"], "CapacityExceeded")
+        self.assertEqual(alias["error"], first["error"])
+        self.assertEqual(alias["duplicate_of"], "source")
+        stored = (self.batch / pdf_ocr.REPORT).read_text()
+        for private in ("/private", "token=secret", "remote.invalid", "signature=secret"):
+            self.assertNotIn(private, stored)
+        self.assertEqual(json.loads(stored), report)
+
+    def test_unknown_backend_exception_and_uncontrolled_code_stay_generic(self):
+        manifest = {"inputs": {"source": self.entry(self.pdf)}}
+        for error in (RuntimeError("token=secret https://private.invalid/signed"),
+                      pdf_ocr.ocr_backend.OCRBackendError("private", code="secret-code",
+                                                          details={"error_message": "private"})):
+            with self.subTest(error=type(error).__name__), patch.object(
+                    pdf_ocr.ocr_backend, "recognize", side_effect=error):
+                report = pdf_ocr.run(self.batch, manifest)
+            self.assertEqual(report["sources"][0]["error"]["code"], "ocr_failed")
+            self.assertNotIn("details", report["sources"][0]["error"])
+            serialized = json.dumps(report)
+            self.assertNotIn("secret", serialized)
+            self.assertNotIn("private.invalid", serialized)
+
     def test_hash_mismatch_missing_file_and_empty_results_are_failures(self):
         wrong = self.entry(self.pdf)
         wrong["sha256"] = "wrong"
@@ -96,6 +132,8 @@ class PdfOcrTest(unittest.TestCase):
         with patch.object(pdf_ocr.ocr_backend, "recognize", side_effect=recognize):
             report = pdf_ocr.run(self.batch, manifest)
         self.assertEqual(report["status"], "completed")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(callable(calls[0].pop("progress_callback")))
         self.assertEqual(calls, [{"force_ocr": True, "config": None, "mandatory_pdf": True}])
 
     def test_markdown_preserves_service_order_and_refreshes_aggregate(self):

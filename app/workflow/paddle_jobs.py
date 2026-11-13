@@ -19,6 +19,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+from . import ocr_job_store
+
 DEFAULTS = {
     "endpoint": "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
     "model": "PaddleOCR-VL-1.6",
@@ -44,9 +46,13 @@ def _safe_message(value, token, limit=500):
 
 
 class PaddleJobsError(RuntimeError):
-    def __init__(self, code, *, http_status=None, error_code=None, error_message=None):
-        self.code = code
-        self.details = {key: value for key, value in {"http_status": http_status, "error_code": error_code, "error_message": error_message}.items() if value is not None}
+    def __init__(self, code, *, http_status=None, error_code=None, error_message=None,
+                 job_id=None, phase=None, retryable=None, progress=None):
+        self.code, self.job_id, self.phase = code, job_id, phase
+        self.retryable = retryable
+        self.progress = progress
+        self.details = {key: value for key, value in {"http_status": http_status, "error_code": error_code, "error_message": error_message,
+                        "job_id": job_id, "phase": phase, "retryable": retryable, "progress": progress}.items() if value is not None}
         message = {
             "invalid_config": "Invalid OCR settings or source.",
             "missing_token": "An OCR token is required.",
@@ -54,6 +60,13 @@ class PaddleJobsError(RuntimeError):
             "unsafe_redirect": "OCR redirect refused; use the final endpoint.",
             "network_error": "Cannot connect to OCR server.",
             "timeout": "OCR job deadline exceeded; submission is not retried.",
+            "waiting": "OCR job is retained and can be queried again.",
+            "submission_unknown": "OCR submission outcome is unknown; automatic resubmission is forbidden.",
+            "submission_conflict": "OCR submission reconciliation returned conflicting jobs.",
+            "receipt_corrupt": "OCR receipt is invalid; automatic resubmission is forbidden.",
+            "storage_error": "OCR durable state could not be saved.",
+            "job_not_found": "OCR job no longer exists; automatic resubmission is forbidden.",
+            "job_expired": "OCR job expired; automatic resubmission is forbidden.",
             "job_failed": "OCR job failed.",
             "invalid_result": "OCR server returned an invalid or empty result.",
         }.get(code, "OCR request failed.")
@@ -205,7 +218,8 @@ def _layout_blocks(layout):
     return blocks, list(dict.fromkeys(warnings))
 
 
-def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consumer=None):
+def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consumer=None,
+            job_store=None):
     """Submit once, poll to done, then fetch and normalize JSONL results.
 
     Result/image URLs receive no Authorization header. Returned remote references
@@ -219,8 +233,14 @@ def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consume
     start = time.monotonic()
     deadline = start + config["timeout_seconds"]
     opener = urllib.request.build_opener(_NoRedirect())
+    if job_store is not None and not job_store.locked:
+        raise RuntimeError("OCR store lock required")
 
-    def request(url, data=None, content_type=None, *, auth=False, json_result=True):
+    def save(**changes):
+        if job_store is not None:
+            job_store.save(**changes)
+
+    def request_once(url, data=None, content_type=None, *, auth=False, json_result=True):
         safe_url(url)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -232,7 +252,7 @@ def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consume
             headers["Content-Type"] = content_type
         req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
         try:
-            with opener.open(req, timeout=remaining) as response:
+            with opener.open(req, timeout=min(remaining, 30)) as response:
                 chunks, total = [], 0
                 while True:
                     if time.monotonic() >= deadline:
@@ -266,41 +286,122 @@ def run_job(config, *, file_url=None, file_path=None, pages=None, _image_consume
         except OSError:
             raise PaddleJobsError("network_error") from None
 
-    optional = {key: config[key] for key in OPTION_KEYS}
-    if file_url:
-        body = json.dumps({"fileUrl": safe_url(file_url), "model": config["model"], "optionalPayload": optional}).encode()
-        submitted = request(config["endpoint"], body, "application/json", auth=True)
-    else:
+    def request(url, data=None, content_type=None, *, auth=False, json_result=True, kind="get"):
+        # A request has its own finite retry budget; the overall deadline also
+        # bounds every socket timeout and backoff. POST is attempted only once.
+        for index in range(3 if data is None else 1):
+            if job_store is not None:
+                job_store.count(kind)
+            try:
+                return request_once(url, data, content_type, auth=auth, json_result=json_result)
+            except PaddleJobsError as exc:
+                transient = exc.code in {"network_error", "timeout"} or (exc.code == "http_error" and exc.details.get("http_status") in {408, 429, 500, 502, 503, 504})
+                if data is not None or not transient or index == 2:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PaddleJobsError("timeout") from None
+                time.sleep(min(.2 * (2 ** index), remaining))
+
+    def remote_error(payload):
+        details = _remote_details(payload, token)
+        code = str(details.get("error_code", ""))
+        if code in {"11001", "11002"}:
+            raise PaddleJobsError("job_not_found" if code == "11001" else "job_expired", **details)
+        if code not in {"", "0", "200"}:
+            raise PaddleJobsError("http_error", **details)
+
+    job_id = job_store.receipt.get("job_id") if job_store is not None else None
+    if job_store is not None and not job_id and job_store.receipt["phase"] != "prepared":
+        save(phase="submission_unknown", last_error="submission_unknown")
+        # batchId is a reconciliation handle, not a promise of remote idempotency.
         try:
-            source = Path(file_path).expanduser().resolve()
-            if not source.is_file() or source.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"} or source.stat().st_size > MAX_FILE:
-                raise OSError()
-            binary = source.read_bytes()
-            if not binary or len(binary) > MAX_FILE:
-                raise OSError()
-        except (OSError, TypeError, ValueError):
-            raise PaddleJobsError("invalid_config") from None
-        boundary = "ocr-" + uuid.uuid4().hex
-        # Fixed safe filename: no local path or user filename is transmitted.
-        parts = []
-        for key, value in (("model", config["model"]), ("optionalPayload", json.dumps(optional))):
-            parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode())
-        mime = mimetypes.guess_type("source" + source.suffix)[0] or "application/octet-stream"
-        parts.extend([(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="source{source.suffix.lower()}"\r\nContent-Type: {mime}\r\n\r\n').encode(), binary, f"\r\n--{boundary}--\r\n".encode()])
-        submitted = request(config["endpoint"], b"".join(parts), "multipart/form-data; boundary=" + boundary, auth=True)
-    data = submitted.get("data") if isinstance(submitted, dict) else None
-    job_id = data.get("jobId") if isinstance(data, dict) else None
-    if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", job_id):
-        raise PaddleJobsError("invalid_result", **_remote_details(submitted, token))
+            reconciled = request(config["endpoint"] + "/batch/" + job_store.receipt["batch_id"], auth=True, kind="reconcile")
+            remote_error(reconciled)
+            data = reconciled.get("data") if isinstance(reconciled, dict) else None
+            jobs = data.get("extractResult") if isinstance(data, dict) and data.get("batchId") == job_store.receipt["batch_id"] else None
+            if not isinstance(jobs, list):
+                raise PaddleJobsError("submission_unknown")
+            if len(jobs) > 1:
+                raise PaddleJobsError("submission_conflict")
+            if len(jobs) == 1 and isinstance(jobs[0], dict):
+                job_id = jobs[0].get("jobId")
+                if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", job_id):
+                    raise PaddleJobsError("submission_unknown")
+                save(job_id=job_id, phase="submitted", last_error=None)
+            else:
+                raise PaddleJobsError("submission_unknown")
+        except PaddleJobsError as exc:
+            if exc.code == "submission_conflict":
+                save(last_error="submission_conflict")
+                raise
+            save(last_error="submission_unknown")
+            raise PaddleJobsError("submission_unknown") from None
+
+    if not job_id:
+        optional = {key: config[key] for key in OPTION_KEYS}
+        fields = {"model": config["model"], "optionalPayload": optional}
+        if job_store is not None:
+            fields["batchId"] = job_store.receipt["batch_id"]
+        if file_url:
+            fields["fileUrl"] = safe_url(file_url)
+            body, content_type = json.dumps(fields).encode(), "application/json"
+        else:
+            try:
+                source = Path(file_path).expanduser().resolve()
+                if not source.is_file() or source.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"} or source.stat().st_size > MAX_FILE:
+                    raise OSError()
+                binary = source.read_bytes()
+                if not binary or len(binary) > MAX_FILE:
+                    raise OSError()
+                if job_store is not None and (ocr_job_store.digest(binary) != job_store.receipt["source"]["sha256"] or len(binary) != job_store.receipt["source"]["size"]):
+                    raise OSError()
+            except (OSError, TypeError, ValueError):
+                raise PaddleJobsError("invalid_config") from None
+            boundary = "ocr-" + uuid.uuid4().hex
+            parts = []
+            for key, value in fields.items():
+                value = json.dumps(value) if isinstance(value, dict) else value
+                parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode())
+            mime = mimetypes.guess_type("source" + source.suffix)[0] or "application/octet-stream"
+            parts.extend([(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="source{source.suffix.lower()}"\r\nContent-Type: {mime}\r\n\r\n').encode(), binary, f"\r\n--{boundary}--\r\n".encode()])
+            body, content_type = b"".join(parts), "multipart/form-data; boundary=" + boundary
+        if job_store is not None:
+            save(phase="submitting", submitted_at=ocr_job_store._now(), last_error=None)
+        try:
+            submitted = request(config["endpoint"], body, content_type, auth=True, kind="submit")
+            data = submitted.get("data") if isinstance(submitted, dict) else None
+            job_id = data.get("jobId") if isinstance(data, dict) else None
+            if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", job_id):
+                raise PaddleJobsError("invalid_result", **_remote_details(submitted, token))
+            # Publish the handle before interpreting anything else in a response.
+            save(job_id=job_id, phase="submitted", last_error=None)
+        except PaddleJobsError as exc:
+            if job_store is not None:
+                save(phase="submission_unknown", last_error="submission_unknown")
+                raise PaddleJobsError("submission_unknown") from None
+            raise
+    save(phase="polling")
     while True:
         status = request(config["endpoint"] + "/" + urllib.parse.quote(job_id, safe=""), auth=True)
+        remote_error(status)
         data = status.get("data") if isinstance(status, dict) else None
         state = data.get("state", data.get("status")) if isinstance(data, dict) else None
+        updates = {"state": state} if state in {"pending", "running", "done", "failed"} else {}
+        if isinstance(data, dict) and isinstance(data.get("extractProgress"), dict):
+            for source_key, target in (("totalPages", "total_pages"), ("extractedPages", "extracted_pages")):
+                value = data["extractProgress"].get(source_key)
+                if isinstance(value, str) and re.fullmatch(r"\d{1,10}", value):
+                    value = int(value)
+                if type(value) is int and 0 <= value <= 1000000000:
+                    updates[target] = value
+        save(**updates)
         if state == "done":
+            save(phase="downloading")
             result_url = data.get("resultUrl", {}).get("jsonUrl") if isinstance(data.get("resultUrl"), dict) else None
             if not isinstance(result_url, str):
                 raise PaddleJobsError("invalid_result")
-            raw = request(result_url, json_result=False)
+            raw = request(result_url, json_result=False, kind="download")
             break
         if state == "failed":
             raise PaddleJobsError("job_failed", **_remote_details(status, token))
@@ -446,25 +547,90 @@ def _download_images(result, attempt, deadline):
     return paths
 
 
-def recognize(source, output_dir, *, config, pages=None, **kwargs):
+def progress(output_dir):
+    """Safe persisted state snapshots; no network requests or credential values."""
+    return ocr_job_store.progress(output_dir)
+
+
+def recognize(source, output_dir, *, config, pages=None, task="ocr", progress_callback=None, **kwargs):
+    """Resume within this batch-local output scope, or reuse verified artifacts.
+
+    waiting is retryable by calling recognize again. submission_unknown permits
+    only batchId reconciliation, never an automatic POST. No exactly-once remote
+    execution guarantee is claimed. Terminal failures retain their remote ID.
+    """
     started = time.monotonic()
-    root = Path(output_dir).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    attempt = Path(tempfile.mkdtemp(prefix="paddle-ocr-", dir=root))
-    media = []
-    def consume_images(result):
-        media.extend(_download_images(result, attempt, started + validate_config(config)["timeout_seconds"]))
-    result = run_job(config, file_path=str(source), pages=pages, _image_consumer=consume_images)
-    markdown, output = attempt / "result.md", attempt / "result.json"
-    raw_path = attempt / "raw-result.jsonl"
-    raw_path.write_text(result.pop("raw_jsonl"), encoding="utf-8")
-    result.pop("markdown")
-    markdown.write_text("\n\n".join(page["text"] for page in result["pages"]), encoding="utf-8")
-    result["source"] = str(Path(source).resolve())
-    result["artifacts"] = {"attempt_dir": str(attempt), "markdown": str(markdown), "json": str(output), "images": media,
-                           "raw_jsonl": str(raw_path)}
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    return result
+    config = validate_config(config)
+    # Preserve configuration validation even when a prior result is reusable.
+    _token(config)
+    if pages is not None and (not re.fullmatch(r"[1-9]\d*(?:-[1-9]\d*)?", str(pages))
+                              or int(str(pages).split("-")[0]) > int(str(pages).split("-")[-1])):
+        raise PaddleJobsError("invalid_config")
+    try:
+        source = Path(source).expanduser().resolve()
+        if source.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"} or source.stat().st_size > MAX_FILE:
+            raise OSError()
+        binary = source.read_bytes()
+        if not binary or len(binary) > MAX_FILE:
+            raise OSError()
+        identity = ocr_job_store.binding(binary, config, OPTION_KEYS, pages=pages,
+                                         task=task, file_type=source.suffix)
+    except (OSError, TypeError, ValueError):
+        raise PaddleJobsError("invalid_config") from None
+    store = ocr_job_store.JobStore(output_dir, identity, progress_callback=progress_callback)
+    try:
+        with store.lock(timeout=0):
+            receipt = store.load()
+            if receipt["phase"] == "succeeded":
+                cached = store.verify_result()
+                if cached is not None:
+                    return cached
+                store.save(phase="polling", last_error="cache_corrupt")
+            if store.receipt["phase"] == "failed":
+                raise PaddleJobsError(store.receipt["last_error"] or "job_failed")
+            attempt = store.directory
+            media = []
+            def consume_images(result):
+                media.extend(_download_images(result, attempt, started + config["timeout_seconds"]))
+            try:
+                result = run_job(config, file_path=str(source), pages=pages,
+                                 _image_consumer=consume_images, job_store=store)
+                markdown, output = attempt / "result.md", attempt / "result.json"
+                raw_path = attempt / "raw-result.jsonl"
+                ocr_job_store.atomic_write(raw_path, result.pop("raw_jsonl").encode())
+                result.pop("markdown")
+                ocr_job_store.atomic_write(markdown, "\n\n".join(page["text"] for page in result["pages"]).encode())
+                result["source"] = str(source)
+                result["artifacts"] = {"attempt_dir": str(attempt), "markdown": str(markdown), "json": str(output), "images": media,
+                                       "raw_jsonl": str(raw_path)}
+                ocr_job_store.atomic_write(output, json.dumps(result, ensure_ascii=False, indent=2).encode())
+                store.complete(result)
+                return result
+            except PaddleJobsError as exc:
+                code = exc.code
+                if code in {"timeout", "network_error"} or (code == "http_error" and exc.details.get("http_status") in {408, 429, 500, 502, 503, 504}):
+                    code = "waiting" if store.receipt.get("job_id") else "submission_unknown"
+                if code == "http_error":
+                    remote_code = str(exc.details.get("error_code", ""))
+                    if exc.details.get("http_status") == 404 or remote_code == "11001":
+                        code = "job_not_found"
+                    elif remote_code == "11002":
+                        code = "job_expired"
+                terminal = code in {"job_failed", "job_not_found", "job_expired", "submission_conflict", "unsafe_redirect"}
+                phase = "failed" if terminal else ("submission_unknown" if code == "submission_unknown" else store.receipt["phase"])
+                store.save(phase=phase, last_error=code if code in ocr_job_store.ERROR_CODES else "invalid_result")
+                snapshot = ocr_job_store._safe_progress(store.receipt)
+                raise PaddleJobsError(code, job_id=store.receipt.get("job_id"), phase=phase,
+                                      retryable=not terminal, progress=snapshot,
+                                      **{key: value for key, value in exc.details.items() if key in {"http_status", "error_code", "error_message"}}) from None
+    except ocr_job_store.StoreError as exc:
+        receipt = store.receipt or {}
+        raise PaddleJobsError(exc.code, job_id=receipt.get("job_id"), phase=receipt.get("phase"),
+                              retryable=exc.code in {"waiting", "storage_error"},
+                              progress=ocr_job_store._safe_progress(receipt) if receipt else None) from None
+    except OSError:
+        receipt = store.receipt or {}
+        raise PaddleJobsError("storage_error", job_id=receipt.get("job_id"), phase=receipt.get("phase"), retryable=True) from None
 
 
 def main():

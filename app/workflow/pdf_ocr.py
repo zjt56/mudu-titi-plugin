@@ -2,15 +2,19 @@
 
 Call ``run(batch_dir, manifest, config=None)`` after registering uploaded inputs.
 The report and snapshots are batch-local; OCR evidence does not certify layout or
-content. Re-running explicitly submits again; no submission is retried in a run.
+content. Paddle jobs persist receipts in a batch-local source scope; subsequent
+calls resume or reuse the existing task instead of resubmitting it.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import os
 from pathlib import Path
 import tempfile
+import time
 
 from . import ocr_backend
 
@@ -57,8 +61,14 @@ def run(batch, manifest, config=None):
         raise ValueError("manifest.inputs must be an object")
     root = batch / "01_source" / "pdf-ocr"
     root.mkdir(parents=True, exist_ok=True)
-    report = {"version": 1, "status": "completed", "report_path": REPORT,
-              "markdown_path": MARKDOWN, "sources": []}
+    report = {"version": 2, "status": "running", "report_path": REPORT,
+              "markdown_path": MARKDOWN, "updated_at": time.time(), "sources": []}
+
+    def publish():
+        report["updated_at"] = time.time()
+        _write_report(batch / REPORT, report)
+
+    publish()
     seen = {}
     for key, entry in manifest["inputs"].items():
         if not isinstance(entry, dict):
@@ -86,17 +96,47 @@ def run(batch, manifest, config=None):
                 continue
             # Reserve the digest before submitting, including on uncertain failure.
             seen[digest] = item
-            source_dir = Path(tempfile.mkdtemp(prefix=digest[:16] + "-", dir=root))
+            source_dir = root / digest
+            source_dir.mkdir(parents=True, exist_ok=True)
+            if source_dir.is_symlink():
+                raise ValueError("unsafe PDF evidence directory")
             snapshot = source_dir / "source.pdf"
-            snapshot.write_bytes(data)
+            if snapshot.exists():
+                if snapshot.is_symlink() or hashlib.sha256(snapshot.read_bytes()).hexdigest() != digest:
+                    raise ValueError("registered SHA-256 does not match source")
+            else:
+                fd = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
             item["snapshot"] = snapshot.relative_to(batch).as_posix()
             item["result_dir"] = source_dir.relative_to(batch).as_posix()
             # Every uploaded PDF is OCR'd in full. JSON and service-ordered
             # Markdown are acquired even with OCR assist off or a clean text
             # layer. Word stays authoritative when supplied; PDF-only extraction
             # consumes this OCR body without requiring native PDF parsing.
+            def on_progress(progress):
+                if not isinstance(progress, dict):
+                    return
+                safe = {}
+                for field in ("phase", "state", "job_id", "batch_id", "created_at", "updated_at",
+                              "total_pages", "extracted_pages", "retry_after_seconds", "poll_attempts"):
+                    value = progress.get(field)
+                    if field in {"phase", "state", "job_id", "batch_id"}:
+                        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,256}", value):
+                            safe[field] = value
+                    elif type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                        safe[field] = value
+                item["progress"] = safe
+                item["status"] = "running"
+                publish()
+
+            item["status"] = "running"
+            publish()
             result = ocr_backend.recognize(snapshot, source_dir, force_ocr=True,
-                                           config=config, mandatory_pdf=True)
+                                           config=config, mandatory_pdf=True,
+                                           progress_callback=on_progress)
             if not isinstance(result, dict) or not isinstance(result.get("pages"), list) or not result["pages"]:
                 raise ValueError("OCR returned no pages")
             if any(not isinstance(page, dict) or not isinstance(page.get("text"), str)
@@ -119,14 +159,24 @@ def run(batch, manifest, config=None):
         except Exception as exc:
             # Backend exceptions can contain private configuration; expose a safe
             # category, rather than serializing arbitrary exception messages.
-            item["error"] = {"type": type(exc).__name__, "message": (
-                str(exc) if isinstance(exc, ValueError) and str(exc) in {
-                    "registered SHA-256 does not match source", "OCR returned no pages",
-                    "OCR returned malformed page text"} else "PDF acquisition or OCR failed; inspect configuration and source")}
-    if any(item["status"] != "completed" for item in report["sources"]):
+            item["error"] = ocr_backend.safe_error(exc)
+            details = item["error"].get("details", {})
+            if item["error"].get("code") == "waiting" and details.get("job_id"):
+                item["status"] = "waiting"
+                item["progress"] = {**item.get("progress", {}), "job_id": details["job_id"],
+                                    "phase": details.get("phase", "waiting"),
+                                    "retry_after_seconds": 15}
+            else:
+                item["status"] = "failed"
+        publish()
+    if any(item["status"] == "failed" for item in report["sources"]):
         report["status"] = "failed"
+    elif any(item["status"] == "waiting" for item in report["sources"]):
+        report["status"] = "waiting"
     elif not report["sources"]:
         report["status"] = "no_pdfs"
+    else:
+        report["status"] = "completed"
     # Aggregate only successful, distinct sources in manifest/service order.
     # Failed sources stay explicit in JSON rather than masquerading as OCR text.
     sections = []
@@ -135,5 +185,5 @@ def run(batch, manifest, config=None):
             markdown = (batch / item["markdown_path"]).read_text(encoding="utf-8")
             sections.append(f"## {item['input']}\n\n{markdown}")
     _write_markdown(batch / MARKDOWN, "\n\n".join(sections))
-    _write_report(batch / REPORT, report)
+    publish()
     return report

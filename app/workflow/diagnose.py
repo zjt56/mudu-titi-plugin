@@ -487,6 +487,21 @@ def _remedy(stage: contracts.Stage, batch_dir: str, detail: str = "") -> dict:
     return {"hint": "", "command": ""}
 
 
+def _ocr_wait_detail(waiting: dict) -> str:
+    """Local fixed copy only: never display remote errors, URLs or tokens."""
+    phases = {"submitted": "OCR任务已提交", "accepted": "OCR任务已提交",
+              "queued": "OCR任务排队中", "pending": "OCR任务排队中",
+              "running": "OCR任务运行中", "processing": "OCR任务运行中",
+              "downloading": "OCR结果下载中", "download": "OCR结果下载中",
+              "result_downloading": "OCR结果下载中"}
+    descriptions = []
+    for task in waiting.get("progress", []):
+        description = phases.get(task.get("phase")) or phases.get(task.get("state")) or "OCR任务已提交"
+        if description not in descriptions:
+            descriptions.append(description)
+    return "；".join(descriptions) + "；稍后续查原任务，提取尚未完成"
+
+
 def diagnose(batch_dir) -> dict:
     """返回整个批次的卡点诊断。
 
@@ -547,6 +562,19 @@ def diagnose(batch_dir) -> dict:
         status = record.get("status") or mf.PENDING
         if status in mf.TERMINAL_OK:
             continue
+        if stage.id == "extract":
+            from .runner import ocr_wait_state
+            waiting = ocr_wait_state(batch, manifest)
+            if waiting:
+                items.append({"stage": stage.id, "title": stage.title, "status": mf.PENDING,
+                              "kind": stage.kind, "reason": "OCR任务等待结果，稍后续查原任务",
+                              "detail": _ocr_wait_detail(waiting),
+                              "hint": "按等待间隔自动续查已提交任务", "command": "",
+                              "depends_on": [], "unmet": [], "missing_inputs": [],
+                              "note": "提取未完成，下游不能使用部分OCR结果",
+                              "failure_class": "", "next_action": "waiting_external",
+                              "retry_after": waiting["retry_after"], "blocking": False})
+                continue
         # 用户明确“课时试卷允许没有听力/答案”等：仅在阶段尚未实际执行（pending）
         # 且属可跳过输入时才视为正常可跳过；已 FAILED/needs_review/blocked 的阶段
         # 是真实执行结果，不能被“历史批次”之类的跳过理由掩盖。

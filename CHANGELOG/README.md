@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-13 | [2026-11-13-pdf-ocr-diagnostics.md](2026-11-13-pdf-ocr-diagnostics.md) | OCR受控错误透传与同源去重；指定八上03批次2页正式提取恢复 |
 | 2026-11-13 | [2026-11-13-host-inject-guard.md](2026-11-13-host-inject-guard.md) | 补 sessionQuery 注入并新增注入声明守卫（含跨模块 scope 读取），防未声明宿主服务复发 |
 | 2026-11-13 | [2026-11-13-sessions-inject-purge.md](2026-11-13-sessions-inject-purge.md) | 内容智能体注入 sessions 服务，修复删除批次时原生会话清理失败 |
 | 2026-11-13 | [2026-11-13-coalesced-image-marker.md](2026-11-13-coalesced-image-marker.md) | 证据中 [IMG 4/5/6.jpeg] 合并写法不再被当媒体路径拒绝；真实单图与越界仍分别绑定/拒绝 |

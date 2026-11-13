@@ -26,6 +26,83 @@ class MaterialRoleAgentTest(unittest.TestCase):
             self.assertEqual((role, source), ('answers', 'model'))
 
 
+class PdfOcrDiagnosticsTest(unittest.TestCase):
+    def test_failed_pdf_aliases_are_summarized_once_with_safe_details(self):
+        error = {"code": "http_error", "message": "private-config",
+                 "details": {"http_status": 429, "error_code": "QuotaExceeded",
+                             "error_message": "quota exhausted", "token": "private-token"}}
+        sources = [{"input": "source", "path": "paper.pdf", "sha256": "same",
+                    "status": "failed", "error": error},
+                   {"input": "alias", "path": "copy.pdf", "sha256": "same",
+                    "duplicate_of": "source", "status": "failed", "error": error},
+                   {"input": "answers", "path": "answers.pdf", "sha256": "other",
+                    "status": "failed", "error": {"code": "timeout"}}]
+        message = extract._pdf_ocr_failure({"sources": sources})
+        self.assertEqual(message.count("[http_error]"), 1)
+        self.assertEqual(message.count("[timeout]"), 1)
+        self.assertIn("http_status=429", message)
+        self.assertIn("error_code=QuotaExceeded", message)
+        self.assertIn("quota exhausted", message)
+        self.assertNotIn("private", message)
+
+    def test_fixed_local_failures_remain_specific_in_summary(self):
+        for message, code in ocr_backend.SAFE_VALUE_ERRORS.items():
+            with self.subTest(code=code):
+                report = {"sources": [{"status": "failed", "path": "paper.pdf",
+                                       "error": {"type": "ValueError", "message": message}}]}
+                summary = extract._pdf_ocr_failure(report)
+                self.assertIn(message, summary)
+                self.assertIn(f"[{code}]", summary)
+                self.assertEqual(ocr_backend.safe_error(ValueError(message))["code"], code)
+
+    def test_source_failure_and_invalid_result_do_not_leak_exception_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            source = batch / "paper.pdf"
+            source.write_bytes(b"synthetic PDF")
+            item = {"path": str(source), "status": "failed", "error": {
+                "message": "token=private https://private.invalid/signed", "code": "unknown-private"}}
+            result, message = extract._pdf_ocr_for_source(batch, source, {"sources": [item]})
+            self.assertIsNone(result)
+            self.assertIn("[ocr_failed]", message)
+            self.assertNotIn("private", message)
+            item.update(status="completed", sha256=mf.sha256_file(source),
+                        result_path="secret-token-result.json")
+            _, message = extract._pdf_ocr_for_source(batch, source, {"sources": [item]})
+            self.assertEqual(message, "PDF OCR 结果不可用：来源或页面证据无效")
+            self.assertNotIn("secret-token", message)
+
+    def test_run_reports_source_ocr_failure_once_without_extract_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            source = batch / "paper.pdf"
+            source.write_bytes(b"synthetic PDF")
+            report = {"status": "failed", "sources": [{"input": "source", "path": str(source),
+                "sha256": mf.sha256_file(source), "status": "failed",
+                "error": {"code": "missing_token", "message": "private config"}}]}
+            with patch.object(mf, "load", return_value={"inputs": {"source": {"path": str(source)}}}), \
+                 patch("workflow.pdf_ocr.run", return_value=report), \
+                 patch.object(extract, "extract_source", side_effect=RuntimeError("private token")):
+                with self.assertRaises(ValueError) as raised:
+                    extract.run(batch)
+            message = str(raised.exception)
+            self.assertEqual(message.count("PDF OCR 获取失败"), 1)
+            self.assertEqual(message.count("[missing_token]"), 1)
+            self.assertNotIn("private", message)
+
+    def test_unexpected_acquisition_failure_is_generic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            source = batch / "paper.pdf"
+            source.write_bytes(b"synthetic PDF")
+            with patch.object(mf, "load", return_value={"inputs": {"source": {"path": str(source)}}}), \
+                 patch("workflow.pdf_ocr.run", side_effect=RuntimeError("secret token https://private.invalid")):
+                with self.assertRaises(ValueError) as raised:
+                    extract.run(batch)
+            self.assertNotIn("secret", str(raised.exception))
+            self.assertNotIn("private", str(raised.exception))
+
+
 class StructureCandidateTest(unittest.TestCase):
     def test_writing_bullets_not_question_numbers_and_appendix_is_separate(self):
         body = ('Ⅰ.单项填空(共2小题)\n1. First?\n2. Second?\n'

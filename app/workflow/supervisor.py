@@ -112,7 +112,7 @@ def record_result(folder, result):
     if not isinstance(result, dict):
         result = {"error": str(result)[:800]}
     compact = {key: result[key] for key in ("action", "status", "stage", "error", "reason",
-               "message", "cooldown_seconds", "error_kind", "retryable") if key in result}
+               "message", "cooldown_seconds", "error_kind", "retryable", "retry_after", "next_retry_at") if key in result}
     # Keep exception/model output bounded; never persist full raw responses.
     for key, value in tuple(compact.items()):
         if isinstance(value, str):
@@ -578,6 +578,50 @@ class WorkflowSupervisor:
             state.update(no_progress_attempts=0, status="progress")
             state.pop("escalation", None)
             reservation = 0
+        # OCR polling has its own durable timer. Waiting for an acknowledged job
+        # neither spends no-progress/repair attempts nor borrows model cooldown.
+        from .runner import ocr_wait_state
+        waiting = ocr_wait_state(folder, manifest)
+        other_failure = any(value.get("status") in {"failed", "blocked", "needs_review", "invalidated"}
+                            for key, value in manifest["stages"].items() if key != "extract")
+        if waiting and not other_failure:
+            attempts = int(_number(state.get("no_progress_attempts"), 0, 0))
+            if state.pop("dispatch_counted", False):
+                attempts = max(0, attempts - 1)
+            same_report = state.get("ocr_wait_report_updated_at") == waiting["report_updated_at"]
+            deadline = max(waiting["next_retry_at"], _number(state.get("ocr_wait_retry_at"), 0, 0)
+                           if same_report else 0)
+            state.update(version=1, status="waiting_external", progress=progress,
+                         no_progress_attempts=attempts, next_retry_at=deadline,
+                         retry_reservation_at=0, ocr_wait_report_updated_at=waiting["report_updated_at"],
+                         ocr_wait_retry_at=deadline, updated_at=now)
+            state.pop("escalation", None)
+            if deadline > now:
+                _write_existing(folder, LEDGER, state)
+                return "waiting_external"
+            # Reserve before dispatch: even if a worker crashes or remains queued,
+            # the same receipt cannot create a tight poll loop across restarts.
+            deadline = now + waiting["retry_after"]
+            state.update(next_retry_at=deadline, ocr_wait_retry_at=deadline, last_dispatched_at=now)
+            if not _active_folder(self.workflows, folder) or not _write_existing(folder, LEDGER, state):
+                return "removed"
+            try:
+                dispatched = self.dispatch(folder.name)
+                if isinstance(dispatched, dict) and dispatched.get("removed"):
+                    return "removed"
+                if isinstance(dispatched, dict) and dispatched.get("started") is False:
+                    return "active"
+            except Exception as exc:
+                state["last_result"] = {"error": str(exc)[:800]}
+                _write_existing(folder, LEDGER, state)
+                return "dispatch_error"
+            return "dispatched"
+        if "ocr_wait_report_updated_at" in state:
+            # A failure or changed source invalidates the external timer, so it
+            # goes through the ordinary real-failure diagnosis on this tick.
+            reservation = 0
+            state.pop("ocr_wait_report_updated_at", None)
+            state.pop("ocr_wait_retry_at", None)
         healing = _read(folder / "workflow/self-heal.json")
         healing_retry = _number(healing.get("next_retry_at"), 0, 0)
         inputs_changed = healing_retry > now and _healing_input_change(folder, manifest, healing)
@@ -628,7 +672,7 @@ class WorkflowSupervisor:
             self.config.retry_max, self.config.retry_base * (2 ** min(attempts, 20)))
         state.update(version=1,
                      status="exhausted" if exhausted else ("waiting_external" if temporary_failure else "scheduled"),
-                     progress=progress, no_progress_attempts=attempts + 1,
+                     progress=progress, no_progress_attempts=attempts + 1, dispatch_counted=True,
                      next_retry_at=max(retry_at, now + delay),
                      retry_reservation_at=max(reservation, now + delay),
                       last_dispatched_at=now, updated_at=now)

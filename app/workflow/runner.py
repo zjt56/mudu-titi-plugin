@@ -23,11 +23,13 @@ import argparse
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -242,6 +244,107 @@ def _stage_argv(rendered: list[str]) -> list[str]:
     return [sys.executable, *rendered]
 
 
+OCR_WAIT_NOTE = "OCR任务等待结果，稍后续查原任务"
+OCR_WAIT_MIN = 5.0
+OCR_WAIT_MAX = 300.0
+
+
+def ocr_retry_after(value) -> float:
+    """Bound external polling separately from model admission/cooldown."""
+    try:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("non-finite delay")
+    except (TypeError, ValueError, OverflowError):
+        number = 30.0
+    return min(OCR_WAIT_MAX, max(OCR_WAIT_MIN, number))
+
+
+def ocr_wait_state(batch_dir: Path, manifest: dict, *, since=None) -> dict:
+    """Read only a current, complete, source-bound OCR wait acknowledgement.
+
+    Exit 6 alone is never evidence. At the write boundary ``since`` binds the
+    report to this invocation; later readers require the exact accepted report
+    timestamp. Every registered PDF must be represented, even with Word primary.
+    Only safe progress fields leave this function; remote messages/URLs do not.
+    """
+    record = (manifest.get("stages") or {}).get("extract") or {}
+    accepted = record.get("ocr_wait") or {}
+    if since is None and not (record.get("status") == mf.PENDING
+                             and record.get("exit_code") == 6 and accepted):
+        return {}
+    try:
+        batch = Path(batch_dir)
+        path = batch / "01_source/pdf-ocr.json"
+        if path.is_symlink():
+            return {}
+        report = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(report, dict) or report.get("version") != 2 or report.get("status") != "waiting":
+            return {}
+        updated = float(report["updated_at"])
+        if not math.isfinite(updated) or updated > time.time() + 5:
+            return {}
+        if since is not None:
+            if updated < since:
+                return {}
+        elif updated != accepted.get("report_updated_at"):
+            return {}
+        expected = {}
+        for key, entry in (manifest.get("inputs") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            value = entry.get("path")
+            if not isinstance(value, str) or Path(value).suffix.lower() != ".pdf":
+                continue
+            source = Path(value).expanduser()
+            if not source.is_absolute():
+                source = batch / source
+            digest = mf.sha256_file(source)
+            if not digest or not entry.get("sha256") or entry["sha256"] != digest:
+                return {}
+            expected[key] = (value, digest)
+        sources = report.get("sources")
+        if not expected or not isinstance(sources, list) or len(sources) != len(expected):
+            return {}
+        seen, progress, delays = set(), [], []
+        for item in sources:
+            if not isinstance(item, dict):
+                return {}
+            key = item.get("input")
+            if not isinstance(key, str) or key not in expected or key in seen:
+                return {}
+            seen.add(key)
+            if (item.get("path"), item.get("sha256")) != expected[key]:
+                return {}
+            status = item.get("status")
+            if status == "completed":
+                continue
+            if status != "waiting" or not isinstance(item.get("error"), dict) or item["error"].get("code") != "waiting":
+                return {}
+            task = item.get("progress")
+            if not isinstance(task, dict):
+                return {}
+            job = task.get("job_id")
+            if not isinstance(job, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", job):
+                return {}
+            safe = {"job_id": job}
+            for field in ("phase", "state"):
+                value = task.get(field)
+                if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
+                    safe[field] = value.lower()
+            delay = ocr_retry_after(task.get("retry_after_seconds"))
+            safe["retry_after_seconds"] = delay
+            progress.append(safe)
+            delays.append(delay)
+        if seen != set(expected) or not progress:
+            return {}
+        delay = min(delays)
+        return {"report_updated_at": updated, "retry_after": delay,
+                "next_retry_at": updated + delay, "progress": progress}
+    except (OSError, ValueError, TypeError, KeyError, OverflowError):
+        return {}
+
+
 def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
                            timeout: int = 1800) -> int:
     rendered = _render(stage.command, batch_dir)
@@ -258,6 +361,7 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
         if current is not manifest:  # 同一对象时 clear+update 会把自己清空
             manifest.clear()
             manifest.update(current)
+    attempt_started = time.time()
     try:
         proc = subprocess.run(argv, cwd=str(SKILL_ROOT), capture_output=True,
                               text=True, encoding="utf-8", errors="replace",
@@ -327,6 +431,22 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
             manifest.clear()
             manifest.update(current)
             return code
+        if stage.id == "extract" and code == 6:
+            waiting = ocr_wait_state(batch_dir, current, since=attempt_started)
+            if waiting:
+                mf.touch_stage(current, stage.id, mf.PENDING, exit_code=6,
+                               notes=OCR_WAIT_NOTE, finished_at=None,
+                               input_hashes={}, output_hashes={}, ocr_wait=waiting)
+                mf.save(batch_dir, current)
+                if current is not manifest:
+                    manifest.clear()
+                    manifest.update(current)
+                print("  ⏳ " + OCR_WAIT_NOTE)
+                return 6
+            # A stale, partial or failed report must not borrow exit 6 to become
+            # a successful wait acknowledgement (especially unknown POST).
+            code, err = 1, "OCR等待报告无效、陈旧、来源不匹配或包含失败；未交付提取结果"
+        current.get("stages", {}).get(stage.id, {}).pop("ocr_wait", None)
         if code != 0:
             source_kind = contracts.STAGE_BY_ID.get(stage.id, stage).kind
             detail = (err or out).strip()
@@ -1314,7 +1434,7 @@ def cmd_run(args) -> int:
     except RuntimeError as exc:
         print(f"✗ {exc}")
         return 3
-    if code != 0 and not getattr(args, "dry_run", False):
+    if code not in (0, 6) and not getattr(args, "dry_run", False):
         try:
             from . import operations
             operations.handoff_if_available(batch_dir)
