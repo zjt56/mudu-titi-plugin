@@ -127,6 +127,10 @@ with job.lock():
             (job.directory / "raw-result.jsonl").write_text('{}\n')
             job.complete(result)
             self.assertIsNotNone(job.verify_result())
+            # On-disk artifact names are POSIX regardless of host separator;
+            # a Windows "\" key would not match the media name rule.
+            self.assertIn("media/page-0001-images-001.png", job.receipt["artifacts"])
+            self.assertNotIn("media\\page-0001-images-001.png", job.receipt["artifacts"])
             media.write_bytes(b"tampered")
             self.assertIsNone(job.verify_result())
 

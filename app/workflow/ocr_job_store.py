@@ -268,7 +268,10 @@ class JobStore:
         for path in [self.directory / name for name in ("result.json", "result.md", "raw-result.jsonl")] + [Path(p) for p in result["artifacts"].get("images", [])]:
             if path.is_symlink() or not path.resolve().is_relative_to(self.directory):
                 raise StoreError("invalid_result")
-            entries[str(path.relative_to(self.directory))] = digest(path.read_bytes())
+            # Receipt keys are part of the on-disk contract: always POSIX so a
+            # Windows receipt validates on any platform (and matches the
+            # media/page-... name rule in _validate).
+            entries[path.relative_to(self.directory).as_posix()] = digest(path.read_bytes())
         # Verification precedes the success receipt. A crash at any earlier point
         # resumes the existing remote job, never creates another submission.
         self.save(artifacts=entries)
