@@ -641,6 +641,34 @@ class BatchFillTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(stdout.getvalue())["status"], "initialized")
 
+    def test_rederived_unit_identity_reaches_an_already_labelled_row(self):
+        """重切来源后，已标注行必须换成新的 section/question 身份，标签保留。
+
+        真实批次 10（七上 Starter Unit 3 课时2 Pronunciation）的表格图片小题
+        6 在首次 preassemble 时没被识别，后来结构重切把 6 补进 numbers；批次
+        填充却沿用旧编号/旧 question_id，组装时 A8 判语音组题缺少 material 证明。
+        """
+        current = {"unit_id": "q-1", "question_type": "单项填空", "answer": "A",
+                   "source_section": {"start_line": 1, "end_line": 1},
+                   "source_span": {"start_line": 1, "end_line": 1},
+                   "question_ids": {"1": "q-1"},
+                   "subquestions": [{"number": 1, "question_id": "q-1", "stem": "One?",
+                                     "answer": "A", "held": True}]}
+        fresh = {"unit_id": "q-1",
+                 "source_section": {"start_line": 1, "end_line": 3, "column_path": [1]},
+                 "source_span": {"start_line": 1, "end_line": 3, "basis": "ai_classified"},
+                 "question_ids": {"1": "q-1", "2": "q-2"},
+                 "subquestions": [{"number": 1, "question_id": "q-1", "stem": "One?"},
+                                  {"number": 2, "question_id": "q-2", "stem": "Two?"}]}
+        row = batch_fill._refresh_row(current, fresh, preserve_fill=True)
+        self.assertEqual(row["source_section"]["column_path"], [1])
+        self.assertEqual(row["question_ids"], {"1": "q-1", "2": "q-2"})
+        self.assertEqual([child["question_id"] for child in row["subquestions"]], ["q-1", "q-2"])
+        # 已产出的标签和已核对的答案不被来源重切覆盖。
+        self.assertEqual(row["question_type"], "单项填空")
+        self.assertEqual(row["subquestions"][0]["answer"], "A")
+        self.assertTrue(row["subquestions"][0]["held"])
+
 
 if __name__ == "__main__":
     unittest.main()

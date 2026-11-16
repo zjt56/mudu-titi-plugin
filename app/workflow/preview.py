@@ -68,16 +68,51 @@ _NUMBER_BEFORE_BLANK = re.compile(r"(?<!\d)(\d{1,3})\s*[.．]\s*(?=(?:[A-Za-z])?
 # `N.[IMG …]`（选项图/引用）不算小题号——与 extract.IMAGE_HINT_BLANK 同源。
 _IMAGE_HINT_BLANK = re.compile(
     r"(?<![\d.．])(\d{1,3})\s*[.．]\s*\[IMG\s+[^\]\r\n]+\]\s*[（(]\s*[^）)\r\n]+?\s*[）)]")
+# 表格空位网格里用图片作提示的编号格：`… 5.<u>　　</u> …,6.[IMG image40.jpeg],in`。
+# 图片本身就是这一空的提示（答案册仍按 6. 给答案），但它只在同行已有编号空位、
+# 且题号与该行编号序列相邻时才算小题号；单独一格的 `6.[IMG …]` 依旧不算。
+_PICTURE_CELL = re.compile(r"(?<![\d.．])(\d{1,3})\s*[.．]\s*\[IMG\s+[^\]\r\n]+\]")
+
+
+def _printed_blank_numbers(plain: str) -> list[int]:
+    """一行材料里已印刷的空位号（文字空/图注空），不含上下文推断。"""
+    found = [int(m.group(1)) for m in _BLANK_BEFORE_NUMBER.finditer(plain)]
+    found += [int(m.group(1)) for m in _NUMBER_BEFORE_BLANK.finditer(plain)]
+    # 图注空（图片+紧随括号提示）是合法子题号，与文本空一致参与锚点。
+    found += [int(m.group(1)) for m in _IMAGE_HINT_BLANK.finditer(plain)]
+    return found
+
+
+def _picture_cells(plain: str, found: list[int]) -> list[int]:
+    """图片作提示的编号格题号；只在同行已有编号空位且题号相邻时成立。"""
+    if not found:
+        return []
+    picked = []
+    for match in _PICTURE_CELL.finditer(plain):
+        number = int(match.group(1))
+        if number not in found and number in (max(found) + 1, min(found) - 1):
+            picked.append(number)
+    return sorted(set(picked))
+
+
+def picture_cell_numbers(line: str) -> list[int]:
+    """图片提示的编号格题号（如 `… 5.<u>　　</u> …,6.[IMG …]` 里的 6）。
+
+    与 `_weak_numbers` 同源：题干投影只对“同一行已有编号空位的编号格”生效，
+    单独一格的 `6.[IMG …]` 依旧不算小题号。
+    """
+    from .source_anchors import strip_visual_markup
+    plain = _plain(strip_visual_markup(line))
+    return _picture_cells(plain, _printed_blank_numbers(plain))
 
 
 def _weak_numbers(line: str) -> list[int]:
     """材料一行里所有空位号（子题号），不把普通句号数字误当题号。"""
     from .source_anchors import strip_visual_markup
     plain = _plain(strip_visual_markup(line))
-    found = [int(m.group(1)) for m in _BLANK_BEFORE_NUMBER.finditer(plain)]
-    found += [int(m.group(1)) for m in _NUMBER_BEFORE_BLANK.finditer(plain)]
-    # 图注空（图片+紧随括号提示）是合法子题号，与文本空一致参与锚点。
-    found += [int(m.group(1)) for m in _IMAGE_HINT_BLANK.finditer(plain)]
+    found = _printed_blank_numbers(plain)
+    # 图片作提示的编号格只在同行编号序列里成立（见 _PICTURE_CELL）。
+    found += _picture_cells(plain, found)
     if re.match(r'^\s*[A-Za-z][A-Za-z .-]*[:：]', plain):
         # A dialogue may print the answer line as an embedded image. Require a
         # speaker and an adjacent printed number; an arbitrary image proves none.

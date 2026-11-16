@@ -194,6 +194,35 @@ test('retryable validator feedback reaches the tool and automatic continuation',
   await f.manager.dispose();
 });
 
+test('a model tool-call JSON slip is corrected in the same session instead of failing the stage', async () => {
+  let turns = 0;
+  const slip = { type: 'turn/end', data: { reason: { kind: 'error', error: {
+    message: 'Tool call "content_submit_candidate": Expected \',\' or \'}\' after property value in JSON at position 2779 (line 1 column 2780)' } } } };
+  const f = await fixture({ program: async a => {
+    turns += 1;
+    if (turns === 1) { a.emit('session/event', {}, slip); return; }
+    await a.call('submit_candidate', { candidate: { recovered: true } });
+  } });
+  await f.run();
+  assert.equal(f.agents[0].turns, 2);
+  assert.match(f.agents[0].agent.messages.map(m => m.content[0].text).join('\n'), /合法 JSON/);
+  assert.deepEqual(states(f), ['running', 'completed']);
+  assert.deepEqual(f.calls.find(call => call.body?.action === 'submit_candidate').body.args, { candidate: { recovered: true } });
+  assert.equal(f.calls.some(call => call.body?.action === 'submit_candidate' && call.body.status), false);
+  await f.manager.dispose();
+});
+
+test('repeated tool-call JSON slippage ends failed once the recovery budget is spent', async () => {
+  const slip = { type: 'turn/end', data: { reason: { kind: 'error', error: {
+    message: 'Tool call "content_submit_candidate": Expected \',\' or \'}\' after property value in JSON at position 2779' } } } };
+  const f = await fixture({ managerOptions: { maxTurns: 6 }, program: a => { a.emit('session/event', {}, slip); } });
+  await f.run();
+  assert.deepEqual(states(f), ['running', 'failed']);
+  assert.equal(f.agents[0].turns, 3);
+  assert.match(f.calls.find(call => call.body?.status === 'failed').body.error, /JSON/);
+  await f.manager.dispose();
+});
+
 test('nonretryable validator rejection concludes failed without more model turns', async () => {
   const f = await fixture({ backend: (_path, init) => init.body?.action === 'submit_candidate'
     ? { accepted: false, retryable: false, failure_class: 'source_binding', errors: ['bad source'] } : undefined,

@@ -28,6 +28,10 @@ ARTIFACTS = {
 }
 BODY = ("id", "unit_id", "unit_kind", "number", "numbers", "stem", "material",
         "options", "materialBlocks", "material_blocks", "attachments")
+# Source-derived identity: re-derived structure windows, question ids and printed
+# numbers must reach the upload object even when the model already labelled it.
+IDENTITY = ("identity_version", "section_id", "source_section", "source_span",
+            "question_ids", "printed_numbers")
 RESET = ("question_type", "type", "answer", "answers", "difficulty",
          "difficultyEvidence", "difficulty_evidence", "explanation", "articleSummary",
          "knowledge", "knowledgeIds", "knowledge_ids", "wordCount", "words",
@@ -383,21 +387,45 @@ def _sync_media_attachments(kept, fresh, batch_name=None):
     return kept
 
 
+def _sync_identity(current, fresh):
+    """Copy source-derived identity onto an already labelled unit.
+
+    Section windows, question ids and printed numbers come from the current
+    confirmed structure, not from a model turn. Keeping an older copy here made
+    a re-derived structure (extra picture-prompt item, visual column path) look
+    like a shape mismatch to phonetic proof and upload checks.
+    """
+    for key in IDENTITY:
+        if key in fresh:
+            current[key] = copy.deepcopy(fresh[key])
+        else:
+            current.pop(key, None)
+    children = _children(current)
+    for child in fresh.get("subquestions", []):
+        target = children.get(_number(child["number"]))
+        if target is not None and "question_id" in child:
+            target["question_id"] = copy.deepcopy(child["question_id"])
+    return current
+
+
 def _refresh_row(current, fresh, *, preserve_fill=False):
     row = copy.deepcopy(current)
     old_children = _children(row)
-    for key in ((*BODY, "source_span") if preserve_fill else (*BODY, *RESET, "source_span")):
+    for key in ((*BODY,) if preserve_fill else (*BODY, *RESET)):
         row.pop(key, None)
         if key in fresh:
             row[key] = copy.deepcopy(fresh[key])
+    row["subquestions"] = [_refresh_row(old_children.get(_number(c["number"]), {}), c,
+                                       preserve_fill=preserve_fill)
+                          for c in fresh.get("subquestions", [])]
+    # Child identity is projected after the children exist: fresh child rows
+    # only carry the question id, while the labelled answers must stay.
+    _sync_identity(row, fresh)
     if not preserve_fill:
         filters = row.setdefault("filterMetadata", {})
         for key in ("subtypes", "difficulty", "difficultyValue"):
             filters.pop(key, None)
         filters["subtypes"] = []
-    row["subquestions"] = [_refresh_row(old_children.get(_number(c["number"]), {}), c,
-                                       preserve_fill=preserve_fill)
-                              for c in fresh.get("subquestions", [])]
     return row
 
 
@@ -479,7 +507,7 @@ def initialize(batch_dir) -> dict:
         token = _source_token(fresh, binding)
         old = state["units"].get(uid)
         if old is not None and old["source_sha256"] == token:
-            kept = copy.deepcopy(previous[uid])
+            kept = _sync_identity(copy.deepcopy(previous[uid]), fresh)
             before = _body(kept)
             _sync_media_attachments(kept, fresh, root.name)
             installed = _body(kept)

@@ -382,11 +382,13 @@ _WORD_SEQUENCE = re.compile(r'(?=.*[A-Za-z]{2})[A-Za-z]+(?:\s*[,，]\s*[A-Za-z]+
 _SUBITEM_CONT = re.compile(r'^[(（]\s*\d{1,3}\s*[)）]')
 _ROMAN_TITLE = re.compile(r'^\s*([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+)[.．、]')
 _ANSWER_ITEM = re.compile(r'(?:^|(?<=\s))(\d{1,3})[.．、](?!\d)')
-_COMPACT_RANGE = re.compile(r'^\s*(\d{1,3})\s*[~～—–-]\s*(\d{1,3})\s+([A-HFTa-hft]+)\s*$')
+_COMPACT_RANGE = re.compile(r'^\s*(\d{1,3})\s*[~～—–-]\s*(\d{1,3})\s+([A-Za-z]+)\s*$')
 # One compact-key token: either a whole-task range ``1~5 ABC`` or a single
 # numbered item ``6.D``. Used to parse Roman lines mixing both forms.
+# 字母不预设 A-H：判断类答案（如 S/D 的 ``1~5 DSDDS``）同样是逐题字母序列，
+# 长度必须与区间题数相等才成立，放宽字母表不会放过漏题/重复。
 _ANSWER_TOKEN = re.compile(
-    r'(?P<first>\d{1,3})\s*[~～—–-]\s*(?P<last>\d{1,3})(?:\s+(?P<letters>[A-HFTa-hft]+))?'
+    r'(?P<first>\d{1,3})\s*[~～—–-]\s*(?P<last>\d{1,3})(?:\s+(?P<letters>[A-Za-z]+))?'
     r'|(?P<num>\d{1,3})[.．、](?P<val>[^\s\u3000]*)')
 
 
@@ -900,6 +902,30 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, bat
     return result
 
 
+def _shortened_band_window(owner_span, annotated):
+    """确认窗口起点就是板块横幅、却在板块仍有后续大题时提前结束。
+
+    板块内部的单个大题（如 Ⅰ/Ⅱ，起点在大题标题而非板块横幅）是合法子窗口；
+    只有“把整个板块当窗口”却在中途截断的情况才算把本板块后面的答案区间让给
+    相邻板块，必须直接拒绝而不是退回数字猜配。
+    """
+    for tagged in annotated or []:
+        band = tagged.get('lesson_band') or {}
+        band_start, band_end = band.get('start_line'), band.get('end_line')
+        if not (type(owner_span.get('start_line')) is int and type(owner_span.get('end_line')) is int
+                and type(band_start) is int and type(band_end) is int):
+            continue
+        if owner_span['start_line'] != band_start or owner_span['end_line'] >= band_end:
+            continue
+        siblings = [row for row in annotated
+                    if type(row.get('start_line')) is int
+                    and band_start <= row['start_line'] <= band_end
+                    and row['start_line'] > owner_span['start_line']]
+        if siblings:
+            return True
+    return False
+
+
 def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
     from .sync_practice import heading_candidates, heading_candidates_of
     body_path = '01_source/正文.txt'
@@ -935,17 +961,13 @@ def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
         sections = [dict(section, **({'lesson_band': tagged['lesson_band']}
                                     if tagged.get('lesson_band') else {}))
                     for section, tagged in zip(sections, annotated)]
-        # 确认窗口不得短于已验证板块边界。短了就等于把本板块的答案区间让给相邻
-        # 板块（或让越界候选显得合法），必须直接拒绝而不是退回数字猜配。
-        owner_span = unit.get('source_section') or {}
-        for tagged in annotated:
-            band = tagged.get('lesson_band') or {}
-            band_start, band_end = band.get('start_line'), band.get('end_line')
-            if (type(owner_span.get('start_line')) is int and type(owner_span.get('end_line')) is int
-                    and type(band_start) is int and type(band_end) is int
-                    and band_start <= owner_span['start_line'] <= band_end
-                    and owner_span['end_line'] < band_end):
-                return []
+        # 确认窗口不得短于已验证板块边界：把整个板块当成窗口（窗口起点就是板块
+        # 横幅）却在板块里还有后续大题时提前结束，等于把本板块后面的答案区间让给
+        # 相邻板块（或让越界候选显得合法），必须直接拒绝而不是退回数字猜配。
+        # 板块内部的单个大题（如 Ⅰ/Ⅱ，起点在大题标题而非板块横幅）是合法子窗口，
+        # 不能因为 end_line 早于板块结尾就拒绝。
+        if _shortened_band_window(unit.get('source_section') or {}, annotated):
+            return []
     owners = [row for row in sections
               if row['start_line'] == (unit.get('source_section') or {}).get('start_line')]
     bands = _answer_section_bands(sections, body)

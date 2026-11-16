@@ -256,6 +256,25 @@ class CompactAnswerCoverageTest(unittest.TestCase):
                     validate_scoped_answer(root, unit, 1, retained, ['附录:1'])
             validate_scoped_answer(root, unit, 1, answer, result['evidence'])
 
+    def test_interior_sections_are_legal_windows_inside_a_verified_band(self):
+        from workflow.upload_content import _shortened_band_window
+        # 板块横幅 5-35 内包含 Ⅰ(6-13)、Ⅱ(14-29) 两个大题：
+        # 单个大题窗口比板块短是正常的，不得当成“窗口被截断”拒绝。
+        band = {'start_line': 5, 'end_line': 35}
+        annotated = [{'start_line': 5, 'end_line': 35, 'lesson_band': band},
+                     {'start_line': 6, 'end_line': 13, 'lesson_band': band},
+                     {'start_line': 14, 'end_line': 29, 'lesson_band': band}]
+        self.assertFalse(_shortened_band_window({'start_line': 6, 'end_line': 13}, annotated))
+        self.assertFalse(_shortened_band_window({'start_line': 14, 'end_line': 29}, annotated))
+        # 覆盖整个板块的窗口不受影响。
+        self.assertFalse(_shortened_band_window({'start_line': 5, 'end_line': 35}, annotated))
+        # 从板块横幅本身开始、却提前结束且后面还有同板块大题的窗口仍必须拒绝：
+        # 它会把本板块的答案区间让给相邻板块。
+        self.assertTrue(_shortened_band_window({'start_line': 5, 'end_line': 20}, annotated))
+        # 缺少页码证据时不做推测。
+        self.assertFalse(_shortened_band_window({'start_line': 5, 'end_line': 20}, []))
+        self.assertFalse(_shortened_band_window({}, annotated))
+
 
 if __name__ == '__main__':
     unittest.main()

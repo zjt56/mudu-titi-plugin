@@ -259,6 +259,35 @@ class PhoneticStructureTest(unittest.TestCase):
         self.assertEqual(phonetic_structure.shape(same, deficient), (False, False))
         self.assertEqual(phonetic_structure.shape(row), (False, False))
 
+    def test_source_judgement_group_with_three_choices_needs_no_material(self):
+        """Ⅲ 判断题给 3 个待比较项、按 S/D 作答：只有印刷选项，同样合法。"""
+        from workflow import extract, structure_gate, denoise
+        text = ('Unit 3 Welcome!\n第二课时 Pronunciation\n'
+                'Ⅲ.判断每组画线部分的读音是否相同(相同的在括号内写S,不同的写D)\n'
+                '(　)1.A.m<u>a</u>p　B.<u>a</u>pple　C.w<u>a</u>nt\n'
+                '(　)2.A.tw<u>e</u>lve　B.g<u>e</u>t　C.y<u>e</u>s\n'
+                '(　)3.A.d<u>o</u>　B.h<u>o</u>t　C.d<u>o</u>g')
+        structure, body, _ = extract.infer_structure(text)
+        lines = denoise.clean_body(body)[0].splitlines()
+        units = structure_gate._build_units(structure['sections'], structure['groups'], lines)
+        self.write('01_source/正文.txt', body)
+        self.write('01_source/structure.json', structure)
+        self.write('01_source/structure.confirmed.json', {'units': units, 'identity_version': 'scoped-v1'})
+        draft = question_draft.build(self.root)
+        self.assertEqual(draft['issues'], [])
+        row = draft['items'][0]
+        row['question_type'] = '语音题'
+        self.assertEqual(row['material'], '')
+        self.assertEqual(len(row['subquestions']), 3)
+        self.assertTrue(all(not child['stem'] and len(child['options']) == 3
+                            for child in row['subquestions']))
+        verified = self.verified()
+        self.assertEqual(phonetic_structure.shape(row, verified), (True, True))
+        # 只有 3 个选项、题干又没写“判断/是否相同 + S/D”时不能当成合法形式。
+        expected = copy.deepcopy(verified)
+        expected[row['unit_id']]['stem'] = 'Ⅲ.找出每组单词中画线部分的读音不同的一项'
+        self.assertEqual(phonetic_structure.shape(row, expected), (False, False))
+
     def test_source_audit_requires_instruction_and_shared_image(self):
         for field in ('stem', 'attachments'):
             rows = copy.deepcopy(self.rows)

@@ -93,6 +93,32 @@ class ExtractSyncDialogueBlanksTest(unittest.TestCase):
             self.assertEqual(_weak_numbers(text), [], text)
             self.assertEqual(blank_numbers(text), [], text)
 
+    # 表格同一行里的 `N.[IMG …]` 与编号空档连续相邻时是只有图片提示的小题
+    # （Ⅱ 歌谣填表第 6 空原文只有一张小图，答案给 6.sit）；孤立的图号仍不算小题。
+    PICTURE_CELL = (
+        'Unit 3\n第二课时 Pronunciation\n'
+        'Ⅱ.熟读下面的歌谣并根据表格规律,在歌谣中找出对应的单词完成表格\n'
+        '[TABLE 1]\n'
+        '| a | /æ/ | 1.<u>　　</u>,and,2.<u>　　</u> |\n'
+        '| e | /e/ | 3.<u>　　</u>,4.<u>　　</u>,tell |\n'
+        '| i | /ɪ/ | big,5.<u>　　</u>,will,listen,music,pink,6.[IMG image40.jpeg],in |\n'
+        '| o | /ɒ/ | 7.<u>　　</u>,8.<u>　　</u>,frog |\n'
+        '| u | /ʌ/ | sun,9.<u>　　</u> |\n'
+        '[/TABLE 1]\n')
+
+    def test_table_picture_cell_beside_numbered_blanks_is_a_slot(self):
+        from workflow.preview import _weak_numbers, picture_cell_numbers
+        from workflow.structure_gate import _scope_anchors
+        lines = self.PICTURE_CELL.splitlines()
+        row = [line for line in lines if 'image40' in line][0]
+        self.assertEqual(picture_cell_numbers(row), [6])
+        self.assertEqual(_weak_numbers(row), [5, 6])
+        for text in ('6.[IMG image40.jpeg]', '6.[IMG image40.jpeg],in',
+                     'A.6.[IMG image40.jpeg]'):
+            self.assertEqual(_weak_numbers(text), [], text)
+        # 表格五行的编号空档加上图片小题 6 构成 1–9 的完整序列。
+        self.assertEqual([number for _, number in _scope_anchors(lines)], list(range(1, 10)))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -4,6 +4,23 @@ import re
 from urllib.parse import unquote, urlsplit
 
 
+JUDGEMENT_PAIRS = (frozenset("SD"), frozenset("TF"))
+
+
+def _judgement_rubric(stem):
+    """True when the printed rubric itself states a letter-coded judgement.
+
+    Example: "判断每组画线部分的读音是否相同(相同的在括号内写S,不同的写D)".
+    The letters must come from the source heading, so an ordinary 4-option
+    phonetic item never qualifies and cannot weaken the A-D proof.
+    """
+    text = str(stem or "")
+    if not re.search(r"判断|正误|是否相同|是否一致", text):
+        return False
+    letters = set(re.findall(r"(?<![A-Za-z])[A-Z](?![A-Za-z])", text))
+    return any(pair <= letters for pair in JUDGEMENT_PAIRS)
+
+
 def verified_groups(batch_path):
     """Rebuild from current source; no persisted flag or arbitrary attachment is proof."""
     from . import question_draft
@@ -108,20 +125,20 @@ def shape(unit, verified=None):
              and unit.get('printed_numbers') == [] and unit.get('source_span') == expected.get('source_span')
              and expected.get('source_span', {}).get('number_binding') == 'unnumbered_section'
              and (bool(images) or bool(str(expected.get('material') or '').strip())))
-    def source_choices_only(child):
+    def source_choices_only(child, allowed=(4,)):
         # This exception is source-proven, not an invitation to erase stems:
-        # every child must originally contain only the full printed A-D choices.
+        # every child must originally contain only the full printed choices.
         if str(child.get('stem') or '').strip():
             return False
         options = child.get('options')
-        if not isinstance(options, list) or len(options) != 4:
+        if not isinstance(options, list) or len(options) not in allowed:
             return False
         labels = []
         for option in options:
             if isinstance(option, dict):
                 label, text = option.get('label', option.get('key')), option.get('text')
             elif isinstance(option, str):
-                match = re.match(r'^\s*([A-D])[.．、]\s*(.*)$', option, re.S)
+                match = re.match(r'^\s*([A-H])[.．、]\s*(.*)$', option, re.S)
                 if not match:
                     return False
                 label, text = match.groups()
@@ -130,9 +147,16 @@ def shape(unit, verified=None):
             if not isinstance(text, str) or not text.strip():
                 return False
             labels.append(label)
-        return labels == list('ABCD')
+        return labels == [chr(ord("A") + index) for index in range(len(labels))]
     choices_only = (expected.get('_source_question_type') == '语音题'
                     and not str(expected.get('material') or '').strip()
                     and all(source_choices_only(child) for child in wanted))
+    # 判断型语音题（原卷给 2–4 个待比较项，按 S/D 等判定字母作答）同样是
+    # “原件只有印刷选项”：大题标题原文写明判定口径时才免除空材料与空子 stem。
+    judgement_only = (expected.get('_source_question_type') == '语音题'
+                      and not str(expected.get('material') or '').strip()
+                      and _judgement_rubric(expected.get('stem'))
+                      and all(source_choices_only(child, (2, 3, 4)) for child in wanted))
     complete = all(str(c.get('stem') or '').strip() for c in subs)
-    return (bool(images) or complete or alias or choices_only), (alias or choices_only)
+    native_choices = choices_only or judgement_only
+    return (bool(images) or complete or alias or native_choices), (alias or native_choices)

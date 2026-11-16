@@ -554,3 +554,19 @@ if __name__ == "__main__":
         block = result["items"][0]["materialBlocks"][0]
         self.assertNotIn("variant", block)
         self.assertIn("<u>", json.dumps(block, ensure_ascii=False))
+
+    def test_picture_prompt_item_keeps_identity_with_blank_stem(self):
+        """表格单元格 `6.[IMG …]` 只有图片提示时也是小题：留空位而不是漏题。"""
+        text = ('Unit 3 Welcome!\n第二课时 Pronunciation\n'
+                'Ⅱ.熟读下面的歌谣并根据表格规律,在歌谣中找出对应的单词完成表格\n'
+                '[TABLE 1]\n'
+                '| i | /ɪ/ | big,5.<u>　　</u>,will,listen,music,pink,6.[IMG image40.jpeg],in |\n'
+                '[/TABLE 1]\n')
+        self.source(text, [([5, 6], "group", "语音题", 2, 6)])
+        draft = question_draft.build(self.root)
+        row = draft['items'][0]
+        stems = {child['number']: child['stem'] for child in row['subquestions']}
+        self.assertEqual(sorted(stems), [5, 6])
+        self.assertEqual(stems[6], '______')
+        self.assertNotIn('CHILD_CONTENT_UNRESOLVED',
+                         [issue['code'] for issue in draft['issues']])

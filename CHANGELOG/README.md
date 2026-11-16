@@ -280,3 +280,4 @@
 | 2026-11-13 | [2026-11-13-review-evidence-scope-and-binding.md](2026-11-13-review-evidence-scope-and-binding.md) | 审核引证只看 stem 导致组题真实引证被判无来源、二审图片选项/板块边界被判未验证；引证范围扩到课时/大题题干+正文窗口并统一坐标投影，差异照旧交人工 |
 | 2026-11-13 | [2026-11-13-review-units-cache-content-digest.md](2026-11-13-review-units-cache-content-digest.md) | 审核单元缓存改用内容摘要判版本：NTFS 同尺寸原地改写后 stat 时间戳可能不变，跨请求会复用旧单元解析；正文变化不重解析结构，结构确认变化必须重解析 |
 | 2026-11-14 | [2026-11-14-ocr-receipt-posix-artifacts.md](2026-11-14-ocr-receipt-posix-artifacts.md) | Windows 下 OCR 完成回执 artifacts 键用反斜杠被判 receipt_corrupt；固定 POSIX 键并补回归 |
+| 2026-11-16 | [2026-11-16-batch10-answer-scope-picture-item.md](2026-11-16-batch10-answer-scope-picture-item.md) | 判断题 S/D 答案被判畸形、表格图片小题 6 漏号、批次身份不随结构刷新；三处修复后该批次答案 22 条全部绑定并走完审核闸门（1 条知识点差异留人工） |

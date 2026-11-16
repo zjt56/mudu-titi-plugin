@@ -617,7 +617,7 @@ def build(batch_dir, *, units=None):
     structure = denoise.project_structure(structure, source, cleaned)
     cleaned_lines = cleaned.splitlines()
     from .structure_gate import _build_units
-    from .preview import _find, _strong_number, _weak_numbers
+    from .preview import _find, _strong_number, _weak_numbers, picture_cell_numbers
     from . import lesson_bands
     evidence = lesson_bands.for_text(root, cleaned)
     sections = lesson_bands.annotate_sections(structure.get("sections") or [], evidence)
@@ -722,6 +722,11 @@ def build(batch_dir, *, units=None):
                         part = {'stem': '______', 'options': [], 'found': True}
                     child = _empty(number)
                     child.update(stem=part["stem"], options=part["options"])
+                    if (not child["stem"] and not child["options"]
+                            and any(int(number) in picture_cell_numbers(line) for line in lines)):
+                        # 图片本身就是这一空的提示（答案册仍按号给答案）：按同表其余空位的
+                        # 写法投影为填空位；图片仍原样留在材料与单元附件里，不算生成内容。
+                        child["stem"] = "______"
                     if not child["stem"] and any(int(number) in _weak_numbers(line) for line in lines[:first]):
                         child["stem"] = "______"  # Explicit blank exists in shared source, not generated prose.
                     elif not unnumbered and not child["stem"] and not child["options"]:

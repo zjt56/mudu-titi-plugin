@@ -408,6 +408,19 @@ class CompactAnswerGrammarTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(_answer_items(text), [])
 
+    def test_judgement_letter_ranges_parse(self):
+        from workflow.upload_content import _answer_items
+        # 判断题的答案在原卷写成 S/D（相同/不同），不是 A–D；
+        # 只要字母数与区间长度一致就是合法紧凑答案块。
+        self.assertEqual(_answer_items('1~5 DSDDS'),
+                         [(1, 'D'), (2, 'S'), (3, 'D'), (4, 'D'), (5, 'S')])
+        self.assertEqual(_answer_items('1~3 TFT'),
+                         [(1, 'T'), (2, 'F'), (3, 'T')])
+        # 词答案、长度不符的缩写仍拒绝。
+        for text in ('1~5 cats', '1~4 DSDDS'):
+            with self.subTest(text=text):
+                self.assertEqual(_answer_items(text), [])
+
     def test_cloze_blank_markers_not_double_counted(self):
         from workflow.upload_content import _printed_item_anchors
         lines = [
