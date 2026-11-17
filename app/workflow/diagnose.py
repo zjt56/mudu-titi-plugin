@@ -603,7 +603,8 @@ def diagnose(batch_dir) -> dict:
             continue
         # 已提交远端的旧批次：派生本地阶段即使因新契约显示 invalidated，也不再
         # 是可执行的当前卡点；不得为了修历史显示而重跑或改写已上传产物。
-        if uploaded and stage.id in ("meta", "underlines", "validate", "review"):
+        if (uploaded and stage.id in ("meta", "underlines", "validate", "review")
+                and status == mf.INVALIDATED):
             continue
         if stage.id == "extract":
             from .runner import ocr_wait_state, ocr_reconciliation_state
