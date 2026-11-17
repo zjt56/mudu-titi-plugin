@@ -508,16 +508,31 @@ def initialize(batch_dir) -> dict:
         old = state["units"].get(uid)
         if old is not None and old["source_sha256"] == token:
             kept = _sync_identity(copy.deepcopy(previous[uid]), fresh)
-            before = _body(kept)
+            original = _body(kept)
+            # Compare against the managed source base, not the current filled
+            # row: accepted normalization (for example, a metadata-approved
+            # option spelling) is user-owned content and must not look like a
+            # new source change. A parser repair still reaches the row when
+            # the fresh source projection differs from that old base.
+            old_base = old.get("base") if isinstance(old.get("base"), dict) else previous[uid]
+            refreshed = (set(_children(kept)) == set(_children(fresh))
+                         and _canonical_body(old_base) != _canonical_body(fresh))
+            if refreshed:
+                kept = _refresh_row(kept, fresh, preserve_fill=True)
             _sync_media_attachments(kept, fresh, root.name)
             installed = _body(kept)
-            if installed != before:
-                # 附件补齐/URL 规范化改写了本对象正文，必须同步托管正文，
-                # 否则下一次 _managed 会把自己刚写入的部署路径误判成人工篡改。
+            if installed != original:
+                # 附件补齐/URL 规范化/来源投影修正改写了本对象正文，必须同步托管正文，
+                # 否则下一次 _managed 会把自己刚写入的对象误判成人工篡改。
                 state.setdefault("managed_bodies", {})[uid] = copy.deepcopy(installed)
             output.append(kept)
-            # Line shifts or parser diagnostics do not invalidate labels.
-            units[uid] = dict(old, binding=binding)
+            if refreshed:
+                units[uid] = dict(old, binding=binding, base=fresh,
+                                  object_sha256=question_draft._digest(fresh))
+                changed_units.append(uid)
+            else:
+                # Line shifts or parser diagnostics do not invalidate labels.
+                units[uid] = dict(old, binding=binding)
         else:
             old_binding = old.get("binding", {}) if old is not None else {}
             old_base = old.get("base", {}) if old is not None else {}

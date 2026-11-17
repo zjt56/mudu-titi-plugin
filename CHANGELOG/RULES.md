@@ -1,5 +1,9 @@
 # RULES — 规则与强调台账
 
+## 2026-11-17：题目来源窗口必须按当前题边界截取，独立题审核空知识子题归一化
+
+批次 35 的 `OPTION_CONTENT_MISMATCH` 证明：题目解析不得把当前题之后的图片选项带入当前题；解析与草稿必须共用当前题来源窗口。审核抽样中，独立题若仅回显空 `knowledge` 子题，必须确定性投影为 `subquestions=[]`；真实非空子题仍须拒绝。落地：`app/workflow/question_content.py`、`app/workflow/question_draft.py`、`app/workflow/review.py`、`app/workflow/batch_fill.py`；验证见 `CHANGELOG/2026-11-17-batch35-option-window-review-normalization.md`。
+
 ## 2026-11-13：上传 PDF 必须完成 OCR，不能以 Word 成功或原生文字层代替
 
 用户强调：「当上传PDF时，要求必须OCR识别」。每份 PDF 都必须整卷识别；包括 Word 配套 PDF 在内，识别失败、当前来源绑定结果缺失、整卷空文字或仅原生文字层均不能让提取通过。强制识别参数由适配器自身保证，不受辅助开关影响；重复上传不能复用缺少有效 OCR 的已完成批次，本次创建新批次且不改历史数据。保留 Word 内容权威、JSON/Markdown 双格式及服务阅读顺序。落地：`app/workflow/pdf_ocr.py`、`ocr_backend.py`、`extract.py`、`contracts.py`、`app/workbench/server.py`；验证见 `CHANGELOG/2026-11-13-pdf-mandatory-ocr.md`。
@@ -533,6 +537,10 @@ question_content.py::restore_source_stems（网格单元格不承载带字母选
 `_prune_stale_round_unchecked`、`app/workflow/review_child_source.py::_section_end_matches`、
 `app/workflow/review_rounds.py`（二审抽样提示词）、`app/workflow/runner.py::do_review_gate`；
 验证见 `CHANGELOG/2026-11-13-review-evidence-scope-and-binding.md`。
+
+## 2026-11-17：中考试卷听力材料按实际来源绑定，不强制补齐
+
+用户明确：后续上传中考试卷时，听力材料如果原卷/随附材料中存在，就放进对应听力题目（题组）的 `material` 或 `materialBlocks`，并将音频按实际切段绑定到该题目的 `attachments`；如果没有文字听力材料，则保持为空，不用 ASR 或模型生成内容冒充原卷材料，也不因缺少听力材料阻断上传。现有 `MISSING_AUDIO_ATTACHMENT` 仅作警告口径保持不变。落地：`app/workflow/upload_payload.py`、`app/workflow/question_content.py`、`app/audio/consistency.py`、`app/docs/upload-api.md`、`app/skills-reference/constraints.md`。
 
 ## 2026-11-13：OCR 异步任务必须持久化身份、可续查、不盲发
 

@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-17 | [2026-11-17-batch35-option-window-review-normalization.md](2026-11-17-batch35-option-window-review-normalization.md) | 批次35题目来源窗口、选项绑定与独立题审核协议修复 |
 | 2026-11-12 | [2026-11-12-review-newest-first.md](2026-11-12-review-newest-first.md) | 试卷审核列表按最新时间置顶 |
 | 2026-11-12 | [2026-11-12-structure-source-shape-regressions.md](2026-11-12-structure-source-shape-regressions.md) | 2026-11-12：无号古诗来源与课时局部题号证明 |
 | 2026-11-13 | [2026-11-13-ai-operations-autonomous-closure.md](2026-11-13-ai-operations-autonomous-closure.md) | AI 运维自动接收、修复与复验闭环 |

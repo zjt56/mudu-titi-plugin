@@ -424,16 +424,18 @@ def _postfix_image_option_label(lines: list[str], index: int, plain: str) -> boo
     return False
 
 
-def question_parts(lines: list[str], number: int, *, scoped=False) -> dict:
-    """Return this child's exact source stem and ordered labeled options."""
-    if scoped:
-        from .question_identity import numbered_projection
-        lines = numbered_projection(lines)
+def _question_window(lines: list[str], number: int) -> tuple[int, int] | None:
+    """Return the (start, end) line window owned by this numbered child.
+
+    The window ends at the next printed question, section heading, material
+    label or field title, so a later question's options can never be read as
+    this question's. ``None`` when the number is absent from ``lines``.
+    """
     from .extract import _plain, material_label, guide_numbers
     from .preview import _find, _strong_number, SECTION, LEADIN
     start = _find(lines, number)
     if start is None:
-        return {"stem": "", "options": [], "found": _find(lines, number, strong=False) is not None}
+        return None
     end = len(lines)
     for i in range(start + 1, len(lines)):
         plain = _plain(lines[i]).strip()
@@ -446,6 +448,20 @@ def question_parts(lines: list[str], number: int, *, scoped=False) -> dict:
                 or guide_numbers(plain) or LEADIN.match(plain)):
             end = i
             break
+    return start, end
+
+
+def question_parts(lines: list[str], number: int, *, scoped=False) -> dict:
+    """Return this child's exact source stem and ordered labeled options."""
+    if scoped:
+        from .question_identity import numbered_projection
+        lines = numbered_projection(lines)
+    from .extract import _plain
+    from .preview import _find
+    window = _question_window(lines, number)
+    if window is None:
+        return {"stem": "", "options": [], "found": _find(lines, number, strong=False) is not None}
+    start, end = window
     text = "\n".join(lines[start:end])
     text = re.sub(r"^\s*(?:[（(]\s*[）)]\s*)?\d{1,3}\s*[.．、)]", "", _plain(text))
     matches = list(OPTION.finditer(text))

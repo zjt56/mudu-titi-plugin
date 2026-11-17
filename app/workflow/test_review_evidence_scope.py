@@ -128,6 +128,24 @@ class ReviewEvidenceScopeTest(unittest.TestCase):
                                  'sample', self.plan, self.batch)
 
 
+    def test_sampled_standalone_empty_child_list_is_removed(self):
+        """独立题抽样时模型回显空知识子题，应投影回协议要求的空列表。"""
+        self.plan['sample'] = [{'unit_id': 'other', 'number': '3'}]
+        check = self.check('other', '3. Different question here.', '3')
+        check['assessment']['subquestions'] = [{'number': '3', 'knowledge': []}]
+        self.assertEqual(
+            review._round_checks(self.record('sample', [check]), 'sample', self.plan, self.batch), [])
+        self.assertEqual(check['assessment']['subquestions'], [])
+
+    def test_sampled_standalone_real_child_knowledge_is_rejected(self):
+        """独立题的真实子题知识点不能被静默丢弃。"""
+        self.plan['sample'] = [{'unit_id': 'other', 'number': '3'}]
+        check = self.check('other', '3. Different question here.', '3')
+        check['assessment']['subquestions'] = [
+            {'number': '3', 'knowledge': ['主题/人与自我/生活与学习/日常起居']}]
+        with self.assertRaisesRegex(ValueError, 'Knowledge subquestions must cover the selected children exactly'):
+            review._round_checks(self.record('sample', [check]), 'sample', self.plan, self.batch)
+
     def test_sampled_group_child_list_is_narrowed_to_the_sampled_number(self):
         """二审按小题抽中组题时，整组空的子题列表是抽样口径投影，不是标签差异。
 

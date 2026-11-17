@@ -1356,10 +1356,18 @@ def _narrow_sampled_group_subquestions(assessment, unit, number, round_id):
     标签判断，也不必让同样的响应反复重跑模型。子题带真实非空知识点时仍然
     视为独立声明，交由覆盖校验报错，不静默丢弃。
     """
-    if round_id != "sample" or number is None or unit.get("unit_kind") != "group":
+    if round_id != "sample" or number is None:
         return
     children = assessment.get("subquestions")
     if not isinstance(children, list) or not children:
+        return
+    # Standalone targets never carry per-child knowledge.  Models sometimes
+    # echo the sampled number with an empty knowledge list; normalize that
+    # deterministic protocol noise instead of sending the target through an
+    # avoidable repair loop.
+    if unit.get("unit_kind") != "group":
+        if all(isinstance(child, dict) and not child.get("knowledge") for child in children):
+            assessment["subquestions"] = []
         return
     if any(not isinstance(child, dict) for child in children):
         return

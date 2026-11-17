@@ -123,9 +123,15 @@ def _parts(lines, number, *, scoped=False):
         lines = numbered_projection(lines)
     parsed = question_content.question_parts(lines, int(number))
     from .preview import _find
-    start = _find(lines, int(number))
-    # Restrict recovery to this question, not an identical phrase in shared material.
-    raw = "\n".join(lines[start:]) if start is not None else ""
+    window = question_content._question_window(lines, int(number))
+    if window is not None:
+        start, end = window
+    else:
+        start, end = _find(lines, int(number)), len(lines)
+    # Restrict recovery to this question: a later question's image options must
+    # not be rebound to this one, and an identical phrase in shared material
+    # must not be reused.
+    raw = "\n".join(lines[start:end]) if start is not None else ""
     # 图片选项前置排版 `[IMG x]A. [IMG y]B. …`：label 后的文本切割会错位（A 拿到下一张
     # 图、末项为空），图属于“紧贴其前的那个选项”。这里按原文顺序把“第 k 个 [IMG] → 第 k
     # 个选项标签”直接配对（视觉已确认这些是选项图），不走逐标签取文本的易错路径。
