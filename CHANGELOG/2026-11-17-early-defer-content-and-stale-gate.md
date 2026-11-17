@@ -20,6 +20,8 @@
 - `app/workflow/final_audit.py`：新增 `content_completeness_errors()`；最终闸门读取
   `03_types/types.json`，对真实缺内容（非合法图片/空白网格）报
   `CONTENT_COMPLETENESS_UNVERIFIED`，把正确性校验放到最终阶段。
+- `app/workflow/manifest.py`：`upload` 已完成的旧批次自动把新增 `content_snapshot`
+  标记为 `skipped（历史批次已提交远端）`，不再让已上传/已暂存批次显示“可执行快照”。
 - `app/workflow/runner.py`：`audio` 返回 `needs_review`（exit 3）时只记录待复核，
   继续执行解析、知识点、快照、元数据、画线、组装等不依赖听力的独立阶段；review
   仍因 audio 未完成而等待。

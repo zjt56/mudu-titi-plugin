@@ -140,7 +140,7 @@ def load(batch_dir) -> dict:
     # from pre-existing files or erase any historical stage/decision.
     stages = value.setdefault("stages", {})
     for stage in contracts.STAGES:
-        historical_upload = (stage.id in ("preassemble", "format_gate")
+        historical_upload = (stage.id in ("preassemble", "format_gate", "content_snapshot")
                              and stages.get("upload", {}).get("status") == COMPLETED)
         historical_assembly = (stage.id == "preassemble"
                                and stages.get("assemble", {}).get("status") == COMPLETED
@@ -987,7 +987,7 @@ def ready_stages(batch_dir, manifest: dict, *, allow_unqualified: bool = False) 
 
 def skip_reason(manifest: dict, stage: contracts.Stage) -> str:
     """按输入形态判断阶段是否应当跳过（不是失败）。"""
-    if (stage.id in ("preassemble", "format_gate")
+    if (stage.id in ("preassemble", "format_gate", "content_snapshot")
             and manifest.get("stages", {}).get("upload", {}).get("status") == COMPLETED):
         return "历史批次已提交远端，不补跑新增本地步骤"
     if stage.id == "preassemble":

@@ -27,6 +27,15 @@ class EarlyDeferPolicyTest(unittest.TestCase):
         self.assertEqual([row['code'] for row in errors], ['CONTENT_COMPLETENESS_UNVERIFIED'])
         self.assertEqual(errors[0]['unit_id'], 'q-1')
 
+    def test_legacy_uploaded_batch_skips_new_content_snapshot_stage(self):
+        self.put('workflow/manifest.json', {'workflow_id': 'b', 'stages': {
+            'preassemble': {'status': mf.COMPLETED},
+            'format_gate': {'status': mf.COMPLETED},
+            'upload': {'status': mf.COMPLETED}}})
+        state = mf.load(self.root)
+        self.assertEqual(state['stages']['content_snapshot']['status'], mf.SKIPPED)
+        self.assertIn('历史批次已提交远端', state['stages']['content_snapshot']['notes'])
+
     def test_unconsumable_confirmed_structure_marks_gate_stale(self):
         self.put('01_source/structure.confirmed.json', {'units': [
             {'unit_kind': 'standalone', 'numbers': [1], 'type': '单项填空'},
@@ -38,6 +47,11 @@ class EarlyDeferPolicyTest(unittest.TestCase):
         stale, reason = mf.is_stale(self.root, state, contracts.STAGE_BY_ID['structure_gate'])
         self.assertTrue(stale)
         self.assertIn('结构确认产物不可消费', reason)
+
+    def test_final_audit_rejects_non_boolean_completeness(self):
+        self.put('03_types/types.json', {'items': [{'unit_id': 'q-1', 'contentComplete': 'false'}]})
+        errors = final_audit.content_completeness_errors(self.root)
+        self.assertEqual(errors[0]['code'], 'FINAL_TYPES_INCOMPLETE')
 
 
 if __name__ == '__main__':
