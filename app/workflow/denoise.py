@@ -244,6 +244,15 @@ def project_structure(structure: dict, raw_text: str, cleaned_text: str | None =
     if result.get("coordinate_projection"):
         raise ValueError("SOURCE_COORDINATE_MISMATCH: structure projection belongs to another body")
     raw_lines = raw_text.splitlines()
+    # 书面表达常被提取器把文末答案/听力材料标题并入 section end，导致 end 超出
+    # 实际正文（例如 19 年安徽卷 319 vs 315）。作文正文以当前 body 为准，超出
+    # body 的尾部只能是附录/页脚，夹到最后一行；普通大题不享受此夹取。
+    for section in result.get("sections") or []:
+        if "书面表达" not in str(section.get("type") or ""):
+            continue
+        end = section.get("source_end_line")
+        if type(end) is int and end > len(raw_lines):
+            section["source_end_line"] = len(raw_lines)
     removed_lines = {row["line_no"] for row in removed}
     # splitlines() drops one trailing empty line while clean_body uses split("\n").
     # Keep the mapping in the same coordinate system as all source consumers.

@@ -188,3 +188,11 @@ class ConsumerChainTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_writing_end_past_body_is_clamped_to_last_line(self):
+        raw = "Ⅺ.书面表达(共1小题)\n请写一篇短文。\nLast line.\n附录标题\n1.A\n"
+        clean, _, removed = denoise.clean_body(raw)
+        section = {"title": "Ⅺ.书面表达(共1小题)", "type": "书面表达",
+                   "questions": [96], "source_line": 1, "source_end_line": 9}
+        projected = denoise.project_structure({"sections": [section]}, raw, clean)
+        self.assertLessEqual(projected["sections"][0]["source_end_line"], len(clean.splitlines()))
