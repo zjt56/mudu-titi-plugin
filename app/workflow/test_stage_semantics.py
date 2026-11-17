@@ -86,7 +86,7 @@ class ContentReuseTest(unittest.TestCase):
         # 等价重写（读出现有内容、重新序列化写回，仅空白/键序差异）不使已完成的
         # 填充阶段失效。
         path = self.batch / '06_batch/batch.base.json'
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
         self.assertFalse(self.stale('types'))
         # 新规则：内容变化不再自动使已完成阶段失效（由用户后续验证），只判完成+产物在。
@@ -112,7 +112,7 @@ class ContentReuseTest(unittest.TestCase):
     def test_changed_confirmed_identity_does_not_auto_reopen_fills(self):
         self.prepare_source_bound_fill()
         path = self.batch / '01_source/structure.confirmed.json'
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding="utf-8") )
         value['units'][0]['numbers'] = [2]
         self.put('01_source/structure.confirmed.json', value)
         for sid in ('answers', 'audio', 'types', 'explanations', 'knowledge'):
@@ -282,14 +282,18 @@ class ContentReuseTest(unittest.TestCase):
         self.assertFalse(mf.dependency_satisfied(self.state, "underlines"))
 
     def test_changed_producer_does_not_auto_invalidate_descendants(self):
-        # 新规则：重跑某阶段不再自动使下游失效（由用户后续验证，或显式 invalidate）。
+        # A changed type delivery invalidates its consumers, but does not reopen
+        # unrelated upstream views such as the already produced metadata.
         self.finish("types")
         self.finish("assemble")
         self.finish("meta")
+        self.finish("underlines")
+        self.finish("validate")
         self.put("03_types/types.json", {"items": [{"unit_id": "q-40", "type": "阅读理解"}]})
         self.finish("types")
-        self.assertEqual(self.state["stages"]["assemble"]["status"], mf.COMPLETED)
+        self.assertEqual(self.state["stages"]["assemble"]["status"], mf.INVALIDATED)
         self.assertEqual(self.state["stages"]["meta"]["status"], mf.COMPLETED)
+        self.assertEqual(self.state["stages"]["underlines"]["status"], mf.COMPLETED)
 
     def test_changed_upstream_artifact_reopens_derived_views(self):
         # 批次 05 卡点：knowledge 局部重生成后 assemble 更新了 batch.json，
@@ -310,12 +314,11 @@ class ContentReuseTest(unittest.TestCase):
         self.put("06_batch/batch.json", {"items": [{"unit_id": "q-40",
                                                     "knowledge": ["词汇/词汇辨析/形容词辨析"]}]})
         stale, reason = mf.is_stale(self.batch, self.state, contracts.STAGE_BY_ID["meta"])
-        self.assertTrue(stale)
-        self.assertIn("06_batch/batch.json", reason)
-        # meta 重算后其产物变化，underlines 必须跟着重算（依次向下直到最终闸门）。
-        self.put("06_batch/batch_meta.base.json", {"items": [{"knowledge": ["词汇/词汇辨析/形容词辨析"]}]})
-        self.assertTrue(self.stale("underlines"))
-        self.put("06_batch/batch_meta.json", {"items": [{"knowledge": ["词汇/词汇辨析/形容词辨析"]}]})
+        self.assertFalse(stale)
+        # The new topology computes meta/underlines before assemble; changing the
+        # assembled output therefore invalidates the final consumer, not its inputs.
+        self.assertFalse(self.stale("meta"))
+        self.assertFalse(self.stale("underlines"))
         self.assertTrue(self.stale("validate"))
         self.put("07_review/review-rounds.json", {"rounds": [{"id": "new"}]})
         self.assertTrue(self.stale("review_gate"))
@@ -326,11 +329,14 @@ class ContentReuseTest(unittest.TestCase):
         self.finish("assemble")
         self.finish("meta")
         self.finish("underlines")
+        self.finish("validate")
         self.put("06_batch/batch.json", {"items": [{"unit_id": "q-40",
                                                    "knowledge": ["词汇/拼写与词形"]}]})
         changed = mf.invalidate_changed_consumers(self.batch, self.state, "assemble")
-        self.assertIn("meta", changed)
-        self.assertEqual(self.state["stages"]["meta"]["status"], mf.INVALIDATED)
+        self.assertNotIn("meta", changed)
+        self.assertEqual(self.state["stages"]["meta"]["status"], mf.COMPLETED)
+        self.assertIn("validate", changed)
+        self.assertEqual(self.state["stages"]["validate"]["status"], mf.INVALIDATED)
 
     def test_legacy_changed_output_cannot_gain_new_trust(self):
         self.put("03_types/types.json", {"items": []})

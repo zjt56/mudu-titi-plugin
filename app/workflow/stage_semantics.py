@@ -24,7 +24,10 @@ DIRECT_INPUTS = {
     "types": ("01_source/正文.txt", "01_source/structure.confirmed.json"),
     "explanations": ("01_source/正文.txt", "01_source/structure.confirmed.json", "01_source/structure.json", "01_source/附录.txt", "01_source_ans/正文.txt", "03_types/types.json"),
     "knowledge": ("01_source/正文.txt", "01_source/structure.confirmed.json", "01_source/structure.json", "01_source/metadata.json", "01_source/附录.txt", "01_source_ans/正文.txt", "03_types/types.json"),
-    "assemble": ("01_source/正文.txt", "01_source/structure.confirmed.json", "01_source/metadata.json", "01_source/extraction.json", "01_source_ans/answers.json"),
+    "content_snapshot": ("06_batch/batch.base.json",),
+    "meta": ("06_batch/content.snapshot.json",),
+    "underlines": ("06_batch/batch_meta.base.json",),
+    "assemble": ("01_source/正文.txt", "01_source/structure.confirmed.json", "01_source/metadata.json", "01_source/extraction.json", "01_source_ans/answers.json", "06_batch/batch_meta.json"),
     "validate": ("01_source/正文.txt", "01_source/structure.json", "01_source/structure.confirmed.json", "01_source/extraction.json", "01_source/附录.txt", "01_source_ans/正文.txt", "01_source_ans/附录.txt", "01_source_ans/answers.json", "02_audio/SKIP_LISTENING"),
 }
 
@@ -89,7 +92,44 @@ def file_value(path):
 def output_signatures(batch, stage):
     # Ignore serialization, clocks and redundant top-level question ranges.
     # Substantive fields (including original numbers and nested evidence) remain.
-    return {rel: digest(file_value(Path(batch) / rel)) for rel in stage.produces}
+    return {rel: digest(_owned_view(stage.id, rel, file_value(Path(batch) / rel)))
+            for rel in stage.produces}
+
+
+def _owned_view(stage, rel, value):
+    # Underlines hands off a source projection before the accepted fills are
+    # assembled into this same file. Later fields are not its output ownership.
+    if (rel == '06_batch/batch_meta.json' and stage in ('underlines', 'assemble')
+            and isinstance(value, dict) and isinstance(value.get('items'), list)):
+        return early_metadata_view(value)
+    return value
+
+
+def early_metadata_view(value):
+    """Preserve source, underline markup and metadata actually owned early.
+
+    Accepted fills later replace these fields in the shared final file. Evidence
+    and source identities are never globally stripped by a key-name heuristic.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get('items'), list):
+        return value
+    later = {'question_type', 'subtypes', 'answer', 'answers', 'explanation',
+             'articleSummary', 'knowledge', 'knowledgePoints', 'knowledgeIds',
+             'knowledge_ids', 'difficulty', 'difficultyEvidence', 'difficulty_evidence',
+             'wordCount', 'words', 'contentComplete', 'textbook'}
+
+    def row_view(row):
+        if not isinstance(row, dict):
+            return row
+        result = {key: child for key, child in row.items() if key not in later}
+        if isinstance(result.get('filterMetadata'), dict):
+            result['filterMetadata'] = {key: child for key, child in result['filterMetadata'].items()
+                                        if key != 'subtypes'}
+        if isinstance(result.get('subquestions'), list):
+            result['subquestions'] = [row_view(child) for child in result['subquestions']]
+        return result
+
+    return dict(value, items=[row_view(row) for row in value['items']])
 
 
 def _projection(stage, rel, value):
@@ -97,6 +137,8 @@ def _projection(stage, rel, value):
         return value
     if rel in {"06_batch/" + name for name in BATCH_CONTENT_FILES}:
         value = batch_content_value(value)
+    if rel == '06_batch/batch_meta.json' and stage == 'assemble':
+        return early_metadata_view(value)
     if rel == "06_batch/batch.base.json" and stage in (CONTENT_STAGES | {"audio"}):
         if stage == "assemble":
             return value
@@ -294,7 +336,7 @@ def input_signatures(batch, manifest, stage, raw_hashes):
             path = source.get("path")
             result["validation-original:" + key] = digest(file_value(path)) if path else digest({"missing": True})
         root = Path(__file__).resolve().parents[1]
-        scripts = [check.script for check in checks.CHECKS]
+        scripts = [check.script for check in checks.CONTENT_CHECKS]
         scripts += ["workflow/checks.py", "workflow/question_content.py", "workflow/source_structure.py",
                     "workflow/content_rules.py", "workflow/label_audit.py", "scripts/_common.py",
                     "references/knowledge-catalog.json", "references/filter-framework.json"]

@@ -189,6 +189,12 @@ def _canonical_body(row):
     return clean(result)
 
 
+def _canonical_attachments(value):
+    """Normalize attachment transport URLs without weakening their identity."""
+    normalized = _canonical_body({"attachments": copy.deepcopy(value)})
+    return normalized.get("attachments")
+
+
 def _base(row, meta=None):
     row = copy.deepcopy(row)
     meta = meta or {}
@@ -608,7 +614,14 @@ def _overlay_item_metadata(target, source):
     # Metadata artifacts may contain a full batch snapshot. Its content is a
     # comparison baseline only; this stage cannot change wording or structure.
     for key in BODY:
-        if key in source and source[key] != target.get(key):
+        if key not in source:
+            continue
+        source_value = source[key]
+        target_value = target.get(key)
+        if key == "attachments":
+            source_value = _canonical_attachments(source_value)
+            target_value = _canonical_attachments(target_value)
+        if source_value != target_value:
             raise ValueError("Metadata payload changes protected body field: " + key)
     filters = source.get("filterMetadata", {})
     if not isinstance(filters, dict):
@@ -812,19 +825,17 @@ def is_filling(batch_dir) -> bool:
     return state is not None and state["mode"] == "filling"
 
 
-def mark_finalized(batch_dir) -> dict:
-    """End filling after the caller's formal assemble validation/acceptance.
+def prepare_finalization(batch_dir, payload, *, _check_body=True, _draft=None) -> dict | None:
+    """Prepare sealed state for the caller's guarded multi-file install; no writes.
 
-    This marks no manifest or review complete and provides no validation itself.
+    The candidate must already have passed formal assembly validation. Existing
+    managed bodies and freshly rebuilt source bindings remain strict.
     """
     root = _root(batch_dir)
-    expected = _snapshot(root)
-    state, payload = _managed(root, check_body=False)
+    state, _ = _managed(root, check_body=_check_body)
     if state is None:
-        return _result("untouched", payload)
-    # The caller has validated the installed normalization; compare its source
-    # ownership rather than rejecting legitimate final field normalization.
-    draft = question_draft.ensure(root)
+        return None
+    draft = question_draft.build(root) if _draft is None else _draft
     rows = _rows(draft)
     if set(rows) != set(state["units"]):
         raise ValueError("Source units changed before finalization")
@@ -843,12 +854,28 @@ def mark_finalized(batch_dir) -> dict:
                 changed.append("media_hashes")
             raise ValueError("Source changed before finalization: " + uid
                              + "; changed fields: " + ", ".join(changed or ["source binding"]))
+    if set(_rows(payload)) != set(state['units']):
+        raise ValueError('Final assembly unit coverage differs from managed source')
     state["mode"] = "finalized"
     state["finalized_bodies"] = {uid: _body(row) for uid, row in _rows(payload).items()}
     state["payload_sha256"] = question_draft._digest(payload)
+    return _seal(state)
+
+
+def mark_finalized(batch_dir) -> dict:
+    """Finalize an already validated installed batch; no manifest/review changes."""
+    root = _root(batch_dir)
+    expected = _snapshot(root)
+    state, payload = _managed(root, check_body=False)
+    if state is None:
+        return _result('untouched', payload)
+    # Legacy callers validate and install before this method; only their already
+    # accepted normalized body bypasses the pre-install body comparison.
+    finalized = prepare_finalization(root, payload, _check_body=False,
+                                     _draft=question_draft.ensure(root))
     _assert_snapshot(root, expected)
-    _atomic(root, STATE, _seal(state))
-    return _result("finalized", payload)
+    _atomic(root, STATE, _seal(finalized))
+    return _result('finalized', payload)
 
 
 def main(argv=None):

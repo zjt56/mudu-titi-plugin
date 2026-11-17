@@ -25,6 +25,11 @@ class Stage:
     command: tuple = ()
     docs: tuple = ()
     optional: bool = False
+    # Explicit non-blocking paths. Values are stable machine-readable labels used
+    # by schedulers/diagnostics; they never weaken content or identity checks.
+    defer: tuple = ()
+    # Performance hints for orchestration (parallelism / late-bound work).
+    optimization: tuple = ()
     description: str = ""
 
 
@@ -77,6 +82,8 @@ STAGES: tuple[Stage, ...] = (
         produces=("01_source_ans/answers.json",),
         docs=("references/stages/01-extract.md",),
         optional=True,
+        defer=("missing_optional_input",),
+        optimization=("parallel", "content_only"),
         description="逐题号提取原答案；没有答案来源时生成覆盖全部确认题号、带明确来源证据的‘无答案’决定，不猜、不漏项。",
     ),
     Stage(
@@ -88,6 +95,8 @@ STAGES: tuple[Stage, ...] = (
         produces=("02_audio/audio_map.json",),
         docs=("references/stages/02-audio.md", "references/audio-splitting.md"),
         optional=True,
+        defer=("missing_optional_input", "external_wait"),
+        optimization=("parallel", "late_external"),
         description="只消费已交付题型与确认结构，按真实听力单元切段并绑定版本；无音频才跳过。",
     ),
     Stage(
@@ -98,6 +107,8 @@ STAGES: tuple[Stage, ...] = (
         produces=("04_knowledge/explanations.json",),
         docs=("docs/content-labeling.md",),
         optional=True,
+        defer=("missing_optional_input",),
+        optimization=("parallel", "content_only"),
         description="有原解析/大意时按Word权威来源逐字匹配并记录绑定；确认不存在时对全部目标填‘无’，不生成。",
     ),
     Stage(
@@ -107,35 +118,29 @@ STAGES: tuple[Stage, ...] = (
         depends_on=("structure_gate", "preassemble", "types"),
         produces=("04_knowledge/knowledge.json",),
         docs=("docs/knowledge-tagging.md",),
+        optimization=("parallel", "content_only"),
         description="仅交知识点目录标签，教材匹配暂停；阶段验证独立于答案/解析，下游仅在汇总时合并。",
     ),
     Stage(
-        id="assemble",
-        title="填充汇总与固化",
-        kind=AGENT,
-        # 组装提示词与导入都会读取 explanations（解析/大意），必须显式依赖，
-        # 否则重跑解析时组装不会失效，batch.json 会留着旧解析。
-        #
-        # 听力（audio）刻意不在这里依赖：听力切段/转写耗时最长，而组装本身不读
-        # 音频内容（音频只由 audio 阶段写入 attachments，缺映射时按“待部署媒体”记录）。
-        # 因此听力与解析/知识点/组装可以并行推进；只有内容审核（review）必须等听力
-        # 完成，见 review 阶段对 audio 的显式依赖。
-        # 前置对象可能在标签完成后被重新校验并判冲突，不能只依赖标签的旧完成态。
-        depends_on=("preassemble", "answers", "types", "knowledge", "explanations"),
-        produces=("06_batch/batch.json",),
-        docs=("references/stages/06-upload.md",),
-        description="固化前置批次已填字段并执行原有保真与格式校验；沿用既有题目身份、题干、选项和分组，不重新组题。旧批次仍支持原有确定性合并路径。通关才登记正式填充完成。不等待听力，听力完成后由审核阶段另行消费。",
+        id="content_snapshot",
+        title="画线前内容快照",
+        kind=COMMAND,
+        depends_on=("preassemble",),
+        produces=("06_batch/content.snapshot.json",),
+        command=("{python}", "-m", "workflow.content_snapshot", "--batch-dir", "{batch_dir}"),
+        docs=("docs/pipeline.md",),
+        description="在答案、解析、知识点并行填充期间保留前置原文快照；只复制已确认内容，不替代后续内容校验。",
     ),
     Stage(
         id="meta",
         title="难度与分类",
         kind=COMMAND,
-        depends_on=("assemble",),
+        depends_on=("content_snapshot",),
         produces=("06_batch/batch_meta.base.json",),
-        command=("scripts/05-meta/assign_meta.py", "--batch", "{batch_json}",
+        command=("scripts/05-meta/assign_meta.py", "--batch", "{content_snapshot}",
                  "--out", "{batch_meta_base}", "--report"),
         docs=("references/stages/05-meta.md",),
-        description="组装阶段已接收题型、知识点与难度结果；此步骤仅做确定性元数据归一与缺省补全。",
+        description="从画线前的来源快照生成元数据视图；内容标签仍由并行阶段完成后在最终汇总固化。",
     ),
     Stage(
         id="underlines",
@@ -147,15 +152,31 @@ STAGES: tuple[Stage, ...] = (
                  "--out", "{batch_meta}", "--docx", "{docx}", "--apply"),
         docs=("references/constraints.md",),
         optional=True,
+        defer=("missing_optional_input", "late_format"),
+        optimization=("late_bound", "format_deferred"),
         description="从 docx 字符格式补 <u>…</u>；无 docx 批次跳过。",
+    ),
+    Stage(
+        id="assemble",
+        title="填充汇总与固化",
+        kind=AGENT,
+        depends_on=("preassemble", "answers", "types", "knowledge", "explanations", "underlines"),
+        produces=("06_batch/batch.json",),
+        docs=("references/stages/06-upload.md",),
+        optimization=("late_bound", "content_only"),
+        description="在画线标记后固化答案、解析、知识点和题型；显式消费画线后的 batch_meta.json，避免旧汇总覆盖原卷标记。听力仍不作依赖。",
     ),
     Stage(
         id="validate",
         title="本地自动体检",
         kind=GATE,
-        depends_on=("underlines",),
+        # Validation must consume the fully assembled post-underlines batch;
+        # depending only on underlines allowed a pre-assemble validation race.
+        depends_on=("assemble",),
         produces=("07_review/validation-report.json",),
         docs=("references/stages/06-upload.md", "references/constraints.md"),
+        defer=("external_wait", "late_format"),
+        optimization=("content_only", "format_deferred"),
         description="全部只读检查；不触碰 SSH、媒体部署或上传接口。",
     ),
     Stage(
@@ -188,6 +209,8 @@ STAGES: tuple[Stage, ...] = (
         produces=("07_review/upload-format.json",),
         command=("{python}", "-m", "workflow.format_gate", "--batch-dir", "{batch_dir}"),
         docs=("docs/pipeline.md", "docs/upload-api.md"),
+        defer=("external_wait",),
+        optimization=("late_bound", "format_boundary"),
         description="所有内容填充与审核结束后，本地检查最终批次是否满足上传字段与格式要求；不调用模型、不访问网络、不提交题库。",
     ),
     Stage(
@@ -221,14 +244,50 @@ STAGES: tuple[Stage, ...] = (
 STAGE_BY_ID = {s.id: s for s in STAGES}
 STAGE_ORDER = tuple(s.id for s in STAGES)
 
+# Contract-level vocabulary.  A deferred path is an explicit scheduling state,
+# never a successful content result and never a substitute for a hard validator.
+DEFER_REASONS = {
+    "missing_optional_input": "optional input is absent; mark skipped and continue",
+    "external_wait": "external media/model evidence is pending; keep stage pending",
+    "late_format": "format-only work belongs at the final upload boundary",
+}
+
+
+def defer_reasons(stage_id: str) -> tuple[str, ...]:
+    """Return declared non-blocking/deferred paths for a stage."""
+    stage = STAGE_BY_ID.get(stage_id)
+    return tuple(stage.defer) if stage else ()
+
+
+def optimization_hints(stage_id: str) -> tuple[str, ...]:
+    """Return orchestration hints without changing validation semantics."""
+    stage = STAGE_BY_ID.get(stage_id)
+    return tuple(stage.optimization) if stage else ()
+
+
+def stage_metadata(stage_id: str) -> dict:
+    """Stable metadata projection for schedulers, diagnostics and UI consumers."""
+    stage = STAGE_BY_ID.get(stage_id)
+    if stage is None:
+        return {}
+    return {
+        "optional": bool(stage.optional),
+        "defer": list(stage.defer),
+        "optimization": list(stage.optimization),
+        "depends_on": list(stage.depends_on),
+    }
+
 # 阶段产物变化时，需要失效的直接下游（由 depends_on 自动推导，这里只声明跨阶段影响）
 EXTRA_INVALIDATION = {
-    "extract": ("structure_gate", "types", "knowledge", "assemble", "meta", "validate", "review"),
-    "structure_gate": ("types", "knowledge", "assemble", "meta", "validate", "review"),
-    "types": ("knowledge", "assemble", "meta", "validate", "review"),
-    "knowledge": ("assemble", "meta", "validate", "review"),
-    "assemble": ("meta", "underlines", "validate", "review"),
-    "meta": ("underlines", "validate", "review"),
+    "extract": ("structure_gate", "preassemble", "content_snapshot", "types", "knowledge", "meta", "underlines", "assemble", "validate", "review"),
+    "structure_gate": ("preassemble", "content_snapshot", "types", "knowledge", "meta", "underlines", "assemble", "validate", "review"),
+    "preassemble": ("content_snapshot", "meta", "underlines", "assemble", "validate", "review"),
+    "types": ("knowledge", "assemble", "validate", "review"),
+    "knowledge": ("assemble", "validate", "review"),
+    "content_snapshot": ("meta", "underlines", "assemble", "validate", "review"),
+    "meta": ("underlines", "assemble", "validate", "review"),
+    "underlines": ("assemble", "validate", "review"),
+    "assemble": ("validate", "review"),
 }
 
 

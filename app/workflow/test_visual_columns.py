@@ -56,6 +56,27 @@ class VisualColumnsTest(unittest.TestCase):
         self.assertEqual(vc.build(self.root)['status'], 'cached')
         self.assertEqual(self.identify.call_count, 1)
 
+    def test_sixteen_full_pages_are_sent_without_scope_block(self):
+        self.pages = {
+            'status': 'verified', 'source_sha256': 'source-hash',
+            'pages': [
+                {'page': number, 'path': f'01_source/visual-pages/page-{number}.png',
+                 'image_sha256': f'image-{number}'}
+                for number in range(1, 17)
+            ],
+        }
+        self.page_reader.return_value = self.pages
+        with patch('workflow.visual_columns._page_images', return_value=[
+            {'id': f'page-{number}', 'path': f'page-{number}.png'}
+            for number in range(1, 17)
+        ]):
+            result = vc.build(self.root)
+        self.assertEqual(result['status'], 'verified')
+        images, _prompt = self.identify.call_args.args
+        self.assertEqual(len(images), 16)
+        self.assertEqual([image['id'] for image in images], [f'page-{n}' for n in range(1, 17)])
+        self.assertNotIn('COLUMN_SCOPE_TOO_LARGE', result.get('reason', ''))
+
     def test_names_do_not_determine_question_role(self):
         self.response['columns'][1]['role'] = 'guidance'
         self.assertEqual(vc.build(self.root)['status'], 'verified')
@@ -123,6 +144,25 @@ class VisualColumnsTest(unittest.TestCase):
         result = vc.build(self.root, force=True)
         self.assertEqual(result['status'], 'unavailable')
         self.assertIn('COLUMN_NUMBERLESS_HAS_PRINTED_ANCHORS', result['reason'])
+
+    def test_transient_provider_failure_is_retryable_without_visual_evidence(self):
+        from workflow.visual_transport import VisualTransportError
+        self.identify.side_effect = VisualTransportError(
+            'PROVIDER_CALL_FAILED: selected provider returned error')
+        result = vc.build(self.root, force=True)
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertTrue(result['deferred'])
+        artifact = json.loads((self.root / vc.ARTIFACT).read_text(encoding='utf-8'))
+        self.assertTrue(artifact['retryable'])
+        self.assertEqual(artifact['columns'], [])
+        self.assertEqual(vc.load_verified(self.root)['columns'], [])
+
+    def test_content_validation_failure_is_not_deferred(self):
+        self.response['issues'] = [{'page': 1, 'reason': '此处有三道题但无法确定是否独立'}]
+        result = vc.build(self.root, force=True)
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertFalse(result.get('deferred', False))
+        self.assertFalse(vc.is_transient_failure(result['reason']))
 
     def test_empty_model_result_and_forged_section_metadata_never_authorize_task(self):
         self.response = {'columns': [], 'issues': []}

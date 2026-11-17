@@ -75,9 +75,14 @@ class DeliveryChecklistTest(unittest.TestCase):
         from workflow import runner
         folder = self.batch / '06_batch'
         folder.mkdir(parents=True)
-        (folder / 'batch.json').write_text(json.dumps({'items': [{'id': 'q-1', 'stem': 'What is this?'}]}), encoding='utf-8')
+        payload = {'items': [{'id': 'q-1', 'stem': 'What is this?'}]}
+        # Metadata now consumes the immutable pre-underlines snapshot, which is
+        # produced from the source-only base rather than the legacy final batch.
+        (folder / 'batch.base.json').write_text(json.dumps(payload), encoding='utf-8')
+        snapshot = contracts.STAGE_BY_ID['content_snapshot']
         meta = contracts.STAGE_BY_ID['meta']
         underlines = contracts.STAGE_BY_ID['underlines']
+        self.assertEqual(runner._execute_command(self.batch, self.manifest, snapshot), 0)
         self.assertEqual(runner._execute_command(self.batch, self.manifest, meta), 0)
         self.assertEqual(runner._execute_command(self.batch, self.manifest, underlines), 0)
         state = mf.load(self.batch)
@@ -89,6 +94,50 @@ class DeliveryChecklistTest(unittest.TestCase):
         final = json.loads((folder / 'batch_meta.json').read_text(encoding='utf-8'))
         base = json.loads((folder / 'batch_meta.base.json').read_text(encoding='utf-8'))
         self.assertEqual(final['items'][0]['filterMetadata'], base['items'][0]['filterMetadata'])
+
+    def test_snapshot_handoff_rejects_tampering_or_invalid_json(self):
+        folder = self.batch / '06_batch'
+        folder.mkdir(parents=True, exist_ok=True)
+        base = {'items': [{'unit_id': 'q-1', 'stem': '原文'}]}
+        (folder / 'batch.base.json').write_text(json.dumps(base, ensure_ascii=False), encoding='utf-8')
+        (folder / 'content.snapshot.json').write_text(json.dumps({**base, 'tampered': True}, ensure_ascii=False), encoding='utf-8')
+        from workflow import handoff
+        result = handoff.inspect_stage(self.batch, self.manifest, 'content_snapshot')
+        self.assertFalse(result['passed'])
+        self.assertIn('snapshot', result['errors'][0]['message'])
+
+        (folder / 'content.snapshot.json').write_text('{bad json', encoding='utf-8')
+        result = handoff.inspect_stage(self.batch, self.manifest, 'content_snapshot')
+        self.assertFalse(result['passed'])
+        self.assertEqual(result['errors'][0]['code'], 'HANDOFF_INVALID')
+
+    def test_meta_and_underline_provenance_rejects_unrelated_changes(self):
+        from workflow import handoff
+        base = {'items': [{'unit_id': 'q-1', 'stem': '原文', 'options': ['A']}]}
+        meta = {'items': [{'unit_id': 'q-1', 'stem': '原文', 'options': ['A'],
+                           'filterMetadata': {'difficulty': '适中'}}]}
+        handoff._assert_meta_projection(base, meta)
+        tampered_meta = {'items': [{'unit_id': 'q-1', 'stem': '改写',
+                                    'filterMetadata': {'difficulty': '适中'}}]}
+        with self.assertRaises(ValueError):
+            handoff._assert_meta_projection(base, tampered_meta)
+        marked = {'items': [{'unit_id': 'q-1', 'stem': '<u>原文</u>', 'options': ['A']}]}
+        handoff._assert_underline_projection(base, marked)
+        tampered_marked = {'items': [{'unit_id': 'q-1', 'stem': '<u>原文</u>', 'options': ['B']}]}
+        with self.assertRaises(ValueError):
+            handoff._assert_underline_projection(base, tampered_marked)
+
+    def test_skipped_underlines_handoff_accepts_base_view(self):
+        base = self.batch / '06_batch/batch_meta.base.json'
+        base.parent.mkdir(parents=True, exist_ok=True)
+        base.write_text(json.dumps({'items': [{'unit_id': 'q-1', 'stem': '原文'}]}), encoding='utf-8')
+        mf.touch_stage(self.manifest, 'underlines', mf.SKIPPED,
+                       notes='无 DOCX，保留基础视图')
+        from workflow import handoff
+        result = handoff.inspect_stage(self.batch, self.manifest, 'underlines')
+        self.assertTrue(result['passed'], result)
+        self.assertTrue(result['skipped'])
+        self.assertEqual(result['source_view'], '06_batch/batch_meta.base.json')
 
     def test_legacy_shared_meta_is_rebuilt_not_silently_accepted(self):
         folder = self.batch / '06_batch'

@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-from .media_transfer import _open_root, _read_file, MAX_FILES, MAX_BATCH_BYTES
+from .media_transfer import _open_root, _close_root, _read_file, MAX_FILES, MAX_BATCH_BYTES
 
 
 class MediaInventoryError(ValueError):
@@ -108,7 +108,7 @@ def referenced_media(batch_root, batch_meta):
                 selected.append({'path': candidates[0][0], 'sha256': candidates[0][1]})
             return selected
         finally:
-            os.close(root_fd)
+            _close_root(root_fd)
     except MediaInventoryError:
         raise
     except (OSError, ValueError, TypeError) as exc:

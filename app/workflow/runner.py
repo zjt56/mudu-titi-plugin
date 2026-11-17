@@ -115,6 +115,8 @@ def _render(argv: tuple, batch_dir: Path) -> list[str]:
     mapping = {
         "{batch_dir}": str(batch_dir),
         "{batch_json}": str(batch_dir / "06_batch" / "batch.json"),
+        "{batch_base}": str(batch_dir / "06_batch" / "batch.base.json"),
+        "{content_snapshot}": str(batch_dir / "06_batch" / "content.snapshot.json"),
         "{batch_meta}": str(batch_dir / "06_batch" / "batch_meta.json"),
         "{batch_meta_base}": str(batch_dir / "06_batch" / "batch_meta.base.json"),
         "{media_dir}": str(batch_dir / "media_upload"),
@@ -662,12 +664,8 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
     report["source_audit"] = audit
     # 图片/音频引用缺失属 AI 能力受限项：只作提示，不阻断本地体检；
     # 结构、题号、题干、选项、材料归属等文本类问题仍是硬阻断。
-    media_codes = {"SOURCE_IMAGE_MISSING", "OPTION_CONTENT_MISMATCH",
-                   "SOURCE_OPTIONS_INCOMPLETE", "SHARED_OPTIONS_MISMATCH"}
-    text_issues = [issue for issue in audit.get("issues", [])
-                   if issue.get("code") not in media_codes]
-    media_issues = [issue for issue in audit.get("issues", [])
-                    if issue.get("code") in media_codes]
+    from .findings import source_partition
+    text_issues, media_issues = source_partition(audit.get("issues", []))
     if media_issues:
         report.setdefault("warnings", []).append("SOURCE_MEDIA_UNVERIFIED")
     report.setdefault("checks", []).append({
@@ -679,6 +677,8 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
     if text_issues:
         report.setdefault("blocking_failures", []).append("SOURCE_SLICE_MISMATCH")
         report["passed"] = False
+    from .findings import attach
+    attach(report, path="07_review/validation-report.json", stage="validate")
     report["checked_at"] = mf.now_iso()
     report["batch_sha256"] = final_batch_hash
     if not batch_json.is_file() or mf.sha256_file(batch_json) != final_batch_hash:
@@ -833,6 +833,11 @@ def _record_structure_findings(batch_dir: Path, report: dict) -> None:
     existing = {item.get("finding_id"): item for item in items if isinstance(item, dict)}
     changed = False
     for blocker in blockers:
+        # Provider-only visual outages are durable retry metadata, not a source
+        # discrepancy. Keep the real structure findings visible without creating
+        # a misleading manual-review item for an external wait.
+        if blocker.get("transient_external"):
+            continue
         code = str(blocker.get("code") or "")
         if code in ("ANSWER_APPENDIX_DETECTED",):
             continue
@@ -1069,6 +1074,14 @@ def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
                     mf.append_log(batch_dir, {"event": "repair_feedback_stale", "files": retired})
             else:
                 _record_structure_findings(batch_dir, report)
+                # A provider-only visual failure is retryable external work, not a
+                # completed gate. Keep passed=false and the candidate unconsumable,
+                # but leave the stage pending so the scheduler can retry it.
+                deferred_items = [item for item in (report.get("deferred") or [])
+                                  if isinstance(item, dict)]
+                hard_blockers = [item for item in (report.get("blockers") or [])
+                                 if not item.get("transient_external")]
+                visual_only_wait = bool(deferred_items) and not hard_blockers
                 # 卡片与台账必须写明具体未解决检查（代码+原因+行号），
                 # 不能只留“N 条未解决”让用户自己去翻报告（硬规则2）。
                 details = []
@@ -1085,13 +1098,23 @@ def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
                         details.append(piece)
                 notes = ("；".join(details[:6]) if details
                          else f"{len(report.get('blockers', []))} 条未解决")
-                mf.touch_stage(current, "structure_gate", mf.BLOCKED, notes=notes)
+                if visual_only_wait:
+                    wait_reason = "视觉提供方暂时不可用，已延后结构闸门；保留 passed=false，待外部恢复后续查：" + notes
+                    mf.touch_stage(current, "structure_gate", mf.PENDING, exit_code=6,
+                                   notes=wait_reason, finished_at=None,
+                                   deferred=deferred_items)
+                else:
+                    mf.touch_stage(current, "structure_gate", mf.BLOCKED, notes=notes)
             mf.save(batch_dir, current)
             manifest.clear()
             manifest.update(current)
         if report.get("passed"):
             print("  ✓ 结构自动确认通过，可进入题型判定")
             return 0
+        if report.get("deferred") and not [b for b in (report.get("blockers") or [])
+                                            if not b.get("transient_external")]:
+            print("  ⏳ 视觉提供方暂时不可用，结构闸门已延后；硬校验仍未放行")
+            return 6
         print("  ✗ 结构自动闸门未通过")
         return 1
 

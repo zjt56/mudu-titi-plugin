@@ -46,6 +46,7 @@ except ImportError:  # 看台可以脱离流水线单独跑
     wf_source_policy = None
 
 ROOT = Path(__file__).resolve().parents[1]
+_WINDOWS = os.name == "nt"
 # 插件版：宿主编译生效配置后，让本进程拉起的 runner/auto 子进程也走插件模型路由。
 # 独立运行 app（没有 backend/.local-agent.effective.json）时保持原行为。
 _plugin_agent_config = ROOT.parent / "backend" / ".local-agent.effective.json"
@@ -2769,7 +2770,7 @@ def _stage_upload_media(folder):
         try:
             raw = media_transfer._read_file(root_fd, '06_batch/batch_meta.json')
         finally:
-            os.close(root_fd)
+            media_transfer._close_root(root_fd)
         from workflow.agent_protocol import _load
         metadata = _load(raw)
         # 若媒体已按内容寻址部署（07_upload/media-map.json 存在且覆盖批次全部附件
@@ -2820,7 +2821,7 @@ def _stage_upload_media(folder):
             if media_transfer._read_file(root_fd, '06_batch/batch_meta.json') != raw:
                 raise ValueError('正式批次在媒体暂存期间发生变化，请重新上传')
         finally:
-            os.close(root_fd)
+            media_transfer._close_root(root_fd)
         upload._write(upload._path(folder, 'media-map.json'), upload._bytes(mapping))
         return mapping, hashlib.sha256(raw).hexdigest()
 
@@ -3140,7 +3141,32 @@ def preview_labels(labels: dict, subs: list, batch_item: dict, row: dict) -> dic
 
 def has_unverified_review_history(folder: Path) -> bool:
     """仅判断目录中是否存在格式像归档的文件，不推断来源或审核范围。"""
-    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+    # Windows lacks POSIX directory-fd flags. Keep the same bounded, symlink-free
+    # check using resolved paths and identity snapshots instead of disabling it.
+    if _WINDOWS:
+        try:
+            root = Path(folder).resolve(strict=True)
+            workflow = root / "workflow"
+            history = workflow / "review-history"
+            if not workflow.is_dir() or workflow.is_symlink() or not history.is_dir() or history.is_symlink():
+                return False
+            for entry in history.iterdir():
+                if not re.fullmatch(r"[0-9a-f]{32}\.json", entry.name) or entry.is_symlink():
+                    continue
+                try:
+                    resolved = entry.resolve(strict=True)
+                    resolved.relative_to(history)
+                    info = resolved.stat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_size > 32 * 1024 * 1024:
+                        continue
+                    with resolved.open("rb") as stream:
+                        data = json.load(stream)
+                    if isinstance(data, dict) and isinstance(data.get("plan"), dict) and isinstance(data.get("rounds"), list):
+                        return True
+                except (OSError, UnicodeError, ValueError, RecursionError):
+                    continue
+        except OSError:
+            return False
         return False
     opened = []
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW

@@ -106,12 +106,16 @@ def _units(batch_dir):
     return confirmed_units(Path(batch_dir))
 
 
-def _unique(rows):
-    """Equivalent extraction copies do not conflict; different prose does."""
+def _unique(rows, *, allow_conflict=False):
+    """Select one real occurrence; equivalent copies are preferred, but a
+    question with two authoritative explanations may use either complete
+    source occurrence without synthesizing or merging text."""
+    if not rows:
+        return None
     values = {source._verbatim(row["source_text"]) for row in rows}
-    if len(values) > 1:
+    if len(values) > 1 and not allow_conflict:
         raise ValueError("conflicting original content")
-    return rows[0] if rows else None
+    return rows[0]
 
 
 def _assign_summaries(units, summaries):
@@ -156,7 +160,7 @@ def build_payload(batch_dir):
                 rows, _ = _parse(path.read_text(encoding="utf-8-sig").splitlines(),
                                  path.relative_to(batch).as_posix())
                 for number in {r["number"] for r in rows}:
-                    _unique([r for r in rows if r["number"] == number])
+                    _unique([r for r in rows if r["number"] == number], allow_conflict=True)
     except ValueError:
         return None
     pdf_questions = [r for r in report["all_questions"] if r["path"] not in source.SOURCES]
@@ -179,7 +183,7 @@ def build_payload(batch_dir):
             rows = [r for r in word_questions if r["number"] == number]
             if not rows:
                 rows = [r for r in pdf_questions if r["number"] == number]
-            explanations[number] = _unique(rows)
+            explanations[number] = _unique(rows, allow_conflict=True)
     except ValueError:
         return None
     items = []

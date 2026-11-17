@@ -56,8 +56,8 @@ EXTRA_STAGE_INPUTS = {
 # upstream "artifact:" inputs so unrelated source edits keep the documented
 # no-auto-reopen behaviour, while a changed producer output always refreshes the
 # view that projects it.
-DERIVED_ARTIFACT_STAGES = ("structure_gate", "meta", "underlines", "validate",
-                           "review_gate", "format_gate")
+DERIVED_ARTIFACT_STAGES = ("structure_gate", "content_snapshot", "meta", "underlines",
+                           "assemble", "validate", "review_gate", "format_gate")
 
 # Public aliases keep every existing importer and on-disk status compatible.
 PENDING = execution_state.PENDING
@@ -645,6 +645,8 @@ def record_delivery(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
                 if manifest['stages'].get('validate', {}).get('status') in TERMINAL_OK:
                     invalidate_stage(batch_dir, manifest, 'validate', '已验收音频改变附件，重新执行本地体检')
                     manifest['stages']['validate']['audio_projection_refresh'] = True
+    if stage.id == 'assemble' and checked.get('passed') is True:
+        _refresh_assembled_underline_delivery(batch_dir, manifest)
     record_semantics(batch_dir, manifest, stage)
     invalidate_changed_consumers(batch_dir, manifest, stage.id)
     if stage.id != "review":
@@ -667,6 +669,32 @@ def record_delivery(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
         "updated_at": now_iso(),
     }
     _save_delivery(batch_dir, delivery)
+
+
+def _refresh_assembled_underline_delivery(batch_dir, manifest):
+    """Refresh shared output only with a guarded acceptance transaction receipt."""
+    from .handoff import inspect_stage
+    root = Path(batch_dir)
+    record = manifest.get('stages', {}).get('underlines', {})
+    if record.get('status') not in (COMPLETED, APPROVED) or record.get('rebuild_required'):
+        return False
+    try:
+        proof = json.loads((root / 'workflow/late-assembly-delivery.json').read_text(encoding='utf-8'))
+        spec = contracts.STAGE_BY_ID['underlines']
+        if (proof.get('version') != 1 or proof.get('workflow_id') != manifest.get('workflow_id')
+                or not record.get('semantic_outputs')
+                or proof.get('before_underlines_outputs') != record['semantic_outputs']
+                or proof.get('before_underlines_inputs') != record.get('semantic_inputs')
+                or proof.get('before_underlines_inputs') != input_hashes(root, manifest, spec)
+                or proof.get('meta_base_sha256') != sha256_file(root / '06_batch/batch_meta.base.json')
+                or proof.get('final_sha256') != sha256_file(root / '06_batch/batch_meta.json')
+                or inspect_stage(root, manifest, 'underlines').get('passed') is not True):
+            return False
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    record['output_hashes'] = output_hashes(root, spec)
+    record_semantics(root, manifest, spec)
+    return True
 
 
 def mark_delivery_consumed(batch_dir, stage_id: str) -> None:
@@ -857,7 +885,8 @@ def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, s
         (manifest['stages'].get(dep) or {}).get('status') in TERMINAL_OK
         and not (manifest['stages'].get(dep) or {}).get('rebuild_required')
         for dep in contracts.upstream_of(stage.id))
-    if (stage.id in ('assemble', 'meta', 'underlines')
+    # Early metadata/underlines own source views, before explanation delivery.
+    if (stage.id == 'assemble'
             and record.get('status') != SKIPPED and upstream_stable):
         from .handoff import require_explanation_projection, ExplanationProjectionMismatch
         try:

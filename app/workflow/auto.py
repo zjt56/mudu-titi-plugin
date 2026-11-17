@@ -1204,9 +1204,6 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                                if not manifest.get("inputs", {}).get(k, {}).get("exists")]
                     if missing:
                         reason = "缺少输入：" + "、".join(missing)
-                if stage.id == "meta" and not (batch_dir / "06_batch" / "batch.json").is_file():
-                    blocked(stage.id, "等待组装产物 06_batch/batch.json", "agent")
-                    continue
                 if reason:
                     print(f"  · {stage.id} 跳过（{reason}）")
                     mf.touch_stage(manifest, stage.id, mf.SKIPPED, notes=reason)
@@ -1241,7 +1238,11 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                 manifest['stages']['validate'].pop('audio_projection_refresh', None)
                 mf.save(batch_dir, manifest)
             if code != 0:
-                blocked(stage.id, "闸门未通过", "gate")
+                if stage.id == "structure_gate" and code == 6:
+                    blocked(stage.id, "视觉提供方暂时不可用；结构闸门已延后，硬校验仍未放行",
+                            "waiting_external", retry_after=60, next_retry_at=time.time() + 60)
+                else:
+                    blocked(stage.id, "闸门未通过", "gate")
                 if stage.id == "structure_gate":
                     from . import provisional
                     if provisional.configured():

@@ -51,13 +51,27 @@ def printed_anchors(lines):
     """Printed item positions in an already bounded lesson section (zero based)."""
     from .preview import _strong_number, _weak_numbers
     result = []
+    strong_numbers = set()
+    literal_numbers = set()
+    from .source_anchors import printed_tokens
+    for line in lines:
+        strong_value = _strong_number(line)
+        if strong_value is not None:
+            strong_numbers.add(strong_value)
+        literal_numbers.update(number for _offset, number in printed_tokens(line))
+    explicit_numbers = strong_numbers | literal_numbers
     for index, line in enumerate(lines):
         nums = []
         strong = _strong_number(line)
         if strong is not None:
             nums.append(strong)
-        nums.extend(n for n in _weak_numbers(line) if n not in nums)
-        from .source_anchors import printed_tokens
+        weak = _weak_numbers(line)
+        # A material blank and its explicit question line can expose the same
+        # number through different parsers. The explicit printed anchor owns
+        # that occurrence; weak markers remain only when no strong anchor for
+        # the number exists on this line.
+        if strong is None:
+            nums.extend(n for n in weak if n not in explicit_numbers and n not in nums)
         literal = [number for _offset, number in printed_tokens(line)]
         for n in literal:
             if n not in nums:

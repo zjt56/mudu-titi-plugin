@@ -102,6 +102,35 @@ class ProjectStructureTest(unittest.TestCase):
                                    "source_line": 1, "source_end_line": 2}]}
         self.assertEqual(denoise.project_structure(structure, body), structure)
 
+    def test_terminal_end_boundary_after_trailing_newline_is_projected(self):
+        body = "\n".join(["Ⅰ.单词拼写", "___"] + [f"{n}. word" for n in range(1, 306)]) + "\n"
+        self.assertEqual(len(body.splitlines()), 307)
+        structure = {"sections": [{"title": "Ⅰ.单词拼写", "questions": [1],
+                                   "source_line": 1, "source_end_line": 308}]}
+        projected = denoise.project_structure(structure, body)
+        self.assertEqual(projected["sections"][0]["source_end_line"], 306)
+
+    def test_appendix_diagnostic_line_is_not_treated_as_question_anchor(self):
+        body = "\n".join(["Ⅰ.单词拼写", "___"] + [f"{n}. word" for n in range(1, 306)]) + "\n"
+        structure = {"sections": [{"title": "Ⅰ.单词拼写", "questions": [1],
+                                   "source_line": 1, "source_end_line": 308}],
+                     "unresolved": [{"code": "ANSWER_APPENDIX_DETECTED", "line": 309}]}
+        projected = denoise.project_structure(structure, body)
+        self.assertEqual(projected["unresolved"][0]["line"], 309)
+
+    def test_terminal_boundary_exception_does_not_allow_real_out_of_range_anchors(self):
+        body = "\n".join(["Ⅰ.单词拼写", "___"] + [f"{n}. word" for n in range(1, 306)]) + "\n"
+        for key in ("source_line", "line", "line_no"):
+            structure = {"sections": [{"title": "Ⅰ.单词拼写", "questions": [1],
+                                       "source_line": 1, "source_end_line": 307,
+                                       "anchor": {key: 308}}]}
+            with self.assertRaisesRegex(ValueError, "SOURCE_COORDINATE_MISMATCH"):
+                denoise.project_structure(structure, body)
+        structure = {"sections": [{"title": "Ⅰ.单词拼写", "questions": [1],
+                                   "source_line": 1, "source_end_line": 309}]}
+        with self.assertRaisesRegex(ValueError, "SOURCE_COORDINATE_MISMATCH"):
+            denoise.project_structure(structure, body)
+
 
 class ConsumerChainTest(unittest.TestCase):
     """The gate, the scoped builder and the consumer rebuild share one projection."""

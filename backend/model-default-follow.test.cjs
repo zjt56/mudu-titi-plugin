@@ -78,3 +78,10 @@ test('non-object stage/role/review maps stay unchanged when the default changes'
   const roundsArr = run({ default: A, review: { rounds: [] } });
   assert.ok(Array.isArray(roundsArr.review.rounds), 'array rounds preserved');
 });
+
+// The shipped template must follow this device's Harness model. Existing local
+// user settings are deliberately not overwritten by template changes.
+test('shipped router has no pinned provider or model', () => {
+  const router = JSON.parse(fs.readFileSync(path.join(root, 'config/model-router.json'), 'utf8'));
+  assert.deepEqual(router.default, {});
+});

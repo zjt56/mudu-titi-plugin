@@ -492,6 +492,39 @@ class FormatGateTest(unittest.TestCase):
         self.assertTrue(any(row.get("code") == "FINAL_FORMAT_CHECK_EXECUTION_FAILED"
                             for row in result["warnings"]))
 
+    def test_deferred_difficulty_stays_hard_when_format_runner_fails(self):
+        data = batch()
+        data['items'][0]['filterMetadata'].update(difficulty='容易', difficultyValue=0.3)
+        self.put(data)
+        before = self.final.read_bytes()
+        with patch.object(format_gate.checks, 'run_all', side_effect=RuntimeError('runner unavailable')):
+            result = format_gate.run(self.root)
+        self.assertFalse(result['passed'])
+        self.assertIn('FINAL_METADATA_CHECK_FAILED', self.codes(result))
+        self.assertTrue(any('冲突' in row.get('message', '') for row in result['errors']))
+        self.assertEqual(before, self.final.read_bytes())
+
+    def test_final_source_bytes_guard_after_consolidated_audit(self):
+        from workflow import final_audit
+        self.put()
+        source = self.root / 'source-evidence.txt'
+        source.write_text('original', encoding='utf-8')
+        expected = hashlib.sha256(source.read_bytes()).hexdigest()
+        real_build = format_gate.upload_payload.build_payload
+
+        def mutate_source(*args, **kwargs):
+            result = real_build(*args, **kwargs)
+            source.write_text('changed', encoding='utf-8')
+            return result
+
+        audit = {'passed': True, 'errors': [], 'warnings': [],
+                 'source_sha256': {'source-evidence.txt': expected}, 'unchecked': []}
+        with patch.object(final_audit, 'run', return_value=audit), \
+                patch.object(format_gate.upload_payload, 'build_payload', side_effect=mutate_source):
+            result = format_gate.run(self.root)
+        self.assertFalse(result['passed'])
+        self.assertIn('FINAL_SOURCE_CHANGED', self.codes(result))
+
     def test_cli_exit_codes_and_source_change_sha(self):
         self.put()
         original = format_gate.run(self.root)["final_sha256"]

@@ -282,32 +282,18 @@ def _snapshot(batch, manifest, stage_id):
 
 
 def _issues(batch):
+    from .findings import collect
     result = []
     for relative in REPORTS:
         try:
             report = json.loads((batch / relative).read_text(encoding="utf-8"))
-            if not isinstance(report, dict):
-                continue
-            values = list(report.get("errors") or []) + list(report.get("blockers") or [])
-            values += list((report.get("source_audit") or {}).get("issues") or [])
-            for value in values[:12]:
-                if isinstance(value, dict):
-                    result.append({"report": relative, **{key: value[key] for key in (
-                        "code", "unit_id", "number", "field", "message", "reason",
-                        "stage", "producer_stage", "check", "item_index", "retryable",
-                        "failure_class", "evidence") if key in value}})
-                elif isinstance(value, str):
-                    result.append({"report": relative, "message": value})
-            checks = report.get("checks")
-            if isinstance(checks, list):
-                for check in checks:
-                    if not isinstance(check, dict) or check.get("passed") is not False:
-                        continue
-                    result.append({"report": relative, "check": check.get("script") or check.get("check"),
-                                   "message": check.get("error") or check.get("output") or "检查未通过"})
+            if isinstance(report, dict):
+                result.extend(collect(report, path=relative))
         except (OSError, ValueError, TypeError, AttributeError):
             continue
-    return result[:24]
+    # Evidence must not disappear merely because a paper has >24 defects.
+    # Model-context budgets are applied at presentation, never at scope lookup.
+    return result
 
 
 def _affected_units(batch, detail, stage_id=None):
@@ -326,7 +312,7 @@ def _affected_units(batch, detail, stage_id=None):
                    "structure_gate": {"07_review/structure-gate.json"},
                    "review": {"07_review/review-gate.json"},
                    "review_gate": {"07_review/review-gate.json"}}
-        issues = _issues(batch)
+        issues = [issue for issue in _issues(batch) if issue.get("blocking") is not False]
         if stage_id is not None:
             issues = [issue for issue in issues if issue.get("report") in reports.get(stage_id, set())]
         found = mentioned(json.dumps(issues, ensure_ascii=False))
@@ -684,6 +670,8 @@ def _producer_for_issue(issue):
     # Never route it upstream to rewrite accepted labels or erase the finding.
     if issue.get("code") in {"REVIEW_ROUND_FINDING", "MANUAL_REVIEW_OPEN", "REVIEW_FINDING_OPEN"}:
         return None
+    if issue.get("blocking") is False or issue.get("disposition") == "retain_review_difference":
+        return None
     explicit = issue.get("producer_stage")
     if explicit in contracts.STAGE_BY_ID and explicit not in BOUNDARIES:
         return explicit
@@ -765,17 +753,6 @@ def _error_producer(batch, stage_id, detail):
                                   if isinstance(candidate, dict)) if owner]
     unique = list(dict.fromkeys(owners))
     return unique[0] if len(unique) == 1 else None
-
-
-# Kept as a compatibility inventory for older status/tests. Runtime recovery does
-# not use this map to choose a producer; it requires structured defect ownership.
-UPSTREAM = {
-    "structure_gate": "extract", "preassemble": "structure_gate", "answers": "preassemble",
-    "audio": "preassemble", "types": "preassemble", "explanations": "types",
-    "knowledge": "types", "assemble": "knowledge", "meta": "assemble",
-    "underlines": "assemble", "validate": "assemble", "review": "validate",
-    "review_gate": "review", "format_gate": "validate",
-}
 
 
 def _escalate_upstream(batch, manifest, stage_id, attempt, reason, *, force=False,

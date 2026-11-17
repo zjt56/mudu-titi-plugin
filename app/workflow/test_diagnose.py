@@ -31,6 +31,24 @@ class DiagnoseTest(unittest.TestCase):
     def _load_manifest(self):
         return mf.load(self.batch)
 
+    def test_every_diagnosis_item_has_structured_repair_target(self):
+        manifest = self._load_manifest()
+        manifest["stages"]["assemble"]["status"] = mf.BLOCKED
+        manifest["stages"]["assemble"]["notes"] = "blocked"
+        mf.save(self.batch, manifest)
+        result = diagnose.diagnose(self.batch)
+        self.assertTrue(result["items"])
+        for item in result["items"]:
+            target = item["repair_target"]
+            self.assertEqual(set(target), {"target", "acceptance", "scope", "can_defer"})
+            self.assertIsInstance(target["target"], str)
+            self.assertIsInstance(target["acceptance"], str)
+            self.assertEqual(target["scope"], f"stage:{item['stage']}")
+            self.assertIsInstance(target["can_defer"], bool)
+        blocked = next(item for item in result["items"] if item["stage"] == "assemble")
+        self.assertTrue(blocked["blocking"])
+        self.assertFalse(blocked["repair_target"]["can_defer"])
+
     def test_invalidated_stage_surfaces_agent_error_from_log(self):
         manifest = self._load_manifest()
         manifest["stages"]["assemble"]["status"] = mf.INVALIDATED
@@ -673,9 +691,9 @@ class BoundReviewFailureDiagnoseTest(unittest.TestCase):
         self.rounds = review_rounds
         self.task = review_rounds.export_task(self.batch)
         self.task_id = self.task["task_id"]
-        binding = json.loads((self.batch / f"workflow/review-bindings/{self.task_id}.json").read_text())
+        binding = json.loads((self.batch / f"workflow/review-bindings/{self.task_id}.json").read_text(encoding="utf-8"))
         self.state_path = binding["state_path"]
-        self.state = json.loads((self.batch / self.state_path).read_text())
+        self.state = json.loads((self.batch / self.state_path).read_text(encoding="utf-8"))
         self.failure = {"task_id": self.task_id, "round_id": "labels", "error": "current failure",
                         "input_binding": binding["plan"]["input_binding"],
                         "state_path": self.state_path, "part_index": binding["part_index"],

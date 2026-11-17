@@ -37,6 +37,19 @@ class MediaTransferTests(unittest.TestCase):
         return media.stage_media('/batch', [{'path': ref, 'sha256': hashlib.sha256(ref.encode()).hexdigest()} for ref in refs], static_root=kwargs.get('root', '/srv/media'),
                                  batch_id=kwargs.get('batch_id', 'batch-one'))
 
+    def test_windows_local_root_reads_without_posix_flags(self):
+        self.patches[2].stop()
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmp:
+            root = os.path.join(tmp, 'batch')
+            os.makedirs(os.path.join(root, '06_batch'))
+            path = os.path.join(root, '06_batch', 'batch_meta.json')
+            with open(path, 'wb') as stream:
+                stream.write(b'{"ok": true}')
+            with patch.object(media, '_WINDOWS', True):
+                root_ref = media._open_root(root)
+                self.assertEqual(media._read_file(root_ref, '06_batch/batch_meta.json'), b'{"ok": true}')
+                media._close_root(root_ref)
+
     def test_mapping_hashes_extensions_and_safe_transport(self):
         mapping = self.stage(['01_source/media/image.PNG', '02_audio/clip.mp3'])
         args, request, options = self.requests[0]

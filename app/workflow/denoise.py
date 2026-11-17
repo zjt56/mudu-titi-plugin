@@ -248,6 +248,10 @@ def project_structure(structure: dict, raw_text: str, cleaned_text: str | None =
     # splitlines() drops one trailing empty line while clean_body uses split("\n").
     # Keep the mapping in the same coordinate system as all source consumers.
     retained = [n for n in range(1, len(raw_lines) + 1) if n not in removed_lines][:len(cleaned.splitlines())]
+    # Some extractors record an inclusive section end on the terminal empty line
+    # represented by a final newline. It is a boundary, not a source anchor;
+    # accept only that one end-coordinate and project it to the last retained line.
+    terminal_boundary = bool(raw_text) and raw_text.endswith(("\n", "\r"))
     direct = {n: i for i, n in enumerate(retained, 1)}
     normalize = lambda text: re.sub(r"</?(?:u|sup|sub)>", "", str(text)).replace("**", "").strip()
     for section in result.get("sections") or []:
@@ -261,11 +265,21 @@ def project_structure(structure: dict, raw_text: str, cleaned_text: str | None =
 
     def project(value, key=""):
         if isinstance(value, dict):
+            # Appendix detection is a diagnostic boundary after the source body,
+            # not a question/source anchor. Preserve its original marker line even
+            # when the detector reports the first appendix line beyond raw text.
+            if value.get("code") == "ANSWER_APPENDIX_DETECTED":
+                return deepcopy(value)
             return {k: project(v, k) for k, v in value.items()}
         if isinstance(value, list):
             return [project(v) for v in value]
         if type(value) is not int or key not in starts | ends | points:
             return value
+        is_terminal_end = key in ends and terminal_boundary and value == len(raw_lines) + 1
+        if is_terminal_end:
+            if not retained:
+                raise ValueError(f"SOURCE_COORDINATE_MISMATCH: {key}={value} has no retained body boundary")
+            return len(retained)
         if not 1 <= value <= len(raw_lines):
             raise ValueError(f"SOURCE_COORDINATE_MISMATCH: {key}={value} outside raw body 1..{len(raw_lines)}")
         if value in direct:

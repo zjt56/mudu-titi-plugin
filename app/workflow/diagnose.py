@@ -502,10 +502,48 @@ def _ocr_wait_detail(waiting: dict) -> str:
     return "；".join(descriptions) + "；稍后续查原任务，提取尚未完成"
 
 
+def _repair_target(item: dict) -> dict:
+    """Return a structured, read-only repair target for a diagnosis item.
+
+    This is presentation metadata only: it deliberately derives from the
+    already-computed blocking/failure fields and never changes blocking
+    semantics or stage state.
+    """
+    stage = str(item.get("stage") or "unknown")
+    failure_class = str(item.get("failure_class") or "")
+    blocking = bool(item.get("blocking"))
+    if failure_class == "quality_differences":
+        target = "在审核工作台逐项判断差异，不修改标签或自动放行"
+        acceptance = "差异保留在审核队列，release_ready 仍按真实审核结果判定"
+        can_defer = True
+    elif blocking:
+        target = f"修复 {stage} 阶段的确定性阻断并复验"
+        acceptance = f"{stage} 的消费者校验通过且阶段状态回写为 completed"
+        can_defer = False
+    elif item.get("unmet"):
+        target = f"等待上游交付满足后再处理 {stage}"
+        acceptance = f"上游依赖满足，且 {stage} 的输入/消费者校验通过"
+        can_defer = True
+    elif item.get("missing_inputs"):
+        target = f"补齐 {stage} 所需输入后复验"
+        acceptance = f"必需输入存在并通过 {stage} 的完整性校验"
+        can_defer = True
+    else:
+        target = f"确认 {stage} 当前状态并按需续跑"
+        acceptance = f"{stage} 完成执行且其消费者校验通过"
+        can_defer = True
+    return {
+        "target": target,
+        "acceptance": acceptance,
+        "scope": f"stage:{stage}",
+        "can_defer": can_defer,
+    }
+
+
 def diagnose(batch_dir) -> dict:
     """返回整个批次的卡点诊断。
 
-    结构：{batch, status, blocked_at, items:[{stage,title,status,kind,reason,detail,hint,command}], summary}
+    结构：{batch, status, blocked_at, items:[{stage,title,status,kind,reason,detail,hint,command,repair_target}], summary}
     只用现成证据，不读取网络、不改文件。
     """
     batch = Path(batch_dir).expanduser().resolve()
@@ -774,6 +812,11 @@ def diagnose(batch_dir) -> dict:
         items.append(entry)
         if first_blocked is None and own_problem:
             first_blocked = stage.id
+
+    # Add structured repair metadata after all branches have computed their
+    # existing fields. This is presentation-only and preserves blocking logic.
+    for item in items:
+        item["repair_target"] = _repair_target(item)
 
     # Blocking failures first, but ALWAYS in contract stage order, so an
     # upstream failure (e.g. format_gate) precedes a pure dependent wait

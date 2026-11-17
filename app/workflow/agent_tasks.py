@@ -585,6 +585,26 @@ def _collect(batch, stage, speculative=False):
     if stage in ("assemble", "review"):
         if not speculative:
             add(ARTIFACTS["explanations"])
+    if stage == "assemble":
+        # 最终汇总优先消费画线后的视图；无 DOCX 而合法跳过画线时，基础
+        # 元数据视图是等价的未标记输入，不能因此把整批卡死。
+        marked = "06_batch/batch_meta.json"
+        if not add(marked, False):
+            marked = "06_batch/batch_meta.base.json"
+            if not add(marked, False):
+                # Managed workflow batches must cross the explicit underlines
+                # handoff.  Historical standalone fixtures have no manifest and
+                # are allowed to use their accepted batch projection instead.
+                managed = ((batch / "workflow" / "manifest.json").is_file()
+                           or (batch / "manifest.json").is_file())
+                if managed:
+                    missing.append("Prepare 06_batch/batch_meta.json or an explicit skipped underlines view before assemble")
+                else:
+                    contexts["underlines_input"] = "06_batch/batch.json (legacy standalone)"
+        else:
+            contexts["underlines_input"] = marked
+        if "underlines_input" not in contexts:
+            contexts["underlines_input"] = marked
     if stage in ("assemble", "review"):
         add(ARTIFACTS["knowledge"])
         # 硬规则 15 / contracts.assemble：听力是最慢的支线，组装不等听力。
@@ -1850,6 +1870,53 @@ def _fill_batch_fields(batch_dir, stage, payload):
         batch_fill.mark_finalized(batch_dir)
 
 
+def _assembly_refresh_proof(batch_dir):
+    """Capture only an already-current underline delivery before shared write."""
+    from . import contracts, manifest as mf, stage_semantics
+    root = Path(batch_dir)
+    if not mf.manifest_path(root).is_file():
+        return None
+    manifest = mf.load(root)
+    record = manifest.get('stages', {}).get('underlines', {})
+    spec = contracts.STAGE_BY_ID['underlines']
+    if (record.get('status') not in (mf.COMPLETED, mf.APPROVED)
+            or record.get('rebuild_required') or not record.get('semantic_outputs')
+            or mf.is_stale(root, manifest, spec)[0]):
+        return None
+    return {'version': 1, 'workflow_id': manifest.get('workflow_id'),
+            'before_underlines_outputs': stage_semantics.output_signatures(root, spec),
+            'before_underlines_inputs': mf.input_hashes(root, manifest, spec),
+            'meta_base_sha256': mf.sha256_file(root / '06_batch/batch_meta.base.json')}
+
+
+def _assembly_delivery_files(batch_dir, payload):
+    """Prepare final consumer view and fill state for the existing installer."""
+    from . import assemble_local, batch_fill, handoff
+    root = Path(batch_dir)
+    files = {ARTIFACTS['assemble']: payload}
+    # A legacy caller without the new source snapshot keeps its old delivery
+    # path; new workflows must install the exact object validate/review consume.
+    if (root / '06_batch/content.snapshot.json').is_file():
+        final = assemble_local.project_final_view(root, payload)
+        handoff._batch(root, 'assemble', final)
+        payload.clear()
+        payload.update(final)
+        files['06_batch/batch_meta.json'] = copy.deepcopy(final)
+    state = batch_fill.prepare_finalization(root, payload)
+    if state is not None:
+        files[batch_fill.STATE] = state
+    return files
+
+
+def _assert_assembly_inputs(batch_dir, hashes):
+    """Exact in-flight source/producer binding immediately before installation."""
+    for name, expected in hashes.items():
+        path = Path(name) if Path(name).is_absolute() else _safe_path(batch_dir, name)
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else MISSING_INPUT
+        if actual != expected:
+            raise ValueError('Assembly inputs changed during acceptance: ' + name)
+
+
 def accept_result(batch_dir, stage, response, *, validate_only=False):
     """Validate complete response before importing any canonical artifacts.
 
@@ -1901,7 +1968,16 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
         json.dumps(result, allow_nan=False)
     except (ValueError, TypeError) as exc:
         raise ValueError("Response must contain JSON values only") from exc
-    context, _, missing, units = _collect(batch_dir, stage)
+    context, acceptance_hashes, missing, units = _collect(batch_dir, stage)
+    assembly_snapshot, assembly_refresh = None, None
+    if stage == 'assemble':
+        from . import batch_fill
+        assembly_snapshot = batch_fill._snapshot(Path(batch_dir))
+        assembly_refresh = _assembly_refresh_proof(batch_dir)
+        from .preassembly import original_input_hashes
+        from . import manifest as mf
+        if mf.manifest_path(batch_dir).is_file():
+            acceptance_hashes.update(original_input_hashes(batch_dir))
     from . import scoped_regeneration
     chosen = scoped_regeneration.selected(stage, context, units)
     _findings(result["findings"], chosen if chosen is not None else units)
@@ -1946,6 +2022,10 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
                 report["notes"] = report["notes"] + ["候选未通过产物校验：" + str(exc)[:200]]
                 return report
             files = {ARTIFACTS[stage]: partial}
+            # A quality-unqualified assembly candidate must not replace the
+            # formal final view or seal managed ownership.
+            if stage == 'assemble':
+                return report
             if not validate_only:
                 _install(Path(batch_dir), files)
                 _fill_batch_fields(batch_dir, stage, partial)
@@ -1994,8 +2074,20 @@ def accept_result(batch_dir, stage, response, *, validate_only=False):
         # Keep missing/stale semantic work visible without manufacturing human
         # confirmation findings for every otherwise clean question.
         files["07_review/unchecked.json"] = payload["unchecked"] + review.evaluate_rounds(batch_dir)["unchecked"]
+    if stage == 'assemble':
+        files = _assembly_delivery_files(batch_dir, payload)
+        if assembly_refresh is not None and '06_batch/batch_meta.json' in files:
+            text = json.dumps(files['06_batch/batch_meta.json'], ensure_ascii=False,
+                              indent=2, allow_nan=False) + '\n'
+            raw = text.replace('\n', os.linesep).encode('utf-8')
+            files['workflow/late-assembly-delivery.json'] = dict(
+                assembly_refresh, final_sha256=hashlib.sha256(raw).hexdigest())
     if not validate_only:
+        if stage == 'assemble':
+            _assert_assembly_inputs(batch_dir, acceptance_hashes)
+            batch_fill._assert_snapshot(Path(batch_dir), assembly_snapshot)
         _install(Path(batch_dir), files)
-        _fill_batch_fields(batch_dir, stage, payload)
+        if stage != 'assemble':
+            _fill_batch_fields(batch_dir, stage, payload)
     report.update(completed=True, artifacts=list(files))
     return report

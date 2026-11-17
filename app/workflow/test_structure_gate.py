@@ -160,6 +160,27 @@ class StructureGateTest(unittest.TestCase):
         marked = text.replace("1.2024年安徽省中考", "  **1.2024年安徽省中考**")
         self.assertEqual(preview.slice_text(marked.splitlines(), 1), ["1.2024年我参加安徽省中考。"])
 
+    def test_transient_visual_provider_is_deferred_but_never_passes(self):
+        from unittest.mock import patch
+        structure = {"sections": [{"type": "单项填空", "questions": [1]}]}
+        batch = make_batch(self.root, structure, "Ⅰ.单项填空\n( )1. A. a  B. b")
+        (batch / "01_source" / "visual-columns.json").write_text(json.dumps({
+            "status": "unavailable", "columns": [], "deferred": True,
+            "retryable": True, "reason": "PROVIDER_CALL_FAILED: route unavailable"
+        }), encoding="utf-8")
+        pages = {"status": "verified", "pages": [{"page": 1, "path": "page.png"}]}
+        candidate = {"sections": structure["sections"], "visual_columns_status": "unavailable",
+                     "visual_columns": [], "visual_column_issues": []}
+        with patch("workflow.source_pages.load_verified", return_value=pages), \
+             patch("workflow.visual_columns.annotate_candidate", return_value=candidate):
+            report = structure_gate.run_gate(batch)
+        self.assertFalse(report["passed"])
+        self.assertTrue(report["deferred"])
+        self.assertEqual(report["deferred"][0]["code"], "VISUAL_PROVIDER_UNAVAILABLE")
+        visual = [b for b in report["blockers"] if b["code"] == "COLUMN_OWNERSHIP_UNRESOLVED"]
+        self.assertEqual(len(visual), 1)
+        self.assertTrue(visual[0]["transient_external"])
+
     def test_empty_source_blocks(self):
         structure = {"sections": [{"type": "单项填空", "questions": [1]}]}
         batch = make_batch(self.root, structure, "")
@@ -280,6 +301,21 @@ class StructureGateTest(unittest.TestCase):
         ]
         units = sg._build_units(sections, [], lines)
         self.assertFalse(any(u.get("source_span") and u["source_span"]["start_line"] == 5 for u in units))
+
+    def test_section_numbers_ignore_material_blank_digits_when_questions_are_bound(self):
+        from workflow import structure_gate as sg
+        section = {
+            "questions": [2, 5, 6, 56, 57, 58, 59],
+            "question_locations": [
+                {"number": 2, "line": 12, "kind": "blank"},
+                {"number": 5, "line": 12, "kind": "blank"},
+                {"number": 56, "line": 20, "kind": "question"},
+                {"number": 57, "line": 22, "kind": "question"},
+                {"number": 58, "line": 24, "kind": "question"},
+                {"number": 59, "line": 30, "kind": "question"},
+            ],
+        }
+        self.assertEqual(sg._section_numbers(section), [56, 57, 58, 59])
 
     def test_cloze_blank_markers_are_not_printed_anchors(self):
         # 完形/短文填空材料行内的 <u>　n　</u> 是编号空格（即子题号），不是印刷题号锚点；

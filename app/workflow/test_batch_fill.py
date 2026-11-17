@@ -435,6 +435,28 @@ class BatchFillTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflict"):
             batch_fill.initialize(self.root)
 
+    def test_metadata_snapshot_accepts_equivalent_attachment_url(self):
+        self.source("One? [IMG first.png]")
+        self.put("01_source/media/first.png", "original image")
+        batch_fill.initialize(self.root)
+        batch_fill.mark_finalized(self.root)
+        artifact = copy.deepcopy(self.load())
+        artifact["items"][0]["attachments"][0]["url"] = "/source-media/batch/first.png"
+        artifact["items"][0]["wordCount"] = 4
+        result = batch_fill.sync(self.root, "metadata", artifact)
+        self.assertEqual(result["units"], ["q-1", "q-2"])
+        self.assertEqual(self.load()["items"][0]["wordCount"], 4)
+
+    def test_metadata_snapshot_rejects_attachment_identity_change(self):
+        self.source("One? [IMG first.png]")
+        self.put("01_source/media/first.png", "original image")
+        batch_fill.initialize(self.root)
+        batch_fill.mark_finalized(self.root)
+        artifact = copy.deepcopy(self.load())
+        artifact["items"][0]["attachments"][0]["name"] = "other.png"
+        with self.assertRaisesRegex(ValueError, "attachments"):
+            batch_fill.sync(self.root, "metadata", artifact)
+
     def test_concurrent_body_edit_during_draft_build_is_not_overwritten(self):
         batch_fill.initialize(self.root)
         ensure = question_draft.ensure

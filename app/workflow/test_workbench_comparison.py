@@ -177,6 +177,17 @@ class ComparisonTest(unittest.TestCase):
             self.assertTrue(has_unverified_review_history(folder))
             self.assertFalse(has_unverified_review_history(other))
 
+    def test_windows_review_history_check_does_not_require_posix_flags(self):
+        from workbench import server
+        from workflow.test_workbench_group_save import make_batch
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = make_batch(Path(tmp))
+            history = folder / 'workflow' / 'review-history'
+            history.mkdir(parents=True)
+            (history / ('a' * 32 + '.json')).write_text(json.dumps({'plan': {}, 'rounds': []}), encoding='utf-8')
+            with patch.object(server, '_WINDOWS', True):
+                self.assertTrue(server.has_unverified_review_history(folder))
+
     def test_only_identical_open_findings_are_grouped(self):
         import copy
         base = {'finding_id': 'a', 'unit_id': 'g', 'field': 'knowledge', 'reason': '题组知识不一致',

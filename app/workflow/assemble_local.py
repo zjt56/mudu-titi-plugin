@@ -29,6 +29,16 @@ def _load(path: Path):
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
+def _workflow_manifest_exists(batch: Path) -> bool:
+    """Return whether this is a managed workflow batch.
+
+    Standalone callers and historical fixtures predate the underline-view
+    handoff.  Production runs always have a workflow manifest, so only those
+    runs enforce the post-marking view as a hard input.
+    """
+    return (batch / "workflow" / "manifest.json").is_file() or (batch / "manifest.json").is_file()
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -214,6 +224,81 @@ def _overlay_text(target: dict, primary: dict, secondary: dict, key: str) -> Non
         target[key] = secondary[key]
 
 
+_SOURCE_FIELDS = frozenset((
+    "stem", "material", "materialBlocks", "material_blocks", "options", "attachments",
+    "blocks", "content", "subquestions",
+))
+
+
+def _overlay_marked_source(target: dict, marked: dict | None) -> None:
+    """Keep source/underline fields from the post-marking view only.
+
+    ``batch_meta.json`` is a source projection, not an authority for labels,
+    answers, explanations, or knowledge. Copying only structural fields keeps
+    underline runs and table/media placement while the fresh producer artifacts
+    below remain authoritative for derived fields.
+    """
+    if not isinstance(marked, dict):
+        return
+    for key in _SOURCE_FIELDS:
+        if key in marked:
+            target[key] = copy.deepcopy(marked[key])
+
+
+def project_final_view(batch_dir, payload: dict) -> dict:
+    """Merge accepted fills with the verified early source/underline/meta view.
+
+    No writes or approvals occur here. Later fills own content and labels; the
+    early view owns underline placement and deterministic metadata categories.
+    """
+    from . import agent_tasks, handoff
+    root = Path(batch_dir)
+    marked = root / '06_batch/batch_meta.json'
+    base = root / '06_batch/batch_meta.base.json'
+    if not marked.is_file() and not base.is_file():
+        if _workflow_manifest_exists(root):
+            raise ValueError('最终汇总缺少画线视图或其明确跳过时的基础视图')
+        return payload
+    source_view = _load(marked if marked.is_file() else base)
+    if (root / '06_batch/content.snapshot.json').is_file():
+        snapshot = _load(root / '06_batch/content.snapshot.json')
+        meta_view = _load(base)
+        handoff._assert_meta_projection(snapshot, meta_view)
+        handoff._assert_underline_projection(meta_view, source_view)
+    units = agent_tasks.confirmed_units(root)
+    source = agent_tasks._coverage(source_view, units)
+    final = copy.deepcopy(payload)
+    rows = agent_tasks._coverage(final, units)
+
+    def overlay(target, early):
+        # Child arrays belong to final identity/coverage and are paired below.
+        for key in _SOURCE_FIELDS - {'subquestions'}:
+            if key in early:
+                target[key] = copy.deepcopy(early[key])
+        filters = target.setdefault('filterMetadata', {})
+        for key, value in (early.get('filterMetadata') or {}).items():
+            if key not in ('subtypes', 'difficulty', 'difficultyValue'):
+                filters[key] = copy.deepcopy(value)
+        # An accepted answer producer's judged difficulty supersedes the early
+        # neutral metadata default; aliases must agree in the actual final view.
+        level = target.get('difficulty') or filters.get('difficulty') or (early.get('filterMetadata') or {}).get('difficulty')
+        if level:
+            filters['difficulty'] = level
+        if 'difficultyValue' not in filters and 'difficultyValue' in (early.get('filterMetadata') or {}):
+            filters['difficultyValue'] = early['filterMetadata']['difficultyValue']
+
+    for unit in units:
+        uid = unit['unit_id']
+        early, target = source[uid], rows[uid]
+        agent_tasks._children(early, unit)
+        agent_tasks._children(target, unit)
+        overlay(target, early)
+        children = {str(c['number']): c for c in early.get('subquestions') or []}
+        for child in target.get('subquestions') or []:
+            overlay(child, children[str(child['number'])])
+    return final
+
+
 def build(batch_dir) -> dict:
     """用已接受结构或首次来源绑定草稿，确定性叠加上游标签。"""
     batch = Path(batch_dir)
@@ -236,6 +321,23 @@ def build(batch_dir) -> dict:
     from .metadata_policy import resolved_paper_meta
     meta = resolved_paper_meta(meta, batch)
     from .wire_format import _year
+    marked_rows = {}
+    marked_path = batch / "06_batch/batch_meta.json"
+    if not marked_path.is_file():
+        # No DOCX is a legal skipped-underlines path; the base view is then the
+        # exact unmarked projection. A missing base view is a handoff error for
+        # managed workflow runs, while old standalone callers retain their
+        # already-accepted batch as the source projection.
+        marked_path = batch / "06_batch/batch_meta.base.json"
+    if not marked_path.is_file():
+        if _workflow_manifest_exists(batch):
+            raise ValueError("最终汇总缺少画线视图或其明确跳过时的基础视图")
+        marked_payload = data
+    else:
+        marked_payload = _load(marked_path)
+    for marked_row in marked_payload.get("items", []) if isinstance(marked_payload, dict) else []:
+        if isinstance(marked_row, dict):
+            marked_rows[_unit_id(marked_row)] = marked_row
 
     def _meta_value(key, value):
         # Confirmed paper metadata is often a digit string; the wire shape needs
@@ -250,6 +352,7 @@ def build(batch_dir) -> dict:
                 if key in item:
                     item[key] = _meta_value(key, meta[key])
         uid = _unit_id(item)
+        _overlay_marked_source(item, marked_rows.get(uid))
         unit = units.get(uid, item)
         item.update(identity_fields(unit))
         if unit.get("identity_version") == "scoped-v1":
@@ -283,7 +386,9 @@ def build(batch_dir) -> dict:
 
         kids_know = {str(c.get("number")): c for c in row_know.get("subquestions") or []}
         kids_expl = {str(c.get("number")): c for c in row_expl.get("subquestions") or []}
+        marked_children = {str(c.get("number")): c for c in (marked_rows.get(uid, {}).get("subquestions") or [])}
         for child in item.get("subquestions") or []:
+            _overlay_marked_source(child, marked_children.get(str(child.get("number"))))
             key = str(child.get("number"))
             _overlay_labels(child, kids_know.get(key) or {})
             _overlay_text(child, kids_expl.get(key) or {}, kids_know.get(key) or {}, "explanation")

@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from . import checks, metadata_policy, upload_payload, wire_format, phonetic_structure, shared_rubric, upload_numbering
 from .label_audit import RULE_FILES as LABEL_RULE_FILES
 
-RULE_VERSION = "final-upload-format-v1"
+RULE_VERSION = "final-upload-format-v2"
 FINAL_PATH = "06_batch/batch_meta.json"
 REPORT_PATH = "07_review/upload-format.json"
 RULE_FILES = (Path(__file__), Path(upload_payload.__file__),
@@ -27,7 +27,11 @@ RULE_FILES = (Path(__file__), Path(upload_payload.__file__),
               Path(shared_rubric.__file__), Path(upload_numbering.__file__),
               Path(__file__).with_name("source_objects.py"),
               Path(__file__).with_name("question_draft.py"), Path(__file__).with_name('table_structure.py'),
-               Path(__file__).with_name('question_content.py'), *LABEL_RULE_FILES)
+               Path(__file__).with_name('question_content.py'), Path(checks.__file__),
+               Path(__file__).with_name('findings.py'), Path(__file__).with_name('final_audit.py'),
+               Path(__file__).with_name('upload_content.py'),
+               *(Path(__file__).resolve().parents[1] / check.script for check in checks.FINAL_FORMAT_CHECKS),
+               *LABEL_RULE_FILES)
 DEFERRED_CODES = frozenset({"CATALOG_REQUIRED", "TEXTBOOK_CATALOG_UNSUPPORTED",
                             "TEXTBOOK_KNOWLEDGE_INVALID"})
 
@@ -272,8 +276,8 @@ def _write_report(path, report):
 def _run_final_format_checks(root, final, report, inputs):
     """Run the format-only checks at the final upload boundary.
 
-    These checks are observational: their output is retained as structured
-    warnings and never changes the content/identity result from build_payload.
+    Presentation findings are observational. Late metadata consistency checks
+    keep their declared blocking policy; moving a check never removes it.
     A runner failure is reported explicitly so a missing check is not mistaken
     for a clean format result.
     """
@@ -283,8 +287,6 @@ def _run_final_format_checks(root, final, report, inputs):
     except Exception as exc:  # a diagnostic must not hide payload validation
         result = {"passed": False, "checks": [], "blocking_failures": [],
                   "warnings": [], "error": f"格式检查执行失败：{exc}"}
-    # Do not persist raw subprocess output: it may contain undecodable bytes
-    # represented as U+FFFD on Windows and is not needed for the final report.
     report["format_checks"] = {
         "passed": bool(result.get("passed")),
         "blocking_failures": list(result.get("blocking_failures") or []),
@@ -292,7 +294,7 @@ def _run_final_format_checks(root, final, report, inputs):
         "skipped": list(result.get("skipped") or []),
         "error": result.get("error"),
         "checks": [{key: check.get(key) for key in
-                    ("check", "script", "blocking", "passed", "error", "warnings", "note")
+                    ("check", "script", "blocking", "passed", "error", "output", "stdout", "stderr", "warnings", "note", "findings")
                     if key in check}
                    for check in (result.get("checks") or []) if isinstance(check, dict)],
     }
@@ -301,11 +303,11 @@ def _run_final_format_checks(root, final, report, inputs):
                                    "message": result["error"]})
     for check in result.get("checks") or []:
         if not check.get("passed", False):
-            report["warnings"].append({
-                "code": "FINAL_FORMAT_CHECK_FAILED",
+            report["errors" if check.get("blocking") else "warnings"].append({
+                "code": "FINAL_METADATA_CHECK_FAILED" if check.get("blocking") else "FINAL_FORMAT_CHECK_FAILED",
                 "check": check.get("check"),
                 "script": check.get("script"),
-                "message": check.get("error") or "格式检查未通过",
+                "message": check.get("error") or check.get("output") or "格式检查未通过",
             })
         for warning in check.get("warnings") or []:
             report["warnings"].append({"code": "FINAL_FORMAT_CHECK_WARNING",
@@ -316,6 +318,31 @@ def _run_final_format_checks(root, final, report, inputs):
                    if isinstance(row, dict)):
             report["warnings"].append({"code": "FINAL_FORMAT_CHECK_WARNING",
                                        "check": name, "message": name})
+    report.setdefault("findings", []).extend(result.get("findings") or [])
+    # A failed aggregate runner cannot silently drop a deferred hard check.
+    if result.get("error"):
+        for spec in checks.FINAL_FORMAT_CHECKS:
+            if spec.blocking:
+                # The difficulty rule is pure Python; reuse its existing
+                # callable without spawning another process after runner failure.
+                # Unknown future hard checks fail closed until a local adapter exists.
+                try:
+                    if Path(spec.script).name != 'check_difficulty.py':
+                        raise ValueError('最终硬检查缺少本地执行适配：' + spec.script)
+                    import runpy
+                    rule = runpy.run_path(str(Path(__file__).resolve().parents[1] / spec.script))
+                    problems = rule['problems'](json.loads(final.read_text(encoding='utf-8-sig')))
+                    outcome = {'check': spec.name, 'script': spec.script, 'blocking': True,
+                               'passed': not problems, 'error': '\n'.join(problems) or None}
+                except Exception as exc:
+                    outcome = {'check': spec.name, 'script': spec.script, 'blocking': True,
+                               'passed': False, 'error': str(exc)}
+                report["format_checks"]["checks"].append(outcome)
+                report.setdefault("findings", []).extend(outcome.get("findings") or [])
+                if not outcome.get("passed"):
+                    report["errors"].append({"code": "FINAL_METADATA_CHECK_FAILED",
+                        "check": spec.name, "script": spec.script,
+                        "message": outcome.get("error") or outcome.get("output") or "最终元数据校验未完成"})
     return result
 
 
@@ -334,9 +361,8 @@ def run(batch_dir) -> dict:
         batch = _load(raw)
         report["errors"].extend(_shape(batch))
         options = _options(root, batch, report)
-        # Format-only checks are intentionally late-bound here.  They inspect
-        # the final batch and contribute diagnostics only; payload/content
-        # errors below retain their existing blocking semantics.
+        # Final checks inspect the complete batch: presentation is advisory,
+        # while deferred metadata consistency and payload/content stay blocking.
         inputs = {}
         manifest_path = _safe(root / "workflow/manifest.json")
         if manifest_path.is_file():
@@ -346,6 +372,13 @@ def run(batch_dir) -> dict:
             if isinstance(manifest, dict) and isinstance(manifest.get("inputs"), dict):
                 inputs = manifest["inputs"]
         _run_final_format_checks(root, final, report, inputs)
+        from . import final_audit
+        source_report = final_audit.run(root, batch)
+        report["final_audit"] = source_report
+        report["errors"].extend(source_report["errors"])
+        report["warnings"].extend(source_report["warnings"])
+        for relative, digest in source_report["source_sha256"].items():
+            report["input_sha256"][relative] = digest
         report["dry_run_options"] = options
         owners, local_files = _local_attachments(root, batch, report)
         # This is the real, read-only mapping API. No client/prepare imports.
@@ -385,10 +418,16 @@ def run(batch_dir) -> dict:
             if not unchanged:
                 report["errors"].append({"code": "LOCAL_ATTACHMENT_CHANGED", "path": url,
                                          "message": "本地附件在检查期间变化，请重新检查"})
+        for relative, digest in report.get("final_audit", {}).get("source_sha256", {}).items():
+            if _sha(_safe(root / relative).read_bytes()) != digest:
+                report["errors"].append({"code": "FINAL_SOURCE_CHANGED", "path": relative,
+                                         "message": "最终核对期间来源发生变化"})
         if _safe(final).read_bytes() != raw:
             report["errors"].append({"code": "FINAL_BATCH_CHANGED", "message": "最终批次在检查期间变化，请重新检查"})
     except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
         report["errors"].append({"code": "FORMAT_INPUT_INVALID", "message": str(exc)})
+    from .findings import attach
+    attach(report, path=REPORT_PATH, stage="format_gate")
     report["passed"] = not report["errors"]
     report["status"] = "passed" if report["passed"] else "failed"
     try:

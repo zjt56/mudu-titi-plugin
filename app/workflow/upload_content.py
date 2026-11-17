@@ -1370,10 +1370,8 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
         if active_unit.get('identity_version') == 'scoped-v1':
             if not scoped_source_matches(active_unit, number, path, line, source_lines):
                 return 'source_scope_mismatch'
-            local = [row for row in questions if row['number'] == number
-                     and scoped_source_matches(active_unit, number, row['path'], row['line'], source_lines)]
-            if not allow_answer_source and len({row['verbatim'] for row in local}) > 1:
-                return 'conflicting_original_content'
+            # 同一 scoped 题号若有多份权威解析，当前候选只要逐字命中
+            # 某一真实坐标即可采用；不拼接、不改写，也不让另一份异文把它卡住。
             return None
         candidates = body_anchors if path == '01_source/正文.txt' else anchors
         hits = [entry for entry in candidates if entry[0] == number and entry[1] == path]
@@ -1390,14 +1388,10 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             return 'explanation_coordinate_mismatch'
         # Separate originals still compete; only existing verbatim equivalence
         # is accepted. NFKC punctuation folding cannot hide different prose.
-        if not allow_answer_source:
-            wanted = _verbatim(expected) if expected is not None else next(
-                (row['verbatim'] for row in local if row['line'] == line), None)
-            competing = [row for row in questions if row['number'] == number
-                         and row['path'] != path and row['path'] != '01_source/正文.txt'
-                         and (wanted is None or row['verbatim'] != wanted)]
-            if competing:
-                return 'conflicting_original_content'
+        # Other authoritative occurrences may carry a different explanation.
+        # They do not invalidate this candidate: the caller selects one complete
+        # real occurrence and preserves it verbatim. Wrong text still fails the
+        # candidate's own content_match/source coordinate checks.
         if path != '01_source/正文.txt':
             body_hits = [entry for entry in body_anchors if entry[0] == number]
             if len(body_hits) != 1:
@@ -1940,17 +1934,13 @@ def collect_source_index(batch_dir):
                                       question_ids={str(n): question_key(unit, n) for n in unit['numbers']}))
         return index, summaries
     index = {}
-    conflicted = set()
     for row in report.get('bound_questions', []):
         if not row.get('source_text'):
             continue
-        n = row['number']
-        if n in index and _verbatim(index[n]) != _verbatim(row['source_text']):
-            conflicted.add(n)
-        else:
-            index[n] = row['source_text']
-    for n in conflicted:
-        index.pop(n, None)
+        # Multiple authoritative parses for one question are alternatives, not
+        # a reason to erase the question. Keep the first complete real source;
+        # source coordinates remain available in the inspection report.
+        index.setdefault(row['number'], row['source_text'])
     summaries = [{'owner': row.get('owner'), 'members': row.get('members') or [],
                   'source_text': row['source_text']}
                  for row in report.get('bound_summaries', []) if row.get('source_text')]

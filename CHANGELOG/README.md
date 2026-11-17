@@ -32,7 +32,16 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-17 | [2026-11-17-visual-provider-deferred-wait.md](2026-11-17-visual-provider-deferred-wait.md) | 视觉提供方暂时失败改为可续查等待，结构硬校验仍阻断 |
+| 2026-11-17 | [2026-11-17-unified-findings-late-consolidation.md](2026-11-17-unified-findings-late-consolidation.md) | 统一完整问题证据、后期集中核对、组装交接修复与 Git 历史架构审计 |
+| 2026-11-17 | [2026-11-17-visual-columns-full-page-window.md](2026-11-17-visual-columns-full-page-window.md) | 视觉栏目归属改为整卷完整页窗口，取消无依据的12页上限 |
+| 2026-11-17 | [2026-11-17-source-coordinate-terminal-boundary.md](2026-11-17-source-coordinate-terminal-boundary.md) | 去噪来源坐标唯一终止端点投影修复 |
+| 2026-11-17 | [2026-11-17-metadata-attachment-transport.md](2026-11-17-metadata-attachment-transport.md) | metadata 附件传输 URL 等价比较，修复保护字段误报 |
+| 2026-11-17 | [2026-11-17-conflicting-explanations-and-late-assembly.md](2026-11-17-conflicting-explanations-and-late-assembly.md) | 冲突解析择一与画线后最终汇总 |
+| 2026-11-17 | [2026-11-17-repair-targets-and-deferred-stages.md](2026-11-17-repair-targets-and-deferred-stages.md) | 卡点结构化修复目标与前期可延期阶段优化 |
+| 2026-11-17 | [2026-11-17-windows-upload-o-directory.md](2026-11-17-windows-upload-o-directory.md) | Windows 上传兼容：本地目录读取不再依赖 O_DIRECTORY |
 | 2026-11-17 | [2026-11-17-batch35-option-window-review-normalization.md](2026-11-17-batch35-option-window-review-normalization.md) | 批次35题目来源窗口、选项绑定与独立题审核协议修复 |
+| 2026-11-17 | [2026-11-17-source-boundary-contract.md](2026-11-17-source-boundary-contract.md) | 统一题目来源边界，阻断旧协议重复题号覆盖 |
 | 2026-11-12 | [2026-11-12-review-newest-first.md](2026-11-12-review-newest-first.md) | 试卷审核列表按最新时间置顶 |
 | 2026-11-12 | [2026-11-12-structure-source-shape-regressions.md](2026-11-12-structure-source-shape-regressions.md) | 2026-11-12：无号古诗来源与课时局部题号证明 |
 | 2026-11-13 | [2026-11-13-ai-operations-autonomous-closure.md](2026-11-13-ai-operations-autonomous-closure.md) | AI 运维自动接收、修复与复验闭环 |

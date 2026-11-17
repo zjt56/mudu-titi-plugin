@@ -6,6 +6,7 @@ the consumers' schema, catalog, source and final wire-shape checks.
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 
 VERSION = 1
@@ -69,6 +70,73 @@ def require_explanation_projection(root, stage, payload=None):
             raise ExplanationProjectionMismatch(f'{uid}: {exc}') from exc
 
 
+_DERIVED_META_KEYS = frozenset((
+    'filterMetadata', 'difficulty', 'difficultyValue', 'categories',
+    'question_type', 'subtypes', 'wordCount', 'words', 'contentComplete',
+    'knowledge', 'knowledgePoints', 'knowledgeIds', 'knowledge_ids', 'textbook',
+    'explanation', 'articleSummary', 'answer', 'answers',
+    'difficultyEvidence', 'difficulty_evidence', 'audio', 'audioFile',
+))
+_UNDERLINE_TAG = re.compile(r'</?u>', re.IGNORECASE)
+
+
+def _source_projection(value):
+    """Project derived question fields only; nested source/evidence stays exact."""
+    result = copy.deepcopy(value)
+
+    def row_projection(row):
+        if not isinstance(row, dict):
+            return
+        for key in _DERIVED_META_KEYS:
+            row.pop(key, None)
+        for child in row.get('subquestions') or []:
+            row_projection(child)
+
+    if isinstance(result, dict):
+        for row in result.get('items') or []:
+            row_projection(row)
+    return result
+
+
+def _without_underline_tags(value):
+    if isinstance(value, dict):
+        return {key: _without_underline_tags(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_without_underline_tags(child) for child in value]
+    if isinstance(value, str):
+        return _UNDERLINE_TAG.sub('', value)
+    return value
+
+
+def _assert_meta_projection(snapshot, payload):
+    if _source_projection(snapshot) != _source_projection(payload):
+        raise ValueError('Metadata view no longer projects the content snapshot')
+
+
+def _assert_underline_projection(base, payload):
+    # Final assembly fills this same view later. Only source-owned fields belong
+    # to underline delivery; requiring later answers/labels creates a DAG cycle.
+    if (_without_underline_tags(_source_projection(base))
+            != _without_underline_tags(_source_projection(payload))):
+        raise ValueError('Underline view changed fields outside underline markup')
+
+
+def _source_view(root, payload):
+    """Check consumer identity/coverage without requiring future fill artifacts."""
+    from . import agent_tasks, batch_fill
+    units = _units(root)
+    rows = agent_tasks._coverage(payload, units)
+    for unit in units:
+        row = rows[unit['unit_id']]
+        for key in ('unit_kind', 'numbers'):
+            if row.get(key) != unit.get(key):
+                raise ValueError(f"{unit['unit_id']}: source view {key} differs from confirmed identity")
+        agent_tasks._children(row, unit)
+    if (root / batch_fill.STATE).is_file():
+        # Includes source/media binding proof and immutable source-base integrity.
+        batch_fill._managed(root)
+
+
 def _batch(root, stage, payload):
     from . import agent_tasks, format_gate, label_audit
     from .runner import source_audit_for_batch
@@ -85,10 +153,8 @@ def _batch(root, stage, payload):
     audit = source_audit_for_batch(root, payload)
     # 图片/音频属于 AI 能力受限项：缺失或未映射只作 informational，不阻断下游。
     # 结构、题号、材料归属等文本类问题仍是硬阻断。
-    media_codes = {'SOURCE_IMAGE_MISSING', 'OPTION_CONTENT_MISMATCH',
-                   'SOURCE_OPTIONS_INCOMPLETE', 'SHARED_OPTIONS_MISMATCH'}
-    blocking = [issue for issue in audit.get('issues', [])
-                if issue.get('code') not in media_codes]
+    from .findings import source_partition
+    blocking, _ = source_partition(audit.get("issues", []))
     if blocking:
         raise ValueError('Downstream source fidelity: ' + str(blocking[:8]))
     for unit in units:
@@ -111,11 +177,21 @@ def inspect_stage(batch_dir, manifest, stage_id, *, legacy_source_only=False):
         if stage_id in ('upload_gate', 'upload', 'publish_gate'):
             return {'passed': True, 'errors': []}
         if record.get('status') == mf.SKIPPED and stage_id in ('answers', 'audio', 'underlines'):
-            # No-input audio has no media contract. Answers and final views do.
+            # No-input audio has no media contract. A skipped underline stage
+            # still hands off the unmarked metadata projection as the exact
+            # source view for final assembly; it must not require a nonexistent
+            # marked file or turn an optional format step into a blocker.
             if stage_id == 'audio':
                 if not mf.skip_reason(dict(manifest, batch_dir=str(root)), spec):
                     raise ValueError('Audio skip is no longer justified')
                 return {'passed': True, 'errors': []}
+            if stage_id == 'underlines':
+                base = root / '06_batch/batch_meta.base.json'
+                if not base.is_file():
+                    raise ValueError('Skipped underlines requires 06_batch/batch_meta.base.json')
+                _json(root, '06_batch/batch_meta.base.json')
+                return {'passed': True, 'errors': [], 'skipped': True,
+                        'source_view': '06_batch/batch_meta.base.json'}
         for relative in spec.produces:
             if legacy_source_only and stage_id == 'preassemble' and relative == '03_types/types.json':
                 continue
@@ -144,6 +220,15 @@ def inspect_stage(batch_dir, manifest, stage_id, *, legacy_source_only=False):
             original = manifest.get('inputs', {}).get('source', {}).get('path')
             if original and report.get('original_sha256') != mf.sha256_file(original):
                 raise ValueError('Original source is not bound to the structure gate')
+        elif stage_id == 'content_snapshot':
+            # The snapshot is an immutable handoff, not merely a present JSON
+            # file. It must remain the exact pre-underlines source projection.
+            snapshot = _json(root, '06_batch/content.snapshot.json')
+            base = _json(root, '06_batch/batch.base.json')
+            if not isinstance(snapshot, dict) or not isinstance(base, dict):
+                raise ValueError('Content snapshot and batch.base must be JSON objects')
+            if snapshot != base:
+                raise ValueError('Content snapshot no longer matches 06_batch/batch.base.json')
         elif stage_id == 'preassemble':
             from . import agent_tasks, batch_fill
             base = _json(root, '06_batch/batch.base.json')
@@ -170,7 +255,15 @@ def inspect_stage(batch_dir, manifest, stage_id, *, legacy_source_only=False):
             payload = copy.deepcopy(context[agent_tasks.ARTIFACTS[stage_id]])
             agent_tasks._validate(root, stage_id, payload, context, _units(root))
         elif stage_id in BATCH_ARTIFACTS:
-            _batch(root, stage_id, _json(root, BATCH_ARTIFACTS[stage_id]))
+            payload = _json(root, BATCH_ARTIFACTS[stage_id])
+            if stage_id == 'meta':
+                _assert_meta_projection(_json(root, '06_batch/content.snapshot.json'), payload)
+                _source_view(root, payload)
+            elif stage_id == 'underlines':
+                _assert_underline_projection(_json(root, '06_batch/batch_meta.base.json'), payload)
+                _source_view(root, payload)
+            else:
+                _batch(root, stage_id, payload)
         elif stage_id in ('validate', 'review_gate', 'format_gate'):
             report = _json(root, spec.produces[0])
             if isinstance(report, dict) and report.get('passed') is not True and stage_id == 'review_gate':

@@ -179,11 +179,11 @@ class EquivalentAnchorsTest(unittest.TestCase):
             self.validate(self.payload(self.ref(2, path)))
         self.assertEqual(collect_source_index(self.batch)[0][31], self.original)
 
-    def test_different_authoritative_source_still_conflicts(self):
+    def test_different_authoritative_source_allows_selected_real_explanation(self):
         (self.batch / '01_source_ans').mkdir()
         (self.batch / '01_source_ans/正文.txt').write_text('Ⅰ.单项填空\n31.C 【解析】另一来源异文。\n', encoding='utf-8')
-        self.assertFalse(inspect_content(self.batch, self.payload(), strict=True)['passed'])
-        self.assertNotIn(31, collect_source_index(self.batch)[0])
+        self.assertTrue(inspect_content(self.batch, self.payload(), strict=True)['passed'])
+        self.assertIn(31, collect_source_index(self.batch)[0])
 
     def test_bare_duplicate_anchor_does_not_count_as_equal_explanation(self):
         self.write('Ⅰ.单项填空\n31.C 【解析】' + self.original + '\n31.C\n')
@@ -200,7 +200,9 @@ class EquivalentAnchorsTest(unittest.TestCase):
         self.assertEqual(self.validate(copy.deepcopy(payload))['q-31']['explanation'], self.original)
         self.write(self.duplicate('不同解析。'))
         with patch('workflow.explanations_direct._units', return_value=[self.unit]):
-            self.assertIsNone(build_payload(self.batch))
+            payload = build_payload(self.batch)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload['items'][0]['explanation'], self.original)
 
     def test_scoped_identical_text_cannot_cross_scopes_or_duplicate_window(self):
         self.body = 'Unit 1\nⅠ.单项填空\n1. First?\nⅡ.单项填空\n1. Second?\n'

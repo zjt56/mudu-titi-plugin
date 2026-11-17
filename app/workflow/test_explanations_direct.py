@@ -132,20 +132,25 @@ class ExplanationsDirectTest(unittest.TestCase):
                 item = explanations_direct.build_payload(self.batch)['items'][0]
                 self.assertEqual([r['explanation'] for r in item['subquestions']], ['原解析。', '无', '无'])
         self.write_word('56.A 【解析】原解析。\n57~58 BC\n56.A 【解析】真实异文。\n')
-        self.assertIsNone(explanations_direct.build_payload(self.batch))
+        item = explanations_direct.build_payload(self.batch)['items'][0]
+        self.assertEqual(item['subquestions'][0]['explanation'], '原解析。')
 
-    def test_distinct_duplicate_explanations_decline_fast_path(self):
+    def test_distinct_duplicate_explanations_choose_one_real_source(self):
         for text in ("56.A 【解析】第一份。\n56.A 【解析】另一份。\n",
                      "56.A 【解析】第一份。\n【解析】另一份。\n"):
             with self.subTest(text=text):
                 self.write_word(text)
-                self.assertIsNone(explanations_direct.build_payload(self.batch))
+                payload = explanations_direct.build_payload(self.batch)
+                self.assertIsNotNone(payload)
+                self.assertEqual(payload['items'][0]['subquestions'][0]['explanation'], '第一份。')
 
-    def test_conflict_in_word_cannot_be_filled_from_pdf(self):
+    def test_conflict_in_word_chooses_word_source_over_pdf(self):
         self.write_word("56.A 【解析】一。\n56.A 【解析】二。\n")
         (self.batch / "01_source/materials/attachment_001.txt").write_text(
             "56.A 【解析】PDF。\n", encoding="utf-8")
-        self.assertIsNone(explanations_direct.build_payload(self.batch))
+        payload = explanations_direct.build_payload(self.batch)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload['items'][0]['subquestions'][0]['explanation'], '一。')
 
     def test_compact_multiple_question_anchors_decline_fast_path(self):
         self.write_word("56.A 57.B【解析】无法唯一归属。\n")
@@ -207,10 +212,12 @@ class ExplanationsDirectTest(unittest.TestCase):
         self.assertEqual(payload["items"][0]["subquestions"][0]["explanation"], "A项意为甲。\n解释续行。")
         self.assertTrue(any("附录.txt:4" in e for e in payload["items"][0]["evidence"]))
 
-    def test_canonical_conflicting_stray_explanations_decline(self):
+    def test_canonical_conflicting_stray_explanations_choose_one(self):
         (self.batch / "01_source/附录.txt").write_text(
             "56.A\n【解析】原解析。\n【解析】另一原解析。\n", encoding="utf-8")
-        self.assertIsNone(explanations_direct.build_payload(self.batch))
+        payload = explanations_direct.build_payload(self.batch)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload['items'][0]['subquestions'][0]['explanation'], '原解析。')
 
 
 if __name__ == "__main__":

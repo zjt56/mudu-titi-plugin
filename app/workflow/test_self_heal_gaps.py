@@ -56,8 +56,13 @@ class SourceOptionRepairTest(unittest.TestCase):
                 result = actions.apply_source_option_repair(self.root)
                 self.assertTrue(result['installed'], result)
                 self.assertTrue(result['passed'])
-                self.assertEqual(result['checks']['format']['passed'], not objects)
-                self.assertEqual(result['format_passed'], not objects)
+                # Source options are repaired independently of unrelated final
+                # content defects. This fixture's old group explanation has no
+                # source binding, so consolidation must retain that blocker.
+                self.assertFalse(result['checks']['format']['passed'])
+                self.assertFalse(result['format_passed'])
+                codes = {row['code'] for row in result['checks']['format']['errors']}
+                self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', codes)
                 receipt = self.load(result['receipt_path'])
                 self.assertEqual(receipt['rule'], 'source-option-prefix-v1')
                 for rel in legacy_format.BATCH_PATHS:
@@ -625,13 +630,12 @@ class NeverParkTest(unittest.TestCase):
         _mf.save(batch, state)
         return batch, state
 
-    def test_upstream_map_covers_every_resumable_stage(self):
+    def test_unknown_defect_does_not_guess_upstream_from_stage_order(self):
         from workflow import self_heal as _heal
-        for stage in ("structure_gate", "preassemble", "answers", "audio", "types",
-                      "explanations", "knowledge", "assemble", "meta", "underlines",
-                      "validate", "review", "review_gate", "format_gate"):
-            self.assertIn(stage, _heal.UPSTREAM, stage)
-            self.assertNotIn(_heal.UPSTREAM[stage], _heal.BOUNDARIES, stage)
+        for stage in ("meta", "underlines", "validate", "format_gate"):
+            self.assertIsNone(_heal._producer_for_issue({"message": "unknown defect", "stage": stage}))
+        self.assertEqual(_heal._producer_for_issue({"field": "explanation", "unit_id": "u-1"}),
+                         "explanations")
 
     def test_record_only_stops_same_signature_after_retry_budget(self):
         from workflow import self_heal as _heal, manifest as _mf

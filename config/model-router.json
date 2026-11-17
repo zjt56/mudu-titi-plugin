@@ -1,9 +1,5 @@
 {
-  "default": {
-    "provider": "deepseek-official",
-    "model": "deepseek-flash",
-    "profile": "wf-deepseek-fast"
-  },
+  "default": {},
   "stages": {},
   "review": {
     "rounds": {}

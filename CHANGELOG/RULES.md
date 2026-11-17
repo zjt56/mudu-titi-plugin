@@ -1,5 +1,21 @@
 # RULES — 规则与强调台账
 
+## 2026-11-17：统一问题闭环，按影响修复并在交付前集中核对
+
+用户要求减少前期流程卡点，同时审视历史架构是否仍有必要。统一完整问题证据并接入既有自愈/运维，不另建修复队列；前期只约束来源、身份、归属及真实消费者交付，警告/审核差异不触发内容重生成。难度一致性与重复显示检查后移最终闸门，真实难度/内容硬约束保留；元数据/画线不提前要求未来填充字段，最终组装须同步真实下游产物。独立分支继续，未合格输入不得消费或伪完成。最终复用严格来源及答案解析审计，尚无独立原件整页覆盖或浏览器渲染证明须明确标注。保留旧协议、审核差异、用户数据和上传授权边界；Git 历史审计确认有消费者的兼容层不得仅因年代久就删除。详见 `CHANGELOG/2026-11-17-unified-findings-late-consolidation.md` 与 `app/docs/git-architecture-audit-2026-11-17.md`。
+
+## 2026-11-17：题目来源边界统一，旧协议重复身份必须阻断
+
+用户要求优化整个判断逻辑，保证后续不再发生跨题选项误绑定。题目解析、草稿、来源审计统一使用当前题窗口；旧协议重复题号或窗口内重复题号不得通过字典覆盖或首个命中猜测，必须报告来源歧义并阻断。落地：`app/workflow/question_content.py`、`app/workflow/question_draft.py`；验证见 `CHANGELOG/2026-11-17-source-boundary-contract.md`。
+
+## 2026-11-17：卡点必须有修复目标，前期可延期工作不得阻断
+
+用户要求减少不必要卡点并加快前期流程。诊断条目必须给出结构化 `repair_target`（目标、验收条件、范围、是否可延期）；可选输入缺失、外部等待、最终格式工作可记录为延期/等待，不得伪造完成；内容、结构、身份、来源、审核和上传硬校验仍然阻断。落地：`app/workflow/diagnose.py`、`app/workflow/contracts.py`；验证见 `CHANGELOG/2026-11-17-repair-targets-and-deferred-stages.md`。
+
+## 2026-11-17：Windows 上传不得依赖 POSIX O_DIRECTORY
+
+用户反馈 Windows 上传因 `module 'os' has no attribute 'O_DIRECTORY'` 未完成。所有本地批次目录/媒体读取必须提供 Windows 等价安全路径校验，不能因缺少 POSIX 常量直接禁用检查；远端 Linux 媒体部署仍保持 POSIX 安全协议。落地：`app/workflow/media_transfer.py`、`app/workflow/media_inventory.py`、`app/workbench/server.py`；验证见 `CHANGELOG/2026-11-17-windows-upload-o-directory.md`。
+
 ## 2026-11-17：题目来源窗口必须按当前题边界截取，独立题审核空知识子题归一化
 
 批次 35 的 `OPTION_CONTENT_MISMATCH` 证明：题目解析不得把当前题之后的图片选项带入当前题；解析与草稿必须共用当前题来源窗口。审核抽样中，独立题若仅回显空 `knowledge` 子题，必须确定性投影为 `subquestions=[]`；真实非空子题仍须拒绝。落地：`app/workflow/question_content.py`、`app/workflow/question_draft.py`、`app/workflow/review.py`、`app/workflow/batch_fill.py`；验证见 `CHANGELOG/2026-11-17-batch35-option-window-review-normalization.md`。
@@ -541,6 +557,22 @@ question_content.py::restore_source_stems（网格单元格不承载带字母选
 ## 2026-11-17：中考试卷听力材料按实际来源绑定，不强制补齐
 
 用户明确：后续上传中考试卷时，听力材料如果原卷/随附材料中存在，就放进对应听力题目（题组）的 `material` 或 `materialBlocks`，并将音频按实际切段绑定到该题目的 `attachments`；如果没有文字听力材料，则保持为空，不用 ASR 或模型生成内容冒充原卷材料，也不因缺少听力材料阻断上传。现有 `MISSING_AUDIO_ATTACHMENT` 仅作警告口径保持不变。落地：`app/workflow/upload_payload.py`、`app/workflow/question_content.py`、`app/audio/consistency.py`、`app/docs/upload-api.md`、`app/skills-reference/constraints.md`。
+
+## 2026-11-17：整卷视觉栏目证据取消无依据的页数上限
+
+视觉栏目归属必须一次覆盖当前原件的全部整页，不再因页面数超过12页直接报 `COLUMN_SCOPE_TOO_LARGE`；无损总览超过内存保护阈值时改为发送全部原始整页，不能缩放、截断或省略页面。正文仍保留150000字符上限，视觉模型路由、JSON、首尾引用、页坐标、页面覆盖和不确定项校验不放宽；提供方失败或栏目归属不确定仍阻断 `structure_gate`，不得把数字题号或OCR候选当作视觉证明。落地：`app/workflow/visual_columns.py`、`app/workflow/test_visual_columns.py`、`app/docs/visual-columns.md`；实批 `【木牍教育】2024中考英语试卷` 当前仍因视觉提供方失败/栏目未确认保持阻断。
+
+## 2026-11-17：去噪来源坐标允许唯一终止端点，不放宽真实锚点
+
+针对批次「【木牍教育】2024中考英语试卷」反馈的 `SOURCE_COORDINATE_MISMATCH: source_end_line=308 outside raw body 1..307`，原文尾换行对应的唯一终止边界 `len(raw_lines)+1` 可投影到最后保留正文行；起始坐标、题目锚点、删除行锚点和更大越界仍阻断。实批目录当前不可取证，未宣称恢复。落地：`app/workflow/denoise.py::project_structure`、`app/workflow/test_source_coordinate_projection.py`；台账：`ISSUES/open/2026-11-17-结构端点超出正文行数且实批目录不可取证.md`。
+
+## 2026-11-17：视觉提供方暂时失败改为可续查等待
+
+视觉模型的 `PROVIDER_CALL_FAILED`、超时、连接重置等暂时性故障只进入 `deferred/waiting_external`，不再与原卷结构错误混成永久卡点；视觉证据仍是 `status=verified` 且来源、页面、正文和提示词哈希一致才可消费。延期期间 `structure_gate` 保持 `passed=false`，不写入可消费的 `structure.confirmed.json`，依赖结构闸门的下游不得运行。`QUESTION_COUNT_MISMATCH`、`DUPLICATE_NUMBERS`、`SOURCE_NUMBER_AMBIGUOUS`、`NUMBERING_RESTART`、`QUESTION_NUMBER_INFERRED`、真实 `COLUMN_OWNERSHIP_UNRESOLVED` 继续阻断，不能因等待而放行。落地：`app/workflow/visual_columns.py`、`app/workflow/structure_gate.py`、`app/workflow/runner.py`、`app/workflow/auto.py`；验证见 `CHANGELOG/2026-11-17-visual-provider-deferred-wait.md`。
+
+## 2026-11-17：同题冲突解析择一，最终汇总在画线后
+
+同一题存在多份真实但内容不同的解析时，允许选择任一份完整真实来源继续，必须保留该候选的 evidence/source_ref，禁止拼接、改写或跨题借用；`audit_ownership`、`preserve` 与上传来源校验继续硬阻断。流程固定为 `content_snapshot → meta → underlines → assemble → validate`，最终 assemble 必须消费 `06_batch/batch_meta.json`；无 DOCX 且 underlines 合法跳过时可消费 `batch_meta.base.json`，缺少两者仍阻断。落地：`app/workflow/explanations_direct.py`、`app/workflow/upload_content.py`、`app/workflow/contracts.py`、`app/workflow/assemble_local.py`、`app/workflow/agent_tasks.py`、`app/workflow/stage_semantics.py`、`app/workflow/manifest.py`。
 
 ## 2026-11-13：OCR 异步任务必须持久化身份、可续查、不盲发
 

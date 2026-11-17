@@ -77,6 +77,20 @@ def _expand_question_numbers(entry) -> list[int]:
 
 
 def _section_numbers(section: dict) -> list[int]:
+    """Return question numbers owned by this section, excluding material digits.
+
+    Composite extraction can also record blank markers from a table/article in
+    ``question_locations``.  For a section that has real question anchors,
+    those anchors are authoritative; otherwise (for blank-only sections such
+    as information transfer) the recorded blank locations remain the source.
+    """
+    locations = section.get("question_locations")
+    if isinstance(locations, list):
+        question_numbers = [row.get("number") for row in locations
+                            if isinstance(row, dict) and row.get("kind") == "question"
+                            and type(row.get("number")) is int and row.get("number") >= 1]
+        if question_numbers:
+            return sorted(set(question_numbers))
     nums: list[int] = []
     for entry in section.get("questions") or []:
         nums.extend(_expand_question_numbers(entry))
@@ -249,7 +263,7 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
         group = section.get("kind") == "group" if section.get("kind") else is_group_type(_section_type_label(section.get("type")))
         declared = set(_section_numbers(section))
         if group:
-            numbers = sorted(declared | _source_members(lines[start:end]))
+            numbers = declared or sorted(_source_members(lines[start:end]))
             articles = _material_windows(lines, start + 1, end)
             if articles and numbers:
                 # 与 _build_scoped_units 同一归一化：选项字母不能切裂题组窗口，
@@ -279,7 +293,22 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
             errors.append({"code": "SOURCE_NUMBERS_MISSING", "source_line": start,
                            "message": f"本大题声明题号未在局部原文定位：{sorted(declared - observed - writing_bound)}"})
         for lo, hi in articles:
-            local_anchors = [(lo + at, number) for at, number in _scope_anchors(lines[lo - 1:hi])]
+            raw_anchors = _scope_anchors(lines[lo - 1:hi])
+            # A cloze/material blank (weak anchor) and its explicit question
+            # line can carry the same number.  The explicit line is the unique
+            # source owner; retain weak-only anchors when no strong occurrence
+            # exists, and keep duplicate strong anchors as a real defect.
+            from .preview import _strong_number
+            from .source_anchors import printed_tokens
+            strong_numbers = set()
+            for at, number in raw_anchors:
+                source_line = lines[lo + at - 1]
+                if printed_tokens(_anchor_text(source_line)) or _strong_number(source_line) is not None:
+                    strong_numbers.add(number)
+            local_anchors = [(lo + at, number) for at, number in raw_anchors
+                             if number not in strong_numbers
+                             or printed_tokens(_anchor_text(lines[lo + at - 1]))
+                             or _strong_number(lines[lo + at - 1]) is not None]
             counts = Counter(number for _, number in local_anchors)
             duplicate = sorted(number for number, count in counts.items() if count > 1)
             if duplicate:
@@ -460,7 +489,12 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
         start, end = section["source_line"], section["source_end_line"]
         type_name = _section_type_label(section.get("type"))
         local = source_lines[start:end]
-        numbers = sorted(set(_section_numbers(section)) | _source_members(local))
+        declared_numbers = _section_numbers(section)
+        # When extraction supplied explicit question/blank locations, do not
+        # union every digit found inside article/table material: dates, prices,
+        # footnotes and table values are not printed question numbers.  Fall
+        # back to source anchors only for legacy sections without locations.
+        numbers = declared_numbers or sorted(_source_members(local))
         group_flag = section.get("kind") == "group" if section.get("kind") else is_group_type(type_name)
         windows = _material_windows(source_lines, start + 1, end) if group_flag else []
         if group_flag and windows and numbers:
@@ -545,6 +579,18 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                 unit["stem"] = "\n".join(local).strip()
                 unit["source_span"] = {"start_line": start + 1, "end_line": end,
                                        "basis": "cleaned_source", "number_binding": "unnumbered_section",
+                                       "printed_numbers": []}
+                unit["original_number"] = None
+                unit["printed_number"] = False
+                units.append(unit)
+            elif not anchors and "书面表达" in type_name and not numbers:
+                # Writing sections commonly have one task without a printed
+                # question number. Keep the internal alias only for binding;
+                # upload numbering must project this as null/null.
+                chunk = source_lines[start:end]
+                unit = _make_unit("standalone", type_name, [1], chunk)
+                unit["source_span"] = {"start_line": start + 1, "end_line": end,
+                                       "basis": "cleaned_source", "number_binding": "single_writing_section",
                                        "printed_numbers": []}
                 unit["original_number"] = None
                 unit["printed_number"] = False
@@ -880,6 +926,10 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     structure_path = batch_dir / "01_source" / "structure.json"
 
     raw_text = _read_text(source_path)
+    # Some extracted bodies record an inclusive terminal boundary one line past
+    # splitlines(); normalize only that boundary, never question/source anchors.
+    if raw_text and not raw_text.endswith(("\n", "\r")):
+        raw_text += "\n"
     cleaned_text, meta, removed = denoise.clean_body(raw_text) if raw_text else ("", {}, [])
     source_lines = cleaned_text.splitlines()
 
@@ -921,16 +971,36 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     checks: dict[str, str] = {}
     resolved_notes: list[dict] = []
     warnings: list[dict] = []
+    deferred: list[dict] = []
     from . import source_pages
     page_proof = source_pages.load_verified(batch_dir)
     if page_proof.get('status') == 'verified' and (batch_dir / visual_columns.ARTIFACT).is_file():
         checks['column_ownership'] = 'passed' if structure.get('visual_columns_status') == 'verified' else 'failed'
         if checks['column_ownership'] == 'failed':
-            blockers.append({'code': 'COLUMN_OWNERSHIP_UNRESOLVED',
-                             'batch_name': batch_dir.name, 'batch_dir': str(batch_dir),
-                             'artifact': visual_columns.ARTIFACT,
-                             'issues': structure.get('visual_column_issues') or [],
-                             'message': '完整页已准备但栏目视觉归属未完成；数字题号覆盖不能证明无号题完整，须补齐当前原件整页的栏目归属证据'})
+            visual_artifact = {}
+            try:
+                visual_artifact = json.loads((batch_dir / visual_columns.ARTIFACT).read_text(encoding='utf-8'))
+            except (OSError, ValueError, TypeError):
+                visual_artifact = {}
+            reason = visual_artifact.get('reason') or ''
+            transient = bool(visual_artifact.get('deferred') or visual_artifact.get('retryable')
+                             or visual_columns.is_transient_failure(reason))
+            blocker = {'code': 'COLUMN_OWNERSHIP_UNRESOLVED',
+                       'batch_name': batch_dir.name, 'batch_dir': str(batch_dir),
+                       'artifact': visual_columns.ARTIFACT,
+                       'issues': structure.get('visual_column_issues') or [],
+                       'transient_external': transient,
+                       'message': '完整页已准备但栏目视觉归属未完成；数字题号覆盖不能证明无号题完整，须补齐当前原件整页的栏目归属证据'}
+            if reason:
+                blocker['reason'] = reason
+            blockers.append(blocker)
+            if transient:
+                deferred.append({'code': 'VISUAL_PROVIDER_UNAVAILABLE',
+                                 'stage': 'structure_gate',
+                                 'artifact': visual_columns.ARTIFACT,
+                                 'reason': reason,
+                                 'retryable': True,
+                                 'message': '视觉提供方暂时不可用；保留结构闸门未通过，稍后续查'})
     else:
         checks['column_ownership'] = 'not_required'
     ai_classified = None
@@ -1006,7 +1076,8 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     for section in sections:
         nums = _section_numbers(section)
         count = section.get("declared_count")
-        if count is not None and count != len(nums):
+        unnumbered_writing = "书面表达" in str(section.get("type") or "") and not nums
+        if count is not None and count != len(nums) and not unnumbered_writing:
             issue = {"code": "QUESTION_COUNT_MISMATCH", "message": f"大题 {section.get('title') or section.get('type')} 声明 {count} 小题，当前提取定位 {len(nums)} 题；交模型结构化"}
             if model_structure_only:
                 warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
@@ -1354,6 +1425,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         **hashes,
         "metadata_missing": metadata_missing,
         "warnings": warnings,
+        "deferred": deferred,
         "source_diagnostic": source_diagnostic,
         "layout_required": layout_required,
         "layout_review_command": "python -m workflow.layout_review --help" if layout_required else None,

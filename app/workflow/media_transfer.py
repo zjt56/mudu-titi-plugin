@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_BATCH_BYTES = 32 * 1024 * 1024
 MAX_FILES = 256
+_WINDOWS = os.name == 'nt'
 
 
 class MediaTransferError(Exception):
@@ -178,6 +179,13 @@ def _open_root(root):
     raw = os.fspath(root)
     if not isinstance(raw, str) or '..' in raw.split('/'):
         raise ValueError()
+    # Windows has no dir_fd/O_DIRECTORY support. Return a resolved Path and
+    # apply the same containment and identity checks in _read_file instead.
+    if _WINDOWS:
+        path = Path(raw).resolve(strict=True)
+        if not path.is_dir():
+            raise ValueError()
+        return path
     path = os.path.abspath(raw)
     current = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -193,8 +201,37 @@ def _open_root(root):
         raise
 
 
+def _close_root(root):
+    if _WINDOWS:
+        return
+    os.close(root)
+
+
 def _read_file(root_fd, relative):
     parts = _parts(relative)
+    if _WINDOWS:
+        root = Path(root_fd).resolve(strict=True)
+        target = (root.joinpath(*parts)).resolve(strict=True)
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise ValueError() from None
+        current = root
+        for part in parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError()
+        before = target.stat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_FILE_BYTES:
+            raise ValueError()
+        content = target.read_bytes()
+        if len(content) > MAX_FILE_BYTES:
+            raise ValueError()
+        after = target.stat()
+        fingerprint = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+        if fingerprint(before) != fingerprint(after):
+            raise ValueError()
+        return content
     current = os.dup(root_fd)
     try:
         for part in parts[:-1]:
@@ -276,7 +313,7 @@ def stage_media(batch_root, references, *, static_root, batch_id, timeout=60, ex
                                  'data': base64.b64encode(content).decode('ascii')}
                 mapping[name] = '/source-media/' + target
         finally:
-            os.close(root_fd)
+            _close_root(root_fd)
     except MediaTransferError:
         raise
     except (OSError, ValueError, TypeError, UnicodeError):
@@ -307,7 +344,7 @@ def stage_media(batch_root, references, *, static_root, batch_id, timeout=60, ex
                 if hashlib.sha256(_read_file(root_fd, relative)).hexdigest() != expected_digest:
                     raise ValueError()
         finally:
-            os.close(root_fd)
+            _close_root(root_fd)
     except (OSError, ValueError, TypeError):
         raise MediaTransferError('Media changed during transfer') from None
     return mapping
