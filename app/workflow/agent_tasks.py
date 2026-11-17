@@ -1430,7 +1430,14 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                             "%s：原卷为图片题或空白作答网格（答案在附录），按能力受限记录，不阻断下游"
                             % row.get("unit_id"))
                     continue
-                raise ValueError(f"{row['unit_id']}: incomplete source content must be repaired before downstream tasks start")
+                # 用户 2026-11-17：类型/前置组装只负责产出可用候选；内容完整
+                # 性属于正确性校验，统一后移到最终闸门（final_audit）判定。
+                # 这里保留 contentComplete=false 与证据，不丢弃、不伪造为 true。
+                row.setdefault("warnings", [])
+                if isinstance(row["warnings"], list):
+                    row["warnings"].append("内容完整性未确认，已后移最终闸门核对")
+                if notes is not None:
+                    notes.append("%s：内容完整性未确认，已后移最终闸门核对" % row.get("unit_id"))
         return
     if stage == "explanations":
         return content_rules.validate(payload, units, _types(context[ARTIFACTS["types"]], units), batch)

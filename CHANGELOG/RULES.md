@@ -599,3 +599,11 @@ question_content.py::restore_source_stems（网格单元格不承载带字母选
 
 用户原话（2026-11-17）：「结构确认的主要工作是创建后续所需要的题目结构化的字段，并将拆解出来的试卷按照结构化进行填入就行，不做阻断的校验，验证环节放在后面的格式检查中」；追问确认「完全不阻断」「疑点记 warning 留痕继续下游」「只改这一环」。
 规则：`structure_gate` 只负责把原卷拆成结构化单元并填入字段，不做阻断；题号覆盖/材料归属/题干保真/重号/无号边界/组题越界/来源冲突等一律写 `structure_warnings`（并进 `warnings`，`blocking=false`），阶段完成继续下游；`blockers` 恒空，`passed=bool(units)`，仅当完全拆不出单元（`unit_counts.total==0`）才算无法交付。验证集中在最终格式闸门与已有来源/答案/内容对照，本轮不放宽任何下游硬校验。落地：`structure_gate.run_gate`、`runner.do_structure_gate`、`contracts.py` 阶段描述、`app/docs/structure.md`；验证见 `CHANGELOG/2026-11-17-structure-gate-non-blocking.md`。
+## 2026-11-17：前期少卡点，内容完整性/正确性后移
+
+用户明确要求前面流程不要有太多卡点，具体格式校验与正确性验证放在后面的流程完成。
+类型/前置组装遇到 `contentComplete=false` 保留候选并记录警告，不提前阻断、不伪改 true；
+最终闸门 `final_audit` 统一报 `CONTENT_COMPLETENESS_UNVERIFIED`。结构闸门台账完成但
+`structure.confirmed.json` 无法被消费者解析时，`manifest.is_stale` 判定过期并自动重跑，
+不得让下游永久等待。来源/身份/归属实质错误仍阻断。落地：`agent_tasks.py`、`final_audit.py`、
+`manifest.py`；验证见 `CHANGELOG/2026-11-17-early-defer-content-and-stale-gate.md`。

@@ -848,6 +848,16 @@ def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, s
     missing = missing_produces(batch_dir, stage)
     if missing:
         return True, f"缺少产物 {', '.join(missing)}"
+    # A gate that says passed is not consumable if its confirmed artifact cannot
+    # be parsed by the built-in consumer (e.g. duplicate/missing identities).
+    # Without this, a stale confirmed file keeps every downstream stage waiting
+    # forever after the gate ledger already says completed.
+    if stage.id == "structure_gate" and record.get("status") in TERMINAL_OK:
+        try:
+            from .agent_tasks import confirmed_units
+            confirmed_units(Path(batch_dir))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            return True, "结构确认产物不可消费：" + str(exc)[:200]
     # Exact output hashes remain in the ledger for audit. Reuse compares a
     # normalized content signature so JSON formatting and clock-only changes
     # cannot create a scheduling loop; actual payload changes still require a rerun.

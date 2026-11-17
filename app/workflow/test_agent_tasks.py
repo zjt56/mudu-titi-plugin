@@ -909,12 +909,16 @@ class AgentTasksTest(unittest.TestCase):
         report = tasks.accept_result(self.batch, "types", self.result("types", payload), validate_only=True)
         self.assertTrue(report["completed"], report)
 
-    def test_real_truncation_still_blocks_content_incomplete(self):
-        # 有文字题干但表格非空、且答案不在附录：真实缺内容，仍必须阻断。
+    def test_real_truncation_is_deferred_to_final_audit(self):
+        # 有文字题干但表格非空、且答案不在附录：内容完整性不再在类型阶段阻断，
+        # 但 contentComplete=false 必须原样保留，由最终闸门逐题核清。
         payload = self._types_batch("1. 下列字母组合 A.BIF B.XHS\n[TABLE 1]\n| 有内容 |\n[/TABLE]",
                                     "参考答案\nⅣ.1 DCABD")
-        with self.assertRaisesRegex(ValueError, "incomplete source content"):
-            tasks.accept_result(self.batch, "types", self.result("types", payload), validate_only=True)
+        report = tasks.accept_result(self.batch, "types", self.result("types", payload), validate_only=True)
+        self.assertTrue(report["completed"], report)
+        row = payload["items"][0]
+        self.assertIs(row["contentComplete"], False)
+        self.assertTrue(any("后移最终闸门" in str(note) for note in report.get("notes") or []))
 
 
 if __name__ == "__main__":
