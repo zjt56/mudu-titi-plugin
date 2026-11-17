@@ -665,8 +665,11 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
     numbers = unit.get("numbers") or []
     scoped = unit.get('identity_version') == 'scoped-v1'
     unnumbered = span.get('number_binding') == 'unnumbered_section'
+    writing = span.get('number_binding') == 'single_writing_section'
     parts = {n: question_parts(lines, n, scoped=scoped) for n in numbers}
-    if not scoped and not unnumbered:
+    # 书面表达按规则23没有确定答案，且常无印刷题号；不能用“题号出现一次”
+    # 的普通小题规则卡它，否则有效作文永远无法通过来源审计。
+    if not scoped and not unnumbered and not writing:
         # Legacy numeric identities are only safe when each declared number has
         # exactly one printed occurrence inside this confirmed unit span.
         # Otherwise question_parts would choose the first occurrence and can
