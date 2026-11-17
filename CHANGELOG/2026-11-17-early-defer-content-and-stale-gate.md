@@ -20,6 +20,12 @@
 - `app/workflow/final_audit.py`：新增 `content_completeness_errors()`；最终闸门读取
   `03_types/types.json`，对真实缺内容（非合法图片/空白网格）报
   `CONTENT_COMPLETENESS_UNVERIFIED`，把正确性校验放到最终阶段。
+- `app/workflow/runner.py`：`audio` 返回 `needs_review`（exit 3）时只记录待复核，
+  继续执行解析、知识点、快照、元数据、画线、组装等不依赖听力的独立阶段；review
+  仍因 audio 未完成而等待。
+- `app/workflow/agent_tasks.py`、`app/workflow/handoff.py`：`assemble` 的来源审计问题
+  保留为 notes/候选，不提前让模型重试；`handoff` 对 assemble 延后内容阻断。最终
+  `validate`/`final_audit` 继续按原卷逐题核对并阻断。
 - `app/workflow/test_agent_tasks.py`、`test_preassembly.py`：同步新语义；新增
   `app/workflow/test_early_defer_policy.py` 覆盖内容延后与结构 stale。
 - `AGENTS.md` 硬规则 9 同步：内容完整性、难度一致性、重复显示后移最终闸门；前期不阻断、不伪造。
@@ -36,7 +42,10 @@
 - 真实批次 `【木牍教育】2024中考英语试卷`：强制重跑 `structure_gate` 后 34 单元
   （独立21/组合13）通过，`preassemble`、`types` 均完成。
 - `workflow.test_agent_tasks` 63 项通过；`workflow.test_early_defer_policy` 2 项通过；
-  `workflow.test_format_gate` 27 项通过。
+  `workflow.test_format_gate` 27 项通过；`workflow.test_agent_tasks`+`test_early_defer_policy`+
+  `test_format_gate` 合计 93 项通过。
+- 真实批次 `【木牍教育】2024中考英语试卷` 继续跑：`answers` 完成、`audio` 待复核不阻断文字链、
+  `assemble` 确定性完成；`validate` 在来源逐题核对处阻断（正确性已后移到该阶段）。
 - `test_preassembly` 仍有 3 个既有 late-audio 夹具失败（新的 content_snapshot/meta/underlines
   顺序未被该夹具完整构造），与本次行为无关，保留待后续统一修复。
 

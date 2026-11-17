@@ -1712,6 +1712,11 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
                     except (ValueError, OSError, KeyError, TypeError) as exc:
                         print("  · 确定性重建也不可用：" + str(exc)[:120])
                 if code != 0:
+                    # 听力待复核是可继续的外部能力项：文字答案/解析/知识点、
+                    # 快照、元数据和组装都不依赖听力，只有 review 需要等它。
+                    if stage.id == "audio" and code == 3:
+                        print("  · audio 待复核，不阻断文字链；继续后续独立阶段")
+                        continue
                     return code
                 continue
         if stage.kind in (contracts.AGENT, contracts.HUMAN):

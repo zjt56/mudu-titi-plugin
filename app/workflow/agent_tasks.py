@@ -1699,9 +1699,11 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             restore_table_variant(payload)
             source_audit = audit_batch_source(batch, payload)
             issues = source_audit["issues"]
-            # 可选字段缺失允许推进，原卷已有的题干、选项、图片和材料仍须保真。
-            if issues:
-                raise ValueError("Assemble source audit failed: " + json.dumps(issues, ensure_ascii=False))
+            # 用户 2026-11-17：组装阶段只产出候选；来源/内容正确性统一到最终闸门
+            # final_audit 复核。这里保留完整 issues 作为警告，不提前让模型重试。
+            if issues and notes is not None:
+                notes.append("组装来源审计发现 %d 项，已保留候选并后移最终闸门：%s"
+                             % (len(issues), json.dumps(issues[:5], ensure_ascii=False)))
             # IDs are a deterministic catalog projection, not semantic proof.
             # Fill absent IDs only; validation above rejects conflicting IDs.
             for row in rows.values():
@@ -1905,7 +1907,7 @@ def _assembly_delivery_files(batch_dir, payload):
     # path; new workflows must install the exact object validate/review consume.
     if (root / '06_batch/content.snapshot.json').is_file():
         final = assemble_local.project_final_view(root, payload)
-        handoff._batch(root, 'assemble', final)
+        handoff._batch(root, 'assemble', final, defer_content=True)
         payload.clear()
         payload.update(final)
         files['06_batch/batch_meta.json'] = copy.deepcopy(final)

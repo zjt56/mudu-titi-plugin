@@ -137,7 +137,7 @@ def _source_view(root, payload):
         batch_fill._managed(root)
 
 
-def _batch(root, stage, payload):
+def _batch(root, stage, payload, *, defer_content=False):
     from . import agent_tasks, format_gate, label_audit
     from .runner import source_audit_for_batch
     units = _units(root)
@@ -155,7 +155,7 @@ def _batch(root, stage, payload):
     # 结构、题号、材料归属等文本类问题仍是硬阻断。
     from .findings import source_partition
     blocking, _ = source_partition(audit.get("issues", []))
-    if blocking:
+    if blocking and not defer_content:
         raise ValueError('Downstream source fidelity: ' + str(blocking[:8]))
     for unit in units:
         row = rows[unit['unit_id']]
@@ -263,7 +263,8 @@ def inspect_stage(batch_dir, manifest, stage_id, *, legacy_source_only=False):
                 _assert_underline_projection(_json(root, '06_batch/batch_meta.base.json'), payload)
                 _source_view(root, payload)
             else:
-                _batch(root, stage_id, payload)
+                # 组装阶段只产出候选；来源/内容正确性由最终闸门集中复核。
+                _batch(root, stage_id, payload, defer_content=(stage_id == 'assemble'))
         elif stage_id in ('validate', 'review_gate', 'format_gate'):
             report = _json(root, spec.produces[0])
             if isinstance(report, dict) and report.get('passed') is not True and stage_id == 'review_gate':
