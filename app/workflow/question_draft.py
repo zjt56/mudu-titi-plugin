@@ -127,7 +127,12 @@ def _parts(lines, number, *, scoped=False):
     if window is not None:
         start, end = window
     else:
-        start, end = _find(lines, int(number)), len(lines)
+        # A weak/missing anchor is not permission to scan the rest of the
+        # unit.  The structured parser already owns any recoverable table
+        # content; this fallback is only a local probe and must not borrow a
+        # later question's image options.
+        start = _find(lines, int(number), strong=False)
+        end = start + 1 if start is not None else 0
     # Restrict recovery to this question: a later question's image options must
     # not be rebound to this one, and an identical phrase in shared material
     # must not be reused.

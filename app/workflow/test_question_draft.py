@@ -39,6 +39,18 @@ class QuestionDraftTest(unittest.TestCase):
         return self.source("1. She <u>reads</u> a book. A. reads B. read C. reading D. to read",
                            [([1], "standalone", "单项填空", 1, 1)])
 
+    def test_missing_question_anchor_never_scans_later_image_options(self):
+        lines = [
+            "(　)1. First question.",
+            "A. one\tB. two",
+            "(　)2. Later picture question.",
+            "[IMG image100.jpeg]A.\t[IMG image101.jpeg]B.",
+            "[IMG image102.jpeg]C.\t[IMG image103.jpeg]D.",
+        ]
+        part = question_draft._parts(lines, 3)
+        self.assertEqual(part["options"], [])
+        self.assertNotIn("image100", part["stem"])
+
     def test_span_binding_accepts_complete_content_reflowed_across_lines(self):
         locate = question_draft._locate_in_window
         self.assertEqual(locate('1. Choose the answer. A.Yes B.No',

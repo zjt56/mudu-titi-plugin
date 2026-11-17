@@ -9,8 +9,29 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from .preview import slice_text
 from .question_identity import source_key
+
+
+def _unique_source_index(units):
+    """Index source units only when their legacy identity is unambiguous.
+
+    Scoped identities are explicit. Legacy numeric keys can repeat across
+    sections, so silently letting a dict comprehension keep the last unit can
+    bind one section's options or images to another section.
+    """
+    index = {}
+    duplicates = set()
+    for unit in units or []:
+        if not isinstance(unit, dict):
+            continue
+        key = source_key(unit)
+        if key in index:
+            duplicates.add(key)
+            index.pop(key, None)
+            continue
+        if key not in duplicates:
+            index[key] = unit
+    return index, duplicates
 
 IMAGE = re.compile(r"\[IMG\s+([^\]]+)\]")
 FORBIDDEN = re.compile(r"(?:考试时间|满分\s*\d+分|本试卷共|扫码练听力|答案链接|初中学业水平考试)")
@@ -257,7 +278,15 @@ def audit_question(source_lines: list[str], number: int, item: dict | None = Non
                    media_dir: str | Path | None = None) -> dict:
     """Check a source slice for obvious scope/structure defects; visual mapping stays human-reviewed."""
     item = item if isinstance(item, dict) else {}
-    lines = slice_text(source_lines, int(number))
+    # Source audit must use the same question-owned window as parsing and
+    # drafting.  Keeping a separate slice implementation lets later image
+    # options leak back into an earlier question during validation.
+    window = _question_window(source_lines, int(number))
+    if window is None:
+        lines = []
+    else:
+        start, end = window
+        lines = [line.rstrip() for line in source_lines[start:end] if line.strip()]
     text = "\n".join(lines)
     issues: list[dict] = []
     if not lines:
@@ -637,6 +666,18 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
     scoped = unit.get('identity_version') == 'scoped-v1'
     unnumbered = span.get('number_binding') == 'unnumbered_section'
     parts = {n: question_parts(lines, n, scoped=scoped) for n in numbers}
+    if not scoped and not unnumbered:
+        # Legacy numeric identities are only safe when each declared number has
+        # exactly one printed occurrence inside this confirmed unit span.
+        # Otherwise question_parts would choose the first occurrence and can
+        # silently bind a later option block to the wrong child.
+        from .question_identity import printed_anchors
+        occurrences = Counter(number for _position, number in printed_anchors(lines))
+        for number in numbers:
+            if occurrences.get(int(number), 0) != 1:
+                issues = [{"code": "SOURCE_NUMBER_AMBIGUOUS", "number": number,
+                           "message": f"来源窗口内第 {number} 题号出现 {occurrences.get(int(number), 0)} 次，无法唯一绑定"}]
+                return {"passed": False, "issues": issues, "questions": parts, "shared_options": []}
     if unnumbered and len(numbers) == 1:
         parts[numbers[0]] = {'stem': '', 'options': [], 'found': True}
     issues = []
@@ -770,8 +811,7 @@ def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
             fresh = [unit for unit in confirmed_units if isinstance(unit, dict) and unit.get('numbers')]
     except (OSError, ValueError, TypeError):
         pass
-    counts = Counter(source_key(u) for u in fresh)
-    by_numbers = {source_key(u): u for u in fresh if counts[source_key(u)] == 1}
+    by_numbers, _ambiguous = _unique_source_index(fresh)
     changed = 0
     for row in batch.get("items") or []:
         key = source_key(row)
@@ -834,11 +874,13 @@ def apply_required_writing_stem(batch_dir: str | Path, batch: dict) -> int:
         return 0
     cleaned, _, _ = denoise.clean_body(source)
     fresh = _rebuild_source_units(root, structure, cleaned)
-    required = {}
-    for unit in fresh:
-        if (unit.get("source_span", {}).get("number_binding") == "single_writing_section"
-                and len(unit.get("numbers") or []) == 1):
-            required[source_key(unit)] = _required_stem(unit.get("stem") or "")
+    required, _ambiguous = _unique_source_index(
+        [unit for unit in fresh
+         if (unit.get("source_span", {}).get("number_binding") == "single_writing_section"
+             and len(unit.get("numbers") or []) == 1)]
+    )
+    if _ambiguous:
+        return 0
     if not required:
         return 0
     changed = 0
@@ -881,7 +923,7 @@ def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
         confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return 0
-    by_numbers = {source_key(u): u for u in confirmed.get("units") or [] if isinstance(u, dict)}
+    by_numbers, _ambiguous = _unique_source_index(confirmed.get("units") or [])
     changed = 0
 
     def lookup(parsed, number):
@@ -1094,7 +1136,7 @@ def restore_table_blocks_from_structure(batch_dir: str | Path, batch: dict) -> i
     """
     root = Path(batch_dir)
     confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
-    by_numbers = {source_key(u): u for u in confirmed.get("units") or []}
+    by_numbers, _ambiguous = _unique_source_index(confirmed.get("units") or [])
     repaired = 0
     for item in batch.get("items") or []:
         blocks = item.get("materialBlocks") or item.get("material_blocks")
@@ -1192,7 +1234,7 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
     cleaned, _, _ = denoise.clean_body(source)
     fresh = _rebuild_source_units(root, structure, cleaned)
-    by_numbers = {source_key(u): u for u in fresh}
+    by_numbers, ambiguous_keys = _unique_source_index(fresh)
     items = batch.get("items") or []
     issues, checked = [], []
 
@@ -1205,6 +1247,8 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     expected_units = confirmed.get("units") or []
     expected_sets = [source_key(u) for u in expected_units]
     actual_sets = [source_key(row) for row in items]
+    for key in sorted(ambiguous_keys, key=str):
+        issue("SOURCE_UNIT_AMBIGUOUS", f"旧协议来源身份重复，无法唯一绑定题号 {list(key) if isinstance(key, tuple) else key}")
     if Counter(expected_sets) != Counter(actual_sets):
         issue("BATCH_NUMBER_COVERAGE", "正式批次单元题号及分组与确认结构不一致")
     # AI grouping is usable only after rechecking its bindings against the
@@ -1216,8 +1260,10 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
         if validated is None:
             issue("SOURCE_GROUP_BOUNDARY_MISMATCH", "AI确认结构的原卷行号、题号或分组证据无效；须重跑结构闸门")
         else:
-            by_numbers = {source_key(u): u for u in validated}
-    elif Counter(expected_sets) != Counter(list(by_numbers)):
+            by_numbers, validated_ambiguous = _unique_source_index(validated)
+            for key in sorted(validated_ambiguous, key=str):
+                issue("SOURCE_UNIT_AMBIGUOUS", f"确认结构来源身份重复，无法唯一绑定题号 {list(key) if isinstance(key, tuple) else key}")
+    elif ambiguous_keys or Counter(expected_sets) != Counter(list(by_numbers)):
         # A merged legacy group cannot conceal independently guided source groups.
         issue("SOURCE_GROUP_BOUNDARY_MISMATCH", "确认结构与原卷材料/分段导语的实际分组不一致；须重跑结构闸门")
     materials = {}
@@ -1273,7 +1319,12 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                     issue("SOURCE_UNDERLINE_MISSING", "原卷实词下划线未保留：" + marked[:80], uid)
         # Keep final batch material semantics based on the confirmed unit stem;
         # structure-gate performs the separate raw-span option audit.
-        source_audit = _grid_source_audit(root, unit, audit_source_unit(unit))
+        # Validate the exact confirmed line/offset span as well as the rebuilt
+        # unit text.  Auditing only unit.stem can hide a stale or widened
+        # source binding after structure changes.
+        source_audit = _grid_source_audit(
+            root, unit, audit_source_unit(unit, cleaned.splitlines())
+        )
 
         def check_images(required, present, number=None, label=""):
             for name in sorted(set(_image_names(str(required).splitlines())) - present):

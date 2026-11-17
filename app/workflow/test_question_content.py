@@ -31,6 +31,22 @@ class LeadingImageOptionTest(unittest.TestCase):
         self.assertNotIn("[IMG", part["stem"])
         self.assertIn("Jimmy can’t use", part["stem"])
 
+    def test_source_audit_does_not_cross_into_later_image_options(self):
+        lines = [
+            "(　)1. What is Kate's favourite subject?",
+            "A. Maths.\tB. PE.",
+            "C. Art.\tD. Music.",
+            "(　)2. Later picture question.",
+            "[IMG image100.jpeg]A.\t[IMG image101.jpeg]B.",
+            "[IMG image102.jpeg]C.\t[IMG image103.jpeg]D.",
+        ]
+        audit = audit_question(lines, 1, item={
+            "number": 1,
+            "options": ["A. Maths.", "B. PE.", "C. Art.", "D. Music."],
+        })
+        self.assertNotIn("image100.jpeg", "\n".join(audit["source_lines"]))
+        self.assertFalse(any(issue["code"] == "OPTIONS_MISMATCH" for issue in audit["issues"]))
+
     def test_text_options_unaffected(self):
         lines = ["(　)1. Question?", "A. one\tB. two", "C. three\tD. four"]
         part = question_parts(lines, 1)
@@ -154,6 +170,28 @@ class InlineOptionTest(unittest.TestCase):
         result = audit_source_unit(unit)
         self.assertEqual([o["label"] for o in result["shared_options"]], ["A", "B", "C"])
         self.assertEqual(result["shared_options"][0]["text"], "Well done!")
+
+
+class LegacySourceAmbiguityTest(unittest.TestCase):
+    def test_duplicate_number_inside_legacy_unit_is_blocked(self):
+        unit = {
+            "unit_kind": "group", "type": "阅读理解", "numbers": [1],
+            "stem": "(　)1. First?\nA. One\tB. Two\n(　)1. Second?\nA. Other\tB. Choice",
+            "source_span": {"start_line": 1, "end_line": 4},
+        }
+        audit = audit_source_unit(unit)
+        self.assertFalse(audit["passed"])
+        self.assertIn("SOURCE_NUMBER_AMBIGUOUS", [item["code"] for item in audit["issues"]])
+
+    def test_duplicate_legacy_source_keys_are_not_overwritten(self):
+        from workflow.question_content import _unique_source_index
+        units = [
+            {"numbers": [1], "source_section": {"start_line": 1, "end_line": 2}},
+            {"numbers": [1], "source_section": {"start_line": 5, "end_line": 6}},
+        ]
+        index, ambiguous = _unique_source_index(units)
+        self.assertEqual(index, {})
+        self.assertEqual(ambiguous, {(1,)})
 
 
 class OptionBoundaryTest(unittest.TestCase):
