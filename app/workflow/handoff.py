@@ -108,16 +108,44 @@ def _without_underline_tags(value):
     return value
 
 
+def _without_audio_fields(value):
+    """Drop derived audio wiring from a projected metadata/content view."""
+    projected = copy.deepcopy(value)
+    def row(item):
+        if not isinstance(item, dict):
+            return
+        item.pop('audio', None)
+        item.pop('audioFile', None)
+        if isinstance(item.get('attachments'), list):
+            item['attachments'] = [a for a in item['attachments']
+                                   if not (isinstance(a, dict) and a.get('kind') == 'audio')]
+            if not item['attachments']:
+                item.pop('attachments')
+        for child in item.get('subquestions') or []:
+            row(child)
+    if isinstance(projected, dict):
+        for item in projected.get('items') or []:
+            row(item)
+    return projected
+
+
 def _assert_meta_projection(snapshot, payload):
-    if _source_projection(snapshot) != _source_projection(payload):
+    # Late audio delivery legitimately adds audio attachments to the batch views
+    # after the content snapshot was taken. Metadata owns source/text fields, not
+    # media wiring, so drop audio entries from every attachments list before
+    # proving the metadata view still projects the snapshot.
+    if (_without_audio_fields(_source_projection(snapshot))
+            != _without_audio_fields(_source_projection(payload))):
         raise ValueError('Metadata view no longer projects the content snapshot')
 
 
 def _assert_underline_projection(base, payload):
     # Final assembly fills this same view later. Only source-owned fields belong
     # to underline delivery; requiring later answers/labels creates a DAG cycle.
-    if (_without_underline_tags(_source_projection(base))
-            != _without_underline_tags(_source_projection(payload))):
+    # Audio attachments are late media wiring and must not make underline delivery
+    # stale after assemble.
+    if (_without_underline_tags(_without_audio_fields(_source_projection(base)))
+            != _without_underline_tags(_without_audio_fields(_source_projection(payload)))):
         raise ValueError('Underline view changed fields outside underline markup')
 
 
@@ -170,7 +198,7 @@ def _batch(root, stage, payload, *, defer_content=False):
 def inspect_stage(batch_dir, manifest, stage_id, *, legacy_source_only=False):
     """Inspect installed output only; never repair, install, mark or invoke a model."""
     from . import contracts, manifest as mf
-    root = Path(batch_dir)
+    root = Path(batch_dir).expanduser().resolve()
     spec = contracts.STAGE_BY_ID[stage_id]
     record = manifest.get('stages', {}).get(stage_id, {})
     try:

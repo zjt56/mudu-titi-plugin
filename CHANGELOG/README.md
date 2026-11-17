@@ -32,6 +32,8 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-17 | [2026-11-17-router-and-stale-docs.md](2026-11-17-router-and-stale-docs.md) | 显式损坏模型路由拒绝静默回退，收敛视觉停用与两轮审核旧说明，测试入口覆盖 `.test.mjs` |
+| 2026-11-17 | [2026-11-17-handoff-relative-root-underlines.md](2026-11-17-handoff-relative-root-underlines.md) | 修复画线交付相对路径误判与音频附件导致的假过期 |
 | 2026-11-17 | [2026-11-17-native-content-route-identity.md](2026-11-17-native-content-route-identity.md) | 视觉移除后原生内容代理恢复 Harness 路由身份绑定 |
 | 2026-11-17 | [2026-11-17-writing-end-past-body.md](2026-11-17-writing-end-past-body.md) | 书面表达 section end 超出正文时夹到最后一行，修复结构确认越界 |
 | 2026-11-17 | [2026-11-17-writing-source-audit-unnumbered.md](2026-11-17-writing-source-audit-unnumbered.md) | 书面表达无印刷题号时来源审计豁免，修复作文被题号唯一性阻断 |
