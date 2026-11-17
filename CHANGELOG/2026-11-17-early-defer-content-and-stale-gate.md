@@ -23,6 +23,8 @@
 - `app/workflow/manifest.py`：`upload` 已完成的旧批次自动把新增 `content_snapshot`
   标记为 `skipped（历史批次已提交远端）`，不再让已上传/已暂存批次显示“可执行快照”；
   `is_stale` 对 `skipped` 阶段不再把“缺少产物”误标为“需重跑”。
+- `app/workflow/diagnose.py`：已提交远端的旧批次不再把 `meta/underlines/validate/review`
+  的派生 `invalidated` 显示为“卡在难度与分类”，避免历史批次出现假卡点。
 - `app/workflow/runner.py`：`audio` 返回 `needs_review`（exit 3）时只记录待复核，
   继续执行解析、知识点、快照、元数据、画线、组装等不依赖听力的独立阶段；review
   仍因 audio 未完成而等待。

@@ -595,10 +595,15 @@ def diagnose(batch_dir) -> dict:
                 "note": "", "blocking": True,
             })
             first_blocked = "model"
+    uploaded = (stages.get("upload") or {}).get("status") == mf.COMPLETED
     for stage in contracts.STAGES:
         record = stages.get(stage.id) or {}
         status = record.get("status") or mf.PENDING
         if status in mf.TERMINAL_OK:
+            continue
+        # 已提交远端的旧批次：派生本地阶段即使因新契约显示 invalidated，也不再
+        # 是可执行的当前卡点；不得为了修历史显示而重跑或改写已上传产物。
+        if uploaded and stage.id in ("meta", "underlines", "validate", "review"):
             continue
         if stage.id == "extract":
             from .runner import ocr_wait_state, ocr_reconciliation_state
