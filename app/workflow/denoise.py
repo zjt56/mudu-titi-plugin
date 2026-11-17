@@ -244,6 +244,10 @@ def project_structure(structure: dict, raw_text: str, cleaned_text: str | None =
     if result.get("coordinate_projection"):
         raise ValueError("SOURCE_COORDINATE_MISMATCH: structure projection belongs to another body")
     raw_lines = raw_text.splitlines()
+    # `unresolved` 是提取/OCR 诊断，不是题目锚点；它的 line 可能来自原始全文
+    # （含答案册/附录，超出已清理正文）。诊断行不参与坐标投影，否则一个
+    # QUESTION_NUMBER_INFERRED 的越界行就会把整个结构闸门卡死。
+    unresolved = result.pop("unresolved", None)
     # 书面表达常被提取器把文末答案/听力材料标题并入 section end，导致 end 超出
     # 实际正文（例如 19 年安徽卷 319 vs 315）。作文正文以当前 body 为准，超出
     # body 的尾部只能是附录/页脚，夹到最后一行；普通大题不享受此夹取。
@@ -302,5 +306,7 @@ def project_structure(structure: dict, raw_text: str, cleaned_text: str | None =
         return mapped
 
     result = project(result)
+    if unresolved is not None:
+        result["unresolved"] = deepcopy(unresolved)
     result["coordinate_projection"] = proof
     return result

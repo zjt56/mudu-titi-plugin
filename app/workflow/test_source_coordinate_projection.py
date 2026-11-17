@@ -196,3 +196,10 @@ if __name__ == "__main__":
                    "questions": [96], "source_line": 1, "source_end_line": 9}
         projected = denoise.project_structure({"sections": [section]}, raw, clean)
         self.assertLessEqual(projected["sections"][0]["source_end_line"], len(clean.splitlines()))
+
+    def test_unresolved_diagnostic_lines_are_not_source_anchors(self):
+        structure = {"sections": SECTIONS,
+                     "unresolved": [{"code": "QUESTION_NUMBER_INFERRED", "line": 999,
+                                     "message": "作文题号在原始全文第999行"}]}
+        projected = denoise.project_structure(structure, RAW, CLEAN)
+        self.assertEqual(projected["unresolved"][0]["line"], 999)
