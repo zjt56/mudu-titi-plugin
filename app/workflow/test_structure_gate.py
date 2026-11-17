@@ -69,6 +69,25 @@ class StructureGateTest(unittest.TestCase):
         # 元信息已抽到 meta，正文不再含卷名
         self.assertEqual(conf["meta"].get("year"), 2026)
 
+    def test_partial_group_match_does_not_leak_into_another_section(self):
+        sections = [
+            {"type": "听力短对话理解", "questions": [1, 2, 3, 4, 5],
+             "source_line": 2, "source_end_line": 6},
+            {"type": "阅读理解", "questions": [56, 57, 58],
+             "source_line": 7, "source_end_line": 8},
+        ]
+        # Stale reading group still carries mis-counted 2/5/6; only its complete
+        # member set may define a group, and only inside its own section.
+        groups = [{"type": "阅读理解", "questions": [2, 5, 6, 56, 57, 58]}]
+        lines = ["卷名", "1. Q", "2. Q", "3. Q", "4. Q", "5. Q", "A", "56. Q", "57. Q", "58. Q"]
+        units = structure_gate._build_units(sections, groups, lines)
+        listening = [u for u in units if u["type"] == "听力短对话理解"]
+        self.assertEqual(len(listening), 5)
+        self.assertTrue(all(u["unit_kind"] == "standalone" and u["numbers"] == [n]
+                            for u, n in zip(sorted(listening, key=lambda u: u["numbers"]), range(1, 6))))
+        reading = [u for u in units if u["type"] == "阅读理解"]
+        self.assertFalse([u["numbers"] for u in reading if set(u["numbers"]) != {56, 57, 58}])
+
     def test_group_without_printed_question_numbers_keeps_section_source(self):
         sections = [{"type": "听力短文理解", "questions": [11, 12, 13, 14, 15],
                      "source_line": 1, "source_end_line": 3}]
@@ -160,20 +179,27 @@ class StructureGateTest(unittest.TestCase):
         marked = text.replace("1.2024年安徽省中考", "  **1.2024年安徽省中考**")
         self.assertEqual(preview.slice_text(marked.splitlines(), 1), ["1.2024年我参加安徽省中考。"])
 
-    def test_empty_source_blocks(self):
+    def test_empty_source_yields_no_units_and_no_pass(self):
+        # 结构确认不做阻断校验；但正文为空 -> 拆不出任何单元 -> 无可交付结构。
         structure = {"sections": [{"type": "单项填空", "questions": [1]}]}
         batch = make_batch(self.root, structure, "")
         report = structure_gate.run_gate(batch)
         self.assertFalse(report["passed"])
-        self.assertIn("SOURCE_EMPTY", [b["code"] for b in report["blockers"]])
+        self.assertEqual(report["unit_counts"]["total"], 0)
+        codes = [w["code"] for w in report["warnings"]]
+        self.assertIn("SOURCE_EMPTY", codes)
+        self.assertEqual(report["blockers"], [])
 
-    def test_no_sections_blocks(self):
+    def test_no_sections_is_warning_not_blocking(self):
+        # 结构确认不做阻断校验；无 sections 只留痕，不阻断阶段。
         batch = make_batch(self.root, {"sections": []}, "( )1. A. a")
         report = structure_gate.run_gate(batch)
-        self.assertFalse(report["passed"])
-        self.assertIn("NO_SECTIONS", [b["code"] for b in report["blockers"]])
+        codes = [w["code"] for w in report["structure_warnings"]]
+        self.assertIn("NO_SECTIONS", codes)
+        self.assertEqual(report["blockers"], [])
 
-    def test_group_out_of_section_blocks(self):
+    def test_group_out_of_section_is_warning_not_blocking(self):
+        # 结构确认不做阻断校验：组题越界只作为 warning 留痕，仍产出单元继续下游。
         structure = {
             "sections": [{"type": "阅读理解", "questions": [[30, 32]]}],
             "groups": [{"questions": [31, 99]}],   # 99 不属于任何大题
@@ -181,8 +207,10 @@ class StructureGateTest(unittest.TestCase):
         body = "阅读\n30. q\n31. q\n32. q"
         batch = make_batch(self.root, structure, body)
         report = structure_gate.run_gate(batch)
-        self.assertFalse(report["passed"])
-        self.assertIn("GROUP_OUT_OF_SECTION", [b["code"] for b in report["blockers"]])
+        codes = [w["code"] for w in report["warnings"]]
+        self.assertIn("GROUP_OUT_OF_SECTION", codes)
+        self.assertEqual(report["blockers"], [])
+        self.assertTrue(report["unit_counts"]["total"] > 0)
 
     def test_outputs_written(self):
         structure = {"sections": [{"type": "单项填空", "questions": [1]}]}

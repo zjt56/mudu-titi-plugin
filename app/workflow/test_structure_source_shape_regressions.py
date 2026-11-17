@@ -150,11 +150,12 @@ class StructureSourceShapeRegressions(unittest.TestCase):
         self.assertEqual(units[0]['numbers'], [1, 2])
 
     def test_restart_resolves_despite_unrelated_empty_section(self):
+        # 结构确认不做阻断校验：漏节/重号疑点只作为 structure_warnings 留痕。
         text = ('Unit 3\n第四课时 Project\nⅠ.写出下列古诗画线句中表示数字的英文单词\n\n'
                 'Ⅱ.根据汉语意思完成句子\n1.Alpha ____\nⅢ.根据汉语意思完成句子\n1.Beta ____')
         _, _, report, _ = self.gate(text)
-        codes = {p['code'] for p in report['blockers']}
-        self.assertFalse(report['passed'])
+        codes = {p['code'] for p in report['structure_warnings']}
+        self.assertEqual(report['blockers'], [])
         self.assertIn('SOURCE_SECTION_UNCOVERED', codes)
         self.assertNotIn('NUMBERING_RESTART', codes)
 
@@ -167,11 +168,12 @@ class StructureSourceShapeRegressions(unittest.TestCase):
         units[-1]['source_section']['occurrence'] = 999
         self.assertFalse(_proven_scoped_restart(5, units, structure['sections'], lines, []))
 
-    def test_duplicate_same_scope_still_blocks(self):
+    def test_duplicate_same_scope_is_warning_not_blocking(self):
+        # 结构确认不做阻断校验：同 scope 题号重复只留痕，不阻断阶段。
         text = 'Unit 3\n第四课时 Project\nⅠ.根据汉语意思完成句子\n1.A ____\n1.B ____'
         _, _, report, _ = self.gate(text)
-        self.assertFalse(report['passed'])
-        self.assertIn('SOURCE_DUPLICATE_NUMBERS', {p['code'] for p in report['blockers']})
+        self.assertEqual(report['blockers'], [])
+        self.assertIn('SOURCE_DUPLICATE_NUMBERS', {p['code'] for p in report['structure_warnings']})
 
     def test_table_missing_body_or_closure_is_not_legal_shape(self):
         for body in ('[TABLE 1]\n\n[/TABLE]\n<u>　</u>', '[TABLE 1]\nReal poem\n<u>　</u>',

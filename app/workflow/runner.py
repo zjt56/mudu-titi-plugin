@@ -1050,7 +1050,15 @@ def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
                                    notes=wait_reason, finished_at=None,
                                    deferred=deferred_items)
                 else:
-                    mf.touch_stage(current, "structure_gate", mf.BLOCKED, notes=notes)
+                    # 结构确认不做阻断校验（用户 2026-11-17）：仅当完全没有拆出任何
+                    # 单元时才视为本阶段无法交付；其余疑点已作为 warning 留痕，继续下游。
+                    lacking_units = not (report.get("unit_counts") or {}).get("total")
+                    if lacking_units:
+                        mf.touch_stage(current, "structure_gate", mf.BLOCKED, notes=notes)
+                    else:
+                        _record_success(batch_dir, current, contracts.STAGE_BY_ID["structure_gate"])
+                        current["stages"]["structure_gate"]["notes"] = (
+                            "结构确认完成（不阻断校验，疑点留痕）：" + notes)[:500]
             mf.save(batch_dir, current)
             manifest.clear()
             manifest.update(current)

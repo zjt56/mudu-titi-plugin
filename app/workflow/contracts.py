@@ -53,7 +53,7 @@ STAGES: tuple[Stage, ...] = (
         depends_on=("extract",),
         produces=("01_source/structure.confirmed.json", "07_review/structure-gate.json"),
         docs=("references/structure.md", "docs/workflow-regressions.md"),
-        description="只保留提取文本、题号线索、材料和媒体证据；题型、题目分片、题组边界与分层交由模型结合上下文判断。缺失或不确定项记录警告，不阻断后续阶段。",
+        description="只负责把原卷拆成结构化单元并填入字段（题号/题型位置/题干/选项/材料/所属大题题组），不做阻断校验：题号覆盖、材料归属、题干保真等疑点一律记为结构告警留痕并继续下游；验证集中在最终格式闸门。只有完全拆不出任何单元时本阶段才无法交付。",
     ),
     Stage(
         id="preassemble",

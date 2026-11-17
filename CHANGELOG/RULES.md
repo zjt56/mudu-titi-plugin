@@ -594,3 +594,8 @@ question_content.py::restore_source_stems（网格单元格不承载带字母选
 
 用户原话（2026-11-17）：「视觉理解先不急，可以先取消」，随后确认「彻底删除视觉相关代码」「缺视觉就按无视觉继续，不阻断」「连 visual_transport 一起删」。
 规则：整页渲染/栏目视觉归属/板块看图/图片语义/视觉传输全部移除（`visual_columns.py`、`source_pages.py`、`visual_review.py`、`visual_crosscheck.py`、`visual_transport.py` 已删除）。A/B 板块等容器只按印刷文本行识别（`lesson_bands.py` 纯文本版，仅依赖 `sync_practice` 文本函数）。图片只作附件按字节指纹绑定，不再据此判定栏目归属/题干/题型。缺视觉证据不阻断任何阶段；无印刷号题仍保留 `printed_numbers=[]`、不补造数字、不漏收。内容结构快照不再绑定整页页图/栏目产物，栏目归属检查一律 `not_required`。历史批次视觉证据文件只读留档。落地：`lesson_bands.py`、`structure_gate.py`、`structure_ai.py`、`question_content.py`、`preview.py`、`content_structure.py`、`content_media.py`、`content_agent.py`、`local_agent.py`、`runner.py`、`extract.py`；验证见 `CHANGELOG/2026-11-17-disable-visual-understanding.md`。
+
+## 2026-11-17：结构确认不做阻断校验
+
+用户原话（2026-11-17）：「结构确认的主要工作是创建后续所需要的题目结构化的字段，并将拆解出来的试卷按照结构化进行填入就行，不做阻断的校验，验证环节放在后面的格式检查中」；追问确认「完全不阻断」「疑点记 warning 留痕继续下游」「只改这一环」。
+规则：`structure_gate` 只负责把原卷拆成结构化单元并填入字段，不做阻断；题号覆盖/材料归属/题干保真/重号/无号边界/组题越界/来源冲突等一律写 `structure_warnings`（并进 `warnings`，`blocking=false`），阶段完成继续下游；`blockers` 恒空，`passed=bool(units)`，仅当完全拆不出单元（`unit_counts.total==0`）才算无法交付。验证集中在最终格式闸门与已有来源/答案/内容对照，本轮不放宽任何下游硬校验。落地：`structure_gate.run_gate`、`runner.do_structure_gate`、`contracts.py` 阶段描述、`app/docs/structure.md`；验证见 `CHANGELOG/2026-11-17-structure-gate-non-blocking.md`。

@@ -61,7 +61,7 @@ Dear friends, thank you for your letter.
             (source / 'structure.json').write_text(json.dumps({'sections': [], 'groups': []}), encoding='utf-8')
             report = structure_gate.run_gate(batch)
             self.assertFalse(report['passed'])
-            self.assertIn('SOURCE_ANSWER_ONLY', [b['code'] for b in report['blockers']])
+            self.assertIn('SOURCE_ANSWER_ONLY', [w['code'] for w in report['structure_warnings']])
             self.assertEqual(report['source_diagnostic']['classification'], 'source_answer_only')
             self.assertEqual(report['source_diagnostic']['scope'], 'full_extracted_text_only; not visual verification')
             self.assertTrue(report['source_diagnostic']['source_sha256'])

@@ -62,12 +62,16 @@ class MetadataPlaceholderTests(unittest.TestCase):
             self.assertEqual(len(confirmed['units']), 1)
 
     def test_missing_metadata_does_not_clear_real_structure_errors(self):
+        # 结构确认不做阻断校验：元数据冲突降级为结构告警留痕，但仍须真实保留（不清空），
+        # 且该批仍有正常单元继续下游。
         with tempfile.TemporaryDirectory() as temp:
             batch = self.make_batch(Path(temp), extra_issues=[
                 {'code': 'SOURCE_METADATA_CONFLICT', 'message': '两个标题年份冲突'}])
             report = structure_gate.run_gate(batch)
-            self.assertFalse(report['passed'])
-            self.assertIn('SOURCE_METADATA_CONFLICT', {b['code'] for b in report['blockers']})
+            codes = {w['code'] for w in report['structure_warnings']}
+            self.assertIn('SOURCE_METADATA_CONFLICT', codes)
+            self.assertEqual(report['blockers'], [])
+            self.assertTrue(report['unit_counts']['total'] > 0)
 
     def test_headerless_docx_reaches_types_task_through_official_runner(self):
         with tempfile.TemporaryDirectory() as temp:

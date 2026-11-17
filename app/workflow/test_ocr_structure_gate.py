@@ -41,7 +41,8 @@ class OCRStructureGateTest(unittest.TestCase):
             return structure_gate.run_gate(self.batch)
 
     def codes(self, report):
-        return {item['code'] for item in report['blockers']}
+        # 结构确认不做阻断校验：疑点写入 structure_warnings，blockers 恒为空。
+        return {item['code'] for item in report['structure_warnings']}
 
     def test_bound_regrouping_overrides_stale_candidate_and_retains_layout_review(self):
         report = self.run_case()

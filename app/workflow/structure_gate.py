@@ -662,8 +662,16 @@ def _build_units(sections: list[dict], groups: list[dict], source_lines: list[st
         type_name = _section_type_label(section.get("type"))
         nums = _section_numbers(section)
         group_flag = is_group_type(type_name)
-        # 该 section 里已被 groups 声明为组内的题号
-        declared_groups = [sorted(set(group_of[n])) for n in nums if n in group_of]
+        # 该 section 里已被 groups 声明为组内的题号。A group belongs to exactly
+        # one section: adopting it on a single shared number would attach a stale
+        # group (e.g. a mis-counted reading group carrying 2/5/6) to an unrelated
+        # listening section. Require the group to be fully contained in this
+        # section; a partial match is a candidate-level defect, not evidence.
+        declared_groups = []
+        for n in nums:
+            members = group_of.get(n)
+            if members and set(members) <= set(nums):
+                declared_groups.append(sorted(set(members)))
         declared_groups = sorted({tuple(g) for g in declared_groups})
         # 原卷的分段导语/材料标题比“整节一组”的旧候选更精确。
         partitions = source_group_partitions(source_lines, nums) if group_flag else []
@@ -1031,6 +1039,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     if not raw_text.strip():
         blockers.append({"code": "SOURCE_EMPTY", "message": "正文为空，无法结构化"})
         checks["source_present"] = "failed"
+        sections = []
     else:
         checks["source_present"] = "passed"
 
@@ -1363,7 +1372,16 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                        or any(issue.get("code") in {"OCR_VISUAL_REVIEW", "EXTRACTION_WARNING"}
                               for issue in blockers))
     checks["grouping"] = "failed" if any("GROUP" in b["code"] for b in blockers) else "passed"
-    passed = not blockers and bool(units)
+    # 用户 2026-11-17 明确：结构确认只负责产出结构化字段并填入，不做阻断校验；
+    # 验证后移到最终格式闸门。因此任何结构疑点只作为 warning 留痕，不阻断阶段；
+    # 只有“完全没有拆出任何单元”才算这一步无法产出（下一阶段无从消费）。
+    structure_warnings = []
+    if blockers:
+        for blocker in blockers:
+            structure_warnings.append({**blocker, "blocking": False, "status": "structure_warning"})
+        warnings.extend(structure_warnings)
+        blockers = []
+    passed = bool(units)
 
     if band_evidence.get("bands") or band_evidence.get("features"):
         # Rebind current visual metadata even for reused source-valid AI units;
@@ -1391,6 +1409,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         **hashes,
         "metadata_missing": metadata_missing,
         "warnings": warnings,
+        "structure_warnings": structure_warnings,
         "deferred": deferred,
         "source_diagnostic": source_diagnostic,
         "layout_required": layout_required,
