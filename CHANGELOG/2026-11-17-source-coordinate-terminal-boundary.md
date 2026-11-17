@@ -6,7 +6,7 @@
 `SOURCE_COORDINATE_MISMATCH: source_end_line=308 outside raw body 1..307`。
 重新上传后已取得实批目录 `C:\Users\Administrator\.dsh\wf-plugin-data\workflows\【木牍教育】2024中考英语试卷`；已读取 `01_source/正文.txt` 与 `01_source/structure.json` 复验。
 
-## 改动
+## 改了什么
 
 - `app/workflow/denoise.py::project_structure`：当原文以换行结束时，仅允许 `source_end_line`/`end_line` 等于 `len(raw_lines)+1` 的唯一终止边界，并将其投影到最后保留正文行。
 - 起始坐标、题目锚点、被删除行上的锚点，以及大于终止边界的坐标仍严格报 `SOURCE_COORDINATE_MISMATCH`。

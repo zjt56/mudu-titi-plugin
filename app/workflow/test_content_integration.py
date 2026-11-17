@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
-from workflow import local_agent, content_agent, visual_transport, agent_tasks
+from workflow import local_agent, content_agent, agent_tasks
 
 
 class ContentIntegrationTests(unittest.TestCase):
@@ -31,40 +31,29 @@ class ContentIntegrationTests(unittest.TestCase):
     def test_live_host_uses_exact_route_and_bound_inputs(self):
         result = {"response": {"status": "completed"}}
         with patch.object(content_agent, "available", return_value=True), \
-             patch.object(visual_transport, "route_identity", return_value=self.route), \
+             patch.object(local_agent, "route_identity", return_value=self.route, create=True), \
              patch.object(content_agent, "invoke", return_value=result) as invoke, \
              patch.object(local_agent.subprocess, "Popen") as spawn:
             actual = local_agent.invoke(self.prompt, self.batch / "run", self.config, permit_parallel=True)
         self.assertIs(actual, result)
         spawn.assert_not_called()
         args, kw = invoke.call_args
-        self.assertEqual(args[2]["_content_route_identity"], self.route)
         self.assertEqual(args[2]["_content_input_hashes"], self.config["_content_input_hashes"])
         self.assertTrue(kw["permit_parallel"])
 
     def test_selected_native_failure_never_starts_cli(self):
         with patch.object(content_agent, "available", return_value=True), \
-             patch.object(visual_transport, "route_identity", return_value=self.route), \
+             patch.object(local_agent, "route_identity", return_value=self.route, create=True), \
              patch.object(content_agent, "invoke", side_effect=local_agent.AgentError("Rejected", "response")), \
              patch.object(local_agent.subprocess, "Popen") as spawn:
             with self.assertRaisesRegex(local_agent.AgentError, "Rejected"):
                 local_agent.invoke(self.prompt, self.batch / "run", self.config)
         spawn.assert_not_called()
 
-    def test_broken_selected_route_is_configuration_error(self):
-        with patch.object(content_agent, "available", return_value=True), \
-             patch.object(visual_transport, "route_identity", side_effect=visual_transport.VisualTransportError("broken route")), \
-             patch.object(content_agent, "invoke") as invoke, \
-             patch.object(local_agent.subprocess, "Popen") as spawn:
-            with self.assertRaisesRegex(local_agent.AgentError, "broken route"):
-                local_agent.invoke(self.prompt, self.batch / "run", self.config)
-        spawn.assert_not_called()
-        invoke.assert_not_called()
-
     def test_strict_does_not_fallback_when_no_service(self):
         self.config["native_agent"]["mode"] = "strict"
         with patch.object(content_agent, "available", return_value=False), \
-             patch.object(visual_transport, "route_identity", return_value=self.route), \
+             patch.object(local_agent, "route_identity", return_value=self.route, create=True), \
              patch.object(content_agent, "invoke", side_effect=local_agent.AgentError("host unavailable", "timeout")) as invoke, \
              patch.object(local_agent.subprocess, "Popen") as spawn:
             with self.assertRaisesRegex(local_agent.AgentError, "host unavailable"):
@@ -75,7 +64,7 @@ class ContentIntegrationTests(unittest.TestCase):
     def test_missing_private_binding_rebuilds_current_stage_task(self):
         self.config.pop("_content_input_hashes")
         with patch.object(content_agent, "available", return_value=True), \
-             patch.object(visual_transport, "route_identity", return_value=self.route), \
+             patch.object(local_agent, "route_identity", return_value=self.route, create=True), \
              patch.object(agent_tasks, "build_task", return_value={"input_hashes": {"source": "sha"}}) as build, \
              patch.object(content_agent, "invoke", return_value={}) as invoke:
             local_agent.invoke(self.prompt, self.batch / "run", self.config)
@@ -132,7 +121,7 @@ class ContentHttpIntegrationTests(unittest.TestCase):
             with patch.object(content_agent, "QUEUE_ROOT", base / "queue"), \
                  patch.object(agent_tasks, "confirmed_units", return_value=units), \
                  patch.object(agent_tasks, "accept_result", return_value={"completed": True}) as validate, \
-                 patch.object(visual_transport, "route_identity", return_value=route):
+                 patch.object(local_agent, "route_identity", return_value=route, create=True):
                 class QuietHandler(workbench.Handler):
                     def log_message(self, *_args):
                         pass

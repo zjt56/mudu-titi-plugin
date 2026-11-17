@@ -3,7 +3,7 @@
 ## 背景/触发
 同一题在不同真实材料中出现两份不一致解析时，原实现把它当成确定性冲突并卡住；同时旧流程先汇总、后画线，后续汇总可能覆盖 `<u>...</u>` 标记。
 
-## 改动
+## 改了什么
 - `app/workflow/explanations_direct.py`：解析候选允许在同题真实来源冲突时择一，保留候选自身的来源坐标与证据，不拼接、不改写、不跨题借用。
 - `app/workflow/upload_content.py`：保留逐字来源、scope/ownership 和上传保真校验；同题另一份异文解析不再清空当前真实候选。
 - `app/workflow/contracts.py`：新增 `content_snapshot`，执行顺序调整为 `content_snapshot → meta → underlines → assemble → validate`；最终 assemble 显式依赖画线产物。

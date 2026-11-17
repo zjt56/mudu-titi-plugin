@@ -533,15 +533,11 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False, co
                               if parent.name == "workflow"), None)
             if batch is None:
                 raise AgentError("Native content agent requires an explicit batch directory", "integration")
-            from . import visual_transport, agent_tasks
+            from . import agent_tasks
             native_settings = dict(settings, _content_batch_dir=str(batch))
             if "_content_input_hashes" not in native_settings:
                 native_settings["_content_input_hashes"] = agent_tasks.build_task(
                     Path(batch), stage, max_input_chars=sys.maxsize)["input_hashes"]
-            try:
-                native_settings["_content_route_identity"] = visual_transport.route_identity(stage)
-            except visual_transport.VisualTransportError as exc:
-                raise AgentError(str(exc), "config") from exc
             return content_agent.invoke(prompt, root, native_settings, permit_parallel=permit_parallel)
     try:
         root.mkdir(parents=True, exist_ok=True)

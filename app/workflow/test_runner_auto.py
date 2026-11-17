@@ -31,8 +31,7 @@ class RunnerAutoTest(unittest.TestCase):
                                return_value={"ran": False, "reason": "测试离线，未调用模型"})
         offline.start()
         self.addCleanup(offline.stop)
-        for target in ('workflow.metadata_ai.auto_identify', 'workflow.lesson_bands.build',
-                       'workflow.visual_review.build', 'workflow.visual_columns.build'):
+        for target in ('workflow.metadata_ai.auto_identify', 'workflow.lesson_bands.build'):
             offline_model = patch(target, return_value={'status': 'unavailable', 'model_calls': 0})
             offline_model.start()
             self.addCleanup(offline_model.stop)

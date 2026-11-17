@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from workflow import model_admission as admission, local_agent, visual_transport
+from workflow import model_admission as admission, local_agent
 
 
 class AdmissionTests(unittest.TestCase):
@@ -48,16 +48,6 @@ class AdmissionTests(unittest.TestCase):
         other = self.batch.parent / "other"
         self.assertEqual(admission.resolve_batch(batch_dir=other, run_dir=attempt), other)
 
-    def test_visual_rejects_before_bridge_but_route_only_is_local(self):
-        route = {"provider": "selected", "model": "exact", "profile": "current"}
-        with patch.object(visual_transport, "_call", return_value=route) as bridge:
-            with self.assertRaises(visual_transport.VisualTransportError) as caught:
-                visual_transport.identify([], "look", batch_dir=self.batch)
-            self.assertEqual(caught.exception.code, "model_cooldown")
-            bridge.assert_not_called()
-            self.assertEqual(visual_transport.route_identity(), route)
-            self.assertTrue(bridge.call_args.args[0]["route_only"])
-
     def test_cli_guard_runs_after_lock_before_process(self):
         config = {"provider": "dsh", "executable": sys.executable,
                   "timeout_seconds": 1, "max_input_chars": 180000}
@@ -72,20 +62,6 @@ class AdmissionTests(unittest.TestCase):
         metadata = json.loads((attempt / "attempt.json").read_text())
         self.assertIsNone(metadata["wall_start"])
         self.assertEqual(metadata["error_code"], "model_cooldown")
-
-    def test_legacy_visual_cache_precedes_guard_and_network_is_blocked(self):
-        from workflow import visual_review
-        with patch.object(visual_review, "_load_key", return_value="fixture-only"), \
-             patch.object(visual_review, "_iter_images", return_value=[(self.batch / "x.png", "x.png")]), \
-             patch.object(visual_review, "_identify", side_effect=AssertionError("no network")) as call:
-            result = visual_review.build(self.batch, endpoint="https://fixture.invalid")
-            self.assertEqual(result["status"], "deferred")
-            self.assertFalse(result["model_started"])
-            call.assert_not_called()
-            artifact = self.batch / visual_review.ARTIFACT
-            artifact.parent.mkdir(parents=True, exist_ok=True)
-            artifact.write_text("{}")
-            self.assertEqual(visual_review.build(self.batch, endpoint="https://fixture.invalid")["status"], "cached")
 
     def test_existing_native_claim_protocol_is_unchanged_during_cooldown(self):
         # Characterization of the remaining boundary: a preexisting queue item may

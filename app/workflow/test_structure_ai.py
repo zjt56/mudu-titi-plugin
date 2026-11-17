@@ -53,11 +53,12 @@ class StructureAiClassifyTest(unittest.TestCase):
         self.assertEqual(got[0]["source_span"]["printed_numbers"], [])
         self.assertFalse(got[0]["printed_number"])
 
-    def test_column_prompt_requires_role_and_internal_alias_without_name_rules(self):
+    def test_prompt_no_longer_requires_visual_column_roles(self):
+        # 视觉理解已停用：提示词不再要求消费整页栏目归属或 column_id。
         prompt = structure_ai._classify_prompt("1. question", {"visual_columns": []})
-        self.assertIn("column_id", prompt)
-        self.assertIn("role=guidance/container不独立成题", prompt)
-        self.assertIn("numbers=[1]仅为内部兼容别名", prompt)
+        self.assertNotIn("column_id", prompt)
+        self.assertNotIn("role=guidance/container", prompt)
+        self.assertIn("视觉栏目归属已停用", prompt)
         self.assertIn("不凭栏目名称猜题型或组单", prompt)
 
     def test_unnumbered_text_requires_exact_complete_rebuilt_window(self):

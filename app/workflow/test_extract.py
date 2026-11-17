@@ -291,6 +291,19 @@ class StructureCandidateTest(unittest.TestCase):
         self.assertEqual([g['questions'] for g in structure['groups']], [[56, 57], [58, 59]])
         self.assertEqual(structure['unresolved'], [])
 
+    def test_reading_times_and_notes_are_not_numbered_answer_blanks(self):
+        from workflow.preview import _weak_numbers
+        material = 'Time：4：45~5：15 p.m.\u3000\u30005：30~6：00 p.m.\n\u30006：15~6：45 p.m.\n※Notes：1.register\u30002.contact'
+        for line in material.splitlines():
+            self.assertEqual(extract.blank_numbers(line), [])
+            self.assertEqual(_weak_numbers(line), [])
+        structure, _, _ = extract.infer_structure(
+            'Ⅰ.单项选择（共1小题）\n1. Q?\nA. One B. Two C. Three D. Four\n'
+            'Ⅷ.阅读理解（共2小题）\nA\n' + material + '\n56. Q?\n57. Q?\n')
+        self.assertEqual(structure['sections'][-1]['questions'], [56, 57])
+        self.assertNotIn('QUESTION_COUNT_MISMATCH', {row['code'] for row in structure['unresolved']})
+        self.assertEqual(extract.blank_numbers('A:<u>　51</u> and <u>　52　</u>'), [51, 52])
+
     def test_cloze_blanks_and_option_rows_are_same_questions(self):
         structure, _, _ = extract.infer_structure(
             'Ⅰ.完形填空(共2小题)\nA\nText <u>　31　</u> and <u>　32　 </u>\n31.A. first\n32.A. next\n')

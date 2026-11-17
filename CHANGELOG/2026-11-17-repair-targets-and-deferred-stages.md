@@ -3,7 +3,7 @@
 ## 背景/触发
 用户要求减少不必要卡点，把卡点转成明确修复目标并加快前期流程；同时不能把题目内容、来源、身份或上传硬校验降级为假通过。
 
-## 改动
+## 改了什么
 - `app/workflow/diagnose.py`：每个诊断条目增加只读 `repair_target`，包含 `target`、`acceptance`、`scope`、`can_defer`；可区分确定性阻断、上游等待、可选输入和审核差异。
 - `app/workflow/contracts.py`：阶段契约增加 `defer` 与 `optimization` 元数据，并提供 `defer_reasons()`、`optimization_hints()`、`stage_metadata()`；答案、听力、解析、知识点等独立分支保持并行，外部等待与最终格式工作明确延期。
 - `app/workflow/test_contracts.py`、`app/workflow/test_diagnose.py`：增加结构化目标、延期语义和依赖不变回归；测试 fixture 显式按 UTF-8 读取 JSON，避免 Windows 默认编码造成假失败。

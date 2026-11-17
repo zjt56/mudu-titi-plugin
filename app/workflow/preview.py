@@ -62,7 +62,7 @@ def _strong_number(line: str) -> int | None:
 #   ① 空位在题号前：「　31　」「__31__」「____31」
 #   ② 题号在空位前（补全对话/信息转换）：「2.　　」「Tony.1.____」，题号后必须确有
 #      空档标记（全角空格/下划线/__），才不会吞掉普通句号后的数字（如 "No.5"）。
-_BLANK_BEFORE_NUMBER = re.compile(r"(?:\u3000|__|_{1,})\s*(\d{1,3})(?!\d)")
+_BLANK_BEFORE_NUMBER = re.compile(r"(?:\u3000|__|_{1,})\s*(\d{1,3})(?![\d.．:：、)])")
 _NUMBER_BEFORE_BLANK = re.compile(r"(?<!\d)(\d{1,3})\s*[.．]\s*(?=(?:[A-Za-z])?(?:\u3000|__|_))")
 # 图注空：`N.[IMG …](提示)`。图片紧跟括号提示才是一个需要填写的空；孤立
 # `N.[IMG …]`（选项图/引用）不算小题号——与 extract.IMAGE_HINT_BLANK 同源。
@@ -341,11 +341,6 @@ def _scoped_source_slice(unit: dict, lines: list[str], *, batch_dir=None) -> lis
     if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
         return []
     window = lines[start - 1:end]
-    if unit.get('column_id') and batch_dir is not None:
-        from . import visual_columns, structure_gate
-        proof = visual_columns.load_verified(batch_dir, text='\n'.join(lines))
-        if not structure_gate._visual_column_for_unit(unit, proof.get('columns') or [], lines):
-            return []
     if "start_offset" in span or "end_offset" in span:
         left, right = span.get("start_offset"), span.get("end_offset")
         if (start != end or type(left) is not int or type(right) is not int

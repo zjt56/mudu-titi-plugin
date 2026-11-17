@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-17 | [2026-11-17-disable-visual-understanding.md](2026-11-17-disable-visual-understanding.md) | 视觉理解整体停用：删除整页栏目/页图/图片语义/视觉传输，板块改纯文本识别，缺视觉不阻断 |
 | 2026-11-17 | [2026-11-17-visual-provider-deferred-wait.md](2026-11-17-visual-provider-deferred-wait.md) | 视觉提供方暂时失败改为可续查等待，结构硬校验仍阻断 |
 | 2026-11-17 | [2026-11-17-unified-findings-late-consolidation.md](2026-11-17-unified-findings-late-consolidation.md) | 统一完整问题证据、后期集中核对、组装交接修复与 Git 历史架构审计 |
 | 2026-11-17 | [2026-11-17-visual-columns-full-page-window.md](2026-11-17-visual-columns-full-page-window.md) | 视觉栏目归属改为整卷完整页窗口，取消无依据的12页上限 |

@@ -19,7 +19,6 @@ import tempfile
 import time
 from urllib.parse import unquote, urlsplit
 
-from . import visual_transport
 
 VERSION = "content-media/v1"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -118,10 +117,8 @@ def _candidate(value, directory, root):
     if Path(relative).suffix.lower() not in IMAGE_SUFFIXES:
         return None
     if relative.startswith('01_source/visual-pages/'):
-        from . import source_pages
-        pages = source_pages.load_verified(root)
-        if pages.get('status') != 'verified' or relative not in {p['path'] for p in pages.get('pages', [])}:
-            raise MediaError('MEDIA_FULL_PAGE_NOT_VERIFIED')
+        # 视觉理解已停用：整页渲染图不再存在于流程中，禁止作为媒体引用。
+        raise MediaError('MEDIA_FULL_PAGE_NOT_VERIFIED')
     elif not any(relative.startswith(d + "/") for d in MEDIA_DIRS):
         raise MediaError("MEDIA_DIRECTORY_NOT_ALLOWED")
     return relative
@@ -223,14 +220,10 @@ def _headers(task):
 
 
 def _selected(task, headers, resolver):
-    try:
-        if resolver:
-            return _route(resolver(stage=task["stage"]))
-        if task.get("agent_role", task["stage"]) != task["stage"] or task.get("review_round"):
-            return _route(visual_transport._call({"prompt": headers + "Route identity", "route_only": True}, 15))
-        return _route(visual_transport.route_identity(stage=task["stage"]))
-    except visual_transport.VisualTransportError as exc:
-        raise MediaError("MEDIA_ROUTE_UNAVAILABLE") from exc
+    # 图片视觉已停用：不再联系视觉桥；只接受任务声明或注入解析器给出的路由。
+    if resolver:
+        return _route(resolver(stage=task["stage"]))
+    return _route(task.get("route"))
 
 
 def _cache_get(cache, key):
@@ -270,6 +263,8 @@ def inspect_media(task, args, *, identify=None, route_identity=None, cache=None,
     stamp = time.time() if now is None else now
     calls = 0
     try:
+        # Keep argument/snapshot/binding validation intact; only the model call is
+        # disabled now that 图片视觉理解已停用.
         if not isinstance(task, dict) or not isinstance(args, dict) or set(args) != {"media_id", "question"}:
             raise MediaError("MEDIA_ARGS_INVALID")
         mid, question = args["media_id"], args["question"]
@@ -299,6 +294,9 @@ def inspect_media(task, args, *, identify=None, route_identity=None, cache=None,
             raise MediaError("MEDIA_INPUT_HASH_CHANGED")
         if not _image(raw):
             raise MediaError("MEDIA_NOT_SUPPORTED_IMAGE")
+        # 图片视觉理解已停用：图片仅作附件证据按字节/指纹绑定，不调用图片模型。
+        return {"media_id": mid, "status": "rejected", "code": "MEDIA_VISION_DISABLED",
+                "evidence_only": True, "authoritative": False, "model_calls": 0}
         expected, headers = _route(task.get("route")), _headers(task)
         if _selected(task, headers, route_identity) != expected:
             raise MediaError("MEDIA_ROUTE_CHANGED")
@@ -333,9 +331,10 @@ def inspect_media(task, args, *, identify=None, route_identity=None, cache=None,
                 copied = Path(temporary) / ("image" + Path(relative).suffix.lower())
                 copied.write_bytes(raw)
                 calls = 1
-                response = (identify or visual_transport.identify)(
-                    [{"id": mid, "path": str(copied)}], prompt, stage=task["stage"], max_tokens=1200, timeout=timeout,
-                    **({"batch_dir": root} if identify is None else {}))
+                if identify is None:
+                    raise MediaError("MEDIA_VISION_DISABLED")
+                response = identify(
+                    [{"id": mid, "path": str(copied)}], prompt, stage=task["stage"], max_tokens=1200, timeout=timeout)
             if not isinstance(response, dict) or not isinstance(response.get("text"), str) or not response["text"].strip():
                 raise RuntimeError("MEDIA_VISION_EMPTY_RESPONSE")
             if any(response.get(k) != expected[k] for k in ("provider", "model")):
@@ -360,7 +359,7 @@ def inspect_media(task, args, *, identify=None, route_identity=None, cache=None,
                     "retry_after": retry_after, "cached": False, "model_calls": calls}
         _cache_put(cache, key, {"key": key, "status": "ok", "description": description})
         return {**base, "status": "ok", "description": description, "cached": False, "model_calls": calls}
-    except (MediaError, OSError, KeyError, TypeError, ValueError, visual_transport.VisualTransportError) as exc:
+    except (MediaError, OSError, KeyError, TypeError, ValueError) as exc:
         # Never forward provider diagnostics, file contents or arbitrary paths.
         code = str(exc).split(":", 1)[0] if isinstance(exc, MediaError) else "MEDIA_REQUEST_REJECTED"
         return {"status": "rejected", "code": code, "evidence_only": True,

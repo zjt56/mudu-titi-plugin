@@ -192,8 +192,7 @@ def _material_windows(lines: list[str], start: int, end: int) -> list[tuple[int,
 def _visual_column_for_unit(unit, columns, lines):
     """Match one whole unnumbered task against already source-verified evidence.
 
-    Callers load columns through visual_columns.load_verified/annotate_candidate;
-    model-provided column records are never passed as the trusted collection.
+    视觉理解已停用，columns 恒为空；保留该函数仅为兼容旧调用签名。
     """
     span = unit.get("source_span") or {}
     matches = [c for c in columns or [] if c.get("column_id") == unit.get("column_id")
@@ -945,9 +944,8 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     model_structure_only = False
     visual_notes: list[dict] = []
     from . import sync_practice
-    from . import visual_columns
-    structure = visual_columns.annotate_candidate(batch_dir, cleaned_text, structure)
-    columns = structure.get("visual_columns") or []
+    # 视觉理解已停用：不再加载整页栏目归属；columns 恒为空即“无视觉证据”。
+    columns = []
     sections = structure.get("sections") or []
     scoped = bool(columns) or sync_practice.looks_like_sync_practice(cleaned_text)
     from . import lesson_bands
@@ -965,44 +963,14 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     hashes = {"source_sha256": mf.sha256_file(source_path) if source_path.is_file() else None,
               "structure_sha256": mf.sha256_file(structure_path) if structure_path.is_file() else None,
               "original_sha256": mf.sha256_file(original_path) if original_path and original_path.is_file() else None,
-              "visual_columns_sha256": mf.sha256_file(batch_dir / visual_columns.ARTIFACT)
-                  if (batch_dir / visual_columns.ARTIFACT).is_file() else None}
+              "visual_columns_sha256": None}
     blockers: list[dict] = []
     checks: dict[str, str] = {}
     resolved_notes: list[dict] = []
     warnings: list[dict] = []
     deferred: list[dict] = []
-    from . import source_pages
-    page_proof = source_pages.load_verified(batch_dir)
-    if page_proof.get('status') == 'verified' and (batch_dir / visual_columns.ARTIFACT).is_file():
-        checks['column_ownership'] = 'passed' if structure.get('visual_columns_status') == 'verified' else 'failed'
-        if checks['column_ownership'] == 'failed':
-            visual_artifact = {}
-            try:
-                visual_artifact = json.loads((batch_dir / visual_columns.ARTIFACT).read_text(encoding='utf-8'))
-            except (OSError, ValueError, TypeError):
-                visual_artifact = {}
-            reason = visual_artifact.get('reason') or ''
-            transient = bool(visual_artifact.get('deferred') or visual_artifact.get('retryable')
-                             or visual_columns.is_transient_failure(reason))
-            blocker = {'code': 'COLUMN_OWNERSHIP_UNRESOLVED',
-                       'batch_name': batch_dir.name, 'batch_dir': str(batch_dir),
-                       'artifact': visual_columns.ARTIFACT,
-                       'issues': structure.get('visual_column_issues') or [],
-                       'transient_external': transient,
-                       'message': '完整页已准备但栏目视觉归属未完成；数字题号覆盖不能证明无号题完整，须补齐当前原件整页的栏目归属证据'}
-            if reason:
-                blocker['reason'] = reason
-            blockers.append(blocker)
-            if transient:
-                deferred.append({'code': 'VISUAL_PROVIDER_UNAVAILABLE',
-                                 'stage': 'structure_gate',
-                                 'artifact': visual_columns.ARTIFACT,
-                                 'reason': reason,
-                                 'retryable': True,
-                                 'message': '视觉提供方暂时不可用；保留结构闸门未通过，稍后续查'})
-    else:
-        checks['column_ownership'] = 'not_required'
+    # 无视觉证据：栏目归属检查不适用，缺视觉不阻断。
+    checks['column_ownership'] = 'not_required'
     ai_classified = None
     try:
         from . import structure_ai
@@ -1114,7 +1082,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         blockers.extend(scoped_problems)
         checks["coverage"] = checks["source_number_coverage"] = checks["grouping"] = "failed" if scoped_problems else "passed"
         content_problems = []
-        _visual_sem = _load_image_semantics(batch_dir)
+        _visual_sem = None
         for unit in units:
             span = unit.get("source_span") or {}
             lo, hi = span.get("start_line", 0), span.get("end_line", 0)
@@ -1408,8 +1376,6 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     confirmed = {
         "version": "1.0",
         "lesson_bands": band_evidence,
-        "visual_columns": columns,
-        "visual_columns_sha256": hashes.get("visual_columns_sha256"),
         "meta": meta,
         "units": units,
         "image_questions": image_questions,
@@ -1445,57 +1411,8 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
     _write_json(confirmed_path, confirmed)
     report["confirmed_sha256"] = mf.sha256_file(confirmed_path)
     report["input_hashes"]["01_source/structure.confirmed.json"] = report["confirmed_sha256"]
-    # 视觉佐证（只读、informational）：不参与 passed/blockers 判定，仅把每个
-    # 含图单元的原图语义作为证据带出，供人工/预览参考。缺失或异常一律忽略。
-    report["visual_evidence"] = _visual_evidence(batch_dir)
-    # 图片选项题经视觉佐证降级的留痕（不阻断，仅记录判定依据）。
-    if visual_notes:
-        report["visual_option_resolutions"] = visual_notes
     _write_json(output_root / "07_review" / "structure-gate.json", report)
     return report
-
-
-def _load_image_semantics(batch_dir: Path) -> dict | None:
-    """读取视觉复核产物 01_source/image_semantics.json；缺失/异常返回 None（不阻断）。"""
-    import json as _json
-    for base in (batch_dir, Path(batch_dir)):
-        path = base / "01_source" / "image_semantics.json"
-        try:
-            data = _json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(data, dict) and data.get("items"):
-            return data
-    return None
-
-
-def _visual_evidence(batch_dir: Path) -> dict:
-    """读取 Word×视觉交叉印证产物，按单元汇总图片语义；只作证据，不影响闸门。"""
-    import json as _json
-    for base in (batch_dir, Path(batch_dir)):
-        path = base / "01_source" / "source_crosscheck.json"
-        try:
-            data = _json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        by_unit: dict[str, list] = {}
-        for row in data.get("rows") or []:
-            uid = row.get("unit_id")
-            if not uid:
-                continue
-            by_unit.setdefault(uid, []).append({
-                "img": row.get("img"),
-                "visual_kind": row.get("visual_kind"),
-                "visual_title": row.get("visual_title"),
-                "line_has_text": row.get("line_has_text"),
-                "verdict": row.get("verdict"),
-            })
-        return {"note": "图片语义候选证据，仅供核对；不影响结构放行",
-                "by_unit": by_unit,
-                "unreferenced_images": data.get("unreferenced_images") or []}
-    return {}
 
 
 def _write_json(path: Path, payload) -> None:

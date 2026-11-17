@@ -43,8 +43,7 @@ class ContentAgentTests(unittest.TestCase):
         patch.object(agent_tasks, "_collect", side_effect=lambda *a, **kw:
                      (self.context, self.hashes, [], self.confirmed.return_value)).start()
         self.validator = patch.object(broker, "_validator_identity", return_value="validator-v1").start()
-        self.route = patch.object(broker.visual_transport, "route_identity",
-                                  side_effect=lambda **kw: self.config["_content_route_identity"]).start()
+        # 视觉传输已停用：_check_route 不再解析图片路由。
         self.workers = []
         self.addCleanup(self._stop_workers)
 
@@ -76,6 +75,18 @@ class ContentAgentTests(unittest.TestCase):
                 break
             time.sleep(.01)
         self.fail("Broker did not publish task: " + str(result))
+
+    def write_task(self, task, *, route=None):
+        """Rewrite the stored task's current route (expected route unchanged) to
+        模拟提交/返回时选中的路由发生漂移；视觉桥已停用，只能从任务绑定读取。"""
+        path = broker._task_path(task["task_id"])
+        stored = broker._read(path)
+        if route is not None:
+            stored["route"] = dict(route)
+        broker._write(path, stored) if hasattr(broker, "_write") else path.write_text(
+            __import__("json").dumps(stored, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        task["route"] = stored.get("route")
+        return task
 
     def test_native_prompt_uses_scoped_tools_without_file_transport_conflict(self):
         original = agent_tasks.OFFLINE_CONTEXT_GUARD + self.prompt()
@@ -530,8 +541,8 @@ class ContentAgentTests(unittest.TestCase):
     def test_route_change_rejects_candidate_without_validation(self):
         task, thread, result = self.start()
         self.claim(task)
-        self.route.side_effect = None
-        self.route.return_value = {"provider": "other", "model": "other"}
+        from workflow import content_agent
+        self.write_task(task, route={"provider": "other", "model": "other"})
         feedback = self.tool(task, "submit_candidate", {"candidate": self.response})
         self.assertFalse(feedback["retryable"])
         thread.join(3)
@@ -616,8 +627,7 @@ class ContentAgentTests(unittest.TestCase):
         task, thread, result = self.start()
         self.claim(task)
         self.finish(task, thread, result)
-        self.route.side_effect = None
-        self.route.return_value = {"provider": "changed", "model": "changed"}
+        task = self.write_task(task, route={"provider": "changed", "model": "changed"})
         with self.assertRaises(local_agent.AgentError) as caught:
             broker.invoke(self.prompt(), self.base / "reused", self.config)
         self.assertEqual(caught.exception.code, "route_changed")
@@ -625,7 +635,6 @@ class ContentAgentTests(unittest.TestCase):
         self.assertEqual(stored["status"], "cancelled")
         self.assertFalse(stored["accepted"])
         self.validator.return_value = "changed-validator"
-        self.route.side_effect = lambda **kw: self.config["_content_route_identity"]
         with self.assertRaises(local_agent.AgentError):
             broker.invoke(self.prompt(), self.base / "reused-again", self.config)
         self.assertEqual(self.accept.call_count, 1)

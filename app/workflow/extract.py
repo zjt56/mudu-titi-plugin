@@ -70,7 +70,7 @@ def blank_numbers(line: str) -> list[int]:
     plain = strip_visual_markup(plain)
     normalized = plain.replace("\xa0", "\u3000")
     numbers = [int(n) for n in re.findall(
-        r"(?:_{2,}|\u3000|__|_)\s*(\d{1,3})(?!\d)", normalized)]
+        r"(?:_{2,}|\u3000|__|_)\s*(\d{1,3})(?![\d.．:：、)])", normalized)]
     numbers.extend(int(n) for n in IMAGE_HINT_BLANK.findall(normalized))
     return sorted(set(numbers))
 
@@ -1333,12 +1333,8 @@ def run(batch_dir: Path) -> dict:
         # the actual saved pages so a completed OCR page is never reported as
         # 'pdf_unknown / 0 pages'.
         page_evidence = json.loads((batch_dir / "01_source" / "extraction.json").read_text(encoding="utf-8"))
-        # 视觉理解是否可用（决定报告里记录"配合视觉理解判结构"这一维）；判定失败不阻断。
-        try:
-            from workflow import visual_review
-            visual_assist = bool(visual_review._load_key())
-        except Exception:  # noqa: BLE001
-            visual_assist = False
+        # 视觉理解已停用：报告中“配合视觉理解判结构”这一维恒为 False。
+        visual_assist = False
         policy = source_policy.build_report(source_path, [path for path in supporting if path],
                                             pages=page_evidence.get("pages"),
                                             visual_assist=visual_assist)

@@ -6,7 +6,7 @@
 
 本轮以当前 master 的 26c407e 为历史基准。启动时 fetch 成功，HEAD 与 origin/master 为 0/0。保留既有及并发工作区修改，不清理用户批次或改写其完成状态。
 
-## 实现
+## 改了什么
 
 - `app/workflow/findings.py` 统一错误码、已有题目身份、完整证据、阻断属性、严重性和稳定 finding_id；汇总原报告并沿用既有 self_heal/监督器/运维，不建立第二个修复队列。软提示和审核差异不获得内容重生成权限。
 - `app/workflow/checks.py` 保留完整 stdout/stderr 和全部结构化诊断；尾句仅用于展示，不再作为唯一证据。超时、执行异常、缺输入和未解释的非零退出都留证。不从打印题号猜 unit_id。

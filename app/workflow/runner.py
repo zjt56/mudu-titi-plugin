@@ -505,36 +505,6 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
                 metadata_ai.auto_identify(batch_dir)
         except (OSError, ValueError, RuntimeError, TypeError) as exc:
             print(f"  · 元信息识别跳过：{str(exc)[:160]}")
-    if code == 0 and stage.id == "extract":
-        # Source-bound graphical lesson containers precede general image review.
-        try:
-            from . import lesson_bands
-            with activity.track(batch_dir, "extract", "正在识别图片板块并绑定原文边界"):
-                bands = lesson_bands.build(batch_dir)
-            print(f"  · 板块视觉：{len(bands.get('bands', []))} 个边界，{bands.get('model_calls', 0)} 次调用，状态 {bands.get('status')}")
-        except (OSError, ValueError, RuntimeError, TypeError) as exc:
-            print(f"  · 板块视觉暂不可用：{str(exc)[:160]}")
-        # 原卷图片视觉语义复核：候选证据，仅供后续结构/题型参考。网关不可用
-        # 或任何异常都只打日志、绝不阻断主流程（硬规则 2/18）。
-        try:
-            from . import visual_review
-            with activity.track(batch_dir, "extract", "正在做原卷图片视觉复核"):
-                outcome = visual_review.build(batch_dir)
-            if outcome.get("status") == "built":
-                print(f"  · 视觉复核：识别 {outcome.get('image_count', 0)} 张原卷图片语义（候选证据）")
-            elif outcome.get("status") == "unavailable":
-                print(f"  · 视觉复核跳过：{outcome.get('reason', '网关不可用')}")
-        except (OSError, ValueError, RuntimeError, TypeError) as exc:
-            print(f"  · 视觉复核跳过：{str(exc)[:160]}")
-        # Word × 视觉交叉印证：把 [IMG] 占位与视觉语义关联留痕（只报告、不改原文）。
-        try:
-            from . import visual_crosscheck
-            crossed = visual_crosscheck.build(batch_dir)
-            if crossed.get("status") == "built":
-                print(f"  · Word×视觉交叉印证：{crossed.get('image_refs', 0)} 处图片引用已留痕"
-                      f"（{crossed.get('verdicts', {})}）")
-        except (OSError, ValueError, RuntimeError, TypeError) as exc:
-            print(f"  · 交叉印证跳过：{str(exc)[:160]}")
     with _agent_lock(timeout):
         current = mf.load(batch_dir)
         # Another actor may have completed this stage while the command ran.
@@ -938,35 +908,11 @@ def _structure_inputs(batch_dir: Path, manifest: dict) -> tuple:
 
 
 def _ensure_visual_evidence(batch_dir: Path) -> None:
-    """结构判断前确保视觉理解产物就绪；缺失则补跑，任何失败只跳过不阻断。
+    """视觉理解已停用：不再做整页渲染、栏目归属、板块看图或图片语义。
 
-    用户策略：提取完文字后做一遍视觉理解，为后续批次组装/结构化判断做铺垫。
-    extract 钩子已触发；此处兜底存量批次或非 extract 路径。只写候选产物，不阻断。
+    缺视觉证据不阻断任何阶段；需要板块边界时由 lesson_bands 用印刷文本识别。
     """
-    try:
-        from . import lesson_bands
-        lesson_bands.build(batch_dir)
-    except Exception:  # noqa: BLE001 - 可选板块识别失败不得跳过其它视觉检查
-        pass
-    try:
-        from . import visual_columns
-        visual_columns.build(batch_dir)
-    except Exception:  # noqa: BLE001 - 失败保留明确证据缺失，不伪称看过整页
-        pass
-    try:
-        sem = batch_dir / "01_source" / "image_semantics.json"
-        if not sem.is_file():
-            from . import visual_review
-            visual_review.build(batch_dir)
-    except Exception:  # noqa: BLE001 - 图片检查失败不得跳过原件交叉核对
-        pass
-    try:
-        cross = batch_dir / "01_source" / "source_crosscheck.json"
-        if not cross.is_file():
-            from . import visual_crosscheck
-            visual_crosscheck.build(batch_dir)
-    except Exception:  # noqa: BLE001 - 视觉铺垫失败不影响结构判断
-        pass
+    return
 
 
 @activity.observed("structure_gate", "正在确认题目结构与来源边界")

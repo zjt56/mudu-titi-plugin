@@ -589,3 +589,8 @@ question_content.py::restore_source_stems（网格单元格不承载带字母选
 落地：`app/workflow/ocr_job_store.py`、`paddle_jobs.py`、`pdf_ocr.py`、`extract.py`、`runner.py::ocr_wait_state`、
 `auto.py`、`supervisor.py`、`diagnose.py`、`ocr_backend.py`、`app/docs/extraction.md`、根 `AGENTS.md` 硬规则 28；
 验证见 `CHANGELOG/2026-11-13-ocr-durable-jobs.md`。
+
+## 2026-11-17：视觉理解停用（用户明确取消）
+
+用户原话（2026-11-17）：「视觉理解先不急，可以先取消」，随后确认「彻底删除视觉相关代码」「缺视觉就按无视觉继续，不阻断」「连 visual_transport 一起删」。
+规则：整页渲染/栏目视觉归属/板块看图/图片语义/视觉传输全部移除（`visual_columns.py`、`source_pages.py`、`visual_review.py`、`visual_crosscheck.py`、`visual_transport.py` 已删除）。A/B 板块等容器只按印刷文本行识别（`lesson_bands.py` 纯文本版，仅依赖 `sync_practice` 文本函数）。图片只作附件按字节指纹绑定，不再据此判定栏目归属/题干/题型。缺视觉证据不阻断任何阶段；无印刷号题仍保留 `printed_numbers=[]`、不补造数字、不漏收。内容结构快照不再绑定整页页图/栏目产物，栏目归属检查一律 `not_required`。历史批次视觉证据文件只读留档。落地：`lesson_bands.py`、`structure_gate.py`、`structure_ai.py`、`question_content.py`、`preview.py`、`content_structure.py`、`content_media.py`、`content_agent.py`、`local_agent.py`、`runner.py`、`extract.py`；验证见 `CHANGELOG/2026-11-17-disable-visual-understanding.md`。

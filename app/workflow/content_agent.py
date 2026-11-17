@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 
-from . import agent_tasks, content_media, content_structure, local_agent, unit_tasks, visual_transport
+from . import agent_tasks, content_media, content_structure, local_agent, unit_tasks
 
 QUEUE_ROOT = Path(__file__).resolve().parents[2] / ".content-agent" / "tasks"
 PROTOCOL = "upload-workflow.content-agent/v1"
@@ -200,13 +200,15 @@ def _guard(task, *, check_deadline=True):
 
 
 def _check_route(task):
-    """Check only at submission/return; ordinary evidence reads start no process."""
-    try:
-        current = visual_transport.route_identity(stage=task["stage"])
-    except (ValueError, RuntimeError, OSError) as exc:
-        raise local_agent.AgentError("Native content route cannot be verified", "route_changed") from exc
-    keys = ("provider", "model", "profile") if task["route"].get("profile") else ("provider", "model")
-    if not isinstance(current, dict) or any(current.get(key) != task["route"].get(key) for key in keys):
+    """Reject a task whose configured route no longer matches its bound route.
+
+    Visual transport is disabled, so the selected route is only read from the
+    task's own binding — no image/model bridge is contacted.
+    """
+    current = task.get("route")
+    expected = task.get("expected_route") or current
+    keys = ("provider", "model", "profile") if (expected or {}).get("profile") else ("provider", "model")
+    if not isinstance(current, dict) or any(current.get(key) != (expected or {}).get(key) for key in keys):
         raise local_agent.AgentError("Native content selected route changed", "route_changed")
 
 
@@ -864,7 +866,7 @@ def invoke(prompt, run_dir, config, *, permit_parallel=False):
                                  "max_tool_calls": settings["max_tool_calls"],
                                  "max_attempt_ms": int(settings["timeout_seconds"] * 1000)},
                     "unit_ids": ids, "partial": set(ids) != all_ids, "batch_dir": str(batch),
-                    "input_hashes": hashes, "route": route, "status": "queued", "created_at": created,
+                    "input_hashes": hashes, "route": route, "expected_route": dict(route), "status": "queued", "created_at": created,
                     "deadline": created + settings["timeout_seconds"], "tool_calls": 0,
                     "max_tool_calls": settings["max_tool_calls"], "attempts": [], "accepted": False}
             if previous_task_id is not None:
