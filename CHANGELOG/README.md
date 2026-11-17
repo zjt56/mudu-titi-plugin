@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-17 | [2026-11-17-native-content-route-identity.md](2026-11-17-native-content-route-identity.md) | 视觉移除后原生内容代理恢复 Harness 路由身份绑定 |
 | 2026-11-17 | [2026-11-17-writing-end-past-body.md](2026-11-17-writing-end-past-body.md) | 书面表达 section end 超出正文时夹到最后一行，修复结构确认越界 |
 | 2026-11-17 | [2026-11-17-writing-source-audit-unnumbered.md](2026-11-17-writing-source-audit-unnumbered.md) | 书面表达无印刷题号时来源审计豁免，修复作文被题号唯一性阻断 |
 | 2026-11-17 | [2026-11-17-early-defer-content-and-stale-gate.md](2026-11-17-early-defer-content-and-stale-gate.md) | 前期内容完整性后移最终闸门；不可消费的结构确认自动判 stale 重跑 |

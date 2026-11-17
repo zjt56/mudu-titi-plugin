@@ -538,6 +538,8 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False, co
             if "_content_input_hashes" not in native_settings:
                 native_settings["_content_input_hashes"] = agent_tasks.build_task(
                     Path(batch), stage, max_input_chars=sys.maxsize)["input_hashes"]
+            if not native_settings.get("_content_route_identity"):
+                native_settings["_content_route_identity"] = _selected_content_route()
             return content_agent.invoke(prompt, root, native_settings, permit_parallel=permit_parallel)
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -801,6 +803,19 @@ def _harness_default_route():
         if first:
             return dict(first, profile=name), path
     return None, None
+
+
+def _selected_content_route():
+    """Selected host model for native content tasks (provider/model only).
+
+    Visual transport used to expose the route; after visual removal the native
+    content path still needs a route identity for task binding. Read the same
+    Harness agent-default-model selection the rest of this module follows.
+    """
+    route, _profile = _harness_default_route()
+    if not route:
+        return None
+    return {"provider": route["provider"], "model": route["model"]}
 
 
 def _router_file(plugin):
