@@ -32,6 +32,8 @@ _UPSTREAM_TRANSIENT_ERRORS = frozenset(("Upstream HTTP/2 stream failed",
                                          "Upstream service temporarily unavailable"))
 _THREAD_LOCK = threading.RLock()
 SUPPORTED_STAGES = frozenset(("knowledge", "answers", "explanations", "types", "preassemble", "structure_gate"))
+PART_STAGES = SUPPORTED_STAGES - {"structure_gate"}
+MAX_PART_UNITS = 4
 
 
 def _json(value):
@@ -292,6 +294,20 @@ def _child_prompt(prompt, context, stage, media):
     summary["source_files"] = files
     summary["media"] = media
     summary["evidence_tools"] = ["read_unit", "read_source", "read_catalog", "search_catalog", "list_media", "inspect_media", "submit_candidate"]
+    if stage in PART_STAGES:
+        summary["evidence_tools"].append("stage_candidate")
+        header += (
+            "\nNative candidate transport: avoid writing the whole paper as one large tool argument. "
+            "Call content_stage_candidate with unit_ids (the selected ID list) and candidate "
+            "(the four-key response object described above, covering only these units). "
+            f"Stage 1–{MAX_PART_UNITS} units per call (prefer one for long content). "
+            "Keep status, artifacts, notes and findings in each candidate; keep every required artifact field. "
+            "Only scoped units and their question IDs may be included. A staged draft is NOT accepted delivery. "
+            "When all selected units are staged, call content_submit_candidate({}); the program merges "
+            "the durable parts and runs the original full validator. Do not retype the whole candidate. "
+            "To correct a part, replace the same unit ID set; do not overlap different partitions. "
+            "On resume, retain staged units and fill only missing units. Content rules and final full coverage remain mandatory.\n"
+        )
     return header + unit_tasks._BEGIN + _json(summary) + unit_tasks._END + suffix
 
 
@@ -310,7 +326,10 @@ def _public(task):
             "unit_ids", "created_at", "deadline", "tool_calls", "max_tool_calls",
             "feedback", "error", "error_code", "retryable", "accepted", "media", "media_calls", "max_media_calls", "budgets",
             "failure_class", "transport", "phase", "last_provider_error", "last_model_activity_at", "last_tool_at")
-    return {key: copy.deepcopy(task[key]) for key in keys if key in task}
+    result = {key: copy.deepcopy(task[key]) for key in keys if key in task}
+    if task.get("candidate_parts"):
+        result["candidate_progress"] = _part_progress(task)
+    return result
 
 
 def purge_batch(batch_dir, *, wait_seconds=20):
@@ -531,13 +550,79 @@ def _catalog(task):
     return rows
 
 
+def _part_progress(task):
+    staged = {uid for part in task.get("candidate_parts", []) for uid in part["unit_ids"]}
+    return {"staged_unit_ids": [uid for uid in task["unit_ids"] if uid in staged],
+            "missing_unit_ids": [uid for uid in task["unit_ids"] if uid not in staged]}
+
+
+def _stage_candidate(task, args):
+    """Persist transport drafts only. Official validation still belongs to _submit."""
+    _check_route(task)
+    if task["stage"] not in PART_STAGES:
+        raise ValueError("Structure candidates require the whole-paper submit_candidate validator")
+    agent_tasks._fields(args, ("unit_ids", "candidate"), ("unit_ids", "candidate"))
+    ids = args["unit_ids"]
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= MAX_PART_UNITS
+            or any(not isinstance(uid, str) or uid not in task["unit_ids"] for uid in ids)
+            or len(ids) != len(set(ids))):
+        raise ValueError(f"stage_candidate needs 1–{MAX_PART_UNITS} distinct selected unit_ids")
+    candidate = args["candidate"]
+    if not isinstance(candidate, dict):
+        raise ValueError("Staged candidate must be a response object, not JSON text")
+    stage = "types" if task["stage"] == "preassemble" else task["stage"]
+    # Reuse the existing partition protocol/coverage checks, not an alternative
+    # semantic validator. A draft never proves source/content correctness.
+    part = {"unit_ids": [uid for uid in task["unit_ids"] if uid in ids], "candidate": candidate}
+    unit_tasks.merge(stage, [part], [candidate])
+    if stage == "answers":
+        selected = [unit for unit in task["context"]["confirmed_units_with_stable_ids"] if unit["unit_id"] in ids]
+        allowed = {agent_tasks.question_key(unit, number) for unit in selected for number in unit.get("numbers", [])}
+        for key, values in candidate.get("artifacts", {}).get(agent_tasks.ARTIFACTS[stage], {}).items():
+            if not isinstance(values, dict) or set(values) - allowed:
+                raise ValueError(f"Answer partition {key} contains question IDs outside selected units")
+    previous = task.get("candidate_parts", [])
+    if any(set(row["unit_ids"]) != set(ids) and set(row["unit_ids"]).intersection(ids) for row in previous):
+        raise ValueError("Overlapping draft partitions; replace the exact same unit_ids set")
+    parts = [row for row in previous if set(row["unit_ids"]) != set(ids)] + [part]
+    parts.sort(key=lambda row: min(task["unit_ids"].index(uid) for uid in row["unit_ids"]))
+    if len(_json(parts).encode("utf-8")) > local_agent.MAX_FINAL_BYTES:
+        raise ValueError("Staged candidates exceed maximum response size")
+    task["candidate_parts"] = copy.deepcopy(parts)
+    _save(task)
+    return {"staged": True, "accepted": False, "retryable": True, **_part_progress(task)}
+
+
+def _submit_parts(task):
+    if task["stage"] not in PART_STAGES:
+        raise ValueError("Structure candidates require an explicit whole-paper candidate")
+    progress = _part_progress(task)
+    if not task.get("candidate_parts") or progress["missing_unit_ids"]:
+        return {"accepted": False, "retryable": True, "code": "candidate_incomplete",
+                "error": "Stage the missing unit candidates before final submission", **progress}
+    stage = "types" if task["stage"] == "preassemble" else task["stage"]
+    parts = task["candidate_parts"]
+    candidate = unit_tasks.merge(stage, parts, [row["candidate"] for row in parts])
+    payload = candidate["artifacts"][agent_tasks.ARTIFACTS[stage]]
+    if isinstance(payload.get("items"), list):
+        payload["items"].sort(key=lambda row: task["unit_ids"].index(row["unit_id"]))
+    return _submit(task, candidate)
+
+
 def _tool(task, action, args):
     if action.startswith("content_"):
         action = action[len("content_"):]
     if action == "submit_candidate":
+        agent_tasks._fields(args, ("candidate",), ())
         if "candidate" not in args:
-            raise ValueError("candidate is required")
+            return _submit_parts(task)
         return _submit(task, args["candidate"])
+    if action == "stage_candidate":
+        try:
+            return _stage_candidate(task, args)
+        except (ValueError, TypeError, KeyError) as exc:
+            return {"staged": False, "accepted": False, "retryable": True,
+                    "error": str(exc)[:2400], **_part_progress(task)}
     if action == "list_media":
         offset, limit = _page(args)
         rows = task.get("media", [])

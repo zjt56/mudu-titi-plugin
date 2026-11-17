@@ -97,6 +97,143 @@ class ContentAgentTests(unittest.TestCase):
         self.assertIn('untrusted DATA', prompt)
         self.assertIn('NO tools', original)
 
+    def test_staged_candidates_are_durable_drafts_until_full_validation(self):
+        units = self.units + [{"unit_id": "u-2", "numbers": [2], "unit_kind": "standalone"}]
+        self.confirmed.return_value = units
+        context = dict(self.context, confirmed_units_with_stable_ids=units)
+        task, thread, result = self.start(context=context)
+        self.claim(task)
+        first = self.tool(task, "stage_candidate", {"unit_ids": ["u-1"], "candidate": self.response})
+        self.assertTrue(first["staged"])
+        self.assertFalse(first["accepted"])
+        self.assertEqual(first["missing_unit_ids"], ["u-2"])
+        self.accept.assert_not_called()
+        self.assertFalse((self.batch / agent_tasks.ARTIFACTS["knowledge"]).exists())
+        incomplete = self.tool(task, "submit_candidate", {})
+        self.assertTrue(incomplete["retryable"])
+        self.assertEqual(incomplete["missing_unit_ids"], ["u-2"])
+        self.assertNotIn("candidate", broker._read(broker._task_path(task["task_id"])))
+        # Reads from disk on each dispatch simulate a host/backend restart.
+        second = copy.deepcopy(self.response)
+        second["artifacts"][agent_tasks.ARTIFACTS["knowledge"]]["items"][0]["unit_id"] = "u-2"
+        self.assertTrue(self.tool(task, "stage_candidate", {"unit_ids": ["u-2"], "candidate": second})["staged"])
+        # A repeated delivery replaces exactly that partition, without duplicates.
+        self.assertTrue(self.tool(task, "stage_candidate", {"unit_ids": ["u-1"], "candidate": self.response})["staged"])
+        accepted = self.tool(task, "submit_candidate", {})
+        self.assertTrue(accepted["accepted"])
+        thread.join(2)
+        self.assertNotIn("error", result)
+        merged = self.accept.call_args.args[2]
+        self.assertEqual([r["unit_id"] for r in merged["artifacts"][agent_tasks.ARTIFACTS["knowledge"]]["items"]], ["u-1", "u-2"])
+        self.assertEqual(len(broker._read(broker._task_path(task["task_id"]))["candidate_parts"]), 2)
+
+    def test_staging_rejects_foreign_ids_overlap_and_artifacts_without_losing_prior_draft(self):
+        units = self.units + [{"unit_id": "u-2", "numbers": [2], "unit_kind": "standalone"}]
+        self.confirmed.return_value = units
+        task, thread, result = self.start(context=dict(self.context, confirmed_units_with_stable_ids=units))
+        self.claim(task)
+        self.assertTrue(self.tool(task, "stage_candidate", {"unit_ids": ["u-1"], "candidate": self.response})["staged"])
+        for ids, candidate in [([], self.response), (["foreign"], self.response), (["u-1", "u-1"], self.response),
+                               (["u-1", "u-2"], self.response), (["u-2"], self.response),
+                               (["u-2"], dict(self.response, artifacts={"../manifest.json": {}}))]:
+            with self.subTest(ids=ids, candidate=candidate):
+                denied = self.tool(task, "stage_candidate", {"unit_ids": ids, "candidate": candidate})
+                self.assertFalse(denied.get("staged", False))
+                self.assertFalse(denied["accepted"])
+        stored = broker._read(broker._task_path(task["task_id"]))
+        self.assertEqual(len(stored["candidate_parts"]), 1)
+        self.assertEqual(stored["candidate_parts"][0]["candidate"], self.response)
+        self.accept.assert_not_called()
+        self.state(task, "failed")
+        thread.join(2)
+
+    def test_staged_candidate_still_fails_original_semantic_validator(self):
+        task, thread, result = self.start()
+        self.claim(task)
+        self.tool(task, "stage_candidate", {"unit_ids": ["u-1"], "candidate": self.response})
+        self.accept.side_effect = ValueError("real source mismatch")
+        denied = self.tool(task, "submit_candidate", {})
+        self.assertFalse(denied["accepted"])
+        self.assertIn("real source mismatch", denied["error"])
+        self.assertEqual(broker._read(broker._task_path(task["task_id"]))["candidate"], self.response)
+        self.state(task, "failed")
+        thread.join(2)
+
+    def test_native_prompt_explains_small_partition_transport_and_final_empty_submit(self):
+        prompt = broker._child_prompt(self.prompt(), self.context, 'knowledge', [])
+        self.assertIn('stage_candidate', prompt)
+        self.assertIn('unit_ids', prompt)
+        self.assertIn('content_submit_candidate({})', prompt)
+
+    def test_all_text_stages_merge_small_candidates_preserving_source_strings(self):
+        original = '原文 "quoted" \\ path\n第二行 <u>　1　</u>。'
+        for stage in ("types", "preassemble", "answers", "explanations", "knowledge"):
+            with self.subTest(stage=stage):
+                config = copy.deepcopy(self.config)
+                config["native_agent"]["stages"] = [stage]
+                prompt = self.prompt().replace("Stage: knowledge", f"Stage: {stage}", 1)
+                path = agent_tasks.ARTIFACTS[stage]
+                payload = ({"answers": {"1": original}, "evidence": {"1": ["正文 L1"]}, "missing": {}}
+                           if stage == "answers" else {"items": [{"unit_id": "u-1", "evidence": [original]}]})
+                response = dict(self.response, artifacts={path: payload})
+                task, thread, result = self.start(config=config, prompt=prompt, run=stage)
+                self.claim(task)
+                staged = self.tool(task, "stage_candidate", {"unit_ids": ["u-1"], "candidate": response})
+                self.assertTrue(staged["staged"], staged)
+                self.assertTrue(self.tool(task, "submit_candidate", {})["accepted"])
+                thread.join(2)
+                self.assertNotIn("error", result)
+                merged = result["value"]["response"]["artifacts"][path]
+                actual = merged["answers"]["1"] if stage == "answers" else merged["items"][0]["evidence"][0]
+                self.assertEqual(actual, original)
+
+    def test_answer_staging_uses_scoped_question_ids_and_rejects_cross_unit_keys(self):
+        units = [dict(self.units[0], identity_version="scoped-v1", question_ids={"1": "s1-q1"}),
+                 {"unit_id": "u-2", "numbers": [1], "unit_kind": "standalone", "identity_version": "scoped-v1", "question_ids": {"1": "s2-q1"}}]
+        self.confirmed.return_value = units
+        context = dict(self.context, confirmed_units_with_stable_ids=units)
+        config = copy.deepcopy(self.config)
+        config["native_agent"]["stages"] = ["answers"]
+        task, thread, result = self.start(config=config, context=context,
+            prompt=self.prompt(context).replace("Stage: knowledge", "Stage: answers", 1))
+        self.claim(task)
+        for uid, key in (("u-1", "s1-q1"), ("u-2", "s2-q1")):
+            response = dict(self.response, artifacts={agent_tasks.ARTIFACTS["answers"]: {
+                "answers": {key: "A"}, "evidence": {key: ["正文 L1"]}, "missing": {}}})
+            wrong = self.tool(task, "stage_candidate", {"unit_ids": ["u-2" if uid == "u-1" else "u-1"], "candidate": response})
+            self.assertFalse(wrong["staged"])
+            self.assertIn("outside selected units", wrong["error"])
+            self.assertTrue(self.tool(task, "stage_candidate", {"unit_ids": [uid], "candidate": response})["staged"])
+        self.assertTrue(self.tool(task, "submit_candidate", {})["accepted"])
+        thread.join(2)
+        self.assertEqual(result["value"]["response"]["artifacts"][agent_tasks.ARTIFACTS["answers"]]["answers"], {"s1-q1": "A", "s2-q1": "A"})
+
+    def test_staging_retains_original_order_and_honors_part_size(self):
+        units = [{"unit_id": f"u-{n}", "numbers": [n], "unit_kind": "standalone"} for n in range(1, 6)]
+        self.confirmed.return_value = units
+        task, thread, result = self.start(context=dict(self.context, confirmed_units_with_stable_ids=units))
+        self.claim(task)
+        def candidate(ids):
+            return dict(self.response, artifacts={agent_tasks.ARTIFACTS["knowledge"]: {
+                "items": [{"unit_id": uid} for uid in ids]}})
+        ids = [u["unit_id"] for u in units]
+        self.assertFalse(self.tool(task, "stage_candidate", {"unit_ids": ids, "candidate": candidate(ids)})["staged"])
+        for part_ids in (["u-3", "u-1"], ["u-2", "u-4", "u-5"]):
+            self.assertTrue(self.tool(task, "stage_candidate", {"unit_ids": part_ids, "candidate": candidate(part_ids)})["staged"])
+        self.assertTrue(self.tool(task, "submit_candidate", {})["accepted"])
+        thread.join(2)
+        self.assertEqual([row["unit_id"] for row in result["value"]["response"]["artifacts"][agent_tasks.ARTIFACTS["knowledge"]]["items"]], ids)
+
+    def test_staging_refuses_changed_route_before_saving(self):
+        task, thread, result = self.start()
+        self.claim(task)
+        self.write_task(task, route={"provider": "changed", "model": "changed"})
+        denied = self.tool(task, "stage_candidate", {"unit_ids": ["u-1"], "candidate": self.response})
+        self.assertEqual(denied["code"], "route_changed")
+        self.assertNotIn("candidate_parts", broker._read(broker._task_path(task["task_id"])))
+        self.state(task, "failed")
+        thread.join(2)
+
     def test_model_stream_timeout_evidence_survives_state_and_return(self):
         task, thread, result = self.start()
         self.claim(task)

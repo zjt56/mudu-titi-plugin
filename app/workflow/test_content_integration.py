@@ -115,7 +115,7 @@ class ContentHttpIntegrationTests(unittest.TestCase):
                                       "timeout_seconds": 5, "poll_seconds": .01},
                       "_content_batch_dir": str(batch), "_content_input_hashes": hashes,
                       "_content_route_identity": route}
-            response = {"status": "completed", "artifacts": {"05_knowledge/knowledge.json": {
+            response = {"status": "completed", "artifacts": {agent_tasks.ARTIFACTS["knowledge"]: {
                 "items": [{"unit_id": "u-1", "knowledge": ["语法/时态"]}]}}, "notes": [], "findings": []}
             result = {}
             with patch.object(content_agent, "QUEUE_ROOT", base / "queue"), \
@@ -157,8 +157,15 @@ class ContentHttpIntegrationTests(unittest.TestCase):
                     source_reply = request(endpoint + "/tools", {"session_id": "http-fixture",
                         "action": "read_source", "args": {"path": "01_source/body.txt"}})
                     self.assertEqual(source_reply["text"], "1. A source-bound question")
+                    staged = request(endpoint + "/tools", {"session_id": "http-fixture",
+                        "action": "stage_candidate", "args": {"unit_ids": ["u-1"], "candidate": response}})
+                    self.assertIs(staged["staged"], True, staged)
+                    self.assertIs(staged["accepted"], False)
+                    validate.assert_not_called()
+                    progress = request(endpoint)["task"]["candidate_progress"]
+                    self.assertEqual(progress["missing_unit_ids"], [])
                     accepted = request(endpoint + "/tools", {"session_id": "http-fixture",
-                        "action": "submit_candidate", "args": {"candidate": response}})
+                        "action": "submit_candidate", "args": {}})
                     self.assertIs(accepted["accepted"], True, accepted)
                     receipt = request(endpoint)["task"]
                     self.assertIs(receipt["accepted"], True)
@@ -168,7 +175,7 @@ class ContentHttpIntegrationTests(unittest.TestCase):
                     self.assertNotIn("error", result)
                     self.assertEqual(result["value"]["response"], response)
                     self.assertIs(validate.call_args.kwargs["validate_only"], True)
-                    self.assertFalse((batch / "05_knowledge").exists())
+                    self.assertFalse((batch / agent_tasks.ARTIFACTS["knowledge"]).exists())
                     self.assertFalse((batch / "workflow/manifest.json").exists())
                 finally:
                     http.shutdown()

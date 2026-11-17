@@ -92,7 +92,7 @@ test('native tools use parameters, no builtins, scoped backend actions and stric
     assert.equal(a.guards[0]({ name: 'bash' }), 'Only task-scoped content tools are allowed');
     assert.equal(a.guards[0]({ name: 'arbitrary_plugin_tool' }), 'Only task-scoped content tools are allowed');
     assert.equal(a.guards[0]({ name: 'content_read_unit' }), undefined);
-    assert.equal(a.tools.size, 7);
+    assert.equal(a.tools.size, 8);
     for (const definition of a.tools.values()) {
       assert.equal(definition.parameters.type, 'object'); assert.equal(definition.parameters.additionalProperties, false);
       assert.equal(definition.input, undefined); assert.equal(definition.isConcurrencySafe(), false);
@@ -227,6 +227,63 @@ test('agent/error tool-call JSON slip also recovers without killing the stage', 
   await f.manager.dispose();
 });
 
+test('duplicate host error events for one malformed call consume one recovery and keep staged parts', async () => {
+  const message = 'Tool call "content_stage_candidate": Expected \',\' or \'}\' after property value in JSON at position 9117';
+  const f = await fixture({ program: async a => {
+    if (a.turns === 1) {
+      await a.call('stage_candidate', { unit_ids: ['u1'], candidate: { status: 'completed' } });
+      a.emit('agent/error', { error: new Error(message) });
+      a.emit('session/event', {}, { type: 'turn/end', data: { reason: { kind: 'error', error: { message } } } });
+      return;
+    }
+    await a.call('submit_candidate');
+  } });
+  await f.run();
+  assert.deepEqual(states(f), ['running', 'completed']);
+  assert.equal(f.agents[0].turns, 2);
+  assert.equal(f.calls.filter(call => call.body?.action === 'stage_candidate').length, 1);
+  assert.deepEqual(f.calls.find(call => call.body?.action === 'submit_candidate').body.args, {});
+  assert.match(f.agents[0].agent.messages[1].content[0].text, /content_stage_candidate/);
+  await f.manager.dispose();
+});
+
+test('agent/error followed by turn/end for the same JSON error must not cancel recovery', async () => {
+  const message = 'Tool call "content_submit_candidate": Unexpected end of JSON input';
+  const f = await fixture({ program: async a => {
+    if (a.turns > 1) return a.call('submit_candidate', { candidate: {} });
+    a.emit('agent/error', { error: new Error(message) });
+    a.emit('session/event', {}, { type: 'turn/end', data: { reason: { kind: 'error', error: { message } } } });
+  } });
+  await f.run();
+  assert.deepEqual(states(f), ['running', 'completed']);
+  assert.equal(f.agents[0].turns, 2);
+  await f.manager.dispose();
+});
+
+test('format recovery is limited to registered content tools and never replays an unknown POST', async () => {
+  const f = await fixture({ program: () => { throw new Error('Tool call "foreign_tool": Invalid JSON'); } });
+  await f.run();
+  assert.deepEqual(states(f), ['running', 'failed']);
+  assert.equal(f.agents[0].turns, 1);
+  await f.manager.dispose();
+});
+
+test('resumed queued messages still receive durable partition progress without replaying staged parts', async () => {
+  const progress = { staged_unit_ids: ['u1'], missing_unit_ids: ['u2'] };
+  const f = await fixture({ rows: [task({ candidate_progress: progress })], pending: true,
+    persistence: { stat: async () => ({}) }, program: async a => {
+      assert.match(a.sections[0].text, /stage only missing units/);
+      assert.ok(a.sections[0].text.includes(JSON.stringify(progress)));
+      await a.call('stage_candidate', { unit_ids: ['u2'], candidate: {} });
+      await a.call('submit_candidate');
+    } });
+  await f.run();
+  assert.equal(f.agents[0].mode, 'resume');
+  assert.equal(f.calls.filter(call => call.body?.action === 'stage_candidate').length, 1);
+  assert.deepEqual(states(f), ['running', 'completed']);
+  await f.manager.dispose();
+});
+
 test('repeated tool-call JSON slippage ends failed once the recovery budget is spent', async () => {
   const slip = { type: 'turn/end', data: { reason: { kind: 'error', error: {
     message: 'Tool call "content_submit_candidate": Expected \',\' or \'}\' after property value in JSON at position 2779' } } } };
@@ -358,7 +415,10 @@ test('tool input validation rejects arbitrary keys and invalid shapes before bac
   const f = await fixture({ program: async a => {
     for (const [action, args] of [['read_unit', {}], ['read_source', { path: 'x', shell: 'cat' }],
       ['read_catalog', { offset: -1 }], ['search_catalog', { query: 'x', limit: 1.5 }],
-      ['read_source', { path: 'x', start_line: 5, end_line: 2 }], ['submit_candidate', { candidate: [] }]]) {
+      ['read_source', { path: 'x', start_line: 5, end_line: 2 }], ['submit_candidate', { candidate: [] }],
+      ['stage_candidate', { unit_ids: [], candidate: {} }], ['stage_candidate', { unit_ids: ['x', 'x'], candidate: {} }],
+      ['stage_candidate', { unit_ids: ['a', 'b', 'c', 'd', 'e'], candidate: {} }],
+      ['stage_candidate', { unit_ids: ['x'], candidate: [] }]]) {
       await assert.rejects(a.call(action, args), { code: 'INVALID_ARGUMENTS' });
     }
     await a.call('submit_candidate', { candidate: {} });
