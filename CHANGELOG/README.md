@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-17 | [2026-11-17-early-defer-content-and-stale-gate.md](2026-11-17-early-defer-content-and-stale-gate.md) | 前期内容完整性后移最终闸门；不可消费的结构确认自动判 stale 重跑 |
 | 2026-11-17 | [2026-11-17-reading-blank-number-boundary.md](2026-11-17-reading-blank-number-boundary.md) | 阅读材料数字误判为空位题号与旧组跨大题串节修复 |
 | 2026-11-17 | [2026-11-17-structure-gate-non-blocking.md](2026-11-17-structure-gate-non-blocking.md) | 结构确认只产出结构化字段不阻断：疑点一律 structure_warnings 留痕，仅零单元无法交付 |
 | 2026-11-17 | [2026-11-17-disable-visual-understanding.md](2026-11-17-disable-visual-understanding.md) | 视觉理解整体停用：删除整页栏目/页图/图片语义/视觉传输，板块改纯文本识别，缺视觉不阻断 |
