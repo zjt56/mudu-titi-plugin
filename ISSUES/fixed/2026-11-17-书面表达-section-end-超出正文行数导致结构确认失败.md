@@ -1,7 +1,7 @@
 # 卡点：书面表达 section end 超出正文行数导致结构确认失败
 
 - id: 2026-11-17-书面表达-section-end-超出正文行数导致结构确认失败
-- status: open
+- status: fixed
 - batch: 【木牍教育】19年安徽中考英语-2
 - batch_dir: workflows/【木牍教育】19年安徽中考英语-2
 - stage: structure_gate
@@ -9,6 +9,9 @@
 - created: 2026-11-17T17:16:59+08:00
 - last_seen: 2026-11-17T17:16:59+08:00
 - occurrences: 1
+- fixed_at: 2026-11-17T17:17:31+08:00
+- fix_commit: 2d540d0
+- verification: test_source_coordinate_projection 14项通过；批次19-2 structure_gate 48单元通过
 - title: 书面表达 section end 超出正文行数导致结构确认失败
 
 ## 现象（卡点）
@@ -23,4 +26,7 @@ SOURCE_COORDINATE_MISMATCH: source_end_line=319 outside raw body 1..315
 
 ## 修复记录
 
-（未修复）
+- 修复方式：project_structure 对书面表达 section 的 source_end_line 超过正文行数时夹到最后一行；普通大题仍严格报错
+- 修复提交：2d540d0
+- 复验证据：test_source_coordinate_projection 14项通过；批次19-2 structure_gate 48单元通过
+- 标记时间：2026-11-17T17:17:31+08:00
