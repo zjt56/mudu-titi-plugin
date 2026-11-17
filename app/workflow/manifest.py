@@ -839,6 +839,11 @@ def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, s
     Consumer validation and final gates remain authoritative for content correctness.
     """
     record = manifest["stages"].get(stage.id, {})
+    # A skipped stage has no output by design (optional input absent / explicit
+    # historical skip). Missing produces is not staleness; the scheduler will
+    # reactivate it only when skip_reason changes.
+    if record.get("status") == SKIPPED:
+        return False, ""
     if stage.id == "upload_gate" and record.get("status") == APPROVED:
         approved = record.get("approved_batch_sha256")
         if not approved or approved != sha256_file(Path(batch_dir) / "06_batch/batch_meta.json"):
