@@ -46,8 +46,10 @@
   `test_format_gate` 合计 93 项通过。
 - 真实批次 `【木牍教育】2024中考英语试卷` 继续跑：`answers` 完成、`audio` 待复核不阻断文字链、
   `assemble` 确定性完成；`validate` 在来源逐题核对处阻断（正确性已后移到该阶段）。
-- `test_preassembly` 仍有 3 个既有 late-audio 夹具失败（新的 content_snapshot/meta/underlines
-  顺序未被该夹具完整构造），与本次行为无关，保留待后续统一修复。
+- `test_preassembly` 仍有 5 个旧夹具/期望失败：`test_fresh_scheduler_delivers_types_before_three_label_workers`
+  仍假设只有 `types` 命令、`test_invalid_labels_never_complete_or_unlock_downstream` 仍按
+  `contentComplete=false` 阻止，另 3 个 late-audio 夹具未构造新的
+  `content_snapshot→meta→underlines→assemble` 顺序；属于测试同步债务，保留待统一修复。
 
 ## 回退方式
 
