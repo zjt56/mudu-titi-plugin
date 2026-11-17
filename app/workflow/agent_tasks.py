@@ -1096,8 +1096,26 @@ def _coverage(payload, units):
     if any(not isinstance(r, dict) or not isinstance(r.get("unit_id"), str) for r in rows):
         raise ValueError("Every item needs a stable unit_id")
     ids = [r["unit_id"] for r in rows]
-    if len(ids) != len(set(ids)) or set(ids) != {u["unit_id"] for u in units}:
-        raise ValueError("Artifact must have unique exact confirmed unit coverage")
+    expected = {u["unit_id"] for u in units}
+    if len(ids) != len(set(ids)) or set(ids) != expected:
+        # 硬规则 19：校验报错必须点名缺/多的键与不匹配的题号，让下一次重试
+        # 一次改对，而不是靠 retries 空转。
+        seen, duplicates = set(), []
+        for uid in ids:
+            if uid in seen and uid not in duplicates:
+                duplicates.append(uid)
+            seen.add(uid)
+        missing = [uid for uid in (u["unit_id"] for u in units) if uid not in seen]
+        extra = [uid for uid in dict.fromkeys(ids) if uid not in expected]
+        detail = []
+        if missing:
+            detail.append("缺少单元 %d 个：%s" % (len(missing), "、".join(missing[:12])))
+        if extra:
+            detail.append("多出单元 %d 个：%s" % (len(extra), "、".join(extra[:12])))
+        if duplicates:
+            detail.append("重复单元 %d 个：%s" % (len(duplicates), "、".join(duplicates[:12])))
+        detail.append("候选 %d 行，确认单元 %d 个，必须逐单元恰好一行" % (len(ids), len(expected)))
+        raise ValueError("Artifact must have unique exact confirmed unit coverage: " + "；".join(detail))
     return {r["unit_id"]: r for r in rows}
 
 

@@ -32,7 +32,11 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-17 | [2026-11-17-content-candidate-parts.md](2026-11-17-content-candidate-parts.md) | 内容候选小分片暂存、程序组包完整验收，JSON 格式错误重复宿主事件幂等恢复 |
 | 2026-11-17 | [2026-11-17-router-and-stale-docs.md](2026-11-17-router-and-stale-docs.md) | 显式损坏模型路由拒绝静默回退，收敛视觉停用与两轮审核旧说明，测试入口覆盖 `.test.mjs` |
+| 2026-11-17 | [2026-11-17-coverage-error-names-units.md](2026-11-17-coverage-error-names-units.md) | 单元覆盖报错点名缺失/多余单元，避免同规模候选空转 |
+| 2026-11-17 | [2026-11-17-source-coordinate-unresolved.md](2026-11-17-source-coordinate-unresolved.md) | unresolved 诊断行不参与坐标投影，修复结构确认越界 |
+| 2026-11-17 | [2026-11-17-tool-call-json-recovery.md](2026-11-17-tool-call-json-recovery.md) | 原生内容代理工具参数 JSON 错误恢复，修复前置组装误失败 |
 | 2026-11-17 | [2026-11-17-handoff-relative-root-underlines.md](2026-11-17-handoff-relative-root-underlines.md) | 修复画线交付相对路径误判与音频附件导致的假过期 |
 | 2026-11-17 | [2026-11-17-native-content-route-identity.md](2026-11-17-native-content-route-identity.md) | 视觉移除后原生内容代理恢复 Harness 路由身份绑定 |
 | 2026-11-17 | [2026-11-17-writing-end-past-body.md](2026-11-17-writing-end-past-body.md) | 书面表达 section end 超出正文时夹到最后一行，修复结构确认越界 |

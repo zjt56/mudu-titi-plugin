@@ -392,6 +392,19 @@ class AgentTasksTest(unittest.TestCase):
         self.assertNotIn("textbook", payload["items"][0])
         self.assertTrue(self.accept("knowledge", payload)["completed"])
 
+    def test_coverage_error_names_missing_and_extra_units(self):
+        # 硬规则 19：覆盖不全必须点名缺/多的单元，方便一次改对。
+        from workflow import agent_tasks
+        units = [{"unit_id": "u-1"}, {"unit_id": "u-2"}, {"unit_id": "u-3"}]
+        with self.assertRaises(ValueError) as caught:
+            agent_tasks._coverage({"items": [{"unit_id": "u-1"}, {"unit_id": "u-1"},
+                                             {"unit_id": "u-9"}]}, units)
+        message = str(caught.exception)
+        self.assertIn("u-2", message)
+        self.assertIn("u-3", message)
+        self.assertIn("u-9", message)
+        self.assertIn("重复单元", message)
+
     def test_every_stage_example_satisfies_its_declared_contract(self):
         # 覆盖所有内容阶段：任何一个阶段示例回退成缺键都会被这里挡住，不必再等真实批次空转。
         unit = {"unit_id": "q-1", "numbers": [1], "unit_kind": "standalone"}
