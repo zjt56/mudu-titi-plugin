@@ -212,6 +212,21 @@ test('a model tool-call JSON slip is corrected in the same session instead of fa
   await f.manager.dispose();
 });
 
+test('agent/error tool-call JSON slip also recovers without killing the stage', async () => {
+  let turns = 0;
+  const f = await fixture({ program: async a => {
+    turns += 1;
+    if (turns === 1) throw new Error('Tool call "content_submit_candidate": Expected \',\' or \'}\' after property value in JSON at position 9117 (line 1 column 9118)');
+    await a.call('submit_candidate', { candidate: { recoveredFromAgentError: true } });
+  } });
+  await f.run();
+  assert.equal(f.agents[0].turns, 2);
+  assert.match(f.agents[0].agent.messages.map(m => m.content[0].text).join('\n'), /合法 JSON/);
+  assert.deepEqual(states(f), ['running', 'completed']);
+  assert.deepEqual(f.calls.find(call => call.body?.action === 'submit_candidate').body.args, { candidate: { recoveredFromAgentError: true } });
+  await f.manager.dispose();
+});
+
 test('repeated tool-call JSON slippage ends failed once the recovery budget is spent', async () => {
   const slip = { type: 'turn/end', data: { reason: { kind: 'error', error: {
     message: 'Tool call "content_submit_candidate": Expected \',\' or \'}\' after property value in JSON at position 2779' } } } };
