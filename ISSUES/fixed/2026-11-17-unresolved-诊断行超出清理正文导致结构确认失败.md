@@ -1,7 +1,7 @@
 # 卡点：unresolved 诊断行超出清理正文导致结构确认失败
 
 - id: 2026-11-17-unresolved-诊断行超出清理正文导致结构确认失败
-- status: open
+- status: fixed
 - batch: 【木牍教育】16年安徽中考英语
 - batch_dir: workflows/【木牍教育】16年安徽中考英语
 - stage: structure_gate
@@ -9,6 +9,9 @@
 - created: 2026-11-17T18:14:58+08:00
 - last_seen: 2026-11-17T18:14:58+08:00
 - occurrences: 1
+- fixed_at: 2026-11-17T18:15:06+08:00
+- fix_commit: b7188db
+- verification: test_source_coordinate_projection 14项通过；批次16 structure_gate completed 48单元
 - title: unresolved 诊断行超出清理正文导致结构确认失败
 
 ## 现象（卡点）
@@ -23,4 +26,7 @@ SOURCE_COORDINATE_MISMATCH: line=332 outside raw body 1..278
 
 ## 修复记录
 
-（未修复）
+- 修复方式：project_structure 原样保留 unresolved 诊断、不参与坐标投影；sections/groups/question 锚点仍严格校验
+- 修复提交：b7188db
+- 复验证据：test_source_coordinate_projection 14项通过；批次16 structure_gate completed 48单元
+- 标记时间：2026-11-17T18:15:06+08:00
