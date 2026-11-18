@@ -57,6 +57,41 @@ class MediaInventoryTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(MediaInventoryError):
                 referenced_media(self.root, {'attachments': [{'url': url, 'kind': 'image'}]})
 
+    def test_stale_deployed_and_local_urls_are_resolved_to_current_batch_media(self):
+        self.put('01_source/media/a.png', b'image')
+        self.put('02_audio/b.mp3', b'audio')
+        metadata = {'attachments': [
+            {'url': '/source-media/old-content-hash-a.png', 'name': 'a.png', 'kind': 'image'},
+            {'url': '02_audio/b.mp3', 'name': 'b.mp3', 'kind': 'audio'},
+        ]}
+        result = referenced_media(self.root, metadata)
+        self.assertEqual([row['path'] for row in result], ['01_source/media/a.png', '02_audio/b.mp3'])
+
+    def test_local_media_path_wins_over_display_name(self):
+        self.put('01_source/media/a.png', b'image')
+        result = referenced_media(self.root, {'attachments': [
+            {'url': '01_source/media/a.png', 'name': 'Caption', 'kind': 'image'}]})
+        self.assertEqual(result[0]['path'], '01_source/media/a.png')
+
+    def test_local_media_path_without_name_or_encoded_or_foreign_is_rejected(self):
+        self.put('01_source/media/a.png', b'image')
+        for url in ('01_source/media/missing.png',
+                    '01_source/media/%61.png',
+                    '01_source/media/a.png?x=1',
+                    '01_source/media/../a.png',
+                    '/other/a.png'):
+            with self.subTest(url=url), self.assertRaises(MediaInventoryError):
+                referenced_media(self.root, {'attachments': [{'url': url, 'kind': 'image'}]})
+
+    def test_legacy_deployed_url_requires_explicit_name(self):
+        self.put('01_source/media/a.png', b'image')
+        with self.assertRaises(MediaInventoryError):
+            referenced_media(self.root, {'attachments': [
+                {'url': '/source-media/other-batch/a.png', 'kind': 'image'}]})
+        self.assertEqual(referenced_media(self.root, {'attachments': [
+            {'url': '/source-media/other-batch/a.png', 'name': 'a.png', 'kind': 'image'}]})[0]['path'],
+            '01_source/media/a.png')
+
     def test_missing_mismatched_and_malformed_attachments_rejected(self):
         self.put('01_source/media/a.png')
         for attachment in (self.attachment('missing.png'), self.attachment('a.png', 'audio'),

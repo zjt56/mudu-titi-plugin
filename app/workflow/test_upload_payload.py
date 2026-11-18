@@ -464,6 +464,14 @@ class UploadPayloadTest(unittest.TestCase):
         self.assertEqual(self.build(data)['payload']['items'][0]['attachments'],
                          [legacy_audio | {'url': q['attachments'][0]['url']}, *q['attachments'][1:]])
 
+    def test_local_batch_media_url_is_remapped_by_attachment_basename(self):
+        q = question()
+        q['attachments'] = [{'kind': 'image', 'url': '01_source/media/a.png', 'name': 'a.png'}]
+        report = self.build(batch(q), media_map={'a.png': '/source-media/current/a.png'})
+        self.assertTrue(report['passed'], report['errors'])
+        self.assertEqual(report['payload']['items'][0]['attachments'][0]['url'],
+                         '/source-media/current/a.png')
+
     def test_upload_verify_replays_frozen_media_mapping_options(self):
         from pathlib import Path
         import tempfile

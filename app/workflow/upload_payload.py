@@ -249,6 +249,27 @@ def _safe_blocks(blocks):
     return result
 
 
+def _media_name(url):
+    """Return a safe basename from a batch-local or deployed media URL."""
+    if not isinstance(url, str) or not url or '?' in url or '#' in url or '\\' in url:
+        return None
+    allowed = (url.startswith('/source-media/') or
+               url.startswith('01_source/media/') or
+               url.startswith('01_source_ans/media/') or
+               url.startswith('02_audio/'))
+    if not allowed:
+        return None
+    value = unquote(url, encoding='utf-8', errors='strict')
+    if ('%' in value or any(part in ('.', '..') for part in value.split('/'))):
+        return None
+    name = value.rsplit('/', 1)[-1]
+    if (not name or name in ('.', '..') or '/' in name
+            or any(ord(c) < 32 or ord(c) == 127 for c in name)
+            or not re.fullmatch(r'[^/]+\.[A-Za-z0-9]{1,10}', name)):
+        return None
+    return name
+
+
 def _media_path(url):
     """Return a decoded safe source-media path, or None for unsafe URLs."""
     if not isinstance(url, str):
@@ -492,8 +513,9 @@ class _Builder:
                 for attachment in attachments:
                     url = attachment.get('url') if isinstance(attachment, dict) else None
                     path = _media_path(url)
-                    if path:
-                        self.media_sources.setdefault(path.rsplit('/', 1)[-1], set()).add(url)
+                    name = _media_name(url)
+                    if path or name:
+                        self.media_sources.setdefault(name or path.rsplit('/', 1)[-1], set()).add(url)
             for key, child in value.items():
                 if key != 'attachments':
                     self.collect_media_sources(child)
@@ -520,8 +542,9 @@ class _Builder:
                 self.error("ATTACHMENT_KIND_INVALID", "附件 kind 仅允许 audio/image", uid)
             url = attachment.get("url")
             path = _media_path(url)
-            if path and remap and self.media_map is not None:
-                name = path.rsplit('/', 1)[-1]
+            name = _media_name(url)
+            if (path or name) and remap and self.media_map is not None:
+                name = name or path.rsplit('/', 1)[-1]
                 if name in self.media_map:
                     if len(self.media_sources.get(name, ())) > 1:
                         self.error("MEDIA_MAP_AMBIGUOUS", f"媒体文件名对应多个来源路径：{name}", uid)

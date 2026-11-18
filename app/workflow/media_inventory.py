@@ -28,17 +28,43 @@ _SUFFIXES = {
 def referenced_media(batch_root, batch_meta):
     """Return path and SHA-256 descriptors for explicitly declared attachments.
 
-    Only the canonical URL /source-media/<quoted batch folder>/<quoted filename>
-    establishes local ownership. Every attachment must satisfy this contract;
-    external or otherwise unrelated references are rejected for caller review.
-    Search is limited to direct files in the three conventional directories.
-    Duplicate candidate basenames are rejected as ambiguous.
+    Canonical URLs establish ownership directly. Legacy deployed URLs and batch-
+    relative paths are accepted only as basename references, then re-proved by a
+    unique file in the current batch's conventional media directories. External
+    or unsafe references are rejected for caller review. Duplicate candidate
+    basenames are rejected as ambiguous.
     """
     root = Path(batch_root)
     if not isinstance(batch_meta, dict):
         raise MediaInventoryError('Batch metadata must be an object')
     prefix = '/source-media/' + quote(root.name, safe='') + '/'
+    local_directories = tuple(directory + '/' for directory in _DIRECTORIES)
     names = set()
+
+    def attachment_name(attachment, url):
+        """Resolve a safe local basename from current, stale, or local URLs.
+
+        Older batches may contain a content-addressed deployed URL or a local
+        batch-relative path.  Those URLs are not ownership proof by themselves;
+        the name is accepted only when it resolves uniquely below the current
+        batch's media directories.
+        """
+        if isinstance(url, str) and url.startswith(prefix):
+            return unquote(url[len(prefix):], encoding='utf-8', errors='strict')
+        # A batch-relative media path already names the file; a display-only
+        # `name` must not replace it (same contract as canonical URLs).
+        if isinstance(url, str) and any(url.startswith(directory) for directory in local_directories):
+            candidate = url.rsplit('/', 1)[-1]
+            if candidate:
+                return unquote(candidate, encoding='utf-8', errors='strict')
+        name = attachment.get('name')
+        if isinstance(name, str) and name:
+            return name
+        if isinstance(url, str):
+            candidate = url.rsplit('/', 1)[-1]
+            if candidate:
+                return unquote(candidate, encoding='utf-8', errors='strict')
+        return None
 
     def visit(value):
         if isinstance(value, dict):
@@ -51,17 +77,29 @@ def referenced_media(batch_root, batch_meta):
                             raise MediaInventoryError('Invalid attachment')
                         url = attachment.get('url')
                         kind = attachment.get('kind')
-                        if not isinstance(url, str) or not url.startswith(prefix):
+                        if not isinstance(url, str) or not url:
                             raise MediaInventoryError('Attachment URL is not owned by this batch')
-                        encoded = url[len(prefix):]
                         try:
-                            name = unquote(encoded, encoding='utf-8', errors='strict')
+                            name = attachment_name(attachment, url)
                         except UnicodeError:
                             raise MediaInventoryError('Invalid attachment URL') from None
-                        if (not name or name in ('.', '..') or '/' in name or '\\' in name
-                                or '\x00' in name or quote(name, safe='') != encoded
-                                or not re.fullmatch(r'\.[A-Za-z0-9]{1,10}', Path(name).suffix)):
-                            raise MediaInventoryError('Invalid attachment filename')
+                        encoded = quote(name, safe='') if isinstance(name, str) else ''
+                        safe_local = (isinstance(name, str) and bool(name)
+                                      and name not in ('.', '..') and '/' not in name and '\\' not in name
+                                      and '\x00' not in name
+                                      and re.fullmatch(r'\.[A-Za-z0-9]{1,10}', Path(name).suffix or '') is not None)
+                        canonical = url.startswith(prefix) and quote(name, safe='') == url[len(prefix):]
+                        local_reference = (not canonical and any(url.startswith(directory) for directory in local_directories)
+                                           and '?' not in url and '#' not in url and '\\' not in url
+                                           and '%' not in url
+                                           and not any(part in ('.', '..') for part in url.split('/')))
+                        explicit_name = isinstance(attachment.get('name'), str) and bool(attachment.get('name'))
+                        stale_deployed = (not canonical and explicit_name
+                                          and url.startswith('/source-media/')
+                                          and '?' not in url and '#' not in url
+                                          and '\\' not in url and not any(part in ('.', '..') for part in url.split('/')))
+                        if not safe_local or not (canonical or local_reference or stale_deployed):
+                            raise MediaInventoryError('Attachment URL is not owned by this batch')
                         if not isinstance(kind, str) or kind not in _SUFFIXES or Path(name).suffix.lower() not in _SUFFIXES[kind]:
                             raise MediaInventoryError('Attachment kind and suffix do not match')
                         names.add(name)
