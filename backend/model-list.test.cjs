@@ -73,6 +73,16 @@ test('AI operations route prefers explicit role, then Harness model, then plugin
   assert.throws(() => plugin.operationsRouteFor({ default: {} }, null));
 });
 
+test('AI operations route rejects an incomplete explicit default instead of using Harness fallback', () => {
+  assert.throws(() => plugin.operationsRouteFor({ default: { provider: 'broken' } }, { provider: 'h', model: 'hm' }),
+    /AI运维需要有效的 operations 或默认模型配置/);
+});
+
+test('AI operations route rejects an incomplete explicit operations role', () => {
+  assert.throws(() => plugin.operationsRouteFor({ default: {}, roles: { operations: { model: 'broken' } } }, { provider: 'h', model: 'hm' }),
+    /AI运维需要有效的 operations 或默认模型配置/);
+});
+
 test('model settings expose a dedicated AI operations row', () => {
   const client = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'lib', 'client.js'), 'utf8');
   assert.match(client, /\['operations', 'AI运维'\]/);

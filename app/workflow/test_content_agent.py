@@ -864,8 +864,9 @@ class ContentAgentTests(unittest.TestCase):
         self.claim(task)
         self.finish(task, thread, result)
         config.pop("_content_route_identity")
-        with self.assertRaises(local_agent.AgentError):
+        with self.assertRaises(local_agent.AgentError) as caught:
             broker.invoke(self.prompt(), root, config)
+        self.assertEqual(caught.exception.code, "native_route_identity_missing")
 
     def test_config_requires_explicit_enable_and_supported_stage(self):
         for native in ({}, {"enabled": 1}, {"enabled": True, "stages": ["audio"]},

@@ -75,6 +75,26 @@ class PipelineRegressions(unittest.TestCase):
         self.assertFalse(saved['passed'])
         self.assertIn('SOURCE_SLICE_MISMATCH', saved['blocking_failures'])
 
+    def test_scoped_option_error_is_deferred_without_losing_evidence(self):
+        script_report = {'passed': True, 'checks': [], 'blocking_failures': [], 'warnings': [], 'skipped': []}
+        issue = {'code': 'OPTION_CONTENT_MISMATCH', 'unit_id': 'q-40', 'message': 'D选项不符'}
+        with patch.object(runner.checks, 'run_all', return_value=script_report), \
+             patch('workflow.question_content.audit_batch_source', return_value={'passed': False, 'issues': [issue]}):
+            self.assertEqual(runner.do_validate(self.root, self.manifest), 0)
+        saved = json.loads((self.root / '07_review/validation-report.json').read_text())
+        row = next(f for f in saved['findings'] if f['code'] == issue['code'])
+        self.assertFalse(row['blocking'])
+        self.assertEqual(row['unit_id'], 'q-40')
+        self.assertEqual(row['deferred_to'], 'format_gate')
+
+    def test_identity_error_still_blocks_even_with_deferred_content(self):
+        script_report = {'passed': True, 'checks': [], 'blocking_failures': [], 'warnings': [], 'skipped': []}
+        issues = [{'code': 'SOURCE_STEM_MISSING', 'unit_id': 'q-1', 'message': '题干错误'},
+                  {'code': 'SOURCE_UNIT_NOT_FOUND', 'unit_id': 'q-2', 'message': '来源身份缺失'}]
+        with patch.object(runner.checks, 'run_all', return_value=script_report), \
+             patch('workflow.question_content.audit_batch_source', return_value={'passed': False, 'issues': issues}):
+            self.assertEqual(runner.do_validate(self.root, self.manifest), 1)
+
     def test_validate_merges_concurrent_stage_update(self):
         mf.save(self.root, self.manifest)
         script_report = {'passed': True, 'checks': [], 'blocking_failures': [], 'warnings': [], 'skipped': []}

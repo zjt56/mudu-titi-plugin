@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 import tempfile
+from bisect import bisect_right
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -597,6 +598,7 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
                                       'lesson_audit': sync_practice.audit_lesson_shape(text),
                                       'confirmed': False}
     body_lines = []
+    body_line_numbers = []
     moved_answer_lines = []
     # 解析版常把书面表达的【参考范文】附在正文末尾：范文是答案，不是题目，
     # 移入附录既能保持正文干净，也让答案校验能在答案文本里找到它。
@@ -637,6 +639,7 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
             moved_answer_lines.append(lines[i])
             continue
         body_lines.append(lines[i])
+        body_line_numbers.append(i + 1)
         if plain:
             prev_body_plain = plain
         match = QUESTION.match(plain)
@@ -653,14 +656,59 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
     # 文末重复卷名属于答案册页眉，不能留在最后一题的正文/题干里。
     while body_lines and not body_lines[-1].strip():
         body_lines.pop()
+        body_line_numbers.pop()
     if body_lines and paper_title and _title_key(body_lines[-1]) == paper_title:
         body_lines.pop()
+        body_line_numbers.pop()
+    # Removing a trailing duplicate paper title can expose the blank separator
+    # lines that preceded the answer appendix. They are stripped from the
+    # emitted正文 as well, so remove their coordinates from the same map.
+    while body_lines and not body_lines[-1].strip():
+        body_lines.pop()
+        body_line_numbers.pop()
     appendix_blocks = ["\n".join(lines[start:end]).strip() for start, end in appendix_ranges]
     if moved_answer_lines:
         appendix_blocks.append("\n".join(moved_answer_lines).strip())
     if appendix_start < len(lines):
         appendix_blocks.append("\n".join(lines[appendix_start:]).strip())
     appendix_text = "\n\n".join(block for block in appendix_blocks if block)
+    # Structure discovery runs on the full extracted text, while downstream
+    # consumers read the split 正文. Project every retained source coordinate
+    # through the exact line map so an appendix boundary cannot leak past the
+    #正文 body (for example a writing section ending on the answer page).
+    if body_line_numbers:
+        retained_index = {line: index + 1 for index, line in enumerate(body_line_numbers)}
+        coordinate_keys = {"source_line", "source_start_line", "start_line",
+                           "heading_line", "source_end_line", "end_line",
+                           "line", "line_no"}
+        end_keys = {"source_end_line", "end_line"}
+
+        def project_coordinate(value, key):
+            if type(value) is not int or key not in coordinate_keys:
+                return value
+            if value in retained_index:
+                return retained_index[value]
+            if key in end_keys:
+                boundary = bisect_right(body_line_numbers, value)
+                if boundary:
+                    return boundary
+            raise ValueError(f"SOURCE_COORDINATE_MISMATCH: {key}={value} has no retained正文 boundary")
+
+        def project(value, key="", diagnostic=False):
+            if isinstance(value, dict):
+                # This is a diagnostic marker for the appendix itself, not a
+                # source anchor consumed by question slicing.
+                if value.get("code") == "ANSWER_APPENDIX_DETECTED":
+                    return value
+                is_diagnostic = diagnostic or ("code" in value and "message" in value)
+                return {name: project(item, name, is_diagnostic) for name, item in value.items()}
+            if isinstance(value, list):
+                return [project(item, diagnostic=diagnostic) for item in value]
+            if diagnostic and key in {"line", "line_no"}:
+                return value
+            return project_coordinate(value, key)
+
+        structure = project(structure)
     return structure, "\n".join(body_lines).rstrip() + "\n", appendix_text
 
 

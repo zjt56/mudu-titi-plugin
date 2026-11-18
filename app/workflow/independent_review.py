@@ -1,4 +1,8 @@
-"""Independent read-only three-level review and subquestion sampling gate."""
+"""Optional independent read-only review and subquestion sampling gate.
+
+This is an explicit compatibility gate enabled by ``MUDU_REVIEW_CONFIG``; it
+is separate from the normal two-round ``labels``/``sample`` review contract.
+"""
 from __future__ import annotations
 
 import hashlib

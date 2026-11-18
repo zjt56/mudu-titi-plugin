@@ -264,7 +264,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m unittest workflow.test_agent_p
 
 # 后端与插件接口测试
 cd ..
-node --test backend/*.test.cjs
+node --test backend/*.test.cjs backend/*.test.mjs
 
 # 宿主插件语法检查
 node --check lib/index.js lib/client.js

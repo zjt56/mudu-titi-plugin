@@ -39,9 +39,11 @@ CHECKS: tuple[Check, ...] = (
           note="最终格式阶段报告，不阻断", phase="format"),
     Check("表格 check_tables", "scripts/06-upload/check_tables.py", blocking=False,
           note="最终格式阶段报告，不阻断", phase="format"),
-    # 前期只查结构与选项完整性；重复显示留到最终格式阶段观察。
+    # 前期仍检查题组归属、选项位置及字母连续；仅 E20 数量不足延后。
     Check("题型版面 audit_type_layout", "scripts/06-upload/audit_type_layout.py",
           args=("--content-only",)),
+    Check("题型内容 audit_type_layout_final", "scripts/06-upload/audit_type_layout.py",
+          note="最终重新检查选项数量及身份归属", phase="format", args=("--content-only",)),
     Check("题型重复显示 audit_type_layout_full", "scripts/06-upload/audit_type_layout.py",
           blocking=False, note="最终格式阶段完整题型版面观察，不阻断", phase="format"),
     Check("批次完整性 audit_batch_integrity", "scripts/06-upload/audit_batch_integrity.py"),
@@ -200,12 +202,31 @@ def run_check(check: Check, skill_root: Path, batch_json: Path, inputs: dict,
                 "warnings": [row["message"] for row in findings if not row["blocking"]],
                 "findings": findings, "note": check.note}
     findings = _output_findings(check, out, err, code)
+    # Only the well-formed option count diagnostics are deferrable. E20 also
+    # includes letter continuity, which must remain an early identity check.
+    # Nonzero exits with unrecognized diagnostics remain hard failures.
+    if (check.script == 'scripts/06-upload/audit_type_layout.py'
+            and check.phase == 'content' and check.args == ('--content-only',)):
+        for row in findings:
+            if (row.get('code') == 'E20' and re.search(
+                    r'(?:单元)?选项应为\s*\d+\s*条，现有\s*\d+\s*条', row.get('message', ''))):
+                row.update(blocking=False, severity='warning', disposition='defer_final',
+                           deferred_to='format_gate')
+        if code == 1 and findings and all(not row['blocking'] for row in findings):
+            code_passed = True
+        else:
+            code_passed = code == 0
+            if code not in (0, 1) and not any(row['blocking'] for row in findings):
+                findings.append(_finding(check, f"检查异常退出码为 {code}",
+                                         code='CHECK_EXIT_NONZERO', exit_code=code))
+    else:
+        code_passed = code == 0
     return {
         "check": check.name,
         "script": check.script,
         "blocking": check.blocking,
         "phase": check.phase,
-        "passed": code == 0,
+        "passed": code_passed,
         "exit_code": code,
         "output": _tail(out),
         "stdout": out,

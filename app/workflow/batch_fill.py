@@ -12,6 +12,7 @@ import hashlib
 import json
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 from . import question_draft
 from .wire_format import FILTER_KEYS, SOURCE_KEYS
@@ -695,7 +696,14 @@ def _apply(root, data, stage, artifact):
             if not isinstance(relative, str) or not _path(root, relative).is_file():
                 raise ValueError("Audio file must be a safe existing batch-local file")
             attachments = [a for a in target.get("attachments", []) if a.get("kind") != "audio"]
-            attachments.append({"kind": "audio", "url": relative, "name": Path(relative).name})
+            # An already-deployed audio attachment keeps its /source-media URL;
+            # only a first-time local file is written as the batch-relative path.
+            prior = next((a for a in target.get("attachments", [])
+                          if a.get("kind") == "audio"
+                          and (a.get("name") or "").endswith(Path(relative).name)), None)
+            url = (prior.get("url") if prior and str(prior.get("url") or "").startswith("/source-media/")
+                   else relative)
+            attachments.append({"kind": "audio", "url": url, "name": Path(relative).name})
             target["attachments"] = attachments
         touched.add(uid)
     if stage == "answers":
@@ -775,9 +783,22 @@ def sync(batch_dir, stage, payload=None) -> dict:
 
 
 def project_audio_views(batch_dir, before):
-    """Project accepted media only; retain every existing non-audio view field."""
+    """Project accepted media only; retain every existing non-audio view field.
+
+    ``before`` is the batch view as it stood when late audio delivery began, so it
+    carries the relative media paths still awaiting the deployed ``/source-media``
+    form. ``sync`` normalizes those to the canonical URL for every attachment
+    (image and audio) in the same transaction; that normalization is media
+    deployment evidence, not a content change. Compare non-audio fields after
+    applying the identical URL normalization so a legitimate media rewrite does
+    not masquerade as a non-audio batch change.
+    """
     root = _root(batch_dir)
     after = _read(root, BATCH)
+
+    def is_media(attachment):
+        return isinstance(attachment, dict) and attachment.get('kind') in ('image', 'audio')
+
     def without_audio(value):
         if isinstance(value, dict):
             return {key: ([without_audio(a) for a in child if a.get('kind') != 'audio']
@@ -788,8 +809,26 @@ def project_audio_views(batch_dir, before):
         if isinstance(value, list):
             return [without_audio(child) for child in value]
         return value
-    if without_audio(before) != without_audio(after):
-        left, right = without_audio(before), without_audio(after)
+
+    def deployed_media_urls(value):
+        """Rewrite relative media URLs to the deployed form, keep everything else."""
+        if isinstance(value, dict):
+            if value.get('kind') in ('image', 'audio'):
+                updated = dict(value)
+                name = updated.get('name') or str(updated.get('url') or '').rsplit('/', 1)[-1]
+                url = updated.get('url')
+                if name and (not isinstance(url, str) or not url.startswith('/source-media/')):
+                    updated['url'] = '/source-media/' + quote(root.name, safe='') + '/' + quote(name, safe='')
+                return {key: deployed_media_urls(child) for key, child in updated.items()}
+            return {key: deployed_media_urls(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [deployed_media_urls(child) for child in value]
+        return value
+
+    before_media = deployed_media_urls(without_audio(before))
+    after_media = deployed_media_urls(without_audio(after))
+    if before_media != after_media:
+        left, right = before_media, after_media
         changed = [key for key in set(left) | set(right) if left.get(key) != right.get(key)]
         if changed == ['items']:
             changed = sorted({key for a, b in zip(left['items'], right['items'])

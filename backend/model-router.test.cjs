@@ -82,6 +82,26 @@ test('router fails instead of falling back when the config is unreadable', t => 
   assert.throws(() => readFileSync(response, 'utf8'), { code: 'ENOENT' });
 });
 
+test('router fails instead of falling back when an explicit stage override is incomplete', t => {
+  const { result, response } = fixture(t, {
+    default: { provider: 'deepseek-official', model: 'deepseek-flash', profile: 'fake' },
+    stages: { answers: { provider: 'deepseek-official' } }, review: { rounds: {} },
+  }, 'Stage: answers\n');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /stages\.answers is incomplete/);
+  assert.throws(() => readFileSync(response, 'utf8'), { code: 'ENOENT' });
+});
+
+test('review round override must not silently fall back when incomplete', t => {
+  const { result, response } = fixture(t, {
+    default: { provider: 'deepseek-official', model: 'deepseek-flash', profile: 'fake' },
+    stages: {}, review: { rounds: { labels: { model: 'missing-provider' } } },
+  }, 'Stage: review\nROUND: labels\n');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /review\.rounds\.labels is incomplete/);
+  assert.throws(() => readFileSync(response, 'utf8'), { code: 'ENOENT' });
+});
+
 test('Chinese self-heal prompt retains its explicit selected route at a multibyte truncation boundary', t => {
   const { result, response } = fixture(t, {
     default: { provider: 'magpie-responses', model: 'default-only', profile: 'fake' },

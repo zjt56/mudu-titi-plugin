@@ -477,6 +477,18 @@ class ReviewRoundsTest(unittest.TestCase):
         return {'status': 'completed', 'artifacts': {'review_round': {'checks': checks}},
                 'notes': [], 'findings': []}
 
+    def test_sample_retained_empty_standalone_children_replay(self):
+        self._parallel_batch()
+        task = review_rounds.export_task(self.batch, only_round='sample')
+        binding = review_rounds._check_bound_inputs(self.batch, task['task_id'])
+        response = self._part_response(binding['task']['prompt'], 'sample')
+        for check in response['artifacts']['review_round']['checks']:
+            check['assessment']['subquestions'] = [{'number': check['number'], 'knowledge': []}]
+        saved = copy.deepcopy(response)
+        review_rounds.import_result(self.batch, task['task_id'], response)
+        self.assertEqual(response, saved)
+        self.assertIn('sample', review.evaluate_rounds(self.batch)['checked_rounds'])
+
     def test_four_parts_complete_after_earlier_evidence_path_correction(self):
         self._parallel_batch()
         self.write('01_source/附录.txt', '1~4 AAAA\n')

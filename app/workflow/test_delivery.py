@@ -121,6 +121,13 @@ class DeliveryChecklistTest(unittest.TestCase):
                                     'filterMetadata': {'difficulty': '适中'}}]}
         with self.assertRaises(ValueError):
             handoff._assert_meta_projection(base, tampered_meta)
+        source = {'items': [{'unit_id': 'q-1', 'evidence': {'audio': 'original.wav'}}]}
+        late = {'items': [{'unit_id': 'q-1', 'evidence': {'audio': 'original.wav'},
+                           'attachments': [{'kind': 'audio', 'url': 'clip.wav'}]}]}
+        handoff._assert_meta_projection(source, late)
+        late['items'][0]['evidence']['audio'] = 'other.wav'
+        with self.assertRaises(ValueError):
+            handoff._assert_meta_projection(source, late)
         marked = {'items': [{'unit_id': 'q-1', 'stem': '<u>原文</u>', 'options': ['A']}]}
         handoff._assert_underline_projection(base, marked)
         tampered_marked = {'items': [{'unit_id': 'q-1', 'stem': '<u>原文</u>', 'options': ['B']}]}

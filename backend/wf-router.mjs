@@ -24,7 +24,25 @@ function firstHeader(name, limit) {
   const match = prompt.slice(0, limit).match(new RegExp(`^${name}:[\\t ]*([A-Za-z0-9_-]+)`, 'm'));
   return match ? match[1] : '';
 }
-function valid(entry) { return entry && typeof entry === 'object' && entry.provider && entry.model; }
+function valid(entry) {
+  return entry && typeof entry === 'object' && !Array.isArray(entry)
+    && typeof entry.provider === 'string' && entry.provider
+    && typeof entry.model === 'string' && entry.model;
+}
+function section(data, name) {
+  const value = data[name];
+  if (value === undefined || value === null) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    fail(`model-router.json ${name} must be an object`);
+  }
+  return value;
+}
+function override(container, key, label) {
+  if (key == null || !(key in container)) return null;
+  const entry = container[key];
+  if (!valid(entry)) fail(`model-router.json ${label}.${key} is incomplete; provider/model are required`);
+  return entry;
+}
 /** Read `- id: agent-default-model` provider/model from one profile patch. */
 function defaultModelBlock(file) {
   if (!existsSync(file)) return null;
@@ -91,17 +109,21 @@ function choose(data, stage, round, agent) {
     // Present but corrupt stays an error: never a silent fallback.
     def = valid(raw) ? raw : null;
   }
-  if (!valid(def)) fail('model-router.json has no valid default provider/model and no Harness agent-default-model was found; select a model in the plugin settings');
+  if (!valid(def)) fail('model-router.json has no valid default provider/model; default is incomplete and no Harness agent-default-model was found; select a model in the plugin settings');
+  const stages = section(data, 'stages');
+  const roles = section(data, 'roles');
+  const review = section(data, 'review');
+  const rounds = section(review, 'rounds');
   let entry;
   if (stage === 'review') {
-    entry = round && data.review?.rounds?.[round];
-    if (!valid(entry)) entry = agent && data.roles?.[agent];
-    if (!valid(entry)) entry = data.roles?.review;
-    if (!valid(entry)) entry = data.stages?.review;
-    if (!valid(entry)) entry = data.review?.default;
+    entry = round ? override(rounds, round, 'review.rounds') : null;
+    if (!entry) entry = agent ? override(roles, agent, 'roles') : null;
+    if (!entry) entry = override(roles, 'review', 'roles');
+    if (!entry) entry = override(stages, 'review', 'stages');
+    if (!entry) entry = override(review, 'default', 'review');
   } else {
-    entry = agent && data.roles?.[agent];
-    if (!valid(entry)) entry = data.stages?.[stage];
+    entry = agent ? override(roles, agent, 'roles') : null;
+    if (!entry) entry = override(stages, stage, 'stages');
   }
   return valid(entry) ? entry : def;
 }

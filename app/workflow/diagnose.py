@@ -232,6 +232,8 @@ def _agent_error(batch: Path, stage_id: str, record: dict | None = None) -> str:
             return ""
         err = report.get("error") or report.get("message")
         if err:
+            if isinstance(report.get("error_code"), str):
+                return json.dumps({"error_code": report["error_code"], "error": str(err)}, ensure_ascii=False)
             return str(err)
     if latest:
         repair = _read(latest)
@@ -257,6 +259,9 @@ def _agent_error(batch: Path, stage_id: str, record: dict | None = None) -> str:
     # invoke 启动/超时/协议失败未必写 import-report；实际错误在 stderr 外框。
     if (envelope.get("stage", stage_id) == stage_id and current(log_path)
             and envelope.get("error")):
+        if isinstance(envelope.get("code"), str):
+            return json.dumps({"error_code": envelope["code"],
+                               "error": str(envelope["error"])}, ensure_ascii=False)
         return str(envelope["error"])
     return ""
 

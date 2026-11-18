@@ -6,6 +6,7 @@ This does not certify independent original-page coverage or browser rendering.
 """
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from . import upload_content
@@ -13,6 +14,92 @@ from .findings import source_partition
 
 SOURCE_FILES = ('01_source/正文.txt', '01_source/structure.json',
                 '01_source/structure.confirmed.json')
+STRUCTURE_REPORT = '07_review/structure-gate.json'
+
+
+def _valid_sequential_writing_warning(root, issue):
+    """Accept a source-bound unnumbered writing section's internal next number.
+
+    The printed section title may use a Roman numeral and the writing prompt may
+    have no Arabic number.  A confirmed ``single_writing_section`` is allowed to
+    use the next number after the preceding numbered unit for local continuity;
+    this is not evidence that the number was printed in the source.
+    """
+    if str(issue.get('code') or '') != 'QUESTION_NUMBER_INFERRED':
+        return False
+    try:
+        confirmed = json.loads((Path(root) / '01_source/structure.confirmed.json').read_text(encoding='utf-8-sig'))
+        units = confirmed.get('units') if isinstance(confirmed, dict) else []
+        writing = [u for u in units if isinstance(u, dict)
+                   and u.get('unit_kind') == 'standalone'
+                   and isinstance(u.get('source_span'), dict)
+                   and u['source_span'].get('number_binding') == 'single_writing_section'
+                   and '书面表达' in str(u.get('type') or '')]
+        if len(writing) != 1:
+            return False
+        numbers = writing[0].get('numbers') or []
+        if len(numbers) != 1 or type(numbers[0]) is not int or numbers[0] <= 0:
+            return False
+        prior = [n for u in units if u is not writing[0]
+                 for n in (u.get('numbers') or []) if type(n) is int and n > 0]
+        return bool(prior) and numbers[0] == max(prior) + 1
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+
+def structure_evidence(root, manifest, hashes):
+    """Retain deferred structure defects only from a currently bound report."""
+    path = root / STRUCTURE_REPORT
+    structure_record = (manifest.get('stages') or {}).get('structure_gate') or {}
+    # Older format-repair batches may predate the structure report. Preserve
+    # compatibility for those isolated artifacts while marking the evidence
+    # boundary explicitly. Current managed workflows must provide the report.
+    requires_report = bool(structure_record) or (root / 'workflow/batch-fill-state.json').exists()
+    if not path.is_file() and not requires_report:
+        return ([], [{'code': 'FINAL_STRUCTURE_EVIDENCE_UNCHECKED',
+                      'path': STRUCTURE_REPORT,
+                      'message': '旧格式修复批次未生成结构报告，结构延期检查未执行'}])
+    try:
+        raw = path.read_bytes()
+        report = json.loads(raw.decode('utf-8-sig'))
+        if not isinstance(report, dict) or report.get('passed') is not True:
+            raise ValueError('结构确认报告缺失或未通过')
+        binding = report.get('input_hashes')
+        if not isinstance(binding, dict) or any(not binding.get(rel) or binding[rel] != hashes.get(rel)
+                                                 for rel in SOURCE_FILES):
+            raise ValueError('结构确认报告与当前正文或结构不一致')
+        original = manifest.get('inputs', {}).get('source', {}).get('path')
+        if not original or not report.get('original_sha256'):
+            raise ValueError('结构确认缺少原件绑定')
+        if hashlib.sha256(Path(original).read_bytes()).hexdigest() != report['original_sha256']:
+            raise ValueError('结构确认原件摘要已变化')
+        issues = report.get('structure_warnings', [])
+        if not isinstance(issues, list) or any(not isinstance(item, dict) for item in issues):
+            raise ValueError('结构警告记录损坏')
+        hashes[STRUCTURE_REPORT] = hashlib.sha256(raw).hexdigest()
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return ([{'code': 'FINAL_STRUCTURE_EVIDENCE_INCOMPLETE', 'path': STRUCTURE_REPORT,
+                  'message': str(exc)}], [])
+    errors, warnings = [], []
+    for item in issues:
+        issue = dict(item)
+        code = str(issue.get('code') or '')
+        limited = (code in {'OCR_VISUAL_REVIEW', 'SOURCE_IMAGE_MISSING',
+                            'SOURCE_METADATA_CONFLICT'} or bool(re.match(r'^W\d', code))
+                   or (issue.get('failure_class') == 'capability_limited'
+                       and issue.get('comparison_performed') is False))
+        # A source-proven writing section may have a local sequential number even
+        # when the printed source has no Arabic question number.  Keep the
+        # evidence as a warning, but do not block the upload-format gate.
+        sequential_writing = _valid_sequential_writing_warning(root, issue)
+        issue['blocking'] = not limited and not sequential_writing
+        if sequential_writing:
+            issue['message'] = str(issue.get('message') or '') + '；已按上一题号顺承为本地编号，非印刷题号'
+        issue['stage'] = 'format_gate'
+        issue['report'] = STRUCTURE_REPORT
+        issue.pop('status', None)
+        (warnings if limited or sequential_writing else errors).append(issue)
+    return errors, warnings
 
 
 def content_completeness_errors(root):
@@ -43,7 +130,14 @@ def content_completeness_errors(root):
     except (OSError, ValueError, KeyError, TypeError):
         unit_by_id = {}
     for row in type_rows:
-        if not isinstance(row, dict) or row.get('contentComplete') is not False:
+        if not isinstance(row, dict):
+            errors.append({'code': 'FINAL_TYPES_INCOMPLETE', 'message': '题型记录必须是对象'})
+            continue
+        if 'contentComplete' in row and not isinstance(row['contentComplete'], bool):
+            errors.append({'code': 'FINAL_TYPES_INCOMPLETE', 'unit_id': row.get('unit_id'),
+                           'message': 'contentComplete 必须是布尔值'})
+            continue
+        if row.get('contentComplete') is not False:
             continue
         uid = row.get('unit_id')
         unit = unit_by_id.get(uid) or {}
@@ -92,11 +186,12 @@ def run(root, payload):
         return {'status': 'failed', 'passed': False, 'errors': errors, 'warnings': [],
                 'scope': 'confirmed_units_and_bound_content', 'source_sha256': hashes,
                 'unchecked': ['source_fidelity', 'original_page_coverage', 'rendered_preview']}
+    structure_errors, structure_warnings = structure_evidence(root, manifest, hashes)
     deferred_errors = content_completeness_errors(root)
     from .runner import source_audit_for_batch
     audit = source_audit_for_batch(root, payload)
     audit_errors, limited = source_partition(audit.get('issues') or [])
-    errors = errors + deferred_errors + list(audit_errors)
+    errors = errors + structure_errors + deferred_errors + list(audit_errors)
     if audit.get('passed') is not True and not audit.get('issues'):
         errors.append({'code': 'FINAL_SOURCE_AUDIT_INCOMPLETE', 'message': '原卷逐题核对未完成且没有可判定证据'})
     content = upload_content.inspect_content(root, payload, strict=True)
@@ -106,6 +201,6 @@ def run(root, payload):
     hashes.update(content.get('source_sha256') or {})
     return {'status': 'failed' if errors else 'passed', 'passed': not errors,
             'scope': 'confirmed_units_and_bound_content', 'errors': errors,
-            'warnings': limited + list(content.get('warnings') or []),
+            'warnings': structure_warnings + limited + list(content.get('warnings') or []),
             'source_sha256': hashes,
             'unchecked': ['independent_original_page_coverage', 'rendered_preview']}

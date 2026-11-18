@@ -35,7 +35,7 @@ def group():
              material="Two children visit a museum.",
              knowledge=["语篇体裁/记叙文/故事", "主题/人与自我/生活与学习/学校生活"],
              filterMetadata={"subtypes": ["选择3题"]},
-             subquestions=[{"number": n, "stem": "Where?", "options": ["A. Museum", "B. Park"],
+             subquestions=[{"number": n, "stem": "Where?", "options": ["A. Museum", "B. Park", "C. Home", "D. School"],
                             "answer": "A", "explanation": "无", "knowledge": []} for n in (2, 3, 4)])
     q.pop("knowledgeIds")
     return q
@@ -491,6 +491,19 @@ class FormatGateTest(unittest.TestCase):
         self.assertTrue(result["passed"], result["errors"])
         self.assertTrue(any(row.get("code") == "FINAL_FORMAT_CHECK_EXECUTION_FAILED"
                             for row in result["warnings"]))
+
+    def test_deferred_option_count_is_hard_even_if_format_runner_crashes(self):
+        data = batch()
+        data['items'][0]['options'] = ['A. go', 'B. see']
+        self.put(data)
+        for failed_runner in (False, True):
+            with self.subTest(failed_runner=failed_runner):
+                with patch.object(format_gate.checks, 'run_all',
+                                  **({'side_effect': RuntimeError('runner unavailable')} if failed_runner
+                                     else {'wraps': format_gate.checks.run_all})):
+                    result = format_gate.run(self.root)
+                self.assertFalse(result['passed'])
+                self.assertIn('E20', self.codes(result))
 
     def test_deferred_difficulty_stays_hard_when_format_runner_fails(self):
         data = batch()

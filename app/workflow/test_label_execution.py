@@ -45,6 +45,15 @@ class LabelExecutionTest(unittest.TestCase):
         return {'status': 'completed', 'artifacts': {agent_tasks.ARTIFACTS['answers']: payload},
                 'notes': [], 'findings': []}
 
+    def test_integration_failure_is_not_repeated_as_per_unit_content_repair(self):
+        fault = local_agent.AgentError('Native agent requires selected provider/model route identity', 'integration')
+        with self.assertRaises(local_agent.AgentError) as caught, \
+             patch.object(local_agent, 'invoke', side_effect=fault) as invoke:
+            label_execution.run(self.batch, 'answers', self.config, self.batch / 'run', invoke=invoke)
+        self.assertIs(caught.exception, fault)
+        self.assertEqual(invoke.call_count, 1)
+        self.assertFalse((self.batch / agent_tasks.ARTIFACTS['answers']).exists())
+
     def test_failed_answer_only_is_retried_and_success_is_preserved(self):
         calls = []
         def invoke(prompt, directory, config, **kw):

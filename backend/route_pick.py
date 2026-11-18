@@ -113,11 +113,29 @@ try:
 except Exception as exc:
     sys.stderr.write("wf-router: cannot read model-router.json: %s\n" % exc)
     sys.exit(1)
+if not isinstance(data, dict) or isinstance(data, list):
+    sys.stderr.write("wf-router: model-router.json root must be an object\n")
+    sys.exit(1)
 
-def pick(entry, fallback):
-    if isinstance(entry, dict) and entry.get("provider") and entry.get("model"):
-        return entry
-    return fallback
+def _section(name, value):
+    """Read a router section without turning malformed config into absence."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"model-router.json {name} must be an object")
+    return value
+
+
+def _override(section, key, label):
+    """Return an explicit override; reject present-but-incomplete entries."""
+    if key is None or key not in section:
+        return None
+    entry = section[key]
+    if (not isinstance(entry, dict) or not isinstance(entry.get("provider"), str)
+            or not entry.get("provider") or not isinstance(entry.get("model"), str)
+            or not entry.get("model")):
+        raise ValueError(f"model-router.json {label}.{key} is incomplete; provider/model are required")
+    return entry
 
 raw_default = data.get("default")
 default = raw_default if isinstance(raw_default, dict) else {}
@@ -127,9 +145,20 @@ if raw_default is None or raw_default == {}:
 elif not (default.get("provider") and default.get("model")):
     # present but corrupt is an error, never a silent fallback
     default = {}
-stages = data.get("stages") or {}
-roles = data.get("roles") or {}
-review = data.get("review") or {}
+if raw_default is not None and raw_default != {} and (
+        not isinstance(raw_default, dict) or not isinstance(raw_default.get("provider"), str)
+        or not raw_default.get("provider") or not isinstance(raw_default.get("model"), str)
+        or not raw_default.get("model")):
+    sys.stderr.write("wf-router: no valid default provider/model; model-router.json default is incomplete and provider/model are required\n")
+    sys.exit(1)
+try:
+    stages = _section("stages", data.get("stages"))
+    roles = _section("roles", data.get("roles"))
+    review = _section("review", data.get("review"))
+    rounds = _section("review.rounds", review.get("rounds"))
+except ValueError as exc:
+    sys.stderr.write("wf-router: %s\n" % exc)
+    sys.exit(1)
 
 if not (isinstance(default, dict) and default.get("provider") and default.get("model")):
     sys.stderr.write("wf-router: model-router.json has no valid default provider/model and no "
@@ -138,23 +167,22 @@ if not (isinstance(default, dict) and default.get("provider") and default.get("m
 
 chosen = None
 if stage == "review":
-    rounds = review.get("rounds") or {}
-    entry = rounds.get(rnd) if rnd else None
-    if not (isinstance(entry, dict) and entry.get("provider") and entry.get("model")):
-        entry = roles.get(agent) if agent else None
-    if not (isinstance(entry, dict) and entry.get("provider") and entry.get("model")):
-        entry = roles.get("review")
-    if not (isinstance(entry, dict) and entry.get("provider") and entry.get("model")):
-        entry = stages.get("review")
-    if not (isinstance(entry, dict) and entry.get("provider") and entry.get("model")):
-        entry = review.get("default")
-    chosen = pick(entry, default)
+    entry = (_override(rounds, rnd, "review.rounds") if rnd else None)
+    if entry is None:
+        entry = _override(roles, agent, "roles") if agent else None
+    if entry is None:
+        entry = _override(roles, "review", "roles")
+    if entry is None:
+        entry = _override(stages, "review", "stages")
+    if entry is None:
+        entry = _override(review, "default", "review")
+    chosen = entry or default
 else:
     # 子 Agent 角色优先于阶段，便于同一阶段的多个角色独立选模型。
-    entry = roles.get(agent) if agent else None
-    if not (isinstance(entry, dict) and entry.get("provider") and entry.get("model")):
-        entry = stages.get(stage)
-    chosen = pick(entry, default)
+    entry = _override(roles, agent, "roles") if agent else None
+    if entry is None:
+        entry = _override(stages, stage, "stages")
+    chosen = entry or default
 
 provider = chosen.get("provider")
 model = chosen.get("model")

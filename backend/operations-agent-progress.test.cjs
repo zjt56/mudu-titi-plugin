@@ -251,7 +251,24 @@ test('tool schema exposes bounded code search and line reads', async () => {
     const schema = tools.get('operations_code_repair').parameters;
     assert.ok(schema.properties.operation.enum.includes('search'));
     assert.ok(schema.properties.operation.enum.includes('read_lines'));
+    assert.ok(schema.properties.operation.enum.includes('patch'));
+    assert.ok(schema.properties.operation.enum.includes('restore_base'));
+    assert.ok(schema.properties.old_text);
+    assert.ok(schema.properties.new_text);
     for (const key of ['query', 'cursor', 'start_line', 'max_matches', 'context']) assert.ok(schema.properties[key]);
+  } });
+  await f.run(); await f.manager.dispose();
+});
+
+test('patch and base-restore are visible as writes and never count as read-only progress', async () => {
+  const f = await fixture({ program: async ({ tools }) => {
+    const schema = tools.get('operations_code_repair').parameters;
+    assert.ok(schema.properties.operation.enum.includes('patch'));
+    assert.ok(schema.properties.operation.enum.includes('restore_base'));
+    const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'lib/operations-agent.js'), 'utf8');
+    assert.match(source, /'patch': 'code_write', restore_base: 'code_write'/);
+    assert.match(source, /\['write', 'patch'\]\.includes\(input\.operation\)/);
+    assert.match(source, /input\.operation === 'restore_base'\) r\.codeStage = 'workspace'/);
   } });
   await f.run(); await f.manager.dispose();
 });

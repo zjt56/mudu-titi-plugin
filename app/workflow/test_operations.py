@@ -961,6 +961,34 @@ class FastRepairOperationsTests(unittest.TestCase):
         self.assertEqual(release["files"], ["app/workflow/test_new.py"])
         self.assertTrue(release["plan_id"])
 
+    def test_code_repair_patch_and_restore_are_receipted_and_workspace_only(self):
+        claim = self.claim()
+        started = self.request(claim, 'request_code_repair', {}, request='start')
+        workspace = Path(started['evidence']['workspace'])
+        relative = 'app/workflow/fixture_mod.py'
+        import hashlib
+        original = (workspace / relative).read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        refused = self.request(claim, 'code_repair', {'operation': 'write', 'path': relative,
+            'content': 'return 2', 'start_line': 2, 'context': 1, 'expected_sha': digest}, request='bad-write')
+        self.assertEqual(refused['status'], 'failed')
+        self.assertIn('write_requires_complete_file', refused['evidence']['error'])
+        self.assertEqual((workspace / relative).read_bytes(), original)
+        patched = self.request(claim, 'code_repair', {'operation': 'patch', 'path': relative,
+            'old_text': 'return 1', 'new_text': 'return 2', 'expected_sha': digest}, request='patch')
+        self.assertEqual(patched['status'], 'completed', patched)
+        self.assertIn(b'return 2', (workspace / relative).read_bytes())
+        restored = self.request(claim, 'code_repair', {'operation': 'restore_base', 'path': relative,
+            'expected_sha': patched['evidence']['sha256']}, request='restore')
+        self.assertEqual(restored['status'], 'completed', restored)
+        self.assertTrue(restored['evidence']['restored'])
+        self.assertEqual((workspace / relative).read_bytes(), original)
+        self.assertEqual((self.source / relative).read_bytes(), original)
+        replay = self.request(claim, 'code_repair', {'operation': 'restore_base', 'path': relative,
+            'expected_sha': patched['evidence']['sha256']}, request='restore')
+        self.assertEqual(replay, restored)
+        self.assertEqual(len(list((workspace / '.repair-history').iterdir())), 1)
+
     def test_code_repair_refuses_install_without_confirmation(self):
         claim = self.claim()
         self.request(claim, "request_code_repair", {}, request="start")

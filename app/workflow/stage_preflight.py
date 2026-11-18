@@ -4,8 +4,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 import errno
 import json
+import math
 import os
 from pathlib import Path
+
+
+AUDIO_CANDIDATE_KEYS = ("unit_id", "file", "start", "end", "evidence")
+AUDIO_REJECTED_QUALITY = ("micro", "interpolated", "coarse")
 
 
 def audio_evidence_ready(batch_dir) -> bool:
@@ -23,7 +28,7 @@ def audio_evidence_ready(batch_dir) -> bool:
         if document.get("generator") == "audio.segment/v1":
             return False  # Legacy cuts used an overly broad verification rule.
         if any(item.get("verified") is not True
-               or item.get("quality") in ("micro", "interpolated", "coarse")
+               or item.get("quality") in AUDIO_REJECTED_QUALITY
                or item.get("review_reasons") for item in items if isinstance(item, dict)):
             return False
         keys = ("unit_id", "file", "start", "end", "evidence")
@@ -39,6 +44,61 @@ def audio_evidence_ready(batch_dir) -> bool:
     except (OSError, ValueError, KeyError, TypeError):
         return False
     return True
+
+
+def _strict_audio_candidates() -> bool:
+    """Strict mode keeps unverified candidate cuts out of the normal path."""
+    return str(os.environ.get("WF_ACCEPT_AUDIO_CANDIDATES", "1")).strip().lower() in (
+        "0", "false", "no", "off")
+
+
+def audio_candidates_acceptable(batch_dir) -> bool:
+    """Cuts are real but only their boundary is unverified.
+
+    The audio contract itself accepts these candidate rows by default
+    (``WF_ACCEPT_AUDIO_CANDIDATES`` != 0, see ``agent_tasks``): file and
+    offsets are copied verbatim and the review reasons are carried into the
+    delivery evidence. The deterministic preflight must therefore hand such a
+    batch to the normal acceptance path instead of pinning the stage in
+    ``needs_review`` forever — nothing in the workflow can promote a candidate
+    row to ``verified`` afterwards. Structural damage (missing row fields,
+    missing evidence, missing cut file, unusable bounds, rejected quality) is
+    still rejected here, and strict mode restores the old needs_review gate.
+    """
+    if _strict_audio_candidates():
+        return False
+    batch = Path(batch_dir)
+    path = batch / "02_audio" / "segment-evidence.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(document, dict):
+        return False
+    if document.get("generator") == "audio.segment/v1":
+        return False  # Legacy cuts cannot be trusted as candidate rows either.
+    items = document.get("items")
+    if not isinstance(items, list) or not items:
+        return False
+    pending = False
+    for item in items:
+        if not isinstance(item, dict) or not all(key in item for key in AUDIO_CANDIDATE_KEYS):
+            return False
+        if not item.get("evidence"):
+            return False
+        if item.get("quality") in AUDIO_REJECTED_QUALITY:
+            return False
+        start, end = item.get("start"), item.get("end")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not math.isfinite(value) for value in (start, end)):
+            return False
+        if not 0 <= start < end:
+            return False
+        if not (batch / str(item["file"])).is_file():
+            return False
+        if item.get("verified") is not True or item.get("review_reasons"):
+            pending = True
+    return pending
 
 
 @contextmanager
@@ -122,6 +182,13 @@ def _audio_locked(batch):
             before = agent_protocol._fingerprints(batch, manifest, 'audio', hashes)
             outputs = mf.output_hashes(batch, spec)
             if not audio_evidence_ready(batch):
+                if audio_candidates_acceptable(batch):
+                    # 候选切片：切片文件与起止时间真实存在，只有边界不是真实静音/
+                    # 精确对齐。audio 契约默认接受候选（WF_ACCEPT_AUDIO_CANDIDATES
+                    # 缺省=1）并记录 review 说明，因此这里交回正常验收路径，而不是
+                    # 把阶段钉死在 needs_review（候选行没有任何途径再变成 verified）。
+                    # strict 模式（=0）仍由上面的契约判定拦截为 needs_review。
+                    return None
                 raise ValueError('切片证据未通过 audio 契约')
             checked = handoff.inspect_stage(batch, manifest, 'audio')
             if checked.get('passed') is not True:

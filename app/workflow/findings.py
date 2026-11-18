@@ -10,6 +10,16 @@ import json
 
 
 REVIEW_CODES = frozenset({"REVIEW_ROUND_FINDING", "MANUAL_REVIEW_OPEN", "REVIEW_FINDING_OPEN"})
+DEFERRED_SOURCE_CONTENT = frozenset({'SOURCE_STEM_MISSING', 'OPTIONS_MISMATCH',
+                                     'OPTION_CONTENT_MISMATCH'})
+
+
+def split_early_source(issues):
+    """Defer only scoped content comparisons; unknown identity stays blocking."""
+    hard, soft = source_partition(issues)
+    deferred = [row for row in hard if row.get('code') in DEFERRED_SOURCE_CONTENT
+                and row.get('unit_id')]
+    return [row for row in hard if row not in deferred], deferred, soft
 
 
 def source_partition(issues):
@@ -61,7 +71,12 @@ def collect(report, *, path="", stage=""):
         row["blocking"] = False
         rows.append(row)
     audit = report.get("source_audit") or {}
-    hard, soft = source_partition(audit.get("issues") or [])
+    if stage == 'validate':
+        hard, deferred, soft = split_early_source(audit.get("issues") or [])
+        rows.extend(dict(row, blocking=False, disposition='defer_to_format_gate',
+                         deferred_to='format_gate') for row in deferred)
+    else:
+        hard, soft = source_partition(audit.get("issues") or [])
     rows.extend(dict(row, blocking=True) for row in hard)
     rows.extend(dict(row, blocking=False) for row in soft)
     for check in report.get("checks") or []:

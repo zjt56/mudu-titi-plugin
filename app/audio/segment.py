@@ -376,6 +376,11 @@ def section_anchors(units: list[dict], words: list[dict]) -> dict[int, float]:
                     best = (candidate, offset + len(keyword))
                 offset = text.find(keyword, offset + 1)
             if best is not None:
+                # Chinese listening papers read the passage (and its questions)
+                # twice. The second reading restarts right after the first; a
+                # section anchor after that restart would place the whole next
+                # section inside the material that must come *before* it. Use the
+                # first occurrence so the section starts at its own announcement.
                 break
         if best is not None:
             cursor = best[1]
@@ -583,9 +588,15 @@ def fine_silence_cuts(silences: list[tuple[float, float]], cut_silence: float,
 
 def _snap(anchor: float, cuts: list[float], fine_cuts: list[float],
           near_window: float = 4.0) -> float:
-    """Word/segment timestamps locate anchors; only long-silence midpoints cut audio."""
-    prior = [c for c in cuts[:-1] if c <= anchor]
-    return prior[-1] if prior else 0.0
+    """Word/segment timestamps locate anchors; only long-silence midpoints cut audio.
+
+    Only a preceding long-silence midpoint can be a cut. Short pauses may occur
+    inside a repeated passage and do not prove a question boundary.
+    """
+    ends = [c for c in cuts if 0 < c < anchor + 1e-6]
+    if not ends:
+        return 0.0
+    return ends[-1]
 
 
 def plan(units: list[dict], anchors: dict[int, list[float]], cuts: list[float],
@@ -616,7 +627,7 @@ def plan(units: list[dict], anchors: dict[int, list[float]], cuts: list[float],
     for index, anchor in enumerate(raw_times):
         if anchor is None:
             continue
-        boundary = _snap(anchor, physical, [])
+        boundary = _snap(anchor, physical, fine_cuts or [])
         if boundary <= previous:
             # Do not substitute a word timestamp or fabricate a 0.5 second cut.
             continue

@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import threading
 import unittest
 from pathlib import Path
@@ -56,6 +57,16 @@ class StagePreflightTest(unittest.TestCase):
         return auto._parallel_ready_agents(self.batch,
             [contracts.STAGE_BY_ID[stage] for stage in stages], self.config)
 
+    def candidate_evidence(self):
+        """Keep the real cut, only the silence-aligned boundary stays unverified."""
+        path = self.batch / '02_audio/segment-evidence.json'
+        document = json.loads(path.read_text())
+        document['items'][0]['verified'] = False
+        document['items'][0]['review_reasons'] = ['unsupported_end']
+        document['items'][0]['quality'] = 'ok'
+        self.put('02_audio/segment-evidence.json', document)
+        return path
+
     def test_parallel_current_audio_is_delivered_without_export_or_model(self):
         paths = [self.batch / '02_audio' / name for name in
                  ('audio_map.json', 'segment-evidence.json', 'seg-q-1.mp3')]
@@ -67,9 +78,10 @@ class StagePreflightTest(unittest.TestCase):
         self.assertTrue(mf.dependency_satisfied(mf.load(self.batch), 'audio'))
 
     def test_parallel_insufficient_audio_never_reaches_model_or_completion(self):
+        # Structurally unusable evidence (cut file missing) must stay blocked.
         path = self.batch / '02_audio/segment-evidence.json'
         document = json.loads(path.read_text())
-        document['items'][0]['verified'] = False
+        document['items'][0]['file'] = '02_audio/missing-cut.mp3'
         self.put('02_audio/segment-evidence.json', document)
         before = path.read_bytes()
         with patch.object(agent_protocol, 'export_task', side_effect=AssertionError('no model task')):
@@ -78,6 +90,27 @@ class StagePreflightTest(unittest.TestCase):
         self.assertEqual(record['status'], mf.NEEDS_REVIEW)
         self.assertEqual(record['output_hashes'], {})
         self.assertEqual(path.read_bytes(), before)
+
+    def test_candidate_audio_defers_to_normal_acceptance_path(self):
+        # Candidate cut: file and offsets are real, only the boundary is not
+        # silence-verified. The audio contract accepts those rows by default and
+        # records the review reasons, so the deterministic preflight must not pin
+        # the stage in needs_review (nothing could ever promote the row).
+        path = self.candidate_evidence()
+        before = path.read_bytes()
+        self.assertFalse(stage_preflight.audio_evidence_ready(self.batch))
+        self.assertTrue(stage_preflight.audio_candidates_acceptable(self.batch))
+        self.assertIsNone(stage_preflight.run(self.batch, 'audio'))
+        self.assertNotEqual(mf.load(self.batch)['stages']['audio']['status'], mf.COMPLETED)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_strict_mode_still_pins_candidate_audio_for_review(self):
+        self.candidate_evidence()
+        with patch.dict(os.environ, {'WF_ACCEPT_AUDIO_CANDIDATES': '0'}):
+            self.assertFalse(stage_preflight.audio_candidates_acceptable(self.batch))
+            code, report = stage_preflight.run(self.batch, 'audio')
+        self.assertEqual(code, 3)
+        self.assertEqual(report['status'], 'needs_review')
 
     def test_live_segmenter_prevents_completion_without_waiting_for_model(self):
         with stage_preflight._segment_snapshot_lock(self.batch) as acquired:

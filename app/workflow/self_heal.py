@@ -358,6 +358,29 @@ def _retry_detail(batch, stage_id, detail):
     return str(detail) + '\n' + tail
 
 
+def _runtime_failure(detail):
+    """Return a machine error code proving dispatch failed before content work."""
+    for row in _diagnostic_rows(detail):
+        code = row.get('error_code')
+        if code in ('native_route_identity_missing', 'integration', 'config'):
+            return str(code)
+    return None
+
+
+def _runtime_failure_signature(batch, stage_id, error_code):
+    """Bind a known dispatch fault to code and the selected route state."""
+    from . import local_agent, operations
+    plugin = Path(local_agent.__file__).resolve().parents[2]
+    router = local_agent._router_file(plugin)
+    route_sha = mf.sha256_file(router) if router.is_file() else 'missing'
+    route = local_agent._selected_content_route()
+    body = json.dumps({'stage': stage_id, 'error_code': error_code,
+                       'code': operations._code_fingerprint(),
+                       'router_sha256': route_sha, 'selected_route': route},
+                      sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(body.encode('utf-8')).hexdigest()[:16]
+
+
 def _deterministic_delivery(batch, stage_id):
     """True when this content stage can be delivered from the source without a model call.
 
@@ -398,6 +421,10 @@ def _content_retry_scope(batch, stage_id, detail, *, origin_stage=None, unit_ids
     if stage_id not in scoped_regeneration.STAGES:
         return None
     origin = origin_stage or stage_id
+    runtime = _runtime_failure(detail)
+    if runtime:
+        raise ValueError('content_runtime_requires_code_repair: ' + stage_id + ': ' + runtime
+                         + ': 派发/配置故障不授权内容重生成；保留原产物并修复派发链路后复验')
     evidence = _retry_detail(batch, origin, detail)
     issues = _producer_issues(batch, origin, stage_id)
     for row in [*_diagnostic_rows(evidence), *issues]:
@@ -824,6 +851,14 @@ def _apply(batch, manifest, stage_id, detail, plan, attempt, snapshot):
     action = plan["action"]
     if action == 'refresh_preassemble' and stage_id not in ('preassemble', 'assemble', 'validate', 'format_gate'):
         raise ValueError('refresh_preassemble_not_applicable: 当前阶段不支持前置格式刷新')
+    runtime = _runtime_failure(detail)
+    if runtime and stage_id in ('answers', 'types', 'explanations', 'knowledge', 'audio'):
+        raise ValueError('content_runtime_requires_code_repair: ' + stage_id + ': ' + runtime)
+    if action == 'record_only' and stage_id in ('answers', 'types', 'explanations', 'knowledge', 'audio'):
+        return {'changed': False, 'status': 'refused', 'verified': False,
+                'outcome': 'repair_not_applicable', 'target_stage': stage_id,
+                'escalation': 'code_repair',
+                'reason': 'record_only 不代表内容修复许可；保留候选与失败证据，升级实际故障修复，不重派内容任务'}
     if action == "record_only" and attempt >= MAX_ATTEMPTS_PER_STAGE:
         # Refuse the exhausted strategy without overwriting the original failure
         # (and hence changing its diagnostic signature). recover schedules a
@@ -1105,6 +1140,29 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
                 "outcome": "stale_running", "target_stage": stage_id, "verified": False,
                 "reason": "运行记录无活跃执行者，已重排该阶段"}
     ledger, now = _load(batch), time.time()
+    runtime = _runtime_failure(detail)
+    if runtime:
+        signature = _runtime_failure_signature(batch, stage_id, runtime)
+        prior = next((event for event in reversed(ledger.get('events') or [])
+                      if event.get('stage') == stage_id and event.get('signature') == signature
+                      and event.get('error_code') == runtime), None)
+        if prior is None:
+            event = {'at': mf.now_iso(), 'finished_at': mf.now_iso(), 'stage': stage_id,
+                     'detail': detail, 'signature': signature, 'error_code': runtime,
+                     'attempt': 0, 'verified': False, 'outcome': 'repair_not_applicable',
+                     'escalation': 'code_repair',
+                     'reason': '确定性内容派发故障；停止自愈模型判断和内容重派，交由既有代码运维修复'}
+            ledger.setdefault('events', []).append(event)
+            ledger['events'] = ledger['events'][-50:]
+            ledger.update(active_signature=stage_id + ':' + signature,
+                          next_retry_at=0, last_status='repair_not_applicable', last_stage=stage_id)
+            _save(batch, ledger)
+        else:
+            event = prior
+        return {'changed': False, 'status': 'refused', 'stage': stage_id,
+                'verified': False, 'outcome': 'repair_not_applicable',
+                'escalation': 'code_repair', 'signature': signature,
+                'reason': event['reason'], 'event': event}
     # New evidence/code opens a fresh strategy budget and bypasses old cooldowns.
     # A requeue's timestamps and model explanation cannot reset this identity.
     #
@@ -1215,7 +1273,8 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
         event["error"] = str(exc)[:800]
         event["error_code"] = exc.code if isinstance(exc, AgentError) else type(exc).__name__
         refused = isinstance(exc, ValueError) and str(exc).startswith((
-            'content_retry_requires_scope:', 'content_source_binding_requires_code_repair:'))
+            'content_retry_requires_scope:', 'content_source_binding_requires_code_repair:',
+            'content_runtime_requires_code_repair:'))
         event["outcome"] = "repair_not_applicable" if refused else "repair_failed"
         changed = False
         outcome = {"changed": False, "status": "refused" if refused else "failed",

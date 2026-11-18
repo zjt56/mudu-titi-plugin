@@ -83,6 +83,9 @@ class StructureHumanClosureTest(unittest.TestCase):
         self.assertEqual(runner._reconcile_structure_findings(self.batch, bad), 0)
         stale = dict(report, original_sha256='stale')
         self.assertEqual(runner._reconcile_structure_findings(self.batch, stale), 0)
+        unresolved = dict(report, structure_warnings=[{'code': 'QUESTION_NUMBER_INFERRED'}])
+        self.assertEqual(runner._reconcile_structure_findings(self.batch, unresolved), 0)
+        self.assertEqual(json.loads(queue_path.read_text())['items'][0]['status'], 'open')
         self.assertEqual(runner._reconcile_structure_findings(self.batch, report), 1)
         rows = json.loads(queue_path.read_text())['items']
         self.assertEqual(rows[0]['status'], 'fixed')

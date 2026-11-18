@@ -104,6 +104,21 @@ class PdfOcrDiagnosticsTest(unittest.TestCase):
 
 
 class StructureCandidateTest(unittest.TestCase):
+    def test_structure_coordinates_project_from_full_text_to_split_body(self):
+        text = ('2019年某省初中学业水平考试\n'
+                'Ⅹ.单词拼写(共1小题)\n91. One word.\n'
+                'Ⅺ.书面表达(共1小题)\n写一封邮件。\n'
+                'Dear Mike,\n<u> </u>\nYours,\nLi Hua\n'
+                '2019年某省初中学业水平考试\n'
+                '题号 | 1~5 | 6~10\n答案 | ABCDE | ABCDE\n')
+        structure, body, appendix = extract.infer_structure(text)
+        writing = next(item for item in structure['sections'] if item['type'] == '书面表达')
+        self.assertEqual(len(body.splitlines()), 9)
+        self.assertEqual(writing['source_line'], 4)
+        self.assertEqual(writing['source_end_line'], 9)
+        self.assertIn('题号 | 1~5 | 6~10', appendix)
+        self.assertLessEqual(writing['source_end_line'], len(body.splitlines()))
+
     def test_writing_bullets_not_question_numbers_and_appendix_is_separate(self):
         body = ('Ⅰ.单项填空(共2小题)\n1. First?\n2. Second?\n'
                 'Ⅱ.书面表达(共1小题)\n1. 内容要点\n2. 内容要点\n'

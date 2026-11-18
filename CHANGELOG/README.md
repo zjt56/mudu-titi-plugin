@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-17 | [2026-11-17-recovery-retry-and-workspace-restore.md](2026-11-17-recovery-retry-and-workspace-restore.md) | 确定性派发故障停止内容重派；隔离代码修复增加唯一文本 patch 与只恢复工作副本的基线还原 |
 | 2026-11-17 | [2026-11-17-content-candidate-parts.md](2026-11-17-content-candidate-parts.md) | 内容候选小分片暂存、程序组包完整验收，JSON 格式错误重复宿主事件幂等恢复 |
 | 2026-11-17 | [2026-11-17-router-and-stale-docs.md](2026-11-17-router-and-stale-docs.md) | 显式损坏模型路由拒绝静默回退，收敛视觉停用与两轮审核旧说明，测试入口覆盖 `.test.mjs` |
 | 2026-11-17 | [2026-11-17-coverage-error-names-units.md](2026-11-17-coverage-error-names-units.md) | 单元覆盖报错点名缺失/多余单元，避免同规模候选空转 |

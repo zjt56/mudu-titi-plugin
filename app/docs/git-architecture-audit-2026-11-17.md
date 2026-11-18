@@ -4,7 +4,7 @@
 
 本仓库在 2026-11-04 至 2026-11-17 的短期高频演进中，从独立录题插件发展出跨平台模型路由、原生内容子智能体、PDF 整卷 OCR、两轮独立审核、来源身份绑定和受控运维恢复。当前的复杂度既包含有意保留的兼容、安全和用户数据边界，也存在已经失去运行用途的清单、失实的能力声明及配置处理缺口。不能仅按文件年龄、名字相似或新实现已出现就整块删除旧代码。
 
-历史审计基准为 [`26c407e8ffabf23a3112cd002c9b07d7c44ac8c5`](https://github.com/zjt56/mudu-titi-plugin/commit/26c407e8ffabf23a3112cd002c9b07d7c44ac8c5)。审计阅读了全部可见提交的索引，并对主要子系统执行路径、关键提交补丁和当前调用关系作定向复核；**并非逐行审阅全部 342 个提交的每一份补丁**。本文区分历史 HEAD、当前工作区修复和未解决风险，不把尚未提交的修复写成已发布版本。
+前一轮审计基准为 [`26c407e8ffabf23a3112cd002c9b07d7c44ac8c5`](https://github.com/zjt56/mudu-titi-plugin/commit/26c407e8ffabf23a3112cd002c9b07d7c44ac8c5)；本次复核推进到当前 `HEAD d21584dc0265fcf449692e132cd0e44e93102972`。审计阅读了全部可见提交的索引，并对主要子系统执行路径、关键提交补丁和当前调用关系作定向复核；**并非逐行审阅全部 353 个提交的每一份补丁**。本文区分历史 HEAD、当前工作区修复和未解决风险，不把尚未提交的修复写成已发布版本。
 
 本轮历史调查未修改文件、分支、提交、stash、设备配置或用户批次；随后仅按父任务要求新增本文。工作区中其他修改属于父任务或原有工作，不归因于本审计。本文不执行 OCR、ASR、模型调用、上传、批次推进或安装。
 
@@ -13,20 +13,21 @@
 | 检查 | 结果与限制 |
 |---|---|
 | 浅克隆 | `git rev-parse --is-shallow-repository` 为 `false`。 |
-| 主历史数量 | `git rev-list --count master` 为 **342**，包含可达合并历史。 |
-| 所有引用数量 | `git rev-list --all --count` 为 **345**；额外对象来自 stash 链，不是额外三次产品交付。 |
+| 主历史数量 | `git rev-list --count master` 为 **353**，包含可达合并历史。 |
+| 所有引用数量 | `git rev-list --all --count` 为 **356**；额外对象来自 Codex 检查点与 stash 链，不是额外三次产品交付。 |
 | 起点 | [`e5f9cd8db6ab26463692577b7e5ad5870acded9b`](https://github.com/zjt56/mudu-titi-plugin/commit/e5f9cd8db6ab26463692577b7e5ad5870acded9b)，2026-11-04 11:33:28 +08:00。 |
-| 基准 HEAD | `26c407e8ffabf23a3112cd002c9b07d7c44ac8c5`，2026-11-17 09:29:45 +08:00。 |
+| 前一轮基准 HEAD | `26c407e8ffabf23a3112cd002c9b07d7c44ac8c5`，用于对比本次 11-17 后续收敛。 |
+| 当前 HEAD | `d21584dc0265fcf449692e132cd0e44e93102972`，2026-11-17 15:24:05 +08:00。 |
 | 分支与标签 | 可见分支为 `master`、`origin/master`，没有 tag。审计开始时二者相同，ahead/behind 为 `0/0`。 |
-| 远端新鲜度 | 本历史审计子任务未执行 `fetch`；父任务启动时成功执行 `fetch`，并确认 HEAD 与 `origin/master` ahead/behind 为 `0/0`。该结果是当时远端快照，不保证定稿后远端未新增提交。 |
+| 远端新鲜度 | 当前工作树检查显示 `master` 与 `origin/master` 同为 `d21584d`，ahead/behind 为 `0/0`；本次未执行新的 `fetch`，因此只代表本地已知远端快照。 |
 | 主要真实合并 | `fd2f915a801be4091dd74da43b52dcc8736884a0`（11-10，同步远端 master）；`08b2cc913954a5e4d3c30071e7a62d8db2457a09`（11-13，OCR/版面投影与本地课时绑定修复）。 |
 | stash | `9fe9edce908e5c97b9121c2142506ec4f9f61fac` 是 stash 伪合并，不能算作 PR；`d138114bb20f02f4ac1f94fcc8f8191e51589718` 是其 untracked-files 根。现存 safety stash/autostash 未清理。 |
-| PR 搜索 | GitHub 仓库元数据可读；`repo:zjt56/mudu-titi-plugin is:pr` 搜索返回空。提交消息也未查到 `Merge pull request` 等 PR 标记。 |
+| PR 搜索 | GitHub API `repos/zjt56/mudu-titi-plugin/pulls?state=all` 返回空；提交消息也未查到 `Merge pull request` 等 PR 标记。 |
 | PR/CI 限制 | 未取得 PR diff、review、批准或 PR CI 证据。部分早期访问受限；定稿时 pulls 页面可返回 HTTP 200，但工具只返回截断的站点导航，未提供 PR 条目，重复 GitHub PR 搜索仍为空。没有跟踪的 `.github/`，但这不证明没有外部 CI。不得写成“历史绝无 PR”或“已通过 PR 审核”。 |
 
 历史显示主要采用直接提交推进；2026-11-09 的 `e4da4b4` 记录 master 单线协作要求。现有提交消息和变更记录可以证明作者记录的意图及当时声称的验证，不能替代当前测试结果。
 
-`git log --all` 按日期的提交数量为：11-04：42；11-05：3；11-06：8；11-07：1；11-08：32；11-09：53；11-10：59；11-11：53；11-12：39；11-13：46；11-14：4；11-16：2；11-17：3。此统计包含 stash 可达对象，合计 345，不应与 342 个 master 可达提交混用。
+前一轮审计记录的日期计数曾是 345 个可达对象；该数字随 11-17 后续提交和检查点变化，当前计数见第 2.1 节，不再把旧数字当成当前历史总量。
 
 ## 2. 主要演进时间线
 
@@ -70,6 +71,18 @@
 | 11-14 | [`c432de94decf60e75be84464a19a0364079b6ce3`](https://github.com/zjt56/mudu-titi-plugin/commit/c432de94decf60e75be84464a19a0364079b6ce3)、[`5cb36fef9d789badb40b0960d613d1302ea2df0d`](https://github.com/zjt56/mudu-titi-plugin/commit/5cb36fef9d789badb40b0960d613d1302ea2df0d) | OCR POST 前持久回执、未知提交对账、续查与复用；artifacts key 固定 POSIX 修 Windows 回执。 |
 | 11-16/17 | [`ff7d6b8ba5239c4bf109ad5b405f9c3a1a4cd857`](https://github.com/zjt56/mudu-titi-plugin/commit/ff7d6b8ba5239c4bf109ad5b405f9c3a1a4cd857)、[`26cd468657a3e50a08a2cbd8e5578541f4508238`](https://github.com/zjt56/mudu-titi-plugin/commit/26cd468657a3e50a08a2cbd8e5578541f4508238)、[`26c407e8ffabf23a3112cd002c9b07d7c44ac8c5`](https://github.com/zjt56/mudu-titi-plugin/commit/26c407e8ffabf23a3112cd002c9b07d7c44ac8c5) | 课时答案区、表格图片小题号、身份刷新、选项窗口及统一边界审计继续收敛，不能宣称来源归属已彻底稳定。 |
 
+| 11-17 | [`32aa4e3`](https://github.com/zjt56/mudu-titi-plugin/commit/32aa4e3)、[`96f9cc1`](https://github.com/zjt56/mudu-titi-plugin/commit/96f9cc1)、[`ab559fa`](https://github.com/zjt56/mudu-titi-plugin/commit/ab559fa)、[`18d0be9`](https://github.com/zjt56/mudu-titi-plugin/commit/18d0be9)、[`44099a6`](https://github.com/zjt56/mudu-titi-plugin/commit/44099a6) | 视觉理解链路停用；结构闸门只生成结构候选；内容完整性和来源一致性后移最终审计；听力待复核不阻塞文字分支；无印刷题号的书面表达按来源证据保留。旧视觉桥接文件未同步清理，见下文。 |
+
+### 2.1 前一轮审计之后的架构收敛
+
+`32aa4e3` 删除了 `visual_columns.py`、`source_pages.py`、`visual_review.py`、`visual_crosscheck.py`、`visual_transport.py` 及其测试；`lesson_bands.py` 被压缩为纯印刷文本边界识别，`content_media.py` 和 `content_structure.py` 只保留附件字节/哈希绑定。这个变更是明确的产品政策，而不是临时关闭开关。它也留下了一个可定位的尾巴：`backend/wf-vision.mjs`、`backend/wf-vision.md`、`backend/wf-vision.test.cjs` 仍在仓库，但当前生产代码没有调用它们，说明文件还引用已经删除的 `workflow.visual_transport`。这三份文件是本审计中最强的安全清理候选；删除前只需确认没有外部脚本把 `node backend/wf-vision.mjs` 当公开入口。
+
+`96f9cc1`、`ab559fa` 和 `18d0be9` 把流程的职责重新分开：结构阶段产出候选结构，前期允许独立内容分支继续，来源/内容完整性在最终审计集中判断，只有 review 等待听力。它们没有取消最终来源、身份、题号、标签或上传 schema 检查。任何把这些提交解释成“整体放宽校验”的重构都会重新引入早期 A1/A3/A4 类问题。
+
+当前仍有两类文档残留。`AGENTS.md` 的旧视觉段落仍列出已删除的视觉模块，并与后面的“视觉理解已停用”规则矛盾；`app/workflow/pipelines/mudu-flow-review.workflow.js` 及 `independent_review.py` 的标题和注释仍使用“三审/three-level”措辞，而正式 `review.ROUND_IDS` 只有 `labels`、`sample` 两轮。前者应优先修正文案；后者不能直接删，因为 `MUDU_REVIEW_CONFIG` 显式启用时 `runner.flowchart_checks()` 仍会调用独立验签。
+
+本次复核的日期计数为：11-04：42；11-05：3；11-06：8；11-07：1；11-08：32；11-09：50；11-10：59；11-11：53；11-12：42；11-13：46；11-14：4；11-16：2；11-17：14。`git log --all` 的 356 个对象包含 Codex 检查点和 stash，产品主线以 353 个 `master` 可达提交为准。
+
 ## 3. 有意设计、兼容、遗留与废弃矩阵
 
 置信度说明：高＝有直接差异/代码调用证据；中＝机制明确但外部使用或运行后果未核实；低＝不足以形成清理决策。下表的“可移除”不等于本次获得删除授权。
@@ -78,6 +91,7 @@
 |---|---|---|---|
 | 仓库固定 `default` | 意外复活的回归，高 | `10294b7…`、`d3051ec…` 明确相反意图；`f312f3d…` 重新固定；首次启动迁移读取模板。 | 本轮父任务已在工作区恢复 `{}`；保留设备本地显式选择。不能靠删用户本地配置修复。 |
 | `self_heal.UPSTREAM` | 运行未用的旧清单，高 | 始于 `41e92f5…`；基准 HEAD 仅定义、两条测试读取及历史 RULES 描述，无运行消费者；注释说明运行依结构化缺陷归属。 | 本轮父任务已移除清单；保持结构化 producer/evidence 及边界测试，不恢复“按失败阶段固定倒推”的路由。 |
+| `backend/wf-vision.mjs`、`wf-vision.md`、`wf-vision.test.cjs` | 视觉退役后的孤立桥接，高 | `32aa4e3…` 删除了 Python 视觉传输和所有生产调用；当前仅三份桥接文件互相引用，说明仍导入已删除的 `workflow.visual_transport`；`git grep` 未发现 runner、agent、插件入口调用。 | 可在确认没有外部脚本调用该 Node 入口后连同测试和说明删除；不需要删除历史 CHANGELOG，也不需要恢复视觉能力。 |
 | `.mjs` 与 shell/Python 路由链 | 当前默认 + 有意兼容，高 | `0e863c2…` 新增原生入口但未移除旧入口；shell 调 `route_pick.py` 和 provider merger；local_agent/structure_ai 同时识别两种入口。 | 只有明确宣布 POSIX/旧配置退役、迁移公开入口和测试后才可删；不能因 Windows 使用 `.mjs` 就判 shell 死代码。 |
 | types 独立入口 | 无模型交接 + 旧任务/局部修正兼容，高 | `2657460…` 及根规则 20；新任务判型在 preassemble。 | 可阻止新批次重复模型调用；删除旧标识须有批次/任务迁移策略。 |
 | 文件/CLI 内容任务协议 | 原生宿主之外的通用协议，高 | 原生内容文档保留 auto/strict；宿主不在线时在选择模式时使用旧协议，原生失败不再偷偷跑 CLI。 | 不把两种执行方式当重复实现；通用接口还服务其他 Agent/离线环境。 |
@@ -195,9 +209,10 @@ Word 嵌入图逐图 OCR 在 `3cc9741…` 被视觉复核替代；这不废弃 P
 
 置信度：**高**。
 
-- 基准 HEAD 的 [子 AGENTS](../AGENTS.md) 仍要求一审/二审/三审，而两轮规则已于 11-05 生效，当前 `ROUND_IDS` 只有 labels/sample；父任务工作区已定向修正两处说明，此项文档残留已处理。
+- [根 AGENTS](../../AGENTS.md) 的旧视觉板块仍保留“用 Harness 模型看图”和 `visual_transport.py` 的落地说明，紧接着的规则 34 又声明视觉理解已停用；两条规则互相矛盾，不能把后者当成前者已被删除的证据。
+- 基准 HEAD 的 [子 AGENTS](../AGENTS.md) 仍要求一审/二审/三审，而两轮规则已于 11-05 生效，当前 `ROUND_IDS` 只有 labels/sample；父任务工作区已定向修正两处说明，但根规则中的旧视觉段落仍未修。
 - [提取说明](extraction.md) 仍有“仅本地/不联网”句子，与当前云 jobs 冲突；稀疏 Word 图片 OCR 的旧说明也需与纯 Word 视觉策略统一。
-- [包描述](../../package.json) 仍只提 shell 路由，并有 R2 的能力声明。
+- [包描述](../../package.json) 已移除“自定义提示词/审核口径已接通”的能力声明；`/prompt`、`/policy` 兼容 API 仍保留，是否继续公开由后续外部调用核查决定。
 
 建议定向修正文案及验证入口；不要据此新增第三轮审核、恢复 Word 逐图 OCR 或移除仍支持的 shell。
 
@@ -228,6 +243,14 @@ Word 嵌入图逐图 OCR 在 `3cc9741…` 被视觉复核替代；这不废弃 P
 ### R7 · P2：问题台账导出与结案不能作为验收权威
 
 流程审计发现 `workflow.issue_log.sync` 重复同步没有导出检查点，可能再次累加 occurrences；`workflow.issue_log.fix` 可接受空验证文本，不能仅以 fixed 状态证明修复。此轮未修改该模块；后续应以原失败检查的真实复验回执作为结案证据，并验证重复同步的幂等性。
+
+### R8 · P2：视觉桥接文件已脱离当前架构
+
+置信度：**高，生产调用关系已核；外部脚本调用未知**。
+
+`backend/wf-vision.mjs`、`backend/wf-vision.md` 和 `backend/wf-vision.test.cjs` 是 11-12 视觉方案留下的 Node 桥。`32aa4e3` 已删除 Python 视觉传输和生产侧视觉理解，当前 `git grep` 只找到这三份文件相互引用，说明还导入不存在的 `workflow.visual_transport`。它们不在 `package.json` 导出、`lib/index.js` 宿主入口、`runner.py` 或内容 Agent 的调用链中。
+
+建议先在用户脚本、安装文档和宿主配置中搜索 `node backend/wf-vision.mjs`；若无外部调用，可连同测试和说明删除，并保留历史 CHANGELOG 作为演变记录。不要删除历史批次中的 `image_semantics.json`、`visual-*` 证据文件，也不要把删除桥接文件扩展为恢复或放宽图片/结构校验。
 
 ## 7. 后续验收建议与未验证事项
 

@@ -112,10 +112,9 @@ class CheckFindingsTests(unittest.TestCase):
         self.assertEqual(len(content), 1)
         self.assertEqual(content[0].args, ("--content-only",))
         self.assertTrue(content[0].blocking)
-        self.assertEqual(len(final), 1)
-        self.assertEqual(final[0].args, ())
-        self.assertFalse(final[0].blocking)
-        self.assertNotEqual(content[0].name, final[0].name)
+        self.assertEqual(len(final), 2)
+        self.assertTrue(any(c.args == ('--content-only',) and c.blocking for c in final))
+        self.assertTrue(any(c.args == () and not c.blocking for c in final))
         self.assertFalse(any(c.script.endswith("check_difficulty.py") for c in checks.CONTENT_CHECKS))
         difficulty = [c for c in checks.FINAL_FORMAT_CHECKS if c.script.endswith("check_difficulty.py")]
         self.assertEqual(len(difficulty), 1)
@@ -126,7 +125,7 @@ class CheckFindingsTests(unittest.TestCase):
             "question_type": "短文填空", "material": "1. The story continues.",
             "subquestions": [{"number": 1, "stem": "1. The story continues."}]}]}), encoding="utf-8")
         content = next(c for c in checks.CONTENT_CHECKS if c.script.endswith("audit_type_layout.py"))
-        final = next(c for c in checks.FINAL_FORMAT_CHECKS if c.script.endswith("audit_type_layout.py"))
+        final = next(c for c in checks.FINAL_FORMAT_CHECKS if c.script.endswith("audit_type_layout.py") and not c.blocking)
         self.assertTrue(checks.run_check(content, ROOT, self.batch, {})["passed"])
         late = checks.run_check(final, ROOT, self.batch, {})
         self.assertFalse(late["passed"])
@@ -135,9 +134,30 @@ class CheckFindingsTests(unittest.TestCase):
         self.batch.write_text(json.dumps({"items": [{"id": "scope-b", "unit_kind": "standalone",
             "question_type": "单项填空", "options": ["A. One", "B. Two"]}]}), encoding="utf-8")
         hard = checks.run_check(content, ROOT, self.batch, {})
-        self.assertFalse(hard["passed"])
-        self.assertTrue(hard["findings"][0]["blocking"])
+        self.assertTrue(hard["passed"])
+        self.assertFalse(hard["findings"][0]["blocking"])
         self.assertEqual(hard["findings"][0]["code"], "E20")
+        self.assertEqual(hard['findings'][0]['deferred_to'], 'format_gate')
+        final_hard = next(c for c in checks.FINAL_FORMAT_CHECKS if c.script.endswith('audit_type_layout.py') and c.blocking)
+        checked = checks.run_check(final_hard, ROOT, self.batch, {})
+        self.assertFalse(checked['passed'])
+        self.assertTrue(checked['findings'][0]['blocking'])
+        self.assertEqual(checked['findings'][0]['code'], 'E20')
+
+    def test_content_layout_defers_only_count_and_keeps_execution_or_identity_failures(self):
+        spec = next(c for c in checks.CONTENT_CHECKS if c.script.endswith('audit_type_layout.py'))
+        for out in ('[D10] group identity error', '[C11] wrong ownership',
+                    '[E20] q-1: 选项字母应 A→C 连续，实际 A,C', ''):
+            with self.subTest(out=out):
+                result = self.run_output(out, check=spec)
+                self.assertFalse(result['passed'])
+                self.assertTrue(any(f['blocking'] for f in result['findings']))
+        mixed = self.run_output('[E20] q-1: 单元选项应为 4 条，现有 2 条\n[D10] wrong group', check=spec)
+        self.assertFalse(mixed['passed'])
+        self.assertEqual([(f['code'], f['blocking']) for f in mixed['findings']], [('E20', False), ('D10', True)])
+        abnormal = self.run_output('[E20] q-1: 单元选项应为 4 条，现有 2 条', code=7, check=spec)
+        self.assertFalse(abnormal['passed'])
+        self.assertTrue(any(f['code'] == 'CHECK_EXIT_NONZERO' and f['blocking'] for f in abnormal['findings']))
 
     def test_run_all_aggregates_all_findings_and_hard_final_failure(self):
         hard = checks.Check("difficulty", "check_difficulty.py", phase="format")

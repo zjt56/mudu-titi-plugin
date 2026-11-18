@@ -100,6 +100,55 @@ class DevelopmentWorkspaceTests(unittest.TestCase):
         self.assertIn("Ran 2 tests", record["output"])
         self.assertEqual(record["fingerprint"], dev.fingerprint(job))
 
+    def test_patch_replaces_unique_text_and_rejects_stale_or_ambiguous_input(self):
+        job = self.create()
+        relative = 'app/workflow/fixture_mod.py'
+        digest = job['base']['files'][relative]['sha256']
+        with self.assertRaisesRegex(ValueError, 'expected_sha_mismatch'):
+            dev.patch_source(job, relative, 'return 1', 'return 2', expected_sha='0' * 64)
+        for old in ('', 'missing', ' '):
+            with self.subTest(old=old), self.assertRaisesRegex(ValueError, 'patch_match_not_unique'):
+                dev.patch_source(job, relative, old, 'replacement', expected_sha=digest)
+        result = dev.patch_source(job, relative, 'return 1', 'return 2', expected_sha=digest)
+        self.assertTrue(result['written'])
+        self.assertEqual(dev.read(job, relative)['text'], 'def answer():\n    return 2\n')
+        self.assertEqual(self.module.read_text(), 'def answer():\n    return 1\n')
+
+    def test_restore_base_recovers_truncated_copy_without_install_journal(self):
+        job = self.create()
+        relative = 'app/workflow/fixture_mod.py'
+        original = self.module.read_bytes()
+        damaged = dev.write(job, relative, '# truncated\n',
+                            expected_sha=job['base']['files'][relative]['sha256'])
+        job['tests'] = [{'passed': True}]
+        job['plan'] = {'obsolete': True}
+        result = dev.restore_base(job, relative, expected_sha=damaged['sha256'])
+        self.assertTrue(result['restored'])
+        self.assertEqual((Path(job['workspace']) / relative).read_bytes(), original)
+        self.assertEqual((Path(job['workspace']) / result['backup_path']).read_bytes(), b'# truncated\n')
+        self.assertEqual(self.module.read_bytes(), original)
+        self.assertEqual(job['tests'], [])
+        self.assertIsNone(job['plan'])
+        self.assertIsNone(job['install'])
+        self.assertEqual(dev.diff(job)['files'], [])
+
+    def test_restore_base_rejects_tampered_baseline_stale_hash_and_installed_job(self):
+        job = self.create()
+        relative = 'app/workflow/fixture_mod.py'
+        digest = job['base']['files'][relative]['sha256']
+        with self.assertRaisesRegex(ValueError, 'expected_sha_mismatch'):
+            dev.restore_base(job, relative, expected_sha='0' * 64)
+        pristine = Path(job['workspace']) / '.base' / relative
+        pristine.write_bytes(b'tampered')
+        with self.assertRaisesRegex(ValueError, 'base_hash_mismatch'):
+            dev.restore_base(job, relative, expected_sha=digest)
+        pristine.write_bytes(self.module.read_bytes())
+        job['install'] = {'status': 'installed'}
+        with self.assertRaisesRegex(ValueError, 'workspace_already_installed'):
+            dev.restore_base(job, relative, expected_sha=digest)
+        with self.assertRaisesRegex(ValueError, 'source_not_allowlisted'):
+            dev.restore_base(self.create(), 'app/workflow/operations.py', expected_sha=digest)
+
     def test_failing_test_blocks_install_until_fixed(self):
         job = self.create()
         dev.write(job, "app/workflow/fixture_mod.py", "def answer():\n    return 3\n",

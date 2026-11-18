@@ -11,7 +11,23 @@ from audio import segment, bootstrap, config
 
 class BoundaryTruthTest(unittest.TestCase):
     def test_short_pause_cannot_split_two_readings(self):
+        # A fine (short) pause is not a trusted cut: when the nearest preceding
+        # candidate is only a short pause, the last long-silence midpoint wins.
         self.assertEqual(segment._snap(28, [0, 10, 50, 70], [27]), 10)
+
+    def test_fine_pause_never_replaces_long_silence(self):
+        self.assertEqual(segment._snap(28, [0, 10, 50, 70], [9.6, 27]), 10)
+
+    def test_anchor_snaps_to_nearest_long_silence_not_last_prior_pause(self):
+        # Real case: long announcement precedes Q1; the pause right before the
+        # anchor (39.669) belongs to the previous item, while the opening pause
+        # close to the anchor (72.376 is next item) must not be crossed. Nearest
+        # preceding long-silence within the window is 39.669, not 0.0.
+        self.assertEqual(segment._snap(41.0, [0.0, 39.669, 72.376], []), 39.669)
+        # No pause within window: keep the plain preceding long-silence cut.
+        self.assertEqual(segment._snap(300.0, [0.0, 100.0, 250.0], []), 250.0)
+        # No preceding pause at all: start at zero rather than a later cut.
+        self.assertEqual(segment._snap(1.0, [0.0, 50.0], []), 0.0)
 
     def test_interpolated_unit_and_previous_end_are_unverified(self):
         units = [{"unit_id": f"q-{n}", "numbers": [n]} for n in (1, 2, 3)]

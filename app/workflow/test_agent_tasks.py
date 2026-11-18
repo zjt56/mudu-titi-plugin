@@ -933,6 +933,12 @@ class AgentTasksTest(unittest.TestCase):
         self.assertIs(row["contentComplete"], False)
         self.assertTrue(any("后移最终闸门" in str(note) for note in report.get("notes") or []))
 
+    def test_completeness_requires_boolean(self):
+        payload = self._types_batch('1. Read this.', '')
+        payload['items'][0]['contentComplete'] = 'false'
+        with self.assertRaisesRegex(ValueError, 'contentComplete must be a boolean'):
+            tasks.accept_result(self.batch, 'types', self.result('types', payload), validate_only=True)
+
 
 if __name__ == "__main__":
     unittest.main()

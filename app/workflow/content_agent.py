@@ -918,7 +918,8 @@ def invoke(prompt, run_dir, config, *, permit_parallel=False):
     route = config.get("_content_route_identity")
     if not isinstance(route, dict) or any(
             not isinstance(route.get(key), str) or not route[key].strip() for key in ("provider", "model")):
-        raise local_agent.AgentError("Native agent requires selected provider/model route identity", "integration")
+        raise local_agent.AgentError("Native agent requires selected provider/model route identity",
+                                     "native_route_identity_missing")
     identity = _digest({"protocol": PROTOCOL, "prompt": prompt, "hashes": hashes,
                         "batch": str(batch), "route": route,
                         "config": {key: value for key, value in config.items() if not key.startswith("_")},

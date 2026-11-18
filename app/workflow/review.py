@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import re
 import time
@@ -1381,6 +1382,21 @@ def _narrow_sampled_group_subquestions(assessment, unit, number, round_id):
                                   if str(child.get("number")) == str(number)]
 
 
+def _source_comparison_checks(checks, round_id, units):
+    """Apply the same sample projection on a copy, preserving retained evidence."""
+    result = copy.deepcopy(checks)
+    if not isinstance(result, list) or round_id != 'sample':
+        return result
+    for check in result:
+        if not isinstance(check, dict):
+            continue
+        unit = units.get(check.get('unit_id'))
+        assessment = check.get('assessment')
+        if unit and isinstance(assessment, dict):
+            _narrow_sampled_group_subquestions(assessment, unit, _sample_number(check), round_id)
+    return result
+
+
 def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage=False):
     """收集每轮逐题判断，把与原标注的差异/问题转成人工 finding。
 
@@ -1675,6 +1691,7 @@ def _verify_round_sources(batch, plan, record, verify_reuse=True):
         raise ValueError("Review install transaction missing or mismatched")
     collected = []
     bound_texts = _bound_source_texts(batch, plan)
+    units = {unit['unit_id']: unit for unit in _confirmed_review_units(batch)}
     for index, (task_id, binding) in enumerate(zip(ids, bindings)):
         task = binding.get("task", {})
         expected_state_digest = (frozen_partition_digest(state) if binding.get("frozen_state")
@@ -1708,9 +1725,9 @@ def _verify_round_sources(batch, plan, record, verify_reuse=True):
         checks = artifact.get("checks")
         normalized = ([dict(c, number=_sample_number(c)) for c in checks]
                       if isinstance(checks, list) and record["round_id"] == "sample" else checks)
-        normalized = _canonical_check_sources(normalized, plan, bound_texts)
+        normalized = _canonical_check_sources(_source_comparison_checks(normalized, record['round_id'], units), plan, bound_texts)
         if not isinstance(checks, list) or (index < len(completed) and normalized !=
-                _canonical_check_sources(entry.get("checks"), plan, bound_texts)):
+                _canonical_check_sources(_source_comparison_checks(entry.get("checks"), record['round_id'], units), plan, bound_texts)):
             raise ValueError("Review execution checks mismatch")
         targets = state_parts[index]["targets"]
         actual = ([{"unit_id": c.get("unit_id"), "number": _sample_number(c)} for c in checks]
@@ -1722,8 +1739,8 @@ def _verify_round_sources(batch, plan, record, verify_reuse=True):
             raise ValueError("Review receipt digest mismatch")
         collected.extend([dict(c, number=_sample_number(c))
                           for c in checks] if record["round_id"] == "sample" else checks)
-    collected = _canonical_check_sources(collected, plan, bound_texts)
-    if collected != _canonical_check_sources(fresh_checks, plan, bound_texts):
+    collected = _canonical_check_sources(_source_comparison_checks(collected, record['round_id'], units), plan, bound_texts)
+    if collected != _canonical_check_sources(_source_comparison_checks(fresh_checks, record['round_id'], units), plan, bound_texts):
         raise ValueError("Review checks differ from retained responses")
 
 

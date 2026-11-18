@@ -56,11 +56,11 @@ const thirdReview = [];
 for (const q of sample) {
   const row = rows.find(r => r && r.unit.unit_id === q.unit_id);
   if (!row || row.reviews.length !== 3 || holds.some(h => h.unit_id === q.unit_id)) {
-    hold(q.unit_id,"三审",`抽样小题 ${q.question_id} 前序未完成`); thirdReview.push({question:q,result:null}); continue;
+    hold(q.unit_id,"独立抽样复核",`抽样小题 ${q.question_id} 前序未完成`); thirdReview.push({question:q,result:null}); continue;
   }
-  const r = await agent(`三审仅核查抽中小题 ${JSON.stringify(q)}；根据原卷核对候选和前序审核：${JSON.stringify(row)}。必须提供此小题可追溯证据；疑点为 uncertain，错误为 error。${rules}`,{schema:review,label:`三审 ${q.question_id}`,phase:"四路并行打标与审核"});
+  const r = await agent(`独立抽样复核仅核查抽中小题 ${JSON.stringify(q)}；根据原卷核对候选和前序审核：${JSON.stringify(row)}。必须提供此小题可追溯证据；疑点为 uncertain，错误为 error。${rules}`,{schema:review,label:`独立抽样复核 ${q.question_id}`,phase:"四路并行打标与审核"});
   thirdReview.push({question:q,result:r || null});
-  if (!r || r.unit_id !== q.unit_id || r.verdict !== "ok" || !r.evidence.length || r.findings.length) hold(q.unit_id,"三审",`抽样小题 ${q.question_id} 审核失败或有疑点`);
+  if (!r || r.unit_id !== q.unit_id || r.verdict !== "ok" || !r.evidence.length || r.findings.length) hold(q.unit_id,"独立抽样复核",`抽样小题 ${q.question_id} 审核失败或有疑点`);
 }
 hold("","human","人工确认结构、冲突和必要的图像音频检查；AI审核不等于人工审核");
 return {batch_dir:dir,status:"human_review_required",source,inventory,units:rows,third_review:{population:questions.length,sample_count:sampleCount,method:"原卷清单顺序等间距向下取整",items:thirdReview},human_queue:holds,note:"仅候选，不代表审核闸门通过；不上传、不发布、不修改正式批次。"};

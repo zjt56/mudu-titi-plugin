@@ -81,6 +81,32 @@ class SourceOptionRepairTest(unittest.TestCase):
         self.assertTrue(result['installed'], result)
         self.assertEqual(self.load(format_gate.FINAL_PATH), complete)
 
+    def test_repair_preserves_independent_invalid_option_and_reports_it(self):
+        broken, complete = self.truncated(listening=True)
+        broken['items'][1]['options'][0] = 'A. invented'
+        complete['items'][1]['options'][0] = 'A. invented'
+        for rel in legacy_format.BATCH_PATHS:
+            self.put(rel, broken)
+        result = actions.apply_source_option_repair(self.root)
+        self.assertTrue(result['installed'], result)
+        self.assertEqual(self.load(format_gate.FINAL_PATH), complete)
+        self.assertFalse(result['format_passed'])
+        remaining = result['checks']['source_audit'][format_gate.FINAL_PATH]['issues']
+        self.assertEqual([(i['code'], i['unit_id']) for i in remaining],
+                         [('OPTION_CONTENT_MISMATCH', 'q-2')])
+
+    def test_scoped_audit_rejects_new_unscoped_or_same_unit_errors(self):
+        change = [{'unit_id': 'q-1'}]
+        before = {'passed': False, 'issues': [
+            {'code': 'OPTIONS_MISMATCH', 'unit_id': 'q-1'},
+            {'code': 'SOURCE_STEM_MISSING', 'unit_id': 'q-2'}]}
+        self.assertTrue(actions._option_audit_safe(before, {'passed': False, 'issues': [
+            {'code': 'SOURCE_STEM_MISSING', 'unit_id': 'q-2'}]}, change))
+        for issue in ({'code': 'SOURCE_STEM_MISSING'},
+                      {'code': 'SOURCE_STEM_MISSING', 'unit_id': 'q-1'},
+                      {'code': 'SOURCE_STEM_MISSING', 'unit_id': 'q-3'}):
+            self.assertFalse(actions._option_audit_safe(before, {'passed': False, 'issues': [issue]}, change))
+
     def test_inherited_group_instructions_do_not_block_an_unrelated_listening_repair(self):
         from workflow import denoise, extract, structure_gate
         from workflow.preview import _strong_number

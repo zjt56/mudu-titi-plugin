@@ -364,10 +364,12 @@ def _unique_source_part(source, number, expected, unit=None):
         raise ValueError("Full source question differs from its bound unit")
 
 
-def _restore_options(original, by_key, rebuilt, source):
+def _restore_options(original, by_key, rebuilt, source, *, targets=None):
     """Only extend an ordered prefix of uniquely bound, complete source options."""
     candidate, changes = deepcopy(original), []
     for index, row in enumerate(candidate["items"]):
+        if targets is not None and (row.get("unit_id") or row.get("id")) not in targets:
+            continue
         unit = legacy_format._bound_unit(row, by_key, rebuilt)
         audit = question_content.audit_source_unit(unit)
         if not audit["passed"]:
@@ -431,6 +433,41 @@ def _restore_options(original, by_key, rebuilt, source):
     return candidate, changes
 
 
+def _option_audit_safe(before, after, changes):
+    """Allow only identical, scoped defects outside repaired units to remain."""
+    if after.get('passed') is True:
+        return True
+    previous, remaining = before.get('issues'), after.get('issues')
+    if not isinstance(previous, list) or not isinstance(remaining, list) or not remaining:
+        return False
+    if any(not isinstance(issue, dict) or not issue.get('unit_id') for issue in previous):
+        return False
+    if before.get('checked_units') != after.get('checked_units'):
+        return False
+    targets = {str(c.get('unit_id')) for c in changes if c.get('unit_id')}
+    if not targets:
+        return False
+    # Unscoped or changed-unit residual defects cannot be proved independent.
+    if any(not isinstance(i, dict) or not i.get('unit_id') or str(i['unit_id']) in targets
+           for i in remaining):
+        return False
+    from collections import Counter
+    encode = lambda issue: json.dumps(issue, sort_keys=True, ensure_ascii=False, default=str)
+    original = Counter(encode(i) for i in previous)
+    residual = Counter(encode(i) for i in remaining)
+    if residual - original:
+        return False
+    removed = list((original - residual).elements())
+    allowed = {'OPTIONS_MISMATCH', 'OPTION_CONTENT_MISMATCH'}
+    repaired = set()
+    for value in removed:
+        issue = json.loads(value)
+        if issue.get('code') not in allowed or str(issue.get('unit_id')) not in targets:
+            return False
+        repaired.add(str(issue['unit_id']))
+    return repaired == targets
+
+
 def _prepare_options(root):
     result = {"passed": False, "files": {}, "changes": [], "refused": [],
               "input_sha256": {}, "checks": {}}
@@ -448,10 +485,21 @@ def _prepare_options(root):
             continue
         original = format_gate._load(raw)
         before = question_content.audit_batch_source(root, original)
-        candidate, changes = _restore_options(original, by_key, rebuilt, cleaned)
+        candidate, changes = original, []
+        for row in original.get('items', []):
+            uid = row.get('unit_id') or row.get('id') if isinstance(row, dict) else None
+            if not uid:
+                raise ValueError('Option repair requires a scoped unit identity')
+            try:
+                next_candidate, unit_changes = _restore_options(candidate, by_key, rebuilt, cleaned,
+                                                                  targets={uid})
+            except ValueError:
+                continue  # Preserve unsupported independent units exactly.
+            candidate = next_candidate
+            changes.extend(unit_changes)
         after = question_content.audit_batch_source(root, candidate)
         result["checks"][relative] = {"source_before": before, "source_after": after}
-        if not after.get("passed"):
+        if not after.get("passed") and not _option_audit_safe(before, after, changes):
             result["refused"].append({"file": relative, "reason": "Option candidate source audit failed",
                                       "issues": after.get("issues", [])})
         if changes:
@@ -749,7 +797,10 @@ def _apply(batch_dir, *, expected_inputs=None, tables=False, options=False) -> d
         for relative, raw in (() if tables else canonical.items()):
             if options:
                 by_key, rebuilt, cleaned = legacy_format._source_units(confirmed, structure, source)
-                candidate, changes = _restore_options(format_gate._load(snapshots[relative]), by_key, rebuilt, cleaned)
+                targets = {str(change['unit_id']) for change in prepared['changes']
+                           if change['file'] == relative and change.get('unit_id')}
+                candidate, changes = _restore_options(format_gate._load(snapshots[relative]), by_key, rebuilt, cleaned,
+                                                       targets=targets)
                 replay = {"passed": True, "candidate": candidate, "changes": changes}
             else:
                 replay = legacy_format.normalize_candidate(format_gate._load(snapshots[relative]),
@@ -810,8 +861,18 @@ def _apply(batch_dir, *, expected_inputs=None, tables=False, options=False) -> d
                 format_gate._load(_path(root, relative).read_bytes()))
             audits[relative] = audit
         result["checks"]["source_audit"] = audits
-        if not all(audit.get("passed") for audit in audits.values()):
-            raise ValueError("Installed source audit failed")
+        for relative, audit in audits.items():
+            prepared_check = prepared.get('checks', {}).get(relative, {})
+            if options:
+                # Verify installed bytes against the complete prepared audit,
+                # including all pre-existing independent issues.
+                if audit != prepared_check.get('source_after'):
+                    raise ValueError("Installed option source audit differs from prepared audit")
+                changes = [c for c in prepared['changes'] if c['file'] == relative]
+                if not audit.get('passed') and not _option_audit_safe(prepared_check.get('source_before', {}), audit, changes):
+                    raise ValueError("Installed option source audit failed")
+            elif not audit.get('passed'):
+                raise ValueError("Installed source audit failed")
         _assert_snapshot(root, expected)
         _check_sources(root, sources, rules)
         # run() performs the real format checks and writes its real report.

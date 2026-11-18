@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -99,6 +100,16 @@ class FinalAuditTest(unittest.TestCase):
                 target = root / rel
                 target.parent.mkdir(exist_ok=True)
                 target.write_text('{}' if rel.endswith('.json') else '原卷正文', encoding='utf-8')
+            original = root / 'original.docx'
+            original.write_bytes(b'original')
+            (root / 'workflow/manifest.json').write_text(json.dumps({'stages': {},
+                'inputs': {'source': {'path': str(original)}}}), encoding='utf-8')
+            report = root / final_audit.STRUCTURE_REPORT
+            report.parent.mkdir(exist_ok=True)
+            report.write_text(json.dumps({'passed': True, 'input_hashes': {
+                rel: hashlib.sha256((root / rel).read_bytes()).hexdigest() for rel in final_audit.SOURCE_FILES},
+                'original_sha256': hashlib.sha256(original.read_bytes()).hexdigest(),
+                'structure_warnings': []}), encoding='utf-8')
             payload = {'items': []}
             with patch('workflow.runner.source_audit_for_batch', return_value={'passed': False,
                       'issues': [{'code': 'OPTION_CONTENT_MISMATCH', 'unit_id': 'u-7'}]}), \

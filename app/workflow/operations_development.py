@@ -448,6 +448,8 @@ def search(job, query, *, relative=None, cursor=None, start_line=1,
 
 
 def write(job, relative, content, *, expected_sha=None):
+    if job.get('install') is not None:
+        raise ValueError('workspace_already_installed')
     relative = str(relative).replace("\\", "/")
     if not allowed(relative):
         raise ValueError("source_not_allowlisted")
@@ -462,12 +464,60 @@ def write(job, relative, content, *, expected_sha=None):
     elif current is not None:
         raise ValueError("expected_sha_required")
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(content, encoding="utf-8", newline="")
-    os.replace(temporary, path)
+    _replace_bytes(path, content.encode('utf-8'), suffix='.editing')
     job.setdefault("writes", {})[relative] = _sha(path.read_bytes())
     job["plan"] = None
+    job['tests'] = []
     return {"path": relative, "sha256": job["writes"][relative], "written": True}
+
+
+def patch_source(job, relative, old_text, new_text, *, expected_sha):
+    """CAS a unique literal source fragment, retaining all surrounding bytes."""
+    relative, raw = _read_source(job, relative)
+    if expected_sha is None or _sha(raw) != expected_sha:
+        raise ValueError('expected_sha_mismatch')
+    if not isinstance(old_text, str) or not old_text or raw.count(old_text.encode('utf-8')) != 1:
+        raise ValueError('patch_match_not_unique')
+    if not isinstance(new_text, str):
+        raise ValueError('content_invalid')
+    changed = raw.replace(old_text.encode('utf-8'), new_text.encode('utf-8'), 1)
+    return write(job, relative, changed.decode('utf-8'), expected_sha=expected_sha)
+
+
+def restore_base(job, relative, *, expected_sha):
+    """Restore one existing workspace file, never the installed source tree.
+
+    Baseline bytes must match the captured digest and size. Retain the abandoned
+    candidate before replacement; both test evidence and prepared plan expire.
+    """
+    if job.get('install') is not None:
+        raise ValueError('workspace_already_installed')
+    relative = str(relative).replace('\\', '/')
+    if not allowed(relative):
+        raise ValueError('source_not_allowlisted')
+    root = _workspace(job)
+    target = _safe(root, relative)
+    entry = job['base']['files'].get(relative)
+    if not entry:
+        raise ValueError('base_file_missing')
+    pristine = _safe(root, '.base/' + relative)
+    raw = pristine.read_bytes()
+    if _sha(raw) != entry['sha256'] or len(raw) != entry['bytes']:
+        raise ValueError('base_hash_mismatch')
+    current = target.read_bytes()
+    if expected_sha is None or _sha(current) != expected_sha:
+        raise ValueError('expected_sha_mismatch')
+    backup = '.repair-history/' + uuid.uuid4().hex + '/' + relative
+    stored = _safe(root, backup)
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    _replace_bytes(stored, current, suffix='.candidate')
+    if _sha(target.read_bytes()) != expected_sha:
+        raise ValueError('expected_sha_mismatch')
+    _replace_bytes(target, raw, suffix='.restoring-base')
+    job.setdefault('writes', {}).pop(relative, None)
+    job.update(tests=[], plan=None)
+    return {'path': relative, 'sha256': _sha(raw), 'restored': True,
+            'backup_path': backup, 'scope': 'isolated_workspace'}
 
 
 def diff(job):

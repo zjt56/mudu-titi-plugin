@@ -1198,7 +1198,7 @@ def _code_repair(folder, incident, data):
     start_line = data.get("start_line", 1)
     if operation == "read_lines" and "start_line" not in data and cursor is not None:
         start_line = cursor["start_line"]
-    if operation in {"read", "read_lines", "write"} and not isinstance(path, str):
+    if operation in {"read", "read_lines", "write", "patch", "restore_base"} and not isinstance(path, str):
         raise ValueError("source_path_required")
     if operation == "status":
         return _code_status(record, job)
@@ -1215,7 +1215,14 @@ def _code_repair(folder, incident, data):
                             start_line=start_line, max_matches=data.get("max_matches", 20),
                             context=data.get("context", 2), cursor=cursor)
     elif operation == "write":
+        if any(key in data for key in ('start_line', 'context', 'offset', 'cursor', 'old_text', 'new_text')):
+            raise ValueError('write_requires_complete_file: 局部修改请用 patch 和唯一 old_text/new_text')
         result = dev.write(job, path, data.get("content"), expected_sha=data.get("expected_sha"))
+    elif operation == 'patch':
+        result = dev.patch_source(job, path, data.get('old_text'), data.get('new_text'),
+                                  expected_sha=data.get('expected_sha'))
+    elif operation == 'restore_base':
+        result = dev.restore_base(job, path, expected_sha=data.get('expected_sha'))
     elif operation == "test":
         evidence = _hash({"code": dev.fingerprint(job), "tests": data.get("tests")})
         _block_repeat(incident, "code_test", "isolated_tests", evidence)
@@ -1236,8 +1243,8 @@ def _code_repair(folder, incident, data):
         record["status"] = "rolled_back"
     else:
         raise ValueError("unsupported_code_operation")
-    if operation in {"write", "test", "prepare"}:
-        record["status"] = {"write": "workspace_ready", "test": record.get("status"),
+    if operation in {"write", "patch", "restore_base", "test", "prepare"}:
+        record["status"] = {"write": "workspace_ready", "patch": "workspace_ready", 'restore_base': 'workspace_ready', "test": record.get("status"),
                             "prepare": "prepared"}[operation]
     record["workspace_fingerprint"] = dev.fingerprint(job)
     _save_code_record(folder, record)

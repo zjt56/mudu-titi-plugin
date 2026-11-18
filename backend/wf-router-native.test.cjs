@@ -62,6 +62,32 @@ test('native router honours stages.review when no round or role override exists'
   assert.match(result.stderr, /stage=review.*provider=deepseek-official model=deepseek-flash/);
 });
 
+test('native router rejects an incomplete explicit stage override', t => {
+  const f = fixture(t);
+  const cfg = JSON.parse(fs.readFileSync(path.join(f.plugin, 'config', 'model-router.json'), 'utf8'));
+  cfg.stages = { answers: { provider: 'deepseek-official' } };
+  fs.writeFileSync(path.join(f.plugin, 'config', 'model-router.json'), JSON.stringify(cfg));
+  const result = spawnSync(process.execPath, [router, f.prompt, f.response], {
+    encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /stages\.answers is incomplete/);
+  assert.equal(fs.existsSync(f.response), false);
+});
+
+test('native router rejects an incomplete explicit review round override', t => {
+  const f = fixture(t, 'Stage: review\nROUND: labels\n');
+  const cfg = JSON.parse(fs.readFileSync(path.join(f.plugin, 'config', 'model-router.json'), 'utf8'));
+  cfg.review = { rounds: { labels: { model: 'missing-provider' } } };
+  fs.writeFileSync(path.join(f.plugin, 'config', 'model-router.json'), JSON.stringify(cfg));
+  const result = spawnSync(process.execPath, [router, f.prompt, f.response], {
+    encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /review\.rounds\.labels is incomplete/);
+  assert.equal(fs.existsSync(f.response), false);
+});
+
 test('native router quotes a Harness path containing spaces', t => {
   const f = fixture(t);
   const install = path.join(f.dir, 'DeepSeek Harness', 'resources', 'runtime', 'cli', 'bin');

@@ -634,15 +634,20 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
     report["source_audit"] = audit
     # 图片/音频引用缺失属 AI 能力受限项：只作提示，不阻断本地体检；
     # 结构、题号、题干、选项、材料归属等文本类问题仍是硬阻断。
-    from .findings import source_partition
-    text_issues, media_issues = source_partition(audit.get("issues", []))
+    from .findings import split_early_source
+    text_issues, deferred_content, media_issues = split_early_source(audit.get("issues", []))
+    if audit.get('passed') is not True and not audit.get('issues'):
+        text_issues.append({'code': 'SOURCE_AUDIT_UNAVAILABLE', 'message': '原卷审计未完成且未提供具体问题'})
+    if deferred_content:
+        report['deferred_source_content'] = deferred_content
+        report.setdefault('warnings', []).append('SOURCE_CONTENT_DEFERRED_TO_FORMAT')
     if media_issues:
         report.setdefault("warnings", []).append("SOURCE_MEDIA_UNVERIFIED")
     report.setdefault("checks", []).append({
         "check": "原卷逐题覆盖与材料归属 source_audit", "blocking": True,
         "passed": not text_issues,
         "output": "；".join(issue.get("message", "") for issue in (text_issues or media_issues)[:5]),
-        "note": "图片/音频能力受限项只报告，不阻断" if media_issues and not text_issues else "",
+        "note": "题干/选项差异保留至最终格式检查；身份和归属错误仍阻断" if deferred_content else ("图片/音频能力受限项只报告，不阻断" if media_issues and not text_issues else ""),
     })
     if text_issues:
         report.setdefault("blocking_failures", []).append("SOURCE_SLICE_MISMATCH")
@@ -879,8 +884,15 @@ def _reconcile_structure_findings(batch_dir: Path, report: dict) -> int:
         return 0
     queue = json.loads(path.read_text(encoding="utf-8-sig"))
     changed = []
+    remaining_codes = {str(issue.get('code')) for issue in
+                       (report.get('structure_warnings') or []) + (report.get('blockers') or [])
+                       if isinstance(issue, dict) and issue.get('code')}
     for item in queue.get("items", []):
         if item.get("review_type") != "structure" or item.get("status") in ("fixed", "closed", "resolved", "accepted"):
+            continue
+        # A successful production step does not resolve a still-reported issue.
+        # Same-code ambiguity is retained rather than closing the wrong finding.
+        if item.get('structure_code') in remaining_codes:
             continue
         item.update(status="fixed", decided_by="automatic-structure-gate", decided_at=mf.now_iso(),
                     resolution_note="当前原卷、正文与结构已重新运行结构闸门并通过；旧结构疑点由当前绑定证据确认消除，非人工核验声明。",

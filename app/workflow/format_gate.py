@@ -303,12 +303,17 @@ def _run_final_format_checks(root, final, report, inputs):
                                    "message": result["error"]})
     for check in result.get("checks") or []:
         if not check.get("passed", False):
-            report["errors" if check.get("blocking") else "warnings"].append({
+            scoped_errors = [dict(item) for item in (check.get('findings') or [])
+                             if isinstance(item, dict) and item.get('blocking')]
+            if check.get('blocking') and scoped_errors:
+                report['errors'].extend(scoped_errors)
+            else:
+                report["errors" if check.get("blocking") else "warnings"].append({
                 "code": "FINAL_METADATA_CHECK_FAILED" if check.get("blocking") else "FINAL_FORMAT_CHECK_FAILED",
                 "check": check.get("check"),
                 "script": check.get("script"),
                 "message": check.get("error") or check.get("output") or "格式检查未通过",
-            })
+                })
         for warning in check.get("warnings") or []:
             report["warnings"].append({"code": "FINAL_FORMAT_CHECK_WARNING",
                                        "check": check.get("check"),
@@ -327,20 +332,33 @@ def _run_final_format_checks(root, final, report, inputs):
                 # callable without spawning another process after runner failure.
                 # Unknown future hard checks fail closed until a local adapter exists.
                 try:
-                    if Path(spec.script).name != 'check_difficulty.py':
-                        raise ValueError('最终硬检查缺少本地执行适配：' + spec.script)
                     import runpy
                     rule = runpy.run_path(str(Path(__file__).resolve().parents[1] / spec.script))
-                    problems = rule['problems'](json.loads(final.read_text(encoding='utf-8-sig')))
+                    data = json.loads(final.read_text(encoding='utf-8-sig'))
+                    if Path(spec.script).name == 'check_difficulty.py':
+                        problems = rule['problems'](data)
+                    elif Path(spec.script).name == 'audit_type_layout.py' and spec.args == ('--content-only',):
+                        problems = []
+                        for unit in rule['units'](data):
+                            if not isinstance(unit, dict):
+                                raise ValueError('题型内容检查遇到非对象单元')
+                            problems.extend(rule['_check_unit'](unit, content_only=True))
+                    else:
+                        raise ValueError('最终硬检查缺少本地执行适配：' + spec.script)
                     outcome = {'check': spec.name, 'script': spec.script, 'blocking': True,
                                'passed': not problems, 'error': '\n'.join(problems) or None}
+                    if problems and Path(spec.script).name == 'audit_type_layout.py':
+                        outcome['findings'] = checks._output_findings(spec, '\n'.join(problems), '', 1)
                 except Exception as exc:
                     outcome = {'check': spec.name, 'script': spec.script, 'blocking': True,
                                'passed': False, 'error': str(exc)}
                 report["format_checks"]["checks"].append(outcome)
                 report.setdefault("findings", []).extend(outcome.get("findings") or [])
                 if not outcome.get("passed"):
-                    report["errors"].append({"code": "FINAL_METADATA_CHECK_FAILED",
+                    if outcome.get('findings'):
+                        report['errors'].extend(outcome['findings'])
+                    else:
+                        report["errors"].append({"code": "FINAL_METADATA_CHECK_FAILED",
                         "check": spec.name, "script": spec.script,
                         "message": outcome.get("error") or outcome.get("output") or "最终元数据校验未完成"})
     return result

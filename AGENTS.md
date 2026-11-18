@@ -75,7 +75,7 @@
 
 27. **同课时重号按来源身份关联，保留原卷顺序**：同步练习新批次采用 `scoped-v1`；保留 `Ⅰ、Ⅱ、Ⅲ`、标题、基础/提升的出现序次及原小题号，不重编号。`section_id/unit_id/question_ids` 分别绑定大题、单元及子题，答案/缺失/证据用 question ID，解析/知识点/审核/预览/保存以 unit ID 加本单元原号定位；禁止全局数字同号兜底。A/B 同号须材料窗口唯一，无号图片题只用内部兼容别名且不伪装印刷题号。漏题、同窗重复、跨材料、来源不明仍阻断；原答案附录缺少大题对应证据不猜、不借、不伪记缺失。旧批次维持原协议且不改历史数据。落地：`app/workflow/question_identity.py`、结构/答案/解析/组装/审核/预览链路，说明见 `app/docs/sync-practice.md`。**语音组题的原生图片与导语**：图片转换为 `placement=question` 原生附件后，空 `material` 不等于丢图；公共作答导语须逐字绑定当前大题来源。只有当前来源复建、媒体文件与归属有效、题组及子题完整对应时，才认可共享图或无共享材料的合法语音组形态；无印刷号纯图题的内部别名不得伪造题干。组装、体检、上传格式使用同一来源证明，缺证明的裸数据仍严格拒绝；不得普遍豁免 A8/A9。
 
-    **图片板块与答案共同归属**：正文A基础巩固/B能力提升为图片时，用当前所选Harness模型看图并将原件/正文/全部候选媒体摘要及边界存证；不从附录反推正文、不按文件名或宽高比猜板块。边界同源消费到结构、独立切片、答案和预览，保留有效身份/原题号；Pronunciation专题不继承前A/B。答案必须核对完整课时/专题/板块/大题序列及每节全题号覆盖，错scope、已存在但过期或partial的问题证据不能退回数字猜配。视觉不生成正文/答案，多图批量和字节+实际路由缓存，失败短暂延期避免紧邻重复。见`lesson_bands.py`、`visual_transport.py`、`source_anchors.py`、`docs/sync-practice.md`（2026-11-12用户确认并授权落地）。
+    **历史视觉规则已退役**：正文 A/B 板块和图片题不再调用视觉模型，不从附录、文件名或宽高比猜栏目归属；图片只按附件字节指纹绑定，缺视觉证据不阻断。当前以规则 34 和 `lesson_bands.py` 纯文本边界为准；本条仅保留历史背景，不构成现行执行要求。
 
 28. **先分材料角色，同角色 Word 优先；PDF 直接 OCR 出 JSON＋Markdown**（用户2026-11-13）：多附件须先按实际内容识别正文、答案、解析或混排，不按上传顺序/扩展名把第二份当答案；正文候选内部才应用 Word 优先，独立答案 Word 不能压过正文 PDF。每份 PDF 无论文字层质量和 OCR 总开关均整卷 OCR，正文直接消费识别服务结果，原生文字层/图片只作可选证据；**OCR 是提取必过条件**：包括 Word 配套 PDF 在内，任一 PDF 失败、缺少当前来源绑定结果或整卷空文字时，提取不得标记通过；强制 OCR 不接受仅原生文字层结果。**异步任务必须持久可续查**：POST 前落回执与 batchId、取得 jobId 立即落盘；提交结果未知只用 batchId 对账、绝不盲发第二次 POST；查询/下载有界重试，预算耗尽返回等待并由调度按 5–300 秒续查原任务，成功结果本地复验复用；等待不算成功、有真实失败即失败，回执不存令牌或签名 URL。保存 `01_source/pdf-ocr.json`、`pdf-ocr.md` 及每源 `acquisition.json/acquisition.md`，JSON 记录 Markdown 路径。同一正文有 Word/PDF 时仍用 Word 原文，不能用 OCR 覆盖；单独上传的答案/解析按自身内容作为独立材料保留，课时必须匹配 Unit、课时、板块、大题和完整题号，不能跨区借同号。实际来源和角色写入 `source-policy.json`、`material-roles.json` 及提取报告；不重写历史批次。**OCR 顺序由识别服务负责**：完整保留脱敏原始响应、版面块、坐标与服务阅读顺序，消费 Markdown 不自行重排；识别自身错序先查官方版面/排序参数及识别链路，不针对单页手工调行、硬编码或自创重排来冒充通用修复。版面块存在不证明顺序正确，未完整验收的结构候选只能隔离留证，不能伪造整卷通过。落地：`app/workflow/source_policy.py`、`pdf_ocr.py`、`extract.py`、`paddle_jobs.py`、`structure_ai.py`、`app/workbench/server.py`，说明见 `app/docs/extraction.md`。
 
@@ -113,7 +113,7 @@
 ## 四、验证要求
 
 - 改 Python 工作流：至少跑受影响的 `python -m unittest workflow.test_<area>`，重大改动跑全量 `workflow`（从 `app/` 目录运行，`PYTHONPATH` 指 `app`）。
-- 改前端/路由：`node --test backend/*.test.cjs`。
+- 改前端/路由：`node --test backend/*.test.cjs backend/*.test.mjs`。
 - 改宿主插件：`node --check lib/index.js lib/client.js`。
 - 在变更记录里写出实际通过数字，不要只写"已测试"。
 

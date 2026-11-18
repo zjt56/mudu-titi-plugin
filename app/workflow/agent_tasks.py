@@ -1440,6 +1440,8 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                     raise ValueError(f"{key} is required from the type/word-count subagent")
             if isinstance(row["words"], bool) or not isinstance(row["words"], int) or row["words"] < 0:
                 raise ValueError("words must be a nonnegative integer")
+            if not isinstance(row["contentComplete"], bool):
+                raise ValueError("contentComplete must be a boolean")
             if row["contentComplete"] is not True:
                 unit = unit_by_id.get(row.get("unit_id")) or {}
                 if capability_limited_source(unit, appendix):
@@ -1452,7 +1454,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 # 性属于正确性校验，统一后移到最终闸门（final_audit）判定。
                 # 这里保留 contentComplete=false 与证据，不丢弃、不伪造为 true。
                 row.setdefault("warnings", [])
-                if isinstance(row["warnings"], list):
+                if isinstance(row["warnings"], list) and "内容完整性未确认，已后移最终闸门核对" not in row["warnings"]:
                     row["warnings"].append("内容完整性未确认，已后移最终闸门核对")
                 if notes is not None:
                     notes.append("%s：内容完整性未确认，已后移最终闸门核对" % row.get("unit_id"))

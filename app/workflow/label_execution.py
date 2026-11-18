@@ -252,8 +252,11 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
                     options["coordinated_imports"] = True
                 response = invoke(part["prompt"] + feedback, directory, config, **options)["response"]
             except local_agent.AgentError as exc:
-                if exc.code not in ("response", "integration"):
-                    raise  # Timeouts/rate limits are not content repair attempts.
+                if exc.code != "response":
+                    # Dispatch/configuration errors must retain their machine
+                    # code; turning integration into 48 content errors both
+                    # loses ownership and burns per-unit repair retries.
+                    raise
                 return part, None, str(exc)
             local_agent._check_input_hashes(batch, strict_hashes)
             unit_tasks.check_part_inputs(batch, part)
