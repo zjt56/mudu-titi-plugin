@@ -53,7 +53,7 @@ async function scenario(options = {}) {
   return { calls, events, prompts, turns, status, cancelCount };
 }
 
-test('early investigation exposes only read/record, then fenced promotion unlocks repair and original verification', async () => {
+test('legacy investigation response keeps read-only tools until fenced promotion confirms repair', async () => {
   let savedReadTool;
   const result = await scenario({ program: async ({ turns, tools, guards, call }) => {
     if (turns === 1) {
@@ -72,7 +72,8 @@ test('early investigation exposes only read/record, then fenced promotion unlock
     }
   } });
   assert.equal(result.turns, 2);
-  assert.equal(result.calls.find(c => c.path.endsWith('/claim')).body.mode, 'investigation');
+  assert.equal(result.calls.find(c => c.path.endsWith('/claim')).body.mode, 'repair');
+  assert.equal(result.calls.find(c => c.path.endsWith('/claim')).body.execution_first, true);
   const promotion = result.calls.find(c => c.body?.action === 'promote');
   assert.equal(promotion.body.attempt_id, 'read-fence');
   assert.equal(result.calls.find(c => c.body?.action === 'apply_repair').body.attempt_id, 'write-fence');

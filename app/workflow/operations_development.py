@@ -14,8 +14,9 @@
   “信任该补丁来源/另有外部隔离”的前提下运行；本模块不声称提供进程、网络或
   凭据隔离。宿主若要安装，必须先暂停源码监听、排空执行队列并在安装后单次
   重启，否则会出现半更新状态。
-* 控制面文件不可改：Operations 自身、阶段契约、清单、调度、runner、上传与
-  发布边界。测试文件可新增或修改，但不得删除生产模块。
+* Operations 自身、阶段契约和清单保持硬锁。调度、runner 和自愈可以在隔离
+  工作区修复，但必须运行对应的完整基线回归；不能修改这些回归来取得放行。
+  安装仍受授权、测试、计划哈希与 CAS 约束，不授权上传或发布。
 """
 from __future__ import annotations
 
@@ -39,10 +40,18 @@ COPY_LIMIT = 8_000_000
 LOCKED = frozenset((
     "app/workflow/operations.py", "app/workflow/operations_development.py",
     "app/workflow/contracts.py", "app/workflow/manifest.py",
-    "app/workflow/supervisor.py", "app/workflow/auto.py",
-    "app/workflow/runner.py", "app/workflow/local_agent.py",
-    "app/workflow/self_heal.py",
 ))
+# These repairable owners used to be locked even when they caused the incident.
+# Their existing regression modules are a mandatory, immutable acceptance floor;
+# the model may add separate regression files, but cannot weaken this floor.
+CORE_REGRESSIONS = {
+    "app/workflow/auto.py": ("workflow.test_runner_auto", "workflow.test_operations_runner_handoff"),
+    "app/workflow/runner.py": ("workflow.test_runner_auto", "workflow.test_operations_runner_handoff"),
+    "app/workflow/local_agent.py": ("workflow.test_local_agent", "workflow.test_agent_protocol"),
+    "app/workflow/supervisor.py": ("workflow.test_supervisor", "workflow.test_supervisor_scheduling"),
+    "app/workflow/self_heal.py": ("workflow.test_self_heal", "workflow.test_self_heal_routing",
+                                  "workflow.test_self_heal_verification"),
+}
 PRODUCTION = re.compile(r"app/workflow/[a-z][a-z0-9_]*\.py")
 TEST = re.compile(r"app/workflow/test_[a-z0-9_]*\.py")
 # Python scripts use numbered/hyphenated stage directories; their regressions
@@ -566,6 +575,52 @@ def _clean_env(home, app_dir):
     return environment
 
 
+def required_core_regressions(job, changes=None):
+    """Return the fixed owner suites for actual core changes, not claimed writes."""
+    changes = diff(job)["files"] if changes is None else changes
+    return sorted({test for change in changes
+                   for test in CORE_REGRESSIONS.get(change["path"], ())})
+
+
+def _check_core_regression_sources(job, modules):
+    """Tests used to authorize core repair must remain captured baseline bytes."""
+    workspace = _workspace(job)
+    for module in modules:
+        relative = "app/" + module.replace(".", "/") + ".py"
+        entry = job["base"]["files"].get(relative)
+        if not entry:
+            raise ValueError("core_regression_baseline_missing:" + module)
+        baseline = _regular(_safe(workspace, ".base/" + relative))
+        current = _regular(_safe(workspace, relative))
+        if (baseline is None or current is None
+                or _sha(baseline.read_bytes()) != entry["sha256"]
+                or _sha(current.read_bytes()) != entry["sha256"]):
+            raise ValueError("core_regression_test_changed:" + module)
+
+
+_CORE_TEST_RECEIPT = "MD_CORE_TEST_RECEIPT:"
+_CORE_TEST_RUNNER = '''
+import json, sys, unittest
+names, required = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+class Result(unittest.TextTestResult):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.started_ids, self.skipped_ids = [], set()
+    def startTest(self, test):
+        self.started_ids.append(test.id())
+        super().startTest(test)
+    def addSkip(self, test, reason):
+        self.skipped_ids.add(test.id())
+        super().addSkip(test, reason)
+suite = unittest.defaultTestLoader.loadTestsFromNames(names)
+result = unittest.TextTestRunner(resultclass=Result).run(suite)
+counts = {module: sum(test_id.startswith(module + ".") and test_id not in result.skipped_ids
+                      for test_id in result.started_ids) for module in required}
+print("MD_CORE_TEST_RECEIPT:" + json.dumps(counts, sort_keys=True), flush=True)
+sys.exit(0 if result.wasSuccessful() and all(counts.values()) else 1)
+'''
+
+
 def run_tests(job, tests, *, timeout=300):
     """Run only named unittest modules inside the copy. Fixed argv, no shell."""
     workspace = _workspace(job)
@@ -576,22 +631,43 @@ def run_tests(job, tests, *, timeout=300):
         if not isinstance(entry, str) or not UNIT_TEST.fullmatch(entry):
             raise ValueError("tests_invalid")
         names.append(entry)
+    required = required_core_regressions(job)
+    _check_core_regression_sources(job, required)
+    names = list(dict.fromkeys([*names, *required]))
     home = workspace / ".test-home"
     home.mkdir(exist_ok=True)
     environment = _clean_env(home, workspace / "app")
     started = time.time()
+    command = ([sys.executable, "-c", _CORE_TEST_RUNNER, json.dumps(names), json.dumps(required)]
+               if required else [sys.executable, "-m", "unittest", *names])
     try:
         completed = subprocess.run(
-            [sys.executable, "-m", "unittest", *names], cwd=workspace / "app",
+            command, cwd=workspace / "app",
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=max(30, min(int(timeout), 900)), env=environment,
             stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         code, output = completed.returncode, (completed.stdout or "") + (completed.stderr or "")
     except subprocess.TimeoutExpired as exc:
         code, output = -1, ((exc.stdout or "") + (exc.stderr or "")) if isinstance(exc.stdout, str) else "timeout"
+    core_results = {}
+    if required:
+        for line in output.splitlines():
+            if line.startswith(_CORE_TEST_RECEIPT):
+                try:
+                    parsed = json.loads(line[len(_CORE_TEST_RECEIPT):])
+                    if isinstance(parsed, dict):
+                        core_results = parsed
+                except ValueError:
+                    pass
+        if not all(type(core_results.get(module)) is int and core_results[module] > 0 for module in required):
+            code = code or -2
+            output += "\ncore_regression_execution_incomplete: each mandatory module must execute non-skipped tests"
     record = {"tests": names, "returncode": code, "passed": code == 0,
               "output": output[-8000:], "seconds": round(time.time() - started, 1),
               "fingerprint": fingerprint(job), "at": _now()}
+    if required:
+        record["required_core_regressions"] = required
+        record["core_regression_results"] = core_results
     job.setdefault("tests", []).append(record)
     job["tests"] = job["tests"][-20:]
     return record
@@ -608,8 +684,15 @@ def prepare_install(job, *, require_tests=True, require_regression=True):
     if any(change["new_sha256"] == "missing" for change in changes):
         raise ValueError("deletion_not_allowed")
     last = (job.get("tests") or [{}])[-1]
-    if require_tests and not (last.get("passed") and last.get("fingerprint") == fingerprint(job)):
+    required = required_core_regressions(job, changes)
+    _check_core_regression_sources(job, required)
+    if (require_tests or required) and not (last.get("passed") and last.get("fingerprint") == fingerprint(job)):
         raise ValueError("passing_tests_required")
+    if required and not set(required) <= set(last.get("tests") or []):
+        raise ValueError("core_regression_tests_required:" + ",".join(required))
+    if required and not all(type((last.get("core_regression_results") or {}).get(module)) is int
+                            and last["core_regression_results"][module] > 0 for module in required):
+        raise ValueError("core_regression_execution_required:" + ",".join(required))
     if last.get("passed"):
         names = last.get("tests") or []
         modules = {"app/" + name.split(".")[0] + "/" + name.split(".")[1] + ".py"
@@ -630,6 +713,8 @@ def prepare_install(job, *, require_tests=True, require_regression=True):
     plan = {"plan_id": "plan-" + uuid.uuid4().hex[:12], "changes": changes,
             "code_fingerprint": fingerprint(job), "base_code_fingerprint": job["base"]["code_fingerprint"],
             "tests": last.get("tests"), "prepared_at": _now()}
+    if required:
+        plan["required_core_regressions"] = required
     job["plan"] = plan
     return plan
 
@@ -686,7 +771,7 @@ def install(job, *, backup_dir, allow=False):
             _safe(_workspace(job), change["path"])
     if not plan or plan.get("code_fingerprint") != fingerprint(job):
         raise ValueError("current_install_plan_required")
-    if authorization["autonomous"]:
+    if authorization["autonomous"] or required_core_regressions(job):
         # Authorization never substitutes for test evidence. Re-check strict
         # preparation even if a caller prepared with optional checks disabled.
         frozen = dict(plan)

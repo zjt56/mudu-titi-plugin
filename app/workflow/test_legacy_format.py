@@ -2,13 +2,36 @@
 from copy import deepcopy
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from workflow import denoise, extract, legacy_format, structure_gate
+from workflow import checks, denoise, extract, legacy_format, manifest as mf, structure_gate
 from workflow.test_format_gate import group, question
+
+
+def bind_structure_report(root):
+    """Supply current source/original evidence for a synthetic managed batch."""
+    root = Path(root)
+    manifest_path = root / 'workflow/manifest.json'
+    state = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    source = state.get('inputs', {}).get('source', {}).get('path')
+    original = Path(source) if source else root / '00_original/source.txt'
+    if not original.exists():
+        original.parent.mkdir(parents=True, exist_ok=True)
+        original.write_bytes((root / legacy_format.SOURCE_PATHS[0]).read_bytes())
+    state.setdefault('inputs', {})['source'] = mf.register_input(root, 'source', original)['source']
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
+    report = {'passed': True, 'input_hashes': {
+        rel: mf.sha256_file(root / rel) for rel in legacy_format.SOURCE_PATHS},
+        'original_sha256': mf.sha256_file(original), 'structure_warnings': []}
+    path = root / '07_review/structure-gate.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, ensure_ascii=False), encoding='utf-8')
 
 
 class LegacyFormatTest(unittest.TestCase):
@@ -22,7 +45,22 @@ class LegacyFormatTest(unittest.TestCase):
         self.network = patch("socket.socket.connect", side_effect=AssertionError("network forbidden"))
         self.network.start()
         self.addCleanup(self.network.stop)
-        self.process = patch("subprocess.Popen", side_effect=AssertionError("model/process forbidden"))
+        real_popen = subprocess.Popen
+        allowed_scripts = {str((Path(__file__).resolve().parents[1] / spec.script).resolve())
+                           for spec in checks.FINAL_FORMAT_CHECKS}
+        def local_format_process(argv, *args, **kwargs):
+            # Run actual deterministic format scripts, while keeping every model,
+            # shell command, unrelated subprocess and non-fixture input forbidden.
+            allowed = (isinstance(argv, list) and len(argv) >= 6
+                       and argv[:3] == [sys.executable, '-X', 'utf8']
+                       and str(Path(argv[3]).resolve()) in allowed_scripts
+                       and argv[4] == '--batch'
+                       and Path(argv[5]).resolve().is_relative_to(self.root)
+                       and not kwargs.get('shell'))
+            if not allowed:
+                raise AssertionError('model/unrelated process forbidden')
+            return real_popen(argv, *args, **kwargs)
+        self.process = patch("subprocess.Popen", side_effect=local_format_process)
         self.process.start()
         self.addCleanup(self.process.stop)
 

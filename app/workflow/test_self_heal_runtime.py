@@ -124,7 +124,8 @@ class SelfHealRuntimeTest(unittest.TestCase):
                 outcome = auto.advance(batch, {}, stop_at='upload_gate')
             self.assertEqual(invoke.call_count, 1)
             return {'started': True, 'result': outcome}
-        watch = supervisor.WorkflowSupervisor(batch.parent, dispatch, busy=lambda folder: False)
+        watch = supervisor.WorkflowSupervisor(batch.parent, dispatch, busy=lambda folder: False,
+                                              clock=lambda: 1000.0)
         watch.one_tick()
         self.assertEqual(calls, ['fixture'])
         state = mf.load(batch)
@@ -140,10 +141,18 @@ class SelfHealRuntimeTest(unittest.TestCase):
         self.assertEqual(set((batch / 'workflow/review-tasks').iterdir()), tasks_before)
         # A blocking review_gate is never bypassed, so no format repair is
         # claimed as applied and the supervisor must not re-dispatch forever.
-        ledger = json.loads((batch / self_heal.LEDGER).read_text())
+        ledger = self_heal._load(batch)
+        self.assertFalse(any(event.get('outcome') == 'repair_applied'
+                             for event in ledger.get('events', [])))
         self.assertNotEqual(state['stages']['format_gate']['status'], mf.COMPLETED)
+        # A real upstream refresh may grant one further pass. Once its semantic
+        # progress settles, repeated ticks at the same time must respect backoff.
         watch.one_tick()
-        self.assertEqual(calls, ['fixture'])
+        settled_calls = len(calls)
+        watch.one_tick()
+        watch.one_tick()
+        self.assertEqual(len(calls), settled_calls)
+        self.assertFalse(supervisor.local_complete(batch, mf.load(batch)))
 
     def test_failed_status_alone_does_not_bypass_repair_cooldown(self):
         root = self.root / 'unchanged-failure'
@@ -234,6 +243,128 @@ class SelfHealRuntimeTest(unittest.TestCase):
         self.assertFalse(result['changed'])
         self.assertEqual(result['status'], 'inputs_changed')
         self.assertEqual(mf.load(root)['stages']['extract']['status'], mf.FAILED)
+
+
+class SelfHealRefusalDispatchTest(unittest.TestCase):
+    """A recovery refusal fences dispatch, including otherwise-ready branches."""
+
+    def setUp(self):
+        import contextlib
+        from workflow import operations
+        self.tmp = tempfile.TemporaryDirectory(prefix='self-heal-refused-')
+        self.addCleanup(self.tmp.cleanup)
+        self.batch = Path(self.tmp.name).resolve()
+        source = self.batch / 'source.txt'
+        source.write_text('Synthetic source for scheduler admission tests.', encoding='utf-8')
+        self.state = mf.new_manifest('refusal-fixture', self.batch,
+            mf.register_input(self.batch, 'source', source), {})
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        for item in (
+            patch.object(operations, 'handoff_if_available', return_value=None),
+            patch.object(mf, 'reconcile_deliveries'),
+            patch.object(auto, '_auto_prepare_audio', return_value={'status': 'no_audio'}),
+            patch.object(auto.rn, '_skip_agent_stage', return_value=False),
+            patch('workflow.agent_protocol._agent_lock', side_effect=lambda *a, **k: contextlib.nullcontext()),
+            patch('workflow.local_agent.invoke', side_effect=AssertionError('offline: no model')),
+        ):
+            self.stack.enter_context(item)
+
+    def advance(self, stages, refused_stage, *, parallel=False, old_inputs=False, real_refusal=False):
+        for stage in stages:
+            mf.touch_stage(self.state, stage, mf.FAILED, notes='deterministic fault')
+        mf.save(self.batch, self.state)
+        self.stack.enter_context(patch.object(contracts, 'STAGES', tuple(contracts.STAGE_BY_ID[s] for s in stages)))
+        # Only upstream readiness is supplied by the fixture. The real scheduler
+        # owns refusal admission, serial/parallel selection and outcome reporting.
+        self.stack.enter_context(patch.object(mf, 'dependency_satisfied', return_value=True))
+        self.stack.enter_context(patch.object(mf, 'skip_reason', return_value=''))
+        self.stack.enter_context(patch.object(auto, 'PARALLEL_AGENTS_ENABLED', parallel))
+        self.stack.enter_context(patch('workflow.agent.configured', return_value=True))
+        self.stack.enter_context(patch('workflow.local_agent.load_config', return_value={}))
+        if real_refusal:
+            self.stack.enter_context(patch.object(self_heal, '_candidate', return_value=(
+                refused_stage, json.dumps({'error_code': 'integration', 'message': 'dispatch contract failed'}))))
+            self.stack.enter_context(patch.object(self_heal, '_busy', return_value=False))
+            self.stack.enter_context(patch.object(self_heal, '_runtime_failure_signature', return_value='stable-runtime-fault'))
+        else:
+            self.stack.enter_context(patch.object(self_heal, 'recover', return_value={
+                'changed': False, 'stage': refused_stage, 'status': 'refused',
+                'outcome': 'repair_not_applicable', 'escalation': 'code_repair',
+                'reason': 'No locatable unit: preserve candidate and repair validator.'}))
+        if old_inputs:
+            self.stack.enter_context(patch.object(self_heal, '_load', return_value={
+                'last_inputs': {refused_stage: {'source': 'old'}}}))
+            self.stack.enter_context(patch.object(mf, 'input_hashes', return_value={'source': 'new'}))
+        execute = self.stack.enter_context(patch.object(auto.rn, '_execute_command', return_value=1))
+        wave = self.stack.enter_context(patch.object(auto, '_parallel_ready_agents',
+            side_effect=lambda batch, specs, config, **kw: {s.id: 1 for s in specs}))
+        bridge = {s: ['{python}', '-m', 'workflow.agent', 'run', '--stage', s,
+                      '--batch-dir', '{batch_dir}'] for s in stages}
+        result = auto._advance_locked(self.batch, bridge)
+        return result, execute, wave
+
+    def test_refused_command_is_not_dispatched(self):
+        result, execute, wave = self.advance(['extract'], 'extract')
+        execute.assert_not_called()
+        wave.assert_not_called()
+        self.assertEqual(result['action'], 'repair_refused')
+        self.assertEqual(result['failed_stages'][0]['self_heal_status'], 'refused')
+        self.assertEqual(mf.load(self.batch)['stages']['extract']['status'], mf.FAILED)
+
+    def test_real_runtime_recovery_refusal_never_dispatches_content(self):
+        result, execute, wave = self.advance(['knowledge'], 'knowledge', real_refusal=True)
+        execute.assert_not_called()
+        wave.assert_not_called()
+        self.assertEqual(result['action'], 'repair_refused')
+        event = self_heal._load(self.batch)['events'][-1]
+        self.assertEqual(event['error_code'], 'integration')
+        self.assertEqual(event['escalation'], 'code_repair')
+
+    def test_refused_agent_stays_fenced_even_with_old_saved_input_hashes(self):
+        result, execute, wave = self.advance(['knowledge'], 'knowledge', old_inputs=True)
+        execute.assert_not_called()
+        wave.assert_not_called()
+        self.assertEqual(result['action'], 'repair_refused')
+
+    def test_refused_agent_is_excluded_from_parallel_wave_and_independent_work_runs(self):
+        result, execute, wave = self.advance(['explanations', 'knowledge'], 'knowledge', parallel=True)
+        self.assertEqual([call.args[2].id for call in execute.call_args_list], ['explanations'])
+        wave.assert_not_called()
+        self.assertTrue(any(row['stage'] == 'knowledge' and row['action'] == 'repair_refused'
+                            for row in result['failed_stages']))
+
+    def test_audio_refusal_cannot_be_bypassed_by_capability_skip(self):
+        result, execute, wave = self.advance(['audio'], 'audio')
+        execute.assert_not_called()
+        wave.assert_not_called()
+        self.assertEqual(result['action'], 'repair_refused')
+        self.assertEqual(mf.load(self.batch)['stages']['audio']['status'], mf.FAILED)
+
+    def test_real_deferral_survives_later_ticks_while_independent_branch_runs(self):
+        mf.touch_stage(self.state, 'extract', mf.FAILED, notes='external source service unavailable')
+        mf.save(self.batch, self.state)
+        self.stack.enter_context(patch.object(contracts, 'STAGES', tuple(
+            contracts.STAGE_BY_ID[s] for s in ('extract', 'explanations'))))
+        self.stack.enter_context(patch.object(mf, 'dependency_satisfied', return_value=True))
+        self.stack.enter_context(patch.object(auto, 'PARALLEL_AGENTS_ENABLED', False))
+        self.stack.enter_context(patch.object(self_heal, '_busy', return_value=False))
+        self.stack.enter_context(patch.object(self_heal, '_candidate', side_effect=lambda batch, state:
+            ('extract', 'external source service unavailable')
+            if state['stages']['extract']['status'] == mf.FAILED else (None, '')))
+        plan = self.stack.enter_context(patch.object(self_heal, '_plan', return_value={
+            'stage': 'extract', 'action': 'defer_and_continue', 'reason': 'External service temporarily unavailable'}))
+        execute = self.stack.enter_context(patch.object(auto.rn, '_execute_command', return_value=1))
+        bridge = {'explanations': ['{python}', '-m', 'workflow.agent', 'run',
+                                  '--stage', 'explanations', '--batch-dir', '{batch_dir}']}
+        for _ in range(2):
+            result = auto._advance_locked(self.batch, bridge)
+            wait = next(row for row in result['pending_stages'] if row['stage'] == 'extract')
+            self.assertEqual(wait['action'], 'waiting_external')
+            self.assertGreater(wait['retry_after'], 0)
+            self.assertEqual(mf.load(self.batch)['stages']['extract']['status'], mf.PENDING)
+        self.assertEqual(plan.call_count, 1, 'Waiting must not call the diagnosis model again')
+        self.assertEqual([call.args[2].id for call in execute.call_args_list], ['explanations', 'explanations'])
 
 
 if __name__ == '__main__':

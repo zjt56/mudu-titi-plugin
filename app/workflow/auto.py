@@ -395,7 +395,10 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
                              _content_input_hashes=task.get("input_hashes", {}))
         if stage_id in {"explanations", "knowledge"}:
             invoke_config["max_input_chars"] = max(int(invoke_config.get("max_input_chars", 180000)), 600000)
-        if stage_id in {"answers", "explanations"}:
+        bounded_knowledge = (stage_id == "knowledge"
+                             and local_agent._label_partition_policy(invoke_config, "knowledge")[0]
+                             and (invoke_config.get("native_agent") or {}).get("enabled") is True)
+        if stage_id in {"answers", "explanations"} or bounded_knowledge:
             from . import label_execution
             return label_execution.run(batch_dir, stage_id, invoke_config, run_dir, coordinated_imports=True)
         return local_agent.invoke(task["prompt"], run_dir, invoke_config, permit_parallel=True, coordinated_imports=True)
@@ -411,14 +414,17 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
             try:
                 exported, task, _ = prepared[stage.id]
                 response_path = value
-                for retry in range(1 if stage.id in {"answers", "explanations"} else int(config.get("retries", 0)) + 1):
+                bounded_knowledge = (stage.id == "knowledge"
+                                     and local_agent._label_partition_policy(config, "knowledge")[0]
+                                     and (config.get("native_agent") or {}).get("enabled") is True)
+                for retry in range(1 if stage.id in {"answers", "explanations"} or bounded_knowledge else int(config.get("retries", 0)) + 1):
                     envelope = json.loads(response_path.read_text(encoding="utf-8"))
                     try:
                         with bookkeeping_lock, agent_protocol._agent_lock(5):
                             agent_tasks.accept_result(batch_dir, stage.id, envelope["result"], validate_only=True)
                         break
                     except ValueError as exc:
-                        if stage.id in {"answers", "explanations"} or retry >= int(config.get("retries", 0)):
+                        if stage.id in {"answers", "explanations"} or bounded_knowledge or retry >= int(config.get("retries", 0)):
                             raise
                         feedback = ("\n\n上一次返回未通过校验，错误："
                                     + str(exc)[:int(config.get("retry_feedback_chars", 1200))]
@@ -781,7 +787,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
         if healed.get("changed"):
             manifest = mf.load(batch_dir)
             print(f"  · {healed.get('stage')} AI自愈已执行动作：{healed.get('status', 'requeued')}，继续校验")
-        elif healed.get("stage") and healed.get("status") in {"cooldown", "busy", "waiting_external", "failed", "recorded", "retry_budget_exhausted", "operations_pending"}:
+        elif healed.get("stage") and healed.get("status") in {"cooldown", "busy", "waiting_external", "failed", "recorded", "retry_budget_exhausted", "operations_pending", "refused"}:
             # A wait recorded against older inputs must not outrank a real upstream
             # repair: if the failed stage is now stale, schedule it again instead
             # of stopping this round and showing a cooldown to the user.
@@ -791,13 +797,18 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
             # into an endless rerun of the same deterministic validation error.
             saved_inputs = (self_heal._load(batch_dir).get('last_inputs') or {}).get(healed['stage'])
             current_inputs = mf.input_hashes(batch_dir, manifest, spec) if spec else None
-            stale = (healed.get('status') != 'operations_pending'
+            # A refusal was evaluated against the current evidence in this very
+            # call. An older ledger binding cannot authorize dispatch around it.
+            stale = (healed.get('status') not in {'operations_pending', 'refused'}
                      and saved_inputs is not None and current_inputs != saved_inputs)
             reason_text = '上游输入内容已更新' if stale else ''
             if stale:
                 print(f"  · {healed['stage']} 输入已变化，忽略旧的自愈等待并重新调度（{reason_text[:60]}）")
             else:
                 recovery_wait[healed["stage"]] = healed
+        # A deferred stage is PENDING, so it is no longer a failure candidate.
+        # Its existing repair event still owns a bounded, evidence-bound wait.
+        recovery_wait.update(self_heal.deferred_waits(batch_dir, manifest))
     except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
         print(f"  · 模型自愈记录失败，不影响主流程：{str(exc)[:160]}")
     blockers = []
@@ -846,7 +857,9 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
         if stage.id == 'audio' and deferred_audio:
             audio_prep = audio_future.result()
             deferred_audio = False
-        if cooldown <= 0 and audio_allowed and audio_future is None and audio_prep.get("status") == "waiting":
+        if (cooldown <= 0 and audio_allowed and audio_future is None
+                and audio_prep.get("status") == "waiting"
+                and recovery_wait.get('audio', {}).get('status') != 'refused'):
             deps = contracts.STAGE_BY_ID["audio"].depends_on
             if all(dep_ready(d) for d in deps):
                 if audio_worker is None:
@@ -882,12 +895,14 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
             # 不能被自愈冷却长期挂住，按既有规则跳过并继续，其它阶段照常推进。
             capability_limited_audio = (
                 stage.id == "audio" and ZERO_TOUCH
+                and recovery_wait[stage.id].get('status') != 'refused'
                 and audio_prep.get("status") in {"disabled", "not_ready", "unavailable", "error",
                                                  "no_audio", "running"})
             if not capability_limited_audio:
                 wait = recovery_wait[stage.id]
                 reason = wait.get('reason') or (wait.get("event") or {}).get("error") or (wait.get("event") or {}).get("reason") or "AI修复已记录，等待自动重试窗口"
-                wait_action = 'operations_pending' if wait.get('status') == 'operations_pending' else 'cooldown'
+                wait_action = ('repair_refused' if wait.get('status') == 'refused' else
+                               wait['status'] if wait.get('status') in {'operations_pending', 'waiting_external'} else 'cooldown')
                 blocked(stage.id, str(reason)[:300], wait_action, next_retry_at=wait.get("next_retry_at"),
                         retry_after=wait.get("retry_after"), self_heal_status=wait.get("status"))
                 continue
@@ -1259,7 +1274,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     outcome = _result(batch_dir, manifest, first.get("stage"),
                       first.get("reason", "自动阶段已全部完成"), first.get("action", ""))
     # 等待只进入调度结果；不改写依赖状态，更不能把阻断闸门登记成完成或批准。
-    failure_actions = ("failed", "gate", "reconciling_external", "reconciliation_exhausted")
+    failure_actions = ("failed", "gate", "repair_refused", "reconciling_external", "reconciliation_exhausted")
     outcome["failed_stages"] = [item for item in blockers if item["action"] in failure_actions]
     outcome["pending_stages"] = [item for item in blockers if item["action"] not in failure_actions]
     outcome["cooldown_seconds"] = _read_cooldown(batch_dir)

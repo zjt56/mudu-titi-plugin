@@ -13,7 +13,7 @@ from pathlib import Path
 from . import agent_tasks, local_agent, private_label_baseline, unit_tasks
 from .question_identity import question_key
 
-STAGES = ("answers", "explanations")
+STAGES = ("answers", "explanations", "knowledge")
 _OWNERSHIP_FAILURE = "Content source/ownership check failed: "
 
 
@@ -172,7 +172,7 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
     def validate(uid, payload):
         candidate = copy.deepcopy(payload)
         scoped = dict(context)
-        if stage == "explanations":
+        if stage in ("explanations", "knowledge"):
             typed = context[agent_tasks.ARTIFACTS["types"]]
             scoped[agent_tasks.ARTIFACTS["types"]] = dict(typed, items=[r for r in typed["items"] if r.get("unit_id") == uid])
         notes = []
@@ -229,13 +229,14 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
     # into one-unit calls destroys the cross-section context needed to bind
     # repeated printed numbers (and multiplies model startup/round-trip cost).
     # build_parts still falls back to size-bounded partitions when necessary.
-    answer_part_limit = len(singleton) if stage == "answers" else 8
+    answer_part_limit = len(singleton) if stage == "answers" else (
+        local_agent._label_partition_policy(config, stage)[1] if stage == "knowledge" else 8)
     for attempt in range(int(config.get("retries", 0)) + 1):
         pending = set(singleton) - set(accepted) - set(deterministic)
         if not pending:
             break
         _, parts = unit_tasks.build_parts(batch, stage, prompt_budget,
-                                         max_units=answer_part_limit if stage == "answers" else 8,
+                                         max_units=answer_part_limit,
                                          selected_ids=pending)
         def call(index_part):
             index, part = index_part
@@ -252,12 +253,25 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
                     options["coordinated_imports"] = True
                 response = invoke(part["prompt"] + feedback, directory, config, **options)["response"]
             except local_agent.AgentError as exc:
-                if exc.code != "response":
+                candidate_path = directory / "candidate.json"
+                # A native partition may have exhausted its own correction
+                # attempts even though some of its units are valid. Recheck the
+                # candidate from this exact invocation, never from another task;
+                # the normal per-unit validators below remain authoritative.
+                if (stage == "knowledge" and exc.code == "validation_no_progress"
+                        and (exc.artifacts or {}).get("candidate") == str(candidate_path)
+                        and candidate_path.is_file() and not candidate_path.is_symlink()):
+                    try:
+                        response = json.loads(candidate_path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        raise exc
+                elif exc.code != "response":
                     # Dispatch/configuration errors must retain their machine
                     # code; turning integration into 48 content errors both
                     # loses ownership and burns per-unit repair retries.
                     raise
-                return part, None, str(exc)
+                else:
+                    return part, None, str(exc)
             local_agent._check_input_hashes(batch, strict_hashes)
             unit_tasks.check_part_inputs(batch, part)
             return part, response, None

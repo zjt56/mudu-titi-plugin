@@ -78,6 +78,13 @@ class QuestionIdentityAnswersTest(unittest.TestCase):
         value = json.loads(path.read_text(encoding='utf-8'))
         self.assertEqual(set(value['missing']), {'section-a-1', 'section-b-1', 'section-b-2'})
 
+    def test_answer_gaps_exempt_only_writing_with_matching_identity(self):
+        self.units[0]['type'] = '书面表达'
+        self.put('01_source/structure.confirmed.json', self.confirmed)
+        self.put(agent_tasks.ARTIFACTS['answers'], {'answers': {}, 'missing': {}})
+        self.assertEqual(agent_tasks.stage_gaps(self.root, 'answers'),
+                         {'answers': ['section-b-1', 'section-b-2']})
+
     def test_injection_preserves_original_child_numbers(self):
         row, children = {}, [{'number': 1}, {'number': 2}]
         explanations = {'explanation': '无', 'articleSummary': '无',

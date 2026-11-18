@@ -1,5 +1,6 @@
 """Tooltip status is evidence, never candidate existence or scheduler readiness."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,21 @@ class SubstepsTest(unittest.TestCase):
         self.assertEqual(len(projected["validate"]), len(CHECKS) + 1)
         self.assertEqual(len(projected["format_gate"]), len(FINAL_FORMAT_CHECKS) + 5)
 
+    def test_listening_script_step_needs_current_accepted_delivery(self):
+        relative = '04_knowledge/explanations.json'
+        path = self.put(relative, {'items': [{'explanation': '听力录音材料：\nM:Hello.'}]})
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        step = next(row for row in substeps.project({})['explanations'] if row['id'] == 'listening_script')
+        self.assertEqual(step['title'], '听力录音材料直抄')
+        self.assertEqual(self.states('explanations', 'pending')['listening_script'], 'pending')
+        self.assertEqual(self.states('explanations', 'completed')['listening_script'], 'pending')
+        self.assertEqual(self.states('explanations', 'completed', output_hashes={relative: digest})['listening_script'], 'completed')
+        self.put(relative, {'items': [{'explanation': '旧解析'}]})
+        self.assertEqual(self.states('explanations', 'completed', output_hashes={relative: digest})['listening_script'], 'pending')
+        manifest = {'stages': {'explanations': {'status': 'running'}}}
+        rows = substeps.project(manifest, self.root, {'stage': 'explanations', 'detail': '听力录音材料直抄'})['explanations']
+        self.assertEqual([row['id'] for row in rows if row['status'] == 'running'], ['listening_script'])
+
     def test_pending_and_invalidated_ignore_all_old_files(self):
         self.put("07_review/validation-report.json", {"passed": True, "checks": [
             {"check": c.name, "passed": True} for c in CHECKS], "source_audit": {"passed": True},
@@ -73,7 +89,10 @@ class SubstepsTest(unittest.TestCase):
     def test_completed_parent_proves_accepted_fields_without_reading_candidates(self):
         for sid in ("preassemble", "types", "answers", "explanations", "knowledge", "assemble", "meta", "underlines"):
             with self.subTest(stage=sid):
-                self.assertEqual(set(self.states(sid, "completed").values()), {"completed"})
+                states = self.states(sid, "completed")
+                if sid == 'explanations':
+                    self.assertEqual(states.pop('listening_script'), 'pending')
+                self.assertEqual(set(states.values()), {"completed"})
 
     def test_nonblocking_check_failure_is_warning_and_accepted_parent_wins(self):
         self.put("07_review/validation-report.json", {"passed": False, "checks": [

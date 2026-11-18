@@ -132,11 +132,12 @@ class SelfHealTest(unittest.TestCase):
         manifest["inputs"] = mf.register_input(self.batch, "source", original)
         mf.save(self.batch, manifest)
         with patch.object(self_heal, "_candidate", return_value=("extract", "same failure")), \
-             patch("workflow.operations._code_fingerprint", side_effect=["v1", "v1", "v2"]), \
+             patch("workflow.operations._code_fingerprint", return_value="v1") as code, \
              patch.object(self_heal, "_plan", return_value={"action": "record_only", "reason": "no safe edit"}):
             results = [self_heal.recover(self.batch)]
             original.write_text("changed source", encoding="utf-8")
             results.append(self_heal.recover(self.batch))
+            code.return_value = "v2"
             results.append(self_heal.recover(self.batch))
         self.assertEqual(len({result["signature"] for result in results}), 3)
         self.assertEqual([result["event"]["attempt"] for result in results], [1, 1, 1])

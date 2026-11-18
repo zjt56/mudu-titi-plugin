@@ -73,6 +73,9 @@ def _question(line):
 
 
 def _section(line):
+    from .listening_script import HEADER
+    if HEADER.fullmatch(line):
+        return ('listening_script', None)
     number = SECTION_NUMBER.match(line)
     rest = line[number.end():] if number else line
     name = SECTION_NAME.match(rest)
@@ -1340,6 +1343,12 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     confirmed_units[str(uid)] = unit
     except (OSError, ValueError):
         confirmed_units = {}
+    from . import listening_script
+    from .agent_tasks import confirmed_units as load_confirmed_units
+    try:
+        listening_scripts = listening_script.extract(batch, load_confirmed_units(batch))
+    except (OSError, ValueError, KeyError, TypeError):
+        listening_scripts = {}
     writing_number_set = {str(n) for unit in confirmed_units.values()
                           if unit.get('identity_version') != 'scoped-v1'
                           and str(unit.get('type') or '').strip() == '书面表达'
@@ -1734,6 +1743,15 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
         restore_field(item, uid, numbers, 'articleSummary')
         summary = item.get('articleSummary', item.get('article_summary', ''))
         explanation = item.get('explanation', '')
+        script = listening_scripts.get(str(active_unit.get('unit_id') or active_unit.get('id') or uid)) if not child else None
+        if script:
+            marker = listening_script.MARK
+            valid = isinstance(explanation, str) and explanation.count(marker) == 1 and explanation.split(marker, 1)[1] == script[0]
+            if not valid:
+                error('ORIGINAL_LISTENING_SCRIPT_OMITTED', '原卷听力录音材料未完整放入对应题目解析', uid, 'explanation',
+                      [f'{script[1]}:{script[2]}'])
+            else:
+                explanation = explanation.split(marker, 1)[0].strip()
         from .content_rules import is_placeholder
         # 明确缺失占位（待补充等）不是可溯源内容，也不是未标注的 AI 生成。
         if summary is None or (isinstance(summary, str) and is_placeholder(summary)):
@@ -1746,9 +1764,11 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     error('CONTENT_TYPE_INVALID', '解析/大意必须是字符串', uid, field)
                 elif AI_MARK in value:
                     error('AI_CONTENT_FORBIDDEN', '禁止 AI 生成解析或文章大意；不得用标记代替原文', uid, field)
-            if not writing_unit and not listening and not explanation and (child or not item.get('subquestions')):
+            if not writing_unit and not explanation and (child or not item.get('subquestions')):
                 originals = [row for row in questions if row['number'] in numbers and row['text'] and not is_placeholder(row['text'])
-                             and unique_anchor(row['number'], row['path'], row['line'], expected=row['verbatim'])]
+                             and (unique_anchor(row['number'], row['path'], row['line'], expected=row['verbatim'])
+                                  or script and sum(str(row['number']) in {str(n) for n in u.get('numbers', [])}
+                                                    for u in confirmed_units.values()) == 1)]
                 if originals:
                     error('ORIGINAL_EXPLANATION_OMITTED', '原题有解析，不能用缺失占位替代', uid, 'explanation',
                           [f"{row['path']}:{row['line']}" for row in originals])

@@ -27,16 +27,13 @@ class SelfHealVerificationTest(unittest.TestCase):
         model = patch("workflow.local_agent.invoke", side_effect=AssertionError("offline test: no model"))
         model.start()
         self.addCleanup(model.stop)
-        # These cases exercise the outcome-observation matrix, not artefact
-        # validity; treat the placeholder deliveries as satisfied prerequisites.
-        from workflow import execution_state as _es
-        def _dep(manifest, stage_id, **_kw):
-            stages = manifest.get("stages") or {}
-            return not any((stages.get(dep) or {}).get("rebuild_required")
-                           for dep in contracts.upstream_of(stage_id))
-        dep = patch.object(mf, "dependency_satisfied", side_effect=_dep)
-        dep.start()
-        self.addCleanup(dep.stop)
+        (self.batch / '01_source/structure.confirmed.json').write_text(json.dumps({
+            'units': [{'unit_kind': 'standalone', 'numbers': [1], 'stem': '1. Hello'}]}))
+        # Matrix fixtures stub only content acceptance. Keep the real dependency
+        # function so failed/current/stale stage states cannot be hidden by a mock.
+        accepted = patch('workflow.handoff.inspect_stage', return_value={'passed': True, 'errors': []})
+        accepted.start()
+        self.addCleanup(accepted.stop)
 
     def schedule(self, outcome="retry_scheduled", origin="validate", target="assemble", legacy=False):
         event = {"at": "2020-01-01T00:00:00+00:00", "stage": origin,
@@ -179,7 +176,8 @@ class CrossStageRecoveryDispatchTest(unittest.TestCase):
                     path = batch / relative
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text('{}')
-            (batch / '01_source/structure.confirmed.json').write_text('{"units":[{}]}')
+            (batch / '01_source/structure.confirmed.json').write_text(json.dumps({
+                'units': [{'unit_kind': 'standalone', 'numbers': [1], 'stem': '1. Hello'}]}))
             final = batch / '06_batch/batch_meta.json'
             (batch / '07_review/upload-format.json').write_text(json.dumps({
                 'passed': True, 'final_sha256': hashlib.sha256(final.read_bytes()).hexdigest()}))
@@ -213,7 +211,8 @@ class CrossStageRecoveryDispatchTest(unittest.TestCase):
                 for obj, key, value in ((auto, 'ZERO_TOUCH', True), (auto, 'PARALLEL_AGENTS_ENABLED', False)):
                     stack.enter_context(patch.object(obj, key, value))
                 stack.enter_context(patch.object(mf, 'reconcile_deliveries', return_value=[]))
-                stack.enter_context(patch.object(mf, 'dependency_satisfied', return_value=True))
+                stack.enter_context(patch('workflow.handoff.inspect_stage',
+                    return_value={'passed': True, 'errors': []}))
                 stack.enter_context(patch.object(mf, 'skip_reason', return_value=''))
                 stack.enter_context(patch('workflow.agent_tasks.stage_gaps', return_value={}))
                 stack.enter_context(patch.object(auto, '_auto_prepare_audio', return_value={'status': 'ready'}))
@@ -240,6 +239,242 @@ class CrossStageRecoveryDispatchTest(unittest.TestCase):
 
     def test_original_recheck_failure_is_not_repaired_or_approved(self):
         self.exercise(False)
+
+
+class DeferredRecoveryWaitTest(unittest.TestCase):
+    def setUp(self):
+        import contextlib
+        self.tmp = tempfile.TemporaryDirectory(prefix='deferred-recovery-')
+        self.addCleanup(self.tmp.cleanup)
+        self.batch = Path(self.tmp.name)
+        self.source = self.batch / 'source.txt'
+        self.source.write_text('Original source', encoding='utf-8')
+        state = mf.new_manifest('deferred-fixture', self.batch,
+            mf.register_input(self.batch, 'source', self.source), {})
+        mf.touch_stage(state, 'extract', mf.FAILED, notes='external source service unavailable')
+        mf.save(self.batch, state)
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        self.clock = stack.enter_context(patch.object(self_heal.time, 'time', return_value=1000.0))
+        self.evidence = stack.enter_context(patch('workflow.operations._code_fingerprint', return_value='same-code'))
+        stack.enter_context(patch.object(self_heal, '_busy', return_value=False))
+        self.plan = stack.enter_context(patch.object(self_heal, '_plan', return_value={
+            'action': 'defer_and_continue', 'stage': 'extract',
+            'reason': 'External service unavailable; continue independent work'}))
+        stack.enter_context(patch('workflow.local_agent.invoke', side_effect=AssertionError('no live model')))
+        self.result = self_heal.recover(self.batch)
+
+    def test_defer_persists_deadline_and_read_only_wait_across_calls(self):
+        self.assertTrue(self.result['changed'])
+        self.assertEqual(self.result['status'], 'deferred')
+        ledger = self_heal._load(self.batch)
+        event = ledger['events'][-1]
+        self.assertEqual(event['deferred_until'], 1060.0)
+        self.assertEqual(ledger['next_retry_at'], 1060.0)
+        self.assertEqual(event['deferred_evidence'], self_heal._retry_evidence(
+            self.batch, mf.load(self.batch), 'extract'))
+        before = {p.relative_to(self.batch): p.read_bytes() for p in self.batch.rglob('*') if p.is_file()}
+        for _ in range(2):
+            waits = self_heal.deferred_waits(self.batch, mf.load(self.batch))
+            self.assertEqual(set(waits), {'extract'})
+            self.assertEqual(waits['extract']['status'], 'waiting_external')
+            self.assertEqual(waits['extract']['retry_after'], 60.0)
+            self.assertFalse(waits['extract']['changed'])
+        self.assertEqual(before, {p.relative_to(self.batch): p.read_bytes()
+                                 for p in self.batch.rglob('*') if p.is_file()})
+
+    def test_recovery_during_persisted_wait_does_not_diagnose_again(self):
+        for _ in range(3):
+            self.assertEqual(self_heal.recover(self.batch)['status'], 'waiting_external')
+        self.assertEqual(self.plan.call_count, 1)
+        self.assertEqual(self_heal._load(self.batch)['next_retry_at'], 1060.0)
+
+    def test_expiry_or_real_source_and_code_change_unlocks(self):
+        self.clock.return_value = 1060.0
+        self.assertEqual(self_heal.deferred_waits(self.batch, mf.load(self.batch)), {})
+        self.clock.return_value = 1001.0
+        self.source.write_text('Changed original source', encoding='utf-8')
+        self.assertEqual(self_heal.deferred_waits(self.batch, mf.load(self.batch)), {})
+        self.source.write_text('Original source', encoding='utf-8')
+        self.evidence.return_value = 'new-code'
+        self.assertEqual(self_heal.deferred_waits(self.batch, mf.load(self.batch)), {})
+
+    def test_completed_stage_or_new_attempt_retires_old_wait(self):
+        state = mf.load(self.batch)
+        mf.touch_stage(state, 'extract', mf.COMPLETED)
+        self.assertEqual(self_heal.deferred_waits(self.batch, state), {})
+        mf.touch_stage(state, 'extract', mf.PENDING)
+        ledger = self_heal._load(self.batch)
+        ledger['events'].append({'stage': 'extract', 'outcome': 'diagnosing'})
+        self_heal._save(self.batch, ledger)
+        self.assertEqual(self_heal.deferred_waits(self.batch, state), {})
+
+    def test_unrelated_stage_attempt_does_not_cancel_persisted_wait(self):
+        ledger = self_heal._load(self.batch)
+        ledger['events'].append({'stage': 'knowledge', 'outcome': 'diagnosing'})
+        self_heal._save(self.batch, ledger)
+        self.assertEqual(set(self_heal.deferred_waits(self.batch, mf.load(self.batch))), {'extract'})
+
+
+class RealDependencyRecoveryVerificationTest(unittest.TestCase):
+    """Real consumer acceptance and dependency checks, without a model or user data."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='real-self-heal-verification-')
+        self.addCleanup(self.tmp.cleanup)
+        self.batch = Path(self.tmp.name)
+        self.state = mf.new_manifest('isolated-recovery', self.batch, {}, {})
+        forbidden = patch('workflow.local_agent.invoke', side_effect=AssertionError('no live model'))
+        forbidden.start()
+        self.addCleanup(forbidden.stop)
+
+    def put(self, relative, value):
+        path = self.batch / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value if isinstance(value, str) else json.dumps(value), encoding='utf-8')
+
+    def deliver_extract(self):
+        for relative in contracts.STAGE_BY_ID['extract'].produces:
+            self.put(relative, '1. Hello' if relative.endswith('.txt') else {})
+        mf.touch_stage(self.state, 'extract', mf.RUNNING)
+        mf.touch_stage(self.state, 'extract', mf.COMPLETED)
+        self.assertTrue(mf.dependency_satisfied(self.state, 'extract'))
+
+    def schedule(self, origin='extract', target=None):
+        target = target or origin
+        event = dict(stage=origin, origin_stage=origin, target_stage=target,
+            outcome='retry_scheduled', at=mf.now_iso(), verified=False,
+            verification=dict(version=1,
+                origin_before=self_heal._execution_baseline(self.state['stages'][origin]),
+                target_before=self_heal._execution_baseline(self.state['stages'][target])))
+        self_heal._save(self.batch, {'events': [event], 'attempts': {}})
+
+    def finish(self, stage, status, **kwargs):
+        mf.touch_stage(self.state, stage, mf.RUNNING)
+        mf.touch_stage(self.state, stage, status, **kwargs)
+
+    def latest(self):
+        return self_heal._load(self.batch)['events'][-1]
+
+    def test_failed_retry_without_dependencies_records_real_failure(self):
+        for status in (mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW):
+            with self.subTest(status=status):
+                self.schedule()
+                self.finish('extract', status, notes='actual retry rejected')
+                self.assertFalse(mf.dependency_satisfied(self.state, 'extract'))
+                self.assertEqual(self_heal.observe_outcomes(self.batch, self.state),
+                                 {'verified': [], 'failed': ['extract']})
+                self.assertEqual(self.latest()['outcome'], 'retry_failed')
+                self.assertEqual(self.latest()['verification_error'], 'actual retry rejected')
+
+    def test_cross_stage_origin_failure_records_after_real_upstream_delivery(self):
+        self.schedule(origin='structure_gate', target='extract')
+        self.deliver_extract()
+        self.finish('structure_gate', mf.BLOCKED, notes='current source binding rejected')
+        self.assertEqual(self_heal.observe_outcomes(self.batch, self.state),
+                         {'verified': [], 'failed': ['structure_gate']})
+        self.assertEqual(self.latest()['verification_stage'], 'structure_gate')
+        self.assertTrue(self.latest()['target_completed'])
+
+    def test_completed_but_stale_retry_records_failure(self):
+        self.schedule()
+        self.deliver_extract()
+        self.state['stages']['extract']['output_hashes'] = mf.output_hashes(
+            self.batch, contracts.STAGE_BY_ID['extract'])
+        self.put('01_source/正文.txt', '1. Different current source')
+        self.assertFalse(mf.dependency_satisfied(self.state, 'extract'))
+        self.assertEqual(self_heal.observe_outcomes(self.batch, self.state)['failed'], ['extract'])
+        self.assertIn('变化', self.latest()['verification_error'])
+
+    def test_completed_retry_rejected_by_real_consumer_records_failure(self):
+        self.schedule()
+        self.deliver_extract()
+        self.put('01_source/metadata.json', [])
+        self.assertFalse(mf.dependency_satisfied(self.state, 'extract'))
+        self.assertEqual(self_heal.observe_outcomes(self.batch, self.state)['failed'], ['extract'])
+        self.assertIn('JSON object', self.latest()['verification_error'])
+
+    def test_real_qualified_retry_verifies_once(self):
+        self.schedule()
+        self.deliver_extract()
+        self.assertEqual(self_heal.observe_outcomes(self.batch, self.state),
+                         {'verified': ['extract'], 'failed': []})
+        self.assertEqual(self_heal.observe_outcomes(self.batch, self.state),
+                         {'verified': [], 'failed': []})
+
+    def test_no_new_execution_or_unstable_ancestor_keeps_verification_pending(self):
+        self.deliver_extract()
+        self.schedule()
+        self.assertEqual(self_heal.observe_outcomes(self.batch, self.state),
+                         {'verified': [], 'failed': []})
+        self.schedule(origin='structure_gate')
+        self.finish('structure_gate', mf.BLOCKED, notes='old downstream failure')
+        for state in ('rebuilding', 'pending', 'stale'):
+            with self.subTest(ancestor=state):
+                self.deliver_extract()
+                if state == 'rebuilding':
+                    self.state['stages']['extract']['rebuild_required'] = True
+                elif state == 'pending':
+                    mf.touch_stage(self.state, 'extract', mf.PENDING)
+                else:
+                    self.state['stages']['extract']['output_hashes'] = mf.output_hashes(
+                        self.batch, contracts.STAGE_BY_ID['extract'])
+                    self.put('01_source/正文.txt', 'changed before consumer recheck')
+                self.assertEqual(self_heal.observe_outcomes(self.batch, self.state),
+                                 {'verified': [], 'failed': []})
+                self.assertFalse(self.latest()['verified'])
+                self.assertEqual(self.latest()['verification_status'], 'pending')
+
+    def test_review_differences_are_output_without_repair_success_or_failure(self):
+        # Other stages are valid historical skips. The real manifest dependency
+        # function still verifies rebuild and review-difference policy itself.
+        for stage in contracts.STAGES:
+            self.state['stages'][stage.id]['status'] = mf.SKIPPED
+        self.schedule(origin='review_gate')
+        self.finish('review_gate', mf.NEEDS_REVIEW, execution_completed=True,
+            continue_unqualified=True, release_ready=False, notes='retain real label differences')
+        before = json.loads(json.dumps(self.state))
+        with patch('workflow.handoff.inspect_stage', return_value={'passed': True, 'errors': []}):
+            self.assertEqual(self_heal.observe_outcomes(self.batch, self.state),
+                             {'verified': [], 'failed': []})
+        self.assertEqual(self.latest()['outcome'], 'retry_quality_differences')
+        self.assertEqual(self.latest()['verification_status'], 'quality_differences')
+        self.assertFalse(self.latest()['verified'])
+        self.assertEqual(self.state, before)
+        self.assertEqual(self_heal._load(self.batch)['last_status'], 'quality_differences')
+        self.assertEqual(self_heal._load(self.batch)['next_retry_at'], 0)
+        self.assertEqual(self_heal.observe_outcomes(self.batch, self.state),
+                         {'verified': [], 'failed': []})
+
+    def test_verified_sibling_does_not_hide_review_differences(self):
+        for stage in contracts.STAGES:
+            self.state['stages'][stage.id]['status'] = mf.SKIPPED
+        self.schedule(origin='extract')
+        sibling = self.latest()
+        self.deliver_extract()
+        self.schedule(origin='review_gate')
+        ledger = self_heal._load(self.batch)
+        ledger['events'].insert(0, sibling)
+        self_heal._save(self.batch, ledger)
+        self.finish('review_gate', mf.NEEDS_REVIEW, execution_completed=True,
+            continue_unqualified=True, release_ready=False)
+        with patch('workflow.handoff.inspect_stage', return_value={'passed': True, 'errors': []}):
+            self.assertEqual(self_heal.observe_outcomes(self.batch, self.state),
+                             {'verified': ['extract'], 'failed': []})
+        self.assertEqual(self_heal._load(self.batch)['last_status'], 'quality_differences')
+        self.assertFalse(self.latest()['verified'])
+
+    def test_incomplete_review_or_blocked_gate_still_records_failure(self):
+        for stage in contracts.STAGES:
+            self.state['stages'][stage.id]['status'] = mf.SKIPPED
+        for status in (mf.NEEDS_REVIEW, mf.BLOCKED):
+            with self.subTest(status=status):
+                self.schedule(origin='review_gate')
+                self.finish('review_gate', status, execution_completed=False,
+                    continue_unqualified=False, release_ready=False)
+                with patch('workflow.handoff.inspect_stage', return_value={'passed': True, 'errors': []}):
+                    self.assertEqual(self_heal.observe_outcomes(self.batch, self.state),
+                                     {'verified': [], 'failed': ['review_gate']})
 
 
 if __name__ == "__main__":

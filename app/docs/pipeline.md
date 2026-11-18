@@ -114,6 +114,8 @@
 
 `workflow/repair-feedback/<stage>.json` 的严格反馈只进入对应阶段和受影响分片。其它题目的精确提示与有效缓存保留；在途任务仍校验全部原始输入。`workflow/self-heal.json` 区分 `retry_scheduled`、`repair_applied`、`retry_verified`、`retry_failed`，排队不冒充修复成功；小型 `self-heal-status.json` 用于界面显示“AI 判断／局部修复／校验／稍后重试”，不新增主流程节点。后台 `/api/health` 返回实际监督线程存活与最近巡检时间。
 
+自愈返回 `refused` 后，当前阶段的串行与并行入口均保持拒绝；旧输入记录或音频能力跳过不能覆盖这次决定。主流程保留具体原因并继续无依赖分支。`defer_and_continue` 的期限及输入/原件/代码证据保存在原自愈事件中，跨调度读取有效等待，到期或实际证据变化后才重新准入，不能在同一轮立即重派。复验先检查上游稳定交付，再判当前阶段真实执行结果；审核已执行的差异独立记为 `retry_quality_differences`，不当成修复失败或质量通过。
+
 ## 阶段状态
 
 台账里每个阶段只有九种状态：

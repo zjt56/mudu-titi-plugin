@@ -616,6 +616,28 @@ class UploadContentTest(unittest.TestCase):
         report = inspect_content(self.batch, {'items': [{'unit_id': 'q-1', 'number': 1, 'explanation': '本题考查名词辨析（AI生成，待校对）'}]})
         self.assertTrue(report['passed'], report)
 
+    def test_legacy_absence_placeholders_are_preserved_without_source_content(self):
+        for value in ('未提供', '未填写'):
+            with self.subTest(value=value):
+                item = {'unit_id': 'q-1', 'number': 1,
+                        'explanation': value, 'articleSummary': value}
+                report = inspect_content(self.batch, {'items': [item]}, strict=True)
+                self.assertTrue(report['passed'], report)
+                self.assertEqual(item['explanation'], value)
+                self.assertEqual(item['articleSummary'], value)
+
+    def test_legacy_placeholders_cannot_hide_existing_original_content(self):
+        for value in ('未提供', '未填写'):
+            with self.subTest(value=value):
+                item = {'unit_id': 'q-31', 'number': 31,
+                        'explanation': value, 'articleSummary': value}
+                report = inspect_content(self.batch, {'items': [item]}, strict=True)
+                self.assertFalse(report['passed'], report)
+                self.assertEqual({row['code'] for row in report['errors']},
+                                 {'ORIGINAL_EXPLANATION_OMITTED', 'ORIGINAL_SUMMARY_OMITTED'})
+                self.assertEqual(item['explanation'], value)
+                self.assertEqual(item['articleSummary'], value)
+
     def test_listening_unit_may_omit_explanation(self):
         report = inspect_content(self.batch, {'items': [{'unit_id': 'l-1', 'question_type': '听力短对话理解',
                                                          'number': 1, 'explanation': ''}]})

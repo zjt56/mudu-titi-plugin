@@ -14,7 +14,7 @@ LISTENING_FILLED = '答案由AI生成（AI生成，待校对）'
 # 用户规则：试卷没有解析/文章大意时不再使用 AI 生成，直接跳过，对应字段一律填「无」。
 # 历史批次里的其它占位写法仍按缺失识别，避免旧产物被误判为编造。
 EMPTY_PLACEHOLDER = '无'
-PLACEHOLDER_TEXTS = frozenset(('无', '无答案', '无解析', '待补充', '暂无', '暂无解析', '暂无文章大意', '原卷无解析', '原卷无文章大意'))
+PLACEHOLDER_TEXTS = frozenset(('无', '无答案', '无解析', '未提供', '未填写', '待补充', '暂无', '暂无解析', '暂无文章大意', '原卷无解析', '原卷无文章大意'))
 AI_MAX_CJK = 50
 AI_MAX_WORDS = 50
 
@@ -31,6 +31,7 @@ RULES = """Artifact: {items:[{unit_id,explanation:string|source_ref,articleSumma
 同课时跨大题允许重复印刷题号：unit_id/section_id/source_section 与 source_span 是归属身份，numbers 和子题 number 原样保留。source_ref 必须位于本单元原文窗口，或具有可独立核验的同大题 context+occurrence 来源身份；标题相似、题型相同或答案文字相同都不能替代来源证据。纯数字附录没有大题 scope 证据时须明确定位未绑定，不能选首条、跨大题借用或声称匹配成功。
 1) 解析匹配：按真实题号、章节和材料边界，在原卷正文、附录、答案册中定位该题原解析，逐字保留（去掉“【解析】”等字段标题），evidence 写明来源文件与行号/题号。
 2) 文章大意匹配：按实际篇章及其所属题号匹配原【文章大意】，逐字保留并记录来源位置；重复的 A/B 篇号不是唯一标识。大意只写组级一份，不在每个子题重复。
+听力录音材料：原卷附录存在与单题或完整题组唯一对应的听力文字稿时，逐字放入该单题或题组的 explanation；保留已有原解析，换行后添加「听力录音材料：」及原稿，不生成、改写或按列表顺序猜归属。共享录音稿写题组解析，不拆散或重复到每个小题。
 3) 缺失处理（用户规则）：确认已提供来源确实没有该题解析或该篇文章大意时，对应字段一律只填字符串「无」，直接跳过；严禁用 AI 生成或自行补写任何内容，也不加任何来源标记。
 约束：有原解析/原大意时逐字复制，不得替换；不得串用其它材料的解析或大意（按题号与材料边界判定）。
 听力不写内容解析：答案来自附录时 explanation 同样填「无」。
@@ -110,12 +111,12 @@ def normalize_optional_content(row):
         return
     for key in ("explanation", "articleSummary"):
         value = row.get(key)
-        if value is None or (isinstance(value, str) and is_placeholder(value)):
+        if value is None or (isinstance(value, str) and not value.strip()):
             row[key] = EMPTY_PLACEHOLDER
     for child in row.get("subquestions") or []:
         if isinstance(child, dict):
             value = child.get("explanation")
-            if value is None or (isinstance(value, str) and is_placeholder(value)):
+            if value is None or (isinstance(value, str) and not value.strip()):
                 child["explanation"] = EMPTY_PLACEHOLDER
 
 

@@ -243,7 +243,9 @@ class DevelopmentWorkspaceTests(unittest.TestCase):
         captured = dev.capture(self.root)
         self.assertIn("app/workflow/extra_mod.py", captured["files"])
         self.assertTrue(dev.allowed("app/workflow/extra_mod.py"))
-        self.assertFalse(dev.allowed("app/workflow/self_heal.py"))
+        self.assertTrue(dev.allowed("app/workflow/self_heal.py"))
+        self.assertIn("app/workflow/self_heal.py", dev.CORE_REGRESSIONS)
+        self.assertFalse(dev.allowed("app/workflow/operations.py"))
 
     def test_copy_never_overlaps_the_source_tree(self):
         with self.assertRaisesRegex(ValueError, "copy_overlap"):

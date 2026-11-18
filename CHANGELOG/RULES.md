@@ -607,3 +607,5 @@ question_content.py::restore_source_stems（网格单元格不承载带字母选
 `structure.confirmed.json` 无法被消费者解析时，`manifest.is_stale` 判定过期并自动重跑，
 不得让下游永久等待。来源/身份/归属实质错误仍阻断。落地：`agent_tasks.py`、`final_audit.py`、
 `manifest.py`、`runner.py`、`handoff.py`、`agent_tasks.py`；`audio=needs_review` 不再中断文字链，`assemble` 的来源审计候选留到 `validate`/`final_audit` 复核。验证见 `CHANGELOG/2026-11-17-early-defer-content-and-stale-gate.md`。
+
+- 2026-11-18：用户要求将原卷中能唯一对应的听力录音材料文字稿写入相应听力单题或题组的解析，保留原解析；共享稿不拆散，不猜测不明确归属。落地：`app/workflow/listening_script.py`、`explanations_direct.py`、`upload_content.py`、`content_rules.py`。

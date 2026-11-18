@@ -77,7 +77,7 @@ class RunnerAutoTest(unittest.TestCase):
             result = auto.advance(self.batch, auto.load_bridge(), stop_at='review')
         self.assertEqual(local_calls, ['answers'])
         assemble.assert_called_once_with(self.batch)
-        self.assertEqual(calls, ['meta', 'underlines', 'validate'])
+        self.assertEqual(calls, ['content_snapshot', 'meta', 'underlines', 'validate'])
         self.assertEqual(mf.load(self.batch)['stages']['validate']['status'], mf.COMPLETED)
         self.assertEqual(mf.load(self.batch)['stages']['audio']['status'], mf.SKIPPED)
         self.assertFalse(result['failed_stages'])
@@ -100,7 +100,7 @@ class RunnerAutoTest(unittest.TestCase):
                             for row in result['pending_stages']))
         self.assertTrue(any(row['stage'] == 'knowledge' and row['action'] == 'cooldown'
                             for row in result['pending_stages']))
-        execute.assert_not_called()
+        self.assertTrue(all(call.args[2].id == 'content_snapshot' for call in execute.call_args_list))
         parallel.assert_not_called()
         invoke.assert_not_called()
 
@@ -544,6 +544,28 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(auto._cooldown_path(self.batch).read_bytes(), marker)
         self.assertEqual(mf.load(self.batch)['stages']['knowledge']['status'], mf.PENDING)
 
+    def test_native_knowledge_parallel_dispatch_uses_bounded_execution(self):
+        from workflow import agent_protocol, agent_tasks, local_agent, label_execution
+        self._ready_parallel_labels()
+        def export(batch, stage, **kwargs):
+            package = batch / 'packages' / stage
+            package.mkdir(parents=True)
+            (package / 'task.json').write_text(json.dumps({'prompt': stage + '\nFILE PROTOCOL: test'}))
+            return {'status': 'ready', 'task_id': stage, 'package_dir': str(package)}
+        config = {'max_input_chars': 10000, 'retries': 0,
+                  'native_agent': {'enabled': True, 'stages': ['knowledge'], 'max_tool_calls': 40}}
+        with patch('workflow.stage_preflight.run', return_value=None), \
+             patch.object(agent_protocol, 'export_task', side_effect=export), \
+             patch.object(agent_tasks, 'build_task', return_value={'status': 'ready', 'prompt': 'knowledge'}), \
+             patch.object(agent_tasks, 'accept_result'), \
+             patch.object(agent_protocol, 'import_result', return_value={'completed': True}), \
+             patch.object(local_agent, 'invoke', side_effect=AssertionError('unbounded call')), \
+             patch.object(label_execution, 'run', return_value={'response': {'status': 'completed'}}) as bounded:
+            outcome = auto._parallel_ready_agents(self.batch, [contracts.STAGE_BY_ID['knowledge']], config)
+        self.assertEqual(outcome, {'knowledge': 0})
+        self.assertEqual(bounded.call_args.args[1], 'knowledge')
+        self.assertTrue(bounded.call_args.kwargs['coordinated_imports'])
+
     def test_parallel_rate_limit_becomes_cooldown_not_failed(self):
         from workflow import agent_protocol, agent_tasks, local_agent
         self._ready_parallel_labels()
@@ -742,7 +764,7 @@ class RunnerAutoTest(unittest.TestCase):
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                 {"answers": (mf.FAILED, 1)}, calls)):
             outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
-        self.assertEqual(calls, ["types", "answers", "audio", "explanations", "knowledge"])
+        self.assertEqual(calls, ["types", "answers", "audio", "explanations", "knowledge", "content_snapshot", "meta", "underlines"])
         self.assertEqual((outcome["stopped_at"], outcome["action"]), ("answers", "failed"))
         self.assertEqual([s["stage"] for s in outcome["failed_stages"]], ["answers"])
         pending = {row["stage"]: row for row in outcome["pending_stages"]}
@@ -808,7 +830,7 @@ class RunnerAutoTest(unittest.TestCase):
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                 {"answers": (mf.FAILED, 1), "audio": (mf.FAILED, 2)}, calls)):
             outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
-        self.assertEqual(calls, ["types", "answers", "audio", "explanations", "knowledge"])
+        self.assertEqual(calls, ["types", "answers", "audio", "explanations", "knowledge", "content_snapshot", "meta", "underlines"])
         self.assertEqual([s["stage"] for s in outcome["failed_stages"]], ["answers", "audio"])
         self.assertEqual(outcome["stopped_at"], "answers")
 
@@ -817,7 +839,7 @@ class RunnerAutoTest(unittest.TestCase):
         calls = []
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline({}, calls)):
             outcome = auto.advance(self.batch, {"audio": ["offline"], "types": ["offline"]})
-        self.assertEqual(calls, ["types", "audio"])
+        self.assertEqual(calls, ["types", "audio", "content_snapshot", "meta", "underlines"])
         self.assertEqual((outcome["stopped_at"], outcome["action"]), ("answers", "agent"))
         self.assertEqual(outcome["pending_stages"][0]["stage"], "answers")
         self.assertEqual(mf.load(self.batch)["stages"]["knowledge"]["status"], mf.PENDING)

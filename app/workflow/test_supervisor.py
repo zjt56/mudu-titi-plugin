@@ -19,6 +19,22 @@ def put(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
 
+def source_bound_final_batch(folder):
+    """A genuine source-derived payload for tests of final gate completion."""
+    from workflow import legacy_format
+    from workflow.test_legacy_format import LegacyFormatTest, bind_structure_report
+    fixture = LegacyFormatTest()
+    fixture.root = folder
+    fixture.fixture()
+    prepared = legacy_format.prepare(folder)
+    if not prepared['passed']:
+        raise AssertionError(prepared)
+    for relative, payload in prepared['files'].items():
+        put(folder / relative, payload)
+    bind_structure_report(folder)
+    return json.loads((folder / format_gate.FINAL_PATH).read_text())
+
+
 class FakeClock:
     def __init__(self):
         self.now = 1000.0
@@ -79,7 +95,7 @@ class SupervisorTest(SupervisorFixture):
             batch = self.workflows / name
             fake_recover(batch)
             calls.append("advance")
-            put(batch / format_gate.FINAL_PATH, valid_final_batch())
+            put(batch / format_gate.FINAL_PATH, source_bound_final_batch(batch))
             report = format_gate.run(batch)  # real deterministic offline gate
             self.assertTrue(report["passed"], report)
             manifest = supervisor._read(batch / "workflow/manifest.json")
@@ -100,7 +116,7 @@ class SupervisorTest(SupervisorFixture):
                             "continue_unqualified": True, "release_ready": False},
             "format_gate": {"status": "completed"}})
         put(folder / "07_review/review-gate.json", {"passed": False, "quality_status": "needs_review"})
-        put(folder / format_gate.FINAL_PATH, valid_final_batch())
+        put(folder / format_gate.FINAL_PATH, source_bound_final_batch(folder))
         self.assertTrue(format_gate.run(folder)["passed"])
         manifest = supervisor._read(folder / "workflow/manifest.json")
         self.assertTrue(supervisor.local_complete(folder, manifest))
@@ -306,7 +322,7 @@ class SupervisorTest(SupervisorFixture):
     def test_old_overall_review_gate_and_stale_format_do_not_mean_done(self):
         folder = self.make_batch(status="pending_confirmation",
             stages={"review_gate": {"status": "completed"}, "format_gate": {"status": "completed"}})
-        put(folder / format_gate.FINAL_PATH, valid_final_batch())
+        put(folder / format_gate.FINAL_PATH, source_bound_final_batch(folder))
         put(folder / format_gate.REPORT_PATH, {"passed": True, "final_sha256": "stale"})
         dispatch = Mock(return_value={"started": True})
         self.assertEqual(self.make_supervisor(dispatch).one_tick()["batches"]["active"], "dispatched")
@@ -324,7 +340,7 @@ class SupervisorTest(SupervisorFixture):
             "review_gate": {"status": "blocked", "execution_completed": True, "continue_unqualified": True},
             "format_gate": {"status": "completed"}})
         put(folder / "07_review/review-gate.json", {"passed": False, "quality_status": "blocked"})
-        put(folder / format_gate.FINAL_PATH, valid_final_batch())
+        put(folder / format_gate.FINAL_PATH, source_bound_final_batch(folder))
         self.assertTrue(format_gate.run(folder)["passed"])
         original = (folder / "workflow/manifest.json").read_bytes()
         dispatch = Mock(return_value={"started": True})
@@ -347,7 +363,7 @@ class SupervisorTest(SupervisorFixture):
 
     def test_missing_or_unknown_local_stage_never_inferred_done_from_format_only(self):
         folder = self.make_batch(stages={sid: {"status": "completed"} for sid in supervisor.LOCAL_STAGES})
-        put(folder / format_gate.FINAL_PATH, valid_final_batch())
+        put(folder / format_gate.FINAL_PATH, source_bound_final_batch(folder))
         self.assertTrue(format_gate.run(folder)["passed"])
         manifest = supervisor._read(folder / "workflow/manifest.json")
         self.assertTrue(supervisor.local_complete(folder, manifest))

@@ -455,7 +455,7 @@ def _validate(task, candidate):
             for unit in selected:
                 candidate_payload = copy.deepcopy(label_execution._unit_payload(stage, payload, unit))
                 scoped = copy.deepcopy(validation_context)
-                if stage == "explanations":
+                if stage in ("explanations", "knowledge"):
                     typed_path = agent_tasks.ARTIFACTS["types"]
                     typed = scoped[typed_path]
                     scoped[typed_path] = dict(typed, items=[row for row in typed["items"]

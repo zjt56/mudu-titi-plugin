@@ -459,6 +459,7 @@ class ContentAgentTests(unittest.TestCase):
 
     def test_partial_candidate_uses_partition_validator_only(self):
         self.confirmed.return_value = self.units + [{"unit_id": "u-2"}]
+        self.context['03_types/types.json']['items'].append({'unit_id': 'u-2', 'type': '书面表达'})
         with patch.object(unit_tasks, "validate_part", return_value=self.response) as validate, \
                 patch.object(agent_tasks, "_validate") as semantic:
             task, thread, result = self.start()
@@ -468,6 +469,7 @@ class ContentAgentTests(unittest.TestCase):
             semantic.assert_called_once()
             self.assertEqual(semantic.call_args.args[1], "knowledge")
             self.assertEqual(semantic.call_args.args[4], self.units)
+            self.assertEqual([row['unit_id'] for row in semantic.call_args.args[3]['03_types/types.json']['items']], ['u-1'])
             self.accept.assert_not_called()
 
     def test_tool_budget_failure_and_host_cannot_claim_completion(self):

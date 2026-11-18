@@ -954,6 +954,24 @@ def _part_units(config, stage):
     return value
 
 
+def _label_partition_policy(config, stage):
+    """Keep native label work bounded without relaxing its tool-call budget."""
+    enabled = bool(config.get("label_split", False))
+    limit = _part_units(config, stage)
+    native = config.get("native_agent", {})
+    if (stage in ("types", "knowledge") and isinstance(native, dict)
+            and native.get("enabled") is True
+            and stage in native.get("stages", ["knowledge"])):
+        # Leave room for catalog/source reads, staged submissions and final
+        # acceptance; never raise an explicitly configured task budget.
+        calls = native.get("max_tool_calls", 64)
+        if isinstance(calls, int) and not isinstance(calls, bool) and calls > 0:
+            native_limit = max(1, min(8, (calls - 4) // 2))
+            limit = min(limit, native_limit) if enabled else native_limit
+            enabled = True
+    return enabled, limit
+
+
 def _record_assemble_guard(batch_dir, stage, report):
     """模型路径组装成功后同样登记基线，后续同结构重跑才能走确定性路径。"""
     if stage == "assemble" and isinstance(report, dict) and report.get("completed"):
@@ -1004,7 +1022,10 @@ def main(argv=None):
             outcome = assemble_local.try_assemble(batch_dir, config)
             if outcome is not None:
                 return outcome
-        if args.stage in ("answers", "explanations") and not args.dry_run:
+        native_knowledge = (args.stage == "knowledge"
+                            and _label_partition_policy(config, "knowledge")[0]
+                            and (config.get("native_agent") or {}).get("enabled") is True)
+        if (args.stage in ("answers", "explanations") or native_knowledge) and not args.dry_run:
             from workflow import label_execution
             attempts = batch_dir / "workflow" / "agent-runs"
             attempts.mkdir(parents=True, exist_ok=True)
@@ -1018,9 +1039,8 @@ def main(argv=None):
             print(json.dumps({"attempt_dir": str(run_dir), "report": report}, ensure_ascii=False))
             return 0 if report.get("completed") else 3
         _label_stage = args.stage in ("answers", "types", "explanations", "knowledge")
-        # 标注阶段默认整卷一次分析（label_split=False）；装配/审核仍按 unit_split 分片。
-        split_enabled = ((bool(config.get("label_split", False)) if _label_stage
-                          else bool(config.get("unit_split", True)))
+        label_split, label_limit = _label_partition_policy(config, args.stage)
+        split_enabled = ((label_split if _label_stage else bool(config.get("unit_split", True)))
                          and args.stage in ("assemble", "review", "types", "explanations", "knowledge"))
         try:
             task = agent_tasks.build_task(batch_dir, args.stage, max_input_chars=config["max_input_chars"],
@@ -1030,7 +1050,7 @@ def main(argv=None):
                 raise
             from workflow import unit_tasks
             task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
-                                                 max_units=_part_units(config, args.stage))
+                                                 max_units=label_limit if _label_stage else _part_units(config, args.stage))
         if split_enabled and parts is None and not task.get("preconditions"):
             try:
                 _unit_count = len(agent_tasks.confirmed_units(batch_dir))
@@ -1039,7 +1059,7 @@ def main(argv=None):
             if (args.stage in ("answers", "types", "explanations", "knowledge") and _unit_count > 0) or _unit_count > _part_units(config, args.stage):
                 from workflow import unit_tasks
                 task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
-                                                     max_units=_part_units(config, args.stage))
+                                                     max_units=label_limit if _label_stage else _part_units(config, args.stage))
         if assembling:
             base = agent_tasks._safe_path(batch_dir, "06_batch/batch.base.json")
             if base.is_file():

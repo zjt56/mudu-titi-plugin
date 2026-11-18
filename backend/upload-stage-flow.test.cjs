@@ -317,6 +317,7 @@ test('overview tooltip lists each class substeps, not only the class name', () =
   // 首行分类名，后续以 · 列出该分类包含的子流程。
   assert.match(tip('extract'), /^内容提取\n· 原卷提取$/);
   assert.match(tip('preassemble'), /组装判型\n· 前置批次组装\n· 题型填充/);
+  assert.match(tip('explanations'), /解析填充\n· 解析与大意填充\n· 听力录音材料直抄/);
   assert.match(tip('upload'), /审核上传\n· .+\n· .+\n· /);
 });
 

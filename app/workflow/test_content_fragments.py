@@ -70,10 +70,10 @@ class ContentFragmentsTest(unittest.TestCase):
         self.assertEqual(row['evidence'], ['附录原文'])
         self.assertEqual(row['explanation'], '第一题解析。')
 
-    def test_placeholder_legacy_normalization_is_unchanged(self):
+    def test_blank_normalizes_and_nonempty_legacy_placeholder_is_preserved(self):
         self.source.write_text('1.A\n', encoding='utf-8')
         row = self.check(self.payload('', '无解析'))
-        self.assertEqual((row['explanation'], row['articleSummary']), ('无', '无'))
+        self.assertEqual((row['explanation'], row['articleSummary']), ('无', '无解析'))
 
     def test_child_explanation_and_group_summary(self):
         units = [{'unit_id': 'g-1-2', 'unit_kind': 'group', 'numbers': [1, 2]}]

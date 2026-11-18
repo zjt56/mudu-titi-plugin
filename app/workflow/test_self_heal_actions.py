@@ -42,6 +42,7 @@ class SelfHealActionsTest(unittest.TestCase):
         for stage_id in ('validate', 'format_gate', 'review', 'review_gate'):
             state['stages'][stage_id].update(status='failed', quality_status='failed', quality_passed=False)
         mf.save(self.root, state)
+        sourcefixture.bind_structure_report(self.root)
         self.put('workflow/delivery.json', {'version': '1.0', 'stages': {
             s: {'status': 'delivered', 'quality_status': 'failed', 'release_ready': False,
                 'artifacts': [], 'input_hashes': {}, 'consumed_by': ['review']}
@@ -316,6 +317,7 @@ class SelfHealActionsTest(unittest.TestCase):
         state['payload_sha256'] = question_draft._digest(original)
         self.put(batch_fill.STATE, batch_fill._seal(state))
         batch_fill._managed(self.root)
+        sourcefixture.bind_structure_report(self.root)
         return original, state
 
     def test_managed_batch_uses_real_finalize_without_source_or_quality_takeover(self):

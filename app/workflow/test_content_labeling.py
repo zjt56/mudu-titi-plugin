@@ -84,6 +84,30 @@ class ContentLabelingTest(unittest.TestCase):
         content_rules.normalize_optional_content(row)
         self.assertEqual(row['explanation'], ['wrong type'])
 
+    def test_normalization_preserves_existing_nonempty_absence_placeholders(self):
+        for value in ('无解析', '未提供', '未填写'):
+            with self.subTest(value=value):
+                row = {'explanation': value, 'articleSummary': value,
+                       'subquestions': [{'number': 1, 'explanation': value}]}
+                before = copy.deepcopy(row)
+                content_rules.normalize_optional_content(row)
+                self.assertEqual(row, before)
+
+    def test_placeholder_import_preserves_content_and_still_rejects_omissions(self):
+        for value in ('无解析', '未提供', '未填写'):
+            with self.subTest(value=value):
+                self.write('01_source/附录.txt', '1.A\n2.B')
+                payload = self.explanation(explanation=value, articleSummary=value)
+                self.assertTrue(self.accept('explanations', payload)['completed'])
+                saved = self.saved('explanations')['items'][0]
+                self.assertEqual((saved['explanation'], saved['articleSummary']), (value, value))
+                artifact = self.batch / tasks.ARTIFACTS['explanations']
+                before = artifact.read_bytes()
+                self.write('01_source/附录.txt', f'【文章大意】{SUMMARY}\n1.A 【解析】{ORIGINAL}')
+                with self.assertRaisesRegex(ValueError, 'ORIGINAL_EXPLANATION_OMITTED|ORIGINAL_SUMMARY_OMITTED'):
+                    self.accept('explanations', self.explanation(explanation=value, articleSummary=value))
+                self.assertEqual(artifact.read_bytes(), before)
+
     def test_normalization_does_not_hide_generated_or_unverified_content(self):
         row = {'explanation': '自撰解析', 'articleSummary': SUMMARY + tasks.AI_MARK,
                'subquestions': [{'number': 1, 'explanation': tasks.AI_MARK}]}

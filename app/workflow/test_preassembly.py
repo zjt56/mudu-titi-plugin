@@ -297,6 +297,21 @@ class PreassemblyTest(unittest.TestCase):
         self.assertTrue(mf.dependency_satisfied(mf.load(self.root), "preassemble"))
         self.assertEqual(contracts.STAGE_BY_ID["types"].kind, contracts.COMMAND)
 
+    def test_native_preassembly_partitions_and_still_uses_final_acceptance(self):
+        from workflow import unit_tasks
+        config = {"max_input_chars": 180000, "timeout_seconds": 30, "retries": 0,
+                  "label_split": False, "unit_split": False,
+                  "native_agent": {"enabled": True, "stages": ["types"], "max_tool_calls": 40}}
+        with patch.object(local_agent, "load_config", return_value=config), \
+             patch.object(local_agent, "_part_model_binding", return_value=None), \
+             patch.object(local_agent, "invoke", return_value={"response": self.response}), \
+             patch.object(unit_tasks, "build_parts", wraps=unit_tasks.build_parts) as build, \
+             redirect_stdout(io.StringIO()):
+            code = agent.main(["run", "--stage", "preassemble", "--batch-dir", str(self.root), "--config", "unused.json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(build.call_args.kwargs["max_units"], 8)
+        self.assertTrue(mf.dependency_satisfied(mf.load(self.root), "preassemble"))
+
     def test_plugin_router_update_during_model_call_does_not_fail_stage(self):
         plugin = self.root / "plugin"
         (plugin / "backend").mkdir(parents=True)

@@ -1062,6 +1062,36 @@ def _retry_evidence(batch, manifest, stage_id):
                         for name in ("self_heal.py", "auto.py", "manifest.py")}}
 
 
+def deferred_waits(batch_dir, manifest):
+    """Read active per-stage delays from existing recovery events; never write."""
+    batch = Path(batch_dir).resolve()
+    if _archived(batch) or not mf.manifest_path(batch).is_file():
+        return {}
+    latest = {}
+    for event in _load(batch).get('events') or []:
+        if isinstance(event, dict) and event.get('stage') in contracts.STAGE_BY_ID:
+            latest[event['stage']] = event
+    now, waits = time.time(), {}
+    for stage_id, event in latest.items():
+        if (event.get('outcome') != 'deferred_and_continuing'
+                or (manifest.get('stages', {}).get(stage_id) or {}).get('status') != mf.PENDING):
+            continue
+        try:
+            until = float(event.get('deferred_until') or 0)
+            if not math.isfinite(until) or until <= now:
+                continue
+            evidence = event.get('deferred_evidence')
+            if not isinstance(evidence, dict) or evidence != _retry_evidence(batch, manifest, stage_id):
+                continue
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            continue
+        waits[stage_id] = {'changed': False, 'status': 'waiting_external', 'stage': stage_id,
+                          'next_retry_at': until, 'retry_after': until - now,
+                          'reason': str(event.get('reason') or (event.get('plan') or {}).get('reason')
+                                        or '外部依赖暂不可用，等待延后时限')}
+    return waits
+
+
 _VOLATILE_FAILURE_PATTERNS = (
     # Unit / section ids and question numbers differ between reruns of the same
     # class of defect and must not fork the retry budget.
@@ -1111,9 +1141,18 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
     if _archived(batch) or not mf.manifest_path(batch).is_file():
         return {"changed": False, "status": "excluded"}
     manifest = mf.load(batch)
+    waits = deferred_waits(batch, manifest)
     stage_id, detail = _candidate(batch, manifest)
+    if stage_id in waits:
+        return waits[stage_id]
     if not stage_id:
         ledger = _load(batch)
+        if waits:
+            wait = min(waits.values(), key=lambda value: value['next_retry_at'])
+            if ledger.get('next_retry_at') != wait['next_retry_at']:
+                ledger['next_retry_at'] = wait['next_retry_at']
+                _save(batch, ledger)
+            return wait
         if ledger.get("next_retry_at"):
             ledger["next_retry_at"] = 0
             _save(batch, ledger)
@@ -1267,7 +1306,12 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
             _persist_action_bookkeeping(batch, ledger, outcome)
         event.update({key: value for key, value in outcome.items() if key != "changed"})
         changed = bool(outcome.get("changed"))
-        ledger["next_retry_at"] = 0 if changed else time.time() + _delay(count + 1, external=True)
+        if outcome.get('status') == 'deferred':
+            event['deferred_until'] = time.time() + _delay(count + 1, external=True)
+            event['deferred_evidence'] = _retry_evidence(batch, mf.load(batch), stage_id)
+            ledger['next_retry_at'] = event['deferred_until']
+        else:
+            ledger["next_retry_at"] = 0 if changed else time.time() + _delay(count + 1, external=True)
     except Exception as exc:  # Invalid model/config/actions are durable, never silent.
         from .local_agent import AgentError
         event["error"] = str(exc)[:800]
@@ -1304,6 +1348,7 @@ def observe_outcomes(batch_dir, manifest=None):
         return {"verified": [], "failed": []}
     manifest = manifest if manifest is not None else mf.load(batch)
     ledger, verified, failed = _load(batch), [], []
+    differences = []
     changed = False
     for event in ledger.get("events", []):
         if event.get("outcome") not in RETRY_OUTCOMES:
@@ -1325,8 +1370,18 @@ def observe_outcomes(batch_dir, manifest=None):
                 break
             status = record.get("status")
             # A dependency wait is not evidence that the retry failed. The target
-            # must run normally after prerequisites become complete.
-            if not mf.dependency_satisfied(manifest, sid):
+            # must run normally after prerequisites become complete. Check its
+            # ancestors separately: requiring sid itself to be a usable delivery
+            # here would hide every failed retry and stale completed output.
+            if any(not mf.dependency_satisfied(manifest, dep, allow_unqualified=True)
+                   for dep in contracts.STAGE_BY_ID[sid].depends_on):
+                break
+            if sid == 'review_gate' and diagnose._review_differences(record):
+                event.update(outcome='retry_quality_differences',
+                             verification_status='quality_differences',
+                             verification_stage=sid, verified=False,
+                             verification_detail=str(record.get('notes') or '')[:500])
+                differences.append(origin)
                 break
             if status in (mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW):
                 event.update(outcome="retry_failed", verification_status="failed",
@@ -1336,10 +1391,23 @@ def observe_outcomes(batch_dir, manifest=None):
                 break
             if status not in (mf.COMPLETED, mf.APPROVED) and not (legacy_same_stage and status == mf.SKIPPED):
                 break
+            if record.get('rebuild_required'):
+                break
             stale, reason = mf.is_stale(batch, manifest, contracts.STAGE_BY_ID[sid])
             if stale:
                 event.update(outcome="retry_failed", verification_status="failed",
                              verification_stage=sid, verification_error=reason)
+                failed.append(origin)
+                break
+            if not mf.dependency_satisfied(manifest, sid, allow_unqualified=True):
+                from .handoff import inspect_stage
+                report = inspect_stage(batch, manifest, sid)
+                errors = report.get('errors') or []
+                reason = '; '.join(str(row.get('message') or row.get('code') or '')
+                                   for row in errors if isinstance(row, dict))
+                event.update(outcome='retry_failed', verification_status='failed',
+                             verification_stage=sid,
+                             verification_error=(reason or '当前阶段交付未通过消费者校验')[:500])
                 failed.append(origin)
                 break
             if role == "target":
@@ -1349,9 +1417,15 @@ def observe_outcomes(batch_dir, manifest=None):
                              verified=True, verified_at=mf.now_iso())
                 verified.append(origin)
         changed = changed or before != json.dumps(event, sort_keys=True, ensure_ascii=False)
-    if verified or failed:
-        ledger["last_status"] = "verified" if verified and not failed else "retry_failed"
-        ledger["next_retry_at"] = 0 if verified and not failed else max(float(ledger.get("next_retry_at") or 0), time.time() + 15)
+    if failed:
+        ledger['last_status'] = 'retry_failed'
+        ledger['next_retry_at'] = max(float(ledger.get('next_retry_at') or 0), time.time() + 15)
+    elif differences:
+        ledger['last_status'] = 'quality_differences'
+        ledger['next_retry_at'] = 0
+    elif verified:
+        ledger['last_status'] = 'verified'
+        ledger['next_retry_at'] = 0
     if changed:
         _save(batch, ledger)
     return {"verified": verified, "failed": failed}

@@ -15,6 +15,7 @@ class RunnerOperationsHandoffTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.batch = Path(self.temp.name) / "batch"
         self.batch.mkdir()
+        mf.save(self.batch, mf.new_manifest("batch", self.batch, {}, {}))
 
     def test_explicit_runner_handoff_occurs_after_run_lock_release(self):
         lock_held = False

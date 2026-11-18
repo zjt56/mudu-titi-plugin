@@ -7,6 +7,7 @@ Reports may locate individual outcomes only after a stage has actually started.
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +15,16 @@ from .checks import CONTENT_CHECKS, FINAL_FORMAT_CHECKS
 from .contracts import STAGES
 
 CHECKS = CONTENT_CHECKS
+
+
+def _check_steps(checks):
+    seen = {}
+    rows = []
+    for check in checks:
+        stem = Path(check.script).stem
+        seen[stem] = seen.get(stem, 0) + 1
+        rows.append((stem if seen[stem] == 1 else f'{stem}_{seen[stem]}', check.name))
+    return tuple(rows)
 
 # Stable ids belong to the tooltip API, not to the scheduler's stage contract.
 STEPS = {
@@ -27,7 +38,7 @@ STEPS = {
     "types": (("handoff", "题型交接"),),
     "audio": (("transcription", "转写"), ("segments", "切段"), ("mapping", "映射"), ("evidence", "证据验收")),
     "answers": (("matching", "原答案匹配"), ("format", "格式"), ("missing", "缺失"), ("delivery", "交付")),
-    "explanations": (("copy", "解析直抄"), ("summary", "大意"), ("source", "来源"),
+    "explanations": (("copy", "解析直抄"), ("listening_script", "听力录音材料直抄"), ("summary", "大意"), ("source", "来源"),
                      ("missing", "缺失"), ("delivery", "交付")),
     "knowledge": (("knowledge", "知识点"), ("catalog", "知识点目录"),
                   ("coverage", "覆盖"), ("delivery", "交付")),
@@ -38,7 +49,7 @@ STEPS = {
                 + (("source_audit", "原卷逐题覆盖与材料归属 source_audit"),),
     "review": (("labels", "第一轮标签审核"), ("sample", "第二轮抽检"), ("coverage", "审核覆盖")),
     "review_gate": (("differences", "差异归集"), ("conclusion", "执行质量结论")),
-    "format_gate": tuple((Path(c.script).stem, c.name) for c in FINAL_FORMAT_CHECKS)
+    "format_gate": _check_steps(FINAL_FORMAT_CHECKS)
                    + (("fields", "字段"), ("media", "媒体"), ("serialization", "序列化"),
                       ("consistency", "一致性"), ("freeze", "固化")),
 }
@@ -160,8 +171,9 @@ def _details(sid, report, read):
         for row in _rows(_object(report.get("format_checks")).get("checks")):
             if not isinstance(row, dict):
                 continue
+            named = any(row.get('check') == title for _, title in STEPS[sid])
             for key, title in STEPS[sid]:
-                if row.get("check") == title or (row.get("script") and Path(str(row["script"])).stem == key):
+                if row.get("check") == title or (not named and row.get("script") and Path(str(row["script"])).stem == key):
                     # 最终格式检查只作提示，不改变本地阻断结论。
                     result[key] = "completed" if row.get("passed") is True else "warning"
         for issue in _rows(report.get("errors")):
@@ -192,6 +204,7 @@ TERMS = {
                        "grouping": ("切题分组",), "materials": ("共享材料",)},
     "audio": {"transcription": ("transcrib", "转写", "asr", "align"), "segments": ("cut", "segment", "切段", "切片"),
               "mapping": ("映射", "mapping"), "evidence": ("证据验收",)},
+    "explanations": {"listening_script": ("听力录音材料直抄",)},
     "review": {"labels": ("labels", "一审", "第一轮"), "sample": ("sample", "二审", "第二轮"),
                "coverage": ("审核覆盖",)},
 }
@@ -218,6 +231,24 @@ def project(manifest, batch_dir=None, activity=None, audio_state=None):
         rows = [{"id": key, "title": title, "status": "completed" if good else "pending"} for key, title in specs]
         by_id = {row["id"]: row for row in rows}
         read = lambda relative: _report(root, relative, record)
+        if sid == 'explanations':
+            # Parent success alone cannot prove an optional script was copied.
+            # Require the accepted artifact's exact registered bytes and marker.
+            by_id['listening_script']['status'] = 'pending'
+            relative = '04_knowledge/explanations.json'
+            expected = _object(record.get('output_hashes')).get(relative)
+            if good and root is not None and isinstance(expected, str):
+                path = root / relative
+                try:
+                    if not path.is_symlink() and not path.parent.is_symlink():
+                        raw = path.read_bytes()
+                        if len(raw) <= 4 * 1024 * 1024 and hashlib.sha256(raw).hexdigest() == expected:
+                            payload = json.loads(raw.decode('utf-8-sig'))
+                            if any(isinstance(row, dict) and '听力录音材料：\n' in str(row.get('explanation') or '')
+                                   for row in _rows(_object(payload).get('items'))):
+                                by_id['listening_script']['status'] = 'completed'
+                except (OSError, ValueError, TypeError):
+                    pass
         observed = not invalid and status not in {"pending", "invalidated"}
         details = _details(sid, read(REPORTS[sid]) if sid in REPORTS else {}, read) if observed else {}
         # Registered success certifies accepted fields. Never infer accepted

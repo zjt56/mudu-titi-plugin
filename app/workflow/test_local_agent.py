@@ -43,6 +43,15 @@ class LocalAgentTest(unittest.TestCase):
             return result
         return spawn
 
+    def test_native_label_tasks_bound_partition_size(self):
+        native = {"native_agent": {"enabled": True, "stages": ["types", "knowledge"], "max_tool_calls": 40}}
+        self.assertEqual(agent._label_partition_policy(native, "types"), (True, 8))
+        self.assertEqual(agent._label_partition_policy(native, "knowledge"), (True, 8))
+        self.assertEqual(agent._label_partition_policy({**native, "label_split": True, "label_part_units": 3}, "types"), (True, 3))
+        self.assertEqual(agent._label_partition_policy({"label_split": False}, "types"), (False, 1))
+        self.assertEqual(agent._label_partition_policy(native, "review"), (False, 15))
+        self.assertEqual(agent._label_partition_policy({"native_agent": {"enabled": True, "stages": ["types"], "max_tool_calls": 10}}, "types"), (True, 3))
+
     def test_config_defaults_relative_executable_and_precedence(self):
         path = self.root / "config.json"
         executable = self.root / "fake cli"

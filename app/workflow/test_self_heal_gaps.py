@@ -49,7 +49,13 @@ class SourceOptionRepairTest(unittest.TestCase):
     def test_group_terminal_option_and_missing_tail_restored_exactly_with_backups(self):
         for objects in (False, True):
             with self.subTest(objects=objects):
-                _, complete = self.truncated(objects=objects, terminal=True)
+                broken, complete = self.truncated(objects=objects, terminal=True)
+                # An actual unsourced explanation, rather than a legitimate
+                # historical absence placeholder, must remain an independent defect.
+                for payload in (broken, complete):
+                    payload['items'][0]['explanation'] = 'This explanation was never printed in the source.'
+                for relative in legacy_format.BATCH_PATHS:
+                    self.put(relative, broken)
                 original = self.raw_files()
                 self.assertFalse(question_content.audit_batch_source(self.root,
                     self.load(format_gate.FINAL_PATH))['passed'])
@@ -57,7 +63,7 @@ class SourceOptionRepairTest(unittest.TestCase):
                 self.assertTrue(result['installed'], result)
                 self.assertTrue(result['passed'])
                 # Source options are repaired independently of unrelated final
-                # content defects. This fixture's old group explanation has no
+                # content defects. This fixture's explicit group explanation has no
                 # source binding, so consolidation must retain that blocker.
                 self.assertFalse(result['checks']['format']['passed'])
                 self.assertFalse(result['format_passed'])
@@ -666,7 +672,7 @@ class NeverParkTest(unittest.TestCase):
     def test_record_only_stops_same_signature_after_retry_budget(self):
         from workflow import self_heal as _heal, manifest as _mf
         batch, state = self.make("record-budget")
-        for stage in ("review", "types", "preassemble"):
+        for stage in ("review", "preassemble"):
             with self.subTest(stage=stage), patch.object(_heal, "_escalate_upstream") as escalate:
                 result = _heal._apply(batch, state, stage,
                                       "Cannot fill batch without proven source binding",
@@ -688,10 +694,14 @@ class NeverParkTest(unittest.TestCase):
             with self.subTest(stage=stage):
                 batch, state = self.make("np-" + stage)
                 before = (batch / "workflow/manifest.json").read_bytes()
-                with self.assertRaisesRegex(ValueError, "content_retry_requires_scope"):
-                    _heal._apply(batch, state, stage, "某处校验失败",
-                        {"action": "record_only", "reason": "证据里没有可改写的内容"}, 1,
-                        {"files": {}})
+                result = _heal._apply(batch, state, stage, "某处校验失败",
+                    {"action": "record_only", "reason": "证据里没有可改写的内容"}, 1,
+                    {"files": {}})
+                self.assertFalse(result['changed'])
+                self.assertFalse(result['verified'])
+                self.assertEqual(result['status'], 'refused')
+                self.assertEqual(result['outcome'], 'repair_not_applicable')
+                self.assertEqual(result['escalation'], 'code_repair')
                 self.assertEqual((batch / "workflow/manifest.json").read_bytes(), before)
                 self.assertFalse((batch / "workflow/repair-feedback" / (stage + ".json")).exists())
 

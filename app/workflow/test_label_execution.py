@@ -54,6 +54,43 @@ class LabelExecutionTest(unittest.TestCase):
         self.assertEqual(invoke.call_count, 1)
         self.assertFalse((self.batch / agent_tasks.ARTIFACTS['answers']).exists())
 
+    def test_native_knowledge_is_partitioned_and_validated_per_unit(self):
+        calls = []
+        def invoke(prompt, *args, **kwargs):
+            units = self.selected(prompt)
+            calls.append([u['unit_id'] for u in units])
+            return {'response': {'status': 'completed', 'artifacts': {
+                agent_tasks.ARTIFACTS['knowledge']: {'items': [
+                    {'unit_id': u['unit_id'], 'knowledge': ['词汇/词汇辨析/动词辨析'],
+                     'subquestions': [], 'evidence': ['正文']} for u in units]}},
+                'notes': [], 'findings': []}}
+        config = dict(self.config, native_agent={'enabled': True, 'stages': ['knowledge'], 'max_tool_calls': 6})
+        result = label_execution.run(self.batch, 'knowledge', config, self.batch / 'run', invoke=invoke)
+        self.assertEqual(calls, [['q-1'], ['q-2']])
+        self.assertEqual(result['response']['status'], 'completed')
+        self.assertTrue(agent_tasks.accept_result(self.batch, 'knowledge', result['response'])['completed'])
+
+    def test_revalidate_rejected_native_candidate_then_repair_only_invalid_unit(self):
+        calls = []
+        def invoke(prompt, directory, config, **kwargs):
+            units = self.selected(prompt)
+            calls.append([u['unit_id'] for u in units])
+            response = {'status': 'completed', 'artifacts': {agent_tasks.ARTIFACTS['knowledge']: {'items': [
+                {'unit_id': u['unit_id'], 'knowledge': ([] if u['unit_id'] == 'q-2' and len(calls) == 1
+                                                        else ['词汇/词汇辨析/动词辨析']),
+                 'subquestions': [], 'evidence': ['正文']} for u in units]}}, 'notes': [], 'findings': []}
+            if len(calls) == 1:
+                directory.mkdir(parents=True, exist_ok=True)
+                path = directory / 'candidate.json'
+                path.write_text(json.dumps(response, ensure_ascii=False), encoding='utf-8')
+                raise local_agent.AgentError('no progress', 'validation_no_progress', artifacts={'candidate': str(path)})
+            return {'response': response}
+        config = dict(self.config, native_agent={'enabled': True, 'stages': ['knowledge'], 'max_tool_calls': 40})
+        result = label_execution.run(self.batch, 'knowledge', config, self.batch / 'run', invoke=invoke)
+        self.assertEqual(calls, [['q-1', 'q-2'], ['q-2']])
+        self.assertEqual(result['response']['status'], 'completed')
+        self.assertTrue(agent_tasks.accept_result(self.batch, 'knowledge', result['response'])['completed'])
+
     def test_failed_answer_only_is_retried_and_success_is_preserved(self):
         calls = []
         def invoke(prompt, directory, config, **kw):

@@ -186,6 +186,8 @@ def build_payload(batch_dir):
             explanations[number] = _unique(rows, allow_conflict=True)
     except ValueError:
         return None
+    from . import listening_script
+    scripts = listening_script.extract(batch, units)
     items = []
     for unit in units:
         numbers = [int(n) for n in unit["numbers"]]
@@ -204,8 +206,13 @@ def build_payload(batch_dir):
             row = explanations[number]
             return row["source_text"] if row else PLACEHOLDER
         grouped = unit["unit_kind"] == "group"
+        script = scripts.get(uid)
+        explanation = PLACEHOLDER if grouped else text(numbers[0])
+        if script:
+            explanation = listening_script.combine(explanation, script[0])
+            evidence.append(f"听力录音材料：{script[1]}:{script[2]}")
         items.append({"unit_id": uid,
-                      "explanation": PLACEHOLDER if grouped else text(numbers[0]),
+                      "explanation": explanation,
                       "articleSummary": summary["source_text"] if summary else PLACEHOLDER,
                       "subquestions": [{"number": n, "explanation": text(n)} for n in numbers] if grouped else [],
                       "evidence": evidence})
