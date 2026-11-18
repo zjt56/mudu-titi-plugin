@@ -182,12 +182,15 @@ def stage_gaps(batch_dir, stage):
         units = []
     expected = {question_key(unit, n) for unit in units for n in unit.get("numbers", [])}
     if stage == "answers":
+        writing = {question_key(unit, n) for unit in units
+                   if str(unit.get("type") or "").strip() == "书面表达"
+                   for n in unit.get("numbers", [])}
         path = batch / ARTIFACTS[stage]
         data = _json(path) if path.is_file() else {}
         answers = data.get("answers") if isinstance(data, dict) else {}
         missing = data.get("missing") if isinstance(data, dict) else {}
         decided = set(answers or {}) | set(missing or {})
-        return {"answers": sorted(expected - decided)}
+        return {"answers": sorted(expected - writing - decided)}
     if stage in ("types", "explanations", "knowledge"):
         path = batch / ARTIFACTS[stage]
         data = _json(path) if path.is_file() else {}
@@ -1242,10 +1245,13 @@ def _provenance(row, source_text, expected_answer=None):
     if explanation and not content_rules.is_placeholder(explanation):
         # 明确标注的 AI 生成解析仍允许（历史能力，末尾带标记即可）；
         if not explanation.endswith(AI_MARK):
-            norm_ex = _provenance_text(explanation)
             norm_src = _provenance_text(source_text)
-            if norm_ex and norm_ex not in norm_src:
-                raise ValueError("Explanation not found in supplied source material (verbatim after normalizing marks)")
+            # 原卷听力稿按要求逐字补进解析时带「听力录音材料：」标识，该标识本身
+            # 不在原卷正文里；逐段核对，标识以外的每个片段都必须能回到来源原文。
+            for piece in re.split(r"\n*\s*听力录音材料\s*[：:]\s*\n?", explanation):
+                norm_ex = _provenance_text(piece)
+                if norm_ex and norm_ex not in norm_src:
+                    raise ValueError("Explanation not found in supplied source material (verbatim after normalizing marks)")
 
 
 def _normalize_blank_text(text):

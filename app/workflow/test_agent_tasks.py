@@ -483,6 +483,20 @@ class AgentTasksTest(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, 'verbatim-bound'):
                             tasks._validate(self.batch, 'answers', payload, {'01_source/附录.txt': expected}, unit)
 
+    def test_listening_script_marker_does_not_break_source_verbatim_check(self):
+        # 原卷听力稿按「听力录音材料：」逐字写进解析：标识本身不在正文里，
+        # 但标识以外的每个片段仍必须能回到来源原文，编造内容照旧拒绝。
+        source = '附:听力录音材料\nW:Hi,Bill.Your watch is really cool.\nM:My uncle gave it to me.'
+        script = '听力录音材料：\nW:Hi,Bill.Your watch is really cool.\nM:My uncle gave it to me.'
+        tasks._provenance({'answer': 'C', 'explanation': script}, source, 'C')
+        tasks._provenance({'answer': 'C', 'explanation': '原有解析\n\n' + script},
+                          source + '\n原有解析', 'C')
+        for explanation in ('听力录音材料：\nW:Hi,Bill.Your watch is really cool.\nM:This line is invented.',
+                            '听力录音材料：\nW:Hi,Bill.Your watch is really cool.\nW:原文没有的对话'):
+            with self.subTest(explanation=explanation[-26:]):
+                with self.assertRaisesRegex(ValueError, 'not found in supplied source material'):
+                    tasks._provenance({'answer': 'C', 'explanation': explanation}, source, 'C')
+
     def test_scripted_source_cannot_bind_to_plain_digit_inside_script_token(self):
         unit = [{'unit_id': 'q-1', 'numbers': [1], 'unit_kind': 'standalone'}]
         for source in ('²', '₂', '<sup>2</sup>', '<sub>2</sub>', 'value 10² units'):
