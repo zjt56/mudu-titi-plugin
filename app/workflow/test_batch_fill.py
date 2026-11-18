@@ -285,6 +285,22 @@ class BatchFillTest(unittest.TestCase):
             batch_fill.is_filling(self.root)
         self.assertEqual((self.root / batch_fill.BATCH).read_bytes(), saved[batch_fill.BATCH][0])
 
+    def test_ancestor_symlink_is_allowed_but_root_symlink_is_rejected(self):
+        # macOS 的 /var、/tmp 本身是符号链接，工作台也可能以链接形式传批次路径：
+        # 祖先目录是链接时必须照常处理，否则合法批次会被误判。
+        base = Path(self.tmp.name)
+        real = base / 'real'
+        batch = real / 'batch-root'
+        batch.mkdir(parents=True)
+        link = base / 'link'
+        link.symlink_to(real, target_is_directory=True)
+        self.assertEqual(batch_fill._root(link / 'batch-root'), batch.resolve())
+        # 批次根自身仍是链接时拒绝：同一份数据不能被两个批次名同时驱动。
+        root_link = base / 'root-link'
+        root_link.symlink_to(batch, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'cannot be a symlink'):
+            batch_fill._root(root_link)
+
     def test_unsafe_paths_symlink_batch_and_root_are_rejected(self):
         batch_fill.initialize(self.root)
         saved = (self.root / batch_fill.BATCH).read_bytes()

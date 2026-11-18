@@ -41,10 +41,20 @@ META = (*SOURCE_KEYS, "region", "paper_title")
 
 
 def _root(batch_dir):
+    """Resolve the batch root without rejecting legitimate ancestor symlinks.
+
+    批次目录的上级可能是符号链接（macOS 的 /var、/tmp 都是链接，工作台也会以链接
+    形式传路径）；拒绝祖级链接只会让合法批次无法处理，并不增加保证。批次根自身仍是
+    符号链接时拒绝：那样同一份数据会被两个批次名同时驱动。批内符号链接由 _path/
+    question_draft._safe 逐路径拒绝。
+    """
     path = Path(batch_dir).absolute()
-    if any(p.is_symlink() for p in (path, *path.parents)):
-        raise ValueError("Batch fill root cannot contain symlinks")
-    return path.resolve()
+    if path.is_symlink():
+        raise ValueError("Batch fill root cannot be a symlink")
+    root = path.resolve()
+    if root.exists() and not root.is_dir():
+        raise ValueError("Batch fill root must be a directory")
+    return root
 
 
 def _path(root, relative):

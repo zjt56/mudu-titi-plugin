@@ -32,6 +32,10 @@ def _digest(value):
 
 
 def _safe(root, relative):
+    # 批次根目录本身可能位于符号链接之下（macOS 的 /var、/tmp 都是链接，工作台传入
+    # 的路径也可能是链接形式），包含判断必须用解析后的根，否则合法批次的产物会被
+    # 误判成“路径越界”。批次目录内部仍然禁止符号链接。
+    root = Path(root).resolve()
     path = root / relative
     if not path.resolve().is_relative_to(root):
         raise ValueError("Question draft path escapes batch")
