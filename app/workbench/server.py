@@ -2952,13 +2952,15 @@ def upload_state(name):
     uncertain = next((a for a in attempts if a.get("state") in ("submitting", "unknown")
                       and not (receipt and a.get("payload_sha256")
                                and a.get("payload_sha256") == receipt.get("payload_sha256"))), None)
-    rejected = next((a for a in attempts if a.get("state") == "rejected"), None)
+    rejected = next((a for a in attempts if a.get("state") in ("rejected", "batch_conflict")), None)
     preflight = load(folder / "07_upload" / "preflight.json")
     if result["running"]:
         result["state"] = "running"
     elif uncertain:
-        result.update(state="unknown", ok=False)
-        result["step"] = result["step"] or "提交结果未知"
+        recoverable = bool(uncertain.get('key_binding') and uncertain.get('api_base'))
+        result.update(state="failed" if recoverable else "unknown", ok=False)
+        result["step"] = ("提交结果未知，可用原 Key 和冻结请求恢复" if recoverable
+                          else result["step"] or "提交结果未知")
         result["error"] = result["error"] or str(uncertain.get("details") or uncertain.get("error_code")
                                                 or "提交结果未知，请先在远端工作台核实")
     elif receipt:

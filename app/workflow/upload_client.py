@@ -1,13 +1,13 @@
 """Restricted draft-upload transport; no publishing or question-media upload endpoints.
 
-Catalog envelopes below are explicit supported adapters, not a claim about a
-live deployment's response. All calls are single attempts. A submission_unknown
-must be reconciled by an operator before attempting the same submission again.
+Transport calls are single attempts; the workflow owns recovery decisions.
 """
 from __future__ import annotations
 
 from http.client import HTTPException
 from http.cookiejar import CookieJar
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -186,10 +186,12 @@ class ApiClient:
         if parts.hostname in {"localhost", "127.0.0.1", "::1"}:
             handlers.append(request.ProxyHandler({}))
         self._opener = request.build_opener(*handlers)
-        # 人工账号会话：API Key 被服务端视为 harness，不能创建上传暂存。
+        # Only explicit review evidence cleanup uses human credentials.
         self._account = (os.environ.get("MUDU_UPLOAD_ACCOUNT") or self.config.get("account") or "").strip()
         self._password = os.environ.get("MUDU_UPLOAD_PASSWORD", "")
         self._logged_in = False
+        self._upload_key = None
+        self._staging_allowed = False
 
     def _api_key(self):
         secret = os.environ.get(self.config["api_key_env"], "")
@@ -197,18 +199,19 @@ class ApiClient:
             raise APIError("missing_api_key")
         return secret
 
-    def _request(self, method, route, payload=None, *, media=False):
+    def _request(self, method, route, payload=None, *, media=False, secret=None):
         allowed = ((method == "GET" and route == "/catalog/knowledge-versions") or
                    (method == "GET" and route.startswith("/catalog/knowledge-points?version_id=")) or
-                   (method == "POST" and route == "/uploads"))
+                   (method == "POST" and route == "/uploads") or
+                   (method == "GET" and (route == "/uploads/capabilities" or
+                    re.fullmatch(r"/uploads/[A-Za-z0-9._-]{1,200}/receipt", route))))
         if media:
             allowed = method == "HEAD" and route.startswith("/source-media/")
         if not allowed:
             raise APIError("unsupported_route")
-        secret = ""
         headers = {"Accept": "application/json"}
         if not media:
-            secret = self._api_key()
+            secret = secret or self._api_key()
             headers["Authorization"] = "Bearer " + secret
         if payload is not None:
             headers["Content-Type"] = "application/json"
@@ -331,63 +334,21 @@ class ApiClient:
             raise APIError("network_error") from None
         self._logged_in = True
 
-    def _pending_by_batch(self, batch_id):
-        """Return an existing pending staging id with the same batch_id, if any."""
-        if not batch_id:
-            return None
-        req = request.Request(self._base + "/uploads", method="GET",
-                              headers={"Accept": "application/json"})
-        try:
-            with self._opener.open(req, timeout=self.config["timeout_seconds"]) as response:
-                if response.status != 200:
-                    return None
-                value = json.loads(response.read(self.config["max_response_bytes"] + 1))
-        except (error.HTTPError, error.URLError, TimeoutError, socket.timeout,
-                HTTPException, OSError, ValueError):
-            return None
-        rows = value.get("items") if isinstance(value, dict) else None
-        if not isinstance(rows, list):
-            return None
-        for row in rows:
-            if isinstance(row, dict) and str(row.get("batch_id") or "") == str(batch_id) \
-                    and row.get("stage") in (None, "pending_confirmation"):
-                return str(row.get("id") or "")
-        return None
+    def require_staging_capability(self):
+        secret = self._upload_key or self._api_key()
+        value = self._request("GET", "/uploads/capabilities", secret=secret)
+        if not isinstance(value, dict) or type(value.get("api_key_staging")) is not bool:
+            raise APIError("invalid_staging_capabilities")
+        if not value["api_key_staging"]:
+            raise APIError("api_key_staging_required", 403)
+        self._upload_key = secret
+        self._staging_allowed = True
 
-    def _session_submit(self, payload, retry=True):
-        req = request.Request(self._base + "/uploads", data=payload, method="POST",
-                              headers={"Content-Type": "application/json", "Accept": "application/json"})
-        try:
-            with self._opener.open(req, timeout=self.config["timeout_seconds"]) as response:
-                status = response.status
-                if not 200 <= status < 300:
-                    raise APIError("rejected", status)
-                raw = response.read(self.config["max_response_bytes"] + 1)
-                value = json.loads(raw)
-                if (not isinstance(value, dict) or not isinstance(value.get("id"), str)
-                        or not value["id"].strip() or value.get("stage") != "pending_confirmation"):
-                    raise APIError("submission_unknown", status)
-                return {"id": value["id"], "stage": value["stage"]}
-        except error.HTTPError as exc:
-            status = exc.code
-            try:
-                raw = exc.read(self.config["max_response_bytes"] + 1)
-            except (OSError, ValueError):
-                raw = b""
-            finally:
-                exc.close()
-            # 会话 8 小时过期后，重新登录一次再提交（仅一次，避免循环）。
-            if status == 401 and retry and self._account and self._password:
-                self._logged_in = False
-                self._login()
-                return self._session_submit(payload, retry=False)
-            details = _error_details(raw, "")
-            if status == 403 and details.get("error") == "human_confirmation_required":
-                raise APIError("human_session_required", status, details) from None
-            code = "submission_unknown" if status >= 500 or status in {408, 425, 429} else "rejected"
-            raise APIError(code, status, details) from None
-        except (error.URLError, TimeoutError, socket.timeout, HTTPException, OSError, ValueError):
-            raise APIError("submission_unknown") from None
+    def upload_key_binding(self, payload_sha256):
+        secret = self._upload_key or self._api_key()
+        self._upload_key = secret
+        return hmac.digest(secret.encode("ascii"),
+                           f"mudu-staging-v1:{self._base}:{payload_sha256}".encode(), "sha256").hex()
 
     def submit(self, payload):
         if not isinstance(payload, bytes) or not payload or len(payload) > MAX_UPLOAD_BYTES:
@@ -396,31 +357,22 @@ class ApiClient:
             value = json.loads(payload)
         except (ValueError, UnicodeError, RecursionError):
             raise APIError("invalid_payload") from None
-        if not isinstance(value, dict) or not isinstance(value.get("items"), list) or not value["items"]:
+        if (not isinstance(value, dict) or not isinstance(value.get("items"), list) or not value["items"]
+                or not isinstance(value.get("batch_id"), str) or not value["batch_id"].strip()):
             raise APIError("invalid_payload")
-        if self._account and self._password:
-            self._login()
-            try:
-                batch_id = json.loads(payload).get("batch_id")
-            except (ValueError, UnicodeError):
-                batch_id = None
-            allow_duplicate = str(os.environ.get("MUDU_ALLOW_DUPLICATE_UPLOAD", "0")).strip().lower() in ("1", "true", "yes", "on")
-            existing = None if allow_duplicate else self._pending_by_batch(batch_id)
-            if existing:
-                raise APIError("duplicate_batch_pending", 409, {"batch_id": batch_id, "staging_id": existing})
-            return self._session_submit(payload)
+        if not self._staging_allowed:
+            self.require_staging_capability()
+        self._staging_allowed = False
+        value = self._request("POST", "/uploads", payload, secret=self._upload_key)
         try:
-            value = self._request("POST", "/uploads", payload)
-        except APIError as exc:
-            if exc.code == "rejected" and exc.http_status == 403 and \
-                    (exc.details or {}).get("error") == "human_confirmation_required":
-                raise APIError("human_session_required", 403, exc.details) from None
-            raise
-        return {"id": value["id"], "stage": value["stage"]}
+            identifier = self._staging_id(value["id"])
+        except APIError:
+            raise APIError("submission_unknown") from None
+        return {"id": identifier, "stage": value["stage"]}
 
     @staticmethod
     def _staging_id(value):
-        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", value):
+        if not isinstance(value, str) or value in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", value):
             raise APIError("invalid_staging_id")
         return value
 
@@ -430,95 +382,51 @@ class ApiClient:
             raise APIError("invalid_batch_id")
         return value
 
-    def _session_headers(self):
-        """Human-session cookies or the same-account draft API key."""
-        if self._account and self._password:
-            self._login()
-            return {"Accept": "application/json"}
-        return {"Accept": "application/json", "Authorization": "Bearer " + self._api_key()}
-
-    def _staging_rows(self, retry=True):
-        route = "/uploads"
-        headers = self._session_headers()
-        req = request.Request(self._base + route, method="GET", headers=headers)
-        try:
-            with self._opener.open(req, timeout=self.config["timeout_seconds"]) as response:
-                if response.status != 200:
-                    raise APIError("staging_list_unavailable", response.status)
-                raw = response.read(self.config["max_response_bytes"] + 1)
-                if len(raw) > self.config["max_response_bytes"]:
-                    raise APIError("staging_list_unavailable", response.status)
-                value = json.loads(raw)
-        except error.HTTPError as exc:
-            status = exc.code
-            try:
-                raw = exc.read(self.config["max_response_bytes"] + 1)
-            except (OSError, ValueError):
-                raw = b""
-            finally:
-                exc.close()
-            if status == 401 and retry and self._account and self._password:
-                self._logged_in = False
-                self._login()
-                return self._staging_rows(retry=False)
-            raise APIError("staging_list_unavailable", status,
-                           _error_details(raw, "")) from None
-        except (error.URLError, TimeoutError, socket.timeout, HTTPException, OSError, ValueError):
-            raise APIError("staging_list_unavailable") from None
-        rows = value.get("items") if isinstance(value, dict) else None
-        if not isinstance(rows, list):
-            raise APIError("staging_list_unavailable")
-        return [row for row in rows if isinstance(row, dict)]
-
-    def staging_attachments(self, staging_id):
-        """Return attachment names on one staging record; None is never guessed."""
+    def staging_receipt(self, staging_id):
         staging_id = self._staging_id(staging_id)
-        row = next((item for item in self._staging_rows()
-                    if str(item.get("id") or "") == staging_id), None)
-        if row is None:
-            raise APIError("staging_not_found")
-        raw = row.get("attachments")
-        if raw is None:
-            raw = row.get("files")
-        if raw is None:
-            try:
-                empty = int(row.get("attachment_count") or 0) == 0
-            except (TypeError, ValueError):
-                empty = False
-            if empty:
-                return []
-            raise APIError("staging_attachments_unavailable")
-        if not isinstance(raw, list):
-            raise APIError("staging_attachments_unavailable")
-        names = []
-        for item in raw:
-            if isinstance(item, str):
-                name = item
-            elif isinstance(item, dict):
-                name = item.get("name") or item.get("filename") or item.get("original_name")
-            else:
-                raise APIError("staging_attachments_unavailable")
-            if not isinstance(name, str) or not name.strip():
-                raise APIError("staging_attachments_unavailable")
-            names.append(name)
-        return names
+        secret = self._upload_key or self._api_key()
+        self._upload_key = secret
+        value = self._request("GET", f"/uploads/{staging_id}/receipt", secret=secret)
+        if (not isinstance(value, dict) or value.get("id", staging_id) != staging_id
+                or not isinstance(value.get("stage"), str)):
+            raise APIError("invalid_staging_receipt")
+        if value["stage"] != "pending_confirmation":
+            raise APIError("staging_not_pending")
+        rows = value.get("attachments")
+        if not isinstance(rows, list) or len(rows) > MAX_ATTACHMENTS:
+            raise APIError("invalid_staging_receipt")
+        verified = {}
+        for row in rows:
+            name = row.get("filename") if isinstance(row, dict) else None
+            digest = row.get("sha256") if isinstance(row, dict) else None
+            if (not isinstance(name, str) or not name.strip() or not isinstance(digest, str)
+                    or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)):
+                raise APIError("invalid_staging_receipt")
+            if name in verified:
+                raise APIError("attachment_duplicate_on_staging", details={"filename": name})
+            verified[name] = digest.lower()
+        return verified
 
-    def append_attachment(self, staging_id, data, filename):
-        """Append one binary review attachment; non-idempotent, one attempt."""
-        staging_id = self._staging_id(staging_id)
+    @staticmethod
+    def _attachment_type(data, filename):
         if not isinstance(data, bytes) or not data or len(data) > MAX_ATTACHMENT_BYTES:
             raise APIError("attachment_too_large")
-        if not isinstance(filename, str) or not filename.strip():
-            raise APIError("attachment_name_invalid")
-        if (filename != Path(filename).name or "/" in filename or "\\" in filename
-                or any(ord(c) < 32 for c in filename)):
+        if (not isinstance(filename, str) or not filename.strip() or filename != Path(filename).name
+                or "/" in filename or "\\" in filename or any(ord(c) < 32 for c in filename)):
             raise APIError("attachment_name_invalid")
         suffix = Path(filename).suffix.lower()
         if suffix not in ATTACHMENT_TYPES:
             raise APIError("attachment_type_invalid")
-        headers = self._session_headers()
-        headers.update({"Content-Type": ATTACHMENT_TYPES[suffix],
-                        "X-Filename": parse.quote(filename, safe="")})
+        return ATTACHMENT_TYPES[suffix]
+
+    def append_attachment(self, staging_id, data, filename):
+        """Append one binary review attachment; non-idempotent, one attempt."""
+        staging_id = self._staging_id(staging_id)
+        content_type = self._attachment_type(data, filename)
+        secret = self._upload_key or self._api_key()
+        self._upload_key = secret
+        headers = {"Accept": "application/json", "Authorization": "Bearer " + secret,
+                   "Content-Type": content_type, "X-Filename": parse.quote(filename, safe="")}
         req = request.Request(self._base + f"/uploads/{staging_id}/attachments",
                               data=data, method="POST", headers=headers)
         try:
@@ -536,62 +444,60 @@ class ApiClient:
                 raw = b""
             finally:
                 exc.close()
-            if status == 401 and self._account and self._password:
-                self._logged_in = False
-                self._login()
             code = "submission_unknown" if status >= 500 or status in {408, 425, 429} else "rejected"
-            raise APIError(code, status, _error_details(raw, "")) from None
+            raise APIError(code, status, _error_details(raw, secret)) from None
         except (error.URLError, TimeoutError, socket.timeout, HTTPException, OSError, ValueError):
             raise APIError("submission_unknown") from None
 
     def append_evidence(self, staging_id, files):
-        """Append planned files after reconciling the staging list first.
-
-        A lost response is resolved by reading the staging list; an attachment
-        that is already present exactly once is never uploaded again.
-        """
+        """Only append missing files; verify every filename and digest via receipt."""
         staging_id = self._staging_id(staging_id)
         if not isinstance(files, list) or not 1 <= len(files) <= MAX_ATTACHMENTS:
             raise APIError("attachments_limit_invalid")
-        names = []
+        expected = {}
         for item in files:
-            if not isinstance(item, dict) or not isinstance(item.get("data"), bytes):
+            if not isinstance(item, dict):
                 raise APIError("attachment_invalid")
-            name = item.get("filename")
-            if not isinstance(name, str) or name in names:
+            name, data = item.get("filename"), item.get("data")
+            self._attachment_type(data, name)
+            if name in expected:
                 raise APIError("attachment_name_duplicate")
-            names.append(name)
-        current = self.staging_attachments(staging_id)
+            expected[name] = hashlib.sha256(data).hexdigest()
         uploaded = []
-        for item in files:
-            name = item["filename"]
-            count = current.count(name)
-            if count == 1:
-                continue
-            if count > 1:
-                raise APIError("attachment_duplicate_on_staging",
-                               details={"filename": name, "uploaded": uploaded})
-            try:
-                self.append_attachment(staging_id, item["data"], name)
-            except APIError as exc:
-                if exc.code != "submission_unknown":
-                    raise
-                # The append may have succeeded before the response was lost.
-                refreshed = self.staging_attachments(staging_id)
-                if refreshed.count(name) != 1:
-                    raise APIError("attachment_unknown",
-                                   details={"filename": name, "uploaded": uploaded}) from None
-                current = refreshed
+        current = {}
+        def refresh():
+            rows = self.staging_receipt(staging_id)
+            for name in expected.keys() & rows.keys():
+                if rows[name] != expected[name]:
+                    raise APIError("attachment_digest_conflict", details={"filename": name})
+            return rows
+
+        try:
+            current = refresh()
+            if len(current.keys() | expected.keys()) > MAX_ATTACHMENTS:
+                raise APIError("attachments_limit_invalid")
+            for item in files:
+                name = item["filename"]
+                if name in current:
+                    continue
+                try:
+                    self.append_attachment(staging_id, item["data"], name)
+                except APIError as exc:
+                    if exc.code != "submission_unknown":
+                        raise
+                # Do not repeat a non-idempotent POST in the same attempt.
+                current = refresh()
+                if name not in current or any(n not in current for n in uploaded):
+                    raise APIError("attachment_unknown", details={"filename": name})
                 uploaded.append(name)
-                continue
-            refreshed = self.staging_attachments(staging_id)
-            if refreshed.count(name) != 1:
-                raise APIError("attachment_unknown",
-                               details={"filename": name, "uploaded": uploaded})
-            current = refreshed
-            uploaded.append(name)
-        return {"staging_id": staging_id, "attachments": names,
-                "uploaded": uploaded, "all": current}
+            if not expected.keys() <= current.keys():
+                raise APIError("attachment_unknown")
+        except APIError as exc:
+            raise APIError(exc.code, exc.http_status,
+                           dict(exc.details, uploaded=[n for n in expected if n in current])) from None
+        return {"staging_id": staging_id, "attachments": list(expected),
+                "uploaded": uploaded, "all": list(current),
+                "verified": [{"filename": n, "sha256": current[n]} for n in expected]}
 
     def clear_review_evidence(self, batch_id):
         """Human-session only: clear review attachments after settlement."""

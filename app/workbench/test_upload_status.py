@@ -237,6 +237,16 @@ class UploadStatusTests(unittest.TestCase):
         self.assertTrue(result['started'])
         thread.assert_called_once()
 
+    def test_new_unknown_staging_allows_explicit_recovery(self):
+        self.record('attempts/a.json', {'state': 'unknown', 'payload_sha256': 'a',
+                                        'key_binding': 'a' * 64, 'api_base': 'https://example.test/api'})
+        status = server.upload_state('batch')
+        self.assertEqual(status['state'], 'failed')
+        self.assertIn('原 Key', status['step'])
+        with patch.object(server.threading, 'Thread') as thread:
+            self.assertTrue(server.start_batch_upload('batch')['started'])
+        thread.assert_called_once()
+
     def test_running_and_unknown_submission(self):
         self.record("attempts/a.json", {"state": "submitting", "payload_sha256": "a"})
         server._upload_jobs["batch"] = {"running": True, "step": "写入云端上传暂存"}

@@ -74,7 +74,7 @@ PYTHONPATH=app python3 -m workflow.issue_log list --status open
 
 先读 `docs/upload-api.md`。`POST /api/uploads` 只产生 pending_confirmation 上传暂存，远端人工确认后才是草稿。使用本机安全隧道或 HTTPS，凭据仅从环境变量读取；不把账号、密码、API Key、私钥或本机私钥路径写入仓库或任务包。
 
-上传前用 `python -m workflow.runner prepare-upload` 读取当前目录、核验媒体并冻结请求；人工批准绑定本地批次、冻结文件及目标，提交不得再改写。超时或结果未知时不要自动重发，由人工在远端工作台核实。没有文档化媒体上传 API，附件须先按受控运维流程部署；Agent 不确认暂存、不发布或撤回、不修改知识点确认状态。
+上传前用 `python -m workflow.runner prepare-upload` 读取当前目录、核验媒体并冻结请求；人工批准绑定本地批次、冻结文件及目标，提交不得再改写。提交前检查上传 Key 的 `api_key_staging`；结果未知时仅允许显式重试同一 Key、同一目标和同一冻结请求，旧版无绑定记录须先在远端核实。原卷审核附件用同一 Key 追加并按文件名和 SHA-256 核对回执；题目图片、音频仍须先按受控运维流程部署；Agent 不确认暂存、不发布或撤回、不修改知识点确认状态。
 
 ## 代码与验证
 

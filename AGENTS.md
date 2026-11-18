@@ -95,6 +95,9 @@
 
 35. **原卷听力稿放入解析**：原卷存在可按题号或完整题组唯一绑定的听力录音材料时，逐字写入对应单题或题组的 `explanation`，使用「听力录音材料：」标识并保留已有原解析；共享稿只放题组解析。来源不唯一或题号重用无法证明归属时不猜、不跨题绑定；模型任务、来源审计和最终交付均须遵守。落地：`workflow/listening_script.py`、`explanations_direct.py`、`upload_content.py`、`content_rules.py`。
 
+36. **远端暂存使用专用上传 Key**：人工明确授权后，从 `MUDU_API_KEY` 读取凭据，`GET /api/uploads/capabilities` 明确返回 `api_key_staging: true` 才可用固定 `batch_id` 提交冻结题目。保存暂存 ID，同一 Key 追加原卷及独立答案并通过单笔回执核对文件名与 SHA-256。不退回账号密码，不读取人工暂存列表。仅同 Key、同目标、同冻结请求可显式恢复未知创建；旧版无绑定或 `upload_batch_conflict` 先核对。远端确认、审核、发布仍由人工处理。落地：`app/workflow/upload_client.py`、`app/workflow/upload.py`。
+
+
 ## 三、变更记录制度（强制）
 
 项目根目录有 `CHANGELOG/`，专门记录本项目的一切重要变更与规则强调。**每次改完都要记，不要等人提醒。**

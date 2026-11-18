@@ -416,7 +416,7 @@ def verify(batch_dir, *, config=None):
     return {'plan': plan, 'plan_sha256': _sha(plan_raw), 'payload': raw}
 
 
-def _finish_attachments(batch, plan, digest, attempt_path, client, staging_id, receipt):
+def _finish_attachments(batch, plan, digest, attempt_path, client, staging_id, receipt, binding):
     """Append the approved evidence files; a receipt keeps the staging id on failure."""
     files = _read_evidence(batch, plan.get('evidence') or [])
     receipt = dict(receipt, state='staged_attachments_pending', attachments=[])
@@ -433,11 +433,13 @@ def _finish_attachments(batch, plan, digest, attempt_path, client, staging_id, r
         _write(_path(batch, 'receipt.json'), _bytes(receipt))
         _write(attempt_path, _bytes({'state': state,
                                      'payload_sha256': digest, 'public_id': staging_id,
+                                     'key_binding': binding, 'api_base': plan['api_base'],
                                      'error_code': exc.code, 'http_status': exc.http_status,
                                      'details': details}))
         raise
     receipt.update(state='staged', attachments=result.get('attachments') or [],
-                   staging_attachments=result.get('all') or [])
+                   staging_attachments=result.get('all') or [],
+                   verified_attachments=result.get('verified') or [])
     receipt.pop('attachment_error', None)
     _write(_path(batch, 'receipt.json'), _bytes(receipt))
     _write(attempt_path, _bytes({'state': 'accepted', 'payload_sha256': digest, 'receipt': receipt}))
@@ -452,7 +454,7 @@ def approval_binding(batch_dir, *, config=None):
 
 
 def submit_approved(batch_dir, manifest, *, config=None, lock_held=False):
-    """只提交已由 runner 确认的冻结字节；远端结果未知时禁止自动重复。"""
+    """提交冻结字节；仅可凭同一 Key 绑定恢复新版幂等请求。"""
     batch = Path(batch_dir).resolve()
     settings = _config(config)
     with (contextlib.nullcontext() if lock_held else _agent_lock(10)):
@@ -467,7 +469,7 @@ def submit_approved(batch_dir, manifest, *, config=None, lock_held=False):
             if prior == attempt_path:
                 continue
             previous = _read(_path(batch, 'attempts/' + prior.name))
-            if previous.get('state') in ('submitting', 'unknown',
+            if previous.get('state') in ('submitting', 'unknown', 'batch_conflict',
                                           'staged_attachments_pending', 'attachment_rejected'):
                 raise ValueError('该批另一次提交结果未知（仍在暂存/附件阶段），修改载荷也不能重发；先核对远端暂存')
             if previous.get('state') == 'accepted':
@@ -475,22 +477,34 @@ def submit_approved(batch_dir, manifest, *, config=None, lock_held=False):
         if not plan.get('evidence'):
             raise ValueError('远端确认至少需要一个审核附件；本批次没有可追加的 Word/PDF/图片，请重新准备')
         client = upload_client.ApiClient(settings)
+        previous = {}
         if attempt_path.is_file():
             previous = _read(attempt_path)
             if previous.get('state') == 'accepted':
                 return previous['receipt']
             if previous.get('state') in ('submitting', 'unknown'):
-                raise ValueError('前次提交结果未知，禁止重发；请人工在远端工作台核实暂存记录')
+                binding = previous.get('key_binding')
+                if (not isinstance(binding, str) or previous.get('api_base') != plan['api_base']
+                        or binding != client.upload_key_binding(digest)):
+                    raise ValueError('前次提交结果未知，无法证明同一 Key 和目标；请人工核实暂存记录')
             if previous.get('state') == 'attachment_rejected':
                 raise ValueError('审核附件追加被远端拒绝，须修正附件或权限后重新准备：'
                                  + str((previous.get('details') or {}).get('error') or previous.get('error_code')))
-            if previous.get('state') == 'staged_attachments_pending':
-                receipt = _read(_path(batch, 'receipt.json'))
+            if previous.get('state') == 'batch_conflict':
+                raise ValueError('upload_batch_conflict：同一 batch_id 已绑定不同请求，请先核对远端暂存')
+            receipt_path = _path(batch, 'receipt.json')
+            receipt = _read(receipt_path) if receipt_path.is_file() else {}
+            if (previous.get('state') == 'staged_attachments_pending' or
+                    (previous.get('state') in ('submitting', 'unknown') and receipt.get('id')
+                     and receipt.get('payload_sha256') == digest)):
                 if (receipt.get('payload_sha256') != digest or not receipt.get('id')
                         or receipt.get('api_base') != plan['api_base']):
                     raise ValueError('暂存附件续传回执与冻结计划不一致，须人工核实')
+                binding = previous.get('key_binding')
+                if not isinstance(binding, str) or binding != client.upload_key_binding(digest):
+                    raise ValueError('暂存附件续传无法证明与创建时使用同一 Key，请人工核实')
                 return _finish_attachments(batch, plan, digest, attempt_path, client,
-                                           receipt['id'], receipt)
+                                           receipt['id'], receipt, binding)
         current = client.fetch_catalog()
         catalog = _read(_path(batch, plan['catalog_file']))
         # fetched_at 不属于目录语义；其余目录值有变化时必须重新准备。
@@ -502,25 +516,36 @@ def submit_approved(batch_dir, manifest, *, config=None, lock_held=False):
             client.check_media(url, kind=kind)
         if frozen['payload'] != verify(batch, config=settings)['payload']:
             raise ValueError('发送前冻结文件发生变化')
-        # 持久化后才开始 POST；即使进程在收到响应前中断也不会静默重发。
-        _write(attempt_path, _bytes({'state': 'submitting', 'payload_sha256': digest, 'api_base': plan['api_base']}))
+        # Pin the authenticated key and persist its keyed binding before POST.
+        client.require_staging_capability()
+        binding = client.upload_key_binding(digest)
+        _write(attempt_path, _bytes({'state': 'submitting', 'payload_sha256': digest,
+                                    'api_base': plan['api_base'], 'key_binding': binding}))
         try:
             response = client.submit(frozen['payload'])
         except upload_client.APIError as exc:
-            state = 'rejected' if exc.http_status in (400, 401, 403, 409, 413) else 'unknown'
+            if exc.http_status == 409 and exc.details.get('error') == 'upload_batch_conflict':
+                state = 'batch_conflict'
+            elif previous.get('state') in ('submitting', 'unknown'):
+                state = 'unknown'  # A failed replay does not settle the first request.
+            else:
+                state = 'rejected' if exc.code == 'rejected' else 'unknown'
             _write(attempt_path, _bytes({'state': state, 'payload_sha256': digest,
-                                        'error_code': exc.code, 'http_status': exc.http_status, 'details': exc.details}))
+                                        'error_code': exc.code, 'http_status': exc.http_status, 'details': exc.details,
+                                        'api_base': plan['api_base'], 'key_binding': binding}))
             raise
         receipt = {'id': response['id'], 'stage': 'pending_confirmation',
                    'state': 'staged_attachments_pending', 'payload_sha256': digest,
                    'source_sha256': plan['source_sha256'], 'api_base': plan['api_base'],
+                   'batch_id': json.loads(frozen['payload'])['batch_id'],
                    'submitted_at': mf.now_iso(), 'summary': plan.get('summary', {}),
                    'attachments': [], 'remote_confirmation_required': True}
         _write(_path(batch, 'receipt.json'), _bytes(receipt))
         _write(attempt_path, _bytes({'state': 'staged_attachments_pending',
-                                     'payload_sha256': digest, 'public_id': response['id']}))
+                                     'payload_sha256': digest, 'public_id': response['id'],
+                                     'key_binding': binding, 'api_base': plan['api_base']}))
         return _finish_attachments(batch, plan, digest, attempt_path, client,
-                                   response['id'], receipt)
+                                   response['id'], receipt, binding)
 
 
 def main(argv=None):

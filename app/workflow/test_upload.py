@@ -35,6 +35,7 @@ class UploadFlowTest(unittest.TestCase):
         mf.save(self.batch, self.state)
         self.client = patch.object(upload_client, 'ApiClient').start(); self.addCleanup(patch.stopall)
         self.client.return_value.fetch_catalog.side_effect = lambda: deepcopy(self.catalog)
+        self.client.return_value.upload_key_binding.return_value = 'a' * 64
         self.client.return_value.submit.return_value = {'id': 'STAGE-123', 'stage': 'pending_confirmation'}
         self.client.return_value.append_evidence.return_value = {
             'staging_id': 'STAGE-123', 'attachments': ['source.docx'],
@@ -146,16 +147,60 @@ class UploadFlowTest(unittest.TestCase):
             upload.submit_approved(self.batch, self.state, config=self.settings)
         self.client.return_value.submit.assert_not_called()
 
-    def test_unknown_outcome_is_persisted_and_never_automatically_resent(self):
+    def test_unknown_outcome_replays_exact_bytes_only_with_original_key(self):
         self.prepare(); self.approve()
-        self.client.return_value.submit.side_effect = upload_client.APIError('submission_unknown')
+        client = self.client.return_value
+        client.submit.side_effect = upload_client.APIError('submission_unknown')
         with self.assertRaises(upload_client.APIError):
             upload.submit_approved(self.batch, self.state, config=self.settings)
-        self.client.return_value.submit.side_effect = None
-        with self.assertRaisesRegex(ValueError, '前次提交结果未知'):
+        client.submit.side_effect = None
+        client.upload_key_binding.return_value = 'b' * 64
+        with self.assertRaisesRegex(ValueError, '无法证明同一 Key'):
             upload.submit_approved(self.batch, self.state, config=self.settings)
-        self.assertEqual(self.client.return_value.submit.call_count, 1)
+        self.assertEqual(client.submit.call_count, 1)
         self.assertFalse((self.batch / '07_upload/receipt.json').exists())
+        client.upload_key_binding.return_value = 'a' * 64
+        result = upload.submit_approved(self.batch, self.state, config=self.settings)
+        self.assertEqual(result['id'], 'STAGE-123')
+        self.assertEqual(client.submit.call_count, 2)
+        self.assertEqual(*client.submit.call_args_list)
+
+    def test_saved_staging_id_survives_interruption_before_attachment_checkpoint(self):
+        report = self.prepare(); self.approve()
+        client = self.client.return_value
+        real_write = upload._write
+
+        def interrupted(path, raw):
+            if path.name == report['payload_sha256'] + '.json' and json.loads(raw)['state'] == 'staged_attachments_pending':
+                raise OSError('interrupted after saving staging ID')
+            return real_write(path, raw)
+
+        with patch.object(upload, '_write', side_effect=interrupted), self.assertRaises(OSError):
+            upload.submit_approved(self.batch, self.state, config=self.settings)
+        self.assertTrue((self.batch / '07_upload/receipt.json').is_file())
+        self.assertEqual(upload.submit_approved(self.batch, self.state, config=self.settings)['id'], 'STAGE-123')
+        client.submit.assert_called_once()
+        client.append_evidence.assert_called_once()
+
+    def test_legacy_unknown_without_key_binding_cannot_replay(self):
+        report = self.prepare(); self.approve()
+        path = self.batch / '07_upload/attempts' / (report['payload_sha256'] + '.json')
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'state': 'unknown', 'payload_sha256': report['payload_sha256']}))
+        with self.assertRaisesRegex(ValueError, '无法证明同一 Key'):
+            upload.submit_approved(self.batch, self.state, config=self.settings)
+        self.client.return_value.submit.assert_not_called()
+
+    def test_batch_conflict_stops_subsequent_submissions(self):
+        self.prepare(); self.approve()
+        client = self.client.return_value
+        client.submit.side_effect = upload_client.APIError('rejected', 409, {'error': 'upload_batch_conflict'})
+        with self.assertRaises(upload_client.APIError):
+            upload.submit_approved(self.batch, self.state, config=self.settings)
+        with self.assertRaisesRegex(ValueError, 'upload_batch_conflict'):
+            upload.submit_approved(self.batch, self.state, config=self.settings)
+        client.submit.assert_called_once()
+        client.append_evidence.assert_not_called()
 
     def test_changed_payload_cannot_bypass_unknown_submission_in_same_batch(self):
         self.prepare(); self.approve()
