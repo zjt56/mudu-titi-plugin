@@ -25,6 +25,21 @@ test('库侧 __N__ 空档同样渲染成填空线', () => {
   const ctx = harness();
   assert.match(ctx.markLine('to be __17__ and friendly'), /<span class="wf-blank">17<\/span>/);
 });
+test('编号空档只绘制一条线，不与 Word 下划线叠加', () => {
+  const ctx = harness();
+  for (const source of [
+    '<u>　1　</u>',
+    '<u>__1__</u>',
+    '<u>　__1__　</u>',
+    '<u>　_1_　</u>',
+    '____1____',
+    '____<u>1</u>____',
+  ]) {
+    assert.equal(ctx.markLine(source), '<span class="wf-blank">1</span>', source);
+  }
+  assert.equal(ctx.markLine('<u>3</u>'), '<span class="wf-blank">3</span>');
+  assert.equal(ctx.markLine('<u>farmers</u>'), '<u>farmers</u>');
+});
 
 test('普通下划线文字不被当成空档', () => {
   const ctx = harness();
