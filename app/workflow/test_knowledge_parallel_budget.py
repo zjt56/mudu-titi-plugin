@@ -110,6 +110,40 @@ class KnowledgeParallelBudgetTest(unittest.TestCase):
         self.assertEqual(resumed, calls[1])
         self.assertEqual(mf.load(self.batch)['stages']['knowledge']['status'], mf.COMPLETED)
 
+    def test_exhausted_part_splits_without_repeating_completed_siblings(self):
+        calls = []
+
+        def invoke(prompt, directory, config, **options):
+            ids = self.selected(prompt)
+            calls.append(ids)
+            if len(calls) == 1:
+                raise local_agent.AgentError('Content tool-call budget exceeded',
+                                             content_agent.TOOL_BUDGET_CODE)
+            return self.native_checked_candidate(ids)
+
+        self.assertEqual(self.dispatch(invoke), {'knowledge': 0})
+        self.assertEqual([len(ids) for ids in calls], [8] * 6 + [4, 4])
+        self.assertEqual([uid for ids in calls[-2:] for uid in ids], calls[0])
+
+    def test_retained_draft_revalidated_and_exhausted_singleton_not_reissued(self):
+        scope = [f'q-{n}' for n in range(1, 9)]
+        stored = [{'unit_ids': scope, 'error': 'Content tool-call budget exceeded',
+                   'candidate_parts': [{'unit_ids': scope[:2],
+                                        'candidate': self.candidate(scope[:2])['response']}]},
+                  {'unit_ids': ['q-3'], 'error': 'Content tool-call budget exceeded'}]
+        calls = []
+
+        def invoke(prompt, directory, config, **options):
+            ids = self.selected(prompt)
+            calls.extend(ids)
+            return self.native_checked_candidate(ids)
+
+        with patch.object(content_agent, 'tool_budget_receipts', return_value=stored):
+            self.assertNotEqual(self.dispatch(invoke), {'knowledge': 0})
+        self.assertEqual(set(calls), {f'q-{n}' for n in range(4, 49)})
+        self.assertEqual(len(calls), 45)
+        self.assertFalse((self.batch / agent_tasks.ARTIFACTS['knowledge']).exists())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -33,7 +33,19 @@
 | 日期 | 记录 | 摘要 |
 |---|---|---|
 | 2026-11-19 | [无印刷题号作文的二审来源复验](2026-11-19-unnumbered-writing-review-source.md) | 按作文来源窗口核验二审引证，消除编号空档误报 |
+| 2026-11-19 | [单元话题写作结构与汇总](2026-11-19-topic-writing-handoff.md) | 分离两篇无号作文和句型训练答案，恢复组装、预览与来源交付 |
+| 2026-11-18 | [一审和二审核对答案考点](2026-11-18-answer-point-review.md) | 各轮标签显示独立核对的答案词，二审按实际抽查范围 |
+| 2026-11-18 | [课时附录栏目边界](2026-11-18-lesson-answer-key-banner.md) | 修复参考答案栏目识别并补齐该批答案标签 |
+| 2026-11-18 | [试卷审核显示答案考点](2026-11-18-review-answer-point-display.md) | 原标签行直接显示批次已有的答案词或短语 |
+| 2026-11-18 | [2026-11-18-workflow-audit-followup.md](2026-11-18-workflow-audit-followup.md) | 收敛阶段失效规则，修正听力重复交付与来源投影误判，明确凭据拒绝的重派准入 |
+| 2026-11-18 | [细化知识点选择与逐目标复核](2026-11-18-review-evidence-and-label-selection.md) | 补充主题、设题角度与实际考点的取舍，要求审核理由逐项对应证据 |
+| 2026-11-18 | [2026-11-18-shared-knowledge-review-rules.md](2026-11-18-shared-knowledge-review-rules.md) | 原标注与盲审共用知识点判据，记录 12 个批次的历史差异基线 |
+| 2026-11-18 | [2026-11-18-batch-evidence-speed.md](2026-11-18-batch-evidence-speed.md) | 从八份实卷定位答案直抄失效和知识点重复查证，减少模型工作并记录各工具用量 |
+| 2026-11-18 | [2026-11-18-native-content-tool-budget.md](2026-11-18-native-content-tool-budget.md) | 原生内容按额度分片，耗尽后复验持久候选并缩小未通过范围 |
+| 2026-11-18 | [2026-11-18-task-reading-content-layout.md](2026-11-18-task-reading-content-layout.md) | 长答案自动换行，解析独占正文宽度，修复任务型阅读预览挤压与截断 |
 | 2026-11-18 | [2026-11-18-api-key-staging.md](2026-11-18-api-key-staging.md) | 专用上传 Key 创建暂存，固定批次幂等恢复，按文件名和 SHA-256 核对附件回执 |
+| 2026-11-18 | [2026-11-18-content-modal-article-summary.md](2026-11-18-content-modal-article-summary.md) | 原卷修改：解析/文章大意保存即写入正式批次与解析产物（事务提交、来源绑定、失效下游），材料小题仍为草稿 |
+| 2026-11-18 | [2026-11-18-content-preview-card.md](2026-11-18-content-preview-card.md) | 审核页原卷预览下新增「文章大意 · 解析」只读预览卡：占位/无号题/书面表达按规则展示 |
 | 2026-11-18 | [2026-11-18-self-heal-closed-loop.md](2026-11-18-self-heal-closed-loop.md) | 自愈拒绝准入、失败复验与外部依赖延后闭环；保留历史占位并维持原文遗漏阻断 |
 | 2026-11-17 | [2026-11-17-recovery-retry-and-workspace-restore.md](2026-11-17-recovery-retry-and-workspace-restore.md) | 确定性派发故障停止内容重派；隔离代码修复增加唯一文本 patch 与只恢复工作副本的基线还原 |
 | 2026-11-17 | [2026-11-17-content-candidate-parts.md](2026-11-17-content-candidate-parts.md) | 内容候选小分片暂存、程序组包完整验收，JSON 格式错误重复宿主事件幂等恢复 |

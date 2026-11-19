@@ -577,7 +577,7 @@ def _section_rubric(lines, unit):
 def _standalone_marked_heading(unit, proof, source, cleaned_lines, fresh):
     """Recover a marked heading only for a fully rebuilt unnumbered section."""
     from .question_identity import VERSION as IDENTITY_VERSION
-    from .sync_practice import source_marks
+    from .sync_practice import source_marks, writing_prompt
     span = unit.get("source_span") or {}
     if (unit.get("identity_version") != IDENTITY_VERSION
             or span.get("number_binding") not in {"unnumbered_section", "single_writing_section"}
@@ -598,10 +598,15 @@ def _standalone_marked_heading(unit, proof, source, cleaned_lines, fresh):
     heading_line, section_end = section.get("start_line"), section.get("end_line")
     if (not all(type(value) is int for value in (start, end, heading_line, section_end))
             or not 1 <= heading_line <= start <= end <= section_end <= len(rows)
-            or (start, end) != (span.get("start_line"), span.get("end_line"))):
+            or start != span.get("start_line")
+            or end > span.get("end_line", 0)
+            or any(line.strip() for line in rows[end:span["end_line"]])):
         return ""
     heading = rows[heading_line - 1].strip()
-    if heading != str(section.get("title") or "").strip() or not source_marks(heading):
+    if heading != str(section.get("title") or "").strip():
+        return ""
+    if not (source_marks(heading) or
+            span.get("number_binding") == "single_writing_section" and writing_prompt(heading)):
         return ""
     return heading
 

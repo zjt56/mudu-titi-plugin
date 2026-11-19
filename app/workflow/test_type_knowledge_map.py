@@ -55,6 +55,10 @@ class TypeKnowledgeMapTests(unittest.TestCase):
         for main_type in ("阅读理解", "任务型阅读", "读写综合"):
             self.assertEqual(self.dims(main_type), ["语篇体裁", "主题", "设题角度"], main_type)
 
+    def test_short_passage_cloze_keeps_content_dims_without_answer_points(self):
+        self.assertEqual(self.dims("短文填空"), ["语篇体裁", "主题", "词汇", "语法"])
+        self.assertIn("答案考点", self.dims("选词填空"))
+
     def test_listening_dialog_types_only_theme_and_angle(self):
         for main_type in ("听力短对话理解", "听力长对话理解"):
             self.assertEqual(self.dims(main_type), ["主题", "设题角度"], main_type)

@@ -82,13 +82,24 @@ _UNDERLINE_TAG = re.compile(r'</?u>', re.IGNORECASE)
 
 def _source_projection(value):
     """Project derived question fields only; nested source/evidence stays exact."""
-    result = copy.deepcopy(value)
+    from .metadata_policy import SOURCE_ALIAS_FIELDS, project_source_metadata
+    from .wire_format import SOURCE_KEYS
+
+    result = project_source_metadata(value)
 
     def row_projection(row):
         if not isinstance(row, dict):
             return
+        filters = row.get('filterMetadata')
+        for key in SOURCE_KEYS:
+            if isinstance(row.get(key), str) and not row[key].strip():
+                row.pop(key)
         for key in _DERIVED_META_KEYS:
             row.pop(key, None)
+        if isinstance(filters, dict):
+            aliases = {key: filters[key] for key in SOURCE_ALIAS_FIELDS if key in filters}
+            if aliases:
+                row['filterMetadata'] = aliases
         for child in row.get('subquestions') or []:
             row_projection(child)
 

@@ -55,6 +55,7 @@ class MetaSourceProjectionTest(unittest.TestCase):
         item.update(source='七上人教版课时A计划 Starter Unit 1 课时1', source_type='同步练习', year='')
         item['filterMetadata'].update(source='未提供', source_type='未提供', year=None)
         for child in item['subquestions']:
+            child['options'].extend(['C. School', 'D. Library'])
             child.update(source='未提供', source_type='未提供', year='')
             child['filterMetadata'] = {'source': '未提供', 'source_type': '未提供', 'year': '未提供'}
         data = batch(item)

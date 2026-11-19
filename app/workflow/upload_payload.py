@@ -757,7 +757,14 @@ class _Builder:
                 for key in ("institution", "school", "regional_version"):
                     if not _nonempty(data.get(key)):
                         self.error("MISSING_" + key.upper(), f"中考模拟缺少 {key}", uid)
-        if "year" in data and not (_positive(data["year"]) and data["year"] <= 9999):
+        # A blank year is an absence marker, not an explicit unverifiable value:
+        # the same absence is legal when the key is omitted entirely. Never infer
+        # a year; only reject a non-blank value that is not a real positive year.
+        explicit_year = data.get("year") if "year" in data else None
+        blank_year = explicit_year is None or (isinstance(explicit_year, str)
+                                               and not explicit_year.strip())
+        if "year" in data and not blank_year and not (
+                _positive(explicit_year) and explicit_year <= 9999):
             self.error("YEAR_INVALID", "显式 year 必须是有来源证据的正整数年份", uid)
         if child and "source_type" in data and data["source_type"] not in [*taxonomy.sources(), "精品题源", "课本原创"]:
             self.error("SOURCE_TYPE_INVALID", "子题显式 source_type 不在正式或兼容题源中", uid)

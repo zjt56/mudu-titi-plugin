@@ -696,6 +696,9 @@ def diagnose(batch_dir) -> dict:
                     detail = "最近一次检查报告 passed=true，manifest 仍是旧的 blocked；直接重跑本阶段即可回写完成，无需排查已解决的历史阻断。"
             else:
                 reason = "阶段失败"
+            if record.get("model_authentication"):
+                reason = "模型服务拒绝凭据"
+                detail = note
             # 逐层找最具体的原因
             if stage.id == "structure_gate":
                 bl = _structure_blockers(batch)

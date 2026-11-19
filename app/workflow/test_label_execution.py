@@ -70,6 +70,19 @@ class LabelExecutionTest(unittest.TestCase):
         self.assertEqual(result['response']['status'], 'completed')
         self.assertTrue(agent_tasks.accept_result(self.batch, 'knowledge', result['response'])['completed'])
 
+    def test_native_answer_partition_bound_leaves_room_for_tools(self):
+        calls = []
+
+        def invoke(prompt, *args, **kwargs):
+            units = self.selected(prompt)
+            calls.append([u['unit_id'] for u in units])
+            return {'response': self.answers(units)}
+
+        config = dict(self.config, native_agent={'enabled': True, 'stages': ['answers'], 'max_tool_calls': 6})
+        result = label_execution.run(self.batch, 'answers', config, self.batch / 'run', invoke=invoke)
+        self.assertEqual(calls, [['q-1'], ['q-2']])
+        self.assertTrue(agent_tasks.accept_result(self.batch, 'answers', result['response'])['completed'])
+
     def test_revalidate_rejected_native_candidate_then_repair_only_invalid_unit(self):
         calls = []
         def invoke(prompt, directory, config, **kwargs):
@@ -90,6 +103,11 @@ class LabelExecutionTest(unittest.TestCase):
         self.assertEqual(calls, [['q-1', 'q-2'], ['q-2']])
         self.assertEqual(result['response']['status'], 'completed')
         self.assertTrue(agent_tasks.accept_result(self.batch, 'knowledge', result['response'])['completed'])
+        run_dir = self.batch / 'run'
+        timing = json.loads((run_dir / 'round-01-part-0000/model-timing.json').read_text())
+        self.assertEqual((timing['stage'], timing['attempt'], timing['units']), ('knowledge', 2, 1))
+        self.assertGreaterEqual(timing['queue_seconds'], 0)
+        self.assertTrue((run_dir / 'round-01-part-0000/acceptance-timing.json').is_file())
 
     def test_failed_answer_only_is_retried_and_success_is_preserved(self):
         calls = []

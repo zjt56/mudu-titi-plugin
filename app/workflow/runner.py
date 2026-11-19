@@ -456,7 +456,9 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
     argv = _stage_argv(rendered)
     log = _log_path(batch_dir, stage.id)
     print(f"  执行：{' '.join(argv[1:])}")
-    from .local_agent import _agent_lock
+    from .local_agent import _agent_lock, authentication_binding, classify_failure, MODEL_AUTHENTICATION_NOTE
+    model_stage = contracts.STAGE_BY_ID.get(stage.id, stage).kind == contracts.AGENT
+    auth_binding = authentication_binding() if model_stage else None
     with _agent_lock(timeout):
         current = mf.load(batch_dir)
         env = _stage_env()
@@ -537,12 +539,12 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
             elif code == 0:
                 current["stages"][stage.id].pop("ocr_reconciliation", None)
         if code != 0:
-            source_kind = contracts.STAGE_BY_ID.get(stage.id, stage).kind
             detail = (err or out).strip()
+            authentication_failed = model_stage and classify_failure(err) == "authentication"
             # 429/额度是“稍后可用”，不是确定性失败：与网页后台同一口径回到 pending
             # 并登记冷却，避免 CLI 把外部额度问题写成 failed 让下游误判为内容缺陷。
             from workflow import auto as auto_flow
-            if source_kind == contracts.AGENT and auto_flow._is_rate_limited(detail):
+            if model_stage and not authentication_failed and auto_flow._is_rate_limited(detail):
                 auto_flow._set_cooldown(batch_dir, auto_flow.RATE_LIMIT_BACKOFF_SECONDS)
                 mf.touch_stage(current, stage.id, mf.PENDING, exit_code=code,
                                notes="限流/额度冷却中，稍后自动续跑：" + (detail.splitlines()[-1][:200] if detail else ""))
@@ -550,9 +552,15 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
                 manifest.clear()
                 manifest.update(current)
                 return 4
-            failed_status = mf.NEEDS_REVIEW if code == 3 and source_kind == contracts.AGENT else mf.FAILED
-            mf.touch_stage(current, stage.id, failed_status, exit_code=code,
-                           notes=detail.splitlines()[-1][:300] if detail else "执行失败")
+            failed_status = mf.NEEDS_REVIEW if code == 3 and model_stage else mf.FAILED
+            fields = {"notes": detail.splitlines()[-1][:300] if detail else "执行失败"}
+            if authentication_failed:
+                from .issue_log import record_model_authentication
+
+                failed_status = mf.FAILED
+                fields.update(notes=MODEL_AUTHENTICATION_NOTE, model_authentication=auth_binding)
+                record_model_authentication(batch_dir, stage.id)
+            mf.touch_stage(current, stage.id, failed_status, exit_code=code, **fields)
             label = "待复核" if failed_status == mf.NEEDS_REVIEW else "失败"
             print(f"  {'⏸' if failed_status == mf.NEEDS_REVIEW else '✗'} {label}（exit {code}），日志：{log.relative_to(batch_dir)}")
         else:
@@ -596,7 +604,8 @@ def _validate_inputs(batch_dir: Path, manifest: dict) -> tuple:
     evidence = {"source": json.dumps(source, sort_keys=True, ensure_ascii=False),
                 "original": mf.sha256_file(original) if original else ""}
     for path in ("06_batch/batch_meta.json", "01_source/正文.txt",
-                 "01_source/structure.json", "01_source/structure.confirmed.json"):
+                 "01_source/structure.json", "01_source/structure.confirmed.json",
+                 "07_review/structure-gate.json"):
         evidence[path] = mf.sha256_file(batch_dir / path)
     evidence["answers_json"] = mf.sha256_file(batch_dir / "01_source_ans" / "answers.json")
     return evidence
@@ -625,8 +634,10 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
     report["deferred"] = [{"check": c.name, "stage": "format_gate"}
                           for c in checks.FINAL_FORMAT_CHECKS]
     # 脚本的字段/目录体检不能代替原卷逐题覆盖与材料归属复核。
+    final_payload = None
     try:
-        audit = source_audit_for_batch(batch_dir, json.loads(batch_json.read_text(encoding="utf-8-sig")))
+        final_payload = json.loads(batch_json.read_text(encoding="utf-8-sig"))
+        audit = source_audit_for_batch(batch_dir, final_payload)
     except (OSError, ValueError, TypeError, ImportError) as exc:
         audit = {"passed": False, "issues": [{"code": "SOURCE_AUDIT_UNAVAILABLE", "message": str(exc)}]}
     # 跳过听力的批次只豁免听力单元的题图/选项内容；非听力单元的题干、选项、
@@ -638,16 +649,33 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
     text_issues, deferred_content, media_issues = split_early_source(audit.get("issues", []))
     if audit.get('passed') is not True and not audit.get('issues'):
         text_issues.append({'code': 'SOURCE_AUDIT_UNAVAILABLE', 'message': '原卷审计未完成且未提供具体问题'})
-    if deferred_content:
+    early_delivery = (batch_dir / 'workflow/batch-fill-state.json').is_file() and final_payload is not None
+    if deferred_content and not early_delivery:
         report['deferred_source_content'] = deferred_content
         report.setdefault('warnings', []).append('SOURCE_CONTENT_DEFERRED_TO_FORMAT')
+    # Detect concrete upload blockers before spending either review round.
+    # Reuse the final shape check and source verdict already computed above.
+    # Source-light legacy fixtures still use the ordinary content checks.
+    if early_delivery:
+        from .format_gate import _shape
+        from .findings import normalize
+        early_errors = _shape(final_payload) + deferred_content
+        report['review_preflight'] = {'passed': not early_errors, 'errors': early_errors}
+        if early_errors:
+            report['passed'] = False
+            report.setdefault('blocking_failures', []).append('REVIEW_PREFLIGHT_BLOCKED')
+        report.setdefault('checks', []).append({
+            'check': '审核前交付检查', 'blocking': True, 'passed': not early_errors,
+            'output': '；'.join(row.get('message', '') for row in early_errors[:5]),
+            'findings': [normalize(row, stage='validate', blocking=True) for row in early_errors],
+        })
     if media_issues:
         report.setdefault("warnings", []).append("SOURCE_MEDIA_UNVERIFIED")
     report.setdefault("checks", []).append({
         "check": "原卷逐题覆盖与材料归属 source_audit", "blocking": True,
         "passed": not text_issues,
         "output": "；".join(issue.get("message", "") for issue in (text_issues or media_issues)[:5]),
-        "note": "题干/选项差异保留至最终格式检查；身份和归属错误仍阻断" if deferred_content else ("图片/音频能力受限项只报告，不阻断" if media_issues and not text_issues else ""),
+        "note": ("题干/选项差异由审核前交付检查处理" if early_delivery else "题干/选项差异保留至最终格式检查；身份和归属错误仍阻断") if deferred_content else ("图片/音频能力受限项只报告，不阻断" if media_issues and not text_issues else ""),
     })
     if text_issues:
         report.setdefault("blocking_failures", []).append("SOURCE_SLICE_MISMATCH")

@@ -201,19 +201,21 @@ def candidates_by_number(folder, *, unit_id=None):
 def candidate(folder, unit_id):
     safe = str(unit_id).replace("/", "_").replace("\\", "_")
     path = folder / "candidates" / f"{safe}.json"
-    item = load(path)
-    if item is not None:
-        return item, path
+    draft = load(path)
     batch = load(folder / "06_batch" / "batch_meta.json") or load(folder / "06_batch" / "batch.json") or {}
-    units = batch.get("units", batch.get("items", batch if isinstance(batch, list) else []))
+    units = batch if isinstance(batch, list) else batch.get("units", batch.get("items", []))
     # Current source partitions take precedence over obsolete merged batches
     # for the review display; formal data is not silently rewritten.
     if isinstance(units, list) and source_group_candidates is not None:
         units = source_group_candidates(folder, units)
     for item in units if isinstance(units, list) else []:
-        if str(item.get("id") or item.get("unit_id")) == str(unit_id):
+        if str(item.get("unit_id") or item.get("id")) == str(unit_id):
+            if isinstance(draft, dict):
+                draft_fields = {key: value for key, value in draft.items()
+                                if key not in ("explanation", "articleSummary")}
+                return {**item, **draft_fields}, path
             return item, None
-    return {}, None
+    return (draft, path) if isinstance(draft, dict) else ({}, None)
 
 
 def source_lines(folder):
@@ -3038,6 +3040,40 @@ def drop_short_knowledge_copies(paths):
                        for other in unique)]
 
 
+def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None):
+    """Display locally derived answer tags while their catalog binding is pending."""
+    pending = load(folder / "04_knowledge/answer-point-tags.pending.json", {})
+    if (not isinstance(pending, dict) or pending.get("status") != "pending_catalog_binding"
+            or pending.get("batch") != folder.name or not isinstance(pending.get("labels"), list)):
+        return []
+    rules = taxonomy.type_knowledge_rules()
+    candidates = dict.fromkeys(
+        entry["name"] for entry in pending["labels"]
+        if isinstance(entry, dict) and entry.get("unit_id") == unit_id
+        and isinstance(entry.get("name"), str) and entry["name"].strip()
+        and entry.get("proposed_path") == "词汇/答案考点/" + entry["name"]
+        and isinstance(entry.get("question_type"), str)
+        and any(dim.get("dim") == "答案考点"
+                for dim in rules.get(entry["question_type"], {}).get("dims", []))
+        and (number is None or any(isinstance(source, dict) and str(source.get("number")) == str(number)
+                                  for source in (entry.get("sources") or [])))
+    )
+    if not candidates:
+        return []
+    hashes = pending.get("source_sha256")
+    if not isinstance(hashes, dict):
+        return []
+    for relative in ("06_batch/batch_meta.json", "01_source_ans/answers.json"):
+        if review_hashes is not None and review_hashes.get(relative) != hashes.get(relative):
+            return []
+        try:
+            if hashlib.sha256((folder / relative).read_bytes()).hexdigest() != hashes.get(relative):
+                return []
+        except OSError:
+            return []
+    return list(candidates)
+
+
 def label_payload(row, batch_item, subs, folder, unit_id=None):
     """当前标签值 + 目录校验结果，供人工核对/修改。
 
@@ -3098,6 +3134,7 @@ def label_payload(row, batch_item, subs, folder, unit_id=None):
         warnings.append(item.get("source_notice") or row["source_notice"])
     values["scope"] = "unit"
     values["unit_id"] = str(unit_id or row.get("unit_id") or "")
+    values["answer_point_tags"] = answer_point_tags(folder, values["unit_id"])
     values["subquestion_count"] = len([s for s in subs if s.get("stem") or s.get("options")])
     values["knowledge_editable"] = True
     values["knowledge_manually_saved"] = explicit_knowledge
@@ -3289,11 +3326,25 @@ def review_comparison(folder: Path, unit_id, numbers):
                             continue
                     # 整组抽样：number 为空表示整组核对，覆盖本单元全部小题。
                 assessment = check.get("assessment") if isinstance(check.get("assessment"), dict) else {}
+                expected_answers = answer_point_tags(folder, uid, number=check.get("number"), review_hashes=hashes)
+                reviewed_answers = assessment.get("answer_points")
+                if reviewed_answers is None and assessment and check.get("verdict") == "ok" and expected_answers:
+                    # Older runs already stated some answers in their reasons.
+                    # Only recover those exact terms against the same bound inputs.
+                    rationale = str(check.get("rationale") or "")
+                    reviewed_answers = [value for value in expected_answers
+                                        if re.search(r"(?<![A-Za-z'-])" + re.escape(value) + r"(?![A-Za-z'-])",
+                                                     rationale)]
+                if isinstance(reviewed_answers, list):
+                    assessment = {**assessment, "answer_points": reviewed_answers}
+                if labels.get("type") in ("完成句子", "短文填空") or assessment.get("type") in ("完成句子", "短文填空"):
+                    assessment = {key: value for key, value in assessment.items() if key != "answer_points"}
                 entry["checks"].append({"unit_id": uid, "number": check.get("number"),
                                         "scope": ("subquestion" if str(check.get("number") or "").strip()
                                                   else "unit"),
                                         "verdict": check.get("verdict"), "rationale": check.get("rationale"),
                                         "assessment": assessment, "evidence": check.get("evidence"),
+                                        "expected_answer_points": expected_answers,
                                         "differences": [
                                             {"field": field, "original": labels[field], "reviewed": assessment[field]}
                                             for field in ("type", "subtypes", "knowledge")
@@ -3375,6 +3426,20 @@ def finding_comparison(finding, comparison, numbers, number_map):
                               and not target_covered else "未涉及")
         out["rounds"].append(item)
     return out
+
+
+def paper_uses_bulk_bold(lines):
+    """Detect document-wide bold runs for display, without touching source data."""
+    body = []
+    for line in lines:
+        text = re.sub(r'<(?:/?(?:u|sup|sub)|br\s*/?)>', '', line.strip(), flags=re.I)
+        if not text or text.startswith(('[IMG ', '[TABLE ', '[/TABLE]')):
+            continue
+        body.append(text)
+    return len(body) >= 20 and sum(
+        bool(re.fullmatch(r'(?:\s*\*\*[^*]+\*\*\s*)+', line))
+        for line in body
+    ) >= 0.85 * len(body)
 
 
 def detail(name, unit_id):
@@ -3553,6 +3618,7 @@ def detail(name, unit_id):
             "paper": paper_info(folder, report, manifest),
             "stage": stage_cards(manifest, bool(numbers), bool(advance_state(name).get("running"))),
             "preview_blocks": blocks, "source_preview": text,
+            "paper_bulk_bold": paper_uses_bulk_bold(lines),
             "audio": audio_blocks_list,
             "hidden_media": sorted(drop),
             "manifest": {"status": manifest.get("status", "unknown"), "stages": manifest.get("stages", {})},
@@ -3578,6 +3644,72 @@ def detail(name, unit_id):
                          "sources": taxonomy.sources(), "years": taxonomy.years(),
                          "regions": taxonomy.regions(), "knowledge": taxonomy.knowledge_version()}}
 
+
+MANUAL_CONTENT_FIELDS = ("explanation", "articleSummary")
+
+
+def _content_row(payload, unit_id):
+    rows = payload.get("items") if isinstance(payload, dict) else None
+    matches = [row for row in (rows if isinstance(rows, list) else [])
+               if isinstance(row, dict) and (row.get("unit_id") or row.get("id")) == unit_id]
+    if len(matches) != 1:
+        raise ValueError(f"无法唯一定位正式单元 {unit_id}，未保存")
+    return matches[0]
+
+
+def apply_manual_content(folder: Path, unit_id, unit, expected, files, current,
+                         payload, has_unit_edit) -> dict:
+    """Stage the accepted text, provenance and gate changes for one install."""
+    import hashlib
+    from workflow import manual_content, stage_semantics
+    from workflow.agent_tasks import _safe_path
+
+    unit = unit or {}
+    edit = {key: unit[key] for key in MANUAL_CONTENT_FIELDS if key in unit}
+    result = {"applied": False, "paths": [], "skipped": [], "reason": ""}
+    if not edit:
+        return result
+    if any(not isinstance(value, str) for value in edit.values()):
+        raise ValueError("解析和文章大意必须是文本")
+    target = "06_batch/batch_meta.json"
+    artifact = "04_knowledge/explanations.json"
+    row = _content_row(payload, unit_id)
+    if expected is not None and any(expected.get(key) != (row.get(key) or "") for key in edit):
+        raise ValueError("正式内容已变化，请重新打开本题后再修改")
+    edit = {key: value for key, value in edit.items() if row.get(key, "") != value}
+    if not edit and not has_unit_edit:
+        return result
+    explanations = load(_safe_path(folder, artifact))
+    explanation_row = _content_row(explanations, unit_id)
+    if current is not None:
+        stages = current["stages"]
+        record = stages["explanations"]
+        if (stages["upload_gate"].get("status") == wf_manifest.APPROVED
+                or stages["upload"].get("status") == wf_manifest.COMPLETED):
+            raise ValueError("此批次已批准上传或已上传，不能覆盖已绑定的内容")
+        spec = wf_contracts.STAGE_BY_ID["explanations"]
+        stale, _ = wf_manifest.is_stale(folder, current, spec)
+        if record.get("status") != wf_manifest.COMPLETED or stale or record.get("rebuild_required"):
+            raise ValueError("解析阶段未完成或产物已过期，不能同步正式批次")
+    if has_unit_edit:
+        files[target] = payload
+        files[manual_content.RELATIVE] = manual_content.prepare(folder, unit_id, edit)
+        result["paths"].append(manual_content.RELATIVE)
+    if edit:
+        explanation_row.update(edit)
+        row.update(edit)
+        files[artifact] = explanations
+        files[target] = payload
+        result.update(applied=True, paths=[artifact, target, *result["paths"]])
+        if current is not None:
+            raw = json.dumps(explanations, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+            record["output_hashes"] = {artifact: hashlib.sha256(raw.replace("\n", os.linesep).encode("utf-8")).hexdigest()}
+            if record.get("semantic_version") == stage_semantics.VERSION:
+                record["semantic_outputs"] = {artifact: stage_semantics.digest(stage_semantics.without_clocks(explanations))}
+            wf_manifest.record_decision(current, "explanations", "manual_edit", "workbench",
+                                        f"{unit_id}: {', '.join(edit)}", result["paths"])
+            wf_manifest.invalidate_downstream(folder, current, "assemble", "工作台人工修改解析/大意，旧检查与审核结果失效")
+    return result
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -3786,9 +3918,19 @@ class Handler(BaseHTTPRequestHandler):
                 unit_edit = payload.get("unit")
                 if unit_edit is not None and not isinstance(unit_edit, dict):
                     raise ValueError("unit 必须是对象")
+                if unit_edit is not None and not any(
+                        key in unit_edit for key in ("material", *MANUAL_CONTENT_FIELDS)):
+                    raise ValueError("unit 没有可保存的字段")
                 if not items and not labels and not unit_edit:
                     raise ValueError("没有可保存的内容")
-                saved = self.save_units(folder, unit_id, items, labels, unit_edit)
+                expected = payload.get("expected")
+                checkable = [key for key in MANUAL_CONTENT_FIELDS if unit_edit and key in unit_edit]
+                if expected is not None and not isinstance(expected, dict):
+                    raise ValueError("expected 必须是对象")
+                if checkable and (expected is None or any(
+                        not isinstance(expected.get(key), str) for key in checkable)):
+                    raise ValueError("缺少这些字段修改前的正式内容，请重新打开本题")
+                saved = self.save_units(folder, unit_id, items, labels, unit_edit, expected)
                 return self.send_json({"ok": True, **saved})
             self.send_json({"error": "not found"}, 404)
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -3799,14 +3941,44 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     @serialized
     def save_units(folder: Path, unit_id: str, items: list[dict], labels: dict | None = None,
-                   unit: dict | None = None) -> dict:
-        """标签写一份（单元级），题面按小题各写各的候选。
+                   unit: dict | None = None, expected: dict | None = None) -> dict:
+        from contextlib import ExitStack
+        from workflow import supervisor
+        from workflow.agent_tasks import _safe_path
+        from workflow.local_agent import _agent_lock, AgentError
 
-        组题（完形/阅读等）整体打标一次，子题不重复存标签，避免同一套标签散在
-        5–10 个文件里、改一处漏九处。写入的仍是 candidates 草稿，不是入库。
-        """
-        if not folder.is_dir():
+        if not folder.is_dir() or folder.is_symlink():
             raise ValueError("批次不存在或已归档，请刷新列表")
+        run_lock = _safe_path(folder, "workflow/.run.lock")
+        busy = f"批次「{folder.name}」正在运行（{folder}），本次未保存"
+        with ExitStack() as locks:
+            if not locks.enter_context(supervisor._try_file_lock(supervisor._auto_lock_path(folder))):
+                raise ValueError(busy)
+            run_lock.parent.mkdir(parents=True, exist_ok=True)
+            if not locks.enter_context(supervisor._try_file_lock(run_lock)):
+                raise ValueError(busy)
+            try:
+                locks.enter_context(_agent_lock(0))
+            except AgentError as exc:
+                raise ValueError(busy) from exc
+            return Handler._save_units_locked(folder, unit_id, items, labels, unit, expected)
+
+    @staticmethod
+    def _save_units_locked(folder, unit_id, items, labels, unit, expected):
+        from workflow.agent_tasks import _install, _safe_path
+
+        files = {}
+        manifest_rel = "workflow/manifest.json"
+        manifest_path = _safe_path(folder, manifest_rel)
+        current = wf_manifest.load(folder) if wf_manifest is not None and manifest_path.is_file() else None
+        if unit:
+            try:
+                payload = load(_safe_path(folder, "06_batch/batch_meta.json"))
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"批次「{folder.name}」缺少可编辑的正式批次（{exc}），未保存") from exc
+        else:
+            payload = None
+        applied = apply_manual_content(folder, unit_id, unit, expected, files, current, payload, bool(unit))
         if labels is not None and "knowledge" in labels:
             labels = {**labels, "knowledge": taxonomy.require_knowledge(labels["knowledge"])}
         rows = merged_rows(folder, report_for(folder))
@@ -3836,9 +4008,10 @@ class Handler(BaseHTTPRequestHandler):
         warnings = []
         with _lock:
             if unit:
-                # 单元级正文/解析：写入单元草稿候选，candidate() 优先读取它；
+                # 单元级正文/解析/文章大意：写入单元草稿候选，candidate() 优先读取它；
                 # 不直接改 batch.json 正式清单。
-                allowed = {k: unit[k] for k in ("material", "explanation") if k in unit}
+                # 解析/大意直接落到正式批次与解析产物；草稿只保留材料，避免同一字段两份来源。
+                allowed = {k: unit[k] for k in ("material",) if k in unit}
                 if allowed:
                     safe = str(unit_id).replace("/", "_").replace("\\", "_")
                     target = folder / "candidates" / f"{safe}.json"
@@ -3850,11 +4023,9 @@ class Handler(BaseHTTPRequestHandler):
                     merged.update({k: ("" if v is None else str(v)) for k, v in allowed.items()})
                     merged["updated_by"] = "workbench"
                     merged["updated_at"] = now()
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    if target.is_file():
-                        shutil.copy2(target, target.with_suffix(target.suffix + ".bak"))
-                    save_json(target, merged)
-                    saved.append(str(target.relative_to(folder)))
+                    relative = target.relative_to(folder).as_posix()
+                    files[relative] = merged
+                    saved.append(relative)
             if labels:
                 target = unit_label_path(folder, unit_id)
                 merged = dict(load(target, {}))
@@ -3888,11 +4059,9 @@ class Handler(BaseHTTPRequestHandler):
                 merged["inherit_subquestions"] = len(merged["numbers"]) > 1
                 merged["updated_by"] = "workbench"
                 merged["updated_at"] = now()
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if target.is_file():
-                    shutil.copy2(target, target.with_suffix(target.suffix + ".bak"))
-                save_json(target, merged)
-                saved.append(str(target.relative_to(folder)))
+                relative = target.relative_to(folder).as_posix()
+                files[relative] = merged
+                saved.append(relative)
                 warnings.extend(f"单元 {unit_id}：{text}" for text in found)
             for item in items:
                 number = str(item.get("number") or "").strip()
@@ -3912,23 +4081,33 @@ class Handler(BaseHTTPRequestHandler):
                         path = folder / "candidates" / f"{stem_name}-{index}.json"
                         index += 1
                     existing = {"unit_id": owner.get(number) or f"LOCAL-Q{int(number):02d}", "number": number}
-                merged = dict(existing)
-                for key in ("stem", "options", "answer"):
-                    if key in item:
-                        merged[key] = item[key]
+                if number in by_number:
+                    # 新建草稿时 existing 只是索引占位，不能当作旧值比较。
+                    merged = {key: item[key] for key in ("stem", "options", "answer") if key in item}
+                else:
+                    merged = dict(existing)
+                    for key in ("stem", "options", "answer"):
+                        if key in item:
+                            merged[key] = item[key]
                 merged["updated_by"] = "workbench"
                 merged["updated_at"] = now()
-                if path.is_file():
-                    shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
-                save_json(path, merged)
-                saved.append(str(path.relative_to(folder)))
-        # Any题面/标签编辑 invalidates review and downstream upload gates. Keep the
-        # previous comparison snapshot for display, but never reuse it for approval.
-        if saved and wf_manifest is not None and (folder / "workflow" / "manifest.json").is_file():
-            current = wf_manifest.load(folder)
-            wf_manifest.invalidate_downstream(folder, current, "review", "工作台编辑了题面或标签，旧审核结果失效")
-            wf_manifest.save(folder, current)
-        return {"saved": saved, "warnings": warnings}
+                relative = path.relative_to(folder).as_posix()
+                files[relative] = merged
+                saved.append(relative)
+        if unit and "material" in unit:
+            applied["skipped"].append("material")
+            warnings.append("材料仅保存为草稿")
+        if items:
+            applied["skipped"].append("items")
+            warnings.append("小题改动仅保存为草稿")
+        if files and current is not None:
+            if not applied["applied"]:
+                wf_manifest.invalidate_downstream(folder, current, "review", "工作台编辑了题面或标签，旧审核结果失效")
+            current["updated_at"] = wf_manifest.now_iso()
+            files[manifest_rel] = current
+        if files:
+            _install(folder, files)
+        return {"saved": saved, "warnings": warnings, "applied": applied}
 
 
 _workflow_supervisor = None

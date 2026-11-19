@@ -714,6 +714,8 @@ def touch_stage(manifest: dict, stage_id: str, status: str, **fields) -> None:
     record = manifest["stages"].setdefault(stage_id, {})
     previous = record.get("status")
     record["status"] = status
+    if status == RUNNING or status in TERMINAL_OK:
+        record.pop("model_authentication", None)
     if status not in (BLOCKED, NEEDS_REVIEW):
         record.pop("execution_completed", None)
         record.pop("continue_unqualified", None)

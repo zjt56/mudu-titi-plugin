@@ -578,6 +578,24 @@ class WorkflowSupervisor:
             state.update(no_progress_attempts=0, status="progress")
             state.pop("escalation", None)
             reservation = 0
+        if any(record.get("model_authentication") for record in manifest["stages"].values()):
+            from . import manifest as mf, self_heal
+
+            waits = self_heal.authentication_waits(manifest)
+            if waits and not any(
+                    sid in LOCAL_STAGES and sid not in waits and record.get("status") not in OK
+                    and all(mf.dependency_satisfied(manifest, dep, allow_unqualified=True)
+                            for dep in contracts.STAGE_BY_ID[sid].depends_on)
+                    for sid, record in manifest["stages"].items()):
+                if state.get("status") != "model_authentication" or changed:
+                    state.update(status="model_authentication", progress=progress, next_retry_at=0,
+                                 retry_reservation_at=0, no_progress_attempts=0, updated_at=now)
+                    state.pop("escalation", None)
+                    _write_existing(folder, LEDGER, state)
+                return "model_authentication"
+            if state.get("status") == "model_authentication":
+                state.update(status="progress", no_progress_attempts=0)
+                reservation = 0
         # OCR polling has its own durable timer. Waiting for an acknowledged job
         # neither spends no-progress/repair attempts nor borrows model cooldown.
         from .runner import ocr_wait_state, ocr_reconciliation_state

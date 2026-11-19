@@ -173,6 +173,14 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None):
             if value not in (None, ""):
                 data[key] = deepcopy(value)
 
+    # Blank source fields are absence markers, not explicit values: drop them so
+    # an optional field (year/location/version/...) is either a real value or
+    # omitted, never an empty string the wire check must special-case.
+    for key in SOURCE_KEYS:
+        if isinstance(data.get(key), str) and not data[key].strip():
+            data.pop(key, None)
+            filters.pop(key, None)
+
     if data.get("year") is not None:
         data["year"] = _year(data["year"])
     if "year" in filters and data.get("year") is not None:

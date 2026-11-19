@@ -12,6 +12,25 @@ MARK = '听力录音材料：\n'
 SOURCES = ('01_source/附录.txt', '01_source/正文.txt', '01_source_ans/正文.txt')
 
 
+def is_end(line):
+    section = SECTION.match(line)
+    return bool(END.fullmatch(line) or section and END.fullmatch(section.group(1)))
+
+
+def without_scripts(lines):
+    """Keep source coordinates while excluding transcript-only numbering."""
+    inside = False
+    for line in lines:
+        if HEADER.fullmatch(line):
+            inside = True
+            yield line  # Keep the heading as the preceding explanation's boundary.
+        elif inside and not is_end(line):
+            yield ''
+        else:
+            inside = False
+            yield line
+
+
 def _type_map(batch):
     try:
         data = json.loads((Path(batch) / '03_types/types.json').read_text(encoding='utf-8-sig'))
@@ -67,12 +86,10 @@ def extract(batch, units):
             current = None
         for i in range(starts[0] + 1, len(lines)):
             line = lines[i]
-            if END.fullmatch(line):
+            if is_end(line):
                 flush(); break
             section = SECTION.match(line)
             if section:
-                if END.fullmatch(section.group(1)):
-                    flush(); break
                 classified = _section_type(section.group(1))
                 if classified:
                     flush(); category = classified; continue

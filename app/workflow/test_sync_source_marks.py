@@ -6,6 +6,7 @@ import tempfile
 import json
 import unittest
 
+from . import denoise, extract, preview, question_draft, review_child_source, structure_gate, upload_content
 from . import sync_practice as sp
 from .question_identity import assign_scoped
 
@@ -172,6 +173,142 @@ class SourceMarksTest(unittest.TestCase):
             before = source.read_bytes(), batch.read_bytes()
             self.assertEqual(module.main(['--batch', str(batch), '--source', str(source)]), 1)
             self.assertEqual((source.read_bytes(), batch.read_bytes()), before)
+
+    def test_script_counts_only_question_body_when_structure_binding_is_current(self):
+        import hashlib
+        path = Path(__file__).resolve().parents[1] / 'scripts/06-upload/audit_source_marks.py'
+        spec = importlib.util.spec_from_file_location('test_bound_source_mark_script', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+
+            def put(relative, value):
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(value, encoding='utf-8')
+                return target
+
+            def digest(target):
+                return hashlib.sha256(target.read_bytes()).hexdigest()
+
+            question = '1.[传统文化]Who?'
+            original = put('original.txt', question + '\n答案与解析\n【熟词生义】\ncanned adj. 罐装的')
+            batch = put('06_batch/batch_meta.json', json.dumps({'items': [{'stem': question}]}))
+            body = put('01_source/正文.txt', question)
+            structure = put('01_source/structure.json', '{}')
+            confirmed = put('01_source/structure.confirmed.json', '{}')
+            put('07_review/structure-gate.json', json.dumps({
+                'passed': True, 'original_sha256': digest(original),
+                'input_hashes': {p.relative_to(root).as_posix(): digest(p) for p in (body, structure, confirmed)},
+            }))
+            argv = ['--batch', str(batch), '--source', str(original)]
+            self.assertEqual(module.main(argv), 0)
+            put('06_batch/batch_meta.json', json.dumps({'items': [{'stem': '1.Who?'}]}))
+            self.assertEqual(module.main(argv), 1)  # A real paper mark is still required.
+            put('06_batch/batch_meta.json', json.dumps({'items': [{'stem': question}]}))
+            for target in (body, original):
+                with self.subTest(target=target.name):
+                    before = target.read_bytes()
+                    target.write_bytes(before + b'\nchanged')
+                    self.assertEqual(module.main(argv), 1)  # No narrowed check on stale evidence.
+                    target.write_bytes(before)
+
+
+    def test_inline_phrase_answers_and_unnumbered_writing_keep_the_mark(self):
+        text = ('九上 · 人教版 · 课时A计划\n'
+                'Unit 1　The Changing World\n'
+                '单元话题写作\n'
+                '根据汉语提示完成下列句子\n'
+                '1.Hefei ______(改变了很多) since I moved here.\n'
+                '2.______(多亏了村民们的努力),our hometown is becoming more beautiful.\n'
+                '3.Many rivers were polluted in my hometown ______(在过去).\n'
+                '4.______(随着……的发展) Chinese railways are ______(越来越方便).\n'
+                '5.The local government ______(已把这家旧工厂变成了) a beautiful park.\n'
+                '[2023·**安徽**]假定你是李辉,你制作的关于家乡变化的海报在某英文网站展示并获得好评。'
+                '请结合下面图示信息,用英语写一篇短文,向该网站浏览者简述你的制作经历。\n'
+                '[IMG image22.jpg]\n'
+                'My Experience of Making a Poster\n'
+                'Last week,I made a poster of the great changes in my hometown.<u> </u>\n'
+                '[IMG image9.jpg]审题思路[IMG image10.jpg]\n'
+                '1.文体:记叙文。\n'
+                '2.主题:介绍自己制作关于家乡变化的海报的经历。\n'
+                '3.人称:以第一人称为主。\n'
+                '4.时态:以一般过去时为主。\n'
+                '[IMG image9.jpg]写作提纲[IMG image10.jpg]\n'
+                '[IMG image23.jpg]\n'
+                '**参考答案**\n'
+                '[IMG image85.jpg]句型训练[IMG image86.jpg]\n'
+                '1.has changed a lot　2.Thanks to the villagers’ efforts　3.in the past　'
+                '4.With the development of;more and more convenient　5.has turned/changed the/this old factory into\n')
+        self.assertEqual(sp.answer_key_start(text), 21)
+        structure, body, appendix = extract.infer_structure(text)
+        self.assertNotIn('参考答案', body)
+        self.assertTrue(appendix.startswith('**参考答案**'))
+        cleaned = denoise.clean_body(body)[0]
+        units = structure_gate._build_units(structure['sections'], structure.get('groups', []),
+                                            cleaned.splitlines())
+        self.assertFalse(any('has turned/changed' in str(unit.get('stem')) for unit in units))
+        writing = [unit for unit in units
+                   if (unit.get('source_span') or {}).get('number_binding') == 'single_writing_section']
+        self.assertEqual(len(writing), 1)
+        span = writing[0]['source_span']
+        self.assertEqual(span.get('printed_numbers'), [])
+        section = writing[0]['source_section']
+        self.assertIn('[2023·安徽]', sp.source_marks(section['title']))
+        heading_line = section['start_line']
+        self.assertEqual(sp.plain_text(cleaned.splitlines()[heading_line - 1]).strip(),
+                         sp.plain_text(section['title']).strip())
+        self.assertTrue(heading_line <= span['start_line'] <= span['end_line'] <= section['end_line'])
+
+    def test_two_writing_prompts_and_labelled_sentence_key_keep_separate_scopes(self):
+        text = (
+            '九上 · 人教版 · 课时A计划\nUnit 1 The Changing World\n单元话题写作\n'
+            '常从描述城市、乡镇的变化进行考查。\n'
+            '根据汉语提示完成下列句子\n1.Hefei ______ (改变了很多).\n2.We ______ (取得了进步).\n'
+            '[2023·安徽]请结合下图,用英语写一篇短文,简述你的制作经历。\n'
+            'My Poster\nI made a poster.<u> </u>\n'
+            '[IMG left.jpg]审题思路[IMG right.jpg]\n1.文体:记叙文。\n2.主题:制作海报。\n'
+            '[新考法·思维导图提示]请根据下图,用英语向他们介绍科技如何改变生活。\n'
+            '注意:1.词数80~100;\n2.适当发挥。\nTechnology has changed our lives.<u> </u>\n'
+            '**参考答案**\n[IMG left.jpg]句型训练[IMG right.jpg]\n1.has changed a lot　2.made progress\n'
+            '实战演练\nTechnology has changed our lives.\n'
+        )
+        structure, body, appendix = extract.infer_structure(text)
+        self.assertNotIn('region', denoise.extract_meta(text.splitlines()))
+        self.assertNotIn('made progress', body)
+        units = structure_gate._build_units(structure['sections'], [], body.splitlines())
+        self.assertEqual([unit['type'] for unit in units],
+                         ['完成句子', '完成句子', '书面表达', '书面表达'])
+        self.assertEqual(structure_gate._scoped_source_errors(units, structure['sections'], body.splitlines(), []), [])
+        first, second = units[-2:]
+        for unit in (first, second):
+            self.assertEqual(unit['source_span']['printed_numbers'], [])
+            self.assertTrue(preview._scoped_source_slice(unit, body.splitlines())[0].startswith('['))
+        self.assertNotIn('文体:', first['stem'])
+        self.assertIn('2.适当发挥', second['stem'])
+        self.assertNotEqual(first['question_ids']['1'], second['question_ids']['1'])
+        proof = review_child_source.prove_child(body, second, '1')
+        self.assertEqual(proof['status'], 'proven', proof)
+        self.assertIn('2.适当发挥', proof['text'])
+        self.assertNotIn('My Poster', proof['text'])
+        shortened = {**second, 'stem': '2.适当发挥。'}
+        self.assertEqual(review_child_source.prove_child(body, shortened, '1')['status'], 'uncertain')
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '01_source').mkdir()
+            (root / '01_source/正文.txt').write_text(body, encoding='utf-8')
+            (root / '01_source/附录.txt').write_text(appendix, encoding='utf-8')
+            (root / '01_source/structure.json').write_text(json.dumps(structure), encoding='utf-8')
+            draft = question_draft.build(root, units=units)
+            self.assertEqual(draft['issues'], [])
+            self.assertIn('[2023·安徽]', draft['items'][-2]['stem'])
+            self.assertIn('[新考法·思维导图提示]', draft['items'][-1]['stem'])
+            self.assertEqual(upload_content.resolve_scoped_answer(root, units[1], 2),
+                             {'answer': 'made progress', 'evidence': ['01_source/附录.txt:3']})
+            (root / '01_source/附录.txt').write_text(appendix.replace('句型训练', '其他练习'), encoding='utf-8')
+            self.assertIsNone(upload_content.resolve_scoped_answer(root, units[1], 2))
 
 
 if __name__ == '__main__':

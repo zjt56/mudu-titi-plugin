@@ -80,6 +80,19 @@ class SupervisorFixture(unittest.TestCase):
 
 
 class SupervisorTest(SupervisorFixture):
+    def test_credential_wait_does_not_spend_dispatch_budget_and_resumes_on_revision(self):
+        folder = self.make_batch(stages={
+            'preassemble': {'status': 'failed', 'model_authentication': {'revision': 1}}})
+        worker = self.make_supervisor()
+        with patch.object(local_agent, 'authentication_binding', return_value={'revision': 1}) as binding:
+            for _ in range(4):
+                self.assertEqual(worker._tick_batch(folder, self.clock()), 'model_authentication')
+            worker.dispatch.assert_not_called()
+            self.assertEqual(self.state(folder)['no_progress_attempts'], 0)
+            binding.return_value = {'revision': 2}
+            self.assertEqual(worker._tick_batch(folder, self.clock()), 'dispatched')
+        worker.dispatch.assert_called_once_with(folder.name)
+
     def test_failed_stage_recovers_advances_and_real_format_gate_completes(self):
         folder = self.make_batch(stages={"validate": {"status": "failed", "notes": "bad field"},
             "review_gate": {"status": "blocked"}}, status="pending_confirmation")

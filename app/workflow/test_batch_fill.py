@@ -116,6 +116,23 @@ class BatchFillTest(unittest.TestCase):
         self.assertEqual(set(state["units"]["q-1"]["stages"]), {"answers", "types", "explanations", "knowledge"})
         self.assertEqual(state["payload_sha256"], question_draft._digest(self.load()))
 
+    def test_newly_proven_source_type_refreshes_finalized_base_without_losing_fill(self):
+        batch_fill.initialize(self.root)
+        batch_fill.sync(self.root, "answers", {"answers": {"1": "A"}})
+        batch_fill.mark_finalized(self.root)
+        confirmed = self.load("01_source/structure.confirmed.json")
+        confirmed["meta"]["source_type"] = "同步练习"
+        self.put("01_source/structure.confirmed.json", confirmed)
+        batch_fill.initialize(self.root)
+        row = self.load()["items"][0]
+        self.assertEqual(row["answer"], "A")
+        self.assertEqual(row["source"], "真实原卷")
+        self.assertEqual(row["source_type"], "同步练习")
+        self.assertEqual(self.load(batch_fill.BATCH_BASE)["items"][0]["source_type"], "同步练习")
+        saved = self.snapshot()
+        batch_fill.initialize(self.root)
+        self.assertEqual(self.snapshot(), saved)
+
     def test_file_payload_metadata_and_local_audio(self):
         batch_fill.initialize(self.root)
         self.put(batch_fill.ARTIFACTS["answers"], {"answers": {"2": "B"}})
@@ -128,7 +145,7 @@ class BatchFillTest(unittest.TestCase):
         self.assertEqual(rows[0]["filterMetadata"]["region"], "安徽省")
         self.assertEqual(self.load()["name"], "真题卷")
         self.assertEqual(rows[1]["filterMetadata"]["year"], 2021)
-        self.assertEqual(rows[0]["attachments"][0]["url"], "02_audio/clips/one.mp3")
+        self.assertEqual(rows[0]["attachments"][0]["url"], f"/source-media/{self.root.name}/one.mp3")
         self.assertTrue(batch_fill.is_filling(self.root))
 
     def test_unchanged_initialize_and_sync_do_not_rewrite_or_erase_labels(self):

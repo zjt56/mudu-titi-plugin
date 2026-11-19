@@ -252,6 +252,7 @@ def project_final_view(batch_dir, payload: dict) -> dict:
     early view owns underline placement and deterministic metadata categories.
     """
     from . import agent_tasks, handoff
+    from .wire_format import SOURCE_KEYS
     root = Path(batch_dir)
     marked = root / '06_batch/batch_meta.json'
     base = root / '06_batch/batch_meta.base.json'
@@ -268,6 +269,8 @@ def project_final_view(batch_dir, payload: dict) -> dict:
     units = agent_tasks.confirmed_units(root)
     source = agent_tasks._coverage(source_view, units)
     final = copy.deepcopy(payload)
+    if "name" in source_view:
+        final["name"] = source_view["name"]
     rows = agent_tasks._coverage(final, units)
 
     def overlay(target, early):
@@ -276,15 +279,21 @@ def project_final_view(batch_dir, payload: dict) -> dict:
             if key in early:
                 target[key] = copy.deepcopy(early[key])
         filters = target.setdefault('filterMetadata', {})
-        for key, value in (early.get('filterMetadata') or {}).items():
+        early_filters = early.get('filterMetadata') or {}
+        # The early view has already resolved the paper's source fields. Keep
+        # those values when the wire normalizer supplied a different fallback.
+        for key in SOURCE_KEYS:
+            if key in early and early[key] not in (None, ''):
+                target[key] = copy.deepcopy(early[key])
+        for key, value in early_filters.items():
             if key not in ('subtypes', 'difficulty', 'difficultyValue'):
                 filters[key] = copy.deepcopy(value)
         # An accepted answer producer's judged difficulty supersedes the early
         # neutral metadata default; aliases must agree in the actual final view.
-        level = target.get('difficulty') or filters.get('difficulty') or (early.get('filterMetadata') or {}).get('difficulty')
+        level = target.get('difficulty') or filters.get('difficulty') or early_filters.get('difficulty')
         if level:
             filters['difficulty'] = level
-        if 'difficultyValue' not in filters and 'difficultyValue' in (early.get('filterMetadata') or {}):
+        if 'difficultyValue' not in filters and 'difficultyValue' in early_filters:
             filters['difficultyValue'] = early['filterMetadata']['difficultyValue']
 
     for unit in units:

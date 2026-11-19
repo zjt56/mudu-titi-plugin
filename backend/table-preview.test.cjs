@@ -32,13 +32,31 @@ test('普通下划线文字不被当成空档', () => {
   assert.equal(ctx.markLine('to be __careful__ here'), 'to be <u>careful</u> here');
 });
 
+test('正文保留上下标，外部字体标签及属性按文本处理', () => {
+  const { markLine } = harness();
+  assert.equal(markLine('x<sup>2</sup> H<sub>2</sub>O **重点**'),
+    'x<sup>2</sup> H<sub>2</sub>O <b>重点</b>');
+  assert.match(markLine('<sup style="font-family:Arial">2</sup>'), /^&lt;sup style=/);
+  assert.match(markLine('<font face="Arial">Text</font>'), /^&lt;font /);
+});
+
 test('无题号的空白下划线保留为普通填空线', () => {
   const ctx = harness();
   assert.match(ctx.markLine('a <u> </u> b'), /<u> <\/u>/);
 });
 
+test('通篇加粗只在该试卷的渲染中压平，保留局部粗体、画线和上下标', () => {
+  const { markLine } = harness();
+  const paragraph = '**Most**** of the ****<u>words</u><sup>2</sup>.**';
+  assert.equal(markLine(paragraph, true), 'Most of the <u>words</u><sup>2</sup>.');
+  assert.equal(markLine('****What class?**', true), 'What class?');
+  assert.equal(markLine('**', true), '');
+  assert.equal(markLine('See **this word** here.', true), 'See <b>this word</b> here.');
+  assert.equal(markLine('**word**'), '<b>word</b>');
+});
+
 function renderTable(block) {
-  const from = client.indexOf('      function renderBlocks(blocks) {');
+  const from = client.indexOf('      function renderBlocks(');
   const to = client.indexOf('      // 预览小字标签', from);
   const ctx = vm.createContext({
     h: (type, props, ...children) => ({ type, props, children }),

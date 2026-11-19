@@ -6,9 +6,107 @@ conflicting or unbound content declines this path; it never becomes a placeholde
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 from pathlib import Path
 
 from . import upload_content as source
+
+
+def legacy_verified_units(batch, units):
+    """Copy only whole units with unique answers inside matching paper sections."""
+    from .agent_tasks import _answer_comparison_text, _safe_path
+    from .content_rules import is_placeholder
+    from .listening_script import without_scripts
+    batch = Path(batch)
+    if not units or any(unit.get('identity_version') or unit.get('source_span', {}).get('number_binding')
+                        == 'unnumbered_section' for unit in units):
+        return {}
+    try:
+        def read(relative):
+            return _safe_path(batch, relative).read_bytes()
+
+        def sha(raw):
+            return hashlib.sha256(raw).hexdigest()
+
+        gate = json.loads(read('07_review/structure-gate.json'))
+        if gate.get('passed') is not True:
+            return {}
+        manifest = json.loads(read('workflow/manifest.json'))
+        inputs = manifest.get('inputs') or {}
+        original = (inputs.get('source') or {}).get('path')
+        if not original or sha(Path(original).read_bytes()) != gate.get('original_sha256'):
+            return {}
+        bindings = gate.get('input_hashes', {})
+        source_files = ('01_source/正文.txt', '01_source/structure.json',
+                        '01_source/structure.confirmed.json')
+        body_raw, structure_raw, confirmed_raw = (read(name) for name in source_files)
+        if any(sha(raw) != bindings.get(name) for name, raw in zip(
+                source_files, (body_raw, structure_raw, confirmed_raw))):
+            return {}
+        body = body_raw.decode('utf-8-sig').splitlines()
+        structure = json.loads(structure_raw)
+        owners, headings = {}, set()
+        for row in structure.get('sections', []):
+            index = row.get('source_line', 0)
+            if type(index) is not int or not 1 <= index <= len(body):
+                return {}
+            title = source._section(source._source_line(body[index - 1]))
+            if not title or not all(title) or title in headings:
+                return {}
+            headings.add(title)
+            for entry in row.get('questions', []):
+                numbers = range(entry[0], entry[-1] + 1) if isinstance(entry, list) else (entry,)
+                for number in numbers:
+                    if str(number) in owners:
+                        return {}
+                    owners[str(number)] = title
+
+        # Use the same material that the answer task exports and validates.
+        prepared = '01_source_ans/正文.txt'
+        has_prepared = _safe_path(batch, prepared).is_file()
+        if not has_prepared and (inputs.get('answers') or {}).get('path'):
+            return {}
+        path = prepared if has_prepared else '01_source/附录.txt'
+        if path in source.reference_only_sources(batch):
+            return {}
+        lines = list(without_scripts(map(source._source_line, read(path).decode('utf-8-sig').splitlines())))
+        candidates, uncertain = {}, {}
+        section = None
+        for index, line in enumerate(lines, 1):
+            title = source._section(line)
+            if title:
+                section = title if title in headings and title[1] != '书面表达' else None
+            if section is None:
+                continue
+            parsed = source._answer_items(line)
+            independent_key = (len(parsed) > 1 or re.search(source.EXPLANATION_LABEL, line)
+                               or '【答案】' in line
+                               or index < len(lines) and source.STRAY_EXPLANATION.match(lines[index]))
+            for number, value in parsed:
+                key = str(number)
+                if owners.get(key) != section or not value or is_placeholder(value):
+                    continue
+                target = candidates if independent_key or re.fullmatch('[A-G]', value) else uncertain
+                target.setdefault(key, []).append((value, f'{path}:{index}'))
+        result = {}
+        for unit in units:
+            keys = list(map(str, unit['numbers']))
+            if unit.get('type') == '书面表达':
+                result[unit['unit_id']] = {'answers': {}, 'evidence': {}, 'missing': {}}
+                continue
+            if any(key not in candidates or len({_answer_comparison_text(value) for value, _ in
+                                                 candidates[key] + uncertain.get(key, [])}) != 1
+                   for key in keys):
+                continue
+            result[unit['unit_id']] = {
+                'answers': {key: candidates[key][0][0] for key in keys},
+                'evidence': {key: list(dict.fromkeys(ref for _, ref in candidates[key])) for key in keys},
+                'missing': {},
+            }
+        return result
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError):
+        return {}
 
 
 def build_payload(batch_dir, retained_payload=None):
@@ -22,7 +120,18 @@ def build_payload(batch_dir, retained_payload=None):
     batch = Path(batch_dir)
     try:
         units = confirmed_units(batch)
-        if not units or any(u.get('identity_version') != 'scoped-v1' for u in units):
+        if not units:
+            return None
+        if all(not u.get('identity_version') for u in units):
+            if retained_payload is not None:
+                return None
+            verified = legacy_verified_units(batch, units)
+            if len(verified) != len(units):
+                return None
+            combined = {key: {number: value for row in verified.values() for number, value in row[key].items()}
+                        for key in ('answers', 'evidence', 'missing')}
+            return combined if combined['answers'] else None
+        if any(u.get('identity_version') != 'scoped-v1' for u in units):
             return None
         keys = {question_key(u, n) for u in units for n in u['numbers']}
         retained = {}

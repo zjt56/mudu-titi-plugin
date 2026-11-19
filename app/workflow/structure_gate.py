@@ -135,6 +135,13 @@ def _scope_windows(sections: list[dict], source_lines: list[str], visual_columns
     return rows
 
 
+def _inline_unnumbered_writing(section, lines):
+    from .sync_practice import writing_prompt
+    return (_section_type_label(section.get("type")) == "书面表达"
+            and not _section_numbers(section)
+            and writing_prompt(lines[section["source_line"] - 1]))
+
+
 def _scope_anchors(lines: list[str]) -> list[tuple[int, int]]:
     """Printed item anchors, including dialogue slots and same-line exercises.
 
@@ -274,6 +281,19 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
             # 图片理解能力受限不等于可以漏掉整节；仍必须保留绑定原文的来源单元。
             errors.append({"code": "SOURCE_SECTION_UNCOVERED", "source_line": start,
                            "message": "原文大题窗口未产生任何来源单元"})
+        if _inline_unnumbered_writing(section, lines):
+            from .sync_practice import writing_prompt_end
+            task_end = start + writing_prompt_end(lines[start:end])
+            owners = [u for u in units
+                      if start < (u.get("source_span") or {}).get("start_line", 0) <= end]
+            if (len(owners) != 1 or owners[0].get("unit_kind") != "standalone"
+                    or owners[0]["source_span"].get("printed_numbers") != []
+                    or owners[0]["source_span"]["start_line"] != start + 1
+                    or owners[0]["source_span"].get("end_line") != task_end):
+                errors.append({"code": "SOURCE_WRITING_WINDOW_MISMATCH", "source_line": start,
+                               "message": "无号作文须单独覆盖写作指令后的作答窗口"})
+            # Numbers inside the task are instructions, e.g. 注意:1. … 2. …
+            continue
         observed = _source_members(lines[start:end])
         if not group and not observed:
             from .question_content import unnumbered_text_responses
@@ -489,11 +509,15 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
         type_name = _section_type_label(section.get("type"))
         local = source_lines[start:end]
         declared_numbers = _section_numbers(section)
+        # 书面表达常无印刷题号：审题思路/注意事项/参考答案里的 1.2.3. 是内容
+        # 要点或答案序号，不是试卷题号。没有显式声明题号时不能回退为
+        # “本节所有数字”，否则整篇作文会被切成多个伪小题。
+        writing_unnumbered = "书面表达" in type_name and not declared_numbers
         # When extraction supplied explicit question/blank locations, do not
         # union every digit found inside article/table material: dates, prices,
         # footnotes and table values are not printed question numbers.  Fall
         # back to source anchors only for legacy sections without locations.
-        numbers = declared_numbers or sorted(_source_members(local))
+        numbers = [] if writing_unnumbered else (declared_numbers or sorted(_source_members(local)))
         group_flag = section.get("kind") == "group" if section.get("kind") else is_group_type(type_name)
         windows = _material_windows(source_lines, start + 1, end) if group_flag else []
         if group_flag and windows and numbers:
@@ -543,7 +567,7 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
             image_only = (section.get("image_only") and any("[IMG " in line for line in local)
                           and all(not _plain(line).strip() or "[IMG " in line or "[TABLE" in line for line in local))
             unnumbered_text = []
-            if not anchors and not numbers and local:
+            if not anchors and not numbers and local and not writing_unnumbered:
                 from .question_content import legitimate_source_shape
                 candidate = _make_unit("standalone", type_name, [1], local)
                 candidate["stem"] = "\n".join(local).strip()
@@ -571,7 +595,7 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                     unnumbered_text = [candidate]
             if unnumbered_text:
                 units.extend(unnumbered_text)
-            elif not anchors and not numbers and image_only:
+            elif not anchors and not numbers and image_only and not writing_unnumbered:
                 # 没有可读印刷题号时只保留整节一个来源对象，不猜图片里的题数。
                 # [1] 是兼容字段内部别名，不能展示成原卷第 1 题。
                 unit = _make_unit("standalone", type_name, [1], local)
@@ -587,8 +611,16 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                 # question number. Keep the internal alias only for binding;
                 # upload numbering must project this as null/null.
                 chunk = source_lines[start:end]
+                inline_prompt = _inline_unnumbered_writing(section, source_lines)
+                if inline_prompt:
+                    from .sync_practice import writing_prompt_end
+                    chunk = chunk[:writing_prompt_end(chunk)]
+                    if not any(line.strip() for line in chunk):
+                        continue
                 unit = _make_unit("standalone", type_name, [1], chunk)
-                unit["source_span"] = {"start_line": start + 1, "end_line": end,
+                if inline_prompt:
+                    unit["stem"] = "\n".join(chunk).strip()
+                unit["source_span"] = {"start_line": start + 1, "end_line": start + len(chunk),
                                        "basis": "cleaned_source", "number_binding": "single_writing_section",
                                        "printed_numbers": []}
                 unit["original_number"] = None
@@ -1320,6 +1352,11 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         if "书面表达" not in str(section.get("type")):
             continue
         nums = _section_numbers(section)
+        if (type(section.get("source_line")) is int and 1 <= section["source_line"] <= len(source_lines)
+                and _inline_unnumbered_writing(section, source_lines)
+                and any(u["source_span"]["start_line"] == section["source_line"] + 1
+                        and u["source_span"].get("printed_numbers") == [] for u in bound_writing)):
+            continue
         title = _plain(str(section.get("title") or "")).strip()
         starts = [i for i, line in enumerate(source_lines) if title and _plain(line).strip() == title]
         first = next((_plain(line).strip() for line in source_lines[starts[0] + 1:] if _plain(line).strip()), "") if len(starts) == 1 else ""
@@ -1329,7 +1366,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
             blockers.append({"code": "WRITING_NUMBER_UNBOUND", "message": "作文题号未可靠定位，须核对原卷及节边界"})
     inferred = [x for x in structure.get("unresolved") or []
                 if isinstance(x, dict) and x.get("code") == "QUESTION_NUMBER_INFERRED"]
-    if bound_writing and not inferred:
+    if any(u["source_span"].get("printed_numbers") != [] for u in bound_writing) and not inferred:
         writing_sections = [s for s in sections if "书面表达" in str(s.get("type"))]
         inferred = [{"code": "QUESTION_NUMBER_INFERRED",
                      "line": writing_sections[0].get("source_line") if len(writing_sections) == 1 else None,

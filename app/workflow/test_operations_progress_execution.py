@@ -139,6 +139,30 @@ class OperationsProgressExecutionTests(unittest.TestCase):
             self.assertEqual(op.action(self.root, self.batch, payload), receipt)
             test.assert_called_once()
 
+    def test_isolated_test_keeps_budget_and_settles_expired_receipt(self):
+        claim = self.claim()
+        payload = {k: claim[k] for k in ('incident_id', 'session_id', 'attempt_id')}
+        payload.update(action='code_repair', request_id='isolated-test', input={'operation': 'test'})
+
+        def run(folder, incident, data):
+            op._attempt(incident, 'code_test', 'isolated_tests', 'same-evidence', 'failed')
+            state = op._load(folder)
+            state['incident']['lease_expires_at'] = 0
+            op._save(folder, state)
+            return {'passed': False}
+
+        with patch.object(op, '_code_repair', side_effect=run) as test:
+            receipt = op.action(self.root, self.batch, payload)
+            self.assertEqual(receipt['status'], 'failed')
+            self.assertIn('stale_lease', receipt['evidence']['error'])
+            self.assertEqual(op.action(self.root, self.batch, payload), receipt)
+            test.assert_called_once()
+        next_claim = self.claim()
+        self.assertNotEqual(next_claim['attempt_id'], claim['attempt_id'])
+        self.assertEqual(next_claim['attempt_count'], 1)
+        with self.assertRaisesRegex(ValueError, 'repeat_without_new_evidence'):
+            op._block_repeat(next_claim, 'code_test', 'isolated_tests', 'same-evidence')
+
     def test_execution_first_claim_can_start_while_independent_worker_holds_locks(self):
         incident = op.incidents(self.root)['incidents'][0]
         with supervisor._try_file_lock(supervisor._auto_lock_path(self.batch)) as auto_lock, \

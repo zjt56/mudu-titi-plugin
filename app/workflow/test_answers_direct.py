@@ -46,6 +46,14 @@ class AnswersDirectTest(unittest.TestCase):
         self.assertFalse(missing)
         agent_tasks._validate(self.batch, 'answers', payload, context, units)
 
+    def test_wrapped_practice_key_banner_preserves_repeated_section_ownership(self):
+        self.fixture.appendix = self.fixture.appendix.replace(
+            'Ⅰ.1.C', '[IMG image85.jpg]课时精练[IMG image86.jpg]\nⅠ.1.C')
+        self.fixture.write_sources()
+        payload = answers_direct.build_payload(self.batch)
+        self.assertIsNotNone(payload)
+        self.assertEqual(list(payload['answers'].values()), ['A', 'B', 'nice', 'Unit', 'C', 'D'])
+
     def test_retained_candidate_keeps_value_but_not_claimed_coordinates(self):
         payload = answers_direct.build_payload(self.batch)
         key = next(iter(payload['answers']))
@@ -78,6 +86,48 @@ class AnswersDirectTest(unittest.TestCase):
         self.put('01_source/structure.confirmed.json', document)
         self.assertIsNone(answers_direct.build_payload(self.batch))
         self.fixture.write_sources()
+
+    def test_legacy_section_proof_delivers_and_conflict_only_dispatches_unresolved_unit(self):
+        from workflow import label_execution
+        body = 'Ⅰ.关键词语选择(共2小题)\n1. Pick one.\n2. Pick another.\nⅡ.书面表达\n3. Write.'
+        raw = self.batch / '01_source/正文.txt'
+        raw.write_text(body, encoding='utf-8')
+        original = self.batch / 'original.txt'
+        original.write_text(body, encoding='utf-8')
+        state = mf.load(self.batch)
+        state['inputs']['source'] = {'path': str(original), 'exists': True}
+        mf.save(self.batch, state)
+        units = [{'unit_id': f'q-{n}', 'unit_kind': 'standalone', 'numbers': [n],
+                  'type': '书面表达' if n == 3 else '听力关键词语选择'} for n in (1, 2, 3)]
+        self.put('01_source/structure.confirmed.json', {'units': units})
+        self.put('01_source/structure.json', {'sections': [
+            {'source_line': 1, 'questions': [1, 2]}, {'source_line': 4, 'questions': [3]}]})
+        self.put('07_review/structure-gate.json', {
+            'passed': True, 'original_sha256': mf.sha256_file(original),
+            'input_hashes': {key: mf.sha256_file(self.batch / key) for key in (
+                '01_source/正文.txt', '01_source/structure.json', '01_source/structure.confirmed.json')},
+        })
+        appendix = self.batch / '01_source/附录.txt'
+        appendix.write_text('Ⅰ.短文理解\n1.A\n2.B\nⅡ.书面表达\n1.D\n', encoding='utf-8')
+        self.assertIsNone(answers_direct.build_payload(self.batch))
+        appendix.write_text('Ⅰ.关键词语选择\n1.A\n2.B\nⅡ.书面表达\n1.D\n', encoding='utf-8')
+        self.assertEqual(answers_direct.build_payload(self.batch)['answers'], {'1': 'A', '2': 'B'})
+        code, _ = stage_preflight.run(self.batch, 'answers')
+        self.assertEqual(code, 0)  # Real protocol import, no model.
+
+        appendix.write_text('Ⅰ.关键词语选择\n1.A\n2.B\n2.C\nⅡ.书面表达\n1.D\n', encoding='utf-8')
+        self.assertIsNone(answers_direct.build_payload(self.batch))
+
+        def invoke(prompt, *_args, **_kwargs):
+            self.assertIn('Return ONLY these exact unit IDs: ["q-2"]', prompt)
+            return {'response': {'status': 'completed', 'notes': [], 'findings': [], 'artifacts': {
+                agent_tasks.ARTIFACTS['answers']: {'answers': {'2': 'B'},
+                    'evidence': {'2': ['01_source/附录.txt:3']}, 'missing': {}}}}}
+
+        report = label_execution.run(self.batch, 'answers', {'max_input_chars': 180000},
+                                     self.batch / 'workflow/test-legacy-partial', invoke=invoke)
+        self.assertEqual(report['response']['artifacts'][agent_tasks.ARTIFACTS['answers']]['answers'],
+                         {'1': 'A', '2': 'B'})
 
     def scope_first_unit(self):
         uid = self.units[0]['unit_id']

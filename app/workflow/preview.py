@@ -367,6 +367,13 @@ def _scoped_source_slice(unit: dict, lines: list[str], *, batch_dir=None) -> lis
     else:
         offset = compact.index(wanted)
         selected = window[owners[offset]:owners[offset + len(wanted) - 1] + 1]
+        if span.get("number_binding") == "single_writing_section" and span.get("printed_numbers") == []:
+            from .sync_practice import writing_prompt
+            section = unit.get("source_section") or {}
+            if start >= 2 and section.get("start_line") == start - 1:
+                heading = lines[start - 2].strip()
+                if heading == section.get("title") and writing_prompt(heading):
+                    selected = [heading, *selected]
     return [line.rstrip() for line in selected if line.strip()]
 
 

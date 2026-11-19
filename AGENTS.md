@@ -97,6 +97,7 @@
 
 36. **远端暂存使用专用上传 Key**：人工明确授权后，从 `MUDU_API_KEY` 读取凭据，`GET /api/uploads/capabilities` 明确返回 `api_key_staging: true` 才可用固定 `batch_id` 提交冻结题目。保存暂存 ID，同一 Key 追加原卷及独立答案并通过单笔回执核对文件名与 SHA-256。不退回账号密码，不读取人工暂存列表。仅同 Key、同目标、同冻结请求可显式恢复未知创建；旧版无绑定或 `upload_batch_conflict` 先核对。远端确认、审核、发布仍由人工处理。落地：`app/workflow/upload_client.py`、`app/workflow/upload.py`。
 
+37. **原卷修改的解析/文章大意真正写入交付**：审核员在「原卷修改」保存的解析与文章大意必须同时写进 `04_knowledge/explanations.json` 与 `06_batch/batch_meta.json`（交付校验要求组装结果与解析产物逐字一致），并登记到 `workflow/manual-content-edits.json`（`manual_content.py`：人工来源、逐字记录、重放依据），重登记 `explanations` 阶段输出摘要，再失效 `assemble` 及其下游（体检/审核/上传）；不得只写 candidates 草稿而让上传内容不变。严格内容校验对**与人工记录逐字相同**的解析/大意按用户确认接受并记 `MANUAL_EDITED_CONTENT` 提示，其余改写（含模型二次生成、与记录不一致的文本）仍按原口径拒绝；听力录音材料完整性、AI 标记与原文遗漏（原卷有解析却留空）检查不放宽。材料/题干/选项/答案属于原文与答案投影，直接改写会破坏画线/元数据投影，仍只存草稿并明确提示，必须走对应阶段。落地：`app/workflow/manual_content.py`、`app/workbench/server.py::apply_manual_content`、`app/workflow/upload_content.py`、`lib/client.js`；验证见 `CHANGELOG/2026-11-18-content-modal-article-summary.md`。
 
 ## 三、变更记录制度（强制）
 

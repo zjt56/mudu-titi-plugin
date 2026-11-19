@@ -828,6 +828,39 @@ def _router_file(plugin):
     return state if state.is_file() else plugin / "config" / "model-router.json"
 
 
+def authentication_binding():
+    """Identify a route/credential revision without reading credential values."""
+    from . import manifest as mf
+
+    def revision(path):
+        if path is None:
+            return None
+        try:
+            info = path.stat()
+        except OSError:
+            return None
+        return [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
+
+    home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh")).expanduser()
+    module = Path(__file__).resolve()
+    router = _router_file(module.parents[2])
+    config = Path(os.environ.get("MUDU_AGENT_CONFIG") or module.with_name("local-agent.json")).expanduser()
+    try:
+        route, profile = _harness_default_route()
+    except UnicodeError:
+        route, profile = None, None
+    try:
+        router_digest = mf.sha256_file(router)
+    except OSError:
+        router_digest = None
+    selection = {key: route[key] for key in ("provider", "model")} if route else None
+    return {"route": selection, "router_sha256": router_digest, "profile_revision": revision(profile),
+            "agent_config_revision": revision(config), "credentials_revision": revision(home / ".credentials.yaml")}
+
+
+MODEL_AUTHENTICATION_NOTE = "模型服务拒绝凭据；模型路由或本机凭据更新后重新检查"
+
+
 def _part_model_binding(config):
     """Observe explicit model identity or the device's actual router selection.
 
@@ -959,12 +992,12 @@ def _label_partition_policy(config, stage):
     enabled = bool(config.get("label_split", False))
     limit = _part_units(config, stage)
     native = config.get("native_agent", {})
-    if (stage in ("types", "knowledge") and isinstance(native, dict)
+    if (stage in ("answers", "types", "explanations", "knowledge") and isinstance(native, dict)
             and native.get("enabled") is True
             and stage in native.get("stages", ["knowledge"])):
         # Leave room for catalog/source reads, staged submissions and final
         # acceptance; never raise an explicitly configured task budget.
-        calls = native.get("max_tool_calls", 64)
+        calls = native.get("max_tool_calls", 40)
         if isinstance(calls, int) and not isinstance(calls, bool) and calls > 0:
             native_limit = max(1, min(8, (calls - 4) // 2))
             limit = min(limit, native_limit) if enabled else native_limit
@@ -1050,7 +1083,8 @@ def main(argv=None):
                 raise
             from workflow import unit_tasks
             task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
-                                                 max_units=label_limit if _label_stage else _part_units(config, args.stage))
+                                                 max_units=label_limit if _label_stage else _part_units(config, args.stage),
+                                                 balance_work=args.stage in ("types", "knowledge"))
         if split_enabled and parts is None and not task.get("preconditions"):
             try:
                 _unit_count = len(agent_tasks.confirmed_units(batch_dir))
@@ -1059,7 +1093,8 @@ def main(argv=None):
             if (args.stage in ("answers", "types", "explanations", "knowledge") and _unit_count > 0) or _unit_count > _part_units(config, args.stage):
                 from workflow import unit_tasks
                 task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
-                                                     max_units=label_limit if _label_stage else _part_units(config, args.stage))
+                                                     max_units=label_limit if _label_stage else _part_units(config, args.stage),
+                                                     balance_work=args.stage in ("types", "knowledge"))
         if assembling:
             base = agent_tasks._safe_path(batch_dir, "06_batch/batch.base.json")
             if base.is_file():
@@ -1132,8 +1167,10 @@ def main(argv=None):
             concurrency = _part_concurrency(config)
             invocation_options = ({"permit_parallel": True}
                                   if concurrency > 1 and len(parts) > 1 else {})
+            queued_at = time.monotonic()
 
             def run_part(index, part):
+                wait_seconds = round(time.monotonic() - queued_at, 4) if invocation_options else 0
                 unit_tasks.check_part_inputs(batch_dir, part)
                 # Resume: a previously validated partition for the same prompt,
                 # unit set, inputs and model config is reused instead of re-run.
@@ -1158,14 +1195,20 @@ def main(argv=None):
                     try:
                         print(f"  分片 {index + 1}/{len(parts)}：调用模型"
                               f"（{len(part['unit_ids'])} 单元，{len(part['prompt']) // 1000}K 字符，第 {attempt + 1} 次）", flush=True)
-                        result = invoke(delivered, part_dir, config, **invocation_options)
+                        from .partition_timing import measure
+                        dimensions = dict(stage=args.stage, part=index + 1, attempt=attempt + 1,
+                                          prompt_chars=len(delivered), units=len(part['unit_ids']),
+                                          queue_seconds=wait_seconds if attempt == 0 else 0)
+                        with measure(part_dir / 'model-timing.json', 'model', **dimensions):
+                            result = invoke(delivered, part_dir, config, **invocation_options)
                         _check_input_hashes(batch_dir, strict_hashes)
                         try:
                             unit_tasks.check_part_inputs(batch_dir, part)
                         except ValueError as exc:
                             raise AgentError(str(exc), "context_changed") from exc
                         candidate = result["response"]
-                        unit_tasks.validate_part(batch_dir, args.stage, part, candidate)
+                        with measure(part_dir / 'acceptance-timing.json', 'acceptance', **dimensions):
+                            unit_tasks.validate_part(batch_dir, args.stage, part, candidate)
                     except (AgentError, ValueError) as exc:
                         recoverable = isinstance(exc, ValueError) or exc.code in ("response", "integration")
                         if not recoverable or attempt >= retries:
@@ -1184,7 +1227,9 @@ def main(argv=None):
                 # 分片之间没有依赖，只有合并需要按原顺序；并发只影响墙钟，不改语义。
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                    outcomes = list(pool.map(lambda item: run_part(*item), list(enumerate(parts))))
+                    # Start larger inputs first without changing merge order.
+                    ordered = sorted(enumerate(parts), key=lambda item: -len(item[1]['prompt']))
+                    outcomes = list(pool.map(lambda item: run_part(*item), ordered))
             else:
                 outcomes = [run_part(index, part) for index, part in enumerate(parts)]
             outcomes.sort(key=lambda row: row[0])

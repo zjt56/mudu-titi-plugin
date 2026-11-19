@@ -7,11 +7,13 @@ import copy
 import hashlib
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import agent_tasks, local_agent, private_label_baseline, unit_tasks
+from . import agent_tasks, content_agent, local_agent, private_label_baseline, unit_tasks
 from .question_identity import question_key
+from .partition_timing import measure
 
 STAGES = ("answers", "explanations", "knowledge")
 _OWNERSHIP_FAILURE = "Content source/ownership check failed: "
@@ -222,22 +224,112 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
                 local_agent._store_part_snapshot(batch, stage, singleton[uid], hashes, config, candidate)
                 private_label_baseline.store(batch, stage, uid, candidate, strict_hashes)
 
+    def accept_partition(ids, response):
+        try:
+            payload = _envelope(stage, response, [by_id[uid] for uid in ids])
+        except (ValueError, TypeError, KeyError) as exc:
+            for uid in ids:
+                if uid not in accepted:
+                    errors[uid] = str(exc)
+            return
+        for uid in ids:
+            if uid in accepted or uid in deterministic or uid not in singleton:
+                continue
+            problems = [f for f in response["findings"] if f["unit_id"] == uid]
+            blocked = [f for f in problems if f["severity"] in ("blocker", "major")]
+            if blocked:
+                errors[uid] = json.dumps(blocked, ensure_ascii=False)
+                continue
+            unit_payload = _unit_payload(stage, payload, by_id[uid])
+            try:
+                candidate = validate(uid, unit_payload)
+                candidate["findings"] = problems
+                candidate["notes"] = list(dict.fromkeys([*response["notes"], *candidate["notes"]]))
+            except (ValueError, TypeError, KeyError) as exc:
+                errors[uid] = str(exc)
+                retain_failure(uid, unit_payload, response, exc)
+                continue
+            accepted[uid] = candidate
+            local_agent._store_part_snapshot(batch, stage, singleton[uid], hashes, config, candidate)
+            private_label_baseline.store(batch, stage, uid, candidate, strict_hashes)
+
+    native = config.get("native_agent") or {}
+    native_enabled = native.get("enabled") is True and stage in native.get("stages", ["knowledge"])
+    route = (config.get("_content_route_identity") or local_agent._selected_content_route()) if native_enabled else None
+
+    def recover_budget_receipts():
+        receipts = content_agent.tool_budget_receipts(batch.resolve(), stage, strict_hashes, route)
+        for receipt in receipts:
+            parts = receipt.get("candidate_parts") or []
+            if not parts and isinstance(receipt.get("candidate"), dict):
+                parts = [{"unit_ids": receipt["unit_ids"], "candidate": receipt["candidate"]}]
+            for part in parts:
+                ids = part["unit_ids"]
+                if set(ids) <= set(by_id) and any(uid in singleton and uid not in accepted for uid in ids):
+                    accept_partition(ids, part["candidate"])
+        return receipts
+
+    exhausted = {}
+    def remember_exhaustion(ids, message):
+        exhausted[frozenset(ids)] = message
+
+    for receipt in recover_budget_receipts():
+        remember_exhaustion(receipt["unit_ids"], receipt["error"])
+
+    if stage == 'answers':
+        from .answers_direct import legacy_verified_units
+        direct = legacy_verified_units(batch, units)
+        local_agent._check_input_hashes(batch, strict_hashes)
+        for uid, payload in direct.items():
+            if uid not in singleton or uid in accepted or uid in deterministic:
+                continue
+            try:
+                candidate = validate(uid, payload)
+            except ValueError:
+                continue  # An unaccepted direct candidate never suppresses model work.
+            candidate['notes'].append('按已确认大题与原文坐标直抄答案')
+            accepted[uid] = candidate
+            private_label_baseline.store(batch, stage, uid, candidate, strict_hashes)
+
     rounds = []
     concurrency = local_agent._part_concurrency(config)
-    # Answers are a single source-matching problem. Keep all pending units in
-    # one prompt whenever the input budget permits; splitting repair attempts
-    # into one-unit calls destroys the cross-section context needed to bind
-    # repeated printed numbers (and multiplies model startup/round-trip cost).
-    # build_parts still falls back to size-bounded partitions when necessary.
-    answer_part_limit = len(singleton) if stage == "answers" else (
-        local_agent._label_partition_policy(config, stage)[1] if stage == "knowledge" else 8)
+    # The whole-packet protocol keeps cross-section context. Native calls
+    # still need a unit bound because reading and staging spend tool calls.
+    limit = (local_agent._label_partition_policy(config, stage)[1]
+             if native_enabled else len(singleton) if stage == "answers" else 8)
+
+    def plan(pending):
+        planned = []
+        pending = set(pending)
+        # Exhausted scopes are durable. Starting the stage again must not buy
+        # the same task under a new prompt merely because feedback changed.
+        for scope, message in sorted(exhausted.items(), key=lambda entry: len(entry[0])):
+            remaining = pending & scope
+            if not remaining:
+                continue
+            pending -= remaining
+            if len(scope) == 1:
+                uid = next(iter(remaining))
+                errors.setdefault(uid, message)
+                continue
+            _, parts = unit_tasks.build_parts(batch, stage, prompt_budget,
+                max_units=min(limit, max(1, len(scope) // 2)), selected_ids=remaining,
+                balance_work=stage == "knowledge")
+            planned.extend(parts)
+        if pending:
+            _, parts = unit_tasks.build_parts(batch, stage, prompt_budget,
+                max_units=limit, selected_ids=pending, balance_work=stage == "knowledge")
+            planned.extend(parts)
+        return planned
+
     for attempt in range(int(config.get("retries", 0)) + 1):
         pending = set(singleton) - set(accepted) - set(deterministic)
         if not pending:
             break
-        _, parts = unit_tasks.build_parts(batch, stage, prompt_budget,
-                                         max_units=answer_part_limit,
-                                         selected_ids=pending)
+        parts = plan(pending)
+        if not parts:
+            break
+        queued_at = time.monotonic()
         def call(index_part):
             index, part = index_part
             local_agent._check_input_hashes(batch, strict_hashes)
@@ -251,7 +343,11 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
                 options = {"permit_parallel": True}
                 if coordinated_imports:
                     options["coordinated_imports"] = True
-                response = invoke(part["prompt"] + feedback, directory, config, **options)["response"]
+                with measure(directory / 'model-timing.json', 'model', stage=stage, part=index + 1,
+                             attempt=attempt + 1, units=len(part['unit_ids']),
+                             prompt_chars=len(part['prompt']) + len(feedback),
+                             queue_seconds=round(time.monotonic() - queued_at, 4)):
+                    response = invoke(part["prompt"] + feedback, directory, config, **options)["response"]
             except local_agent.AgentError as exc:
                 candidate_path = directory / "candidate.json"
                 # A native partition may have exhausted its own correction
@@ -265,6 +361,8 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
                         response = json.loads(candidate_path.read_text(encoding="utf-8"))
                     except (OSError, ValueError):
                         raise exc
+                elif exc.code == content_agent.TOOL_BUDGET_CODE:
+                    return part, None, exc
                 elif exc.code != "response":
                     # Dispatch/configuration errors must retain their machine
                     # code; turning integration into 48 content errors both
@@ -276,44 +374,44 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
             unit_tasks.check_part_inputs(batch, part)
             return part, response, None
         fatal = None
-        with ThreadPoolExecutor(max_workers=min(concurrency, len(parts))) as pool:
-            futures = {pool.submit(call, item): item[1] for item in enumerate(parts)}
-            for future in as_completed(futures):
-                try:
-                    part, response, call_error = future.result()
-                except (RuntimeError, OSError) as exc:
-                    fatal = fatal or exc
-                    for uid in futures[future]["unit_ids"]:
-                        errors[uid] = str(exc)
-                    continue
-                ids = part["unit_ids"]
-                rounds.append({"attempt": attempt + 1, "unit_ids": ids, "prompt_chars": len(part["prompt"])})
-                try:
-                    if call_error:
-                        raise ValueError(call_error)
-                    payload = _envelope(stage, response, [by_id[uid] for uid in ids])
-                except (ValueError, TypeError, KeyError) as exc:
-                    for uid in ids:
-                        errors[uid] = str(exc)
-                    continue
-                for uid in ids:
-                    problems = [f for f in response["findings"] if f["unit_id"] == uid]
-                    blocked = [f for f in problems if f["severity"] in ("blocker", "major")]
-                    if blocked:
-                        errors[uid] = json.dumps(blocked, ensure_ascii=False)
-                        continue
-                    unit_payload = _unit_payload(stage, payload, by_id[uid])
+        next_index = 0
+        while parts:
+            budget_pending = set()
+            with ThreadPoolExecutor(max_workers=min(concurrency, len(parts))) as pool:
+                ordered = list(enumerate(parts, start=next_index))
+                next_index += len(parts)
+                if concurrency > 1:
+                    ordered.sort(key=lambda item: -len(item[1]["prompt"]))
+                futures = {pool.submit(call, item): item for item in ordered}
+                for future in as_completed(futures):
+                    index, planned = futures[future]
+                    ids = planned["unit_ids"]
                     try:
-                        candidate = validate(uid, unit_payload)
-                        candidate["findings"] = problems
-                        candidate["notes"] = list(dict.fromkeys([*response["notes"], *candidate["notes"]]))
-                    except (ValueError, TypeError, KeyError) as exc:
-                        errors[uid] = str(exc)
-                        retain_failure(uid, unit_payload, response, exc)
+                        part, response, call_error = future.result()
+                    except (RuntimeError, OSError) as exc:
+                        fatal = fatal or exc
+                        for uid in ids:
+                            errors[uid] = str(exc)
                         continue
-                    accepted[uid] = candidate
-                    local_agent._store_part_snapshot(batch, stage, singleton[uid], hashes, config, candidate)
-                    private_label_baseline.store(batch, stage, uid, candidate, strict_hashes)
+                    rounds.append({"attempt": attempt + 1, "unit_ids": ids, "prompt_chars": len(part["prompt"])})
+                    if isinstance(call_error, local_agent.AgentError):
+                        remember_exhaustion(ids, str(call_error))
+                        for uid in ids:
+                            errors[uid] = str(call_error)
+                        budget_pending.update(ids)
+                        continue
+                    directory = run_dir / ("round-%02d-part-%04d" % (attempt, index))
+                    with measure(directory / 'acceptance-timing.json', 'acceptance', stage=stage,
+                                 part=index + 1, attempt=attempt + 1, units=len(ids)):
+                        if call_error:
+                            for uid in ids:
+                                errors[uid] = call_error
+                        else:
+                            accept_partition(ids, response)
+            if not budget_pending or fatal is not None:
+                break
+            recover_budget_receipts()
+            parts = plan(budget_pending - set(accepted) - set(deterministic))
         local_agent._json_write(run_dir / ("repair-progress-%02d.json" % attempt), {
             "stage": stage, "validated_units": sorted(accepted),
             "failed_units": {uid: errors.get(uid) for uid in singleton if uid not in accepted},

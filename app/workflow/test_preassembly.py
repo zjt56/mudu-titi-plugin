@@ -7,6 +7,7 @@ import unittest
 from contextlib import nullcontext, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import quote
 
 from workflow import agent, agent_protocol, agent_tasks, batch_fill, contracts, handoff, local_agent, manifest as mf, preassembly
 
@@ -91,15 +92,23 @@ class PreassemblyTest(unittest.TestCase):
         self.assertTrue(self.import_response(self.export())['completed'])
         self.put('01_source/附录.txt', '参考答案\n1.A 【解析】原卷解析。')
         dispatched = []
+        commands = []
         def execute(batch, state, spec):
-            self.assertEqual(spec.id, 'types')
-            self.assertTrue(preassembly.check(batch)['passed'])
-            runner._record_success(batch, state, spec)
+            commands.append(spec.id)
+            if spec.id == 'types':
+                self.assertTrue(preassembly.check(batch)['passed'])
+                runner._record_success(batch, state, spec)
+            else:
+                self.assertIn(spec.id, ('content_snapshot', 'meta', 'underlines'))
+                self.assertIn('knowledge', dispatched)
+                mf.touch_stage(state, spec.id, mf.COMPLETED)
             mf.save(batch, state)
             return 0
-        def labels(batch, stages, config):
+        def labels(batch, stages, config, *, while_running):
             self.assertTrue(mf.dependency_satisfied(mf.load(batch), 'types'))
             dispatched.extend(s.id for s in stages)
+            while_running()
+            self.assertIn('content_snapshot', commands)
             return {s.id: 3 for s in stages}
         with patch('workflow.self_heal.recover', return_value={}), \
              patch.object(agent, 'configured', return_value=True), \
@@ -108,6 +117,7 @@ class PreassemblyTest(unittest.TestCase):
              patch.object(auto, '_parallel_ready_agents', side_effect=labels):
             auto._advance_locked(self.root, auto.load_bridge(), stop_at='assemble')
         self.assertCountEqual(dispatched, ['answers', 'explanations', 'knowledge'])
+        self.assertEqual(commands.count('content_snapshot'), 1)
         self.assertEqual(mf.load(self.root)['stages']['types']['status'], mf.COMPLETED)
 
     def test_explanation_task_accepts_original_material_after_answer_peer_delivers(self):
@@ -178,21 +188,32 @@ class PreassemblyTest(unittest.TestCase):
             batch_fill.sync(self.root, sid)
             runner._record_success(self.root, state, contracts.STAGE_BY_ID[sid])
         mf.save(self.root, state)
-        self.assertEqual(assemble_local.try_assemble(self.root), 0)
-        runner._record_success(self.root, state, contracts.STAGE_BY_ID['assemble'])
+        for sid in ('content_snapshot', 'meta', 'underlines'):
+            self.assertEqual(runner._execute_command(self.root, state, contracts.STAGE_BY_ID[sid]), 0, sid)
+        # Repair the shared type handoff after the text projections have already
+        # been produced. Word count is type-owned and must preserve those views.
+        state = mf.load(self.root)
+        mf.touch_stage(state, 'types', mf.PENDING)
         mf.save(self.root, state)
-        self.assertEqual(runner._execute_command(self.root, state, contracts.STAGE_BY_ID['meta']), 0)
-        self.assertEqual(runner._execute_command(self.root, state, contracts.STAGE_BY_ID['underlines']), 0)
-        # Final-only markup/metadata is a legitimate existing view; media
-        # projection must not regenerate this file from the intermediate batch.
+        repaired = copy.deepcopy(self.response)
+        repaired['artifacts']['03_types/types.json']['items'][0]['words'] = 11
+        self.assertTrue(self.import_response(agent_protocol.export_task(self.root, 'types'), repaired)['completed'])
+        state = mf.load(self.root)
+        for sid in ('preassemble', 'content_snapshot', 'meta', 'underlines'):
+            self.assertTrue(mf.dependency_satisfied(state, sid), sid)
+        # Supply the legitimate underline output before assembly binds it.
+        # The audio projection must preserve this markup on the final view.
         final = json.loads((self.root / '06_batch/batch_meta.json').read_text())
         final['items'][0]['stem'] = '<u>' + final['items'][0]['stem'] + '</u>'
-        final['items'][0]['localExtension'] = {'preserve': 'exactly'}
         self.put('06_batch/batch_meta.json', final)
         runner._record_success(self.root, state, contracts.STAGE_BY_ID['underlines'])
         mf.save(self.root, state)
+        self.assertEqual(assemble_local.try_assemble(self.root), 0)
+        runner._record_success(self.root, state, contracts.STAGE_BY_ID['assemble'])
+        mf.save(self.root, state)
         self.assertEqual(runner.do_validate(self.root, state), 0)
         views = {rel: json.loads((self.root / rel).read_text()) for rel in ('06_batch/batch.json', '06_batch/batch_meta.base.json', '06_batch/batch_meta.json')}
+        self.assertIn('<u>', views['06_batch/batch_meta.json']['items'][0]['stem'])
         clip = self.put('02_audio/seg-q-1.mp3', 'ID3cut')
         binding, _ = listening_context(self.root)
         item = {'unit_id': 'q-1', 'file': '02_audio/seg-q-1.mp3', 'start': 0.0, 'end': 1.0, 'evidence': ['real fixture cut'], 'verified': True, 'file_sha256': hashlib.sha256(clip.read_bytes()).hexdigest()}
@@ -235,7 +256,8 @@ class PreassemblyTest(unittest.TestCase):
         self.assertTrue(agent_protocol._preconditions(state, contracts.STAGE_BY_ID['review']))
         for rel, before in views.items():
             after = json.loads((self.root / rel).read_text())
-            self.assertEqual(after['items'][0]['attachments'][-1]['url'], '02_audio/seg-q-1.mp3')
+            self.assertEqual(after['items'][0]['attachments'][-1]['url'],
+                             '/source-media/' + quote(self.root.name, safe='') + '/seg-q-1.mp3')
             if 'attachments' in before['items'][0]:
                 after['items'][0]['attachments'] = before['items'][0]['attachments']
             else:
@@ -258,11 +280,11 @@ class PreassemblyTest(unittest.TestCase):
         self.assertEqual(mf.load(self.root)['stages']['validate']['status'], mf.COMPLETED)
         self.assertEqual(saved, mf.sha256_file(self.root / '06_batch/batch_meta.json'))
 
-    def test_invalid_labels_never_complete_or_unlock_downstream(self):
+    def test_missing_confirmed_unit_never_completes_or_unlocks_downstream(self):
         package = self.export()
         invalid = copy.deepcopy(self.response)
-        invalid["artifacts"]["03_types/types.json"]["items"][0]["contentComplete"] = False
-        with self.assertRaisesRegex(ValueError, "contentComplete|incomplete"):
+        invalid["artifacts"]["03_types/types.json"]["items"].clear()
+        with self.assertRaisesRegex(ValueError, "缺少单元.*q-1"):
             self.import_response(package, invalid)
         self.assertFalse(mf.dependency_satisfied(mf.load(self.root), "preassemble"))
         self.assertFalse((self.root / "03_types/types.json").exists())
@@ -311,6 +333,74 @@ class PreassemblyTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(build.call_args.kwargs["max_units"], 8)
         self.assertTrue(mf.dependency_satisfied(mf.load(self.root), "preassemble"))
+
+    def test_parallel_model_authentication_failure_preserves_typed_dispatch_fence(self):
+        from workflow import auto, runner
+
+        self.assertTrue(self.import_response(self.export())['completed'])
+        state = mf.load(self.root)
+        runner._record_success(self.root, state, contracts.STAGE_BY_ID['types'])
+        mf.save(self.root, state)
+        with patch.object(local_agent, 'authentication_binding', return_value={'revision': 3}), \
+             patch.object(local_agent, 'invoke', side_effect=local_agent.AgentError('fake provider', 'authentication')):
+            outcome = auto._parallel_ready_agents(
+                self.root, [contracts.STAGE_BY_ID['knowledge']], {'max_input_chars': 180000})
+        self.assertEqual(outcome, {'knowledge': 1})
+        actual = mf.load(self.root)['stages']['knowledge']
+        self.assertEqual(actual['status'], mf.FAILED)
+        self.assertEqual(actual['model_authentication'], {'revision': 3})
+
+    def test_large_native_preassembly_reuses_accepted_parts_after_interruption(self):
+        import re
+        from workflow import structure_gate
+
+        numbers = list(range(1, 49))
+        source = 'Ⅰ.单项填空\n' + '\n'.join(
+            f'{number}. She reads a book. A. Yes B. No C. Good D. Bad'
+            for number in numbers)
+        for relative in ('original.txt', '01_source/正文.txt'):
+            self.put(relative, source)
+        self.put('01_source/metadata.json', {'original_sha256': mf.sha256_file(self.root / 'original.txt')})
+        sections = [{'type': '单项填空', 'questions': numbers}]
+        self.put('01_source/structure.json', {'sections': sections, 'groups': []})
+        units = structure_gate._build_units(sections, [], source.splitlines())
+        self.put('01_source/structure.confirmed.json', {'units': units})
+        gate_paths = ('01_source/正文.txt', '01_source/structure.json', '01_source/structure.confirmed.json')
+        self.put('07_review/structure-gate.json', {
+            'passed': True, 'original_sha256': mf.sha256_file(self.root / 'original.txt'),
+            'input_hashes': {path: mf.sha256_file(self.root / path) for path in gate_paths}})
+        state = mf.load(self.root)
+        for sid in ('extract', 'structure_gate'):
+            state['stages'][sid]['output_hashes'] = mf.output_hashes(self.root, contracts.STAGE_BY_ID[sid])
+        mf.save(self.root, state)
+        config = {'max_input_chars': 180000, 'timeout_seconds': 30, 'retries': 0,
+                  'label_split': False, 'unit_split': False, 'part_concurrency': 1,
+                  'native_agent': {'enabled': True, 'stages': ['types'], 'max_tool_calls': 40}}
+        dispatched = []
+
+        def invoke(prompt, run_dir, config, **kwargs):
+            ids = json.loads(re.search(r'Return ONLY these exact unit IDs: (\[.*?\])\.', prompt)[1])
+            dispatched.append(ids)
+            if len(dispatched) == 6:
+                raise local_agent.AgentError('simulated interruption after five accepted parts', 'timeout')
+            response = copy.deepcopy(self.response)
+            response['artifacts']['03_types/types.json']['items'] = [
+                dict(self.payload['items'][0], unit_id=uid) for uid in ids]
+            return {'response': response}
+
+        argv = ['run', '--stage', 'preassemble', '--batch-dir', str(self.root)]
+        with patch.object(local_agent, 'load_config', return_value=config), \
+             patch.object(local_agent, '_part_model_binding', return_value={'model': 'fixture'}), \
+             patch.object(local_agent, 'invoke', side_effect=invoke), redirect_stdout(io.StringIO()):
+            self.assertNotEqual(agent.main(argv), 0)
+            self.assertFalse((self.root / '03_types/types.json').exists())
+            self.assertEqual(agent.main(argv), 0)
+        self.assertEqual(len(dispatched), 7)
+        self.assertEqual(dispatched[-1], dispatched[-2])
+        self.assertTrue(all(len(ids) == 8 for ids in dispatched))
+        accepted = json.loads((self.root / '03_types/types.json').read_text())
+        self.assertEqual([row['unit_id'] for row in accepted['items']], [f'q-{n}' for n in numbers])
+        self.assertTrue(mf.dependency_satisfied(mf.load(self.root), 'preassemble'))
 
     def test_plugin_router_update_during_model_call_does_not_fail_stage(self):
         plugin = self.root / "plugin"

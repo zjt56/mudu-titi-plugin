@@ -48,6 +48,34 @@ test('未抽中的单元显示未抽中，不伪装为待审核或已通过', ()
  assert.doesNotMatch(rendered,/待审核/);
 });
 
+test('答案词显示在原标签，已绑定和待绑定的同一路径只显示一次', () => {
+  const d = detail([{number:'77',assessment:{knowledge:['主题/原标签']}}]);
+  d.labels.knowledge.push('词汇/答案考点/pencil');
+  d.labels.answer_point_tags = ['pencil', 'each other'];
+  d.comparison.stale = true;
+  const rendered = text(labelAuditPanels(d));
+  assert.match(rendered, /原标签 原标签、pencil、each other/);
+  assert.match(rendered, /一审标签/);
+  assert.match(rendered, /二审标签/);
+  assert.doesNotMatch(rendered, /答案考点|历史一审|历史二审/);
+  assert.doesNotMatch(rendered, /不一致/);
+  assert.equal(hasKnowledgeDiff(d), false);
+});
+
+test('答案考点按各轮实际判断显示，漏标和不同答案参与比较', () => {
+  const sample = {number:'77',expected_answer_points:['have seen'],
+    assessment:{knowledge:['主题/原标签'],answer_points:['have seen']}};
+  const d = detail([sample]);
+  const first = d.comparison.rounds[0].checks[0];
+  first.expected_answer_points = ['have seen'];
+  first.assessment.answer_points = ['have seen'];
+  assert.match(text(labelAuditPanels(d)), /一审标签 原标签、have seen.*二审标签 原标签、have seen/);
+  assert.equal(hasKnowledgeDiff(d), false);
+  first.assessment.answer_points = [];
+  assert.equal(hasKnowledgeDiff(d), true);
+  assert.match(text(labelAuditPanels(d)), /一审标签 原标签.*不一致/);
+});
+
 test('审核面板不展示难度/来源/分类等基本标签（不在审核范畴）', () => {
   const d = { unit_kind: 'standalone', labels: { knowledge: ['主题/原标签'], source_type: '中考真题', categories: ['未提供'], difficulty: '适中' },
     comparison: { original: { labels: { knowledge: ['主题/原标签'] } }, rounds: [] } };

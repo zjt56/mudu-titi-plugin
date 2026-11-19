@@ -341,6 +341,45 @@ class SelfHealRefusalDispatchTest(unittest.TestCase):
         self.assertEqual(result['action'], 'repair_refused')
         self.assertEqual(mf.load(self.batch)['stages']['audio']['status'], mf.FAILED)
 
+    def test_credential_rejection_blocks_only_affected_dispatch_until_revision_changes(self):
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from workflow import issue_log, local_agent
+
+        stages = ('knowledge', 'explanations')
+        bridge = {sid: ['fixture-agent'] for sid in stages}
+        self.stack.enter_context(patch.object(contracts, 'STAGES', tuple(contracts.STAGE_BY_ID[s] for s in stages)))
+        self.stack.enter_context(patch.object(mf, 'dependency_satisfied', return_value=True))
+        self.stack.enter_context(patch.object(mf, 'skip_reason', return_value=''))
+        self.stack.enter_context(patch.object(auto, 'PARALLEL_AGENTS_ENABLED', False))
+        self.stack.enter_context(patch.object(local_agent, '_agent_lock', side_effect=lambda *a, **k: nullcontext()))
+        binding = self.stack.enter_context(patch.object(local_agent, 'authentication_binding',
+                                                      return_value={'revision': 1}))
+        process = self.stack.enter_context(patch.object(auto.rn.subprocess, 'run',
+            side_effect=lambda argv, **kwargs: SimpleNamespace(
+                returncode=1, stdout='', stderr='{"code":"authentication","error":"provider rejected key"}'
+                if '--stage' in argv and argv[argv.index('--stage') + 1] == 'knowledge' else 'other failure')))
+        bridge = {sid: command + ['--stage', sid] for sid, command in bridge.items()}
+        mf.save(self.batch, self.state)
+        with patch.object(self_heal, '_plan') as plan:
+            auto._advance_locked(self.batch, {'knowledge': bridge['knowledge']}, stop_at='explanations')
+            self.assertEqual(mf.load(self.batch)['stages']['knowledge']['model_authentication'], {'revision': 1})
+            result = auto._advance_locked(self.batch, bridge)
+            self.assertEqual(result['action'], 'repair_refused')
+            self.assertFalse(result['failed_stages'][0]['retryable'])
+            self.assertEqual([call.args[0][-1] for call in process.call_args_list], ['knowledge', 'explanations'])
+            blocker, = issue_log.load_blockers(self.batch)['blockers'].values()
+            self.assertEqual((blocker['check'], blocker['occurrences']), ('MODEL_AUTHENTICATION_REJECTED', 1))
+            state = mf.load(self.batch)
+            mf.touch_stage(state, 'explanations', mf.PENDING)
+            mf.save(self.batch, state)
+            binding.return_value = {'revision': 2}
+            auto._advance_locked(self.batch, {'knowledge': bridge['knowledge']}, stop_at='explanations')
+            self.assertEqual([call.args[0][-1] for call in process.call_args_list],
+                             ['knowledge', 'explanations', 'knowledge'])
+            self.assertEqual(mf.load(self.batch)['stages']['knowledge']['model_authentication'], {'revision': 2})
+            plan.assert_not_called()
+
     def test_real_deferral_survives_later_ticks_while_independent_branch_runs(self):
         mf.touch_stage(self.state, 'extract', mf.FAILED, notes='external source service unavailable')
         mf.save(self.batch, self.state)

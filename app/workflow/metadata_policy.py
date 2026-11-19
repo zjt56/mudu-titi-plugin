@@ -7,6 +7,7 @@ from pathlib import Path
 
 MISSING = "未提供"
 PAPER_TEXT_FIELDS = ("paper_title", "source", "source_type")
+SOURCE_ALIAS_FIELDS = ("source", "source_type", "year")
 # 试卷名/来源缺证据时的最后一档：原卷 Word 文件名。它是用户自己的文件身份，
 # 不是编造标签；只有连文件名都没有时才落到「未提供」占位。
 FILE_NAME_FIELDS = ("paper_title", "source")
@@ -130,7 +131,7 @@ def project_source_metadata(payload: dict) -> dict:
         if filters is not None and not isinstance(filters, dict):
             return
         filters = filters if isinstance(filters, dict) else {}
-        for key in ("source", "source_type", "year"):
+        for key in SOURCE_ALIAS_FIELDS:
             for owner in (node, filters):
                 if key in owner and absent(owner[key]):
                     del owner[key]

@@ -73,8 +73,11 @@ def collect(report, *, path="", stage=""):
     audit = report.get("source_audit") or {}
     if stage == 'validate':
         hard, deferred, soft = split_early_source(audit.get("issues") or [])
-        rows.extend(dict(row, blocking=False, disposition='defer_to_format_gate',
-                         deferred_to='format_gate') for row in deferred)
+        if isinstance(report.get("review_preflight"), dict):
+            hard.extend(deferred)
+        else:
+            rows.extend(dict(row, blocking=False, disposition='defer_to_format_gate',
+                             deferred_to='format_gate') for row in deferred)
     else:
         hard, soft = source_partition(audit.get("issues") or [])
     rows.extend(dict(row, blocking=True) for row in hard)

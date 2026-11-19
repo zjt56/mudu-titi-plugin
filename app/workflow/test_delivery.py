@@ -134,6 +134,20 @@ class DeliveryChecklistTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             handoff._assert_underline_projection(base, tampered_marked)
 
+    def test_meta_accepts_only_policy_authorized_source_normalization(self):
+        from workflow import handoff
+        snapshot = {'items': [{'unit_id': 'q-1', 'stem': '原文', 'source': '试卷',
+                               'source_type': '未提供', 'year': '2024'}]}
+        generated = {'items': [{'unit_id': 'q-1', 'stem': '原文', 'source': '试卷', 'year': 2024}]}
+        handoff._assert_meta_projection(snapshot, generated)
+        for field, replacement in [('source', '另一份试卷'), ('year', 2023), ('stem', '改写')]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                handoff._assert_meta_projection(snapshot, {
+                    'items': [dict(generated['items'][0], **{field: replacement})]})
+        with self.assertRaises(ValueError):
+            handoff._assert_meta_projection(snapshot, {
+                'items': [dict(generated['items'][0], filterMetadata={'source': '另一份试卷'})]})
+
     def test_skipped_underlines_handoff_accepts_base_view(self):
         base = self.batch / '06_batch/batch_meta.base.json'
         base.parent.mkdir(parents=True, exist_ok=True)

@@ -277,20 +277,6 @@ def stage_metadata(stage_id: str) -> dict:
         "depends_on": list(stage.depends_on),
     }
 
-# 阶段产物变化时，需要失效的直接下游（由 depends_on 自动推导，这里只声明跨阶段影响）
-EXTRA_INVALIDATION = {
-    "extract": ("structure_gate", "preassemble", "content_snapshot", "types", "knowledge", "meta", "underlines", "assemble", "validate", "review"),
-    "structure_gate": ("preassemble", "content_snapshot", "types", "knowledge", "meta", "underlines", "assemble", "validate", "review"),
-    "preassemble": ("content_snapshot", "meta", "underlines", "assemble", "validate", "review"),
-    "types": ("knowledge", "assemble", "validate", "review"),
-    "knowledge": ("assemble", "validate", "review"),
-    "content_snapshot": ("meta", "underlines", "assemble", "validate", "review"),
-    "meta": ("underlines", "assemble", "validate", "review"),
-    "underlines": ("assemble", "validate", "review"),
-    "assemble": ("validate", "review"),
-}
-
-
 def downstream_of(stage_id: str) -> tuple[str, ...]:
     """返回该阶段全部下游（含间接下游），按阶段顺序。"""
     seen: set[str] = set()
@@ -301,8 +287,6 @@ def downstream_of(stage_id: str) -> tuple[str, ...]:
             if current in stage.depends_on and stage.id not in seen:
                 seen.add(stage.id)
                 frontier.append(stage.id)
-    for extra in EXTRA_INVALIDATION.get(stage_id, ()):
-        seen.add(extra)
     return tuple(s for s in STAGE_ORDER if s in seen)
 
 

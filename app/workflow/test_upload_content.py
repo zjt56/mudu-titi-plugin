@@ -30,6 +30,24 @@ class UploadContentTest(unittest.TestCase):
         payload['items'][0]['explanation'] = 'OCR 改写的游泳原因。'
         self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
 
+    def test_manual_edit_is_accepted_with_provenance_but_other_rewrites_are_not(self):
+        from workflow import manual_content
+        payload = {'items': [{'unit_id': 'q-31', 'number': 31,
+                              'explanation': '审核员改写的解析。', 'articleSummary': '审核员改写的大意。'}]}
+        # 未登记人工修改：不可溯源，严格校验拒绝。
+        self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
+        path = self.batch / manual_content.RELATIVE
+        path.parent.mkdir()
+        path.write_text(json.dumps(manual_content.prepare(self.batch, 'q-31', {
+            'explanation': '审核员改写的解析。', 'articleSummary': '审核员改写的大意。'})))
+        result = inspect_content(self.batch, payload, strict=True)
+        self.assertTrue(result['passed'], result)
+        self.assertEqual([w['code'] for w in result['warnings']],
+                         ['MANUAL_EDITED_CONTENT', 'MANUAL_EDITED_CONTENT'])
+        # 与人工记录逐字不同（模型二次生成或他人改写）不获得豁免。
+        payload['items'][0]['explanation'] = '审核员改写的解析！'
+        self.assertFalse(inspect_content(self.batch, payload, strict=True)['passed'])
+
     def test_reference_copy_role_excludes_it_from_ambiguity(self):
         materials = self.batch / '01_source/materials'; materials.mkdir()
         (materials / 'attachment_001.txt').write_text(

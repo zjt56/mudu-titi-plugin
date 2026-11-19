@@ -78,10 +78,17 @@ class ListeningScriptTest(unittest.TestCase):
                 self.assertEqual(listening_script.extract(self.batch, self.units)['q-1'][0], 'Keep your attention.')
 
     def test_original_explanation_cannot_be_replaced_by_script_only(self):
-        self.put('01_source/附录.txt', '1. A 【解析】原有解析。\n听力稿\nⅠ.关键词语选择\n1.Keep your attention.\n')
+        self.put('01_source/正文.txt', 'Ⅰ.关键词语选择\n1. A. First B. Second C. Third\n')
+        self.put('01_source/附录.txt', 'Ⅰ.关键词语选择\n1. A 【解析】原有解析。\n听力稿\nⅠ.关键词语选择\n1.Keep your attention.\n')
         item = dict(self.units[0], question_type='听力关键词语选择', explanation=listening_script.combine('', 'Keep your attention.'))
         report = upload_content.inspect_content(self.batch, {'items': [item]}, strict=True)
         self.assertIn('ORIGINAL_EXPLANATION_OMITTED', {row['code'] for row in report['errors']})
+        item['explanation'] = listening_script.combine('原有解析。', 'Keep your attention.')
+        report = upload_content.inspect_content(self.batch, {'items': [item]}, strict=True)
+        self.assertTrue(report['passed'], report['errors'])
+        item['explanation'] = listening_script.combine('改写的解析。', 'Keep your attention.')
+        report = upload_content.inspect_content(self.batch, {'items': [item]}, strict=True)
+        self.assertIn('EXPLANATION_SOURCE_UNVERIFIED', {row['code'] for row in report['errors']})
 
     def test_direct_explanation_retains_original_and_supplies_script(self):
         word = {'number': 1, 'source_text': '原有解析', 'path': '01_source/附录.txt', 'line': 1}

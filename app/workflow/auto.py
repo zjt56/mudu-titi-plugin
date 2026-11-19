@@ -325,7 +325,8 @@ def _cooldown_preflight(batch_dir, stage):
 
 # ---------------------------------------------------------------- 推进
 
-def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pending_audio=None) -> dict:
+def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pending_audio=None,
+                           while_running=None) -> dict:
     """Export and import serially; only read-only model calls overlap."""
     from . import agent_protocol, agent_tasks, local_agent, stage_preflight
     from .agent_prepare import prepare_answers
@@ -403,6 +404,9 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
             return label_execution.run(batch_dir, stage_id, invoke_config, run_dir, coordinated_imports=True)
         return local_agent.invoke(task["prompt"], run_dir, invoke_config, permit_parallel=True, coordinated_imports=True)
 
+    authentication_failures = set()
+    auth_binding = local_agent.authentication_binding() if prepared else None
+
     def import_outcome(stage):
         code, value = outcomes[stage.id]
         imported = False
@@ -441,11 +445,14 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
                 imported = True
             except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
                 code, value = 1, str(exc)
+                if isinstance(exc, local_agent.AgentError) and exc.code == "authentication":
+                    authentication_failures.add(stage.id)
         if code and not imported:
             # Coordinate with protocol imports and do not overwrite a stage another
             # participant completed while the model call was running.
-            limited = code == 4 or _is_rate_limited(str(value))
-            if not limited and code == 5 and stage.id in prepared:
+            authentication_failed = stage.id in authentication_failures
+            limited = not authentication_failed and (code == 4 or _is_rate_limited(str(value)))
+            if not authentication_failed and not limited and code == 5 and stage.id in prepared:
                 limited = not _has_deterministic_partition_failure(prepared[stage.id][2])
             admission_cooldown = code == 4
             if code == 5:
@@ -460,6 +467,13 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
                             _set_cooldown(batch_dir, RATE_LIMIT_BACKOFF_SECONDS)
                         mf.touch_stage(manifest, stage.id, mf.PENDING,
                                        notes="限流/额度或模型调用异常冷却中：" + str(value)[:200])
+                    elif authentication_failed:
+                        from .issue_log import record_model_authentication
+
+                        mf.touch_stage(manifest, stage.id, mf.FAILED, exit_code=code,
+                                       notes=local_agent.MODEL_AUTHENTICATION_NOTE,
+                                       model_authentication=auth_binding)
+                        record_model_authentication(batch_dir, stage.id)
                     else:
                         mf.touch_stage(manifest, stage.id, mf.NEEDS_REVIEW if code == 3 else mf.FAILED,
                                        exit_code=code, notes=str(value)[:300])
@@ -485,6 +499,8 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
             result_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
             outcomes[sid] = (0, result_path)
         except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+            if isinstance(exc, local_agent.AgentError) and exc.code == "authentication":
+                authentication_failures.add(sid)
             code = (4 if getattr(exc, 'code', '') == 'model_cooldown' else
                     5 if isinstance(exc, local_agent.AgentError) and (
                         exc.code == 'exit' and _is_upstream_call_failure(str(exc))
@@ -513,6 +529,14 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
         # Only the lock-owning scheduler calls this closure and writes delivery.
         pending_audio.append(collect_audio)
     try:
+        if while_running is not None and futures:
+            if os.name == "nt":
+                # Windows file locks are process-owned. Serialize ledger
+                # writes against worker admission on the same process.
+                with bookkeeping_lock:
+                    while_running()
+            else:
+                while_running()
         for future in as_completed([f for f in futures if not deferred or f is not audio]):
             collect(future)
         for stage in stages:
@@ -809,6 +833,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
         # A deferred stage is PENDING, so it is no longer a failure candidate.
         # Its existing repair event still owns a bounded, evidence-bound wait.
         recovery_wait.update(self_heal.deferred_waits(batch_dir, manifest))
+        recovery_wait.update(self_heal.authentication_waits(manifest))
     except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
         print(f"  · 模型自愈记录失败，不影响主流程：{str(exc)[:160]}")
     blockers = []
@@ -820,6 +845,32 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
 
     def dep_ready(stage_id):
         return mf.dependency_satisfied(manifest, stage_id, allow_unqualified=ZERO_TOUCH)
+
+    projected = set()
+
+    def advance_local_projection():
+        # Keep the scheduler as the sole writer for these steps. Model workers
+        # are already dispatched and their imports still run on this thread.
+        from .agent_protocol import _agent_lock
+        for sid in ('content_snapshot', 'meta', 'underlines'):
+            spec = contracts.STAGE_BY_ID[sid]
+            if (sid in projected or sid in recovery_wait or cancel_requested(batch_dir)
+                    or stop_at and contracts.STAGE_ORDER.index(sid) >= contracts.STAGE_ORDER.index(stop_at)):
+                continue
+            with _agent_lock(1500):
+                current = mf.load(batch_dir)
+                if current['stages'][sid].get('status') in mf.TERMINAL_OK:
+                    continue  # Normal pass owns staleness/skip reconciliation.
+                if not all(mf.dependency_satisfied(current, dep, allow_unqualified=False)
+                           for dep in spec.depends_on):
+                    continue
+                if mf.skip_reason(current, spec) or any(
+                        not current.get('inputs', {}).get(key, {}).get('exists') for key in spec.requires):
+                    continue
+            projected.add(sid)
+            print(f"  · {sid} 与文字填充并行执行")
+            if rn._execute_command(batch_dir, current, spec) != 0:
+                blocked(sid, "脚本执行失败", "failed")
 
     # 契约已按拓扑排列：每阶段只尝试一次，阻断只影响真正依赖它的阶段。
     audio_prep = {"status": "waiting"}
@@ -880,6 +931,8 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
             continue
         if stop_at and stage.id == stop_at:
             break
+        if stage.id in projected:
+            continue
         if (stage.id == 'review' and manifest['stages'].get('validate', {}).get('audio_projection_refresh')
                 and manifest['stages']['validate'].get('status') not in mf.TERMINAL_OK):
             # Audio-only view projection preserves existing metadata/underlines,
@@ -904,7 +957,8 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                 wait_action = ('repair_refused' if wait.get('status') == 'refused' else
                                wait['status'] if wait.get('status') in {'operations_pending', 'waiting_external'} else 'cooldown')
                 blocked(stage.id, str(reason)[:300], wait_action, next_retry_at=wait.get("next_retry_at"),
-                        retry_after=wait.get("retry_after"), self_heal_status=wait.get("status"))
+                        retry_after=wait.get("retry_after"), self_heal_status=wait.get("status"),
+                        **{key: wait[key] for key in ('error_code', 'retryable') if key in wait})
                 continue
         if stage.id in parallel_done:
             code = parallel_done[stage.id]
@@ -1102,9 +1156,11 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                     try:
                         if any(item.id == 'audio' for item in eligible):
                             results = _parallel_ready_agents(batch_dir, eligible, config,
-                                                             pending_audio=pending_audio)
+                                                             pending_audio=pending_audio,
+                                                             while_running=advance_local_projection)
                         else:
-                            results = _parallel_ready_agents(batch_dir, eligible, config)
+                            results = _parallel_ready_agents(batch_dir, eligible, config,
+                                                             while_running=advance_local_projection)
                     except Exception as exc:  # lock contention is "busy", not a failure
                         if getattr(exc, "code", "") != "lock_timeout":
                             raise

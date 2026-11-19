@@ -92,6 +92,16 @@ class UnitTasksTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "max_units"):
                 unit_tasks.build_parts("unused", "review", len(self.prompt) + 1000, max_units=0)
 
+    def test_weighted_groups_balance_children_without_splitting_or_reordering_units(self):
+        units = [{'unit_id': str(index), 'numbers': list(range(count))}
+                 for index, count in enumerate((1, 1, 1, 1, 10, 10, 1, 1, 1, 1))]
+        groups = unit_tasks._weighted_groups(units, 4, {})
+        self.assertEqual([unit for group in groups for unit in group], units)
+        self.assertEqual(len(groups), 3)
+        self.assertTrue(all(len(group) <= 4 for group in groups))
+        worst = max(sum(len(unit['numbers']) for unit in group) for group in groups)
+        self.assertLess(worst, 22)  # Sequential groups of four put both heavy units together.
+
     def test_rejects_wrong_or_duplicate_partition_coverage(self):
         _, parts = self.build()
         with self.assertRaises(ValueError):

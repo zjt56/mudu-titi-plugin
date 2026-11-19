@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import sys
 import zipfile
@@ -47,6 +49,36 @@ def collect_batch_corpus(batch):
     return _mark_key("\n".join(_unit_text(u) for u in units(batch) if isinstance(u, dict)))
 
 
+def confirmed_body(batch_path, original_path):
+    """Use the current structure gate's verified question paper, with its line coordinates."""
+    batch_path = Path(batch_path)
+    if batch_path.parent.name != '06_batch':
+        return None
+    root = batch_path.parent.parent.resolve()
+    original_path = Path(original_path)
+    gate_path = root / '07_review/structure-gate.json'
+    relative_paths = ('01_source/正文.txt', '01_source/structure.json',
+                      '01_source/structure.confirmed.json')
+    paths = [root / relative for relative in relative_paths]
+    if any(path.is_symlink() or path.parent.is_symlink() for path in (gate_path, *paths)):
+        return None
+    try:
+        gate = json.loads(gate_path.read_text(encoding='utf-8-sig'))
+        if gate.get('passed') is not True:
+            return None
+        digest = lambda raw: hashlib.sha256(raw).hexdigest()
+        if digest(original_path.read_bytes()) != gate.get('original_sha256'):
+            return None
+        snapshots = [path.read_bytes() for path in paths]
+        if any(digest(raw) != gate.get('input_hashes', {}).get(relative)
+               for relative, raw in zip(relative_paths, snapshots)):
+            return None
+        body = snapshots[0].decode('utf-8-sig')
+        return body if body.strip() else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
 def main(argv=None):
     args = arg_parser("提示标记体检（D12/B9）").parse_args(argv)
     try:
@@ -58,7 +90,11 @@ def main(argv=None):
     if args.source is None:
         return report([], ok_msg="未提供 --source，跳过提示标记检查")
 
-    src_text = read_source_text(args.source)
+    # Appendix commentary is outside the verified question paper. If the
+    # structure binding is unavailable, retain the existing full-source check.
+    src_text = confirmed_body(args.batch, args.source)
+    if src_text is None:
+        src_text = read_source_text(args.source)
     if src_text is None:
         return report([], ok_msg="未能读取原卷文本，跳过提示标记检查")
 

@@ -1,9 +1,36 @@
 """原卷预览旁的快速核对标签：来源、知识点、难度、词数。"""
+import hashlib
+import tempfile
 import unittest
-from workbench.server import preview_labels
+from pathlib import Path
+from workbench.server import answer_point_tags, preview_labels, save_json
 
 
 class PreviewLabelsTest(unittest.TestCase):
+    def test_answer_points_require_current_batch_inputs_and_unit_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            batch = Path(directory)
+            files = ("06_batch/batch_meta.json", "01_source_ans/answers.json")
+            for relative in files:
+                save_json(batch / relative, {})
+            save_json(batch / "04_knowledge/answer-point-tags.pending.json", {
+                "batch": batch.name, "status": "pending_catalog_binding",
+                "source_sha256": {
+                    name: hashlib.sha256((batch / name).read_bytes()).hexdigest()
+                    for name in files
+                },
+                "labels": [
+                    {"unit_id": "q-1", "question_type": "单词拼写", "name": "people",
+                     "proposed_path": "词汇/答案考点/people"},
+                    {"unit_id": "q-2", "question_type": "完成句子", "name": "take care of",
+                     "proposed_path": "词汇/答案考点/take care of"},
+                ],
+            })
+            self.assertEqual(answer_point_tags(batch, "q-1"), ["people"])
+            self.assertEqual(answer_point_tags(batch, "q-2"), [])
+            save_json(batch / files[1], {"answers": {"1": "children"}})
+            self.assertEqual(answer_point_tags(batch, "q-1"), [])
+
     def test_combines_source_and_counts_words(self):
         labels = {'source': '2022年安徽省初中学业水平考试', 'source_type': '中考真题',
                   'type': '阅读理解', 'subtypes': ['选择4题'], 'difficulty': '适中',

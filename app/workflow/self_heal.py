@@ -223,6 +223,10 @@ def _candidate(batch: Path, manifest: dict) -> tuple[str | None, str]:
     for item in view.get("items", []):
         stage_id = item.get("stage")
         spec = contracts.STAGE_BY_ID.get(stage_id)
+        if (manifest.get("stages", {}).get(stage_id) or {}).get("model_authentication"):
+            # Configuration revisions control dispatch for authentication failures.
+            # Neither a diagnosis model nor isolated source repair can refresh credentials.
+            continue
         # Ordinary invalidation is work already queued by the scheduler, not a
         # reason to pay for another diagnostic model call.
         if (item.get("blocking") and spec and spec.kind != contracts.HUMAN
@@ -361,10 +365,21 @@ def _retry_detail(batch, stage_id, detail):
 def _runtime_failure(detail):
     """Return a machine error code proving dispatch failed before content work."""
     for row in _diagnostic_rows(detail):
-        code = row.get('error_code')
-        if code in ('native_route_identity_missing', 'integration', 'config'):
+        code = row.get('error_code') or row.get('code')
+        if code in ('native_route_identity_missing', 'integration', 'config', 'authentication'):
             return str(code)
     return None
+
+
+def authentication_waits(manifest):
+    from .local_agent import authentication_binding, MODEL_AUTHENTICATION_NOTE
+
+    recorded = {sid: record['model_authentication'] for sid, record in manifest['stages'].items()
+                if record.get('status') not in mf.TERMINAL_OK and record.get('model_authentication')}
+    current = authentication_binding() if recorded else None
+    return {sid: {'status': 'refused', 'error_code': 'authentication', 'retryable': False,
+                  'reason': MODEL_AUTHENTICATION_NOTE}
+            for sid, previous in recorded.items() if current == previous}
 
 
 def _runtime_failure_signature(batch, stage_id, error_code):
@@ -422,6 +437,8 @@ def _content_retry_scope(batch, stage_id, detail, *, origin_stage=None, unit_ids
         return None
     origin = origin_stage or stage_id
     runtime = _runtime_failure(detail)
+    if runtime == 'authentication':
+        raise ValueError('model_authentication_requires_configuration_change: ' + stage_id)
     if runtime:
         raise ValueError('content_runtime_requires_code_repair: ' + stage_id + ': ' + runtime
                          + ': 派发/配置故障不授权内容重生成；保留原产物并修复派发链路后复验')
@@ -852,6 +869,8 @@ def _apply(batch, manifest, stage_id, detail, plan, attempt, snapshot):
     if action == 'refresh_preassemble' and stage_id not in ('preassemble', 'assemble', 'validate', 'format_gate'):
         raise ValueError('refresh_preassemble_not_applicable: 当前阶段不支持前置格式刷新')
     runtime = _runtime_failure(detail)
+    if runtime == 'authentication':
+        raise ValueError('model_authentication_requires_configuration_change: ' + stage_id)
     if runtime and stage_id in ('answers', 'types', 'explanations', 'knowledge', 'audio'):
         raise ValueError('content_runtime_requires_code_repair: ' + stage_id + ': ' + runtime)
     if action == 'record_only' and stage_id in ('answers', 'types', 'explanations', 'knowledge', 'audio'):
@@ -1146,6 +1165,10 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
     if stage_id in waits:
         return waits[stage_id]
     if not stage_id:
+        authentication = authentication_waits(manifest)
+        if authentication:
+            stage, wait = next(iter(authentication.items()))
+            return {"changed": False, "stage": stage, **wait}
         ledger = _load(batch)
         if waits:
             wait = min(waits.values(), key=lambda value: value['next_retry_at'])
@@ -1186,11 +1209,13 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
                       if event.get('stage') == stage_id and event.get('signature') == signature
                       and event.get('error_code') == runtime), None)
         if prior is None:
+            credentials = runtime == 'authentication'
             event = {'at': mf.now_iso(), 'finished_at': mf.now_iso(), 'stage': stage_id,
                      'detail': detail, 'signature': signature, 'error_code': runtime,
                      'attempt': 0, 'verified': False, 'outcome': 'repair_not_applicable',
-                     'escalation': 'code_repair',
-                     'reason': '确定性内容派发故障；停止自愈模型判断和内容重派，交由既有代码运维修复'}
+                     'escalation': 'model_credentials' if credentials else 'code_repair',
+                     'reason': ('模型服务拒绝凭据；保留产物，等待可信凭据更新' if credentials else
+                                '确定性内容派发故障；停止自愈模型判断和内容重派，交由既有代码运维修复')}
             ledger.setdefault('events', []).append(event)
             ledger['events'] = ledger['events'][-50:]
             ledger.update(active_signature=stage_id + ':' + signature,
@@ -1200,7 +1225,7 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
             event = prior
         return {'changed': False, 'status': 'refused', 'stage': stage_id,
                 'verified': False, 'outcome': 'repair_not_applicable',
-                'escalation': 'code_repair', 'signature': signature,
+                'escalation': event['escalation'], 'signature': signature,
                 'reason': event['reason'], 'event': event}
     # New evidence/code opens a fresh strategy budget and bypasses old cooldowns.
     # A requeue's timestamps and model explanation cannot reset this identity.

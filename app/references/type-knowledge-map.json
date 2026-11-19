@@ -368,12 +368,6 @@
      "branch": "语法",
      "show": "below-root",
      "note": "一级标题及子标题"
-    },
-    {
-     "dim": "答案考点",
-     "branch": "词汇/语法",
-     "show": "leaf",
-     "note": ""
     }
    ]
   },
@@ -474,12 +468,6 @@
      "branch": "语法",
      "show": "below-root",
      "note": "一级标题及子标题"
-    },
-    {
-     "dim": "答案考点",
-     "branch": "词汇/语法",
-     "show": "leaf",
-     "note": ""
     }
    ]
   },

@@ -62,7 +62,12 @@ def has_answer_source(batch_dir) -> bool:
 
 def has_explanation_source(batch_dir) -> bool:
     """True when a supplied answer source actually contains explanation markers."""
-    return any(EXPLANATION_MARK.search(_nonempty(path)) for path in _answer_text_files(Path(batch_dir)))
+    from .sync_practice import writing_guide_heading
+    root = Path(batch_dir)
+    if any(EXPLANATION_MARK.search(_nonempty(path)) for path in _answer_text_files(root)):
+        return True
+    body = _nonempty(root / "01_source/正文.txt")
+    return any(writing_guide_heading(line) for line in body.splitlines())
 
 
 

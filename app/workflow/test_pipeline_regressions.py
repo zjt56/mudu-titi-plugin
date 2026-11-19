@@ -95,6 +95,23 @@ class PipelineRegressions(unittest.TestCase):
              patch('workflow.question_content.audit_batch_source', return_value={'passed': False, 'issues': issues}):
             self.assertEqual(runner.do_validate(self.root, self.manifest), 1)
 
+    def test_assembled_batch_stops_before_review_on_concrete_source_and_shape_errors(self):
+        (self.root / 'workflow').mkdir(exist_ok=True)
+        (self.root / 'workflow/batch-fill-state.json').write_text('{}', encoding='utf-8')
+        (self.root / '06_batch/batch_meta.json').write_text('{"items":[{"id":"q-40","number":0}]}')
+        issue = {'code': 'OPTION_CONTENT_MISMATCH', 'unit_id': 'q-40', 'message': 'D选项不符'}
+        script_report = {'passed': True, 'checks': [], 'blocking_failures': [], 'warnings': [], 'skipped': []}
+        with patch.object(runner.checks, 'run_all', return_value=script_report), \
+             patch('workflow.question_content.audit_batch_source', return_value={'passed': False, 'issues': [issue]}):
+            self.assertEqual(runner.do_validate(self.root, self.manifest), 1)
+        self.assertFalse(mf.dependency_satisfied(mf.load(self.root), 'validate'))
+        self.assertFalse((self.root / '07_review/upload-format.json').exists())
+        report = json.loads((self.root / '07_review/validation-report.json').read_text())
+        codes = {row['code'] for row in report['review_preflight']['errors']}
+        self.assertTrue({'OPTION_CONTENT_MISMATCH', 'QUESTION_NUMBER_INVALID'} <= codes)
+        matches = [row for row in report['findings'] if row['code'] == 'OPTION_CONTENT_MISMATCH']
+        self.assertTrue(matches and all(row['blocking'] for row in matches))
+
     def test_validate_merges_concurrent_stage_update(self):
         mf.save(self.root, self.manifest)
         script_report = {'passed': True, 'checks': [], 'blocking_failures': [], 'warnings': [], 'skipped': []}

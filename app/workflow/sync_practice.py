@@ -38,6 +38,13 @@ _ANSWER_ROW = re.compile(
     r"^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+|[一二三四五六七八九十]+)\s*[.．、,，]\s*(?:答案|解析|\d)"
     r"|^\s*\d{1,4}\s*[~～\-–—至]\s*\d{1,4}\s*[A-Ha-h]"
     r"|^\s*\d{1,4}\s*[.．、]\s*[A-Ha-h]\s*$")
+# 一行内并排的短语答案（`1.has changed a lot　2.Thanks to…`）也是答案行形态；
+# 答案行的题号后可以紧跟英文/中文答案，不限于单个选项字母。
+_INLINE_ANSWER_ITEM = re.compile(r"(?:^|[\s\u3000])\d{1,4}\s*[.．、]\s*[^\s\d\u3000]")
+
+
+def _inline_answer_items(plain: str) -> int:
+    return len(_INLINE_ANSWER_ITEM.findall(str(plain or "")))
 
 
 def plain_text(text: str) -> str:
@@ -83,7 +90,9 @@ def _matches(rule: dict, text: str) -> bool:
     if any(bad in text for bad in rule.get("none") or []):
         return False
     keywords = rule.get("any") or []
-    if not any(word in text for word in keywords):
+    heading_pattern = rule.get("heading_pattern")
+    if not any(word in text for word in keywords) and not (
+            heading_pattern and re.search(heading_pattern, text)):
         return False
     required = rule.get("subtype_any") or []
     if required and not any(word in text for word in required):
@@ -260,12 +269,31 @@ def heading_hit(line: str, path: str | Path | None = None) -> dict | None:
         return hit
     # 无序号指令标题；不匹配“这篇阅读理解…”等普通叙述。
     if hit["type"] == "书面表达":
-        return hit if (text == '书面表达' or re.search(r"(?:请|假如|假设).{0,160}写一[篇封段份]", text)) else None
+        return hit if text == '书面表达' or writing_prompt(line, path) else None
     if len(text) <= 100 and re.match(
             r"(?:阅读理解|任务型阅读|完形填空|补全对话|单项填空|单项选择|教材语篇回顾|短文填空|选词填空|"
             r"根据|用|填入|按照|将|选出|找出|在下列|写出|按要求|翻译|汉译英|☆?佳句仿写)", text):
         return hit
     return None
+
+
+def writing_prompt(line: str, path: str | Path | None = None) -> bool:
+    rule = next((row for row in rules(path) if row.get("id") == "writing"), {})
+    pattern = rule.get("heading_pattern")
+    return bool(pattern and re.search(pattern, normalize(line)))
+
+
+def writing_prompt_end(lines: list[str]) -> int:
+    """Count task lines before an explicit inline writing-guide heading."""
+    for index, raw in enumerate(lines):
+        if writing_guide_heading(raw):
+            return index
+    return len(lines)
+
+
+def writing_guide_heading(line: str) -> bool:
+    title = plain_text(line).strip().strip("【】[]:：").strip()
+    return title in {"审题思路", "思路点拨", "写作提纲", "优秀范文", "参考范文"}
 
 
 def answer_key_start(raw_text: str) -> int | None:
@@ -282,12 +310,17 @@ def answer_key_start(raw_text: str) -> int | None:
         if not _ANSWER_HEADING.match(line):
             continue
         tail = [item for item in lines[index + 1:] if item]
-        if sum(1 for item in tail[:40] if _ANSWER_ROW.match(item)) < 2:
+        rows = sum(1 for item in tail[:40] if _ANSWER_ROW.match(item))
+        rows += sum(max(0, _inline_answer_items(item) - 1)
+                    for item in tail[:40] if not _ANSWER_ROW.match(item))
+        if rows < 2:
             continue
         # 合订练习册可能每课时后都附答案，后面仍有真实课时/大题。
         # 这类中间答案不能作为整份正文的终点；罗马序号行内答案不算新大题。
+        # 一行内并排多个短语答案的行同样是答案行，不能当成新大题起始。
         if any(_LESSON.match(item) or _UNIT.match(item)
-               or (heading_hit(item) and not _ANSWER_ROW.match(item)) for item in tail):
+               or (heading_hit(item) and not _ANSWER_ROW.match(item)
+                   and _inline_answer_items(item) < 2) for item in tail):
             continue
         return index + 1
     return None

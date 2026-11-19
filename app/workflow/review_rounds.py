@@ -23,7 +23,7 @@ from .local_agent import _agent_lock, _check_input_hashes, invoke, load_config
 # Bumped whenever the prompt builder or blind context changes, so stale
 # partition states and bindings are never reused silently.
 CONTEXT_VERSION = "blind-context-v12"
-PROMPT_VERSION = "review-prompt-v12"
+PROMPT_VERSION = "review-prompt-v16"
 
 
 ARTIFACT = "review_round"
@@ -144,7 +144,7 @@ def _round_prompt(round_id, targets, context):
                    "无法判断标签时使用 verdict=uncertain、assessment=null 并说明具体原因及可核验证据，继续审其他目标；不得猜测。"
                    "【标签分层口径·必须遵守】以组题为准的单元在组级挂体裁/主题/内容标签，subquestions[].knowledge 允许为空数组；"
                    "这是合规设计而非缺陷，严禁因『子题知识点为空/考点未落到小题』生成 error、uncertain 或整改要求。"
-                   "用户规则：以组题为准的单元（包括补全对话、完形填空、阅读理解、任务型阅读、信息转换等）只要求组级 knowledge 非空；子题 knowledge 可为空，不因留空生成错误、不确定或整改要求。子题已填写的合法知识点也可保留，不强制删除。独立单题仍须有自身知识点。"
+                   "整组题型的 assessment 只提交组级知识点，子题 knowledge=[]。独立单题提交自身知识点。"
                    "带编号子题的选择题组，组级 options 按协议为空、选项只存在于各子题；严禁因『组级 options 为空』或旧证据里曾出现的串题生成意见，一切判断以本次绑定的当前数据为准。"
                    "【引证口径】quote 必须是绑定文件的逐字连续片段，不得改写原文的单复数、所有格、拼写或标点，先在给定正文中逐字定位再复制。"
                    + ("二审还须提供 source_comparison:string，说明目标与原文、答案的对照；"
@@ -170,6 +170,14 @@ def _round_prompt(round_id, targets, context):
         + "Quote actual bound source text, with at least one 01_source/正文.txt reference per check. "
         "Each quote MUST be one single contiguous substring copied verbatim from the bound file (one line or consecutive lines as they appear); never concatenate separate paragraphs, never join a lead-in with a later paragraph using an ellipsis or invented separators. Keep quotes short and exact. "
         "Give actual question-specific semantic rationale. Structural/nonempty/catalog checks alone cannot justify ok. "
+        "【逐目标复核】先独立核对题面的真实作答方式和正确答案所依赖的证据，再确定标签。"
+        "对于题型维度表列有答案考点的题型，在 assessment.answer_points 独立填写当前审核范围内的正确答案词或短语数组。"
+        "选择题先将答案字母映射到正确选项文字，填空保留实际词形，组题按审核覆盖范围逐空核对后去重。"
+        "仅填单词或短语，跳过完整句子、纯数字和占位。完成句子、短文填空等未配置答案考点的题型填 []。"
+        "在理由中指出答案词及依据，答案考点放在 answer_points，目录知识点仍照常填 knowledge。"
+        "在现有 rationale 中简要把每个所选知识点对应到具体线索；组题说明主题依据，并用小题号标明不同设题角度的依据。"
+        "同一证据可支持多个判断时合并说明。交卷前逐项核对 rationale 与 assessment，移除只有背景或干扰项支撑的可选标签，"
+        "保留有独立证据的考点。若必带标签或主类确实无法判定，写明缺少哪项证据，使用现有 uncertain 协议。"
         "Write every rationale and assessment explanation in SIMPLIFIED CHINESE (简体中文), concise and readable; do not use English template prefixes like 'What the question tests' or 'Answer-to-point relation'. " 
         "Actual differences/conflicts/uncertainties use error/uncertain, never create routine human confirmations. "
         "试卷名、来源、来源类型、分类标签缺失时使用「未提供」是允许的占位，不是试题错误；"
@@ -186,9 +194,12 @@ def _round_prompt(round_id, targets, context):
         "不得引用、猜测或要求查看已隐藏的当前标签值。"
         "verdict 只描述可见题面、答案、解析的实质问题或无法独立判断的具体原因；"
         "能独立判定且未发现实质问题时填 ok，即使 assessment 最终与原标签不同，程序仍会保留该真实差异。 "
-        "status=completed means this round was executed, even if it found errors. Missing review evidence => needs_review; never clear it.\n"
+        "【提交检查】已覆盖全部目标时，顶层 status=completed；已检查但证据不足写在该目标的 check。"
+        "尚未覆盖全部目标时，顶层 status=needs_review。返回前检查根对象有 status、artifacts、notes、findings 四个同级键，"
+        "没有备注时也写 notes:[]，findings 必须写 []。\n"
         + "ROUND: " + round_id + "\n" + instruction
         + _agent_roles().section("review", "07_review/agent-review.json", round_id)
+        + _agent_roles().knowledge_judgment_rules()
         + "\nTARGETS: " + json.dumps(targets, ensure_ascii=False)
         + '\n返回根结构示例（checks 必须替换为覆盖 TARGETS 的实际判断）：'
         + json.dumps(_round_envelope(), ensure_ascii=False, separators=(',', ':'))
@@ -810,6 +821,8 @@ def _write_part_package(batch, state, state_path, plan, input_hashes, index, fro
             "required": ["number", "knowledge"], "properties": {"number": {"type": "string"}, "knowledge": dict(string_list)}}},
     }
     assessment_schemas = {r: dict(common_assessment) for r in review.ROUND_IDS}
+    for assessment_schema in assessment_schemas.values():
+        assessment_schema["answer_points"] = string_list
     assessment_schemas['sample']['source_comparison'] = {"type": "string", "minLength": 1}
     properties = {"unit_id": {"type": "string"}, "verdict": {"enum": ["ok", "error", "uncertain"]},
                   "rationale": {"type": "string", "minLength": 1},
@@ -817,7 +830,8 @@ def _write_part_package(batch, state, state_path, plan, input_hashes, index, fro
                       "required": ["path", "locator", "quote"], "properties": {
                           k: {"type": "string", "minLength": 1} for k in ("path", "locator", "quote")}}},
                   "assessment": {"type": ["object", "null"], "additionalProperties": False,
-                      "required": list(assessment_schemas[round_id]), "properties": assessment_schemas[round_id]}}
+                      "required": [key for key in assessment_schemas[round_id] if key != "answer_points"],
+                      "properties": assessment_schemas[round_id]}}
     if round_id == "sample":
         # 抽样目标既可能是独立小题（需 number），也可能是整组题（number 省略，
         # 只做组级核对），因此 number 不作为必填。
@@ -964,6 +978,7 @@ def export_group(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
             task_id = state["parts"][index]["task_id"]
             parts.append({"task_id": task_id, "round_id": state["round_id"],
                           "part_index": index + 1, "part_count": len(state["parts"]),
+                          "prompt_chars": len(state["parts"][index]["prompt"]),
                           "package_dir": str(batch / "workflow/review-tasks" / task_id)})
         return {"action": "exported", "round_id": state["round_id"], "parts": parts}
 
@@ -1088,8 +1103,16 @@ def _recover_installs(batch, *, only_round=None, skip_rounds=()):
 
 
 def import_result(batch_dir, task_id, result):
+    from .partition_timing import measure
     with _agent_lock(60):
-        return _import_result(batch_dir, task_id, result)
+        if not isinstance(task_id, str) or not re.fullmatch(r'round-[0-9a-f]{32}', task_id):
+            return _import_result(batch_dir, task_id, result)
+        try:
+            target = _path(Path(batch_dir), f'workflow/review-attempts/{task_id}-{uuid.uuid4().hex}-acceptance.json')
+        except (OSError, ValueError):
+            return _import_result(batch_dir, task_id, result)
+        with measure(target, 'acceptance', stage='review', task_id=task_id):
+            return _import_result(batch_dir, task_id, result)
 
 
 def _import_result(batch_dir, task_id, result):
@@ -1397,7 +1420,9 @@ def _run_parts_parallel(batch_dir, parts, config, workers, retries=1, feedbacks=
     budget = int(config.get("max_input_chars", 600000))
     feedback_limit = int(config.get("retry_feedback_chars", 1200) or 1200)
 
-    def call_once(part, feedback):
+    queued_at = _time.monotonic()
+    def call_once(part, feedback, attempt, wait_seconds):
+        from .partition_timing import measure
         task = _check_bound_inputs(batch, part["task_id"])["task"]
         run_dir = _attempt_dir(batch, part["task_id"])
         prompt = task["prompt"]
@@ -1405,11 +1430,15 @@ def _run_parts_parallel(batch_dir, parts, config, workers, retries=1, feedbacks=
             room = max(0, budget - len(prompt))
             prompt += ("\n前次分片结果未通过协议/语义校验，请修正并完整返回本分片全部目标的 JSON。错误："
                        + feedback[:feedback_limit])[:room]
-        response = invoke(prompt, run_dir, config, permit_parallel=True)["response"]
+        with measure(run_dir / 'model-timing.json', 'model', stage='review',
+                     round_id=part['round_id'], task_id=part['task_id'], attempt=attempt + 1,
+                     queue_seconds=wait_seconds, prompt_chars=len(prompt)):
+            response = invoke(prompt, run_dir, config, permit_parallel=True)["response"]
         _check_response_envelope(response)
         return response
 
     def run_one(part):
+        wait_seconds = round(_time.monotonic() - queued_at, 4)
         last_error = ""
         last_exception = None
         for attempt in range(retries):
@@ -1420,7 +1449,7 @@ def _run_parts_parallel(batch_dir, parts, config, workers, retries=1, feedbacks=
                 raise RuntimeError("其它分片已遇到代理额度/限流，当前分片未发起调用")
             feedback = feedbacks.get(part["task_id"], "") if attempt == 0 else (last_error or feedbacks.get(part["task_id"], ""))
             try:
-                return call_once(part, feedback)
+                return call_once(part, feedback, attempt, wait_seconds if attempt == 0 else 0)
             except ReviewInputsChanged:
                 raise
             except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
@@ -1842,7 +1871,12 @@ def _run(batch_dir, config=None, portable_max_input_chars=None, *, blocked_round
                                    skip_rounds=failures, max_units_per_part=_part_units(config))
                 done["summary"] = write_summary(batch_dir, failures)
                 return done
-            all_parts = [part for group in invokable for part in group["parts"]]
+            # Alternate the independent rounds while starting larger inputs in
+            # each round first. Import order still follows the frozen plan.
+            from itertools import zip_longest
+            queues = [sorted(group["parts"], key=lambda part: -part.get("prompt_chars", 0))
+                      for group in invokable]
+            all_parts = [part for wave in zip_longest(*queues) for part in wave if part is not None]
             outcomes, quota_hit = _run_parts_parallel(batch_dir, all_parts, config, parallel, retries)
             if quota_hit:
                 summary = write_summary(batch_dir, failures)
@@ -1926,7 +1960,11 @@ def _run(batch_dir, config=None, portable_max_input_chars=None, *, blocked_round
                 response = _load_pending(batch_dir, exported["task_id"])
                 if response is None:
                     run_dir = _attempt_dir(batch_dir, exported["task_id"])
-                    response = invoke(prompt, run_dir, config)["response"]
+                    from .partition_timing import measure
+                    with measure(run_dir / 'model-timing.json', 'model', stage='review',
+                                 round_id=round_id, task_id=exported['task_id'],
+                                 attempt=attempt + 1, queue_seconds=0, prompt_chars=len(prompt)):
+                        response = invoke(prompt, run_dir, config)["response"]
                     _check_response_envelope(response)
                     _save_pending(batch_dir, exported["task_id"], response)
                 try:

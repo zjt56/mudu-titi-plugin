@@ -28,7 +28,7 @@ SUMMARY = re.compile(rf'{SUMMARY_LABEL}\s*(.*)')
 ANNOTATION = re.compile(r'^\s*(?:\*\*\s*)?#*\s*【\s*(?:熟词生义|点拨|思路点拨|拓展|引申|考点|词义辨析|语法点|注意|易错点|重难点|词汇积累|难句分析)\s*】')
 ICON_HEADING = re.compile(rf'^\s*{IMG}[^\n]*?{IMG}')
 SECTION_NUMBER = re.compile(r'^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+|[一二三四五六七八九十]+)[.．、]')
-SECTION_NAME = re.compile(r'^\s*(短对话理解|长对话理解|短文理解|信息转换|单项填空|完形填空|补全对话|阅读理解|任务型阅读|单词拼写|书面表达)(?=\s|$|[（(：:])')
+SECTION_NAME = re.compile(r'^\s*(关键词语选择|短对话理解|长对话理解|短文理解|信息转换|单项填空|完形填空|补全对话|阅读理解|任务型阅读|单词拼写|书面表达)(?=\s|$|[（(：:])')
 # A bare letter, a Chinese passage heading, or an explicit “Passage B”
 # marks a boundary; an English sentence beginning with the article “A” does not.
 PASSAGE_HEADING = re.compile(
@@ -514,6 +514,12 @@ def _compact_answer_blocks(lines, features=()):
         if feature_topic:
             topic, band, active = feature_topic, '', None
             continue
+        # A printed key banner delimits the preceding block even when the
+        # corresponding body banner is image-only. Section ownership still
+        # requires the complete Roman skeleton and printed-number coverage.
+        if re.fullmatch(rf'\s*{IMG}\s*(?:语法精练|课时精练)\s*{IMG}\s*', text):
+            active = None
+            continue
         if is_section_title(visible):
             topic, band, active = _norm(visible), '', None
             continue
@@ -929,6 +935,40 @@ def _shortened_band_window(owner_span, annotated):
     return False
 
 
+def _topic_writing_sentence_answers(unit, number, lines, sections):
+    """Bind a labelled Word key to the sole numbered task in a writing section."""
+    from .sync_practice import plain_text, writing_prompt
+
+    body_path, key_path = '01_source/正文.txt', '01_source/附录.txt'
+    body, appendix = lines.get(body_path, []), lines.get(key_path, [])
+    if (len(sections) < 2 or unit.get('type') != '完成句子'
+            or any(row.get('context') != '单元话题写作' for row in sections)
+            or sum(plain_text(line).strip() == '单元话题写作' for line in body) != 1):
+        return []
+    section, *writing = sections
+    if (section['type'] != '完成句子'
+            or any(row['type'] != '书面表达' or not writing_prompt(row['title']) for row in writing)
+            or not scoped_source_matches(unit, number, body_path, unit['source_span']['start_line'],
+                                         lines, _file_coordinates=True)):
+        return []
+    anchors = _printed_item_anchors(body[section['start_line']:section['end_line']])
+    printed = [n for _, n in anchors]
+    headings = [i for i, row in enumerate(appendix) if plain_text(row).strip() == '句型训练']
+    if (not printed or printed != sorted(set(printed)) or len(headings) != 1
+            or not any(plain_text(row).strip() == '参考答案' for row in appendix[:headings[0]])):
+        return []
+    following = [(i, row) for i, row in enumerate(appendix[headings[0] + 1:], headings[0] + 2)
+                 if plain_text(row).strip()]
+    if not following:
+        return []
+    line, text = following[0]
+    parsed = _answer_items(text)
+    if ([n for n, _ in parsed] != printed or any(not value for _, value in parsed)
+            or any(_answer_items(row) for _, row in following[1:])):
+        return []
+    return [(key_path, line, value) for n, value in parsed if n == int(number)]
+
+
 def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
     from .sync_practice import heading_candidates, heading_candidates_of
     body_path = '01_source/正文.txt'
@@ -996,6 +1036,7 @@ def _scoped_answer_candidates(unit, number, lines, *, batch_dir=None):
                     if path == body_path or not owner_band or companion_band == owner_band:
                         candidates.append((path, index, value))
     primary_lines = {path: rows for path, rows in lines.items() if path in SOURCES}
+    candidates.extend(_topic_writing_sentence_answers(unit, number, primary_lines, sections))
     candidates.extend(_compact_scoped_candidates(unit, number, primary_lines, sections=sections,
                                                  batch_dir=batch_dir, features=features))
     primary = list(dict.fromkeys(row for row in candidates if row[0] in SOURCES))
@@ -1125,7 +1166,25 @@ def validate_scoped_missing(batch_dir, unit, number, evidence=None):
 
 def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
     """共享来源绑定；只有显式 restore 模式允许恢复内存候选，不写文件。"""
+    from . import listening_script, manual_content
     batch = Path(batch_dir).resolve()
+    try:
+        manual_edits = manual_content.load(batch)["edits"]
+        manual_binding = manual_content.source_binding(batch) if manual_edits else None
+    except (OSError, ValueError):
+        manual_edits, manual_binding = {}, None
+
+    def manual_value(uid, field, value):
+        """审核员在「原卷修改」里保存过的字段按人工确认接受（规则 3）。
+
+        只认与人工记录逐字相同的当前值：模型改写、二次生成或伪造标记都不会因此
+        获得豁免；听力稿完整性与 AI 标记检查仍照常执行。
+        """
+        entry = manual_edits.get(str(uid)) if isinstance(manual_edits, dict) else None
+        return (isinstance(entry, dict) and entry.get('updated_by') == 'workbench'
+                and entry.get('source_binding') == manual_binding
+                and isinstance(value, str) and isinstance(entry.get(field), str)
+                and _verbatim(entry[field]) == _verbatim(value))
     errors, warnings, hashes, summaries, questions, anchors = [], [], {}, [], [], []
     restorations = []
     body_anchors = []
@@ -1147,6 +1206,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
         source_lines[relative] = lines
         if relative in reference_only:
             continue  # Corroborating copies never supply or compete for content.
+        lines = list(listening_script.without_scripts(lines))
         section = None
         for index, line in enumerate(lines):
             heading = _section(line)
@@ -1343,7 +1403,6 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     confirmed_units[str(uid)] = unit
     except (OSError, ValueError):
         confirmed_units = {}
-    from . import listening_script
     from .agent_tasks import confirmed_units as load_confirmed_units
     try:
         listening_scripts = listening_script.extract(batch, load_confirmed_units(batch))
@@ -1653,7 +1712,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
 
     def restore_field(item, uid, numbers, field):
         value = item.get(field)
-        if not restore or not isinstance(value, str) or AI_MARK in value:
+        if not restore or not isinstance(value, str) or AI_MARK in value or manual_value(uid, field, value):
             return
         candidates = []
         if active_unit.get('identity_version') == 'scoped-v1':
@@ -1766,9 +1825,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     error('AI_CONTENT_FORBIDDEN', '禁止 AI 生成解析或文章大意；不得用标记代替原文', uid, field)
             if not writing_unit and not explanation and (child or not item.get('subquestions')):
                 originals = [row for row in questions if row['number'] in numbers and row['text'] and not is_placeholder(row['text'])
-                             and (unique_anchor(row['number'], row['path'], row['line'], expected=row['verbatim'])
-                                  or script and sum(str(row['number']) in {str(n) for n in u.get('numbers', [])}
-                                                    for u in confirmed_units.values()) == 1)]
+                             and unique_anchor(row['number'], row['path'], row['line'], expected=row['verbatim'])]
                 if originals:
                     error('ORIGINAL_EXPLANATION_OMITTED', '原题有解析，不能用缺失占位替代', uid, 'explanation',
                           [f"{row['path']}:{row['line']}" for row in originals])
@@ -1794,10 +1851,14 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             # 允许两种：可逐字溯源到该题组材料，或明确标注为 AI 生成待校对（F3/F5）。
             owned = owned and reference_problem(item, numbers, 'articleSummary', summary) is None
             if not marked and not owned:
-                unverified('SUMMARY_SOURCE_UNVERIFIED',
-                           '书面表达的文章大意未逐字绑定原文（不阻断）' if writing_unit else
-                           '文章大意未能唯一逐字绑定原材料；严格校验拒绝交付',
-                           uid, 'articleSummary', numbers, summary, item, warn=writing_unit)
+                if not child and manual_value(uid, 'articleSummary', summary) and reference_problem(item, numbers, 'articleSummary', summary) is None:
+                    warning('MANUAL_EDITED_CONTENT', '文章大意为工作台人工修改，按用户确认接受',
+                            uid, 'articleSummary', [manual_content.RELATIVE])
+                else:
+                    unverified('SUMMARY_SOURCE_UNVERIFIED',
+                               '书面表达的文章大意未逐字绑定原文（不阻断）' if writing_unit else
+                               '文章大意未能唯一逐字绑定原材料；严格校验拒绝交付',
+                               uid, 'articleSummary', numbers, summary, item, warn=writing_unit)
         if isinstance(explanation, str) and explanation.strip():
             value = _norm(explanation)
             marked = AI_MARK in explanation
@@ -1829,10 +1890,14 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     traceable = True
             traceable = traceable and reference_problem(item, numbers, 'explanation', explanation) is None
             if not marked and not traceable:
-                unverified('EXPLANATION_SOURCE_UNVERIFIED',
-                           '书面表达的解析/指导未逐字绑定原文（不阻断）' if writing_unit else
-                           '解析未能唯一逐字绑定原题；严格校验拒绝交付',
-                           uid, 'explanation', numbers, explanation, item, warn=writing_unit)
+                if not child and manual_value(uid, 'explanation', item.get('explanation')) and reference_problem(item, numbers, 'explanation', explanation) is None:
+                    warning('MANUAL_EDITED_CONTENT', '解析为工作台人工修改，按用户确认接受',
+                            uid, 'explanation', [manual_content.RELATIVE])
+                else:
+                    unverified('EXPLANATION_SOURCE_UNVERIFIED',
+                               '书面表达的解析/指导未逐字绑定原文（不阻断）' if writing_unit else
+                               '解析未能唯一逐字绑定原题；严格校验拒绝交付',
+                               uid, 'explanation', numbers, explanation, item, warn=writing_unit)
             for row in summaries:
                 if (row['owner'] is not None and row['owner'] not in numbers
                         and row['text'] in value):

@@ -97,6 +97,31 @@ class ContentAgentTests(unittest.TestCase):
         self.assertIn('untrusted DATA', prompt)
         self.assertIn('NO tools', original)
 
+    def test_knowledge_prompt_inlines_only_complete_bound_evidence(self):
+        context = copy.deepcopy(self.context)
+        types = "03_types/types.json"
+        context[types]["items"].append({"unit_id": "outside", "type": "书面表达"})
+        task = {"context": context, "unit_ids": ["u-1"], "stage": "knowledge"}
+
+        def supplied():
+            prompt = broker._child_prompt(self.prompt(context), context, "knowledge", [])
+            return json.loads(prompt.split(unit_tasks._BEGIN, 1)[1].split(unit_tasks._END, 1)[0])
+
+        summary = supplied()
+        self.assertEqual(summary["catalog"]["items"], context[broker.CATALOG]["paths"])
+        self.assertEqual(summary["supplied_unit_evidence"],
+                         [broker._tool(task, "read_unit", {"unit_id": "u-1"})])
+        self.assertNotIn("outside", json.dumps(summary))
+
+        with patch.object(broker, "INLINE_CATALOG_CHARS", 1), \
+             patch.object(broker, "INLINE_UNIT_CHARS", 1):
+            summary = supplied()
+        self.assertEqual(summary["catalog"]["entries"], len(context[broker.CATALOG]["paths"]))
+        self.assertNotIn("items", summary["catalog"])
+        self.assertNotIn("supplied_unit_evidence", summary)
+        self.assertIn("read_catalog", summary["evidence_tools"])
+        self.assertIn("read_unit", summary["evidence_tools"])
+
     def test_staged_candidates_are_durable_drafts_until_full_validation(self):
         units = self.units + [{"unit_id": "u-2", "numbers": [2], "unit_kind": "standalone"}]
         self.confirmed.return_value = units
@@ -310,13 +335,23 @@ class ContentAgentTests(unittest.TestCase):
         task, thread, result = self.start()
         first = self.claim(task)
         self.assertEqual(first["task"]["session_id"], "session-A")
-        self.assertEqual(self.claim(task)["task"]["session_id"], "session-A")
+        reclaimed = self.claim(task)["task"]
+        self.assertEqual(reclaimed["session_id"], "session-A")
+        self.assertEqual(reclaimed["claimed_at"], first["task"]["claimed_at"])
         self.assertEqual(self.claim(task, "other")["code"], "session_conflict")
         self.assertEqual(self.tool(task, "read_unit", {"unit_id": "u-1"}, session="other")["code"], "session_conflict")
         self.state(task, "running")
-        self.assertEqual(broker.dispatch("GET", "/api/content-agent/tasks")["tasks"][0]["status"], "running")
+        running = broker.dispatch("GET", "/api/content-agent/tasks")["tasks"][0]
+        self.assertEqual(running["status"], "running")
+        self.assertLessEqual(running["created_at"], running["claimed_at"])
+        self.assertLessEqual(running["claimed_at"], running["running_at"])
         self.assertEqual(broker._read(broker._task_path(task["task_id"]))["session_id"], "session-A")
         self.finish(task, thread, result)
+        attempt = Path(result["value"]["artifacts"]["attempt_dir"])
+        timing = json.loads((attempt / "native-timing.json").read_text())
+        self.assertGreaterEqual(timing["host_queue_seconds"], 0)
+        self.assertGreaterEqual(timing["host_setup_seconds"], 0)
+        self.assertGreaterEqual(timing["host_run_seconds"], 0)
 
     def test_tools_are_exact_snapshots_and_whitelisted(self):
         task, thread, result = self.start()
@@ -483,6 +518,23 @@ class ContentAgentTests(unittest.TestCase):
         self.assertFalse(denied["retryable"])
         thread.join(2)
         self.assertIn("error", result)
+        self.assertEqual(result["error"].code, broker.TOOL_BUDGET_CODE)
+        timing = json.loads((self.base / "attempt" / "native-timing.json").read_text(encoding="utf-8"))
+        self.assertEqual(timing["tools_by_action"], {"read_unit": 1})
+        route = config["_content_route_identity"]
+        saved = broker.tool_budget_receipts(self.batch, "knowledge", self.hashes, route)
+        self.assertEqual([row["task_id"] for row in saved], [task["task_id"]])
+        feedback = "workflow/repair-feedback/knowledge.json"
+        stored = broker._read(broker._task_path(task["task_id"]))
+        stored["input_hashes"][feedback] = "missing"
+        broker._save(stored)
+        current = dict(self.hashes, **{feedback: "new-feedback-hash",
+                                      agent_tasks.ARTIFACTS["knowledge"]: "missing"})
+        self.assertEqual(len(broker.tool_budget_receipts(self.batch, "knowledge", current, route)), 1)
+        self.assertEqual(broker.tool_budget_receipts(self.batch, "knowledge", self.hashes,
+                                                    dict(route, model="other")), [])
+        self.source.write_text("changed", encoding="utf-8")
+        self.assertEqual(broker.tool_budget_receipts(self.batch, "knowledge", self.hashes, route), [])
         self.accept.assert_not_called()
 
     def test_each_enabled_text_stage_uses_its_full_validator(self):
@@ -571,10 +623,11 @@ class ContentAgentTests(unittest.TestCase):
         self.assertIn("error", denied)
         self.finish(task, thread, result)
 
-    def test_child_prompt_keeps_rules_and_only_evidence_directories(self):
+    def test_child_prompt_keeps_rules_and_leaves_large_catalog_available_by_tool(self):
         context = copy.deepcopy(self.context)
         context["01_source/source.txt"] = "SECRET_RAW\n" * 500
-        context[broker.CATALOG] = {"paths": ["SECRET_CATALOG"] * 500}
+        context[broker.CATALOG] = {"paths": [f"SECRET_CATALOG/{i:06d}/" + "leaf" * 4
+                                             for i in range(500)]}
         prompt = "Stage: knowledge\nKEEP EVERY RULE\n" + unit_tasks._BEGIN + json.dumps(context) + unit_tasks._END
         task, thread, result = self.start(prompt=prompt)
         self.assertIn("KEEP EVERY RULE", task["prompt"])
@@ -583,6 +636,8 @@ class ContentAgentTests(unittest.TestCase):
         self.assertIn("confirmed_unit_ids", task["prompt"])
         self.claim(task)
         self.assertIn("SECRET_RAW", self.tool(task, "read_source", {"path": "01_source/source.txt"})["text"])
+        self.assertEqual(self.tool(task, "read_catalog", {"limit": 1})["items"],
+                         context[broker.CATALOG]["paths"][:1])
         self.finish(task, thread, result)
 
     def structure_start(self, directory=True):

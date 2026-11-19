@@ -102,6 +102,9 @@ def _anchor(unit, lines):
     start, end = _range(unit)
     if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
         raise ValueError("scoped identity requires a valid source span")
+    span = unit.get("source_span") or {}
+    if span.get("number_binding") == "single_writing_section" and span.get("printed_numbers") == []:
+        return start
     wanted = set(unit.get("numbers") or [])
     for index, number in printed_anchors(lines[start - 1:end]):
         if number in wanted:
@@ -221,7 +224,9 @@ def assign_scoped(units, source_lines, sections=None, previous=None, visual_colu
         qids = {}
         for n in row.get('numbers') or []:
             local = lines[start - 1:end]
-            pos = question_position(local, n)
+            span = row.get("source_span") or {}
+            pos = (None if span.get("number_binding") == "single_writing_section"
+                   and span.get("printed_numbers") == [] else question_position(local, n))
             qanchor = start + pos if pos is not None else anchor
             qids[str(n)] = existing.get(str(n)) or f'{sid}-l{qanchor}{column_suffix}-q{n}'
         row['question_ids'] = qids

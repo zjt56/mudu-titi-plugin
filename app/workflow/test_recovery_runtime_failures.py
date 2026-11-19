@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from workflow import manifest as mf, self_heal
+from workflow import local_agent, manifest as mf, self_heal
 
 
 class RuntimeRecoveryTests(unittest.TestCase):
@@ -17,6 +17,19 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.manifest = mf.new_manifest('batch', self.batch, {}, {})
         mf.touch_stage(self.manifest, 'answers', mf.FAILED, notes='route failure')
         mf.save(self.batch, self.manifest)
+
+    def test_authentication_binding_tracks_credential_replacement_without_serializing_values(self):
+        credentials = self.batch / '.credentials.yaml'
+        credentials.write_text('TEST_TOKEN: first-fixture-value', encoding='utf-8')
+        with patch.dict('os.environ', {'DSH_HOME': str(self.batch)}), \
+             patch.object(local_agent, '_harness_default_route', return_value=(None, None)):
+            initial = local_agent.authentication_binding()
+            replacement = credentials.with_suffix('.new')
+            replacement.write_text('TEST_TOKEN: second-fixture-value', encoding='utf-8')
+            replacement.replace(credentials)
+            changed = local_agent.authentication_binding()
+        self.assertNotEqual(initial, changed)
+        self.assertNotIn('fixture-value', json.dumps([initial, changed]))
 
     def test_runtime_failure_rejects_all_retry_aliases_even_with_unit_ids(self):
         detail = json.dumps({'error_code': 'native_route_identity_missing',
@@ -38,6 +51,8 @@ class RuntimeRecoveryTests(unittest.TestCase):
             with self.subTest(code=code), self.assertRaisesRegex(ValueError, expected):
                 self_heal._content_retry_scope(self.batch, 'knowledge', json.dumps(
                     {'error_code': code, 'error': 'dispatch diagnostic'}), unit_ids=['q-1'])
+        with self.assertRaisesRegex(ValueError, 'model_authentication_requires_configuration_change'):
+            self_heal._content_retry_scope(self.batch, 'knowledge', '{"code":"authentication"}')
 
     def test_record_only_with_a_real_scope_does_not_requeue_content(self):
         with patch.object(self_heal, '_retry_admission', return_value=['q-1']), \

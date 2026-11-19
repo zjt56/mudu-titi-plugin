@@ -327,7 +327,9 @@ def _check_labels(values, prefixes=None):
         problems.append(f"知识点必须是叶子，这些是中间层：{resolved['non_leaf']}")
     if main_type in types():
         allowed = _allowed_prefixes(main_type) if prefixes is None else prefixes
-        bad = [path for path in paths if not any(_under(path, prefix) for prefix in allowed)]
+        bad = [path for path in paths
+               if not any(_under(path, prefix) for prefix in allowed)
+               or (main_type in ("完成句子", "短文填空") and _under(path, "词汇/答案考点"))]
         if bad:
             problems.append(f"「{main_type}」知识点超出允许维度/范围（{'、'.join(allowed)}）：{bad}")
     return problems

@@ -413,6 +413,15 @@ def record_blocker(batch_dir, stage: str, *, check: str = "", symptom: str = "",
         return None
 
 
+def record_model_authentication(batch_dir, stage):
+    return record_blocker(
+        batch_dir, stage, check="MODEL_AUTHENTICATION_REJECTED",
+        symptom="模型服务拒绝当前凭据",
+        why="模型调用入口返回了明确的身份验证失败分类",
+        how="保留已交付产物；当前模型路由或本机凭据更新后重新检查",
+        error_code="authentication", source="model_dispatch")
+
+
 def sync(batch_dir, *, root: Path | None = None) -> dict:
     """把某个批次的批次内台账汇总进仓库 ISSUES/open/（同卡点累加，不重复建单）。"""
     batch = Path(batch_dir)

@@ -310,9 +310,14 @@ def _is_trailing_answer_block(lines: list[str], start: int, seen_headings=None) 
         r"^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+|[一二三四五六七八九十]+)\s*[.．、]\s*"
         r"\d{1,4}(?:\s*[~～\-–—]\s*\d{1,4})?\s*[.．、]?\s*\S")
     hits = 0
+    # 一行内并排的短语答案也是答案行（`1.has changed a lot　2.Thanks to…`）。
+    inline_answer = re.compile(r"(?:^|[\s\u3000])\d{1,4}\s*[.．、]\s*[^\s\d\u3000]")
     for raw in tail:
         plain = _plain(raw).strip()
-        if QUESTION.match(plain) or re.match(r"^\s*\d{1,4}\s*[~～\-–—]\s*\d{1,4}\b", plain):
+        inline = inline_answer.findall(plain)
+        if len(inline) >= 2:
+            hits += len(inline)
+        elif QUESTION.match(plain) or re.match(r"^\s*\d{1,4}\s*[~～\-–—]\s*\d{1,4}\b", plain):
             hits += 1
         elif re.match(r"^\s*\d{1,4}\s*[.．、]\s*[A-Ha-h]\s*$", plain):
             hits += 1
@@ -556,6 +561,9 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
             unresolved.append({"code": "QUESTION_COUNT_MISMATCH", "line": section["source_line"],
                                "message": f"{section['title']} 声明 {declared} 小题，实际定位 {len(nums)} 个"})
         if not nums:
+            if (is_sync and section["type"] == "书面表达"
+                    and sync_practice.writing_prompt(lines[section["source_line"] - 1])):
+                continue
             unresolved.append({"code": "QUESTION_BOUNDARY_MISSING", "line": section["source_line"],
                                "message": f"{section['title']} 未能定位题号"})
             continue
@@ -1217,8 +1225,10 @@ def refresh_from_evidence(batch_dir: Path) -> dict:
     evidence_rel = str(result.get("evidence_dir") or "")
     if evidence_rel and not (destination / evidence_rel).is_dir():
         raise ValueError("提取证据目录缺失，不能按旧证据重算")
-    return _publish_analysis(source, destination, original_hash, dict(result, text=text),
-                             evidence_rel, config=None)
+    report = _publish_analysis(source, destination, original_hash, dict(result, text=text),
+                               evidence_rel, config=None)
+    _write(batch_dir / "07_review" / "extraction-report.json", report)
+    return report
 
 
 

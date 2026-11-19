@@ -371,12 +371,14 @@ class RunnerAutoTest(unittest.TestCase):
         self._ready_parallel_labels()
         stages = [contracts.STAGE_BY_ID[s] for s in ('answers', 'knowledge')]
         imported = threading.Event()
+        local_finished = threading.Event()
         def export(batch, stage, **kw):
             package = self.batch / 'early-packages' / stage
             package.mkdir(parents=True)
             (package / 'task.json').write_text(json.dumps({'prompt': stage + '\nFILE PROTOCOL: test'}))
             return {'status': 'ready', 'task_id': stage, 'package_dir': str(package)}
         def slow(prompt, *a, **kw):
+            self.assertTrue(local_finished.wait(3), 'Independent local work was held behind model work')
             self.assertTrue(imported.wait(3), 'Fast stage was held behind slow peer')
             return {'response': {'status': 'completed'}}
         def install(batch, task_id, path):
@@ -390,7 +392,8 @@ class RunnerAutoTest(unittest.TestCase):
              patch('workflow.label_execution.run', return_value={'response': {'status': 'completed'}}), \
              patch.object(local_agent, 'invoke', side_effect=slow), \
              patch.object(agent_protocol, 'import_result', side_effect=install):
-            self.assertEqual(auto._parallel_ready_agents(self.batch, stages, {'max_input_chars': 10000, 'retries': 0}),
+            self.assertEqual(auto._parallel_ready_agents(self.batch, stages, {'max_input_chars': 10000, 'retries': 0},
+                                                        while_running=local_finished.set),
                              {'answers': 0, 'knowledge': 0})
 
     def test_slow_audio_preparation_allows_text_chain_through_validate(self):

@@ -6,6 +6,7 @@ and passed through the ordinary whole-batch importer before installation.
 """
 import copy
 import json
+import math
 import sys
 
 from . import agent_tasks
@@ -44,7 +45,39 @@ def compact_extraction(value):
 _SPLIT_STAGES = ("answers", "assemble", "review", "types", "explanations", "knowledge")
 
 
-def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=None):
+def _weighted_groups(units, max_units, drafts):
+    """Balance contiguous units by children and source size without splitting a group."""
+    weights = []
+    for unit in units:
+        draft = drafts.get(unit["unit_id"], {})
+        # One unit read plus work proportional to its children and source text.
+        chars = len(json.dumps(draft or unit, ensure_ascii=False))
+        weights.append(2 + len(unit.get("numbers", [])) + math.ceil(chars / 1200))
+    count = math.ceil(len(units) / max_units)
+    prefix = [0]
+    for weight in weights:
+        prefix.append(prefix[-1] + weight)
+    # Find the smallest maximum weight achievable with the existing shard
+    # count. Greedy packing is feasible for a given cap (all weights positive).
+    def groups(cap):
+        cuts, start = [], 0
+        for end in range(1, len(units) + 1):
+            if end - start > max_units or prefix[end] - prefix[start] > cap:
+                cuts.append(units[start:end - 1])
+                start = end - 1
+        return [*cuts, units[start:]]
+
+    low, high = max(weights), prefix[-1]
+    while low < high:
+        mid = (low + high) // 2
+        if len(groups(mid)) <= count:
+            high = mid
+        else:
+            low = mid + 1
+    return groups(low)
+
+
+def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=None, balance_work=False):
     if isinstance(max_units, bool) or not isinstance(max_units, int) or max_units < 1:
         raise ValueError("max_units must be a positive integer")
     if stage not in _SPLIT_STAGES:
@@ -154,21 +187,26 @@ def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=Non
         if not chosen_ids or not chosen_ids <= set(ids):
             raise ValueError("Retry unit IDs must be a nonempty confirmed subset")
         units = [u for u in units if u["unit_id"] in chosen_ids]
-    parts, selected = [], []
-    for unit in units:
-        candidate = selected + [unit]
-        prompt = make(candidate)
-        if len(candidate) <= max_units and len(prompt) <= max_input_chars:
-            selected = candidate
-            continue
-        if not selected:
-            raise ValueError("A single unit with complete source and required rules exceeds max_input_chars; no source was truncated")
-        parts.append({"unit_ids": [u["unit_id"] for u in selected], "prompt": make(selected)})
-        selected = [unit]
-        if len(make(selected)) > max_input_chars:
-            raise ValueError("A single unit with complete source and required rules exceeds max_input_chars; no source was truncated")
-    if selected:
-        parts.append({"unit_ids": [u["unit_id"] for u in selected], "prompt": make(selected)})
+    parts = []
+    draft_rows = (context.get("06_batch/question-draft.json") or {}).get("items", [])
+    drafts = {row.get("unit_id"): row for row in draft_rows if isinstance(row, dict)}
+    groups = _weighted_groups(units, max_units, drafts) if balance_work and units else [units]
+    for group in groups:
+        selected = []
+        for unit in group:
+            candidate = selected + [unit]
+            prompt = make(candidate)
+            if len(candidate) <= max_units and len(prompt) <= max_input_chars:
+                selected = candidate
+                continue
+            if not selected:
+                raise ValueError("A single unit with complete source and required rules exceeds max_input_chars; no source was truncated")
+            parts.append({"unit_ids": [u["unit_id"] for u in selected], "prompt": make(selected)})
+            selected = [unit]
+            if len(make(selected)) > max_input_chars:
+                raise ValueError("A single unit with complete source and required rules exceeds max_input_chars; no source was truncated")
+        if selected:
+            parts.append({"unit_ids": [u["unit_id"] for u in selected], "prompt": make(selected)})
     if projection is not None:
         for part in parts:
             part["cache_scope"] = {"version": unit_context.VERSION, "guards": projection.guards}

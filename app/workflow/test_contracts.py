@@ -38,6 +38,16 @@ class ContractMetadataTest(unittest.TestCase):
         self.assertEqual(contracts.defer_reasons("missing"), ())
         self.assertEqual(contracts.optimization_hints("missing"), ())
 
+    def test_invalidation_follows_consumers_without_joining_independent_branches(self):
+        self.assertEqual(contracts.downstream_of("extract"), contracts.STAGE_ORDER[1:])
+        self.assertEqual(contracts.downstream_of("audio"),
+                         ("review", "review_gate", "format_gate", "upload_gate", "upload", "publish_gate"))
+        downstream = contracts.downstream_of("types")
+        for consumer in ("answers", "knowledge", "audio", "assemble", "validate", "review"):
+            self.assertIn(consumer, downstream)
+        for independent in ("content_snapshot", "meta", "underlines"):
+            self.assertNotIn(independent, downstream)
+
 
 if __name__ == "__main__":
     unittest.main()

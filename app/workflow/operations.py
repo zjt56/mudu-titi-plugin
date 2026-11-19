@@ -1340,20 +1340,48 @@ def _background_workspace_test(root, folder, payload):
             raise ValueError('inputs_changed: release then claim a fresh snapshot')
         receipt = {'request_id': request, 'status': 'unknown', 'fingerprint': fingerprint, 'evidence': None}
         state.setdefault('receipts', []).append(receipt)
+        identity = state['identity']
         _save(folder, state)
     try:
         result = _code_repair(folder, incident, payload['input'])
         status = 'completed'
     except Exception as exc:
         result, status = {'error': _redact(str(exc))[:1000]}, 'failed'
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            return _settle_workspace_test(root, folder, payload, identity, receipt, incident, status, result)
+        except OperationsBusy:
+            # Admission already occurred. Retry only the receipt write.
+            if time.monotonic() >= deadline:
+                return dict(receipt)
+            time.sleep(0.05)
+
+
+def _settle_workspace_test(root, folder, payload, identity, receipt, tested, status, result):
     with _metadata_locked(root, folder):
         state = _load(folder)
+        if state.get('identity') != identity:
+            raise ValueError('identity_changed: 拒绝迟到写入')
         current = state.get('incident') or {}
-        if (current.get('status') != 'claimed' or current.get('lease_expires_at', 0) <= time.time()
-                or current.get('execution_process') != _process_identity()
-                or any(current.get(k) != payload.get(k) for k in ('incident_id', 'attempt_id', 'session_id'))):
-            return dict(receipt)  # Retain unknown; an old test cannot finish a new lease.
-        saved = next(r for r in state['receipts'] if r['request_id'] == request)
+        saved = next((r for r in state.get('receipts', []) if r['request_id'] == receipt['request_id']), None)
+        if saved is None or saved.get('fingerprint') != receipt['fingerprint']:
+            raise ValueError('workspace_test_receipt_changed')
+        if saved['status'] != 'unknown':
+            return dict(saved)
+        same_incident = current.get('incident_id') == payload.get('incident_id')
+        if same_incident:
+            for key in ('attempts', 'attempt_count', 'install_count', 'regeneration_count', 'escalation'):
+                if key in tested:
+                    current[key] = tested[key]
+        live = (same_incident and current.get('status') == 'claimed'
+                and current.get('lease_expires_at', 0) > time.time()
+                and current.get('execution_process') == _process_identity()
+                and all(current.get(k) == payload.get(k) for k in ('attempt_id', 'session_id')))
+        if not live:
+            saved.update(status='failed', evidence={'error': 'stale_lease: 隔离测试已结束，旧租约不能推进安装'})
+            _save(folder, state)
+            return dict(saved)
         saved.update(status=status, evidence=result)
         current['repair_progress'] = {'phase': 'code_test', 'at': mf.now_iso(), 'passed': result.get('passed')}
         _event(current, 'code_repair', status, 'isolated test', result)

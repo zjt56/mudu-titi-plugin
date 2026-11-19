@@ -78,8 +78,14 @@ def _clean_lines(text: str) -> list[str]:
 def extract_meta(lines: list[str]) -> dict:
     """从卷头若干行里抽取元信息，不假设一定存在，抽不到就不写该键。"""
     # 只看卷头；题目中的年份、地名不能覆盖试卷来源。移除排版标记后再识别。
+    from . import sync_practice
+    sync = sync_practice.looks_like_sync_practice("\n".join(lines[:40]))
     header = []
     for index, raw in enumerate(lines[:40], 1):
+        if sync and sync_practice.is_section_title(raw):
+            # Workbook topic containers introduce content. Their introductory
+            # prose can mention arbitrary cities without setting paper region.
+            break
         text = re.sub(r"<[^>]+>", "", raw).replace("**", "").strip()
         title = _numbered_title(text)
         if re.match(r"^(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+[.．、]|[（(]\s*[）)]\s*\d+[.．、]|\d+[.．、]\s*\S)", text) and not title:
@@ -113,6 +119,8 @@ def extract_meta(lines: list[str]) -> dict:
     region = _region_of("\n".join(t for _, t, _ in titles)) or _region_of(head)
     if region:
         meta["region"] = region
+    if sync:
+        meta.setdefault("source_type", "同步练习")
     for key, pattern in META_PATTERNS:
         match = pattern.search(head)
         if match:

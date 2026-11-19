@@ -1474,6 +1474,13 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
         from workbench import taxonomy
         def valid_strings(value):
             return isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value)
+        if "answer_points" in assessment and not valid_strings(assessment["answer_points"]):
+            raise ValueError("Answer points must be a list of nonempty strings")
+        answer_type = assessment.get("type")
+        if (assessment.get("answer_points") and isinstance(answer_type, str)
+                and not any(dim.get("dim") == "答案考点"
+                            for dim in taxonomy.type_knowledge_rules().get(answer_type, {}).get("dims", []))):
+            raise ValueError("This question type does not allow answer points")
         # subtypes must be a list of strings; an empty list is tolerated when
         # the catalog type requires a subtype and the model omitted it (see the
         # recoverable subtype-gap handling below). A malformed list still fails.

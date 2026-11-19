@@ -281,6 +281,23 @@ def _source_token(row, binding):
         "source": binding.get("source_text_sha256"), "media": binding.get("media_hashes", {})})
 
 
+def _fill_new_source_aliases(target, fresh):
+    """Fill source metadata newly proven by the current paper without replacing set values."""
+    from .metadata_policy import known
+    filters = target.get("filterMetadata") or {}
+    changed = False
+    for key in ("source", "source_type"):
+        if known(fresh.get(key)) and not (known(target.get(key)) or known(filters.get(key))):
+            target[key] = copy.deepcopy(fresh[key])
+            target.setdefault("filterMetadata", {})[key] = copy.deepcopy(fresh[key])
+            changed = True
+    children = _children(fresh)
+    for child in target.get("subquestions") or []:
+        if counterpart := children.get(_number(child["number"])):
+            changed = _fill_new_source_aliases(child, counterpart) or changed
+    return changed
+
+
 def _seal(state):
     value = copy.deepcopy(state)
     value.pop("state_sha256", None)
@@ -475,17 +492,20 @@ def initialize(batch_dir) -> dict:
         raise ValueError("Cannot fill batch without proven source-bound items")
     for uid in rows:
         _validate_binding(root, bindings.get(uid))
+    meta = _source_meta(root)
     if state is not None and state["mode"] == "finalized":
         unchanged = set(rows) == set(state["units"]) and all(
             _source_token(_base(row), bindings[uid]) == state["units"][uid]["source_sha256"]
             for uid, row in rows.items())
-        if unchanged:
+        if unchanged and not any(
+                _fill_new_source_aliases(copy.deepcopy(state["units"][uid]["base"]), _base(row, meta))
+                for uid, row in rows.items()):
             # 即便整体已完成且源未变，也要把 draft 权威媒体附件补齐到旧对象：历史清洗
             # 可能丢过图片附件（如组级共享材料图），否则上传会报 SOURCE_IMAGE_MISSING。
             media_changed = False
             by_uid = {it.get("unit_id") or it.get("id"): it for it in (payload.get("items") or [])}
             for uid, row in rows.items():
-                fresh = _base(row, _source_meta(root))
+                fresh = _base(row, meta)
                 target = by_uid.get(uid)
                 if target is not None:
                     before = copy.deepcopy(target.get("attachments"))
@@ -510,7 +530,6 @@ def initialize(batch_dir) -> dict:
             raise ValueError("Unmanaged batch base file already exists")
         state = {"version": VERSION, "mode": "filling", "units": {}}
         payload = {"items": []}
-    meta = _source_meta(root)
     source_header = {}
     _set_batch_title(source_header, meta)
     if source_header.get("name"):
@@ -549,7 +568,13 @@ def initialize(batch_dir) -> dict:
                 changed_units.append(uid)
             else:
                 # Line shifts or parser diagnostics do not invalidate labels.
-                units[uid] = dict(old, binding=binding)
+                base = copy.deepcopy(old_base)
+                if _fill_new_source_aliases(base, fresh):
+                    _fill_new_source_aliases(kept, fresh)
+                    units[uid] = dict(old, binding=binding, base=base,
+                                      object_sha256=question_draft._digest(base))
+                else:
+                    units[uid] = dict(old, binding=binding)
         else:
             old_binding = old.get("binding", {}) if old is not None else {}
             old_base = old.get("base", {}) if old is not None else {}
@@ -706,14 +731,11 @@ def _apply(root, data, stage, artifact):
             if not isinstance(relative, str) or not _path(root, relative).is_file():
                 raise ValueError("Audio file must be a safe existing batch-local file")
             attachments = [a for a in target.get("attachments", []) if a.get("kind") != "audio"]
-            # An already-deployed audio attachment keeps its /source-media URL;
-            # only a first-time local file is written as the batch-relative path.
-            prior = next((a for a in target.get("attachments", [])
-                          if a.get("kind") == "audio"
-                          and (a.get("name") or "").endswith(Path(relative).name)), None)
-            url = (prior.get("url") if prior and str(prior.get("url") or "").startswith("/source-media/")
-                   else relative)
-            attachments.append({"kind": "audio", "url": url, "name": Path(relative).name})
+            # Use the same batch-owned URL on first delivery and on replay.
+            # The audio map keeps the checked relative path as source evidence.
+            name = Path(relative).name
+            url = "/source-media/" + quote(root.name, safe='') + "/" + quote(name, safe='')
+            attachments.append({"kind": "audio", "url": url, "name": name})
             target["attachments"] = attachments
         touched.add(uid)
     if stage == "answers":
