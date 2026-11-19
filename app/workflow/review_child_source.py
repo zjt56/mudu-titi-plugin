@@ -235,6 +235,23 @@ def _prove_scoped_child(source, unit, number, result):
     context = _scoped_context(source, unit)
     if context is None:
         return dict(result, reason='scoped 来源窗口或逐字题干未验证')
+    span = unit.get('source_span') or {}
+    # The scoped identity uses 1 as an internal alias for this writing task.
+    # Numbered instructions inside the prompt must not become child anchors.
+    if span.get('number_binding') == 'single_writing_section' and span.get('printed_numbers') == []:
+        from .sync_practice import writing_prompt, writing_prompt_end
+        heading, first, last = context['heading'], context['first'], context['last']
+        lines = context['lines']
+        task_end = heading + writing_prompt_end(lines[heading:context['end']])
+        stem = '\n'.join(lines[first - 1:last]).strip()
+        if (unit.get('type') != '书面表达' or unit.get('unit_kind') != 'standalone'
+                or unit.get('numbers') != [1] or not writing_prompt(lines[heading - 1])
+                or first != heading + 1 or last != task_end or stem != unit['stem'].strip()):
+            return dict(result, reason='scoped 无号作文来源窗口未完整验证')
+        start, end = context['scope_start'], context['matched'][-1][2]
+        return dict(result, status='proven', reason='', start=start, end=end,
+                    text=source[start:end], method='scoped-unnumbered-writing/v1',
+                    scope_start=start, scope_end=end)
     # A duplicate printed target anywhere in this section is ambiguous, even if
     # one occurrence happens to match the persisted stem or narrower unit span.
     if _blank_marker(number).search(source[context['scope_start']:context['scope_end']]):

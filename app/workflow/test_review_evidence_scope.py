@@ -1,4 +1,5 @@
 """Review evidence must belong to its confirmed target, including shared material."""
+import hashlib
 import json
 import tempfile
 import unittest
@@ -49,7 +50,6 @@ class ReviewEvidenceScopeTest(unittest.TestCase):
         return {'round_id': rid, 'input_binding': 'binding', 'execution_id': 'exec', 'checks': checks}
 
     def test_supplied_ocr_and_authority_context_are_bound(self):
-        import hashlib
         self.save('04_knowledge/knowledge.json', {'items': []})
         self.save('06_batch/batch.json', {'items': []})
         self.save('01_source/pdf-ocr.json', {'text': 'Shared passage about a library.'})
@@ -77,6 +77,41 @@ class ReviewEvidenceScopeTest(unittest.TestCase):
         self.plan['input_hashes'] = absent['input_hashes']
         with self.assertRaisesRegex(ValueError, 'Evidence must cite a bound batch input'):
             review._round_checks(self.record('sample', [check]), 'sample', self.plan, self.batch)
+
+    def test_sample_unnumbered_writing_uses_full_prompt_and_excludes_guide(self):
+        from workflow.sync_practice import heading_candidates
+
+        title = '请根据下图,用英语向他们介绍科技如何改变我们的生活和学习。'
+        stem = '[IMG diagram.jpg]\n注意:1.词数80~100;\n2.须包括上图中的要点;\nTechnology changes our lives.<u>　</u>'
+        guide = 'This model essay is separate from the prompt.'
+        source = f'{title}\n{stem}\n[IMG frame.jpg]参考范文\n{guide}\n'
+        self.save('01_source/正文.txt', source)
+        section = heading_candidates(source)[0]
+        unit = {
+            'identity_version': 'scoped-v1', 'section_id': 'writing', 'unit_id': 'essay',
+            'unit_kind': 'standalone', 'type': '书面表达', 'numbers': [1],
+            'question_ids': {'1': 'writing-l2-q1'}, 'stem': stem,
+            'source_section': dict(section, ordinal=''),
+            'source_span': {'start_line': 2, 'end_line': 5, 'basis': 'cleaned_source',
+                            'number_binding': 'single_writing_section', 'printed_numbers': []},
+        }
+        self.save('01_source/structure.confirmed.json', {'units': [unit]})
+        self.plan['input_hashes']['01_source/正文.txt'] = hashlib.sha256(source.encode()).hexdigest()
+
+        proof = review._sample_source_binding(
+            self.batch, self.plan, self.check('essay', '2.须包括上图中的要点;', '1'))
+        self.assertEqual(proof['status'], 'proven', proof)
+        self.assertEqual(source[proof['start']:proof['end']], f'{title}\n{stem}')
+        wrong_quote = review._sample_source_binding(
+            self.batch, self.plan, self.check('essay', guide, '1'))
+        self.assertEqual(wrong_quote['status'], 'uncertain')
+
+        unit['source_span']['end_line'] = 4
+        unit['stem'] = stem.rsplit('\n', 1)[0]
+        self.save('01_source/structure.confirmed.json', {'units': [unit]})
+        clipped = review._sample_source_binding(
+            self.batch, self.plan, self.check('essay', '2.须包括上图中的要点;', '1'))
+        self.assertEqual(clipped['status'], 'uncertain')
 
     def test_year_or_another_unit_cannot_stand_in_for_target(self):
         for quote in ('2017', 'Different question here.'):

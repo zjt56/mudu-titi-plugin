@@ -32,6 +32,7 @@
 
 | 日期 | 记录 | 摘要 |
 |---|---|---|
+| 2026-11-19 | [无印刷题号作文的二审来源复验](2026-11-19-unnumbered-writing-review-source.md) | 按作文来源窗口核验二审引证，消除编号空档误报 |
 | 2026-11-18 | [2026-11-18-api-key-staging.md](2026-11-18-api-key-staging.md) | 专用上传 Key 创建暂存，固定批次幂等恢复，按文件名和 SHA-256 核对附件回执 |
 | 2026-11-18 | [2026-11-18-self-heal-closed-loop.md](2026-11-18-self-heal-closed-loop.md) | 自愈拒绝准入、失败复验与外部依赖延后闭环；保留历史占位并维持原文遗漏阻断 |
 | 2026-11-17 | [2026-11-17-recovery-retry-and-workspace-restore.md](2026-11-17-recovery-retry-and-workspace-restore.md) | 确定性派发故障停止内容重派；隔离代码修复增加唯一文本 patch 与只恢复工作副本的基线还原 |
