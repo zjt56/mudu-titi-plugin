@@ -16,9 +16,11 @@ def docx(path, paragraphs):
     body = []
     for paragraph in paragraphs:
         runs, cursor = [], 0
-        for mark in re.finditer(r'<u>(.*?)</u>', paragraph):
+        for mark in re.finditer(r'<u>(.*?)</u>|\*\*(.*?)\*\*', paragraph):
             runs.append('<w:r><w:t xml:space="preserve">' + html.escape(paragraph[cursor:mark.start()]) + '</w:t></w:r>')
-            runs.append('<w:r><w:rPr><w:u/></w:rPr><w:t xml:space="preserve">' + html.escape(mark.group(1)) + '</w:t></w:r>')
+            style = 'u' if mark.group(1) is not None else 'b'
+            runs.append(f'<w:r><w:rPr><w:{style}/></w:rPr><w:t xml:space="preserve">'
+                        + html.escape(mark.group(1) if style == 'u' else mark.group(2)) + '</w:t></w:r>')
             cursor = mark.end()
         runs.append('<w:r><w:t xml:space="preserve">' + html.escape(paragraph[cursor:]) + '</w:t></w:r>')
         body.append('<w:p>' + ''.join(runs) + '</w:p>')
@@ -70,6 +72,67 @@ class UnderlineLayoutTest(unittest.TestCase):
         self.assertTrue(report['passed'], report)
         self.assertEqual(report['changes'], [])
         self.assertEqual(candidate, batch)
+
+    def test_bold_question_numbers_preserve_full_stem_and_underline(self):
+        cases = (
+            ('**1.**I’m <u>fine</u>.(对画线部分提问)', 'I’m fine.(对画线部分提问)', 'fine'),
+            ('**2.**My name is <u>Susan</u>.(对画线部分提问)',
+             'My name is Susan.(对画线部分提问)', 'Susan'),
+            ('**(　)3.**读音与hell<u>o</u>相同的是______。',
+             '读音与hello相同的是______。', 'o'),
+        )
+        for source, stem, word in cases:
+            with self.subTest(source=source):
+                expected = '**' + (stem.replace(word, f'<u>{word}</u>', 1)) + '\n作答线 ______'
+                batch = {'items': [{'stem': '**' + stem + '\n作答线 ______'}]}
+                candidate, report = underline.restore(batch, source)
+                self.assertTrue(report['passed'], report)
+                self.assertEqual(candidate['items'][0]['stem'], expected)
+                self.assertEqual(len(report['changes']), 1)
+                again, report = underline.restore(candidate, source)
+                self.assertTrue(report['passed'], report)
+                self.assertEqual(report['changes'], [])
+                self.assertEqual(again, candidate)
+
+    def test_bold_number_keeps_missing_and_ambiguous_context_checks(self):
+        source = '**1.**I’m <u>fine</u>.(对画线部分提问)'
+        stem = 'I’m fine.(对画线部分提问)'
+        for stems, code in ((['I’m fine.(改为同义句)'], 'UNDERLINE_MAPPING_MISSING'),
+                            ([stem, stem], 'UNDERLINE_MAPPING_AMBIGUOUS')):
+            with self.subTest(code=code):
+                batch = {'items': [{'stem': text} for text in stems]}
+                candidate, report = underline.restore(batch, source)
+                self.assertFalse(report['passed'], report)
+                self.assertEqual([issue['code'] for issue in report['issues']], [code])
+                self.assertEqual(candidate, batch)
+
+    def test_bold_decimal_at_start_remains_part_of_context(self):
+        stem = '3.14 is an approximation.'
+        candidate, report = underline.restore({'items': [{'stem': stem}]},
+                                              '**3.14** is an <u>approximation</u>.')
+        self.assertTrue(report['passed'], report)
+        self.assertEqual(candidate['items'][0]['stem'], '3.14 is an <u>approximation</u>.')
+
+    def test_native_docx_bold_number_and_underlines_survive_separate_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper, base, final = root / 'source.docx', root / 'base.json', root / 'final.json'
+            docx(paper, ['**1.**I am <u>fine</u>.', '**(　)3.**读音与hell<u>o</u>相同的是______。'])
+            data = {'items': [{'number': 1, 'stem': 'I am <u>fine</u>.'},
+                              {'number': 3, 'stem': '读音与hello相同的是______。'}]}
+            base.write_text(json.dumps(data), encoding='utf-8')
+            paper_before, base_before = paper.read_bytes(), base.read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                code = underline.main(['--batch', str(base), '--docx', str(paper),
+                                       '--out', str(final), '--apply'])
+            report = json.loads(output.getvalue())
+            self.assertEqual(code, 0, report)
+            self.assertEqual([change['field'] for change in report['changes']], ['items/1/stem'])
+            expected = {'items': [data['items'][0],
+                                  {'number': 3, 'stem': '读音与hell<u>o</u>相同的是______。'}]}
+            self.assertEqual(json.loads(final.read_text()), expected)
+            self.assertEqual(base.read_bytes(), base_before)
+            self.assertEqual(paper.read_bytes(), paper_before)
 
     def test_missing_mark_is_restored_and_second_run_is_noop(self):
         batch = {'items': [{'stem': STEM}]}
