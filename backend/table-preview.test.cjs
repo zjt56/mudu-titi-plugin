@@ -44,7 +44,10 @@ test('编号空档只绘制一条线，不与 Word 下划线叠加', () => {
 test('普通下划线文字不被当成空档', () => {
   const ctx = harness();
   assert.equal(ctx.markLine('<u>farmers</u>'), '<u>farmers</u>');
-  assert.equal(ctx.markLine('to be __careful__ here'), 'to be <u>careful</u> here');
+  // 库侧空档格式只有 __数字__；__文字__ 不是后端产物，不得被当标记（保持原样）。
+  assert.equal(ctx.markLine('to be __careful__ here'), 'to be __careful__ here');
+  // 多段纯空下划线夹文字：不得把中间文字误包成下划线。
+  assert.equal(ctx.markLine('______ are ______?'), '______ are ______?');
 });
 
 test('正文保留上下标，外部字体标签及属性按文本处理', () => {
@@ -111,4 +114,16 @@ test('旧 structured 表格保留合并跨度与显式表头', () => {
   assert.equal(cells[0].type, 'th');
   assert.equal(cells[0].props.rowSpan, 3);
   assert.equal(cells[0].props.colSpan, 2);
+});
+
+test('单词后接纯空下划线不产生嵌套 <u> 双线（用户反馈很短一粗一细两条线）', () => {
+  const ctx = harness();
+  // 单词填空：<u>i______</u>、<u>i</u>______ 曾被 __(.+?)__ 误拆，渲染出嵌套 <u>_</u>。
+  for (const source of ['<u>i______</u>', '<u>i</u>______', '<u>r______</u>', '<u>o</u>____']) {
+    const html = ctx.markLine(source);
+    // 不得出现嵌套 <u>（内部又套 <u>），否则就是双线
+    assert.doesNotMatch(html, /<u>[^<]*<u>/, source + ' -> ' + html);
+  }
+  // 真正的库侧题号空 __17__ 仍还原为填空线
+  assert.match(ctx.markLine('to be __17__ and'), /<span class="wf-blank">17<\/span>/);
 });

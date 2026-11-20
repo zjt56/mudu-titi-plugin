@@ -17,7 +17,7 @@ _END = "\nEND SUPPLIED CONTENT\nReturn JSON only."
 
 # 分片里丢弃的原卷字段：text 与 01_source/正文.txt 重复，blocks 是逐段版式噪声，
 # pages 只对 PDF 草稿存在。表格、图片、警告和溯源字段必须保留，它们是证据来源。
-_EXTRACTION_DROP = ("text", "blocks", "pages")
+_EXTRACTION_DROP = ("text", "blocks", "pages", "source_objects")
 
 # 组装只搬运标签，不做标签合法性判断（合法性由导入器和 label_audit 程序校验）。
 # 整份知识点目录与打标规则因此不进组装分片，避免每片重背六七十 KB 规则。

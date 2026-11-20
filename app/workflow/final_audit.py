@@ -47,6 +47,63 @@ def _valid_sequential_writing_warning(root, issue):
         return False
 
 
+def _scoped_numbering_restart_warning(root, issue):
+    """Accept numbering that restarts inside each printed 大题 of the lesson.
+
+    The structure report defers every structure doubt to this final gate.  A
+    restart is resolved only when the confirmed structure proves the original
+    paper partition instead of a global number line: every unit is bound to its
+    own section occurrence (``identity_version='scoped-v1'`` plus
+    ``section_id``/``source_section``), its span stays inside that section, and
+    at least two distinct 大题 occurrences print the same numbers.  Without that
+    proof the deferred evidence stays blocking; numbers are never merged into
+    one whole-paper sequence.
+    """
+    if str(issue.get('code') or '') != 'NUMBERING_RESTART':
+        return False
+    try:
+        confirmed = json.loads((Path(root) / '01_source/structure.confirmed.json').read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return False
+    units = confirmed.get('units') if isinstance(confirmed, dict) else None
+    if not isinstance(units, list) or not units:
+        return False
+    occurrences, seen_units = {}, set()
+    for unit in units:
+        if not isinstance(unit, dict) or unit.get('identity_version') != 'scoped-v1':
+            return False
+        unit_id = unit.get('unit_id')
+        if not isinstance(unit_id, str) or not unit_id.strip() or unit_id in seen_units:
+            return False
+        seen_units.add(unit_id)
+        if not str(unit.get('section_id') or '').strip():
+            return False
+        span, section = unit.get('source_span'), unit.get('source_section')
+        if not isinstance(span, dict) or not isinstance(section, dict):
+            return False
+        start, end = span.get('start_line'), span.get('end_line')
+        sec_start, sec_end = section.get('start_line'), section.get('end_line')
+        occurrence = section.get('occurrence')
+        numbers = unit.get('numbers')
+        if type(start) is not int or type(end) is not int or not 0 < start <= end:
+            return False
+        if type(sec_start) is not int or type(sec_end) is not int or not sec_start < start <= end <= sec_end:
+            return False
+        if type(occurrence) is not int or occurrence < 1:
+            return False
+        if not isinstance(numbers, list) or not numbers:
+            return False
+        if any(type(number) is not int or number < 1 for number in numbers):
+            return False
+        if len(set(numbers)) != len(numbers):
+            return False
+        occurrences.setdefault(occurrence, set()).update(numbers)
+    if len(occurrences) < 2:
+        return False
+    groups = list(occurrences.values())
+    return any(first & second for index, first in enumerate(groups) for second in groups[index + 1:])
+
+
 def structure_evidence(root, manifest, hashes):
     """Retain deferred structure defects only from a currently bound report."""
     path = root / STRUCTURE_REPORT
@@ -92,13 +149,16 @@ def structure_evidence(root, manifest, hashes):
         # when the printed source has no Arabic question number.  Keep the
         # evidence as a warning, but do not block the upload-format gate.
         sequential_writing = _valid_sequential_writing_warning(root, issue)
-        issue['blocking'] = not limited and not sequential_writing
+        scoped_restart = _scoped_numbering_restart_warning(root, issue)
+        issue['blocking'] = not limited and not sequential_writing and not scoped_restart
         if sequential_writing:
             issue['message'] = str(issue.get('message') or '') + '；已按上一题号顺承为本地编号，非印刷题号'
+        elif scoped_restart:
+            issue['message'] = str(issue.get('message') or '') + '；已按原卷大题分区定位，逐大题内部题号独立编号，非全卷题号合并'
         issue['stage'] = 'format_gate'
         issue['report'] = STRUCTURE_REPORT
         issue.pop('status', None)
-        (warnings if limited or sequential_writing else errors).append(issue)
+        (warnings if limited or sequential_writing or scoped_restart else errors).append(issue)
     return errors, warnings
 
 

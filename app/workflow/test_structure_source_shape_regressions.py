@@ -45,6 +45,19 @@ class StructureSourceShapeRegressions(unittest.TestCase):
         self.assertFalse(unit['printed_number'])
         self.assertEqual(legitimate_source_shape(unit), 'unnumbered_table_response')
 
+    def test_poem_full_width_answer_lines_survive_denoise_and_keep_unit(self):
+        # 整行等宽下划线是本流水线的作答空位（`_{2,}`），不是装饰分隔线。
+        # 若被去噪当分隔线剔除，古诗题窗口就失去作答证据，结构闸门会漏掉
+        # 整道无号题（进而画线阶段 0 命中）。
+        text = ('Unit 3\n第四课时 Project\nⅠ.写出下列古诗画线句中表示数字的英文单词\n'
+                '[TABLE 1]\n《咏雪》<br>郑燮<br><u>一片两片三四片</u><br>五六七八九十片。\n[/TABLE]\n'
+                + '\n'.join(['_' * 80, '_' * 80]))
+        _, _body, report, units = self.gate(text)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(units[0]['source_span']['number_binding'], 'unnumbered_section')
+        self.assertNotIn('SOURCE_SECTION_UNCOVERED',
+                         {item['code'] for item in report['structure_warnings']})
+
     def test_familiar_word_single_unnumbered_response_is_source_bound(self):
         text = ('Unit 3\n第一课时 Section A\n写出下面画线词的汉语意思\n'
                 'Lang Lang is famous in the <u>field</u> of music.\t<u>　</u>\n'

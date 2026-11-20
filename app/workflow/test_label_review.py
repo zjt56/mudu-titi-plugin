@@ -116,11 +116,17 @@ class CompleteTaxonomyTest(unittest.TestCase):
         for main_type in taxonomy.types():
             prefixes = []
             for dim in taxonomy.type_knowledge_rules()[main_type]["dims"]:
+                if dim.get("show") == "exact" or dim.get("separate"):
+                    continue
                 for branch in dim["branch"].split("/"):
                     prefix = branch + ("/" + dim["scope"] if dim.get("scope") else "")
                     prefixes.append("设题角度/阅读" if prefix == "阅读技能" else prefix)
+            excluded = taxonomy._excluded_prefixes(main_type)
             for path in leaves:
                 allowed = any(path.startswith(prefix + "/") for prefix in prefixes)
+                # 题型级排除（dim.exclude，如单词拼写排除 词汇/词汇辨析）同样判不通过。
+                if any(path == ex or path.startswith(ex + "/") for ex in excluded):
+                    allowed = False
                 with self.subTest(main_type=main_type, path=path):
                     problems = taxonomy.check_labels({"type": main_type, "knowledge": [path]})
                     self.assertEqual(bool(problems), not allowed)

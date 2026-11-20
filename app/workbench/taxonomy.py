@@ -164,11 +164,14 @@ def knowledge_catalog_for_prompt():
             "leaf_total": len(leaves), "points": points}
 
 
-def require_knowledge(paths):
+def require_knowledge(paths, main_type=None):
     """工作台写入只接受目录中的完整叶子路径，不接受自由值或容器强制转换。"""
     if not isinstance(paths, list) or any(not isinstance(p, str) or not p.strip() for p in paths):
         raise ValueError("knowledge 必须是目录叶子路径的字符串列表")
-    resolved = resolve_knowledge(paths)
+    resolved = resolve_knowledge(paths, main_type)
+    if exact_knowledge_paths(main_type) and main_type and any(
+            not knowledge_path_allowed(path.strip(), main_type) for path in paths):
+        raise ValueError("知识点超出该题型允许的精确目录路径")
     if resolved["unknown"] or resolved["non_leaf"]:
         raise ValueError("知识点必须从目录叶子选择；目录外路径："
                          f"{resolved['unknown']}；中间分类：{resolved['non_leaf']}")
@@ -199,9 +202,10 @@ def _closest_leaf(path, limit=1):
     return difflib.get_close_matches((path or "").strip().strip("/"), list(leaves), n=limit, cutoff=0.78)
 
 
-def resolve_knowledge(paths):
+def resolve_knowledge(paths, main_type=None):
     """解析完整目录路径；保留名称中的斜线，用目录路径前缀判定叶子。"""
     by_path, leaves = knowledge_index()
+    exact = exact_knowledge_paths(main_type) if main_type else set()
     resolved, unknown, non_leaf = [], [], []
     # 不把错误的字符串当作逐字符路径列表，也不因错误的容器而抛异常。
     if paths is None:
@@ -229,7 +233,7 @@ def resolve_knowledge(paths):
                 point = by_path[canonical_path]
         if point is None:
             unknown.append(path)
-        elif canonical_path not in leaves:
+        elif canonical_path not in leaves and (raw.strip() != path or path not in exact):
             non_leaf.append(path)
         else:
             resolved.append(dict(point))
@@ -246,9 +250,47 @@ def type_knowledge_rules():
     return _type_rules_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime)
 
 
+def exact_knowledge_paths(main_type=None):
+    """Catalog nodes selectable only as exact paths for the given question type."""
+    if main_type is not None and not isinstance(main_type, str):
+        return set()
+    rules = type_knowledge_rules()
+    specs = rules.values() if main_type is None else (rules.get(main_type, {}),)
+    return {dim["branch"] + "/" + dim["scope"] for spec in specs
+            for dim in spec.get("dims", []) if dim.get("show") == "exact"}
+
+
+def knowledge_path_allowed(path, main_type, prefixes=None):
+    if prefixes is None:
+        prefixes = _allowed_prefixes(main_type)
+    # 某些题型在允许维度内部仍排除特定子分支（如单词拼写不用「词汇/词汇辨析」）。
+    if any(_under(path, excluded) for excluded in _excluded_prefixes(main_type)):
+        return False
+    exact = exact_knowledge_paths(main_type)
+    if exact:
+        return path in exact
+    return any(_under(path, prefix) for prefix in prefixes)
+
+
+def _excluded_prefixes(main_type):
+    """题型级排除的知识点子前缀（dim.exclude）。
+
+    例如单词拼写虽允许「词汇」维度，但不用「词汇/词汇辨析」这一子类：
+    拼写/词形落 词汇/拼写与词形 而不是 词汇辨析/<词性>辨析。
+    """
+    excluded = []
+    for dim in type_knowledge_rules().get(main_type, {}).get("dims", []):
+        for item in dim.get("exclude", []) or []:
+            if isinstance(item, str) and item.strip() and item.strip() not in excluded:
+                excluded.append(item.strip())
+    return excluded
+
+
 def _allowed_prefixes(main_type):
     prefixes = []
     for dim in type_knowledge_rules().get(main_type, {}).get("dims", []):
+        if dim.get("show") == "exact" or dim.get("separate"):
+            continue
         # branch 的复合值是多个维度根，不是知识点路径。
         for branch in dim.get("branch", "").split("/"):
             prefix = branch + ("/" + dim["scope"] if dim.get("scope") else "")
@@ -314,7 +356,7 @@ def _check_labels(values, prefixes=None):
     if bad_cats:
         problems.append(f"分类 {bad_cats} 不合法，只能是 {'/'.join(categories())}")
     paths = _string_list(values["knowledge"], "knowledge", problems) if "knowledge" in values else []
-    resolved = resolve_knowledge(paths)
+    resolved = resolve_knowledge(paths, main_type)
     if resolved["unknown"]:
         # 路径笔误（尤其主题里的「沟通/际沟通」「与/于」之类）很常见：报出最接近的
         # 目录叶子，方便模型/运维一次改对；只提示、不自动替换、不放宽校验。
@@ -328,10 +370,10 @@ def _check_labels(values, prefixes=None):
     if main_type in types():
         allowed = _allowed_prefixes(main_type) if prefixes is None else prefixes
         bad = [path for path in paths
-               if not any(_under(path, prefix) for prefix in allowed)
-               or (main_type in ("完成句子", "短文填空") and _under(path, "词汇/答案考点"))]
+               if not knowledge_path_allowed(path, main_type, allowed)
+               or (main_type in ("完成句子", "短文填空", "选词填空", "教材语篇填空") and _under(path, "词汇/答案考点"))]
         if bad:
-            problems.append(f"「{main_type}」知识点超出允许维度/范围（{'、'.join(allowed)}）：{bad}")
+            problems.append(f"「{main_type}」知识点超出允许维度/范围（{'、'.join([*allowed, *sorted(exact_knowledge_paths(main_type))])}）：{bad}")
     return problems
 
 
@@ -378,12 +420,38 @@ def check_unit_dims(main_type: str, knowledge) -> list[str]:
         problems.append(f"「{main_type}」组级不挂 {'/'.join(rule['forbid'])}：{banned}；"
                         f"整组题型不再把这些维度下放到子题")
     outside = [path for path in paths if path not in banned and
-               not any(_under(path, prefix) for prefix in rule["allow"])]
+               not knowledge_path_allowed(path, main_type, rule["allow"])]
     if outside:
-        problems.append(f"「{main_type}」组级知识点超出允许维度/范围（{'、'.join(rule['allow'])}）：{outside}")
+        problems.append(f"「{main_type}」组级知识点超出允许维度/范围（{'、'.join([*rule['allow'], *sorted(exact_knowledge_paths(main_type))])}）：{outside}")
     missing = [dim for dim in rule["need"] if not any(_under(path, dim) for path in paths)]
     if missing:
         problems.append(f"「{main_type}」组级缺必带维度：{'/'.join(missing)}")
+    return problems
+
+
+def check_per_question_required(main_type: str, knowledge) -> list[str]:
+    """逐题（per-question）题型的必带维度校验。
+
+    与 check_unit_dims 同口径读取 _unit_dims()[main_type]["need"]，但作用于单个
+    题目/子题自身的标签，而非整组。整组题型由 check_unit_dims 在组级负责，这里
+    只对非整组题型生效；单词拼写/单项填空/翻译/语音题等 need 为空者不受影响。
+    """
+    if whole_unit_type(main_type):
+        return []
+    # 书面表达不是客观题（规则 23）：知识点标签可空/可只有部分维度，缺少体裁或主题
+    # 不算硬错误，因此不做逐题必带维度强制（避免合法作文被判缺失而卡流程）。
+    if main_type == "书面表达":
+        return []
+    rule = _unit_dims().get(main_type)
+    if not rule or not rule["need"]:
+        return []
+    problems = []
+    paths = _string_list(knowledge, "knowledge", problems)
+    if problems:
+        return problems
+    missing = [dim for dim in rule["need"] if not any(_under(path, dim) for path in paths)]
+    if missing:
+        problems.append(f"「{main_type}」缺必带维度：{'/'.join(missing)}")
     return problems
 
 
@@ -461,7 +529,7 @@ def check_question_labels(question) -> list[str]:
         if (parent_type in _READING_TYPES and not whole_unit_type(parent_type)
                 and not any(_under(p, "设题角度/阅读") for p in clean_paths)):
             problems.append("阅读子题必须包含设题角度/阅读叶子")
-        expected_ids = [point["id"] for point in resolve_knowledge(clean_paths)["resolved"]]
+        expected_ids = [point["id"] for point in resolve_knowledge(clean_paths, main_type)["resolved"]]
         for key in ("knowledgeIds", "knowledge_ids"):
             if key in item:
                 ids = _string_list(item[key], key, problems)
@@ -475,6 +543,12 @@ def check_question_labels(question) -> list[str]:
         is_group = bool(children) or item.get("unit_kind") == "group"
         if is_group and parent_type is None and main_type in types():
             problems.extend(check_unit_dims(main_type, clean_paths))
+        elif main_type in types():
+            # 逐题（per-question）题型不走整组单元校验，但 _unit_dims 里为其规定的
+            # 必带维度（如听力短对话的「主题」）仍必须落到本题标签上。此前只在
+            # is_group 分支执行，导致听力短对话/判断/排序/问答/听力其他/书面表达
+            # 等逐题题型只打「设题角度」也能通过，主题成批漏标（2026-11-19 修复）。
+            problems.extend(check_per_question_required(main_type, clean_paths))
         for index, child in enumerate(children, 1):
             problems.extend(validate(child, main_type, f"子题[{index}]", parent_is_group=is_group))
         return [f"{location}：{problem}" for problem in problems]

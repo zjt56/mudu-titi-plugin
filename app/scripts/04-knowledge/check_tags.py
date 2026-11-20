@@ -61,7 +61,8 @@ def _check_knowledge_ids(item, child, problems, warnings):
         return
     has_camel = "knowledgeIds" in obj
     has_snake = "knowledge_ids" in obj
-    resolved = taxonomy.resolve_knowledge(obj["knowledge"])
+    main_type = obj.get("question_type", obj.get("type", item.get("question_type", item.get("type"))))
+    resolved = taxonomy.resolve_knowledge(obj["knowledge"], main_type)
     expected = [point["id"] for point in resolved["resolved"]]
     if not has_camel or not has_snake:
         problems.append(f"{_label(item, child)}：A22 知识点必须同时提供 knowledgeIds 和 knowledge_ids")

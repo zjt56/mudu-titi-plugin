@@ -2,7 +2,9 @@
 from copy import deepcopy
 import hashlib
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from workbench import taxonomy
@@ -73,6 +75,32 @@ class UploadPayloadTest(unittest.TestCase):
         self.assertNotIn('GROUP_INCOMPLETE', self.codes(report))
         self.assertEqual(report['payload']['items'][0]['stem'], '')
 
+    def test_cloze_uses_number_only_for_choice_placeholders_covered_by_the_passage(self):
+        item = reading_group()
+        item.update(question_type="完形填空", material="They saw <u>　56　</u> and __57__.", options=[])
+        item["filterMetadata"]["subtypes"] = ["其他空数"]
+        for child in item["subquestions"]:
+            child.update(stem="______", knowledge=[], options=["A. x", "B. y", "C. z", "D. w"])
+        item["subquestions"][1]["stem"] = "Choose the meaning of <u>visit</u>."
+        original = deepcopy(item)
+
+        report = self.build(batch(item))
+        self.assertTrue(report["passed"], report["errors"])
+        group = report["payload"]["items"][0]
+        self.assertEqual(group["material"], "They saw __56__ and __57__.")
+        self.assertEqual([child["stem"] for child in group["subquestions"]],
+                         ["56.", "Choose the meaning of <u>visit</u>.", "______"])
+        self.assertEqual(group["subquestions"][0]["options"], original["subquestions"][0]["options"])
+        self.assertEqual(item, original)
+
+        for question_type, options in (("阅读理解", original["subquestions"][0]["options"]), ("完形填空", [])):
+            with self.subTest(question_type=question_type):
+                variant = deepcopy(original)
+                variant["question_type"] = question_type
+                variant["subquestions"][0]["options"] = options
+                report = self.build(batch(variant))
+                self.assertEqual(report["payload"]["items"][0]["subquestions"][0]["stem"], "______")
+
     def test_group_children_may_leave_knowledge_empty(self):
         # 语音题等整组题只在组级打知识点；子题留空是既定规则，不能误拦上传。
         item = reading_group()
@@ -120,6 +148,66 @@ class UploadPayloadTest(unittest.TestCase):
         self.assertEqual(self.catalog, catalog)
         canonical = json.dumps(catalog, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         self.assertEqual(report["catalog_sha256"], hashlib.sha256(canonical.encode()).hexdigest())
+
+    def test_answer_points_follow_original_labels_in_upload_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = deepcopy(self.catalog)
+            vocabulary = next(point for point in catalog["points"]
+                              if point["parent_id"] is None and point["name"] == "词汇")
+            branch_id = "REMOTE-ANSWER-POINTS"
+            catalog["points"].append({"id": branch_id, "name": "答案考点",
+                                      "parent_id": vocabulary["id"], "version_id": "REMOTE-V1",
+                                      "active": True, "subject_id": "english"})
+            catalog["points"].append({"id": "REMOTE-PEOPLE", "name": "people",
+                                      "parent_id": branch_id, "version_id": "REMOTE-V1",
+                                      "active": True, "subject_id": "english"})
+            source = batch()
+            original = deepcopy(source)
+            with patch("workbench.server.answer_point_tags", return_value=["people"]):
+                report = self.build(source, catalog=catalog, batch_dir=Path(directory))
+            self.assertTrue(report["passed"], report["errors"])
+            wire = report["payload"]["items"][0]
+            self.assertEqual(wire["knowledge"][-1], "词汇/答案考点/people")
+            self.assertIn("REMOTE-PEOPLE", wire["knowledge_ids"])
+            self.assertEqual(source, original)
+
+    def test_unapproved_answer_point_path_still_blocks_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("workbench.server.answer_point_tags", return_value=["people"]):
+                report = self.build(batch(), batch_dir=Path(directory))
+            self.assertFalse(report["passed"])
+            self.assertIn("REMOTE_KNOWLEDGE_MISSING", self.codes(report))
+
+    def test_child_answer_points_stay_on_their_question_in_upload_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = deepcopy(self.catalog)
+            vocabulary = next(point for point in catalog["points"]
+                              if point["parent_id"] is None and point["name"] == "词汇")
+            branch_id = "REMOTE-ANSWER-POINTS"
+            catalog["points"].append({"id": branch_id, "name": "答案考点",
+                                      "parent_id": vocabulary["id"], "version_id": "REMOTE-V1",
+                                      "active": True, "subject_id": "english"})
+            catalog["points"].extend([
+                {"id": "REMOTE-FIRST", "name": "first", "parent_id": branch_id,
+                 "version_id": "REMOTE-V1", "active": True, "subject_id": "english"},
+                {"id": "REMOTE-SECOND", "name": "second", "parent_id": branch_id,
+                 "version_id": "REMOTE-V1", "active": True, "subject_id": "english"},
+            ])
+            item = reading_group()
+            item["subquestions"][0]["unit_id"] = item["unit_id"]
+            item["subquestions"][1]["unit_id"] = item["unit_id"]
+            item["subquestions"][2]["unit_id"] = item["unit_id"]
+            source = batch(item)
+            with patch("workbench.server.answer_point_tags",
+                       side_effect=lambda _folder, _uid, number=None, **_kw:
+                           ["first"] if number == 56 else ["second"] if number == 57 else []):
+                report = self.build(source, catalog=catalog, batch_dir=Path(directory))
+            self.assertTrue(report["passed"], report["errors"])
+            group = report["payload"]["items"][0]
+            children = {child["number"]: child for child in group["subquestions"]}
+            self.assertIn("词汇/答案考点/first", children[56]["knowledge"])
+            self.assertIn("词汇/答案考点/second", children[57]["knowledge"])
+            self.assertNotIn("词汇/答案考点/second", children[56]["knowledge"])
 
     def test_group_audits_local_before_wire_union(self):
         data = batch(reading_group())

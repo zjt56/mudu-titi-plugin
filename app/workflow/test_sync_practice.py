@@ -278,5 +278,88 @@ class TestLessonHeadingsMatchesRulesDocument(unittest.TestCase):
 
 
 
+class TestColumnBannersAndRepeatedAnswerHeadings(unittest.TestCase):
+    """通用栏目板块边界切分与答案区重复大题标题回归测试。"""
+
+    def test_repeated_heading_in_answer_key_does_not_break_extraction(self):
+        from . import extract, structure_gate, denoise
+        text = (
+            "九上 · 人教版 · 课时A计划\n"
+            "**Unit 2　Inspiring People**\n"
+            "**第四课时**　Section B (1a-1f)\n"
+            "**[IMG image9.jpg]****一、教材语篇回顾****[IMG image10.jpg]**\n"
+            "[IMG image28.jpg]\n"
+            "\n"
+            "**【二、A 基础巩固】**\n"
+            "**Ⅰ. 根据句意及汉语提示完成单词**\n"
+            "**1.**Drop me off near the ________(银行).\n"
+            "**2.**I hope they are happy ________(永远).\n"
+            "\n"
+            "**【三、B 能力提升】**\n"
+            "**阅读理解[2025·四川广元改编]**\n"
+            "Victor Hugo once said laughter drives winter away.\n"
+            "**1.**Why are Hugo's words mentioned?\n"
+            "A.To explain.\tB.To introduce.\n"
+            "C.To think.\tD.To show.\n"
+            "\n"
+            "**\n"
+            "****参考答案**\n"
+            "\n"
+            "**[IMG image85.jpg]****一、教材语篇回顾****[IMG image86.jpg]**\n"
+            "1.was born in　2.researching　3.radio\n"
+            "**[IMG image85.jpg]****二、基础巩固****[IMG image86.jpg]**\n"
+            "Ⅰ.1.bank　2.forever\n"
+            "**[IMG image85.jpg]****三、能力提升****[IMG image86.jpg]**\n"
+            "1.B\n"
+        )
+        self.assertEqual(sp.answer_key_start(text), 20)
+        structure, body, appendix = extract.infer_structure(text)
+        self.assertNotIn("参考答案", body)
+        self.assertIn("1.was born in", appendix)
+        self.assertEqual(len(structure["sync_practice"]["headings"]), 3)
+        body_lines = body.splitlines()
+        for sec in structure["sections"]:
+            window = "\n".join(body_lines[sec["source_line"] - 1:sec["source_end_line"]])
+            self.assertNotIn("基础巩固", window)
+            self.assertNotIn("能力提升", window)
+        cleaned, _, _ = denoise.clean_body(body)
+        proj = denoise.project_structure(structure, body, cleaned)
+        units = structure_gate._build_units(proj["sections"], proj["groups"], cleaned.splitlines())
+        self.assertTrue(units)
+        for unit in units:
+            self.assertNotIn("基础巩固", unit["stem"])
+            self.assertNotIn("能力提升", unit["stem"])
+
+    def test_is_column_banner_distinguishes_banners_from_headings_and_prompts(self):
+        from .lesson_bands import is_column_banner
+        for banner in (
+            "**【二、A 基础巩固】**",
+            "**【三、B 能力提升】**",
+            "**[IMG a.jpg]****一、重要考点集训****[IMG b.jpg]**",
+            "三、创新阅读专练",
+            "**【二、素养提升】**",
+            "二、拓展延伸",
+            "【课前预习】",
+            "综合阅读提升",
+            "Pronunciation",
+        ):
+            with self.subTest(banner=banner):
+                self.assertTrue(is_column_banner(banner))
+        for non_banner in (
+            "**[IMG a.jpg]****一、教材语篇回顾****[IMG b.jpg]**",
+            "**Ⅰ. 根据句意及汉语提示完成单词**",
+            "**Ⅱ. 单项填空**",
+            "**阅读理解[2025·四川广元改编]**",
+            "**1.**What did Chaplin want to express?",
+            "A.He was in pain.",
+            "【写作要点】",
+            "【思路点拨】",
+            "****参考答案**",
+            "[TABLE 1]",
+        ):
+            with self.subTest(non_banner=non_banner):
+                self.assertFalse(is_column_banner(non_banner))
+
+
 if __name__ == "__main__":
     unittest.main()

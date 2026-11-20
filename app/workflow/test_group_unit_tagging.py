@@ -43,6 +43,70 @@ class GroupUnitTypesTest(unittest.TestCase):
         self.assertEqual(taxonomy.check_question_labels(item), [])
 
 
+class PerQuestionRequiredDimTest(unittest.TestCase):
+    """逐题题型（非整组）的必带维度必须落到单题上（2026-11-19 修复）。
+
+    此前 check_question_labels 只在 is_group 分支跑 check_unit_dims，导致听力短对话
+    等逐题题型只打「设题角度」也能通过、主题成批漏标。现按 check_per_question_required
+    在每道单题上强制必带维度。
+    """
+
+    def _sub(self, type_name):
+        subs = taxonomy.subtypes(type_name)
+        return [subs[0]] if subs else []
+
+    def test_short_dialogue_without_theme_fails(self):
+        item = {"question_type": "听力短对话理解", "printed_numbers": ["1"],
+                "knowledge": ["设题角度/听力/细节理解"],
+                "subtypes": self._sub("听力短对话理解")}
+        problems = taxonomy.check_question_labels(item)
+        self.assertTrue(any("缺必带维度" in p and "主题" in p for p in problems), problems)
+
+    def test_short_dialogue_with_theme_passes(self):
+        item = {"question_type": "听力短对话理解", "printed_numbers": ["1"],
+                "knowledge": ["设题角度/听力/细节理解",
+                              "主题/人与社会/社会服务与人际沟通/人际交往"],
+                "subtypes": self._sub("听力短对话理解")}
+        self.assertEqual(taxonomy.check_question_labels(item), [])
+
+    def test_listening_judgement_needs_genre_and_theme(self):
+        # 听力判断必带 体裁+主题，仅给主题仍缺体裁
+        item = {"question_type": "听力判断", "printed_numbers": ["1"],
+                "knowledge": ["主题/人与自然/自然生态/动物与植物"],
+                "subtypes": self._sub("听力判断")}
+        problems = taxonomy.check_question_labels(item)
+        self.assertTrue(any("缺必带维度" in p and "语篇体裁" in p for p in problems), problems)
+
+    def test_per_question_no_need_type_unaffected(self):
+        # 单词拼写 need=[]，不受逐题必带影响；其词汇知识点落「拼写与词形」
+        # （用户 2026-11-19：单词拼写不用「词汇/词汇辨析」子类）。
+        item = {"question_type": "单词拼写", "printed_numbers": ["1"],
+                "knowledge": ["词汇/拼写与词形"],
+                "subtypes": self._sub("单词拼写")}
+        self.assertEqual(taxonomy.check_question_labels(item), [])
+
+    def test_word_spelling_excludes_vocabulary_disambiguation(self):
+        # 用户 2026-11-19：单词拼写不需要「词汇/词汇辨析」子类；拼写/词形落 词汇/拼写与词形。
+        subs = self._sub("单词拼写")
+        bad = {"question_type": "单词拼写", "printed_numbers": ["1"],
+               "knowledge": ["词汇/词汇辨析/名词辨析"], "subtypes": subs}
+        problems = taxonomy.check_question_labels(bad)
+        self.assertTrue(any("超出允许维度" in p for p in problems), problems)
+        good = {"question_type": "单词拼写", "printed_numbers": ["1"],
+                "knowledge": ["词汇/拼写与词形"], "subtypes": subs}
+        self.assertEqual(taxonomy.check_question_labels(good), [])
+        # 其他题型仍允许词汇辨析（排除只作用于单词拼写）
+        other = {"question_type": "单项填空",
+                 "knowledge": ["词汇/词汇辨析/名词辨析"],
+                 "subtypes": self._sub("单项填空"), "printed_numbers": ["1"]}
+        self.assertEqual(taxonomy.check_question_labels(other), [])
+
+    def test_whole_unit_still_not_double_checked(self):
+        # 整组题型由 check_unit_dims 负责，check_per_question_required 不重复报错。
+        self.assertEqual(taxonomy.check_per_question_required(
+            "听力长对话理解", []), [])
+
+
 class GroupSamplePlanTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

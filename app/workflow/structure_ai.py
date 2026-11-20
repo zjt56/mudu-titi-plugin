@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 from . import sync_practice
+from .shared_rubric import GROUP_MATERIAL_RULE
 
 MARKER = "01_source/structure.ai.json"
 EXPLAIN = re.compile(r"【解析】|【答案】|【分析】|参考答案")
@@ -363,6 +364,9 @@ def _classify_prompt(raw_text: str, candidate: dict, pdf_ocr=None) -> str:
         "独立题逐题一个单元；共享材料题组合成一个group。请区分大题标题、正文材料、"
         "题干、A-H选项、答案和解析；答案/解析不应伪装成题干。缺少题干/选项时保留可见材料，"
         "在notes说明，不要编造。返回 JSON：{\"status\":\"completed\",\"artifacts\":{\"structure\":{\"units\":[...]}},\"notes\":[],\"findings\":[]}，不要 markdown。行号从1开始。\n"
+        + "\n" + GROUP_MATERIAL_RULE
+        + "\n结构归类须保留首个子题前的共享内容。窗口外的印刷导语按同一大题坐标核对，"
+          "保持现有窗口与题号契约，不把标题混作共享材料。\n"
         + sync_hint +
         ("\n视觉已绑定的板块边界（不是题面文字）：" + json.dumps(candidate.get("lesson_bands"), ensure_ascii=False)
          + "\n图片横幅是容器边界，不得并入上一题材料。跨栏/跨页不自动结束大题，"
@@ -500,7 +504,8 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict, *, diagnostics=N
             from .structure_gate import _source_members
             span_numbers = _source_members(lines[start - 1:end])
         unnumbered = scoped and span.get("number_binding") == "unnumbered_section"
-        if not unnumbered and any(n in visible_numbers and n not in span_numbers for n in nums):
+        inferred_image = scoped and span.get("number_binding") == "answer_inferred_image_group"
+        if not unnumbered and not inferred_image and any(n in visible_numbers and n not in span_numbers for n in nums):
             reject("QUESTION_NOT_FOUND", f"题号未在本窗口定位：{sorted(set(nums) - span_numbers)}")
             continue
         parts = raw.get('source_parts', [])
@@ -550,6 +555,13 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict, *, diagnostics=N
                 reject("UNNUMBERED_BINDING_INVALID", "无号单元必须有唯一重建的完整无号题或完整合法来源节证明")
                 continue
             binding = {"number_binding": "unnumbered_section", "printed_numbers": []}
+        elif inferred_image and span.get("printed_numbers") == [] and span.get("inferred_numbers") == nums:
+            binding = {
+                "number_binding": "answer_inferred_image_group",
+                "printed_numbers": [],
+                "inferred_numbers": list(nums),
+                "inferred_evidence": list(span.get("inferred_evidence") or []),
+            }
         elif scoped and span.get("number_binding") == "single_writing_section" and "书面表达" in qtype and len(nums) == 1:
             binding = {"number_binding": "single_writing_section"}
         try:

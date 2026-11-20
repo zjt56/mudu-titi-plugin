@@ -41,6 +41,21 @@ class DenoiseTest(unittest.TestCase):
         self.assertIn("What is the man doing", cleaned)
         self.assertTrue(all(r["kind"] == "noise" for r in removed))
 
+    def test_full_width_underscore_answer_lines_are_kept(self):
+        # 无号古诗画线题的作答区是整行下划线，不是装饰分隔线；
+        # 当分隔线丢掉会让该大题窗口无作答证据，整道题不产出来源单元。
+        text = "\n".join([
+            "Ⅰ.写出下列古诗画线句中表示数字的英文单词",
+            "[TABLE 1]",
+            "《咏雪》<br>郑燮<br><u>一片两片三四片</u><br>五六七八九十片。",
+            "[/TABLE]",
+            "_________",
+            "_________",
+        ])
+        cleaned, _meta, removed = denoise.clean_body(text)
+        self.assertEqual(removed, [])
+        self.assertIn("_________", cleaned)
+
     def test_answer_references_in_stems_continuations_and_options_are_kept(self):
         lines = [
             "1. 阅读下面的说明并回答问题。",

@@ -35,7 +35,10 @@ NOISE_PATTERNS = (
     re.compile(r"扫码(?:练|听|查看|观看|获取)"),
     # 只丢弃完整的答案册标签或明确链接；自由文本可能是题干或选项。
     re.compile(r"^(?:答案册|答案见答案册|答案(?:册)?链接\s*[:：]\s*https?://[^\s]+)\s*$", re.I),
-    re.compile(r"^[\s\-_=*·•—]+$"),                       # 纯分隔线
+    # 纯分隔线只认装饰字符。下划线是本流水线的作答空位标记（`_{2,}`）：
+    # 整行等宽下划线是无号题（如古诗画线题）的作答区，属于题目内容；
+    # 当分隔线丢掉会让该大题窗口失去作答证据，进而整道题不产出来源单元。
+    re.compile(r"^[\s\-=*·•—]+$"),                        # 纯分隔线（不含作答下划线）
     # Only an explicit publisher watermark is disposable; URLs can be question content.
     re.compile(r"^\s*(?:来源\s*[:：]?\s*)?学科网(?:\s*(?:https?://)?www\.zxxk\.com/?)?\s*$", re.I),
     re.compile(r"^\s*第\s*\d+\s*页\s*(?:共\s*\d+\s*页)?"),  # 页脚

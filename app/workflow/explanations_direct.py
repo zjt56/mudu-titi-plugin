@@ -34,6 +34,50 @@ def _pdf_sources(batch):
             if re.fullmatch(r"attachment_\d{3,}\.txt", p.name) and p.is_file()]
 
 
+_WRITING_START = re.compile(r"^【(?:思路点拨|参考范文)】")
+
+
+def _writing_explanation(batch):
+    """书面表达专用：逐字抄取答案区的【思路点拨】/【参考范文】/【范文点评】整段作为解析。
+
+    书面表达不是客观题（规则 23），附录常有“思路点拨＋参考范文＋范文点评”这类写作说明，
+    却不在题号解析里，导致解析留空「无」（用户 2026-11-19 明确要求写入，不再留空）。
+    只在源文件里逐字存在这些标题段时抄录，绝不自写范文或编造；找不到保持占位。
+    返回 (相对路径, 文本) 或 (None, None)。
+    """
+    batch = Path(batch)
+    for name in ("01_source/附录.txt", "01_source_ans/正文.txt"):
+        path = batch / name
+        if not path.is_file():
+            continue
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        starts = [j for j, line in enumerate(lines) if _WRITING_START.match(line.strip())]
+        if not starts:
+            continue
+        # 有书面表达大题标题时只取标题之后的写作说明；无标题（附录只有孤立范文）用首个。
+        head = None
+        for i, line in enumerate(lines):
+            sec = source._section(line)
+            if sec and sec[1] == "书面表达":
+                head = i
+                break
+        candidates = [j for j in starts if head is None or j > head]
+        start = (candidates or starts)[0]
+        collected = []
+        for k in range(start, len(lines)):
+            line = lines[k]
+            sec = source._section(line)
+            if k > start and sec and sec[1] != "书面表达":
+                break
+            if re.match(r"^\s*附[:：]\s*听力", line.strip()):
+                break
+            collected.append(line.strip())
+        text = "\n".join(part for part in collected if part).strip()
+        if text:
+            return name, text
+    return None, None
+
+
 def _boundary(line):
     return (source._section(line) or source._answer_range_boundary(line)
             or source.ICON_HEADING.match(line)
@@ -208,6 +252,15 @@ def build_payload(batch_dir):
         grouped = unit["unit_kind"] == "group"
         script = scripts.get(uid)
         explanation = PLACEHOLDER if grouped else text(numbers[0])
+        # 书面表达：解析即答案区的写作说明（思路点拨/参考范文/范文点评）。题号解析
+        # 无法绑定这些段落时，按来源逐字补入；仍找不到就保持「无」，不编造（规则 23）。
+        if unit.get("type") == "书面表达" and explanation == PLACEHOLDER:
+            anchor_path, writing_text = _writing_explanation(batch)
+            if writing_text:
+                explanation = writing_text
+                location = f"原文：{anchor_path}"
+                if location not in evidence:
+                    evidence.append(location)
         if script:
             explanation = listening_script.combine(explanation, script[0])
             evidence.append(f"听力录音材料：{script[1]}:{script[2]}")

@@ -85,6 +85,12 @@ _batches_epoch = 0
 _batches_read_lock = threading.Lock()
 # 听力切段后台任务（安装 / 切段共用一把闸，避免并发下载与切片）。
 _audio_job = {"running": False, "kind": "", "batch": "", "lock": threading.Lock()}
+# CHANGELOG 保留：超过两天的变更记录定期自动删除（用户 2026-11-19 要求）。
+CHANGELOG_DIR = Path(os.environ.get("WF_CHANGELOG_DIR") or (ROOT.parent / "CHANGELOG")).resolve()
+CHANGELOG_KEEP_DAYS = 2
+CHANGELOG_PRUNE_INTERVAL_SECONDS = int(os.environ.get("WF_CHANGELOG_PRUNE_INTERVAL") or 6 * 60 * 60)
+_changelog_prune_halt = threading.Event()
+_changelog_prune_state: dict = {"last_result": None, "last_run": None}
 
 
 def serialized(function):
@@ -3040,8 +3046,8 @@ def drop_short_knowledge_copies(paths):
                        for other in unique)]
 
 
-def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None):
-    """Display locally derived answer tags while their catalog binding is pending."""
+def _pending_answer_point_tags(folder, unit_id, *, number=None, review_hashes=None):
+    """Read historical candidates only while their original inputs still match."""
     pending = load(folder / "04_knowledge/answer-point-tags.pending.json", {})
     if (not isinstance(pending, dict) or pending.get("status") != "pending_catalog_binding"
             or pending.get("batch") != folder.name or not isinstance(pending.get("labels"), list)):
@@ -3072,6 +3078,100 @@ def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None):
         except OSError:
             return []
     return list(candidates)
+
+
+def _answer_point_terms(answer, options):
+    from workflow.content_rules import is_placeholder
+    from workflow.wire_format import OPTION_PREFIX, option_strings
+
+    if is_placeholder(answer):
+        return []
+    text = re.sub(r'</?(?:u|b|strong|em|i)>|\*\*', '', answer, flags=re.I).strip()
+    if options:
+        if not re.fullmatch(r'[A-Z]', text):
+            return []
+        choices = [option[match.end():] for option in option_strings(options)
+                   if (match := OPTION_PREFIX.match(option)) and match.group(1) == text]
+        if len(choices) != 1:
+            return []
+        text = re.sub(r'</?(?:u|b|strong|em|i)>|\*\*', '', choices[0], flags=re.I)
+        text = re.sub(r'\s+[（(]\s*[）)]\s*$', '', text)
+    text = text.strip()
+    numbered = list(re.finditer(r'(?<!\S)(\d+)[.．、]\s*(\S.*?)(?=\s+\d+[.．、]|$)', text, re.S))
+    if (len(numbered) > 1 and numbered[0].start() == 0
+            and [part[1] for part in numbered] == [str(index + 1) for index in range(len(numbered))]):
+        text = ';'.join(part[2] for part in numbered)
+    terms = []
+    for piece in re.split(r'[/／;；]', text):
+        term = ' '.join(piece.split())
+        if not re.fullmatch(r"[A-Za-z]+(?:['’\-‐‑⁃][A-Za-z]+)*(?: [A-Za-z]+(?:['’\-‐‑⁃][A-Za-z]+)*)*", term):
+            continue
+        if re.match(r"(?i)^(?:(?:I|he|she|it|we|you|they|this|that|there)(?:['’](?:m|re|s|ve|d|ll) | (?:am|is|are|was|were|have|has|had|do|does|did|will|can|must|should)\b))", term):
+            continue
+        terms.append(term)
+    return terms
+
+
+def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None):
+    """Project original answer points from the accepted keys and final options."""
+    from workflow.agent_tasks import _answer_comparison_text, confirmed_units
+    from workflow.question_identity import question_key
+
+    answer_path = '01_source_ans/answers.json'
+    type_path = '03_types/types.json'
+    batch_path = '06_batch/batch_meta.json'
+    try:
+        manifest = wf_manifest.load(folder)
+        record = manifest['stages']['answers']
+        if (record.get('status') != wf_manifest.COMPLETED or record.get('rebuild_required')
+                or not (record.get('output_hashes') or {}).get(answer_path)
+                or wf_manifest.is_stale(folder, manifest, wf_contracts.STAGE_BY_ID['answers'])[0]):
+            return []
+        if review_hashes is not None and any(
+                not review_hashes.get(relative)
+                or review_hashes[relative] != wf_manifest.sha256_file(folder / relative)
+                for relative in (answer_path, type_path, batch_path)):
+            return []
+        unit = next((row for row in confirmed_units(folder) if row['unit_id'] == unit_id), None)
+        batch = load(folder / batch_path, {})
+        type_data = load(folder / type_path, {})
+        rows = batch.get('items', []) if isinstance(batch, dict) else []
+        type_rows = type_data.get('items', []) if isinstance(type_data, dict) else []
+        matches = [item for item in rows if isinstance(item, dict) and item.get('unit_id') == unit_id]
+        type_matches = [item for item in type_rows if isinstance(item, dict) and item.get('unit_id') == unit_id]
+        if unit is None or len(matches) != 1 or len(type_matches) != 1:
+            return []
+        item = matches[0]
+        type_item = type_matches[0]
+        main_type = type_item.get('type') or type_item.get('question_type')
+        if (item.get('question_type') or item.get('type')) != main_type:
+            return []
+        if not any(dim.get('dim') == '答案考点'
+                   for dim in taxonomy.type_knowledge_rules().get(main_type, {}).get('dims', [])):
+            return []
+        answers = load(folder / answer_path, {}).get('answers', {})
+        children = item.get('subquestions') if unit['unit_kind'] == 'group' else [item]
+        terms = []
+        for child_number in unit['numbers']:
+            if number is not None and str(number) != str(child_number):
+                continue
+            key = question_key(unit, child_number)
+            children_at_number = [child for child in children or [] if isinstance(child, dict)
+                                  and str(child.get('number')) == str(child_number)]
+            if len(children_at_number) != 1:
+                continue
+            child = children_at_number[0]
+            if unit.get('identity_version') == 'scoped-v1' and child.get('question_id') != key:
+                continue
+            value, current = answers.get(key), child.get('answer')
+            if (isinstance(value, str) and isinstance(current, str)
+                    and _answer_comparison_text(value) == _answer_comparison_text(current)):
+                terms.extend(_answer_point_terms(value, child.get('options') or item.get('options') or []))
+        return list(dict.fromkeys(terms))
+    except FileNotFoundError:
+        return _pending_answer_point_tags(folder, unit_id, number=number, review_hashes=review_hashes)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return []
 
 
 def label_payload(row, batch_item, subs, folder, unit_id=None):
@@ -3105,19 +3205,21 @@ def label_payload(row, batch_item, subs, folder, unit_id=None):
             for path in sub.get("knowledge") or []:
                 if str(path).strip() and str(path).strip() not in knowledge:
                     knowledge.append(str(path).strip())
-    resolved = taxonomy.resolve_knowledge(knowledge)
+    main_type = (unit_labels.get("type") or item.get("question_type") or item.get("type")
+                 or row.get("question_type") or row.get("type") or "")
+    resolved = taxonomy.resolve_knowledge(knowledge, main_type)
     # 旧批次可能保存不带顶级维度的叶子路径；展示和维度校验统一使用
     # 唯一解析出的当前目录全路径，避免加载时误报目录外路径。
     if resolved["resolved"] and not resolved["unknown"] and not resolved["non_leaf"]:
         knowledge = list(dict.fromkeys(point["path"] for point in resolved["resolved"]))
-        resolved = taxonomy.resolve_knowledge(knowledge)
+        resolved = taxonomy.resolve_knowledge(knowledge, main_type)
     from workflow.metadata_policy import MISSING
     values = {
         "source": item.get("source") or filters.get("source") or row.get("source") or MISSING,
         "source_type": item.get("source_type") or filters.get("source_type") or row.get("source_type") or MISSING,
         "year": str(item.get("year") or filters.get("year") or row.get("year") or ""),
         "location": item.get("location") or filters.get("location") or row.get("location") or "",
-        "type": unit_labels.get("type") or item.get("question_type") or item.get("type") or row.get("question_type") or row.get("type") or "",
+        "type": main_type,
         "subtypes": filters.get("subtypes") or ([item.get("subtype")] if item.get("subtype") else []),
         "difficulty": (taxonomy.difficulty_name(item.get("difficulty"))
                        or taxonomy.difficulty_name(filters.get("difficulty"))
@@ -3472,9 +3574,10 @@ def detail(name, unit_id):
             if key in bound_unit:
                 row[key] = bound_unit[key]
         printed_numbers = bound_unit.get("printed_numbers", (bound_unit.get("source_span") or {}).get("printed_numbers"))
+        binding = (bound_unit.get("source_span") or row.get("source_span") or {}).get("number_binding")
         if printed_numbers is not None:
             row["printed_numbers"] = printed_numbers
-        if row.get("printed_numbers") == []:
+        if row.get("printed_numbers") == [] and binding != "answer_inferred_image_group":
             row["label"] = str((row.get("source_section") or {}).get("title") or "无印刷题号")
         # Numeric-only findings have no unique owner in a scoped batch.
         queue = dict(queue, items=[f for f in queue.get("items", [])
@@ -3612,7 +3715,7 @@ def detail(name, unit_id):
             if item["verdict"] in ("header", "banner", "unused", "excluded")}
     if drop:
         blocks = [block for block in blocks if not (block.get("type") == "image" and block.get("name") in drop)]
-    if scoped and row.get("printed_numbers") == []:
+    if scoped and row.get("printed_numbers") == [] and (bound_unit.get("source_span") or row.get("source_span") or {}).get("number_binding") != "answer_inferred_image_group":
         subs = [dict(sub, display_number=None, internal_number=sub.get("number")) for sub in subs]
     return {"batch": name, "meta": report.get("meta", manifest.get("meta", {})),
             "paper": paper_info(folder, report, manifest),
@@ -3626,8 +3729,9 @@ def detail(name, unit_id):
             "unit_id": row.get("unit_id", unit_id), "label": row.get("label") or "-".join(str(n) for n in numbers),
             "unit_kind": row.get("unit_kind", "standalone"), "numbers": numbers,
             "type": row.get("type") or batch_item.get("type", ""),
-            "subtypes": row.get("subtypes") if isinstance(row.get("subtypes"), list)
-                        else ([_row_subtype(row)] if _row_subtype(row) else []),
+            "subtypes": (labels.get("subtypes") if isinstance(labels.get("subtypes"), list) and labels.get("subtypes")
+                         else row.get("subtypes") if isinstance(row.get("subtypes"), list)
+                         else ([_row_subtype(row)] if _row_subtype(row) else [])),
             "source_section": row.get("source_section") or {},
             "printed_numbers": row.get("printed_numbers"),
             "material": batch_item.get("material") or row.get("material") or "",
@@ -3979,8 +4083,6 @@ class Handler(BaseHTTPRequestHandler):
         else:
             payload = None
         applied = apply_manual_content(folder, unit_id, unit, expected, files, current, payload, bool(unit))
-        if labels is not None and "knowledge" in labels:
-            labels = {**labels, "knowledge": taxonomy.require_knowledge(labels["knowledge"])}
         rows = merged_rows(folder, report_for(folder))
         confirmed = load(folder / "01_source/structure.confirmed.json", {}) or {}
         scoped_units = [u for u in confirmed.get("units", []) if isinstance(u, dict)
@@ -4034,9 +4136,11 @@ class Handler(BaseHTTPRequestHandler):
                     if key in labels:
                         merged[key] = labels[key]
                 subtypes = merged.get("subtypes") or ([merged["subtype"]] if merged.get("subtype") else [])
-                knowledge = taxonomy.require_knowledge(merged.get("knowledge", []))
+                main_type = merged.get("type") or next((row.get("type") or row.get("question_type")
+                    for row in rows if str(row.get("unit_id")) == str(unit_id)), None)
+                knowledge = taxonomy.require_knowledge(merged.get("knowledge", []), main_type)
                 merged["knowledge"] = knowledge
-                resolved = taxonomy.resolve_knowledge(knowledge)
+                resolved = taxonomy.resolve_knowledge(knowledge, main_type)
                 # 清空或改成未知路径时也同步清空旧 ID，避免名字与关联脱节。
                 merged["knowledgeIds"] = [point["id"] for point in resolved["resolved"]]
                 filters = dict(merged.get("filterMetadata") or {})
@@ -4113,6 +4217,33 @@ class Handler(BaseHTTPRequestHandler):
 _workflow_supervisor = None
 
 
+def prune_changelog(now_ts=None):
+    """删除超过保留期的 CHANGELOG 记录（默认 2 天），返回结构化结果。
+
+    只删除形如 YYYY-MM-DD-*.md 的记录文件；README.md / RULES.md 与其它非
+    日期文件永不删除。结果记入 _changelog_prune_state 便于诊断。删除失败只
+    记录，不抛出，避免后台线程或接口因个别文件失败而中断。
+    """
+    from workflow import changelog_retention
+    result = changelog_retention.prune(
+        CHANGELOG_DIR, keep_days=CHANGELOG_KEEP_DAYS,
+        tz=os.environ.get("WF_CHANGELOG_TZ") or "Asia/Shanghai",
+    )
+    _changelog_prune_state["last_result"] = result
+    _changelog_prune_state["last_run"] = now_ts if now_ts is not None else now()
+    return result
+
+
+def _changelog_prune_loop():
+    """后台周期清理：启动即清一次，之后按间隔重复，直到服务器停止。"""
+    while not _changelog_prune_halt.is_set():
+        try:
+            prune_changelog()
+        except Exception:  # noqa: BLE001 - 清理失败绝不拖垮工作台
+            pass
+        _changelog_prune_halt.wait(CHANGELOG_PRUNE_INTERVAL_SECONDS)
+
+
 def _wake_supervisor():
     """Resume the idle-paused watchdog when new work appears (never raises)."""
     try:
@@ -4130,10 +4261,16 @@ def serve(http_server):
         is_active=lambda name: bool((_advance_state.get(name) or {}).get("running")
                                    or (_upload_jobs.get(name) or {}).get("running")))
     _workflow_supervisor = supervisor
+    # CHANGELOG 保留：随服务器生命周期启停周期清理线程（超过两天自动删除）。
+    _changelog_prune_halt.clear()
+    prune_thread = threading.Thread(target=_changelog_prune_loop, daemon=True,
+                                    name="workbench-changelog-prune")
+    prune_thread.start()
     try:
         supervisor.start()
         http_server.serve_forever()
     finally:
+        _changelog_prune_halt.set()
         supervisor.stop()
         _workflow_supervisor = None
         http_server.server_close()

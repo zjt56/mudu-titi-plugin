@@ -182,7 +182,7 @@ class PreassemblyTest(unittest.TestCase):
         values = {
             'answers': {'answers': {'1': 'A'}, 'evidence': {'1': ['答案原文']}, 'missing': {}},
             'explanations': {'items': [{'unit_id': 'q-1', 'explanation': '无', 'articleSummary': '无', 'subquestions': [], 'evidence': ['未提供解析']}]},
-            'knowledge': {'items': [{'unit_id': 'q-1', 'knowledge': ['词汇/词汇辨析/动词辨析'], 'subquestions': [], 'evidence': ['原文']}]}}
+            'knowledge': {'items': [{'unit_id': 'q-1', 'knowledge': ['语音/基本读音'], 'subquestions': [], 'evidence': ['原文']}]}}
         for sid, value in values.items():
             self.put(agent_tasks.ARTIFACTS[sid], value)
             batch_fill.sync(self.root, sid)

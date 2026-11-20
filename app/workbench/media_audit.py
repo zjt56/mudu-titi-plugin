@@ -132,6 +132,12 @@ def _owner(index: int, starts):
     return owner
 
 
+def _section_title(value) -> str:
+    """Strip decorative [IMG ...] markers from headings to match question_identity.source_section.title."""
+    raw = str(value or "")
+    return re.sub(r"\s*\[IMG\s+[^\]]*\]", "", raw).strip() or raw
+
+
 def _scoped_image_owners(folder: Path, lines: list[str]):
     """Use the preview's checked source window, never an unchecked span or stem alone."""
     try:
@@ -142,9 +148,10 @@ def _scoped_image_owners(folder: Path, lines: list[str]):
         return {}
     from workflow.preview import _scoped_source_slice
     from workflow.denoise import clean_body
+    from workflow.lesson_bands import annotate_sections, for_text
     from workflow.sync_practice import heading_candidates
-    cleaned = clean_body("\n".join(lines))[0].splitlines()
-    sections = heading_candidates("\n".join(cleaned))
+    cleaned_text = clean_body("\n".join(lines))[0]
+    sections = annotate_sections(heading_candidates(cleaned_text), for_text(folder, cleaned_text))
     units = [unit for unit in confirmed["units"] if isinstance(unit, dict)
              and unit.get("identity_version") == "scoped-v1"]
     ids = [str(unit.get("unit_id") or "") for unit in units]
@@ -161,7 +168,8 @@ def _scoped_image_owners(folder: Path, lines: list[str]):
             continue
         matches = [row for row in sections
                    if all(row.get(key) == section.get(key)
-                          for key in ("start_line", "end_line", "title"))
+                          for key in ("start_line", "end_line"))
+                   and _section_title(row.get("title")) == _section_title(section.get("title"))
                    and all(row.get(key) == section[key]
                            for key in ("context", "occurrence") if key in section)]
         start, end = span.get("start_line"), span.get("end_line")

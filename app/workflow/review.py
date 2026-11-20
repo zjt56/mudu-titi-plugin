@@ -48,10 +48,10 @@ ROUND_INPUTS = (
     "01_source/pdf-ocr.json", "01_source/material-roles.json",
 )
 # 只绑定审核提示词实际使用的规则；装配版式/上传约束变化不应让审核轮次
-# 无条件过期，除非它们确实改变审核语义。
+# 无条件过期，除非它们确实改变审核语义。skills-reference/README.md 仅为人读索引，不进审核上下文。
 ROUND_RULES = ("references/filter-framework.json", "references/knowledge-catalog.json",
                "references/type-knowledge-map.json", "skills-reference/knowledge-matching-rules.md",
-               "skills-reference/README.md", "skills-reference/type-taxonomy.md",
+               "skills-reference/type-taxonomy.md",
                "skills-reference/knowledge-catalog.md", "skills-reference/type-knowledge-map.md",
                "docs/knowledge-tagging.md", "docs/content-labeling.md")
 
@@ -104,14 +104,17 @@ def compact_knowledge_catalog(types, catalog=None):
     rules = taxonomy.type_knowledge_rules()
     points = catalog["points"]
     if not types or any(not isinstance(ty, str) or ty not in rules
-                        or not taxonomy._allowed_prefixes(ty) for ty in types):
+                        or not (taxonomy._allowed_prefixes(ty) or taxonomy.exact_knowledge_paths(ty))
+                        for ty in types):
         kept = points
     else:
-        prefixes = [p for ty in types for p in taxonomy._allowed_prefixes(ty)]
         kept = [point for point in points
                 if not isinstance(point, dict) or not isinstance(point.get("path"), str)
-                or any(taxonomy._under(point["path"], pre) for pre in prefixes)]
+                or any(taxonomy.knowledge_path_allowed(point["path"], ty) for ty in types)]
     result["points"] = [_mark_leaf(point, points) for point in kept]
+    result["exact_paths_by_type"] = {ty: sorted(taxonomy.exact_knowledge_paths(ty))
+                                     for ty in (types or rules) if isinstance(ty, str)
+                                     and taxonomy.exact_knowledge_paths(ty)}
     return result
 
 

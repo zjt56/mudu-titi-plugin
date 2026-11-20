@@ -267,6 +267,31 @@ class TestPointBannerAnswersTest(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(len(payload["answers"]), 9)
 
+    def test_cleaned_question_span_projects_when_section_heading_stays_raw(self):
+        from workflow import denoise, upload_content
+        raw = ['Unit 1', '第一课时 Project', 'Ⅰ.单项填空', '1. First?',
+               '--------------------', '2. Second?', '--------------------',
+               'Ⅱ.阅读理解', '1. Again?', '--------------------']
+        _raw_to_clean, clean_to_raw = denoise.deletion_map(raw)
+        self.assertTrue(clean_to_raw)
+        sections = [
+            {'title': 'Ⅰ.单项填空', 'ordinal': 'Ⅰ.', 'context': '第一课时 Project',
+             'occurrence': 1, 'start_line': 3, 'end_line': 6},
+            {'title': 'Ⅱ.阅读理解', 'ordinal': 'Ⅱ.', 'context': '第一课时 Project',
+             'occurrence': 2, 'start_line': 7, 'end_line': 8},
+        ]
+        unit = {'identity_version': 'scoped-v1', 'numbers': [2],
+                'source_span': {'start_line': 5, 'end_line': 5, 'basis': 'cleaned_source'},
+                'source_section': sections[0]}
+        projected = upload_content._project_unit_to_body_file(unit, clean_to_raw, raw)
+        self.assertEqual(projected['source_span']['start_line'], 6)
+        self.assertEqual(projected['source_span']['end_line'], 6)
+        source_lines = {'01_source/正文.txt': raw}
+        self.assertTrue(upload_content.scoped_source_matches(
+            projected, 2, '01_source/正文.txt', 6, source_lines, _file_coordinates=True))
+        self.assertFalse(upload_content.scoped_source_matches(
+            projected, 1, '01_source/正文.txt', 6, source_lines, _file_coordinates=True))
+
     def test_duplicate_point_banner_stays_unbound(self):
         self.appendix = self.appendix.replace(
             '[IMG image158.jpeg]重要考点集训[IMG image159.jpeg]',
@@ -349,6 +374,252 @@ class WholeBookCompanionWindowTest(unittest.TestCase):
         self.save(source_name='七上 人教版 Starter Unit 1 Hello!.pdf')
         (self.batch / '01_source/正文.txt').write_text(body, encoding='utf-8')
         self.assertIsNone(resolve_scoped_answer(self.batch, self.units[0], 1))
+
+
+class TrailingSubColumnAnswerTest(unittest.TestCase):
+    """Appendix ☆熟词生义 sub-column must not poison preceding Roman answer blocks."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.batch = Path(self.tmp.name)
+        (self.batch / '01_source').mkdir(parents=True)
+        self.body = (
+            'Unit 1 The Changing World\n'
+            '第二课时　Section A (3a-3d)\n'
+            '**【一、A 基础巩固】**\n'
+            '**Ⅰ. 根据句意用所给词的适当形式填空**\n'
+            '**1.**Many ________(railway) pass through here.\n'
+            '**2.**His way interests us ________(great).\n'
+            '**Ⅱ. 单项填空**\n'
+            '**1.**I want to know your ________.\n'
+            'A.secret B.opinion\n'
+            '**【二、B 能力提升】**\n'
+            '**Ⅰ. 完形填空**\n'
+            'He was sent to China as a sports __<u>1</u>__.\n'
+            '**1.**A.doctor B.player C.reporter D.fan\n'
+            '**Ⅱ. 阅读理解**\n'
+            'Some passage.\n'
+            '**1.**When was it?\n'
+            'A.In 1805. B.In 1825.\n'
+            '**【三、熟词生义】**\n'
+            '**写出下面画线词的汉语意思**\n'
+            'In 2014,he was sent to China as a sports __<u>1</u>__ to <u>cover</u> the games.\t_________\n'
+        )
+        self.appendix = (
+            '****参考答案**\n'
+            '**[IMG image85.jpg]****一、基础巩固****[IMG image86.jpg]**\n'
+            'Ⅰ.1.railways　2.greatly\n'
+            'Ⅱ.1.B\n'
+            '**[IMG image85.jpg]****二、能力提升****[IMG image86.jpg]**\n'
+            'Ⅰ.1.C\n'
+            'Ⅱ.1.B\n'
+            '**☆****熟词生义**\n'
+            '报道\n'
+        )
+        (self.batch / '01_source/正文.txt').write_text(self.body, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(self.appendix, encoding='utf-8')
+        self.units = assign_scoped([
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 5, 'end_line': 5, 'basis': 'cleaned_source'}},
+            {'numbers': [2], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 6, 'end_line': 6, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单项填空',
+             'source_span': {'start_line': 8, 'end_line': 9, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '完形填空',
+             'source_span': {'start_line': 12, 'end_line': 13, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '阅读理解',
+             'source_span': {'start_line': 15, 'end_line': 17, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '翻译',
+             'source_span': {'start_line': 20, 'end_line': 20, 'basis': 'cleaned_source',
+                             'number_binding': 'unnumbered_section', 'printed_numbers': []}},
+        ], self.body)
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': self.units}), encoding='utf-8')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_trailing_word_meaning_sub_column_binds_all_sections_including_itself(self):
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[0], 1)['answer'], 'railways')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[1], 2)['answer'], 'greatly')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[2], 1)['answer'], 'B')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[3], 1)['answer'], 'C')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[4], 1)['answer'], 'B')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[5], 1),
+                         {'answer': '报道', 'evidence': ['01_source/附录.txt:9']})
+
+    def test_trailing_word_meaning_in_appendix_alone_does_not_poison_roman_blocks(self):
+        body_without_tail = '\n'.join(self.body.splitlines()[:-3]) + '\n'
+        units = assign_scoped([
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 5, 'end_line': 5, 'basis': 'cleaned_source'}},
+            {'numbers': [2], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 6, 'end_line': 6, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单项填空',
+             'source_span': {'start_line': 8, 'end_line': 9, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '完形填空',
+             'source_span': {'start_line': 12, 'end_line': 13, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '阅读理解',
+             'source_span': {'start_line': 15, 'end_line': 17, 'basis': 'cleaned_source'}},
+        ], body_without_tail)
+        (self.batch / '01_source/正文.txt').write_text(body_without_tail, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': units}), encoding='utf-8')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[0], 1)['answer'], 'railways')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[4], 1)['answer'], 'B')
+
+    def test_arbitrary_named_sub_column_literal_and_numbered_answers_bind_generically(self):
+        # 1) 任意新栏目名（无号文字答案）：☆词义猜测
+        body_lit = self.body.replace('【三、熟词生义】', '【三、词义猜测】')
+        app_lit = self.appendix.replace('**☆****熟词生义**', '**☆****词义猜测**')
+        units_lit = assign_scoped([
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 5, 'end_line': 5, 'basis': 'cleaned_source'}},
+            {'numbers': [2], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 6, 'end_line': 6, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单项填空',
+             'source_span': {'start_line': 8, 'end_line': 9, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '完形填空',
+             'source_span': {'start_line': 12, 'end_line': 13, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '阅读理解',
+             'source_span': {'start_line': 15, 'end_line': 17, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '翻译',
+             'source_span': {'start_line': 20, 'end_line': 20, 'basis': 'cleaned_source',
+                             'number_binding': 'unnumbered_section', 'printed_numbers': []}},
+        ], body_lit)
+        (self.batch / '01_source/正文.txt').write_text(body_lit, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(app_lit, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': units_lit}), encoding='utf-8')
+        self.assertEqual(resolve_scoped_answer(self.batch, units_lit[5], 1),
+                         {'answer': '报道', 'evidence': ['01_source/附录.txt:9']})
+
+        # 2) 任意新栏目名（带编号答案）：☆微练 -> 1.carefully 2.useful
+        body_num = '\n'.join(self.body.splitlines()[:-3]) + (
+            '\n**【三、词形微练】**\n'
+            '**根据句意用所给词的适当形式填空**\n'
+            '**1.**Listen ________(careful).\n'
+            '**2.**It is ________(use).\n'
+        )
+        app_num = '\n'.join(self.appendix.splitlines()[:-2]) + '\n**☆****词形微练**\n1.carefully　2.useful\n'
+        units_num = assign_scoped([
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 5, 'end_line': 5, 'basis': 'cleaned_source'}},
+            {'numbers': [2], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 6, 'end_line': 6, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单项填空',
+             'source_span': {'start_line': 8, 'end_line': 9, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '完形填空',
+             'source_span': {'start_line': 12, 'end_line': 13, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '阅读理解',
+             'source_span': {'start_line': 15, 'end_line': 17, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 20, 'end_line': 20, 'basis': 'cleaned_source'}},
+            {'numbers': [2], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 21, 'end_line': 21, 'basis': 'cleaned_source'}},
+        ], body_num)
+        (self.batch / '01_source/正文.txt').write_text(body_num, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(app_num, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': units_num}), encoding='utf-8')
+        self.assertEqual(resolve_scoped_answer(self.batch, units_num[5], 1)['answer'], 'carefully')
+        self.assertEqual(resolve_scoped_answer(self.batch, units_num[6], 2)['answer'], 'useful')
+
+    def test_reverse_lookup_from_appendix_sub_column_works_when_roman_skeleton_is_incomplete(self):
+        # 即使其他大题罗马骨架不完整且小栏目位于卷中（非末尾 trailing），
+        # 路径 4 仍可根据附录 ☆熟词生义 反向唯一匹配正文中的【熟词生义】位置。
+        body_mid = (
+            'Unit 1 The Changing World\n'
+            '第二课时　Section A (3a-3d)\n'
+            '**Ⅰ. 单项填空**\n'
+            '**1.**I want to know your ________.\n'
+            'A.secret B.opinion\n'
+            '**【熟词生义】**\n'
+            '**写出下面画线词的汉语意思**\n'
+            'He went to <u>cover</u> the games.\t_________\n'
+            '**Ⅱ. 阅读理解**\n'
+            'Some passage.\n'
+            '**1.**When was it?\n'
+            'A.In 1805. B.In 1825.\n'
+        )
+        # 刻意缺少 Ⅱ. 阅读理解 答案，令整卷罗马骨架路径（路径 3）不成立
+        app_partial = (
+            '****参考答案**\n'
+            'Ⅰ.1.B\n'
+            '**☆****熟词生义**\n'
+            '报道\n'
+        )
+        units = assign_scoped([
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单项填空',
+             'source_span': {'start_line': 4, 'end_line': 5, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '翻译',
+             'source_span': {'start_line': 8, 'end_line': 8, 'basis': 'cleaned_source',
+                             'number_binding': 'unnumbered_section', 'printed_numbers': []}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '阅读理解',
+             'source_span': {'start_line': 10, 'end_line': 12, 'basis': 'cleaned_source'}},
+        ], body_mid)
+        (self.batch / '01_source/正文.txt').write_text(body_mid, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(app_partial, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': units}), encoding='utf-8')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[1], 1),
+                         {'answer': '报道', 'evidence': ['01_source/附录.txt:4']})
+
+        # 附录出现两个同名 ☆熟词生义（歧义）时必须拒绝绑定
+        app_dup = app_partial + '**☆****熟词生义**\n覆盖\n'
+        (self.batch / '01_source/附录.txt').write_text(app_dup, encoding='utf-8')
+        self.assertIsNone(resolve_scoped_answer(self.batch, units[1], 1))
+
+    def test_stacked_parent_and_child_banners_accept_either_in_appendix(self):
+        # 正文同一大题前连续叠加【三、B 能力提升】+【四、时文阅读】，附录只写【三、能力提升】时，
+        # 父子板块等价集（accepted_bands）应同时接受父板块，不再导致整卷全盘失效。
+        body_stacked = (
+            'Unit 1 The Changing World\n'
+            '第四课时　Section B (1a-1f)\n'
+            '**[IMG image9.jpg]****一、教材语篇回顾****[IMG image10.jpg]**\n'
+            '[IMG image20.jpg]\n'
+            '**【二、A 基础巩固】**\n'
+            '**Ⅰ. 根据汉语意思完成句子,每空一词**\n'
+            '**1.**We ________ ________ it.\n'
+            '**Ⅱ. 单项填空**\n'
+            '**1.**She is happy.\n'
+            'A.yes B.no\n'
+            '**【三、B 能力提升】**\n'
+            '**【四、时文阅读】**\n'
+            '**阅读理解**\n'
+            'On 12 June 2025, CR450 was tested.\n'
+            '**1.**When was it tested?\n'
+            'A.2024 B.2025\n'
+        )
+        app_parent_only = (
+            '****参考答案**\n'
+            '**[IMG image85.jpg]****一、教材语篇回顾****[IMG image86.jpg]**\n'
+            '1.capital　2.slow\n'
+            '**[IMG image85.jpg]****二、基础巩固****[IMG image86.jpg]**\n'
+            'Ⅰ.1.benefit from\n'
+            'Ⅱ.1.A\n'
+            '**[IMG image85.jpg]****三、能力提升****[IMG image86.jpg]**\n'
+            '1.B\n'
+        )
+        units = assign_scoped([
+            {'numbers': [1], 'unit_kind': 'group', 'type': '教材语篇填空',
+             'source_span': {'start_line': 4, 'end_line': 4, 'basis': 'cleaned_source',
+                             'number_binding': 'unnumbered_section', 'printed_numbers': []}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '完成句子',
+             'source_span': {'start_line': 7, 'end_line': 7, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单项填空',
+             'source_span': {'start_line': 9, 'end_line': 10, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '阅读理解',
+             'source_span': {'start_line': 14, 'end_line': 16, 'basis': 'cleaned_source'}},
+        ], body_stacked)
+        (self.batch / '01_source/正文.txt').write_text(body_stacked, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(app_parent_only, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': units}), encoding='utf-8')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[0], 1)['answer'], '1.capital\u30002.slow')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[1], 1)['answer'], 'benefit from')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[2], 1)['answer'], 'A')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[3], 1)['answer'], 'B')
 
 
 if __name__ == '__main__':

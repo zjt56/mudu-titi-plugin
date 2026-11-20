@@ -200,7 +200,7 @@ def available(batch_dir) -> bool:
         return False
 
 
-def _overlay_labels(target: dict, source: dict) -> None:
+def _overlay_labels(target: dict, source: dict, main_type=None) -> None:
     # 教材匹配暂停：刷新知识点时不沿用历史自动匹配的教材候选。
     target.pop("textbook", None)
     if "knowledge" not in source:
@@ -209,7 +209,7 @@ def _overlay_labels(target: dict, source: dict) -> None:
     ids = list(source.get("knowledgeIds") or [])
     if not ids and target["knowledge"]:
         from workbench import taxonomy
-        resolved = taxonomy.resolve_knowledge(target["knowledge"])
+        resolved = taxonomy.resolve_knowledge(target["knowledge"], target.get("question_type", target.get("type", main_type)))
         if not resolved["unknown"] and not resolved["non_leaf"]:
             ids = [point["id"] for point in resolved["resolved"]]
     target["knowledgeIds"] = ids
@@ -261,21 +261,48 @@ def project_final_view(batch_dir, payload: dict) -> dict:
             raise ValueError('最终汇总缺少画线视图或其明确跳过时的基础视图')
         return payload
     source_view = _load(marked if marked.is_file() else base)
+    units = agent_tasks.confirmed_units(root)
+    from .phonetic_structure import verified_picture_headings
+    headings = verified_picture_headings(root, units)
     if (root / '06_batch/content.snapshot.json').is_file():
         snapshot = _load(root / '06_batch/content.snapshot.json')
         meta_view = _load(base)
         handoff._assert_meta_projection(snapshot, meta_view)
-        handoff._assert_underline_projection(meta_view, source_view)
-    units = agent_tasks.confirmed_units(root)
+        handoff._assert_underline_projection(meta_view, source_view, source_headings=headings)
     source = agent_tasks._coverage(source_view, units)
     final = copy.deepcopy(payload)
     if "name" in source_view:
         final["name"] = source_view["name"]
     rows = agent_tasks._coverage(final, units)
 
-    def overlay(target, early):
+    def overlay(target, early, *, source_heading=None):
         # Child arrays belong to final identity/coverage and are paired below.
         for key in _SOURCE_FIELDS - {'subquestions'}:
+            if (key == 'stem' and source_heading and target.get('stem') == source_heading
+                    and early.get('stem') == ''):
+                continue
+            if key == 'attachments':
+                # early 视图产于解析/答案/听力叠加之前，只含 question/option 附件；
+                # 必须保留 target 在组装阶段提取出的 explanation/answer/audio 附件，避免写作提纲等解析配图被抹掉。
+                merged = [copy.deepcopy(a) for a in (early.get('attachments') or []) if isinstance(a, dict)]
+                seen = {
+                    (a.get('kind'), a.get('name') or str(a.get('url', '')).rsplit('/', 1)[-1],
+                     a.get('placement'), a.get('optionKey'))
+                    for a in merged
+                }
+                for att in target.get('attachments') or []:
+                    if not isinstance(att, dict):
+                        continue
+                    if att.get('placement') not in ('explanation', 'answer') and att.get('kind') != 'audio':
+                        continue
+                    sig = (att.get('kind'), att.get('name') or str(att.get('url', '')).rsplit('/', 1)[-1],
+                           att.get('placement'), att.get('optionKey'))
+                    if sig not in seen:
+                        seen.add(sig)
+                        merged.append(copy.deepcopy(att))
+                if merged or 'attachments' in early:
+                    target['attachments'] = merged
+                continue
             if key in early:
                 target[key] = copy.deepcopy(early[key])
         filters = target.setdefault('filterMetadata', {})
@@ -301,7 +328,7 @@ def project_final_view(batch_dir, payload: dict) -> dict:
         early, target = source[uid], rows[uid]
         agent_tasks._children(early, unit)
         agent_tasks._children(target, unit)
-        overlay(target, early)
+        overlay(target, early, source_heading=headings.get(uid))
         children = {str(c['number']): c for c in early.get('subquestions') or []}
         for child in target.get('subquestions') or []:
             overlay(child, children[str(child['number'])])
@@ -399,7 +426,7 @@ def build(batch_dir) -> dict:
         for child in item.get("subquestions") or []:
             _overlay_marked_source(child, marked_children.get(str(child.get("number"))))
             key = str(child.get("number"))
-            _overlay_labels(child, kids_know.get(key) or {})
+            _overlay_labels(child, kids_know.get(key) or {}, item.get("question_type", item.get("type")))
             _overlay_text(child, kids_expl.get(key) or {}, kids_know.get(key) or {}, "explanation")
             answer_key = question_key(units.get(uid, item), child.get("number"))
             if answer_key in answers:
@@ -431,7 +458,7 @@ def build_image_option_repair(batch_dir, payload: dict | None = None) -> dict:
     structure = _load(root / "01_source/structure.json")
     cleaned, _, _ = denoise.clean_body(source)
     structure = denoise.project_structure(structure, source, cleaned)
-    fresh_units = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
+    fresh_units = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines(), batch_dir=root)
     fresh = {}
     for unit in fresh_units:
         key = tuple(map(str, unit["numbers"]))

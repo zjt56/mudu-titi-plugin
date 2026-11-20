@@ -78,6 +78,40 @@ class ReviewTypeDisplayTest(unittest.TestCase):
             self.assertNotIn(row["type"], titles)
             self.assertNotEqual(row["type"], row["source_section"]["title"])
 
+    def test_batch_multi_subtypes_preserved_in_rows_and_detail(self):
+        from workflow import preview
+
+        batch_dir = self.folder / "06_batch"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        (batch_dir / "batch.json").write_text(json.dumps({
+            "items": [{
+                "id": "sec-demo-u24",
+                "unit_id": "sec-demo-u24",
+                "number": 3,
+                "unit_kind": "standalone",
+                "type": "单词拼写",
+                "stem": "3.Being an ______(invent) is his dream as he loves making new things.",
+                "answer": "inventor",
+                "source_section": {"title": "Ⅱ.根据句意用所给词的适当形式填空"},
+                "filterMetadata": {
+                    "type": "单词拼写",
+                    "subtypes": ["适当形式", "词形转换"],
+                    "knowledge": ["派生法（前缀、后缀）", "inventor"],
+                },
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+
+        rows = preview.batch_rows(self.folder, {})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["subtypes"], ["适当形式", "词形转换"])
+
+        decorated = self.decorate(rows)
+        self.assertEqual(decorated[0]["subtypes"], ["适当形式", "词形转换"])
+
+        with patch.object(server, "WORKFLOWS", self.folder.parent):
+            payload = server.detail(self.folder.name, "sec-demo-u24")
+        self.assertEqual(payload["subtypes"], ["适当形式", "词形转换"])
+
 
 if __name__ == "__main__":
     unittest.main()

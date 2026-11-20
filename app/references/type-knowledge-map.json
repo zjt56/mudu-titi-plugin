@@ -334,12 +334,6 @@
      "branch": "语法",
      "show": "below-root",
      "note": "一级标题及子标题"
-    },
-    {
-     "dim": "答案考点",
-     "branch": "词汇/语法",
-     "show": "leaf",
-     "note": ""
     }
    ]
   },
@@ -396,12 +390,6 @@
      "branch": "语法",
      "show": "below-root",
      "note": "一级标题及子标题"
-    },
-    {
-     "dim": "答案考点",
-     "branch": "词汇/语法",
-     "show": "leaf",
-     "note": ""
     }
    ]
   },
@@ -433,7 +421,10 @@
      "dim": "词汇",
      "branch": "词汇",
      "show": "below-root",
-     "note": "一级标题及子标题"
+     "note": "一级标题及子标题；单词拼写不用「词汇辨析」子类，拼写/词形落 词汇/拼写与词形",
+     "exclude": [
+      "词汇/词汇辨析"
+     ]
     },
     {
      "dim": "语法",
@@ -625,16 +616,18 @@
   "听力关键词语选择": {
    "dims": [
     {
-     "dim": "词汇",
-     "branch": "词汇",
-     "show": "below-root",
-     "note": "一级标题及子标题"
+     "dim": "语音",
+     "branch": "语音",
+     "scope": "基本读音",
+     "show": "exact",
+     "note": "只匹配语音/基本读音节点本身"
     },
     {
      "dim": "答案考点",
      "branch": "词汇/语法",
      "show": "leaf",
-     "note": ""
+     "note": "",
+     "separate": true
     }
    ]
   }

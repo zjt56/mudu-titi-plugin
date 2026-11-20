@@ -18,12 +18,12 @@ import uuid
 from . import agent_tasks, ingest, review
 from .question_identity import question_key
 from .agent_protocol import _atomic, _encoded, _load
-from .local_agent import _agent_lock, _check_input_hashes, invoke, load_config
+from .local_agent import AgentError, _agent_lock, _check_input_hashes, invoke, load_config
 
 # Bumped whenever the prompt builder or blind context changes, so stale
 # partition states and bindings are never reused silently.
 CONTEXT_VERSION = "blind-context-v12"
-PROMPT_VERSION = "review-prompt-v16"
+PROMPT_VERSION = "review-prompt-v18"
 
 
 ARTIFACT = "review_round"
@@ -134,10 +134,10 @@ def _round_prompt(round_id, targets, context):
                    "assessment={type:string,subtypes:[string],knowledge:[full paths],subquestions:[{number:string,knowledge:[full paths]}]}。"
                    "单题 subquestions=[]；整篇题组按目标列出子题且其 knowledge=[]（二审按小题抽中时只列该小题）。一审覆盖单元全部小题；二审对整组题只做组级核对（整组抽取、不拆小题），对独立单题仅列抽中小题，不宣称同组其他小题已审核。"
                    "knowledge 路径必须逐字取自供给目录（references/knowledge-catalog.json），不得自造更深的子级：目录里 '语用/情景交际' 已是叶子时只能写它，不能写 '语用/情景交际/询问目的'；某维度没有合法叶子就不写该维度。"
-                   "【叶子即终点·必须遵守】供给目录每个节点都带 leaf 与 leafTerminal：leaf=true（『叶子：到此为止』）表示该路径就是可选的最终知识点，必须原样照抄、绝不能再往后拼接任何子级；leaf=false（非叶子）必须继续往下选到某个 leaf=true 的叶子。注意同名为不同层级的情况：例如『电子邮件』是『语篇体裁/新媒体语篇/电子邮件』这一片的叶子，不是『语篇体裁/应用文/电子邮件』——照抄目录中真实存在的完整路径，不得把不同分支的词拼在一起。"
+                   "【叶子即终点·必须遵守】供给目录每个节点都带 leaf 与 leafTerminal：leaf=true（『叶子：到此为止』）表示该路径就是可选的最终知识点，必须原样照抄、绝不能再往后拼接任何子级；leaf=false（非叶子）一般继续下选。若题型在目录 exact_paths_by_type 中有精确路径，只选该路径本身，不下选。注意同名为不同层级的情况：例如『电子邮件』是『语篇体裁/新媒体语篇/电子邮件』这一片的叶子，不是『语篇体裁/应用文/电子邮件』——照抄目录中真实存在的完整路径，不得把不同分支的词拼在一起。"
                    "assessment.knowledge 还必须遵守 references/type-knowledge-map.json 的题型维度：例如听力长对话理解只允许主题、设题角度/听力，不得写语篇体裁；路径不在目录或超出允许维度会让整轮校验失败。"
                    "【主类与知识点维度自洽·必须遵守】assessment 的知识点维度以供给的 references/type-knowledge-map.json 为唯一口径，不凭提示词示例扩展允许范围。若无法在该主类允许维度中找到有语义证据的合法叶子，使用 uncertain、assessment=null 并说明原因；不得为了目录校验挑一个『最近』的知识点，也不得改主类来迁就知识点。"
-                   "【子类必填·必须遵守】只要主类在目录里有子类，assessment.subtypes 必须给出至少一个取自目录的合法子类，不得留空数组；只有目录里确实无子类的主类才可写 subtypes:[]，不得自造目录外子类。"
+                   "【子类必填·必须遵守】只要主类在目录里有子类，assessment.subtypes 必须给出至少一个取自目录的合法子类，不得留空数组；只有目录里确实无子类的主类才可写 subtypes:[]，不得自造目录外子类。单词拼写若为「用所给词的适当形式填空」，即使涉及派生词性变化（如 invent→inventor）也只填单一子类 [\"适当形式\"]，不叠加「词形转换」；仅当题目同时给出两类独立提示线索（如首字母+适当形式）时才多选。"
                    "【无选项不判选项题型·必须遵守】先核对目标自身及其共享材料、图片和音频的真实作答方式，再独立判型。明确要求用所给词的适当形式填空、根据汉语提示补词等且没有备选答案的独立填词题，不得因为要填子类而判成单项填空/四个选项。此规则不以 A–D 文字是否出现为充分条件：三个选项、图片选项、共享选项和听力选项都可能合法；证据只有图片/音频占位时不得据此断言没有选项，也不得编造其内容。"
                    "填词题仍需区分句子、整篇语境、选词框及作答指令，不一律套用单词拼写；主类、子类与知识点均按供给目录和原卷证据独立判断。返回前逐条核对 rationale 与 assessment：理由若明确否定某主类/子类，assessment 不得同时填写该值；无法确定则如实 uncertain，不为减少与原标签的差异改判。"
                    "整篇题型（阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话）只判定组级知识点，其子题 knowledge=[]。"
@@ -156,6 +156,10 @@ def _round_prompt(round_id, targets, context):
                       "assessment.subquestions 只列出这个 number 本身（knowledge=[]），不得把同组其他子题一并列入；"
                       "每条 check 的 unit_id+number 必须与 TARGETS 一一对应，覆盖全部目标恰好一次。"
                       if round_id == 'sample' else ""))
+    from .content_rules import boundary_guidelines_block
+    guidelines = boundary_guidelines_block("review")
+    if guidelines:
+        instruction = instruction + "\n" + guidelines
     check_shape = ("{unit_id,number?,verdict:ok|error|uncertain,rationale,evidence:[{path,locator,quote}],assessment:{type:string,subtypes:[string],knowledge:[string],subquestions:[{number:string,knowledge:[string]}],source_comparison:string}}"
                    if round_id == 'sample' else
                    "{unit_id,verdict:ok|error|uncertain,rationale,evidence:[{path,locator,quote}],assessment}")
@@ -173,8 +177,8 @@ def _round_prompt(round_id, targets, context):
         "【逐目标复核】先独立核对题面的真实作答方式和正确答案所依赖的证据，再确定标签。"
         "对于题型维度表列有答案考点的题型，在 assessment.answer_points 独立填写当前审核范围内的正确答案词或短语数组。"
         "选择题先将答案字母映射到正确选项文字，填空保留实际词形，组题按审核覆盖范围逐空核对后去重。"
-        "仅填单词或短语，跳过完整句子、纯数字和占位。完成句子、短文填空等未配置答案考点的题型填 []。"
-        "在理由中指出答案词及依据，答案考点放在 answer_points，目录知识点仍照常填 knowledge。"
+        "仅填单词或短语，跳过完整句子、纯数字和占位。完成句子、短文填空、选词填空、教材语篇填空等未配置答案考点的题型填 []。"
+        "可在理由中指出答案及依据。仅当 assessment.type 在映射表启用答案考点时填写 answer_points，目录知识点照常填 knowledge。"
         "在现有 rationale 中简要把每个所选知识点对应到具体线索；组题说明主题依据，并用小题号标明不同设题角度的依据。"
         "同一证据可支持多个判断时合并说明。交卷前逐项核对 rationale 与 assessment，移除只有背景或干扰项支撑的可选标签，"
         "保留有独立证据的考点。若必带标签或主类确实无法判定，写明缺少哪项证据，使用现有 uncertain 协议。"
@@ -472,7 +476,13 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
                 answers.pop('difficultyEvidence', None)
             # Free-form validation diagnostics can contain the original labels.
             subset.pop('07_review/validation-report.json', None)
+            subset.pop('07_review/structure-gate.json', None)
             subset.pop('01_source/metadata.json', None)
+            # confirmed_units_with_stable_ids already carries the exact target
+            # partition; dropping the full structure.confirmed.json avoids
+            # feeding duplicate unit payloads into every blind review call.
+            if 'confirmed_units_with_stable_ids' in subset:
+                subset.pop('01_source/structure.confirmed.json', None)
             # The assembled batch repeats provenance (upload-only) and the
             # explanation text that is already supplied separately; drop those
             # copies from the blind review context to shrink each prompt.
@@ -551,6 +561,28 @@ def _reject_assessment_contradiction(check):
         raise ValueError(
             "REVIEW_ASSESSMENT_CONTRADICTION: rationale 明确否定 assessment.type="
             + main + "，请仅重新独立核对该目标的理由与结构化判断；不得修改正式标签或迎合原标签。")
+
+
+def _project_review_answer_points(checks):
+    """Drop inapplicable optional metadata from the candidate installation view."""
+    from workbench import taxonomy
+
+    if not isinstance(checks, list):
+        return checks
+    rules = taxonomy.type_knowledge_rules()
+    projected = []
+    for check in checks:
+        assessment = check.get("assessment") if isinstance(check, dict) else None
+        if isinstance(assessment, dict):
+            main_type = assessment.get("type")
+            points = assessment.get("answer_points")
+            rule = rules.get(main_type) if isinstance(main_type, str) else None
+            if (rule and isinstance(points, list) and points
+                    and all(isinstance(p, str) and p.strip() for p in points)
+                    and not any(dim.get("dim") == "答案考点" for dim in rule["dims"])):
+                check = {**check, "assessment": {**assessment, "answer_points": []}}
+        projected.append(check)
+    return projected
 
 
 def _partition_check_issues(review, plan, round_id, checks, batch):
@@ -760,9 +792,25 @@ def _repair_round(batch, task_id, config):
         raise ReviewInputsChanged("Inputs changed; repair is not allowed")
     prompt, targets = _repair_context(batch, partial, plan)
     run_dir = _attempt_dir(batch, task_id + "-repair")
-    invoked = invoke(prompt, run_dir, config, permit_parallel=True)
-    response = invoked["response"]
-    checks = ((response.get("artifacts") or {}).get("review_round") or {}).get("checks") or []
+    try:
+        response = invoke(prompt, run_dir, config, permit_parallel=True)["response"]
+    except AgentError as exc:
+        if exc.code != "response":
+            raise
+        # Preserve the malformed response in its own attempt directory. Give
+        # only the same failed targets one fresh serialization attempt.
+        _check_bound_inputs(batch, task_id)
+        retry_prompt = prompt + (
+            "\n补审响应无法解析。仅重新输出本次 TARGETS 的完整 JSON。"
+            "检查 checks 数组中相邻对象只用逗号分隔，删除多余的闭合括号。"
+            "根对象包含 status、artifacts、notes、findings 四个同级键。"
+        )
+        retry_dir = _attempt_dir(batch, task_id + "-repair-json")
+        response = invoke(retry_prompt, retry_dir, config, permit_parallel=True)["response"]
+    _check_response_envelope(response)
+    if response["status"] != "completed":
+        raise ValueError("Repair response needs completed status")
+    checks = response["artifacts"][ARTIFACT]["checks"]
     if not isinstance(checks, list) or not checks:
         raise ValueError("Repair response has no checks")
     def key(check):
@@ -1125,6 +1173,17 @@ def _import_result(batch_dir, task_id, result):
     # hashing/validation, so a trivial typographic difference no longer fails
     # the whole round while paraphrases still fail closed.
     result = review._normalize_result_quotes(batch, result)
+    artifacts = result.get("artifacts")
+    candidate = artifacts.get(ARTIFACT) if isinstance(artifacts, dict) else None
+    if result.get("status") == "completed" and isinstance(candidate, dict):
+        original_checks = candidate.get("checks")
+        projected = _project_review_answer_points(original_checks)
+        if projected != original_checks:
+            # Keep the submitted candidate separately. Receipts and replay bind
+            # the exact installation view used to verify the round.
+            raw_path = "workflow/review-raw-results/" + task_id + "/" + review._digest(result) + ".json"
+            _save(batch, raw_path, result)
+            result = {**result, "artifacts": {**artifacts, ARTIFACT: {**candidate, "checks": projected}}}
     digest = review._digest(result)
     receipt_path = "workflow/review-bindings/" + task_id + ".receipt.json"
     if _path(batch, receipt_path).is_file():
@@ -1182,6 +1241,7 @@ def _import_result(batch_dir, task_id, result):
         raise ValueError("Round response needs completed status and only review_round artifact")
     candidate = result["artifacts"][ARTIFACT]
     agent_tasks._fields(candidate, ("checks",), ("checks",))
+    checks = candidate["checks"]
     round_id = binding["task"]["round_id"]
     if round_id not in review.ROUND_IDS or round_id in review.evaluate_rounds(batch)["checked_rounds"]:
         raise ValueError("This round is not currently executable")
@@ -1204,8 +1264,8 @@ def _import_result(batch_dir, task_id, result):
     part_plan = dict(plan)
     part_plan["sample" if round_id == "sample" else "units"] = part["targets"]
     record = {"round_id": round_id, "input_binding": plan["input_binding"],
-              "execution_id": task_id, "checks": candidate["checks"]}
-    valid_checks, failed = _partition_check_issues(review, plan, round_id, candidate["checks"], batch)
+              "execution_id": task_id, "checks": checks}
+    valid_checks, failed = _partition_check_issues(review, plan, round_id, checks, batch)
     if failed:
         # Keep the checks that passed and let the caller repair only the
         # offending targets, instead of discarding the whole partition.
@@ -1216,7 +1276,7 @@ def _import_result(batch_dir, task_id, result):
         raise review.RoundCheckError(
             "%d target(s) need repair: %s" % (len(failed), failed[0]["reason"]), failed)
     review._round_checks(record, round_id, part_plan, batch, lenient=True, require_coverage=True)
-    completed = {"task_id": task_id, "result_digest": digest, "checks": candidate["checks"]}
+    completed = {"task_id": task_id, "result_digest": digest, "checks": checks}
     if binding["part_index"] + 1 < len(state["parts"]):
         report = {"completed": False, "action": "continue", "round_id": round_id,
                   "part_completed": binding["part_index"] + 1, "part_count": len(state["parts"])}

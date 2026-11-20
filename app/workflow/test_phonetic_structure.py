@@ -111,6 +111,61 @@ class PhoneticStructureTest(unittest.TestCase):
         broken['subquestions'][0]['answer'] = ''
         self.assertTrue(any('[A9]' in p for p in structure._check_unit(broken, verified)))
 
+    def test_picture_sentence_group_keeps_rubric_and_one_shared_image(self):
+        from workbench.server import source_blocks
+        from workflow import denoise, extract, handoff, structure_gate
+
+        text = ('Starter Unit 2 Keep Tidy!\n第四课时 Project\n'
+                '**Ⅰ. 根据图片提示完成下列句子**\n[IMG shared.jpeg]\n'
+                '**1.**The ball is ______ the chair.\n**2.**The books are ______ the desk.')
+        structure, text, _ = extract.infer_structure(text)
+        units = structure_gate._build_units(structure['sections'], structure['groups'],
+                                            denoise.clean_body(text)[0].splitlines())
+        self.assertEqual(len(units), 1)
+        unit = units[0]
+        for path, content in (('正文.txt', text), ('structure.json', structure),
+                              ('structure.confirmed.json', {'units': units})):
+            self.write('01_source/' + path, content)
+        media = self.root / '01_source/media/shared.jpeg'
+        media.write_bytes(b'shared-source-image')
+        row = question_draft.build(self.root)['items'][0]
+        row['question_type'] = '完成句子'
+        for child in row['subquestions']:
+            child['answer'] = 'under'
+        row['attachments'][0]['url'] = '/source-media/' + self.root.name + '/shared.jpeg'
+        self.assertEqual(row['stem'], unit['source_section']['title'])
+        self.assertEqual(row['material'], '')
+        self.assertEqual(phonetic_structure.shape(row, self.verified()), (True, False))
+        check = self.check_script('check_structure')._check_unit
+        self.assertEqual(check(row, self.verified()), [])
+        self.assertEqual(question_content.audit_batch_source(self.root, {'items': [row]})['issues'], [])
+        filled = {'items': [row]}
+        early = copy.deepcopy(filled)
+        early['items'][0]['stem'] = ''
+        for filename in ('content.snapshot.json', 'batch_meta.base.json', 'batch_meta.json'):
+            self.write('06_batch/' + filename, early)
+        final = assemble_local.project_final_view(self.root, filled)
+        self.assertEqual(final['items'][0]['stem'], row['stem'])
+        self.write('06_batch/batch_meta.json', final)
+        self.assertEqual(assemble_local.project_final_view(self.root, filled), final)
+        headings = phonetic_structure.verified_picture_headings(self.root, units)
+        handoff._assert_underline_projection(early, final, source_headings=headings)
+        chunk = preview.source_slice(self.root, row['numbers'], unit_id=row['unit_id'])
+        self.assertEqual(chunk[:2], [row['stem'], '[IMG shared.jpeg]'])
+        self.assertIn('shared.jpeg', json.dumps(source_blocks(chunk)))
+        result = upload_payload.build_payload(final, batch_dir=self.root)
+        self.assertNotIn('GROUP_INCOMPLETE', {e['code'] for e in result['errors']})
+        wire = result['payload']['items'][0]
+        self.assertEqual(wire['stem'], row['stem'])
+        self.assertEqual(wire['attachments'], row['attachments'])
+        for invalid in ([], [dict(row['attachments'][0], placement='answer')],
+                        [dict(row['attachments'][0], name='other.jpeg')]):
+            self.assertTrue(any('[A8]' in problem for problem in
+                                check({**row, 'attachments': invalid}, self.verified())))
+        media.unlink()
+        self.assertFalse(self.verified())
+        self.assertTrue(any('[A8]' in problem for problem in check(row, self.verified())))
+
     def test_no_source_context_is_strict_even_for_plausible_native_attachment(self):
         self.assertEqual(phonetic_structure.shape(self.rows[0]), (False, False))
         codes = [p['code'] for p in upload_payload.build_payload({'items': self.rows})['errors']]

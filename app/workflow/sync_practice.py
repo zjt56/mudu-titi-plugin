@@ -304,30 +304,54 @@ def answer_key_start(raw_text: str) -> int | None:
     还会把答案文字当成题干/选项（`QUESTION_NOT_FOUND`、`SOURCE_OPTIONS_INCOMPLETE`）。
     只有标题后面确实成行出现答案（至少 2 行）才认定，避免正文里一句「答案：B」
     被误判成附录。
+
+    答案区里为了给答案分组，经常重复出现正文已有大题标题（如「一、教材语篇回顾」、
+    「阅读理解」等）；这类紧跟答案行而非真实题干/选项的重复标题属于答案分组，
+    不能把整个答案区误判为「后面还有新大题」。
     """
     lines = [plain_text(line).strip() for line in str(raw_text or "").splitlines()]
+    seen_before: set[str] = set()
     for index, line in enumerate(lines):
-        if not _ANSWER_HEADING.match(line):
-            continue
-        tail = [item for item in lines[index + 1:] if item]
-        rows = sum(1 for item in tail[:40] if _ANSWER_ROW.match(item))
-        rows += sum(max(0, _inline_answer_items(item) - 1)
-                    for item in tail[:40] if not _ANSWER_ROW.match(item))
-        if rows < 2:
-            continue
-        # 合订练习册可能每课时后都附答案，后面仍有真实课时/大题。
-        # 这类中间答案不能作为整份正文的终点；罗马序号行内答案不算新大题。
-        # 一行内并排多个短语答案的行同样是答案行，不能当成新大题起始。
-        if any(_LESSON.match(item) or _UNIT.match(item)
-               or (heading_hit(item) and not _ANSWER_ROW.match(item)
-                   and _inline_answer_items(item) < 2) for item in tail):
-            continue
-        return index + 1
+        if _ANSWER_HEADING.match(line):
+            tail = [item for item in lines[index + 1:] if item]
+            rows = sum(1 for item in tail[:40] if _ANSWER_ROW.match(item))
+            rows += sum(max(0, _inline_answer_items(item) - 1)
+                        for item in tail[:40] if not _ANSWER_ROW.match(item))
+            if rows >= 2:
+                # 合订练习册可能每课时后都附答案，后面仍有真实课时/大题。
+                # 这类中间答案不能作为整份正文的终点；但答案区里重复出现且紧跟答案行
+                # 的分组标题不是新大题。
+                has_later_questions = False
+                for pos, item in enumerate(tail):
+                    if _LESSON.match(item) or _UNIT.match(item):
+                        has_later_questions = True
+                        break
+                    if (heading_hit(item) and not _ANSWER_ROW.match(item)
+                            and _inline_answer_items(item) < 2):
+                        following = tail[pos + 1:pos + 8]
+                        looks_like_real_q = any(
+                            len(re.findall(r"[A-H][.．]\s*\S", f)) >= 2
+                            or bool(re.search(r"_{2,}|\u3000{2,}|[?？]", f))
+                            for f in following
+                            if not _ANSWER_ROW.match(f) and _inline_answer_items(f) < 2
+                        )
+                        following_answers = sum(
+                            1 for f in following
+                            if _ANSWER_ROW.match(f) or _inline_answer_items(f) >= 2
+                        )
+                        if looks_like_real_q or (normalize(item) not in seen_before and following_answers == 0):
+                            has_later_questions = True
+                            break
+                if not has_later_questions:
+                    return index + 1
+        if heading_hit(line):
+            seen_before.add(normalize(line))
     return None
 
 
 def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[dict]:
     """原文坐标上的大题 occurrence 候选；不生成/改写正式题号或确认单元。"""
+    from .lesson_bands import is_column_banner
     lines = str(raw_text or "").splitlines()
     rows, context, table_depth = [], "", 0
     appendix = answer_key_start(raw_text)
@@ -349,10 +373,18 @@ def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[di
                          "title": raw, "context": context, **{k: hit[k] for k in ("type", "subtype", "kind", "rule")}})
     for pos, row in enumerate(rows):
         end = rows[pos + 1]["start_line"] - 1 if pos + 1 < len(rows) else len(lines)
-        # 课时/容器边界不能附在上一大题的材料里。
+        # 课时/容器/栏目板块边界不能附在上一大题的材料里（表格内部行不参与判定）。
+        in_table = False
         for cursor in range(row["start_line"], end):
             plain = plain_text(lines[cursor]).strip()
-            if _LESSON.match(plain) or _UNIT.match(plain) or is_section_title(plain):
+            if plain.startswith("[TABLE"):
+                in_table = True
+            if in_table:
+                if plain.startswith("[/TABLE"):
+                    in_table = False
+                continue
+            if (_LESSON.match(plain) or _UNIT.match(plain)
+                    or is_section_title(plain) or is_column_banner(lines[cursor])):
                 end = cursor
                 break
         # 文末答案区不属于任何大题：答案里的题号/选项不得进入来源窗口。
@@ -544,14 +576,21 @@ _MARK_SKIP = re.compile(
 
 
 def source_marks(text: str) -> list[str]:
-    """按原文取出方括号提示标记（排除图片/表格/答案解析类标签）。"""
+    """按原文取出方括号提示标记（排除图片/表格/答案解析类标签及独立栏目容器横幅）。"""
+    from .lesson_bands import is_column_banner
+
     raw = str(text or "")
     found: list[str] = []
-    for match in re.finditer(r"[\[【]([^\[\]【】]{1,80})[\]】]", raw):
-        body = plain_text(match.group(1)).strip()
-        if not body or _MARK_SKIP.match(body) or not _MARK_HINT.search(body):
+    for line in raw.splitlines():
+        # 整行栏目/板块容器横幅（如 `**【三、熟词生义】**`、`【二、素养提升】`）是结构边界，
+        # 不是需要抄进题干/材料的题内提示标记；行内 `[熟词生义]`、`[情境题]` 等仍正常提取校验。
+        if is_column_banner(line):
             continue
-        found.append(plain_text(match.group(0)).strip())
+        for match in re.finditer(r"[\[【]([^\[\]【】]{1,80})[\]】]", line):
+            body = plain_text(match.group(1)).strip()
+            if not body or _MARK_SKIP.match(body) or not _MARK_HINT.search(body):
+                continue
+            found.append(plain_text(match.group(0)).strip())
     return found
 
 

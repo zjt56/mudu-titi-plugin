@@ -134,10 +134,35 @@ def project_batch(batch_dict, batch_dir=None):
         kind = item.get("unit_kind", "group" if children else "standalone")
         values = _numbers(item)
         candidates = by_id.get(uid, [])
+        inferred_binding = (_binding(item) == "answer_inferred_image_group"
+                            or any(_binding(u) == "answer_inferred_image_group" for u in candidates))
         marked = _binding(item) in _UNNUMBERED or any(_binding(u) in _UNNUMBERED for u in candidates)
         unnumbered = False
         proof = None
-        if marked:
+        if inferred_binding:
+            if ids[uid] != 1 or len(candidates) != 1:
+                error("PAPER_NUMBER_EVIDENCE_REQUIRED", "答案反推题号必须按唯一 unit_id 回接当前确认结构", index, item, "source_span")
+            else:
+                confirmed = candidates[0]
+                span = confirmed.get("source_span") or {}
+                inferred_nums = span.get("inferred_numbers")
+                same = (confirmed.get("unit_kind") == kind and _numbers(confirmed) == values
+                        and inferred_nums == values
+                        and _binding(confirmed) == "answer_inferred_image_group"
+                        and all(key not in item or item[key] == confirmed.get(key)
+                                for key in ("section_id", "question_ids"))
+                        and ("source_span" not in item or item["source_span"] == confirmed.get("source_span"))
+                        and ("printed_numbers" not in item or item["printed_numbers"] == []))
+                if not same:
+                    error("PAPER_NUMBER_SOURCE_CONFLICT", "本地身份/题号/答案反推标记与确认单元不一致", index, item)
+                else:
+                    proof, reason = _prove_unnumbered(confirmed, context)
+                    if reason:
+                        error("PAPER_NUMBER_EVIDENCE_REQUIRED", reason, index, item, "source_span")
+                    else:
+                        proof = dict(proof or {}, inferred_numbers=list(inferred_nums),
+                                     inferred_evidence=list(span.get("inferred_evidence") or []))
+        elif marked:
             if ids[uid] != 1 or len(candidates) != 1:
                 error("PAPER_NUMBER_EVIDENCE_REQUIRED", "无号来源必须按唯一 unit_id 回接当前确认结构", index, item, "source_span")
             else:
@@ -181,7 +206,8 @@ def project_batch(batch_dict, batch_dir=None):
                 error("PAPER_NUMBER_SOURCE_CONFLICT", f"显式范围 {(start, end)} 与来源投影 {projected} 冲突", index, item, "numberStart/numberEnd")
         elif projected is not None and not (marked and not unnumbered):
             item["numberStart"], item["numberEnd"] = projected
-        evidence["units"].append({"unit_id": uid, "state": "proven-unnumbered" if unnumbered else "unknown" if marked or not valid else "printed",
+        evidence["units"].append({"unit_id": uid,
+                                  "state": "answer-inferred" if inferred_binding and proof else "proven-unnumbered" if unnumbered else "unknown" if marked or not valid else "printed",
                                   "range": list(projected) if projected is not None else None, "binding": proof})
         if unnumbered and kind == "group":
             evidence["diagnostics"].append({"code": "UNNUMBERED_SUBQUESTION_CONTRACT_UNRESOLVED", "unit_id": uid,

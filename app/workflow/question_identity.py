@@ -109,8 +109,10 @@ def _anchor(unit, lines):
     for index, number in printed_anchors(lines[start - 1:end]):
         if number in wanted:
             return start + index
-    # Unnumbered source tasks are bound to an explicit original section window.
-    if (unit.get("source_span") or {}).get("number_binding") in {"single_writing_section", "unnumbered_section"}:
+    # Unnumbered source tasks (including answer-inferred image groups) are bound
+    # to an explicit original section window.
+    if (unit.get("source_span") or {}).get("number_binding") in {
+            "single_writing_section", "unnumbered_section", "answer_inferred_image_group"}:
         return start
     raise ValueError("scoped identity requires a printed question anchor")
 
@@ -225,7 +227,7 @@ def assign_scoped(units, source_lines, sections=None, previous=None, visual_colu
         for n in row.get('numbers') or []:
             local = lines[start - 1:end]
             span = row.get("source_span") or {}
-            pos = (None if span.get("number_binding") == "single_writing_section"
+            pos = (None if span.get("number_binding") in {"single_writing_section", "answer_inferred_image_group"}
                    and span.get("printed_numbers") == [] else question_position(local, n))
             qanchor = start + pos if pos is not None else anchor
             qids[str(n)] = existing.get(str(n)) or f'{sid}-l{qanchor}{column_suffix}-q{n}'

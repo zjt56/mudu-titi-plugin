@@ -380,6 +380,17 @@ def extract_docx(source: Path, output_dir: Path) -> dict:
                     elif child.tag == _w("altChunk"):
                         extractor.warn("Embedded alternate document content was not extracted")
             append_content(body)
+            # 源头标记高频小尺寸装饰花边图标（<=3KB 且在正文/标题重复出现 >=2 次），
+            # 供下游在解析/标题剥离时与实质内容配图（如写作提纲、插图）区分，不删原文件。
+            counts: dict[str, int] = {}
+            for entry in extractor.media:
+                nm = entry.get("name") or ""
+                counts[nm] = counts.get(nm, 0) + 1
+            for entry in extractor.media:
+                nm = entry.get("name") or ""
+                size = entry.get("size") or 0
+                if isinstance(size, int) and 0 < size <= 3072 and counts.get(nm, 0) >= 2:
+                    entry["decorative"] = True
             from .source_objects import attach
             result = {"text": "\n".join(block["text"] for block in blocks),
                       "blocks": blocks, "tables": extractor.tables, "media": extractor.media,

@@ -61,18 +61,18 @@ def safe_blocks(blocks):
 
 
 def _walk_images(node, media_map, attachments, skip=("attachments", "subquestions"),
-                 placement="question"):
+                 placement="question", decorative_names=None):
     if isinstance(node, dict):
         for key, value in node.items():
             if key in skip:
                 continue
             child_placement = key if key in ("answer", "explanation") else placement
-            node[key] = _walk_images(value, media_map, attachments, skip, child_placement)
+            node[key] = _walk_images(value, media_map, attachments, skip, child_placement, decorative_names)
         return node
     if isinstance(node, list):
-        return [_walk_images(value, media_map, attachments, skip, placement) for value in node]
+        return [_walk_images(value, media_map, attachments, skip, placement, decorative_names) for value in node]
     if isinstance(node, str):
-        return replace_images(node, placement, None, media_map, attachments)
+        return replace_images(node, placement, None, media_map, attachments, decorative_names=decorative_names)
     return node
 
 
@@ -102,10 +102,38 @@ def _blank_run(match):
     return "".join(f"__{number}__" for number in numbers)
 
 
+# <u>标签内部夹着连续下划线（如词形填空 <u>i______</u>）是歧义形态：任何宽松把
+# __x__ 当下划线标记的渲染器都会在其内部再套一层 <u>，显示成「很短、一粗一细两条线」。
+# 规范为：标签内保留非下划线文字（<u>i</u>），连续下划线移出标签成为库侧 ______，
+# 语义等价（词仍画线、空档是一条填空线），且在任何渲染器下都只画一条线。
+_U_INLINE_RUN = re.compile(r"<u>([^<]*?)</u>")
+
+
+def _split_inline_underline(match):
+    inner = match.group(1)
+    if "_" not in inner:
+        return match.group(0)
+    out = []
+    buf = ""
+    for part in re.split(r"(_+)", inner):
+        if part and set(part) == {"_"} and len(part) >= 3:
+            if buf:
+                out.append("<u>" + buf + "</u>")
+                buf = ""
+            out.append("______")
+        else:
+            buf += part
+    if buf:
+        out.append("<u>" + buf + "</u>")
+    return "".join(out)
+
+
 def normalize_blank_text(text):
     """库侧空档写法：<u>　26　</u> → __26__，纯空档 → ______。
 
     连续多段下划线属于同一处空档（题号 + 两侧留白），必须先整体识别再归一。
+    <u>词______</u> 这种标签内夹连续下划线的歧义形态会拆成 <u>词</u>______，
+    避免下游宽松解析器在 <u> 内再套 <u> 渲染成双线（用户 2026-11-19 反馈）。
     """
     if not isinstance(text, str):
         return text
@@ -113,7 +141,18 @@ def normalize_blank_text(text):
     text = re.sub(r"<u>\s*[\u3000\s]*(\d{1,3})[\u3000\s]*\s*</u>", r"__\1__", text)
     text = re.sub(r"\u3000\s*(\d{1,3})\s*\u3000", r"__\1__", text)
     text = re.sub(r"<u>\s*[\u3000\s]*\s*</u>", "______", text)
-    text = re.sub(r"\u3000{2,}", "______", text)
+    # 行首中文段首缩进（如 `　　注意:`、`　　假定你是...`）不是填空空档，保留原缩进；
+    # 其余位置的连续全角空格（句中空位、括号/英文前空位）统一归一为 ______。
+    text = re.sub(
+        r"(?m)(^\u3000{2,}(?=[\u4e00-\u9fff]))|\u3000{2,}",
+        lambda m: m.group(1) if m.group(1) else "______",
+        text,
+    )
+    # 最后一步：拆掉标签内夹连续下划线的歧义形态（<u>i______</u> → <u>i</u>______）。
+    # 只合并「拆分产生的 6+ 连续下划线」（如 <u>w</u>____________），不触碰形如
+    # ____1____ 的编号空档或词间带空格的 ______。
+    text = _U_INLINE_RUN.sub(_split_inline_underline, text)
+    text = re.sub(r"_{6,}", "______", text)
     return text
 
 
@@ -136,7 +175,7 @@ def option_strings(values):
     return result
 
 
-def replace_images(text, placement, option_key, media_map, attachments):
+def replace_images(text, placement, option_key, media_map, attachments, *, decorative_names=None):
     if not isinstance(text, str) or not media_map:
         return text
 
@@ -145,6 +184,10 @@ def replace_images(text, placement, option_key, media_map, attachments):
         url = media_map.get(name)
         if not url:
             return match.group(0)
+        # 解析中的小尺寸装饰花边图标（如 [IMG image9.jpg]审题思路[IMG image10.jpg]）
+        # 仅剥离文本占位，不挂入正式解析附件；实质配图（如写作提纲导图）正常保留。
+        if placement == "explanation" and decorative_names and name in decorative_names:
+            return ""
         entry = {"kind": "image", "url": url, "name": name, "placement": placement}
         if option_key:
             entry["optionKey"] = option_key
@@ -154,7 +197,7 @@ def replace_images(text, placement, option_key, media_map, attachments):
     return IMAGE.sub(repl, text)
 
 
-def normalize_item(item, media_map=None, meta=None, materials=None, audio=None):
+def normalize_item(item, media_map=None, meta=None, materials=None, audio=None, *, decorative_names=None):
     """Return a copy converted to the server's field names and value shapes."""
     if not isinstance(item, dict):
         return item
@@ -264,7 +307,7 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None):
 
     # 其余文本字段里的 [IMG] 标记（来源行、解析、答案、大意等）一并转换。
     if media_map:
-        data = _walk_images(data, media_map, attachments)
+        data = _walk_images(data, media_map, attachments, decorative_names=decorative_names)
 
     # 听力单元：装配时按 audio_map 关联已切分音频，避免上传时缺音频附件。
     if isinstance(audio, dict) and media_map:
@@ -297,5 +340,5 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None):
 
     children = data.get("subquestions")
     if isinstance(children, list):
-        data["subquestions"] = [normalize_item(child, media_map, meta, materials, audio) for child in children]
+        data["subquestions"] = [normalize_item(child, media_map, meta, materials, audio, decorative_names=decorative_names) for child in children]
     return data

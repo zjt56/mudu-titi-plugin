@@ -8,7 +8,7 @@
 
 - 唯一前端：`lib/client.js` 的原生面板；
 - 后端：`app/workbench/server.py` 的纯 REST 服务，不含任何网页；
-- 阶段契约唯一来源：[`app/workflow/contracts.py`](app/workflow/contracts.py)（共 18 个阶段）。
+- 阶段契约唯一来源：[`app/workflow/contracts.py`](app/workflow/contracts.py)（共 19 个阶段）。
 
 ---
 
@@ -83,27 +83,28 @@ Word 与 PDF 同时存在时以 **Word 原文为准**；PDF/OCR 只辅助版面�
 
 ---
 
-## 5. 工作流（18 阶段）
+## 5. 工作流（19 阶段）
 
 ```text
-extract        原卷复合提取（Word 原生 / PDF 文字层 / 必要 OCR）
-structure_gate 结构自动确认（题号覆盖、题组边界、去噪、答案分离）
-preassemble    前置批次组装（含目录题型/子类/词数判定）
-types          题型交接校验（归属组装判型，先于填充完成）
-audio          听力切段/转写     ┐
-answers        答案填充          ├ 四路并行，听力只阻塞审核
-explanations   解析与文章大意     │ 解析只读原卷/答案材料
-knowledge      知识点与教材匹配   ┘
-assemble       汇总装配与固化（唯一确定性合并点）
-meta           难度与分类
-underlines     画线标记
-validate       本地自动体检（硬校验）
-review         两轮内容审核（一审全量 + 二审抽检）
-review_gate    审核放行判断（差异待人工 = needs_review，不阻断手动上传）
-format_gate    最终上传格式检查
-upload_gate    上传人工确认
-upload         写入远端上传暂存
-publish_gate   发布人工确认
+extract          原卷复合提取（Word 原生 / PDF 文字层 / 必要 OCR）
+structure_gate   结构自动确认（题号覆盖、题组边界、去噪、答案分离）
+preassemble      前置批次组装（含目录题型/子类/词数判定）
+types            题型交接校验（归属组装判型，先于填充完成）
+audio            听力切段/转写     ┐
+answers          答案填充          │
+explanations     解析与文章大意     ├ 并行推进，听力只阻塞审核
+knowledge        知识点与教材匹配   │ 解析只读原卷/答案材料
+content_snapshot 画线前内容快照     │
+meta             难度与分类        │
+underlines       画线标记          ┘
+assemble         汇总装配与固化（消费画线视图，唯一确定性合并点）
+validate         本地自动体检（硬校验）
+review           两轮内容审核（一审全量 + 二审抽检）
+review_gate      审核放行判断（差异待人工 = needs_review，不阻断手动上传）
+format_gate      最终上传格式检查
+upload_gate      上传人工确认
+upload           写入远端上传暂存
+publish_gate     发布人工确认
 ```
 
 要点：

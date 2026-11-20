@@ -1,7 +1,7 @@
 """装配产物与题库线上格式的确定性映射。"""
 import unittest
 
-from workflow.wire_format import normalize_item
+from workflow.wire_format import normalize_item, normalize_blank_text
 
 
 class WireFormatTest(unittest.TestCase):
@@ -86,6 +86,30 @@ class WireFormatTest(unittest.TestCase):
         self.assertEqual(bound, {"A": "image14.jpeg", "B": "image15.jpeg",
                                  "C": "image16.jpeg", "D": "image17.jpeg"})
         self.assertNotIn(None, [a.get("optionKey") for a in out["attachments"]])
+
+    def test_blank_normalization_removes_inline_underline_ambiguity(self):
+        # <u>词______</u>（词形填空）曾原样带着标签内连续下划线发出；任何把 __x__ 当
+        # 下划线标记的宽松渲染器会在 <u> 内再套 <u>，显示成「很短、一粗一细两条线」。
+        # 规范为 <u>词</u>______：词仍画线、空档是一条填空线，任何渲染器都只画一条线。
+        self.assertEqual(normalize_blank_text("clear <u>i______</u>(想法) of"),
+                         "clear <u>i</u>______(想法) of")
+        self.assertEqual(normalize_blank_text("<u>r______</u>"), "<u>r</u>______")
+        # 拆分后紧邻的 6+ 连续下划线合并成一处置空。
+        self.assertEqual(normalize_blank_text("<u>w______</u>______(祝愿)"),
+                         "<u>w</u>______(祝愿)")
+
+    def test_blank_normalization_preserves_legitimate_forms(self):
+        # 普通画线词、编号空、纯空档、词间空档都保持原口径，不被新规则破坏。
+        self.assertEqual(normalize_blank_text("<u>fine</u>"), "<u>fine</u>")
+        self.assertEqual(normalize_blank_text("<u>o</u>"), "<u>o</u>")
+        self.assertEqual(normalize_blank_text("<u>26</u>"), "__26__")
+        self.assertEqual(normalize_blank_text("<u> </u>"), "______")
+        self.assertEqual(normalize_blank_text("______ are ______?"), "______ are ______?")
+        self.assertEqual(normalize_blank_text("____1____"), "____1____")
+        self.assertEqual(normalize_blank_text("to be __17__ and"), "to be __17__ and")
+        # 结果本身不再含「<u> 内套下划线」的歧义形态。
+        for raw in ["<u>i______</u>", "<u>t______</u>"]:
+            self.assertNotRegex(normalize_blank_text(raw), r"<u>[^<]*_{3,}")
 
 if __name__ == "__main__":
     unittest.main()

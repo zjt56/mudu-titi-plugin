@@ -59,6 +59,19 @@ class ScopedReviewTests(unittest.TestCase):
             with self.assertRaises(scope.ScopeError):
                 scope.resolve_scope(self.request(), decision, self.mapping, self.catalog)
 
+    def test_keyword_scope_stops_at_basic_pronunciation_node(self):
+        ty = '听力关键词语选择'
+        path = '语音/基本读音'
+        allowed = scope.resolve_scope(self.request(), self.decision([ty], [path]),
+                                      self.mapping, self.catalog)['q1']
+        self.assertEqual({point['path'] for point in allowed['points']}, {'语音', path})
+        check = {'unit_id': 'q1', 'verdict': 'ok', 'assessment': {
+            'type': ty, 'knowledge': [path], 'subquestions': [], 'answer_points': ['paper']}}
+        scope.validate_assessment(check, 'q1', allowed, self.catalog)
+        check['assessment']['knowledge'] = [path + '/26个字母的读音']
+        with self.assertRaises(scope.ScopeError):
+            scope.validate_assessment(check, 'q1', allowed, self.catalog)
+
     def test_compound_and_alias_mapping(self):
         paths = {p['path'] for p in self.catalog['points']}
         self.assertEqual(scope._roots('听力信息转换', self.mapping, paths),

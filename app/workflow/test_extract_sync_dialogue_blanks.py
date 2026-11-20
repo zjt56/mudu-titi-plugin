@@ -61,6 +61,36 @@ class ExtractSyncDialogueBlanksTest(unittest.TestCase):
         # Existing explicit question 1 remains; No.5 is no blank proof.
         self.assertEqual(structure['sections'][0]['questions'], [1])
 
+    def test_phonetic_picture_columns_keep_all_printed_question_numbers(self):
+        text = (
+            '七上·人教版·课时A计划\nUnit 2\n第二课时 Pronunciation\n'
+            'A 基础巩固\n'
+            'Ⅱ.根据图片及所给音标写出下列单词所缺的字母\n'
+            '**1.**[IMG image21.jpeg]\n'
+            'c______/eɪ/ke\t2.[IMG image22.jpeg]\n'
+            'n______/əʊ/se\n'
+            '**3.**[IMG image23.jpeg]\n'
+            'b______/aɪ/ke\t4.[IMG image24.jpeg]\n'
+            'm______/iː/t\n'
+            '**5.**[IMG image25.jpeg]\n'
+            'comp______/juː/ter\n'
+            'Ⅲ.将下面歌谣中画线的单词按所给音标归类\n'
+            '1. Wake up, little Kate.\n'
+        )
+        structure, _, _ = infer_structure(text)
+        section = next(row for row in structure['sections'] if row['title'].startswith('Ⅱ.'))
+        self.assertEqual(section['questions'], [1, 2, 3, 4, 5])
+        self.assertEqual([row['number'] for row in section['question_locations']], [1, 2, 3, 4, 5])
+        self.assertEqual([row['kind'] for row in section['question_locations']],
+                         ['question'] * 5)
+        from workflow.structure_gate import _scope_anchors
+        body_lines = text.splitlines()
+        start = next(i for i, line in enumerate(body_lines) if line.startswith('Ⅱ.'))
+        next_section = next(i for i, line in enumerate(body_lines[start + 1:], start + 1)
+                            if line.startswith('Ⅲ.'))
+        self.assertEqual([n for _, n in _scope_anchors(body_lines[start:next_section])],
+                         [1, 2, 3, 4, 5])
+
     def test_non_sync_exam_does_not_gain_dialogue_inline_fallback(self):
         text = '2025年期末考试试卷\nⅠ.补全对话\n' + self.DIALOGUE
         structure, _, _ = infer_structure(text)

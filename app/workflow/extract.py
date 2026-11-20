@@ -475,24 +475,34 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
                                      line[match.end():], re.I)):
                 match = None
         numbers = [int(match.group(1))] if match else []
+        inline_question_numbers = set()
         # 一行并排两个小题时，行首题号之后的题号也要收进来，否则结构闸门会把
         # 这些真实存在的题号判成「未归属」并阻断整卷。
+        if is_sync and active.get("candidate_unit_kind") == "group":
+            # Printed same-line columns may put the next number before an image prompt.
+            from workflow.source_anchors import printed_tokens, strip_visual_markup
+            inline_tokens = printed_tokens(strip_visual_markup(raw))
+            inline_question_numbers.update(number for _offset, number in inline_tokens)
+            numbers.extend(inline_question_numbers)
         if is_sync and numbers and not DIALOGUE_QUESTION.match(line):
             numbers.extend(same_line_numbers(plain_line, numbers[0]))
+        numbers = sorted(set(numbers))
         # 表格/文章里的空位题号：只认明确下划线或全角空格边界，不扫普通数字。
-        if not numbers:
+        # 同步练习的独立题大题（如翻译/熟词生义引用完形原句里的 __<u>1</u>__）不把句中引用空位当小题号。
+        if not numbers and not (is_sync and active.get("candidate_unit_kind") == "standalone"):
             numbers = blank_numbers(plain_line)
-        # 同步练习的组题材料（短文填空/完形/选词/补全对话等）一行可能同时含两类空：
-        # ①空位在前（`　3　`，blank_numbers）；②题号在前（`3.<u></u>`、`1.[IMG](提示)`，
-        # _weak_numbers）。两类都要收全，否则图注空/题号在前的空会被漏掉。
+        # 同步练习的组题材料（短文填空/完形/选词/补全对话/任务型阅读/读写综合等）一行可能同时含两类空：
+        # ①空位在前（`　3　`，blank_numbers）；②题号在前（`3.<u></u>`、`6.________`、`1.[IMG](提示)`，
+        # _weak_numbers）。两类都要收全，否则表格空/图注空/题号在前的空会被漏掉。
         if (is_sync and active.get('candidate_unit_kind') == 'group'
-                and active['type'] in {'补全对话', '完形填空', '选词填空', '短文填空', '教材语篇填空', '听力信息转换'}):
+                and active['type'] in {'补全对话', '完形填空', '选词填空', '短文填空',
+                                       '教材语篇填空', '听力信息转换', '任务型阅读', '读写综合'}):
             from workflow.preview import _weak_numbers
             numbers = sorted(set(numbers) | set(_weak_numbers(raw)))
         for number in numbers:
             active["questions"].append(number)
             active["question_locations"].append({"number": number, "line": index + 1,
-                                                 "kind": "question" if match else "blank"})
+                                                 "kind": "question" if match or number in inline_question_numbers else "blank"})
             scan_numbers.add(int(number))
         if "[IMG " in raw and active["questions"]:
             image_questions.append(active["questions"][-1])
@@ -500,10 +510,25 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
         # 同步练习册的文末答案区不属于正文：最后一个大题的窗口必须止于答案区之前，
         # 否则答案里的题号会撞进正文题号、答案文字会混进题干与选项。
         appendix_start = min(appendix_start, sync_answer - 1)
+    from workflow.lesson_bands import is_column_banner
     previous = 0
     for section_index, section in enumerate(sections):
         end_line = sections[section_index + 1]["source_line"] - 1 if section_index + 1 < len(sections) else appendix_start
-        section["source_end_line"] = end_line
+        # 栏目板块横幅（如【二、A 基础巩固】、【三、B 能力提升】）属于容器边界，
+        # 不得附在上一大题的结尾（表格内部行不参与判定）。
+        in_table = False
+        for cursor in range(section["source_line"], end_line):
+            plain_cursor = _plain(lines[cursor]).strip()
+            if plain_cursor.startswith("[TABLE"):
+                in_table = True
+            if in_table:
+                if plain_cursor.startswith("[/TABLE"):
+                    in_table = False
+                continue
+            if is_column_banner(lines[cursor]):
+                end_line = cursor
+                break
+        section["source_end_line"] = max(section["source_line"], end_line)
         nums = section["questions"]
         # 完形同一题号在文章空位和选项行各出现一次是正常结构。
         question_lines = [x["number"] for x in section["question_locations"] if x["kind"] == "question"]
@@ -686,6 +711,13 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
     #正文 body (for example a writing section ending on the answer page).
     if body_line_numbers:
         retained_index = {line: index + 1 for index, line in enumerate(body_line_numbers)}
+        if is_sync and isinstance(structure.get("sync_practice"), dict):
+            # 仅保留落在正文行集合内的候选大题；附录/被移除行上的重复标题绝不进入正文坐标映射。
+            structure["sync_practice"]["headings"] = [
+                row for row in structure["sync_practice"].get("headings") or []
+                if row.get("start_line") in retained_index
+            ]
+            structure["sync_practice"]["lesson_audit"] = sync_practice.audit_lesson_shape("\n".join(body_lines))
         coordinate_keys = {"source_line", "source_start_line", "start_line",
                            "heading_line", "source_end_line", "end_line",
                            "line", "line_no"}

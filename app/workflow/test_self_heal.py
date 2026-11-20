@@ -106,7 +106,7 @@ class SelfHealTest(unittest.TestCase):
                 clock[0] += 10000
                 before = mf.load(self.batch)["stages"]["review"]
                 result = self_heal.recover(self.batch)
-                if n < 2 or n == 5:
+                if n == 5:
                     self.assertTrue(result["changed"], result)
                     # Simulate the normal executor reproducing the same failure.
                     state = mf.load(self.batch)
@@ -114,7 +114,7 @@ class SelfHealTest(unittest.TestCase):
                     mf.save(self.batch, state)
                 else:
                     self.assertFalse(result["changed"], result)
-                    self.assertEqual(result["status"], "retry_budget_exhausted")
+                    self.assertEqual(result["status"], "refused")
                     self.assertEqual(result["event"]["escalation"], "code_repair")
                     self.assertGreater(result["next_retry_at"], clock[0])
                     self.assertLessEqual(result["retry_after"], 3600)
@@ -124,6 +124,22 @@ class SelfHealTest(unittest.TestCase):
             self.assertEqual(plan.call_count, 6)
         ledger = self_heal._load(self.batch)
         self.assertEqual(list(ledger["attempts"].values()), [6])
+
+    def test_review_record_only_preserves_failure_without_redispatch(self):
+        manifest = mf.load(self.batch)
+        detail = "2 target(s) need repair: This question type does not allow answer points"
+        mf.touch_stage(manifest, "review", mf.FAILED, notes=detail)
+        mf.save(self.batch, manifest)
+        before = mf.load(self.batch)["stages"]["review"]
+        with patch.object(self_heal, "_candidate", return_value=("review", detail)), \
+             patch.object(self_heal, "_plan", return_value={"action": "record_only", "reason": "保留证据"}), \
+             patch.object(self_heal, "_requeue") as requeue:
+            result = self_heal.recover(self.batch)
+        requeue.assert_not_called()
+        self.assertFalse(result["changed"])
+        self.assertEqual(result["outcome"], "repair_not_applicable")
+        self.assertEqual(result["escalation"], "code_repair")
+        self.assertEqual(mf.load(self.batch)["stages"]["review"], before)
 
     def test_changed_input_or_code_opens_new_budget_during_cooldown(self):
         original = self.batch / "source.txt"
@@ -250,8 +266,7 @@ class SelfHealTest(unittest.TestCase):
                 state = mf.load(self.batch)
                 mf.touch_stage(state, "review", mf.FAILED, notes="scoped answer source is not uniquely bound")
                 mf.save(self.batch, state)
-        # One shared budget: it must reach retry_budget_exhausted, not stay requeued.
-        self.assertIn("retry_budget_exhausted", statuses, statuses)
+        self.assertEqual(statuses, ["refused"] * len(details))
         ledger = self_heal._load(self.batch)
         self.assertEqual(list(ledger["attempts"].values()), [len(details)],
                          "volatile detail must not fork the retry budget")

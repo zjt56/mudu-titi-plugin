@@ -20,8 +20,14 @@ def _roots(type_name, type_map, paths):
         raise ScopeError('题型无可用目录映射')
     roots = set()
     for dim in spec['dims']:
+        if dim.get('separate'):
+            continue
         branch = dim.get('branch')
-        if branch == '词汇/语法':
+        if dim.get('show') == 'exact':
+            branch = branch + '/' + dim['scope']
+        if dim.get('show') == 'exact':
+            candidates = (branch,)
+        elif branch == '词汇/语法':
             candidates = ('词汇', '语法')
         elif branch == '阅读技能':
             candidates = ('设题角度/阅读',)
@@ -101,10 +107,18 @@ def resolve_scope(request, response, type_map, catalog):
             raise ScopeError('所选分支超出题型允许范围')
         if any(not any(b == root or b.startswith(root + '/') for b in branches) for root in roots):
             raise ScopeError('所选分支未覆盖所有题型维度')
-        selected = [dict(p) for p in points if any(p['path'] == b or p['path'].startswith(b + '/') or b.startswith(p['path'] + '/') for b in branches)]
+        exact_by_type = {t: [d['branch'] + '/' + d['scope'] for d in type_map['by_type'][t]['dims']
+                             if d.get('show') == 'exact'] for t in types}
+        exact = set().union(*(set(v) for v in exact_by_type.values()))
+        expanded = set().union(*(_roots(t, type_map, paths) - set(exact_by_type[t]) for t in types))
+        selected = [dict(p) for p in points if any(
+            p['path'] == b or b.startswith(p['path'] + '/') or
+            (p['path'].startswith(b + '/') and (b not in exact or b in expanded)) for b in branches)]
         if not selected or len(selected) >= len(points):
             raise ScopeError('目录范围为空或未收敛')
         resolved[row['unit_id']] = {'types': list(types), 'branches': list(branches), 'points': selected}
+        if exact:
+            resolved[row['unit_id']]['exact_paths_by_type'] = exact_by_type
     return resolved
 
 
@@ -151,7 +165,8 @@ def validate_assessment(check, unit_id, allowed, catalog):
         raise ScopeError('审核题型超出独立判断范围')
     paths = {p['path'] for p in catalog['points']}
     leaves = {p for p in paths if not any(q.startswith(p + '/') for q in paths)}
-    allowed_paths = {p['path'] for p in allowed['points']} & leaves
+    exact = set(allowed.get('exact_paths_by_type', {}).get(assessment['type'], []))
+    allowed_paths = {p['path'] for p in allowed['points']} & (exact or leaves)
     entries = assessment.get('knowledge')
     children = assessment.get('subquestions')
     if not isinstance(entries, list) or not isinstance(children, list):

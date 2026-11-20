@@ -19,10 +19,25 @@ from _common import arg_parser, iter_questions, load_batch, plain, report  # noq
 # 连续下划线块（至少 2 个下划线视为空档）。完成句子的空档标准是 6 个下划线，
 # 这里接受 2+ 以容忍录入误差，但仍按“块”计数。
 _BLANK = re.compile(r"_{2,}")
+# 汉语提示整句/短语长横线形态：空档紧跟 `(中文提示)` 或 `（中文提示）`（如 `______(改变了很多)`），
+# 原卷本就用单条长横线填完整短语而非一词一空。
+_CHINESE_HINT_BLANK = re.compile(r"_{2,}\s*[（(][^）)]*[\u4e00-\u9fff][^）)]*[）)]")
 
 
 def _blank_count(text):
     return len(_BLANK.findall(plain(text)))
+
+
+def _is_phrase_hint_blanks(stem, answer):
+    """原卷为「长横线 + (汉语提示)」短语填空，空档数等于分号分隔的短语段数（或 1 空）。"""
+    text = plain(stem)
+    hints = _CHINESE_HINT_BLANK.findall(text)
+    if not hints:
+        return False
+    # 答案按分号拆成若干短语段（如 `With the development of;more and more convenient` -> 2 段）
+    segments = [seg.strip() for seg in re.split(r"[;；]", plain(answer or "")) if seg.strip()]
+    blanks = _blank_count(text)
+    return len(hints) == len(segments) and blanks >= len(hints)
 
 
 def _word_count(answer):
@@ -57,7 +72,7 @@ def main(argv=None):
         if blanks == 0:
             problems.append(f"{label}: 完成句子题干缺少 ______ 空档（D11）")
             continue
-        if blanks != words:
+        if blanks != words and not _is_phrase_hint_blanks(stem, answer):
             problems.append(
                 f"{label}: 完成句子空档数 {blanks} ≠ 答案词数 {words}"
                 f"（answer={answer!r}，C14 一词一空）")

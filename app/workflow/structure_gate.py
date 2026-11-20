@@ -83,6 +83,10 @@ def _section_numbers(section: dict) -> list[int]:
     ``question_locations``.  For a section that has real question anchors,
     those anchors are authoritative; otherwise (for blank-only sections such
     as information transfer) the recorded blank locations remain the source.
+    Inline dialogue slots (``A:Hello,I am Tony.1.______``) are printed child
+    numbers too, but they are recorded as blank markers; when the section's own
+    recorded ``questions`` list covers every anchor, that list is the section's
+    full printed sequence and supplies the missing inline slots.
     """
     locations = section.get("question_locations")
     if isinstance(locations, list):
@@ -90,11 +94,20 @@ def _section_numbers(section: dict) -> list[int]:
                             if isinstance(row, dict) and row.get("kind") == "question"
                             and type(row.get("number")) is int and row.get("number") >= 1]
         if question_numbers:
-            return sorted(set(question_numbers))
-    nums: list[int] = []
-    for entry in section.get("questions") or []:
-        nums.extend(_expand_question_numbers(entry))
-    return sorted(set(nums))
+            owned = set(question_numbers)
+            recorded = sorted({n for entry in section.get("questions") or []
+                               for n in _expand_question_numbers(entry)})
+            # 补全对话把空位号印在行内（`A:Hello,I am Tony.1.______`），任务型阅读/
+            # 读写综合也常在同一题组中混排“行首题号 + 表格/摘要内空位号（如 6.________）”，
+            # 在 question_locations 里记作 kind="blank"，与行首题号同属一个题组。
+            # 提取侧记录的 sections[].questions 覆盖了全部行首锚点时，它就是该
+            # 分区的题号全集；只取行首锚点会把行内/表格空位号漏成未声明题号。
+            if (recorded and owned.issubset(recorded)
+                    and _section_type_label(section.get("type")) in {"补全对话", "任务型阅读", "读写综合"}):
+                owned |= set(recorded)
+            return sorted(owned)
+    return sorted({n for entry in section.get("questions") or []
+                   for n in _expand_question_numbers(entry)})
 
 
 def _scope_windows(sections: list[dict], source_lines: list[str], visual_columns=None) -> list[dict]:
@@ -295,6 +308,12 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
             # Numbers inside the task are instructions, e.g. 注意:1. … 2. …
             continue
         observed = _source_members(lines[start:end])
+        if not group and not declared:
+            # 独立无号文字作答题（如熟词生义引用完形原句含 __<u>1</u>__）没有印刷小题号，
+            # 不把句内引用的弱空位号当成印刷题号阻塞无号作答区重建。
+            from .preview import _strong_number
+            if not any(_strong_number(line) is not None for line in lines[start:end]):
+                observed = set()
         if not group and not observed:
             from .question_content import unnumbered_text_responses
             for lo, hi in unnumbered_text_responses(lines[start:end]):
@@ -381,6 +400,11 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
                 if unit.get("column_id") and not _visual_column_for_unit(unit, visual_columns, lines):
                     errors.append({"code": "UNNUMBERED_BINDING_INVALID", "source_line": lo,
                                    "message": "无号栏目题缺少当前整页视觉来源证明"})
+                continue
+            if (span.get("number_binding") == "answer_inferred_image_group"
+                    and span.get("printed_numbers") == []
+                    and span.get("inferred_numbers") == list(unit.get("numbers") or [])
+                    and span.get("inferred_evidence")):
                 continue
             if sum(1 for at, n in anchors if n == number and lo <= at <= hi) != 1:
                 errors.append({"code": "QUESTION_NOT_FOUND", "number": number, "source_line": lo,
@@ -495,7 +519,7 @@ def _numbered_windows(windows: list[tuple[int, int]], lines: list[str],
     return [(lo, hi) for lo, hi in enriched]
 
 
-def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: list[str], visual_columns=None) -> list[dict]:
+def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: list[str], visual_columns=None, *, batch_dir=None) -> list[dict]:
     from .question_content import question_parts
     from .question_identity import assign_scoped
     from .preview import _strong_number
@@ -517,8 +541,17 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
         # union every digit found inside article/table material: dates, prices,
         # footnotes and table values are not printed question numbers.  Fall
         # back to source anchors only for legacy sections without locations.
-        numbers = [] if writing_unnumbered else (declared_numbers or sorted(_source_members(local)))
         group_flag = section.get("kind") == "group" if section.get("kind") else is_group_type(type_name)
+        # 独立题大题（如熟词生义/翻译）若未声明题号且正文无行首强题号，不把句内引用的
+        # 完形编号空位（__<u>1</u>__）当成印刷小题号，使其正常进入无号文字作答题通道。
+        if writing_unnumbered:
+            numbers = []
+        elif declared_numbers:
+            numbers = declared_numbers
+        elif not group_flag and not any(_strong_number(line) is not None for line in local):
+            numbers = []
+        else:
+            numbers = sorted(_source_members(local))
         windows = _material_windows(source_lines, start + 1, end) if group_flag else []
         if group_flag and windows and numbers:
             windows = _numbered_windows(windows, source_lines, numbers, start, end)
@@ -536,14 +569,34 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                 if not members and not has_body:
                     # 纯空白/空行窗口没有可绑定原文，跳过以免造出空单元。
                     continue
-                unit = _make_unit("group", type_name, members or [1], chunk)
-                unit["stem"] = "\n".join(chunk).strip()
-                unit["source_span"] = {"start_line": lo, "end_line": hi, "basis": "cleaned_source"}
-                if unnumbered:
-                    unit["source_span"]["number_binding"] = "unnumbered_section"
-                    unit["source_span"]["printed_numbers"] = []
-                    unit["original_number"] = None
+                image_only_chunk = (any("[IMG " in line for line in chunk)
+                                    and all(not _plain(line).strip() or "[IMG " in line or "[TABLE" in line for line in chunk))
+                inferred = None
+                if unnumbered and image_only_chunk and batch_dir is not None and lo == start + 1 and hi == end:
+                    from .upload_content import infer_image_group_numbers
+                    inferred = infer_image_group_numbers(batch_dir, start, end)
+                if inferred and inferred.get("numbers"):
+                    inferred_nums = list(inferred["numbers"])
+                    unit = _make_unit("group", type_name, inferred_nums, chunk)
+                    unit["stem"] = "\n".join(chunk).strip()
+                    unit["source_span"] = {
+                        "start_line": lo, "end_line": hi, "basis": "cleaned_source",
+                        "number_binding": "answer_inferred_image_group",
+                        "printed_numbers": [],
+                        "inferred_numbers": list(inferred_nums),
+                        "inferred_evidence": list(inferred.get("evidence") or []),
+                    }
+                    unit["original_number"] = inferred_nums[0] if len(inferred_nums) == 1 else None
                     unit["printed_number"] = False
+                else:
+                    unit = _make_unit("group", type_name, members or [1], chunk)
+                    unit["stem"] = "\n".join(chunk).strip()
+                    unit["source_span"] = {"start_line": lo, "end_line": hi, "basis": "cleaned_source"}
+                    if unnumbered:
+                        unit["source_span"]["number_binding"] = "unnumbered_section"
+                        unit["source_span"]["printed_numbers"] = []
+                        unit["original_number"] = None
+                        unit["printed_number"] = False
                 units.append(unit)
         else:
             from .source_anchors import printed_tokens
@@ -596,15 +649,33 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
             if unnumbered_text:
                 units.extend(unnumbered_text)
             elif not anchors and not numbers and image_only and not writing_unnumbered:
-                # 没有可读印刷题号时只保留整节一个来源对象，不猜图片里的题数。
-                # [1] 是兼容字段内部别名，不能展示成原卷第 1 题。
-                unit = _make_unit("standalone", type_name, [1], local)
-                unit["stem"] = "\n".join(local).strip()
-                unit["source_span"] = {"start_line": start + 1, "end_line": end,
-                                       "basis": "cleaned_source", "number_binding": "unnumbered_section",
-                                       "printed_numbers": []}
-                unit["original_number"] = None
-                unit["printed_number"] = False
+                inferred = None
+                if batch_dir is not None:
+                    from .upload_content import infer_image_group_numbers
+                    inferred = infer_image_group_numbers(batch_dir, start, end)
+                if inferred and inferred.get("numbers"):
+                    inferred_nums = list(inferred["numbers"])
+                    inferred_kind = "group" if (len(inferred_nums) > 1 or group_flag) else "standalone"
+                    unit = _make_unit(inferred_kind, type_name, inferred_nums, local)
+                    unit["stem"] = "\n".join(local).strip()
+                    unit["source_span"] = {"start_line": start + 1, "end_line": end,
+                                           "basis": "cleaned_source",
+                                           "number_binding": "answer_inferred_image_group",
+                                           "printed_numbers": [],
+                                           "inferred_numbers": list(inferred_nums),
+                                           "inferred_evidence": list(inferred.get("evidence") or [])}
+                    unit["original_number"] = inferred_nums[0] if len(inferred_nums) == 1 else None
+                    unit["printed_number"] = False
+                else:
+                    # 没有可读印刷题号且无法从同大题答案确定性反推时，只保留整节一个来源对象。
+                    # [1] 是兼容字段内部别名，不能展示成原卷第 1 题。
+                    unit = _make_unit("standalone", type_name, [1], local)
+                    unit["stem"] = "\n".join(local).strip()
+                    unit["source_span"] = {"start_line": start + 1, "end_line": end,
+                                           "basis": "cleaned_source", "number_binding": "unnumbered_section",
+                                           "printed_numbers": []}
+                    unit["original_number"] = None
+                    unit["printed_number"] = False
                 units.append(unit)
             elif not anchors and "书面表达" in type_name and not numbers:
                 # Writing sections commonly have one task without a printed
@@ -659,11 +730,11 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
         return units
 
 
-def _build_units(sections: list[dict], groups: list[dict], source_lines: list[str], visual_columns=None) -> list[dict]:
+def _build_units(sections: list[dict], groups: list[dict], source_lines: list[str], visual_columns=None, *, batch_dir=None) -> list[dict]:
     """把 section / group 信息组织成入库单元：独立题逐题，组合题成组。"""
     from . import sync_practice
     if visual_columns or sync_practice.looks_like_sync_practice("\n".join(source_lines)):
-        return _build_scoped_units(sections, groups, source_lines, visual_columns)
+        return _build_scoped_units(sections, groups, source_lines, visual_columns, batch_dir=batch_dir)
     group_of: dict[int, list[int]] = {}
     for group in groups:
         nums = _section_numbers({"questions": group.get("questions") or []})
@@ -1092,7 +1163,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                 warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
             else:
                 blockers.append(issue)
-    units = _build_units(sections, groups, source_lines, columns) if sections else []
+    units = _build_units(sections, groups, source_lines, columns, batch_dir=batch_dir) if sections else []
     if isinstance(ai_classified, dict) and ai_classified.get("units"):
         units = _merge_visual_units(units, ai_classified["units"], columns, source_lines, sections)
     # A stale candidate group may differ from the final AI grouping. Only the

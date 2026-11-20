@@ -49,6 +49,24 @@ class ReviewEvidenceScopeTest(unittest.TestCase):
     def record(self, rid, checks):
         return {'round_id': rid, 'input_binding': 'binding', 'execution_id': 'exec', 'checks': checks}
 
+    def test_keyword_assessment_uses_exact_node_in_both_rounds(self):
+        path = '语音/基本读音'
+        self.plan['units'] = ['other']
+        self.plan['sample'] = [{'unit_id': 'other', 'number': '3'}]
+        for rid in ('labels', 'sample'):
+            check = self.check('other', 'Different question here.', '3' if rid == 'sample' else None)
+            check['assessment'].update(type='听力关键词语选择', subtypes=[],
+                                       knowledge=[path], answer_points=['paper'])
+            record = self.record(rid, [check])
+            self.assertEqual(review._round_checks(record, rid, self.plan, self.batch), [])
+            for rejected in (path + '/26个字母的读音', '语音/语调与节奏/节奏', '词汇/词汇辨析/名词辨析'):
+                with self.subTest(round=rid, rejected=rejected), self.assertRaisesRegex(ValueError, '超出允许'):
+                    check['assessment']['knowledge'] = [rejected]
+                    review._round_checks(record, rid, self.plan, self.batch)
+        catalog = review.compact_knowledge_catalog(['听力关键词语选择'])
+        self.assertEqual([point['path'] for point in catalog['points']], [path])
+        self.assertEqual(catalog['exact_paths_by_type'], {'听力关键词语选择': [path]})
+
     def test_supplied_ocr_and_authority_context_are_bound(self):
         self.save('04_knowledge/knowledge.json', {'items': []})
         self.save('06_batch/batch.json', {'items': []})

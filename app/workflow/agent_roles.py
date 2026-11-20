@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .shared_rubric import GROUP_MATERIAL_RULE
+
 ROLES_DIR = Path(__file__).resolve().parent.parent / "prompts" / "roles"
 REQUIRED = ("stage", "artifact")
 _HEAD = re.compile(r"^#\s*角色[:：]\s*(?P<title>.+?)\s*$", re.M)
@@ -76,8 +78,10 @@ def knowledge_judgment_rules() -> str:
         "\n【共用知识点判定口径】\n"
         "1. 先确定题型和层级，再选完整目录叶子。题型表 dims 是允许范围；组级仅把允许的主题、语篇体裁作为必带维度（其他题型除外），"
         "其余维度按实际考点逐项判断。历史参考中的宽泛举例与本段冲突时以本段为准。\n"
-        "完成句子和短文填空均不把答案词或短语作为答案考点标签。完成句子按实际考点打词汇和语法标签；"
-        "短文填空按材料打体裁、主题，再按组内实际考点打词汇、语法标签。\n"
+        "完成句子、短文填空、选词填空和教材语篇填空均不把答案词或短语作为答案考点标签。完成句子按实际考点打词汇和语法标签；"
+        "短文填空、选词填空和教材语篇填空按材料打体裁、主题，再按组内实际考点打词汇、语法标签。\n"
+        "听力关键词语选择是唯一例外：knowledge 只填原目录节点『语音/基本读音』，该节点虽有子级也直接选，"
+        "不选任何子类或其他语音、词汇、语法标签。答案考点走原有独立字段或派生链路，不填入 knowledge。按确认的单元层级提交。\n"
         "2. 每个叶子先定位题干、答案对照、材料主旨或设问证据。能用一个更具体的叶子解释作答原因时，不再加描述同一原因的泛项；"
         "有不同证据支持的独立考点分别保留。不要因某词出现在干扰项、背景里或解析顺带提到就打标。\n"
         "选点前先独立说明正确答案靠哪条规则或哪句原文得出。对拟加的第二个知识点逐个核对：它是否解释了另一个实际作答步骤？"
@@ -125,6 +129,7 @@ def section(stage: str, artifact: str | None = None, round_id: str | None = None
                 + "不改语义判断来减少差异，不重跑已合格目标；当前审核未完成不得靠旧完成标记背书。"
                 + "差异不阻止本地格式检查或用户手动上传，也不授权自动上传/发布；质量仍未放行。\n")
     return ("\n\n[子 Agent] " + role["title"] + "\n允许写入的产物：" + role["artifact"] + "\n" + role["body"]
+            + ("\n\n" + GROUP_MATERIAL_RULE if stage in {"preassemble", "types", "assemble"} else "")
             + (knowledge_judgment_rules() if stage == "knowledge" else ""))
 
 

@@ -19,6 +19,8 @@ from urllib.parse import unquote, urlsplit
 from workbench import taxonomy
 from workflow import label_audit
 from workflow.metadata_policy import MISSING
+from workflow.question_content import material_blank_numbers
+from workflow.wire_format import normalize_blank_text
 
 SOURCE_ALIASES = {"精品资料": "精品题源", "模拟卷": "中考模拟", "历年考题": "中考真题", "课本原创": "课本原创"}
 TYPE_ALIASES = {"单项选择": "单项填空", "短对话理解": "听力短对话理解", "长对话理解": "听力长对话理解",
@@ -929,6 +931,15 @@ class _Builder:
             if len(numbers) != len(set(numbers)):
                 self.error("SUBQUESTION_NUMBER_DUPLICATE", "题组内子题号重复", uid)
             output["subquestions"] = [self.item(c, f"{uid}/{c.get('number', i) if isinstance(c, dict) else i}", True, main_type, alias_children, parent_group=(kind == "group")) for i, c in enumerate(children, 1)]
+            if kind == "group" and main_type == "完形填空":
+                blank_numbers = material_blank_numbers(normalize_blank_text(output.get("material")))
+                for subquestion in output["subquestions"]:
+                    number = subquestion.get("number")
+                    stem = subquestion.get("stem")
+                    if (_positive(number) and number in blank_numbers and subquestion.get("options")
+                            and isinstance(stem, str) and re.fullmatch(r"_{2,}", stem.strip())):
+                        # The question bank renders the structured number and strips its repeat from the stem.
+                        subquestion["stem"] = f"{number}."
             # Aggregate names and IDs only on the wire, after the local audit.
             paths = output.get("knowledge", []) + [path for c in output["subquestions"] for path in c.get("knowledge", [])]
             output["knowledge"] = list(dict.fromkeys(paths))
@@ -940,7 +951,6 @@ class _Builder:
             self.summary["questions"] += 1
         # 空档统一成库侧写法：<u>　26　</u> → __26__，纯空档 → ______。
         # 装配阶段已归一化；这里兜底历史批次，避免把 <u> 原样写进题库。
-        from .wire_format import normalize_blank_text
         for key in ("stem", "material"):
             if isinstance(output.get(key), str):
                 output[key] = normalize_blank_text(output[key])
@@ -965,7 +975,6 @@ def _source_table_stems(batch, batch_dir):
         return {}
     from .table_structure import verified_groups
     from .question_content import table_blank_stem_numbers
-    from .wire_format import normalize_blank_text
     verified = verified_groups(Path(batch_dir) / '06_batch/batch_meta.json')
     result = {}
     for unit in batch['items']:
@@ -978,7 +987,7 @@ def _source_table_stems(batch, batch_dir):
             marker = ref.get('marker')
             if not isinstance(marker, str):
                 continue
-            pattern = rf'(?<!\d){re.escape(str(number))}[.．][\s\u3000\xa0]*(?:<u>[\s\u3000\xa0]*</u>)+'
+            pattern = rf'(?<!\d){re.escape(str(number))}[.．][\s\u3000\xa0]*(?:(?:<u>[\s\u3000\xa0]*</u>)+|_{{2,}})'
             matches = list(re.finditer(pattern, marker))
             if len(matches) != 1:
                 continue
@@ -987,6 +996,41 @@ def _source_table_stems(batch, batch_dir):
                 continue
             result[f'{uid}/{number}'] = {'stem': stem, **{key: ref[key] for key in
                 ('source_ref', 'table_number', 'source_line')}}
+    return result
+
+
+def _project_answer_point_tags(batch, batch_dir):
+    """Add verified original answer points to the upload-only copy."""
+    from workbench.server import answer_point_tags
+
+    result = deepcopy(batch)
+    items = result.get("items") if isinstance(result, dict) else None
+    if not isinstance(items, list):
+        return result
+    unit_scoped_types = {"听力信息转换"}
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("unit_id"), str):
+            continue
+        unit_id = item["unit_id"]
+        children = item.get("subquestions")
+        if item.get("unit_kind") == "group" and isinstance(children, list) and children:
+            if (item.get("question_type") or item.get("type")) in unit_scoped_types:
+                names = answer_point_tags(batch_dir, unit_id)
+                targets = [(item, names)]
+            else:
+                targets = [(child, answer_point_tags(batch_dir, unit_id,
+                            number=child.get("number"))) for child in children
+                           if isinstance(child, dict)]
+        else:
+            targets = [(item, answer_point_tags(batch_dir, unit_id))]
+        for target, names in targets:
+            paths = list(target.get("knowledge") or [])
+            for name in names:
+                path = "词汇/答案考点/" + name
+                if path not in paths:
+                    paths.append(path)
+            if names:
+                target["knowledge"] = paths
     return result
 
 
@@ -1026,13 +1070,15 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
         layout = layout_issues(batch_dir, items)
         builder.errors.extend(layout["errors"])
         builder.warnings.extend(layout["warnings"])
+    # Audit the local labels before any remote ID replacement or group union.
+    audit = label_audit.inspect_batch(_local_audit_view(batch))
+    builder.errors.extend({"unit_id": "", **error} for error in audit["errors"])
+    if batch_dir is not None:
+        batch = _project_answer_point_tags(batch, batch_dir)
     from .upload_numbering import project_batch
     numbering = project_batch(batch, batch_dir=batch_dir)
     builder.errors.extend(numbering["errors"])
     items = numbering["items"] if isinstance(numbering["items"], list) else []
-    # Audit the local labels before any remote ID replacement or group union.
-    audit = label_audit.inspect_batch(_local_audit_view(batch))
-    builder.errors.extend({"unit_id": "", **error} for error in audit["errors"])
     selected_id = batch_id if batch_id is not None else batch.get("batch_id", batch.get("id"))
     selected_name = name if name is not None else batch.get("name", batch.get("title"))
     mode = upload_mode if upload_mode is not None else batch.get("upload_mode", "manual")

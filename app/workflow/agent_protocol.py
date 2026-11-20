@@ -390,6 +390,16 @@ def import_result(batch_dir, task_id, result_path) -> dict:
             # Publish a content baseline and recheck actual consumers. A changed
             # ancestor is not itself evidence that every descendant changed.
             mf.record_delivery(batch, manifest, spec)
+            # 阶段已通过程序校验并正式交付，其历史局部修复反馈随之退役留档，
+            # 避免后续上游结构更新重跑该阶段时被旧单题 repair-feedback 锁死并误触发模型重派。
+            fb = _path(batch, f"workflow/repair-feedback/{stage}.json")
+            if fb.is_file():
+                try:
+                    resolved_dir = fb.parent / "resolved"
+                    resolved_dir.mkdir(parents=True, exist_ok=True)
+                    fb.replace(resolved_dir / f"{stage}-{task_id[:8]}.json")
+                except OSError:
+                    pass
         manifest["status"] = mf.derive_status(manifest)
         receipt = {"protocol": PROTOCOL, "task_id": task_id, "stage": stage,
                    "result_sha256": result_sha256, **report}

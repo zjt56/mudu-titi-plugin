@@ -18,7 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _common import arg_parser, iter_questions, load_batch, plain, report, units
 
 # B1/B2：全角空格（U+3000）连续空档被当作空位；真实空位应为 `______`。
+# 保护行首中文段首缩进（如 `　　注意:`），与 wire_format.normalize_blank_text 保持同源。
 U3000_RUN = re.compile(r"\u3000{2,}")
+_CJK_INDENT = re.compile(r"(?m)^\u3000{2,}(?=[\u4e00-\u9fff])")
 
 # B10：应使用真实换行 \n，不写 <br>。
 BR = re.compile(r"<br\s*/?>", re.IGNORECASE)
@@ -27,6 +29,12 @@ BR = re.compile(r"<br\s*/?>", re.IGNORECASE)
 # 形如：单个英文字母 + 空格 + 下划线空档 + （可选空格）+ 中文提示括号
 LOOSE_INITIAL = re.compile(
     r"(?<![A-Za-z])([A-Za-z])\s+(_{2,})\s*[\(（][^()（）]*[\u4e00-\u9fff][^()（）]*[\)）]"
+)
+_ARTICLE_BEFORE_A = re.compile(
+    r"(?:^|\b(?:for|in|as|with|is|was|are|were|be|become|becomes|became|of|to|at|by|on|"
+    r"have|has|had|get|got|like|make|made|take|took|give|gave|need|needs|want|wants|"
+    r"find|found|see|saw|buy|bought|write|wrote|read|keep|kept|such|what|quite|not|only|just|than))\s+$",
+    re.I,
 )
 
 
@@ -49,11 +57,13 @@ def _check_unit(unit, child):
     else:
         loc = uid
 
+    answer_text = str((child if child is not None else unit).get("answer") or "").strip()
+
     for field, raw in _texts(unit, child):
         text = str(raw or "")
 
-        # B1/B2：U+3000 连续空档
-        for _m in U3000_RUN.finditer(text):
+        # B1/B2：U+3000 连续空档（排除行首中文段首缩进）
+        for _m in U3000_RUN.finditer(_CJK_INDENT.sub("", text)):
             problems.append(f"[W] U+3000空档（提示，不阻断）: {uid}（{loc} {field}）")
             break  # 同一字段只报一次，避免刷屏
 
@@ -62,12 +72,20 @@ def _check_unit(unit, child):
             problems.append(f"[W] <br>换行（提示，不阻断）: {loc}（{field} 建议使用真实换行）")
 
         # B4/B9：首字母与空档被空格隔开，且后面有中文提示括号
-        m = LOOSE_INITIAL.search(text)
-        if m:
+        # 排除英语不定冠词 `a ______` 与第一人称代词 `I ______`（非首字母拼写提示）。
+        for m in LOOSE_INITIAL.finditer(text):
+            letter = m.group(1)
+            if letter in ("a", "A", "I"):
+                ans_initial = re.match(r"[A-Za-z]", answer_text)
+                if ans_initial and ans_initial.group(0).lower() != letter.lower():
+                    continue
+                if letter in ("a", "A") and _ARTICLE_BEFORE_A.search(text[:m.start()]):
+                    continue
             problems.append(
                 f"[W] 首字母提示未紧贴空档: {loc}（提示，不阻断）"
-                f"（{field}「{m.group(1)} {m.group(2)}」建议「{m.group(1)}{m.group(2)}」）"
+                f"（{field}「{letter} {m.group(2)}」建议「{letter}{m.group(2)}」）"
             )
+            break
 
     return problems
 

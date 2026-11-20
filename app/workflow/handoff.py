@@ -150,7 +150,17 @@ def _assert_meta_projection(snapshot, payload):
         raise ValueError('Metadata view no longer projects the content snapshot')
 
 
-def _assert_underline_projection(base, payload):
+def _assert_underline_projection(base, payload, *, source_headings=None):
+    if source_headings:
+        # The marked view may already contain a heading restored at assembly.
+        # For this comparison, remove only verified additions to empty stems.
+        payload = copy.deepcopy(payload)
+        early = {row.get('unit_id'): row for row in base.get('items', [])}
+        for row in payload.get('items', []):
+            uid = row.get('unit_id')
+            heading = source_headings.get(uid)
+            if heading and early.get(uid, {}).get('stem') == '' and row.get('stem') == heading:
+                row['stem'] = ''
     # Final assembly fills this same view later. Only source-owned fields belong
     # to underline delivery; requiring later answers/labels creates a DAG cycle.
     # Audio attachments are late media wiring and must not make underline delivery
@@ -299,7 +309,9 @@ def inspect_stage(batch_dir, manifest, stage_id, *, legacy_source_only=False):
                 _assert_meta_projection(_json(root, '06_batch/content.snapshot.json'), payload)
                 _source_view(root, payload)
             elif stage_id == 'underlines':
-                _assert_underline_projection(_json(root, '06_batch/batch_meta.base.json'), payload)
+                from .phonetic_structure import verified_picture_headings
+                _assert_underline_projection(_json(root, '06_batch/batch_meta.base.json'), payload,
+                                             source_headings=verified_picture_headings(root, _units(root)))
                 _source_view(root, payload)
             else:
                 # 组装阶段只产出候选；来源/内容正确性由最终闸门集中复核。

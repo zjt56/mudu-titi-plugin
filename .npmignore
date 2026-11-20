@@ -1,6 +1,8 @@
 # 发布包排除：数据、缓存、运行产物，绝不能进包
 workflows/
 inbox/
+# 项目变更记录：不进上传仓库/发布包
+CHANGELOG/
 .port-backup/
 .git/
 node_modules/

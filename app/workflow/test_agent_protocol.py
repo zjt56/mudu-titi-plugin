@@ -63,7 +63,7 @@ class AgentProtocolTest(unittest.TestCase):
         mf.touch_stage(manifest, "structure_gate", mf.COMPLETED,
                        output_hashes=mf.output_hashes(self.batch, contracts.STAGE_BY_ID["structure_gate"]))
         self.write("06_batch/batch.base.json", {"items": [{
-            "unit_id": "q-1", "unit_kind": "standalone", "number": 1, "numbers": [1],
+            "id": "q-1", "unit_id": "q-1", "unit_kind": "standalone", "number": 1, "numbers": [1],
             "stem": "She ______ a book.", "material": "", "options": ["A. reads", "B. read", "C. reading", "D. to read"],
             "subquestions": []}], "name": "test"})
         types = {"items": [{"unit_id": "q-1", "type": "单项填空", "subtypes": ["四个选项"],
@@ -260,18 +260,31 @@ print(json.dumps(result, ensure_ascii=False))
         batch = {"name": "test", "items": [{
             "id": "q-1", "unit_id": "q-1", "unit_kind": "standalone", "number": 1, "numbers": [1],
             "question_type": "单项填空", "filterMetadata": {"subtypes": ["四个选项"]},
-            "stem": "1. She ______ a book. A. reads B. read C. reading D. to read", "material": "",
+            "stem": "She ______ a book.", "material": "",
             "options": ["A. reads", "B. read", "C. reading", "D. to read"],
             "knowledge": knowledge, "knowledgeIds": ids, "knowledge_ids": ids,
             "answer": "A", "explanation": "无", "articleSummary": "无", "subquestions": []}]}
+        base_snap = json.loads((self.batch / "06_batch/batch.base.json").read_text(encoding="utf-8"))
+        meta_base = copy.deepcopy(base_snap)
+        meta_base["items"][0]["filterMetadata"] = {}
+        self.write("06_batch/content.snapshot.json", base_snap)
         self.write("06_batch/batch.json", batch)
-        self.write("06_batch/batch_meta.base.json", batch)
-        self.write("06_batch/batch_meta.json", batch)
+        self.write("06_batch/batch_meta.base.json", meta_base)
+        self.write("06_batch/batch_meta.json", meta_base)
         self.write("07_review/validation-report.json", {
             "passed": True, "batch_sha256": mf.sha256_file(self.batch / "06_batch/batch_meta.json")})
         for stage in contracts.upstream_of("review"):
             if stage == "audio":
                 self.mark_chain([stage], **{stage: {'status': mf.SKIPPED, 'notes': '未提供音频'}})
+            elif stage == "assemble":
+                # Final assembly projects answers/labels into batch_meta.json while preserving
+                # the early source/metadata projection owned by meta/underlines.
+                self.write("06_batch/batch_meta.json", batch)
+                self.mark_delivered("assemble")
+            elif stage == "validate":
+                self.write("07_review/validation-report.json", {
+                    "passed": True, "batch_sha256": mf.sha256_file(self.batch / "06_batch/batch_meta.json")})
+                self.mark_delivered("validate")
             else:
                 self.mark_delivered(stage)
 
@@ -373,7 +386,11 @@ print(json.dumps(result, ensure_ascii=False))
             'unit_id': 'q-1', 'knowledge': ['词汇/词汇辨析/动词辨析'],
             'subquestions': [], 'evidence': ['正文 L1']}]})
         self.write("02_audio/SKIP_LISTENING", "no original audio")
-        for stage in contracts.STAGE_BY_ID['assemble'].depends_on:
+        snap = json.loads((self.batch / "06_batch/batch.base.json").read_text(encoding="utf-8"))
+        self.write("06_batch/content.snapshot.json", snap)
+        self.write("06_batch/batch_meta.base.json", snap)
+        self.write("06_batch/batch_meta.json", snap)
+        for stage in contracts.upstream_of('assemble'):
             if stage == "audio":
                 self.mark_chain([stage], **{stage: {'status': mf.SKIPPED, 'notes': '未提供音频'}})
             else:

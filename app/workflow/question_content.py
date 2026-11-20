@@ -78,23 +78,28 @@ def unnumbered_text_responses(lines: list[str]) -> list[tuple[int, int]]:
     if IMAGE.search(text) or re.search(r"\[/?TABLE|<br\s*/?>", text, re.I):
         return []
     blank = re.compile(r"<u>\s*</u>|_{2,}", re.I)
+    # 熟词生义等无号题可能引用完形原句（含 __<u>1</u>__ 或 __1__ 编号空位），
+    # 该引用空位是原句语境而非本题作答区，计数作答空位时先剔除。
+    quoted_cloze_blank = re.compile(r"_{2,}\s*<u>\s*\d{1,3}\s*</u>\s*_{2,}|__\d{1,3}__", re.I)
     terminal = re.compile(r"(?:<u>\s*</u>|_{2,})\s*[。.]?\s*$", re.I)
+    def _response_blanks(s):
+        return blank.findall(quoted_cloze_blank.sub(" ", s))
     def readable(line):
-        return bool(re.search(r"[A-Za-z\u4e00-\u9fff]", re.sub(r"<[^>]*>", "", blank.sub("", line))))
+        return bool(re.search(r"[A-Za-z\u4e00-\u9fff]", re.sub(r"<[^>]*>", "", blank.sub("", quoted_cloze_blank.sub(" ", line)))))
     nonempty = [(i, line) for i, line in enumerate(lines) if line.strip()]
     if not nonempty or any(OPTION.search(line) for _, line in nonempty):
         return []
-    if len(nonempty) == 1 and readable(nonempty[0][1]) and len(blank.findall(text)) == 1:
+    if len(nonempty) == 1 and readable(nonempty[0][1]) and len(_response_blanks(text)) == 1:
         return [(0, len(lines) - 1)]
     # All readable rows have their own terminal response area: each source row
     # proves one item. Multiple blanks within a row do not prove multiple items.
-    if all(readable(line) and len(blank.findall(line)) == 1 and terminal.search(line)
+    if all(readable(line) and len(_response_blanks(line)) == 1 and terminal.search(line)
            for _, line in nonempty):
         starts = [0] + [i for i, _ in nonempty[1:]]
         return [(lo, starts[n + 1] - 1 if n + 1 < len(starts) else len(lines) - 1)
                 for n, lo in enumerate(starts)]
     # A single complete wrapped paragraph has just one answer area overall.
-    if (len(blank.findall(text)) == 1 and terminal.search(nonempty[-1][1])
+    if (len(_response_blanks(text)) == 1 and terminal.search(nonempty[-1][1])
             and all(readable(line) for _, line in nonempty)
             and all(not re.search(r"[.!?。！？]\s*$", line) for _, line in nonempty[:-1])):
         return [(0, len(lines) - 1)]
@@ -574,12 +579,19 @@ def strip_writing_answer_space(text: str) -> str:
     sentence. A marked word (including a spelling initial) is never empty space.
     This is deliberately scoped to writing; numbered cloze gaps stay required.
     """
+    raw_lines = str(text or "").splitlines()
     lines = []
-    for line in str(text or "").splitlines():
+    for idx, line in enumerate(raw_lines):
         line = re.sub(r"<u>[\s_]*</u>", "", line)
         # Remove a trailing response rule, optionally wrapped in DOCX bold runs.
         # The word boundary guard keeps e.g. r______ as actual source content.
         line = re.sub(r"(?<![\w])(?:\*\*)?[_\s]*_{2,}[_\s]*(?:\*\*)?\s*$", "", line)
+        # Word 作文开头句末尾常放 1 个孤立 `_` 衔接下一行整行答题线（如 `in my hometown._`）；
+        # 当下一行确为纯答题线时一并移除，不误伤单词内下划线。
+        if idx + 1 < len(raw_lines):
+            nxt = re.sub(r"<u>[\s_]*</u>", "", raw_lines[idx + 1]).replace("**", "").strip()
+            if nxt and set(nxt) <= {"_", " ", "\t", "\u3000"} and nxt.count("_") >= 2:
+                line = re.sub(r"(?<=[.!?。！？:：,，;；\s])_\s*$", "", line)
         visible = line.replace("**", "").strip()
         if visible:
             lines.append(line.rstrip())
@@ -665,11 +677,12 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
     numbers = unit.get("numbers") or []
     scoped = unit.get('identity_version') == 'scoped-v1'
     unnumbered = span.get('number_binding') == 'unnumbered_section'
+    inferred_image = span.get('number_binding') == 'answer_inferred_image_group'
     writing = span.get('number_binding') == 'single_writing_section'
     parts = {n: question_parts(lines, n, scoped=scoped) for n in numbers}
     # 书面表达按规则23没有确定答案，且常无印刷题号；不能用“题号出现一次”
     # 的普通小题规则卡它，否则有效作文永远无法通过来源审计。
-    if not scoped and not unnumbered and not writing:
+    if not scoped and not unnumbered and not inferred_image and not writing:
         # Legacy numeric identities are only safe when each declared number has
         # exactly one printed occurrence inside this confirmed unit span.
         # Otherwise question_parts would choose the first occurrence and can
@@ -681,8 +694,9 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
                 issues = [{"code": "SOURCE_NUMBER_AMBIGUOUS", "number": number,
                            "message": f"来源窗口内第 {number} 题号出现 {occurrences.get(int(number), 0)} 次，无法唯一绑定"}]
                 return {"passed": False, "issues": issues, "questions": parts, "shared_options": []}
-    if unnumbered and len(numbers) == 1:
-        parts[numbers[0]] = {'stem': '', 'options': [], 'found': True}
+    if (unnumbered and len(numbers) == 1) or inferred_image:
+        for n in numbers:
+            parts[n] = {'stem': '', 'options': [], 'found': True}
     issues = []
     scoped_shared = []
     if scoped and unit.get('unit_kind') == 'group' and unit.get('type') == '补全对话':
@@ -760,12 +774,13 @@ def _rebuild_source_units(root, structure, cleaned):
     candidate = dict(structure, sections=structure.get("sections") or [])
     sections = lesson_bands.annotate_sections(candidate.get("sections") or [], evidence)
     lines = cleaned.splitlines()
-    units = structure_gate._build_units(sections, structure.get("groups") or [], lines, [])
-    # Match the gate's final canonical annotation, including its verified stop.
+    units = structure_gate._build_units(sections, structure.get("groups") or [], lines, [], batch_dir=root)
+    # Match the gate's final canonical annotation, including its verified stop
+    # (e.g. lesson_container_end_line on sections before the first band banner).
     for unit in units:
         section = unit.get("source_section") or {}
         annotated = lesson_bands.annotate_sections([section], evidence)[0]
-        if annotated.get("lesson_band"):
+        if annotated != section:
             unit["source_section"] = annotated
     return units
 
@@ -886,7 +901,7 @@ def apply_required_writing_stem(batch_dir: str | Path, batch: dict) -> int:
 _BLANK_NUMBER = re.compile(r"(?:__(\d+)__|(?<!\d)(\d+)\s*[.．]\s*_+|[\u3000\s](\d+)[\u3000\s]*_+)")
 
 
-def _material_blank_numbers(material) -> set:
+def material_blank_numbers(material) -> set:
     """材料里作为「空位题号」出现的数字集合（`__N__`、`N.______`、`　N　____`）。"""
     found = set()
     for match in _BLANK_NUMBER.finditer(str(material or "")):
@@ -980,7 +995,7 @@ def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
             # 共享选项/对话类组题（补全对话等）材料里已带齐每个空位题号时，
             # 子题题干只能是空壳 `______`（D3/D25）：解析出的「后一行对白」
             # 属于 material，不能抄进子题题干，否则与材料重复、且会被 D7 拦。
-            shared_blank_numbers = _material_blank_numbers(row.get("material") or "")
+            shared_blank_numbers = material_blank_numbers(row.get("material") or "")
             row_numbers = {int(n) for n in unit.get("numbers") or [] if str(n).isdigit()}
             shell_group = bool(row_numbers) and row_numbers.issubset(shared_blank_numbers)
             for child in row.get("subquestions") or []:
@@ -1061,7 +1076,8 @@ def _validated_ai_units(units, fresh, lines):
         # stem, not merely invented by the classifier or borrowed from elsewhere.
         stem_lines = stem.splitlines()
         from .question_identity import question_position, printed_anchors
-        unnumbered = span.get('number_binding') in {'single_writing_section', 'unnumbered_section'}
+        unnumbered = span.get('number_binding') in {
+            'single_writing_section', 'unnumbered_section', 'answer_inferred_image_group'}
         if scoped:
             if not unnumbered and any(question_position(stem_lines, n) is None for n in nums):
                 return None
@@ -1098,7 +1114,8 @@ def _validated_ai_units(units, fresh, lines):
                 local = lines[start - 1:end]
                 for n in row.get('numbers') or []:
                     pos = question_position(local, n)
-                    if pos is None and span.get('number_binding') in {'single_writing_section', 'unnumbered_section'}:
+                    if pos is None and span.get('number_binding') in {
+                            'single_writing_section', 'unnumbered_section', 'answer_inferred_image_group'}:
                         positions.append((n, start, 'unnumbered'))
                         continue
                     if pos is None:
@@ -1375,12 +1392,12 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
         if unit["unit_kind"] == "group":
             candidate_text = _canonical_image_text(candidate_material)
             from .question_draft import _bound_source, _rubric_lines
-            from .shared_rubric import section_rubric, phonetic_section_rubric
+            from .shared_rubric import section_rubric, native_section_rubric
             confirmed_unit = next((u for u in expected_units if source_key(u) == key), unit)
             bound, proof = _bound_source(confirmed_unit, source, cleaned, fresh)
             rubric_lines = source.splitlines() if proof.get("line_basis") == "01_source/正文.txt" else cleaned.splitlines()
             shared_rubric = (_rubric_lines(bound.splitlines(), unit.get("type") or "")
-                             or (phonetic_section_rubric(rubric_lines, confirmed_unit,
+                             or (native_section_rubric(rubric_lines, confirmed_unit,
                                                           band_evidence=lesson_bands.for_text(root, '\n'.join(rubric_lines))) if bound else [])
                              or section_rubric(rubric_lines, proof.get("start_line"), unit.get("type") or ""))
             for required in shared_rubric:

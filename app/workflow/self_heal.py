@@ -873,6 +873,11 @@ def _apply(batch, manifest, stage_id, detail, plan, attempt, snapshot):
         raise ValueError('model_authentication_requires_configuration_change: ' + stage_id)
     if runtime and stage_id in ('answers', 'types', 'explanations', 'knowledge', 'audio'):
         raise ValueError('content_runtime_requires_code_repair: ' + stage_id + ': ' + runtime)
+    if action == 'record_only' and stage_id == 'review':
+        return {'changed': False, 'status': 'refused', 'verified': False,
+                'outcome': 'repair_not_applicable', 'target_stage': stage_id,
+                'escalation': 'code_repair',
+                'reason': '审核诊断仅记录。保留候选与失败检查，交由现有运维入口处理。'}
     if action == 'record_only' and stage_id in ('answers', 'types', 'explanations', 'knowledge', 'audio'):
         return {'changed': False, 'status': 'refused', 'verified': False,
                 'outcome': 'repair_not_applicable', 'target_stage': stage_id,

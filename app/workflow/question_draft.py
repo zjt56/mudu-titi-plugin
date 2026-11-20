@@ -84,8 +84,44 @@ def _raw_fragment(raw, needle, after=0):
     if start < 0:
         return "", after
     end = start + len(needle)
-    left = offsets[start - 1] + 1 if start else 0
-    right = offsets[end] if end < len(offsets) else len(raw)
+    left_gap_start = offsets[start - 1] + 1 if start else 0
+    left_exact = offsets[start]
+    # 只吸收真正包裹 needle 的开标签（<u>/<sup>/<sub> 或成对开启的 **），
+    # 绝不把前一段（如加粗题号 **1.**）遗留在边界上的闭合标记吞进 needle 开头。
+    bold_parity = raw[:left_gap_start].count("**") % 2
+    left = left_exact
+    if left_gap_start < left_exact:
+        kept_open = None
+        for m in _MARKUP.finditer(raw, left_gap_start, left_exact):
+            tok = m.group(0)
+            if tok == "**":
+                is_open = (bold_parity == 0)
+                bold_parity ^= 1
+            else:
+                is_open = not tok.startswith("</")
+            if is_open:
+                if kept_open is None:
+                    kept_open = m.start()
+            else:
+                kept_open = None
+        if kept_open is not None:
+            left = kept_open
+    right_exact = offsets[end - 1] + 1
+    right_gap_end = offsets[end] if end < len(offsets) else len(raw)
+    right = right_exact
+    if right_exact < right_gap_end:
+        bold_parity_r = raw[:right_exact].count("**") % 2
+        for m in _MARKUP.finditer(raw, right_exact, right_gap_end):
+            tok = m.group(0)
+            if tok == "**":
+                is_close = (bold_parity_r == 1)
+                bold_parity_r ^= 1
+            else:
+                is_close = tok.startswith("</")
+            if is_close:
+                right = m.end()
+            else:
+                break
     # The source parser strips leading whitespace, including a Word blank's
     # contents. Recover its opening tag as well as the otherwise orphaned </u>.
     prefix = re.search(r"(?:<u>\s*</u>\s*)+$", raw[:offsets[start]])
@@ -388,7 +424,8 @@ def _bound_source(unit, source, cleaned, fresh):
 
 def _skeleton_text(text):
     """Normalize source layout blanks, retaining underlined nonblank words."""
-    return wire_format.normalize_blank_text(re.sub(r"<br\s*/?>", "\n", text, flags=re.I))
+    normalized = wire_format.normalize_blank_text(re.sub(r"<br\s*/?>", "\n", text, flags=re.I))
+    return re.sub(r"\t+(?=______)", " ", normalized)
 
 
 INFO_TRANSFER_BLANK = re.compile(r"<u>\s*[\u3000\xa0]*\s*(\d{1,3})\s*[\u3000\xa0]*\s*</u>")
@@ -605,8 +642,16 @@ def _standalone_marked_heading(unit, proof, source, cleaned_lines, fresh):
     heading = rows[heading_line - 1].strip()
     if heading != str(section.get("title") or "").strip():
         return ""
-    if not (source_marks(heading) or
-            span.get("number_binding") == "single_writing_section" and writing_prompt(heading)):
+    from .sync_practice import heading_hit, source_marks, writing_prompt
+    hit = heading_hit(heading) or {}
+    unnumbered_translate = (
+        span.get("number_binding") == "unnumbered_section"
+        and not section.get("ordinal")
+        and hit.get("rule") == "translate-en"
+    )
+    if not (source_marks(heading)
+            or (span.get("number_binding") == "single_writing_section" and writing_prompt(heading))
+            or unnumbered_translate):
         return ""
     return heading
 
@@ -641,7 +686,7 @@ def build(batch_dir, *, units=None):
     from . import lesson_bands
     evidence = lesson_bands.for_text(root, cleaned)
     sections = lesson_bands.annotate_sections(structure.get("sections") or [], evidence)
-    fresh = _build_units(sections, structure.get("groups") or [], cleaned.splitlines())
+    fresh = _build_units(sections, structure.get("groups") or [], cleaned.splitlines(), batch_dir=root)
     items, bindings, issues, media = [], {}, [], set()
     layout_diagnostics = []
     inspected_media = {}
@@ -691,10 +736,10 @@ def build(batch_dir, *, units=None):
                     # 完形 A/B、阅读各篇共用同一大题题干：后一篇的绑定窗口只含
                     # 自己的文章，必须补回同大题的原文导语，不能留空。
                     # 补入的导语不属于本组切片，绝不能据此截断材料正文。
-                    from .shared_rubric import section_rubric, phonetic_section_rubric
+                    from .shared_rubric import section_rubric, native_section_rubric
                     rubric_source = (source.splitlines() if proof.get("line_basis") == "01_source/正文.txt"
                                      else cleaned_lines)
-                    rubric = (phonetic_section_rubric(rubric_source, unit, band_evidence=evidence)
+                    rubric = (native_section_rubric(rubric_source, unit, band_evidence=evidence)
                               or section_rubric(rubric_source, proof.get("start_line"), unit.get("type") or ""))
                     if rubric:
                         proof["shared_rubric"] = rubric
@@ -734,7 +779,8 @@ def build(batch_dir, *, units=None):
                     row["material"] = "\n".join(body_lines[:body_first]).strip()
                 for number in unit["numbers"]:
                     part = _parts(lines, number, scoped=unit.get('identity_version') == 'scoped-v1')
-                    unnumbered = (unit.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
+                    unnumbered = (unit.get('source_span') or {}).get('number_binding') in {
+                        'unnumbered_section', 'answer_inferred_image_group'}
                     if unnumbered:
                         part = {'stem': '', 'options': [], 'found': True}
                     elif audit['shared_options']:

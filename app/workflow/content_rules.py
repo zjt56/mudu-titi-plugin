@@ -25,6 +25,29 @@ def is_placeholder(text) -> bool:
     return value == '' or value in PLACEHOLDER_TEXTS
 
 
+def boundary_guidelines_block(stage: str = "") -> str:
+    """读取生产侧与审核侧共用的高频易分歧边界口径（唯一来源：references/boundary-guidelines.json）。"""
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "references" / "boundary-guidelines.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    lines = []
+    if stage in ("", "preassemble", "types", "review"):
+        writing = data.get("writing_subtypes") or []
+        if writing:
+            lines.append("【同源边界口径·书面表达子类】" + " ".join(str(x) for x in writing))
+    if stage in ("", "knowledge", "review"):
+        phrase = data.get("phrase_knowledge_granularity") or []
+        if phrase:
+            lines.append("【同源边界口径·固定短语知识点粒度】" + " ".join(str(x) for x in phrase))
+        spelling = data.get("word_spelling_granularity") or []
+        if spelling:
+            lines.append("【同源边界口径·适当形式填词知识点粒度】" + " ".join(str(x) for x in spelling))
+    return "\n".join(lines)
+
+
 RULES = """Artifact: {items:[{unit_id,explanation:string|source_ref,articleSummary:string|source_ref,subquestions:[{number,explanation:string|source_ref}],evidence:[nonempty location strings]}]}.
 优先定位后引用原文，避免重新抄写长段解析：source_fragment_index 提供文件 path、完整文件 sha256 和原始行号。字段可返回 {"source_ref":{"path":"01_source/附录.txt","sha256":"索引中的完整摘要","start_line":12,"end_line":13,"start_column":0,"end_column":20}}；行号1起含首尾，列号0起、末列不含，列号可省略。程序逐字复制该范围后仍校验题号与材料归属；引用不证明归属。仅选择已提供的来源，不猜行号，不用确定性直抄标记。缺失仍填字符串「无」，也可沿用既有字符串格式。
 你只做匹配与定位，不判题型、不打知识点、不改答案、不改结构，也**不撰写、不生成、不推断**任何解析或文章大意。
@@ -37,9 +60,9 @@ RULES = """Artifact: {items:[{unit_id,explanation:string|source_ref,articleSumma
 听力不写内容解析：答案来自附录时 explanation 同样填「无」。
 非听力题组每个子题各自填（缺失填「无」）；独立题缺失也填「无」；articleSummary 仅在需要大意的题型填写，缺失填「无」。
 字段标题处理：原解析/原大意所在行常带【解析】【答案】【分析】【详解】【思路点拨】【文章大意】等标题；用 source_ref 指向该行即可，程序会自动去掉标题只保留正文，不要自己连标题一起抄进 explanation/articleSummary。
-书面表达：其原解析就是附录的【思路点拨】（写作指导）；用 source_ref 指向该【思路点拨】行（可含标题，程序会剥掉），逐字保留，不要改写或改写成范文。
+书面表达：其原解析就是答案区/附录的写作说明——从【思路点拨】（写作指导）起，连同【参考范文】【范文点评】等整段逐字保留（可含标题，程序会剥掉），作为 explanation；这些内容没有题号也必须抄入，不得因无法按题号绑定就留空「无」。只逐字抄录原卷确有文字，绝不自写范文或编造。
 来源优先级（用户规则，必须遵守）：以 Word 原卷/答案材料（01_source/正文.txt、01_source/materials/source.txt、01_source_ans/正文.txt、附录）为准；Word 确实没有该题解析或该篇文章大意时，才在随附 PDF/OCR 提取文本（01_source/materials/attachment_*.txt）中定位同一题/同一篇并逐字保留，evidence 注明来自 PDF；PDF 也没有时按上面规则填「无」。有 Word 时绝不用 PDF 覆盖或改写，也不得跨材料借用。
-书面表达（作文）不是客观题：没有确定答案，范文/写作指导可有可无，只要题目存在即可；不要求答案、解析或文章大意逐字绑定原文，缺失填「无」完全正常，绝不自行撰写范文或讲解。若原卷确有【参考范文】/【思路点拨】，逐字保留；无法逐字定位只会提示，不会阻断交付。
+书面表达（作文）不是客观题：没有确定答案，只要题目存在即可；不要求答案逐字绑定原文。若原卷确有【思路点拨】/【参考范文】/【范文点评】等写作说明，必须逐字抄入 explanation，不要留空（用户 2026-11-19 要求）；原卷确实没有写作说明时才填「无」。绝不自行撰写范文或讲解。
 防遗漏交付硬约束（所有入口相同，包括全量、自动并行和局部分片）：
 - 标题识别：`【解析】`、`[解析]`、`[IMG ...]解析[IMG ...]` 都是明确的文字解析标题；文章大意的对应形式同理。装饰图片不代表内容缺失或图片能力受限，不能据此填「无」。裸图片本身不提供解析含义。
 - 返回「无」之前必须核对所提供 Word 正文、附录与答案材料的本题/本篇，再按同字段查 PDF/OCR；不能只检查一种标题写法、当前页或当前切片就宣称原卷没有。已有原文即逐字保留，多行续文不得截断；重复来源副本不作为竞争者，权威原文内部冲突则如实定位，禁止选第一条、拼接或生成调和。

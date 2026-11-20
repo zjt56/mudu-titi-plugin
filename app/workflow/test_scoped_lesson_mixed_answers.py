@@ -437,5 +437,317 @@ class CompactAnswerGrammarTest(unittest.TestCase):
         self.assertEqual(dup, [1, 1])
 
 
+class BoldWrappedLessonBandBannerTest(unittest.TestCase):
+    """答案册板块横幅带 **粗体** 与中文序号前缀（一、/三、）时的识别回归。
+
+    真实批次 12七上人教版…StarterUnit3Welcome!第四课时Proj 的附录把
+    `**[IMG …]****一、重要考点集训****[IMG …]**` 当作板块横幅；旧 _LESSON_BAND 只认
+    `[IMG …]重要考点集训[IMG …]`，横幅被当游离文字把前一块判为畸形，整卷答案卡在
+    "duplicate or malformed compact answer block"。
+    """
+
+    def test_bold_and_chinese_ordinal_banners_are_recognized(self):
+        from workflow.upload_content import _LESSON_BAND, _answer_band
+        foundation = '**[IMG image158.jpeg]****一、重要考点集训****[IMG image159.jpeg]**'
+        extension = '**[IMG image158.jpeg]****三、创新阅读专练****[IMG image159.jpeg]**'
+        self.assertEqual(_LESSON_BAND.fullmatch(foundation)[1], '重要考点集训')
+        self.assertEqual(_LESSON_BAND.fullmatch(extension)[1], '创新阅读专练')
+        self.assertEqual(_answer_band(foundation), 'foundation')
+        self.assertEqual(_answer_band(extension), 'extension')
+        # 普通与 **B 能力提升** 形态仍识别；无关文字不误判。
+        self.assertEqual(_answer_band('基础巩固'), 'foundation')
+        self.assertEqual(_answer_band('**B 能力提升**'), 'extension')
+        self.assertEqual(_LESSON_BAND.fullmatch('随便一行文字'), None)
+
+    def test_band_label_and_canonical_recognize_all_wrapped_forms(self):
+        from workflow.lesson_bands import band_label, canonical_label, normalize_band_text
+        # 四类板块标签都能在 **粗体**/IMG/中文序号包裹下识别。
+        self.assertEqual(band_label('**[IMG x]****一、重要考点集训****[IMG y]**'), '重要考点集训')
+        self.assertEqual(band_label('**[IMG x]****三、创新阅读专练****[IMG y]**'), '创新阅读专练')
+        self.assertEqual(band_label('**B 能力提升**'), '能力提升')
+        self.assertEqual(band_label('A 基础巩固'), '基础巩固')
+        self.assertEqual(normalize_band_text('**[IMG x]****二、创新阅读专练****[IMG y]**'), '创新阅读专练')
+        # canonical_label 只认 A/B 一对（正文层级），不返回答案册容器标签。
+        self.assertEqual(canonical_label('**B 能力提升**'), '能力提升')
+        self.assertEqual(canonical_label('一、重要考点集训'), '')
+        # A/B 与标签冲突时 canonical 判空（语义兜底）。
+        self.assertEqual(canonical_label('A 能力提升'), '')
+
+    def test_section_ordinal_tolerates_bold_and_img_decoration(self):
+        from workflow.upload_content import _section, _ROMAN_ANSWER, _ROMAN_TITLE
+        # 粗体包裹的序号标题不再是“简单漏识别”。
+        self.assertEqual(_section('**Ⅰ. 写出下列单词**')[0], 'I.')
+        self.assertEqual(_section('**Ⅲ.** 完成句子')[0], 'III.')
+        self.assertEqual(_ROMAN_ANSWER.match('**Ⅲ.** 完成句子').group(1), 'Ⅲ')
+        self.assertEqual(_ROMAN_TITLE.match('**Ⅱ. 选词**').group(1), 'Ⅱ')
+        # 普通形态与中文序号仍照常。
+        self.assertEqual(_section('Ⅰ. 单词')[0], 'I.')
+        self.assertEqual(_section('三、创新阅读专练')[0], '三、')
+
+    def test_banner_between_blocks_does_not_poison_preceding_block(self):
+        from workflow.upload_content import _compact_answer_blocks
+        appendix = [
+            '****参考答案**',
+            '**[IMG image158.jpeg]****一、重要考点集训****[IMG image159.jpeg]**',
+            'Ⅰ.one,two,three,four,five,six,seven,eight,nine,ten',
+            'Ⅱ.1.another　2.Those　3.fun　4.count　5.his　6.sheep',
+            'Ⅲ.1.are these;They’re some boxes　2.How many apple trees　3.Look at　4.What else　5.many kinds of',
+            '**[IMG image158.jpeg]****三、创新阅读专练****[IMG image159.jpeg]**',
+            '1~5 CEDBF',
+            '6.fifteen/15　7.tidy　8.classes　9.animal　10.two/2',
+        ]
+        blocks = _compact_answer_blocks(appendix, features=())
+        # _norm 把罗马序号归一为 ASCII（Ⅰ→I）。
+        self.assertEqual([b['ordinal'] for b in blocks], ['I', 'II', 'III', None])
+        # 三、创新阅读专练 横幅夹在 Ⅲ 与尾部裸块之间，不得把 Ⅲ 判为畸形。
+        self.assertFalse(any(b['invalid'] for b in blocks), [b['invalid'] for b in blocks])
+        self.assertEqual(blocks[0]['band'], '重要考点集训')
+        self.assertEqual(blocks[3]['band'], '创新阅读专练')
+        # Ⅲ 五小题、尾部裸块十项都完整解析。
+        self.assertEqual([n for n, _, _ in blocks[2]['rows']], [1, 2, 3, 4, 5])
+        self.assertEqual([n for n, _, _ in blocks[3]['rows']], list(range(1, 11)))
+
+
+class DynamicOutlineBandAlignmentTest(unittest.TestCase):
+    """基于正文目录树动态对齐答案板块（不再依赖写死的四词白名单）。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.batch = Path(tmp.name)
+        (self.batch / '01_source').mkdir()
+        self.body = '\n'.join((
+            '第四课时　Project',
+            '**【一、A 基础达标】**',
+            '**【二、考点小结】**',
+            '知识梳理，不是题目。',
+            'Ⅰ.根据句意用所给词的适当形式填空',
+            '1. First?',
+            '2. Second?',
+            'Ⅱ.单项填空',
+            '(　)1. Choice one?',
+            '(　)2. Choice two?',
+            '**【三、B 素养提升】**',
+            '任务型阅读',
+            'Read the passage.',
+            '1. Task one?',
+            '2. Task two?',
+        )) + '\n'
+        self.appendix = '\n'.join((
+            '参考答案',
+            '**[IMG image158.jpeg]****一、基础达标****[IMG image159.jpeg]**',
+            'Ⅰ.1.apple　2.pear',
+            'Ⅱ.1~2 AB',
+            '**[IMG image158.jpeg]****三、素养提升****[IMG image159.jpeg]**',
+            '1.Yes, he does.　2.In the yard.',
+        )) + '\n'
+        lines = self.body.splitlines()
+
+        def line(text):
+            return lines.index(text) + 1
+
+        raw = [
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '单词拼写',
+             'source_span': {'start_line': line('1. First?'), 'end_line': line('2. Second?')}},
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '单项填空',
+             'source_span': {'start_line': line('(　)1. Choice one?'), 'end_line': line('(　)2. Choice two?')}},
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '任务型阅读',
+             'source_span': {'start_line': line('Read the passage.'), 'end_line': len(lines)}},
+        ]
+        self.units = assign_scoped(raw, self.body)
+        self.write_sources()
+
+    def write_sources(self):
+        (self.batch / '01_source/正文.txt').write_text(self.body, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(self.appendix, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': self.units}, ensure_ascii=False),
+            encoding='utf-8')
+
+    def test_non_whitelist_body_outline_banners_align_and_skip_empty_summary(self):
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[0], 1)['answer'], 'apple')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[0], 2)['answer'], 'pear')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[1], 1)['answer'], 'A')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[1], 2)['answer'], 'B')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[2], 1)['answer'], 'Yes, he does.')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[2], 2)['answer'], 'In the yard.')
+        payload = answers_direct.build_payload(self.batch)
+        self.assertIsNotNone(payload)
+        self.assertEqual(len(payload['answers']), 6)
+
+    def test_bracketed_and_markdown_header_banners_parse_consistently(self):
+        from workflow.upload_content import _compact_answer_blocks
+        appendix = [
+            '参考答案',
+            '## 【一、基础达标】',
+            'Ⅰ.1.apple　2.pear',
+            'Ⅱ.1~2 AB',
+            '【三、B 素养提升】',
+            '1.Yes, he does.　2.In the yard.',
+        ]
+        blocks = _compact_answer_blocks(appendix, outline_bands=('基础达标', '素养提升'))
+        self.assertFalse(any(b['invalid'] for b in blocks))
+        self.assertEqual([b['band'] for b in blocks], ['基础达标', '基础达标', '素养提升'])
+
+    def test_unknown_banner_not_in_body_outline_or_with_stray_text_still_rejected(self):
+        original = self.appendix
+        for bad in (
+            original.replace('三、素养提升', '三、课外拓展'),
+            original.replace('三、素养提升', '三、素养提升 extra'),
+            original.replace('三、素养提升', '二、考点小结'),
+        ):
+            with self.subTest(bad=bad):
+                self.appendix = bad
+                self.write_sources()
+                self.assertIsNone(resolve_scoped_answer(self.batch, self.units[2], 1))
+                self.assertIsNone(answers_direct.build_payload(self.batch))
+
+
+class TestChineseOutlineSectionWithClassicBands(unittest.TestCase):
+    """正文含中文一级大题标题（一、教材语篇回顾）+ 经典板块（二、基础巩固 Ⅰ/Ⅱ + 三、能力提升）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.batch = Path(self.tmp.name)
+        (self.batch / '01_source').mkdir(parents=True)
+        self.body = '\n'.join((
+            '九上 · 人教版 · 课时A计划',
+            '**Unit 2　Inspiring People**',
+            '**第四课时**　Section B (1a-1f)',
+            '**[IMG image9.jpg]****一、教材语篇回顾****[IMG image10.jpg]**',
+            '[IMG image28.jpg]',
+            '',
+            '**【二、A 基础巩固】**',
+            '**Ⅰ. 根据句意及汉语提示完成单词**',
+            '**1.**Drop me off near the ________(银行).',
+            '**2.**Happy and healthy ________(永远).',
+            '**Ⅱ. 单项填空**',
+            '**1.**First choice?',
+            'A.a  B.b',
+            '**2.**Second choice?',
+            'A.a  B.b',
+            '**【三、B 能力提升】**',
+            '**阅读理解[2025·四川广元改编]**',
+            'A short passage.',
+            '**1.**Question one?',
+            'A.a  B.b',
+            '**2.**Question two?',
+            'A.a  B.b',
+        )) + '\n'
+        self.appendix = '\n'.join((
+            '****参考答案**',
+            '**[IMG image85.jpg]****一、教材语篇回顾****[IMG image86.jpg]**',
+            '1.was born in　2.researching',
+            '3.lives on',
+            '**[IMG image85.jpg]****二、基础巩固****[IMG image86.jpg]**',
+            'Ⅰ.1.bank　2.forever',
+            'Ⅱ.1~2 BC',
+            '**[IMG image85.jpg]****三、能力提升****[IMG image86.jpg]**',
+            '1~2 CD',
+        )) + '\n'
+        lines = self.body.splitlines()
+
+        def line(text):
+            return lines.index(text) + 1
+
+        raw = [
+            {'numbers': [1], 'unit_kind': 'group', 'type': '教材语篇填空',
+             'source_span': {'start_line': line('[IMG image28.jpg]'), 'end_line': line('[IMG image28.jpg]') + 1,
+                             'basis': 'cleaned_source', 'number_binding': 'unnumbered_section', 'printed_numbers': []}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': line('**1.**Drop me off near the ________(银行).'),
+                             'end_line': line('**1.**Drop me off near the ________(银行).')}},
+            {'numbers': [2], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': line('**2.**Happy and healthy ________(永远).'),
+                             'end_line': line('**2.**Happy and healthy ________(永远).')}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单项填空',
+             'source_span': {'start_line': line('**1.**First choice?'), 'end_line': line('**1.**First choice?') + 1}},
+            {'numbers': [2], 'unit_kind': 'standalone', 'type': '单项填空',
+             'source_span': {'start_line': line('**2.**Second choice?'), 'end_line': line('**2.**Second choice?') + 1}},
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '阅读理解',
+             'source_span': {'start_line': line('A short passage.'), 'end_line': len(lines)}},
+        ]
+        self.units = assign_scoped(raw, self.body)
+        self.write_sources()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_sources(self):
+        (self.batch / '01_source/正文.txt').write_text(self.body, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(self.appendix, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': self.units}, ensure_ascii=False),
+            encoding='utf-8')
+
+    def test_leading_chinese_outline_section_binds_with_classic_bands(self):
+        first = resolve_scoped_answer(self.batch, self.units[0], 1)
+        self.assertEqual(first, {
+            'answer': '1.was born in　2.researching\n3.lives on',
+            'evidence': ['01_source/附录.txt:3', '01_source/附录.txt:4'],
+        })
+        validate_scoped_answer(self.batch, self.units[0], 1, first['answer'], first['evidence'])
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[1], 1)['answer'], 'bank')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[2], 2)['answer'], 'forever')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[3], 1)['answer'], 'B')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[4], 2)['answer'], 'C')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[5], 1)['answer'], 'C')
+        self.assertEqual(resolve_scoped_answer(self.batch, self.units[5], 2)['answer'], 'D')
+        payload = answers_direct.build_payload(self.batch)
+        self.assertIsNotNone(payload)
+        self.assertEqual(len(payload['answers']), 7)
+
+    def test_missing_or_mismatched_outline_or_extension_banner_stays_rejected(self):
+        original = self.appendix
+        for bad in (
+            original.replace('**[IMG image85.jpg]****一、教材语篇回顾****[IMG image86.jpg]**\n', ''),
+            original.replace('一、教材语篇回顾', '一、词汇梳理'),
+            original.replace('**[IMG image85.jpg]****三、能力提升****[IMG image86.jpg]**\n', ''),
+        ):
+            with self.subTest(bad=bad):
+                self.appendix = bad
+                self.write_sources()
+                self.assertIsNone(resolve_scoped_answer(self.batch, self.units[0], 1))
+                self.assertIsNone(resolve_scoped_answer(self.batch, self.units[5], 1))
+                self.assertIsNone(answers_direct.build_payload(self.batch))
+
+    def test_two_unnumbered_sections_in_same_band_still_rejected(self):
+        self.body += '\n'.join((
+            '**任务型阅读**',
+            'Another passage.',
+            '**1.**Task one?',
+            '**2.**Task two?',
+        )) + '\n'
+        self.appendix += '1.yes　2.no\n'
+        lines = self.body.splitlines()
+        raw = [
+            {'numbers': [1], 'unit_kind': 'group', 'type': '教材语篇填空',
+             'source_span': {'start_line': lines.index('[IMG image28.jpg]') + 1,
+                             'end_line': lines.index('[IMG image28.jpg]') + 2,
+                             'basis': 'cleaned_source', 'number_binding': 'unnumbered_section', 'printed_numbers': []}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': lines.index('**1.**Drop me off near the ________(银行).') + 1,
+                             'end_line': lines.index('**1.**Drop me off near the ________(银行).') + 1}},
+            {'numbers': [2], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': lines.index('**2.**Happy and healthy ________(永远).') + 1,
+                             'end_line': lines.index('**2.**Happy and healthy ________(永远).') + 1}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单项填空',
+             'source_span': {'start_line': lines.index('**1.**First choice?') + 1,
+                             'end_line': lines.index('**1.**First choice?') + 2}},
+            {'numbers': [2], 'unit_kind': 'standalone', 'type': '单项填空',
+             'source_span': {'start_line': lines.index('**2.**Second choice?') + 1,
+                             'end_line': lines.index('**2.**Second choice?') + 2}},
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '阅读理解',
+             'source_span': {'start_line': lines.index('A short passage.') + 1,
+                             'end_line': lines.index('**任务型阅读**')}},
+            {'numbers': [1, 2], 'unit_kind': 'group', 'type': '任务型阅读',
+             'source_span': {'start_line': lines.index('Another passage.') + 1, 'end_line': len(lines)}},
+        ]
+        self.units = assign_scoped(raw, self.body)
+        self.write_sources()
+        self.assertIsNone(resolve_scoped_answer(self.batch, self.units[5], 1))
+        self.assertIsNone(resolve_scoped_answer(self.batch, self.units[6], 1))
+
+
 if __name__ == '__main__':
     unittest.main()

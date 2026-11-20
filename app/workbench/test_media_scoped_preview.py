@@ -61,8 +61,12 @@ class ScopedImagePreviewTest(unittest.TestCase):
         for unit, image in zip(self.units, ("image2.png", "image3.png")):
             with self.subTest(image=image):
                 chunk = preview.source_slice(self.batch, [1], unit_id=unit["unit_id"])
-                self.assertEqual(chunk, [f"[IMG {image}]"])
-                self.assertEqual(server.source_blocks(chunk), [{"type": "image", "name": image}])
+                title = unit["source_section"]["title"]
+                self.assertEqual(chunk, [title, f"[IMG {image}]"])
+                self.assertEqual(server.source_blocks(chunk), [
+                    {"type": "text", "text": title},
+                    {"type": "image", "name": image},
+                ])
                 with patch.object(server, "WORKFLOWS", self.root):
                     result = server.detail("lesson", unit["unit_id"])
                     handler = object.__new__(server.Handler)
@@ -167,6 +171,73 @@ class ScopedImagePreviewTest(unittest.TestCase):
                 item = self.audit()["image2.png"]
                 self.assertEqual(item["verdict"], "header")
                 self.assertEqual(item["unit_ids"], [])
+
+    def test_decorative_heading_images_and_band_container_preserve_question_image(self):
+        lines = [
+            "九上 · 人教版 · 课时A计划",
+            "**Unit 2　Inspiring People**",
+            "**第四课时**　Section B (1a-1f)",
+            "**[IMG image9.jpg]****一、教材语篇回顾****[IMG image10.jpg]**",
+            "[IMG image28.jpg]",
+            "**【二、A 基础巩固】**",
+            "**Ⅰ. 单项填空**",
+            "1. What is it?",
+            "A. a B. b C. c D. d",
+        ]
+        self.write(self.source / "正文.txt", "\n".join(lines))
+        uid = "sec-textbook-u5"
+        unit = {
+            "identity_version": "scoped-v1",
+            "unit_id": uid,
+            "section_id": "sec-textbook",
+            "unit_kind": "group",
+            "numbers": [1],
+            "printed_number": False,
+            "type": "教材语篇填空",
+            "subtypes": ["人教版"],
+            "stem": "[IMG image28.jpg]",
+            "question_ids": {"1": f"{uid}-q1"},
+            "source_section": {
+                "title": "******一、教材语篇回顾******",
+                "ordinal": "",
+                "context": "第四课时　Section B (1a-1f)",
+                "occurrence": 1,
+                "start_line": 4,
+                "end_line": 5,
+                "lesson_container_end_line": 5,
+            },
+            "source_span": {
+                "basis": "cleaned_source",
+                "start_line": 5,
+                "end_line": 5,
+                "number_binding": "unnumbered_section",
+                "printed_numbers": [],
+            },
+        }
+        self.units = [unit]
+        self.save_confirmed()
+        item = dict(unit, id=uid, question_type=unit["type"], stem=unit["source_section"]["title"],
+                    material="", subquestions=[])
+        for name in ("batch.json", "batch_meta.json"):
+            self.write(self.batch / "06_batch" / name, {"items": [item]})
+        for image, size in (("image9.jpg", (40, 40)), ("image10.jpg", (40, 40)), ("image28.jpg", (2106, 893))):
+            (self.media / image).write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", *size))
+
+        audited = self.audit()
+        self.assertEqual(audited["image28.jpg"]["verdict"], "question")
+        self.assertEqual(audited["image28.jpg"]["unit_ids"], [uid])
+        self.assertEqual(audited["image9.jpg"]["verdict"], "header")
+        self.assertEqual(audited["image9.jpg"]["unit_ids"], [])
+        self.assertEqual(audited["image10.jpg"]["verdict"], "header")
+        self.assertEqual(audited["image10.jpg"]["unit_ids"], [])
+
+        with patch.object(server, "WORKFLOWS", self.root):
+            result = server.detail("lesson", uid)
+        self.assertEqual(result["hidden_media"], [])
+        image_blocks = [b for b in result["preview_blocks"] if b.get("type") == "image"]
+        self.assertEqual(len(image_blocks), 1)
+        self.assertEqual(image_blocks[0]["name"], "image28.jpg")
+        self.assertIn("/media/image28.jpg", image_blocks[0]["url"])
 
 
 if __name__ == "__main__":

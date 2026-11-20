@@ -1,5 +1,15 @@
-"""Source-backed section instructions shared by cloze/reading groups."""
+"""Source-backed instructions shared by questions in a section."""
 import re
+
+GROUP_MATERIAL_RULE = (
+    "【题组共享材料】按当前原卷的完整题组窗口，核对共享文字、表格、图片或音频的实际归属，"
+    "并核对组级作答导语与全部成员小题。仅当原卷和题型契约证明本组无需共享文字，"
+    "且当前阶段要求的其余内容均已交付时，才允许 material 为空。"
+    "同组已绑定的原生图片附件或结构化表格可承载共享材料，子题图、装饰图或邻组附件不可替代。"
+    "阶段尚未交付的音频按听力契约处理，不据此报文字缺失。"
+    "真实缺失或错绑须指出单元 ID、原文位置、具体缺项及首个有证据的丢失或覆盖环节。"
+    "仅按唯一来源恢复受影响单元，同证据不原样重试，不造占位、不跨题借用，也不按批次或题号特判。"
+)
 
 SECTION_LEAD = re.compile(r"^\s*第[一二三四五六七八九十百零]+\s*(?:部分|节)\s*")
 _TYPES = {"完形填空", "语法选择", "阅读理解", "任务型阅读"}
@@ -18,19 +28,29 @@ def instruction(line, kind=""):
                 or re.match(r"(?:将答案填写|答案写在|从每小题所给)", text))
 
 
-def phonetic_section_rubric(lines, unit, *, band_evidence=None):
-    """Bind a whole scoped phonetic/legitimate unnumbered group's real heading.
+def picture_sentence_group(unit):
+    """Identify the existing lesson rule for completing sentences from a picture."""
+    from .sync_practice import heading_hit
+    hit = heading_hit((unit.get("source_section") or {}).get("title") or "") or {}
+    return (unit.get("unit_kind") == "group" and unit.get("type") == "完成句子"
+            and hit.get("rule") == "sentence-picture")
 
-    Keep the historical entry point shared by draft creation and source audit.
-    Non-phonetic use requires the central legitimate-source-shape classifier;
-    a type label or an arbitrary empty group is never sufficient.
-    """
+
+def native_section_rubric(lines, unit, *, band_evidence=None):
+    """Bind the printed heading of an intact, scoped source group."""
     from .question_content import legitimate_source_shape
-    native_alias = (unit.get('unit_kind') == 'group' and unit.get('numbers') == [1]
-                    and (unit.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
-                    and legitimate_source_shape(unit) in {'image_only', 'unnumbered_no_image'})
+    span_binding = (unit.get('source_span') or {}).get('number_binding')
+    native_alias = (unit.get('unit_kind') == 'group'
+                    and (
+                        (unit.get('numbers') == [1] and span_binding == 'unnumbered_section'
+                         and legitimate_source_shape(unit) in {'image_only', 'unnumbered_no_image'})
+                        or (span_binding == 'answer_inferred_image_group'
+                            and bool(unit.get('numbers'))
+                            and legitimate_source_shape(unit) == 'image_only')
+                    ))
+    picture = picture_sentence_group(unit)
     if (unit.get("identity_version") != "scoped-v1"
-            or unit.get('type') != '语音题' and not native_alias):
+            or unit.get('type') != '语音题' and not native_alias and not picture):
         return []
     section, span = unit.get("source_section") or {}, unit.get("source_span") or {}
     heading, first, last = section.get("start_line"), span.get("start_line"), span.get("end_line")
@@ -38,31 +58,38 @@ def phonetic_section_rubric(lines, unit, *, band_evidence=None):
             or not all(type(n) is int for n in (heading, first, last, section.get("end_line")))
             or not 1 <= heading < first <= last <= section["end_line"] <= len(lines)):
         return []
-    title = str(section.get("title") or "")
-    if not title or lines[heading - 1].strip() != title.strip():
+    from .lesson_bands import annotate_sections, strip_decorative_images
+
+    title = strip_decorative_images(section.get("title") or "")
+    heading_text = strip_decorative_images(lines[heading - 1])
+    if not title or heading_text != title:
         return []
     # Reconstruct the owner independently: persisted section end/span cannot
     # extend this instruction into the next exercise or answer appendix.
     from .sync_practice import heading_candidates
-    from .lesson_bands import annotate_sections
     owners = [row for row in annotate_sections(heading_candidates("\n".join(lines)), band_evidence or {})
               if row["start_line"] == heading]
     if (len(owners) != 1 or owners[0]['type'] != unit.get('type')
             or owners[0]['kind'] != 'group'
-            or owners[0]["title"] != title
+            or strip_decorative_images(owners[0]["title"]) != title
             or owners[0]["end_line"] != section["end_line"]
             or last > owners[0]["end_line"]):
         return []
-    # A phonetic exercise is the whole section, not a partial group selected
-    # from its children. Empty margins are harmless; substantive omitted lines
-    # and repeated/missing printed numbers cannot authorize an exception.
+    # Prove whole-section ownership. Empty margins are harmless; omitted
+    # content and repeated or missing printed numbers are rejected.
     if any(line.strip() for line in lines[heading:first - 1] + lines[last:section["end_line"]]):
         return []
     from .question_identity import printed_anchors
-    printed = [number for _, number in printed_anchors(lines[heading:section["end_line"]])]
+    body = lines[heading:section["end_line"]]
+    anchors = printed_anchors(body)
+    printed = [number for _, number in anchors]
+    if picture:
+        if not anchors or not any(re.fullmatch(r"\s*\[IMG\s+[^\]]+\]\s*", line)
+                                  for line in body[:anchors[0][0]]):
+            return []
     if printed and sorted(printed) != sorted(int(n) for n in unit.get("numbers") or []):
         return []
-    return [lines[heading - 1]]
+    return [heading_text]
 
 
 def section_rubric(lines, start_line, kind=""):

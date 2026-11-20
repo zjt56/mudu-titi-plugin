@@ -38,8 +38,9 @@ class MediaTransferTests(unittest.TestCase):
                                  batch_id=kwargs.get('batch_id', 'batch-one'))
 
     def test_windows_local_root_reads_without_posix_flags(self):
-        self.patches[2].stop()
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmp:
+        for p in self.patches[:3]:
+            p.stop()
+        with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, 'batch')
             os.makedirs(os.path.join(root, '06_batch'))
             path = os.path.join(root, '06_batch', 'batch_meta.json')

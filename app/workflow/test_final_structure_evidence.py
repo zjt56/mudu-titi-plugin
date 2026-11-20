@@ -77,6 +77,39 @@ class FinalStructureEvidenceTest(unittest.TestCase):
         self.assertEqual(warnings[0]['code'], 'QUESTION_NUMBER_INFERRED')
         self.assertFalse(warnings[0]['blocking'])
 
+    def scoped_units(self):
+        return {'units': [
+            {'unit_id': 'u-7', 'unit_kind': 'group', 'numbers': [1, 2],
+             'identity_version': 'scoped-v1', 'section_id': 'sec-a',
+             'source_span': {'start_line': 7, 'end_line': 40},
+             'source_section': {'start_line': 6, 'end_line': 40, 'occurrence': 1}},
+            {'unit_id': 'u-42', 'unit_kind': 'group', 'numbers': [1, 2],
+             'identity_version': 'scoped-v1', 'section_id': 'sec-b',
+             'source_span': {'start_line': 42, 'end_line': 51},
+             'source_section': {'start_line': 41, 'end_line': 51, 'occurrence': 2}},
+        ]}
+
+    def test_scoped_section_restart_is_warning_not_error(self):
+        (self.root / '01_source/structure.confirmed.json').write_text(
+            json.dumps(self.scoped_units()), encoding='utf-8')
+        self.write_report([{'code': 'NUMBERING_RESTART', 'message': '题号跨大题重置',
+                            'source_line': 46, 'blocking': False}])
+        errors, warnings = final_audit.structure_evidence(self.root, self.manifest, dict(self.hashes))
+        self.assertEqual(errors, [])
+        self.assertEqual(warnings[0]['code'], 'NUMBERING_RESTART')
+        self.assertFalse(warnings[0]['blocking'])
+
+    def test_restart_without_section_partition_proof_stays_blocking(self):
+        confirmed = self.scoped_units()
+        confirmed['units'][1]['source_span'] = {'start_line': 41, 'end_line': 51}
+        (self.root / '01_source/structure.confirmed.json').write_text(
+            json.dumps(confirmed), encoding='utf-8')
+        self.write_report([{'code': 'NUMBERING_RESTART', 'message': '题号跨大题重置',
+                            'source_line': 46, 'blocking': False}])
+        errors, _ = final_audit.structure_evidence(self.root, self.manifest, dict(self.hashes))
+        self.assertEqual(errors[0]['code'], 'NUMBERING_RESTART')
+        self.assertTrue(errors[0]['blocking'])
+
     def test_format_gate_reports_deferred_structure_issue(self):
         from workflow import format_gate
         self.write_report([{'code': 'GROUP_OUT_OF_SECTION', 'message': '跨大题', 'source_line': 3}])

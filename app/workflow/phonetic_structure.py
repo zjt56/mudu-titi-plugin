@@ -1,4 +1,4 @@
-"""Current-source proof for phonetic and legitimate unnumbered native groups."""
+"""Current-source proof for groups supported by printed instructions and native media."""
 from pathlib import Path
 import re
 from urllib.parse import unquote, urlsplit
@@ -29,12 +29,18 @@ def verified_groups(batch_path):
     from .agent_tasks import confirmed_units
     from collections import Counter
     from .question_content import legitimate_source_shape
+    from .shared_rubric import picture_sentence_group
     try:
         eligible = {u['unit_id']: u.get('type') for u in confirmed_units(root)
-                    if u.get('type') == '语音题' or (
-                        u.get('unit_kind') == 'group' and u.get('numbers') == [1]
-                        and (u.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
-                        and legitimate_source_shape(u) in {'image_only', 'unnumbered_no_image'})}
+                    if u.get('type') == '语音题' or picture_sentence_group(u) or (
+                        u.get('unit_kind') == 'group' and (
+                            (u.get('numbers') == [1]
+                             and (u.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
+                             and legitimate_source_shape(u) in {'image_only', 'unnumbered_no_image'})
+                            or ((u.get('source_span') or {}).get('number_binding') == 'answer_inferred_image_group'
+                                and bool(u.get('numbers'))
+                                and legitimate_source_shape(u) == 'image_only')
+                        ))}
         if not eligible:
             return {}
         draft = question_draft.build(root)
@@ -63,6 +69,16 @@ def verified_groups(batch_path):
     except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, IndexError):
         # Missing or malformed current evidence cannot grant a shape exemption.
         return {}
+
+
+def verified_picture_headings(root, units):
+    from .shared_rubric import picture_sentence_group
+
+    ids = {unit['unit_id'] for unit in units if picture_sentence_group(unit)}
+    if not ids:
+        return {}
+    return {uid: item['stem'] for uid, item in verified_groups(Path(root) / '06_batch/batch.json').items()
+            if uid in ids}
 
 
 def shape(unit, verified=None):
@@ -121,9 +137,16 @@ def shape(unit, verified=None):
                and source_url(a)}
     if not images.issubset(present):
         return False, False
-    alias = (len(subs) == 1 and expected.get('printed_numbers') == []
+    if expected.get("_source_question_type") == "完成句子":
+        actual = [a for a in unit.get("attachments") or []
+                  if isinstance(a, dict) and a.get("kind") == "image" and a.get("placement") == "question"]
+        return bool(images and images == present and len(actual) == len(images)), False
+    binding = expected.get('source_span', {}).get('number_binding')
+    alias = ((
+        (len(subs) == 1 and binding == 'unnumbered_section')
+        or (len(subs) >= 1 and binding == 'answer_inferred_image_group' and bool(images))
+    ) and expected.get('printed_numbers') == []
              and unit.get('printed_numbers') == [] and unit.get('source_span') == expected.get('source_span')
-             and expected.get('source_span', {}).get('number_binding') == 'unnumbered_section'
              and (bool(images) or bool(str(expected.get('material') or '').strip())))
     def source_choices_only(child, allowed=(4,)):
         # This exception is source-proven, not an invitation to erase stems:

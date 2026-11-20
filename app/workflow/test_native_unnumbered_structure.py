@@ -290,5 +290,79 @@ class A8SelfContainedGroupTest(unittest.TestCase):
         self.assertTrue(self.a8(unit))
 
 
+class DecoratedHeadingUnnumberedImageGroupTest(unittest.TestCase):
+    """带装饰图的中文一级大题标题（如 **[IMG]****一、教材语篇回顾****[IMG]**）无号纯图组题不误报 A8/A9。"""
+
+    def test_decorated_chinese_heading_unnumbered_image_group_verifies(self):
+        temporary = tempfile.TemporaryDirectory(prefix="decorated-unnumbered-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        text = "\n".join((
+            "九上 · 人教版 · 课时A计划",
+            "**Unit 2　Inspiring People**",
+            "**第四课时**　Section B (1a-1f)",
+            "**[IMG image9.jpg]****一、教材语篇回顾****[IMG image10.jpg]**",
+            "[IMG image28.jpg]",
+            "",
+            "**【二、A 基础巩固】**",
+            "**Ⅰ. 根据句意及汉语提示完成单词**",
+            "**1.**Drop me off near the ________(银行).",
+        ))
+        structure, extracted, _ = extract.infer_structure(text)
+        cleaned = denoise.clean_body(extracted)[0]
+        units = structure_gate._build_units(structure["sections"], structure["groups"], cleaned.splitlines())
+        # 模拟结构确认已剥离标题装饰图
+        units[0]["source_section"]["title"] = "******一、教材语篇回顾******"
+        (root / "01_source/media").mkdir(parents=True)
+        (root / "01_source/正文.txt").write_text(cleaned, encoding="utf-8")
+        (root / "01_source/structure.json").write_text(json.dumps(structure, ensure_ascii=False), encoding="utf-8")
+        (root / "01_source/structure.confirmed.json").write_text(
+            json.dumps({"identity_version": "scoped-v1", "units": units}, ensure_ascii=False), encoding="utf-8")
+        (root / "01_source/media/image28.jpg").write_bytes(b"synthetic-image")
+
+        draft = question_draft.build(root)
+        self.assertEqual(draft["issues"], [])
+        first = draft["items"][0]
+        self.assertEqual(first["stem"], "******一、教材语篇回顾******")
+        self.assertEqual([a["name"] for a in first["attachments"]], ["image28.jpg"])
+        first["question_type"] = units[0]["type"]
+        first["difficulty"] = "适中"
+        first["subquestions"][0]["answer"] = "1.was born in"
+        (root / "06_batch").mkdir(parents=True)
+        batch_path = root / "06_batch/batch.json"
+        batch_path.write_text(json.dumps({"items": draft["items"]}, ensure_ascii=False), encoding="utf-8")
+
+        verified = phonetic_structure.verified_groups(batch_path)
+        self.assertIn(units[0]["unit_id"], verified)
+        self.assertEqual(phonetic_structure.shape(first, verified), (True, True))
+
+        path = Path(__file__).parents[1] / "scripts/06-upload/check_structure.py"
+        spec = importlib.util.spec_from_file_location("decorated_check_structure", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        problems = module._check_unit(first, verified)
+        self.assertFalse(any("[A8]" in p or "[A9]" in p for p in problems), problems)
+
+        # 同时验证 source_audit：位于首个板块横幅之前的大题带有 lesson_container_end_line，
+        # _rebuild_source_units 必须与 structure_gate 保持一致，不得误报 BATCH_IDENTITY_MISMATCH。
+        from workflow import lesson_bands
+        ev = lesson_bands.for_text(root, cleaned)
+        for u in units:
+            sec = u.get("source_section") or {}
+            ann = lesson_bands.annotate_sections([sec], ev)[0]
+            if ann != sec:
+                u["source_section"] = ann
+        (root / "01_source/structure.confirmed.json").write_text(
+            json.dumps({"identity_version": "scoped-v1", "units": units}, ensure_ascii=False), encoding="utf-8")
+        draft2 = question_draft.build(root)
+        for item, u in zip(draft2["items"], units):
+            item["question_type"] = u["type"]
+            item["difficulty"] = "适中"
+            for child in item.get("subquestions") or []:
+                child["answer"] = "1.was born in"
+        audit = question_content.audit_batch_source(root, {"items": draft2["items"]})
+        self.assertTrue(audit["passed"], audit)
+
+
 if __name__ == "__main__":
     unittest.main()

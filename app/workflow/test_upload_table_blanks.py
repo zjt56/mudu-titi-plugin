@@ -48,3 +48,17 @@ class UploadTableBlanksTest(fixtures.TableBlankStructureTest):
         with patch('workflow.table_structure.verified_groups', return_value=proof):
             result = self.payload()
         self.assertTrue(any(e['code'] == 'MISSING_STEM' and e['unit_id'].endswith('/6') for e in result['errors']))
+
+    def test_transport_projects_literal_underscore_table_blanks(self):
+        proof = self.verified()
+        uid = self.row['unit_id']
+        for n in range(6, 11):
+            proof[uid]['blanks'][n]['marker'] = proof[uid]['blanks'][n]['marker'].replace(
+                f'{n}.<u>\u3000</u>', f'{n}.________')
+        with patch('workflow.table_structure.verified_groups', return_value=proof):
+            result = self.payload()
+        children = result['payload']['items'][0]['subquestions']
+        self.assertEqual([c['stem'] for c in children[5:]], [f'{n}.______' for n in range(6, 11)])
+        self.assertFalse(any(e['code'] == 'MISSING_STEM' for e in result['errors']), result['errors'])
+        changes = [w for w in result['warnings'] if w['code'] == 'TABLE_BLANK_STEM_PROJECTED']
+        self.assertEqual(len(changes), 5)

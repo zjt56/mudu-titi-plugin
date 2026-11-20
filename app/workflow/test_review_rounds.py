@@ -612,6 +612,105 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(report.get('part_completed'), 1)
         self.assertEqual(report.get('action'), 'continue')
 
+    def test_inapplicable_answer_points_are_projected_at_import(self):
+        self._parallel_batch()
+        first = review_rounds.export_task(self.batch, max_units_per_part=1)
+        task = json.loads((Path(first['package_dir']) / 'task.json').read_text())
+        response = self._part_response(task['prompt'], 'labels')
+        assessment = response['artifacts']['review_round']['checks'][0]['assessment']
+        assessment.update(type='完成句子', subtypes=['汉语提示'],
+                          knowledge=['语法/动词/系动词/be动词'], answer_points=['You are'])
+        report = review_rounds.import_result(self.batch, first['task_id'], response)
+        self.assertEqual(report.get('part_completed'), 1)
+        binding = review_rounds._check_bound_inputs(self.batch, first['task_id'])
+        state = json.loads((self.batch / binding['state_path']).read_text())
+        saved = state['completed'][0]['checks'][0]['assessment']
+        self.assertEqual(saved, {**assessment, 'answer_points': []})
+        raw = next((self.batch / 'workflow/review-raw-results' / first['task_id']).glob('*.json'))
+        self.assertEqual(json.loads(raw.read_text()), response)
+        self.assertEqual(review_rounds.import_result(self.batch, first['task_id'], response), report)
+        while report.get('round_completed') != 'labels':
+            next_part = review_rounds.export_task(self.batch, max_units_per_part=1)
+            next_prompt = review_rounds._check_bound_inputs(self.batch, next_part['task_id'])['task']['prompt']
+            report = review_rounds.import_result(self.batch, next_part['task_id'],
+                                                 self._part_response(next_prompt, 'labels'))
+        while not report.get('completed'):
+            next_part = review_rounds.export_task(self.batch, max_units_per_part=1)
+            next_prompt = review_rounds._check_bound_inputs(self.batch, next_part['task_id'])['task']['prompt']
+            report = review_rounds.import_result(self.batch, next_part['task_id'],
+                                                 self._part_response(next_prompt, 'sample'))
+        evaluated = review.evaluate_rounds(self.batch)
+        self.assertTrue(evaluated['execution_completed'])
+        self.assertTrue(any(f['unit_id'] == response['artifacts']['review_round']['checks'][0]['unit_id']
+                            for f in evaluated['findings']), evaluated['findings'])
+
+    def test_word_choice_cloze_answer_points_are_stripped_across_review_rounds(self):
+        checks = [
+            {
+                'unit_id': 'u-wc',
+                'verdict': 'ok',
+                'assessment': {
+                    'type': '选词填空',
+                    'subtypes': ['方框选词'],
+                    'knowledge': ['语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/日常起居'],
+                    'subquestions': [],
+                    'answer_points': ['happy', 'quickly'],
+                },
+            },
+            {
+                'unit_id': 'u-tb',
+                'verdict': 'ok',
+                'assessment': {
+                    'type': '教材语篇填空',
+                    'subtypes': ['人教版'],
+                    'knowledge': ['语篇体裁/说明文/介绍类短文', '主题/人与自我/生活与学习/学习方法'],
+                    'subquestions': [],
+                    'answer_points': ['remember', 'wisely'],
+                },
+            },
+        ]
+        projected = review_rounds._project_review_answer_points(checks)
+        self.assertEqual(projected[0]['assessment']['answer_points'], [])
+        self.assertEqual(projected[1]['assessment']['answer_points'], [])
+        for rid in review.ROUND_IDS:
+            prompt = review_rounds._round_prompt(rid, [], '{}')
+            self.assertIn('完成句子、短文填空、选词填空、教材语篇填空等未配置答案考点的题型填 []', prompt)
+            self.assertIn('完成句子、短文填空、选词填空和教材语篇填空均不把答案词或短语作为答案考点标签', prompt)
+
+    def test_repair_json_error_retries_only_failed_targets_once(self):
+        self._parallel_batch()
+        first = review_rounds.export_task(self.batch, max_units_per_part=2)
+        task = json.loads((Path(first['package_dir']) / 'task.json').read_text())
+        bad = self._part_response(task['prompt'], 'labels')
+        checks = bad['artifacts']['review_round']['checks']
+        checks[0]['evidence'][0]['quote'] = '这句话原文里并不存在'
+        with self.assertRaises(review.RoundCheckError):
+            review_rounds.import_result(self.batch, first['task_id'], bad)
+        attempts = []
+
+        def repair(prompt, run_dir, config, permit_parallel=False):
+            attempts.append(run_dir)
+            fixed = self._part_response(prompt, 'labels')
+            self.assertEqual([c['unit_id'] for c in fixed['artifacts']['review_round']['checks']],
+                             [checks[0]['unit_id']])
+            if len(attempts) == 1:
+                from workflow.local_agent import _parse_response
+                # Replay a redundant closing brace inside the checks array.
+                raw = json.dumps(fixed, separators=(',', ':'))
+                malformed = raw.replace(']}}]', ']}}}]', 1)
+                self.assertNotEqual(malformed, raw)
+                (run_dir / 'stdout.log').write_text(malformed, encoding='utf-8')
+                _parse_response(malformed, strict=True)
+                self.fail('Malformed response was accepted')
+            self.assertIn('补审响应无法解析', prompt)
+            return {'response': fixed}
+
+        with patch.object(review_rounds, 'invoke', side_effect=repair) as invoke:
+            report = review_rounds._repair_round(self.batch, first['task_id'], {'provider': 'fixture'})
+        self.assertEqual(invoke.call_count, 2)
+        self.assertNotEqual(*attempts)
+        self.assertEqual(report.get('part_completed'), 1)
+
     def test_hidden_labels_trigger_real_local_repair_and_keep_other_checks(self):
         self._parallel_batch()
         first = review_rounds.export_task(self.batch, max_units_per_part=2)

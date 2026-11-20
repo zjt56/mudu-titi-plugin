@@ -63,7 +63,7 @@ def _strong_number(line: str) -> int | None:
 #   ② 题号在空位前（补全对话/信息转换）：「2.　　」「Tony.1.____」，题号后必须确有
 #      空档标记（全角空格/下划线/__），才不会吞掉普通句号后的数字（如 "No.5"）。
 _BLANK_BEFORE_NUMBER = re.compile(r"(?:\u3000|__|_{1,})\s*(\d{1,3})(?![\d.．:：、)])")
-_NUMBER_BEFORE_BLANK = re.compile(r"(?<!\d)(\d{1,3})\s*[.．]\s*(?=(?:[A-Za-z])?(?:\u3000|__|_))")
+_NUMBER_BEFORE_BLANK = re.compile(r"(?<!\d)(\d{1,3})\s*[.．]\s*(?=(?:[A-Za-z]\s*)?(?:\u3000|__|_))")
 # 图注空：`N.[IMG …](提示)`。图片紧跟括号提示才是一个需要填写的空；孤立
 # `N.[IMG …]`（选项图/引用）不算小题号——与 extract.IMAGE_HINT_BLANK 同源。
 _IMAGE_HINT_BLANK = re.compile(
@@ -227,13 +227,24 @@ def slice_text(lines: list[str], number: int) -> list[str]:
 
     chunk.append(lines[start])
     for line in lines[start + 1:]:
-        if SECTION.match(_plain(line)) or LEADIN.match(_plain(line)) or material_label(line):
+        if SECTION.match(_plain(line)) or LEADIN.match(_plain(line)) or material_label(line) or _is_band_heading(line):
             break
         found = _start_number(line)
         if found is not None and found != number:
             break
         chunk.append(line)
     return [line.rstrip() for line in chunk if line.strip()]
+
+
+def _is_band_heading(text: str) -> bool:
+    """板块栏目标题（A/B 基础巩固/能力提升、重要考点集训/创新阅读专练 及通用栏目横幅）。
+
+    这只是板块分隔标识，用于切分与归属，本身不是题目/材料内容——预览切片必须把它
+    当边界并排除，不能显示在上一题题干后面（用户 2026-11-19 反馈）。
+    容忍 ** 粗体、[IMG] 标记、中文序号前缀与【】/[] 包裹。
+    """
+    from .lesson_bands import is_column_banner
+    return is_column_banner(text)
 
 
 def slice_range(lines: list[str], numbers) -> list[str]:
@@ -278,7 +289,8 @@ def slice_range(lines: list[str], numbers) -> list[str]:
             top = target
             cursor = target - 1
             continue
-        if SECTION.match(text) or _strong_number(text) is not None or BARE_OPTION.match(text):
+        if (SECTION.match(text) or _is_band_heading(text)
+                or _strong_number(text) is not None or BARE_OPTION.match(text)):
             break
         # 表格前的备注/说明（如 `※Notes：1.…`）属于本组材料，弱题号不构成其他题。
         top = cursor
@@ -299,7 +311,10 @@ def slice_range(lines: list[str], numbers) -> list[str]:
         if plain.startswith("[TABLE"):
             in_table = True
         if not in_table:
-            if cursor > top and (SECTION.match(plain) or (cursor > start and material_label(plain))):
+            # 板块栏目标题（如 【三、B 创新阅读专练】）是容器分隔，不是题目/材料内容：
+            # 遇到即结束当前片段，且不纳入 out。
+            if cursor > top and (_is_band_heading(plain) or SECTION.match(plain)
+                                 or (cursor > start and material_label(plain))):
                 break
             if cursor > start and LEADIN.match(plain) and not guide_numbers(line):
                 break
@@ -323,6 +338,9 @@ def slice_range(lines: list[str], numbers) -> list[str]:
         if not line.strip():
             continue
         if not in_table and material_label(line):
+            continue
+        # 板块栏目标题不是正文，绝不纳入预览内容。
+        if not in_table and _is_band_heading(plain):
             continue
         out.append(line.rstrip())
         if plain.startswith("[/TABLE]"):
@@ -360,10 +378,10 @@ def _scoped_source_slice(unit: dict, lines: list[str], *, batch_dir=None) -> lis
     if not wanted or compact.count(wanted) != 1:
         return []
     if unit.get("unit_kind") == "group":
-        from .shared_rubric import phonetic_section_rubric
+        from .shared_rubric import native_section_rubric
         from . import lesson_bands
         evidence = lesson_bands.for_text(batch_dir, "\n".join(lines)) if batch_dir is not None else {}
-        selected = phonetic_section_rubric(lines, unit, band_evidence=evidence) + window
+        selected = native_section_rubric(lines, unit, band_evidence=evidence) + window
     else:
         offset = compact.index(wanted)
         selected = window[owners[offset]:owners[offset + len(wanted) - 1] + 1]
@@ -374,7 +392,10 @@ def _scoped_source_slice(unit: dict, lines: list[str], *, batch_dir=None) -> lis
                 heading = lines[start - 2].strip()
                 if heading == section.get("title") and writing_prompt(heading):
                     selected = [heading, *selected]
-    return [line.rstrip() for line in selected if line.strip()]
+    # 板块栏目标题（如 【三、B 创新阅读专练】）只是容器分隔，可能落在确认窗口/题组
+    # 导语里，但绝不能作为预览内容显示。此处统一剔除，避免混进上一题题干（用户 2026-11-19）。
+    return [line.rstrip() for line in selected
+            if line.strip() and not _is_band_heading(line)]
 
 
 def source_slice(batch_dir, numbers, lines: list[str] | None = None, *, unit_id=None) -> list[str]:
@@ -430,7 +451,7 @@ def source_slice(batch_dir, numbers, lines: list[str] | None = None, *, unit_id=
         raw = "\n".join(lines)
         cleaned, meta, _ = denoise.clean_body(raw)
         structure = denoise.project_structure(structure, raw, cleaned)
-        units = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
+        units = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines(), batch_dir=root)
         matches = [u for u in units if u.get("numbers") == nums
                    and u.get("type") == "书面表达"
                    and u.get("source_span", {}).get("number_binding") == "single_writing_section"]
@@ -562,7 +583,7 @@ def source_group_candidates(batch_dir: Path, items: list[dict]) -> list[dict]:
         structure = json.loads((root / "01_source/structure.json").read_text(encoding="utf-8-sig"))
         cleaned, _, _ = denoise.clean_body(raw)
         structure = denoise.project_structure(structure, raw, cleaned)
-        units = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines())
+        units = structure_gate._build_units(structure.get("sections") or [], structure.get("groups") or [], cleaned.splitlines(), batch_dir=root)
     except (OSError, ValueError, TypeError, KeyError):
         return items
     result = []
@@ -642,8 +663,11 @@ def _rows_from_batch(batch_dir: Path, review_rows: list[dict]) -> list[dict] | N
             resolved.extend(r.get("resolved") or [])
         label = str(nums[0]) if len(nums) == 1 else f"{nums[0]}–{nums[-1]}"
         printed_numbers = item.get("printed_numbers", (item.get("source_span") or {}).get("printed_numbers"))
-        if scoped and printed_numbers == []:
+        binding = (item.get("source_span") or {}).get("number_binding")
+        if scoped and printed_numbers == [] and binding != "answer_inferred_image_group":
             label = str((item.get("source_section") or {}).get("title") or "无印刷题号")
+        filters = item.get("filterMetadata") if isinstance(item.get("filterMetadata"), dict) else {}
+        item_subtypes = item.get("subtypes") if isinstance(item.get("subtypes"), list) else filters.get("subtypes")
         rows.append({
             "unit_id": uid if scoped else item.get("id", ""),
             **{key: item[key] for key in ("identity_version", "section_id", "source_section", "question_ids", "printed_numbers") if key in item},
@@ -653,7 +677,8 @@ def _rows_from_batch(batch_dir: Path, review_rows: list[dict]) -> list[dict] | N
             "numbers": nums,
             "unit_kind": item.get("unit_kind", "standalone"),
             "type": item.get("type") or item.get("question_type", ""),
-            **{key: item[key] for key in ("subtype", "subtypes") if key in item},
+            **({"subtype": item["subtype"]} if "subtype" in item else {}),
+            **({"subtypes": item_subtypes} if isinstance(item_subtypes, list) else {}),
             "answer": item.get("answer", ""),
             "difficulty": item.get("difficulty", ""),
             "knowledge": _short_knowledge_list(item.get("knowledge")),
