@@ -274,18 +274,102 @@ def local_preflight(batch_dir) -> dict:
     return report
 
 
-def prepare(batch_dir, *, catalog=None, config=None, check_media=True, **options):
+def _find_active_container_id(snapshot: dict, container_path: str) -> str | None:
+    """在目录快照中唯一定位启用容器节点（如 词汇/考察词汇）的 ID。"""
+    parts = [p.strip() for p in container_path.split("/") if p.strip()]
+    points = snapshot.get("points") if isinstance(snapshot, dict) else None
+    if not parts or not isinstance(points, list):
+        return None
+    def _is_active(point: dict) -> bool:
+        val = point.get("active", True)
+        return val is True or val == 1
+    parent_id = None
+    for part in parts:
+        matches = [p for p in points if isinstance(p, dict)
+                   and _is_active(p)
+                   and (p.get("parent_id") or None) == parent_id
+                   and isinstance(p.get("name"), str) and p["name"].strip() == part]
+        if len(matches) != 1 or not isinstance(matches[0].get("id"), str) or not matches[0]["id"].strip():
+            return None
+        parent_id = matches[0]["id"]
+    return parent_id
+
+
+def _pending_answer_point_names(snapshot: dict, source: dict, batch: Path):
+    """返回 (version_id, parent_id, missing_names)，不执行任何远端写入。"""
+    needed = upload_payload.collect_answer_point_names(source, batch)
+    if not needed:
+        return None, None, []
+    version = snapshot.get("version") if isinstance(snapshot, dict) else None
+    version_id = version.get("id") if isinstance(version, dict) else None
+    if not isinstance(version_id, str) or not version_id.strip():
+        return None, None, []
+    parent_id = _find_active_container_id(snapshot, upload_payload.ANSWER_POINT_CONTAINER_PATH)
+    if not parent_id:
+        return version_id, None, []
+    existing_by_name = {}
+    for point in snapshot.get("points") or []:
+        if (isinstance(point, dict) and point.get("parent_id") == parent_id
+                and isinstance(point.get("name"), str) and point["name"].strip()):
+            existing_by_name[point["name"].strip()] = point
+    missing = [name for name in needed if name not in existing_by_name]
+    return version_id, parent_id, missing
+
+
+def _ensure_answer_points_in_catalog(client, snapshot: dict, source: dict, batch: Path):
+    """在线准备上传时，对「词汇/考察词汇」下缺失的答案考点词条调用 ensure 幂等批量注册。"""
+    version_id, parent_id, missing = _pending_answer_point_names(snapshot, source, batch)
+    if not version_id or not parent_id or not missing:
+        return snapshot, []
+    reason = f"answer_point_tags:{batch.name}"
+    idem_key = "ap-ensure-" + _sha(_bytes({
+        "version_id": version_id,
+        "parent_id": parent_id,
+        "names": missing,
+        "reason": reason,
+    }))[:32]
+    ensured = client.ensure_knowledge_points(
+        version_id,
+        parent_id,
+        missing,
+        reason=reason,
+        idempotency_key=idem_key,
+    )
+    refreshed = client.fetch_catalog()
+    for extra_key in ("textbooks", "curriculum_nodes"):
+        if extra_key in snapshot and extra_key not in refreshed:
+            refreshed[extra_key] = snapshot[extra_key]
+    return refreshed, ensured
+
+
+def _write_api_error_preflight(batch: Path, exc: upload_client.APIError):
+    message = str(exc)
+    if exc.code == "knowledge_ensure_denied":
+        message = "当前上传 Key 未获授权在「词汇/考察词汇」下注册词条，请联系主管理员开通父节点注册权限或走知识点提议流程"
+    elif exc.code == "knowledge_point_inactive":
+        message = "「词汇/考察词汇」中存在已停用的答案考点词条，请人工核对后再上传"
+    _write(_path(batch, 'preflight.json'), _bytes({'passed': False,
+        'errors': [{'code': exc.code, 'message': message}], 'details': exc.details}))
+
+
+def prepare(batch_dir, *, catalog=None, config=None, check_media=True, ensure_catalog=True, **options):
     """读取实时目录后冻结确定性映射。离线目录预检不等同已验证远端媒体。"""
     batch = Path(batch_dir).resolve()
     settings = _config(config)
     with _agent_lock(10):
         source_path, source_raw, source = _source(batch)
         client = upload_client.ApiClient(settings)
+        needs_tb = any(isinstance(item, dict) and isinstance(item.get("textbook"), dict) and item.get("textbook")
+                       for item in (source.get("items") or []))
         try:
-            snapshot = client.fetch_catalog() if catalog is None else catalog
+            if catalog is None:
+                snapshot = client.fetch_catalog()
+                if needs_tb:
+                    snapshot.update(client.fetch_textbook_catalog())
+            else:
+                snapshot = catalog
         except upload_client.APIError as exc:
-            _write(_path(batch, 'preflight.json'), _bytes({'passed': False,
-                'errors': [{'code': exc.code, 'message': str(exc)}], 'details': exc.details}))
+            _write_api_error_preflight(batch, exc)
             raise
         manifest = mf.load(batch)
         evidence = _evidence_files(batch, manifest)
@@ -309,9 +393,28 @@ def prepare(batch_dir, *, catalog=None, config=None, check_media=True, **options
             if (isinstance(title, str) and title.strip() and metadata.get('source_sha256')
                     and metadata['source_sha256'] == mf.sha256_file(batch / '01_source' / '正文.txt')):
                 options['name'] = title
+        # 先在只读目录快照上完成本地映射与内容归属硬校验；未通过前绝不触发远端目录写入。
         report = _mapping(source, snapshot, options, batch_dir=batch)
         from .upload_content import inspect_content
         content = inspect_content(batch, source, strict=True)
+        if catalog is None and ensure_catalog and content['passed']:
+            _, _, missing_ap = _pending_answer_point_names(snapshot, source, batch)
+            if missing_ap:
+                pending_paths = {f"{upload_payload.ANSWER_POINT_CONTAINER_PATH}/{name}" for name in missing_ap}
+                other_errors = [
+                    err for err in report.get('errors', [])
+                    if not (
+                        err.get('code') == 'REMOTE_KNOWLEDGE_MISSING'
+                        and any(err.get('message') == f"远端目录无完整路径：{path}" for path in pending_paths)
+                    )
+                ]
+                if not other_errors:
+                    try:
+                        snapshot, _ = _ensure_answer_points_in_catalog(client, snapshot, source, batch)
+                    except upload_client.APIError as exc:
+                        _write_api_error_preflight(batch, exc)
+                        raise
+                    report = _mapping(source, snapshot, options, batch_dir=batch)
         report['content_source'] = content
         report['errors'].extend(content['errors'])
         report['passed'] = report['passed'] and content['passed']
@@ -507,6 +610,8 @@ def submit_approved(batch_dir, manifest, *, config=None, lock_held=False):
                                            receipt['id'], receipt, binding)
         current = client.fetch_catalog()
         catalog = _read(_path(batch, plan['catalog_file']))
+        if 'textbooks' in catalog or 'curriculum_nodes' in catalog:
+            current.update(client.fetch_textbook_catalog())
         # fetched_at 不属于目录语义；其余目录值有变化时必须重新准备。
         def semantic(value):
             return {k: v for k, v in value.items() if k not in ('fetched_at', 'fetchedAt')}

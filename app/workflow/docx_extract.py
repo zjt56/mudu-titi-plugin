@@ -62,6 +62,9 @@ class _Extractor:
         self.styles = {}
         self.defaults = {}
         self.default_paragraph = None
+        self.abstract_nums = {}
+        self.nums = {}
+        self.num_counters = {}
         self.rels = {}
         self.block_index = 0
         infos = archive.infolist()
@@ -87,6 +90,130 @@ class _Extractor:
         if rels is not None:
             for rel in rels:
                 self.rels[rel.get("Id")] = dict(rel.attrib)
+        numbering = self.xml("word/numbering.xml", optional=True)
+        if numbering is not None:
+            for abstract in numbering.findall("w:abstractNum", NS):
+                aid = abstract.get(_w("abstractNumId"))
+                if not aid:
+                    continue
+                levels = {}
+                for lvl in abstract.findall("w:lvl", NS):
+                    ilvl = lvl.get(_w("ilvl"), "0")
+                    levels[ilvl] = self._parse_lvl(lvl)
+                self.abstract_nums[aid] = levels
+            for num in numbering.findall("w:num", NS):
+                nid = num.get(_w("numId"))
+                aid = _val(num.find("w:abstractNumId", NS))
+                if not nid or not aid:
+                    continue
+                overrides = {}
+                for ov in num.findall("w:lvlOverride", NS):
+                    ilvl = ov.get(_w("ilvl"), "0")
+                    start_ov = _val(ov.find("w:startOverride", NS))
+                    lvl_node = ov.find("w:lvl", NS)
+                    overrides[ilvl] = {
+                        "startOverride": int(start_ov) if start_ov is not None and start_ov.lstrip("-").isdigit() else None,
+                        "lvl": self._parse_lvl(lvl_node) if lvl_node is not None else None,
+                    }
+                self.nums[nid] = {"abstractNumId": aid, "overrides": overrides}
+
+    @staticmethod
+    def _parse_lvl(node):
+        start_raw = _val(node.find("w:start", NS), "1")
+        start = int(start_raw) if str(start_raw).lstrip("-").isdigit() else 1
+        return {
+            "start": start,
+            "numFmt": _val(node.find("w:numFmt", NS), "decimal"),
+            "lvlText": _val(node.find("w:lvlText", NS), "%1."),
+            "suff": _val(node.find("w:suff", NS), "tab"),
+        }
+
+    @staticmethod
+    def _format_num_value(value: int, fmt: str):
+        if fmt in ("bullet", "none") or value < 0:
+            return None
+        if fmt == "decimal":
+            return str(value)
+        if fmt == "decimalZero":
+            return f"{value:02d}"
+        if fmt in ("upperRoman", "lowerRoman") and 1 <= value <= 3999:
+            pairs = ((1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+                     (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+                     (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"))
+            n, out = value, []
+            for num, sym in pairs:
+                while n >= num:
+                    out.append(sym)
+                    n -= num
+            roman = "".join(out)
+            return roman if fmt == "upperRoman" else roman.lower()
+        if fmt in ("upperLetter", "lowerLetter") and value >= 1:
+            base = ord("A") if fmt == "upperLetter" else ord("a")
+            return chr(base + (value - 1) % 26) * ((value - 1) // 26 + 1)
+        return None
+
+    def _effective_lvl(self, num_id: str, ilvl: str):
+        info = self.nums.get(num_id)
+        if not info:
+            return None
+        base = dict(self.abstract_nums.get(info["abstractNumId"], {}).get(ilvl) or {})
+        ov = info["overrides"].get(ilvl) or {}
+        if ov.get("lvl"):
+            base.update(ov["lvl"])
+        if ov.get("startOverride") is not None:
+            base["start"] = ov["startOverride"]
+        return base or None
+
+    def _paragraph_numbering(self, node, style_id: str, text: str) -> str:
+        if not text.strip():
+            return ""
+        num_pr = node.find("w:pPr/w:numPr", NS)
+        if num_pr is None and style_id:
+            for st in reversed(self.style_chain(style_id)):
+                candidate = st.find("w:pPr/w:numPr", NS)
+                if candidate is not None:
+                    num_pr = candidate
+                    break
+        if num_pr is None:
+            return ""
+        num_id = _val(num_pr.find("w:numId", NS))
+        if not num_id or num_id == "0" or num_id not in self.nums:
+            return ""
+        ilvl = str(_val(num_pr.find("w:ilvl", NS), "0"))
+        lvl_def = self._effective_lvl(num_id, ilvl)
+        if not lvl_def:
+            return ""
+        cur_lvl_int = int(ilvl) if ilvl.isdigit() else 0
+        # Reset deeper levels when advancing an outer level within the same list.
+        for key_nid, key_ilvl in list(self.num_counters):
+            if key_nid == num_id and key_ilvl.isdigit() and int(key_ilvl) > cur_lvl_int:
+                del self.num_counters[(key_nid, key_ilvl)]
+        prev = self.num_counters.get((num_id, ilvl))
+        value = lvl_def["start"] if prev is None else prev + 1
+        self.num_counters[(num_id, ilvl)] = value
+        formatted = self._format_num_value(value, lvl_def.get("numFmt", "decimal"))
+        if formatted is None:
+            return ""
+        lvl_text = lvl_def.get("lvlText", "%1.")
+        if "%" not in lvl_text:
+            return ""
+
+        def _replace_placeholder(match):
+            idx = int(match.group(1)) - 1
+            lvl_key = str(idx)
+            if lvl_key == ilvl:
+                return formatted
+            other_def = self._effective_lvl(num_id, lvl_key)
+            other_val = self.num_counters.get((num_id, lvl_key), (other_def or {}).get("start", 1))
+            other_fmt = (other_def or {}).get("numFmt", "decimal")
+            return self._format_num_value(other_val, other_fmt) or ""
+
+        prefix = re.sub(r"%(\d+)", _replace_placeholder, lvl_text)
+        if not prefix:
+            return ""
+        suff = lvl_def.get("suff", "tab")
+        sep = "" if (suff == "nothing" or text.startswith("[IMG ")) else (" " if suff == "space" else "\t")
+        return prefix + sep
 
     def warn(self, message):
         if message not in self.warnings:
@@ -273,6 +400,9 @@ class _Extractor:
         if before is not None and _val(before, "1") not in ("0", "false", "off"):
             breaks.append({"type": "page", "source": "pageBreakBefore"})
         text = self.inline(node, style, breaks)
+        prefix = self._paragraph_numbering(node, style, text)
+        if prefix:
+            text = prefix + text
         return {"type": "paragraph", "text": text, "page_breaks": breaks}
 
     @staticmethod

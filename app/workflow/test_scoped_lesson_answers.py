@@ -621,6 +621,91 @@ class TrailingSubColumnAnswerTest(unittest.TestCase):
         self.assertEqual(resolve_scoped_answer(self.batch, units[2], 1)['answer'], 'A')
         self.assertEqual(resolve_scoped_answer(self.batch, units[3], 1)['answer'], 'B')
 
+    def test_sibling_outline_banner_continuing_parent_roman_sequence_accepts_parent_band(self):
+        # 正文【二、B 能力提升】下先有 Ⅰ.完形填空，接着插【三、时文阅读】+ Ⅱ.阅读理解（罗马序号顺延）；
+        # 附录省略【时文阅读】而将 Ⅰ/Ⅱ 一并归入【二、能力提升】时应全部唯一绑定。
+        body_cont = (
+            'Starter Unit 3 Welcome!\n'
+            '第三课时　Section B (1a-1e)\n'
+            '**【一、A 基础巩固】**\n'
+            '**Ⅰ. 根据首字母及汉语提示补全单词**\n'
+            '**1.**I can c________(数数) from one to ten.\n'
+            '**Ⅱ. 根据汉语意思完成句子,每空一词**\n'
+            '**1.**This is my uncle’s ________(农场).\n'
+            '**【二、B 能力提升】**\n'
+            '**Ⅰ. 完形填空**\n'
+            'Look at the __<u>1</u>__.\n'
+            '**1.**A.dog B.cat\n'
+            '**【三、时文阅读】**\n'
+            '**Ⅱ. 阅读理解**\n'
+            'A short passage.\n'
+            '**1.**What is it?\n'
+            'A.A farm. B.A zoo.\n'
+        )
+        app_cont = (
+            '参考答案\n'
+            '**[IMG image158.jpeg]****一、基础巩固****[IMG image159.jpeg]**\n'
+            'Ⅰ.1.count\n'
+            'Ⅱ.1.farm\n'
+            '**[IMG image158.jpeg]****二、能力提升****[IMG image159.jpeg]**\n'
+            'Ⅰ.1.A\n'
+            'Ⅱ.1.B\n'
+        )
+        units = assign_scoped([
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 5, 'end_line': 5, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '完成句子',
+             'source_span': {'start_line': 7, 'end_line': 7, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '完形填空',
+             'source_span': {'start_line': 10, 'end_line': 11, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '阅读理解',
+             'source_span': {'start_line': 14, 'end_line': 16, 'basis': 'cleaned_source'}},
+        ], body_cont)
+        (self.batch / '01_source/正文.txt').write_text(body_cont, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(app_cont, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': units}), encoding='utf-8')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[0], 1)['answer'], 'count')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[1], 1)['answer'], 'farm')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[2], 1)['answer'], 'A')
+        self.assertEqual(resolve_scoped_answer(self.batch, units[3], 1)['answer'], 'B')
+
+        # 正例2：即使子栏目横幅下罗马序号从 Ⅰ 重新起算，只要附录省略该子栏目且全卷顺序骨架+题号1:1匹配，
+        # 仍应回落到其所属一级经典容器（能力提升）并唯一绑定。
+        body_restart = body_cont.replace('**Ⅱ. 阅读理解**', '**Ⅰ. 阅读理解**')
+        app_restart = app_cont.replace('Ⅱ.1.B', 'Ⅰ.1.B')
+        units_restart = assign_scoped([
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '单词拼写',
+             'source_span': {'start_line': 5, 'end_line': 5, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'standalone', 'type': '完成句子',
+             'source_span': {'start_line': 7, 'end_line': 7, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '完形填空',
+             'source_span': {'start_line': 10, 'end_line': 11, 'basis': 'cleaned_source'}},
+            {'numbers': [1], 'unit_kind': 'group', 'type': '阅读理解',
+             'source_span': {'start_line': 14, 'end_line': 16, 'basis': 'cleaned_source'}},
+        ], body_restart)
+        (self.batch / '01_source/正文.txt').write_text(body_restart, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(app_restart, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': units_restart}), encoding='utf-8')
+        self.assertEqual(resolve_scoped_answer(self.batch, units_restart[3], 1)['answer'], 'B')
+
+        # 反例：当附录显式印出【时文阅读】却错位标在基础巩固题上时，或基础巩固/能力提升颠倒时，仍严格拒绝。
+        app_swapped = (
+            '参考答案\n'
+            '**[IMG image158.jpeg]****一、能力提升****[IMG image159.jpeg]**\n'
+            'Ⅰ.1.count\n'
+            'Ⅱ.1.farm\n'
+            '**[IMG image158.jpeg]****二、基础巩固****[IMG image159.jpeg]**\n'
+            'Ⅰ.1.A\n'
+            'Ⅱ.1.B\n'
+        )
+        (self.batch / '01_source/正文.txt').write_text(body_cont, encoding='utf-8')
+        (self.batch / '01_source/附录.txt').write_text(app_swapped, encoding='utf-8')
+        (self.batch / '01_source/structure.confirmed.json').write_text(
+            json.dumps({'identity_version': 'scoped-v1', 'units': units}), encoding='utf-8')
+        self.assertIsNone(resolve_scoped_answer(self.batch, units[3], 1))
+
 
 if __name__ == '__main__':
     unittest.main()

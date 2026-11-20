@@ -38,9 +38,10 @@ class PreviewLabelsTest(unittest.TestCase):
             self.assertEqual(answer_point_tags(batch, "q-4"), [])
             from workbench import taxonomy
             for excluded in ("选词填空", "教材语篇填空"):
-                self.assertTrue(taxonomy.check_labels({
-                    "type": excluded, "knowledge": ["词汇/答案考点/happy"],
-                }), excluded)
+                for branch in ("词汇/考察词汇/happy", "词汇/答案考点/happy"):
+                    self.assertTrue(taxonomy.check_labels({
+                        "type": excluded, "knowledge": [branch],
+                    }), (excluded, branch))
             save_json(batch / files[1], {"answers": {"1": "children"}})
             self.assertEqual(answer_point_tags(batch, "q-1"), [])
 

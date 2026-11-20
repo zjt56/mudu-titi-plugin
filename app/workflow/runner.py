@@ -1441,10 +1441,13 @@ def _cmd_mark_locked(batch_dir: Path, args) -> int:
             from workflow.label_audit import inspect_file
             labels = inspect_file(batch_dir / '06_batch' / 'batch_meta.json')
             flow = flowchart_checks(batch_dir, manifest)
-            stale, reason = mf.is_stale(batch_dir, manifest, contracts.STAGE_BY_ID['validate'])
-            if (not labels['passed'] or not flow['passed'] or stale
+            # 与 workbench/server.py 一致：validate 的 is_stale 不阻碍上传，
+            # 只要 validate 曾通过（completed）且实时标签/结构校验通过即可放行。
+            if (not labels['passed'] or not flow['passed']
                     or manifest['stages'].get('validate', {}).get('status') != mf.COMPLETED):
-                print('✗ 数据、结构或校验未通过：' + str(reason if stale else (labels.get('errors') or flow.get('errors')))); return 2
+                detail = (labels.get('errors') or flow.get('errors')
+                          or '请先完成本地体检（validate）')
+                print('✗ 数据、结构或校验未通过：' + str(detail)); return 2
         elif do_review_gate(batch_dir, manifest, lock_held=True) != 0:
             print("✗ 审核未通过，不能确认上传"); return 2
         upload_file = batch_dir / "06_batch" / "batch_meta.json"
@@ -1885,7 +1888,9 @@ def _cmd_upload_locked(batch_dir: Path, args) -> int:
         print('✗ 未审核上传确认不属于本次尝试，请重新确认'); return 2
     if unreviewed and unreviewed_summary(batch_dir, manifest)['revision'] != confirmation.get('revision'):
         print('✗ 审核状态已变化，请重新查看并确认'); return 2
-    for stage_id in (("validate", "upload_gate") if unreviewed else ("validate", "review_gate", "upload_gate")):
+    # 与 workbench/server.py 一致：validate 曾通过（completed）即可上传，不再因 is_stale 阻断；
+    # upload_gate（及已审核路径的 review_gate）仍须保持未过期。
+    for stage_id in (("upload_gate",) if unreviewed else ("review_gate", "upload_gate")):
         stale, reason = mf.is_stale(batch_dir, manifest, contracts.STAGE_BY_ID[stage_id])
         if stale:
             print(f"✗ {stage_id} 不可复用：{reason}，请重新检查和确认")

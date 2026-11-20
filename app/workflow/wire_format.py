@@ -141,10 +141,14 @@ def normalize_blank_text(text):
     text = re.sub(r"<u>\s*[\u3000\s]*(\d{1,3})[\u3000\s]*\s*</u>", r"__\1__", text)
     text = re.sub(r"\u3000\s*(\d{1,3})\s*\u3000", r"__\1__", text)
     text = re.sub(r"<u>\s*[\u3000\s]*\s*</u>", "______", text)
-    # 行首中文段首缩进（如 `　　注意:`、`　　假定你是...`）不是填空空档，保留原缩进；
+    # 行首/单元格首段首缩进（如 `　　注意:`、`　　McArdle...`、`Jane | 　　My room...`）与多栏并排题/选项间的全角分隔
+    # （如 `c____/æ/t　　2.[IMG ...]`、`A. map　　B. apple`）不是填空空档，保留原空格；
     # 其余位置的连续全角空格（句中空位、括号/英文前空位）统一归一为 ______。
     text = re.sub(
-        r"(?m)(^\u3000{2,}(?=[\u4e00-\u9fff]))|\u3000{2,}",
+        r"(?m)((?:^|\|\s*)\u3000{2}(?!\u3000)(?=[“\"‘'《\u4e00-\u9fff]|[A-Z][a-z])"
+        r"|\u3000{2,}(?=(?:\*{1,3})?(?:[（(][ \u3000]*[）)][ \u3000]*)?(?:\*{1,3})?[1-9]\d{0,2}\s*[.．、](?!\d))"
+        r"|\u3000{2,}(?=(?:\*{1,3})?[A-H]\s*[.．、](?![A-Za-z]\.)))"
+        r"|\u3000{2,}",
         lambda m: m.group(1) if m.group(1) else "______",
         text,
     )
@@ -342,3 +346,68 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None, 
     if isinstance(children, list):
         data["subquestions"] = [normalize_item(child, media_map, meta, materials, audio, decorative_names=decorative_names) for child in children]
     return data
+
+
+_TABLE_RE = re.compile(r"\[TABLE(?:\s+\d+)?\]([\s\S]*?)\[/TABLE\]", re.I)
+
+
+def restore_table_cell_images(blocks, source_text):
+    """Restore stripped `[IMG ...]` tags into table cells by exact cell-text match against source text."""
+    if not isinstance(blocks, list) or not blocks or not isinstance(source_text, str) or "[IMG" not in source_text:
+        return blocks
+    def _norm(s):
+        plain = IMAGE.sub("", str(s or ""))
+        plain = re.sub(r"<br\s*/?>", "", plain, flags=re.I)
+        return re.sub(r"[\s\u3000*]+", "", plain)
+
+    table_maps = []
+    for match in _TABLE_RE.finditer(source_text):
+        if "[IMG" not in match.group(1):
+            continue
+        cells = []
+        for line in match.group(1).strip().splitlines():
+            cells.extend(line.split("|") if "|" in line else ([line] if line.strip() else []))
+        cmap = {}
+        for raw_cell in cells:
+            if "[IMG" in raw_cell:
+                key = _norm(raw_cell)
+                if key:
+                    cmap[key] = raw_cell
+        if cmap:
+            table_maps.append(cmap)
+    if not table_maps:
+        return blocks
+
+    for blk in blocks:
+        if not isinstance(blk, dict) or not isinstance(blk.get("rows"), list):
+            continue
+        if any("[IMG" in str(c.get("text") or "") for r in blk["rows"] for c in (r.get("cells") or []) if isinstance(c, dict)):
+            continue
+        best_map = None
+        best_hits = 0
+        for cmap in table_maps:
+            hits = sum(
+                1 for r in blk["rows"] for c in (r.get("cells") or [])
+                if isinstance(c, dict) and _norm(c.get("text")) in cmap
+            )
+            if hits > best_hits:
+                best_hits, best_map = hits, cmap
+        if not best_map or best_hits == 0:
+            continue
+        for r in blk["rows"]:
+            for c in r.get("cells") or []:
+                if not isinstance(c, dict):
+                    continue
+                raw_cell = best_map.get(_norm(c.get("text")))
+                if not raw_cell:
+                    continue
+                imgs = [m.group(0) for m in IMAGE.finditer(raw_cell)]
+                if not imgs:
+                    continue
+                cur = str(c.get("text") or "")
+                stripped_raw = raw_cell.strip()
+                if stripped_raw.startswith("[IMG"):
+                    c["text"] = "\n".join(imgs) + ("\n" + cur.lstrip("\n") if cur.strip() else "")
+                else:
+                    c["text"] = (cur.rstrip("\n") + "\n" if cur.strip() else "") + "\n".join(imgs)
+    return blocks

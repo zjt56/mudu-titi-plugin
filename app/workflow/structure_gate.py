@@ -103,7 +103,10 @@ def _section_numbers(section: dict) -> list[int]:
             # 提取侧记录的 sections[].questions 覆盖了全部行首锚点时，它就是该
             # 分区的题号全集；只取行首锚点会把行内/表格空位号漏成未声明题号。
             if (recorded and owned.issubset(recorded)
-                    and _section_type_label(section.get("type")) in {"补全对话", "任务型阅读", "读写综合"}):
+                    and (_section_type_label(section.get("type")) in {
+                        "补全对话", "任务型阅读", "读写综合", "短文填空",
+                        "选词填空", "教材语篇填空", "阅读理解", "听力信息转换",
+                    } or recorded == list(range(min(recorded), max(recorded) + 1)))):
                 owned |= set(recorded)
             return sorted(owned)
     return sorted({n for entry in section.get("questions") or []
@@ -290,30 +293,38 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
                 articles = _numbered_windows(articles, lines, numbers, start, end)
         else:
             articles = [(start + 1, end)]
-        if not any(start < u.get("source_span", {}).get("start_line", 0) <= u.get("source_span", {}).get("end_line", 0) <= end for u in units):
+        if not any((start <= u.get("source_span", {}).get("start_line", 0)
+                    if (u.get("source_span") or {}).get("number_binding") == "single_writing_section"
+                    else start < u.get("source_span", {}).get("start_line", 0))
+                   and u.get("source_span", {}).get("start_line", 0) <= u.get("source_span", {}).get("end_line", 0) <= end
+                   for u in units):
             # 图片理解能力受限不等于可以漏掉整节；仍必须保留绑定原文的来源单元。
             errors.append({"code": "SOURCE_SECTION_UNCOVERED", "source_line": start,
                            "message": "原文大题窗口未产生任何来源单元"})
         if _inline_unnumbered_writing(section, lines):
             from .sync_practice import writing_prompt_end
-            task_end = start + writing_prompt_end(lines[start:end])
+            tail_len = writing_prompt_end(lines[start:end])
+            expected_start = start + 1 if tail_len > 0 else start
+            task_end = start + tail_len
             owners = [u for u in units
-                      if start < (u.get("source_span") or {}).get("start_line", 0) <= end]
+                      if expected_start <= (u.get("source_span") or {}).get("start_line", 0) <= end]
             if (len(owners) != 1 or owners[0].get("unit_kind") != "standalone"
                     or owners[0]["source_span"].get("printed_numbers") != []
-                    or owners[0]["source_span"]["start_line"] != start + 1
+                    or owners[0]["source_span"]["start_line"] != expected_start
                     or owners[0]["source_span"].get("end_line") != task_end):
                 errors.append({"code": "SOURCE_WRITING_WINDOW_MISMATCH", "source_line": start,
                                "message": "无号作文须单独覆盖写作指令后的作答窗口"})
             # Numbers inside the task are instructions, e.g. 注意:1. … 2. …
             continue
         observed = _source_members(lines[start:end])
+        unnumbered_standalone = False
         if not group and not declared:
             # 独立无号文字作答题（如熟词生义引用完形原句含 __<u>1</u>__）没有印刷小题号，
             # 不把句内引用的弱空位号当成印刷题号阻塞无号作答区重建。
             from .preview import _strong_number
             if not any(_strong_number(line) is not None for line in lines[start:end]):
                 observed = set()
+                unnumbered_standalone = True
         if not group and not observed:
             from .question_content import unnumbered_text_responses
             for lo, hi in unnumbered_text_responses(lines[start:end]):
@@ -326,12 +337,12 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
                     errors.append({'code': 'SOURCE_UNNUMBERED_RESPONSE_UNCOVERED', 'source_line': expected_span[0],
                                    'message': '当前无号作答区域须完整且唯一归属，不能遗漏、截断或合并相邻题'})
         writing_bound = {n for u in units if u.get("source_span", {}).get("number_binding") == "single_writing_section"
-                         and start < u["source_span"]["start_line"] <= u["source_span"]["end_line"] <= end for n in u["numbers"]}
+                         and start <= u["source_span"]["start_line"] <= u["source_span"]["end_line"] <= end for n in u["numbers"]}
         if declared - observed - writing_bound:
             errors.append({"code": "SOURCE_NUMBERS_MISSING", "source_line": start,
                            "message": f"本大题声明题号未在局部原文定位：{sorted(declared - observed - writing_bound)}"})
         for lo, hi in articles:
-            raw_anchors = _scope_anchors(lines[lo - 1:hi])
+            raw_anchors = [] if unnumbered_standalone else _scope_anchors(lines[lo - 1:hi])
             # A cloze/material blank (weak anchor) and its explicit question
             # line can carry the same number.  The explicit line is the unique
             # source owner; retain weak-only anchors when no strong occurrence
@@ -410,7 +421,10 @@ def _scoped_source_errors(units: list[dict], sections: list[dict], lines: list[s
                 errors.append({"code": "QUESTION_NOT_FOUND", "number": number, "source_line": lo,
                                "message": f"单元题号{number}在本来源窗口没有唯一实际位置"})
         if (not _visual_column_for_unit(unit, visual_columns, lines)
-                and not any(s["source_line"] < lo <= hi <= s["source_end_line"] for s in windows)):
+                and not any(((s["source_line"] <= lo)
+                             if span.get("number_binding") == "single_writing_section"
+                             else (s["source_line"] < lo))
+                            and lo <= hi <= s["source_end_line"] for s in windows)):
             errors.append({"code": "GROUP_CROSSES_SECTION", "source_line": lo,
                            "message": "单元未绑定唯一大题来源窗口"})
     for column in visual_columns or []:
@@ -683,15 +697,24 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                 # upload numbering must project this as null/null.
                 chunk = source_lines[start:end]
                 inline_prompt = _inline_unnumbered_writing(section, source_lines)
+                span_start = start + 1
+                span_end = start + len(chunk)
                 if inline_prompt:
                     from .sync_practice import writing_prompt_end
-                    chunk = chunk[:writing_prompt_end(chunk)]
-                    if not any(line.strip() for line in chunk):
+                    tail_len = writing_prompt_end(chunk)
+                    if tail_len > 0 and any(line.strip() for line in chunk[:tail_len]):
+                        chunk = chunk[:tail_len]
+                        span_end = start + len(chunk)
+                    elif 1 <= start <= len(source_lines) and source_lines[start - 1].strip():
+                        chunk = [source_lines[start - 1]]
+                        span_start = start
+                        span_end = start
+                    else:
                         continue
                 unit = _make_unit("standalone", type_name, [1], chunk)
                 if inline_prompt:
                     unit["stem"] = "\n".join(chunk).strip()
-                unit["source_span"] = {"start_line": start + 1, "end_line": start + len(chunk),
+                unit["source_span"] = {"start_line": span_start, "end_line": span_end,
                                        "basis": "cleaned_source", "number_binding": "single_writing_section",
                                        "printed_numbers": []}
                 unit["original_number"] = None
@@ -1425,7 +1448,7 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         nums = _section_numbers(section)
         if (type(section.get("source_line")) is int and 1 <= section["source_line"] <= len(source_lines)
                 and _inline_unnumbered_writing(section, source_lines)
-                and any(u["source_span"]["start_line"] == section["source_line"] + 1
+                and any(u["source_span"]["start_line"] in (section["source_line"], section["source_line"] + 1)
                         and u["source_span"].get("printed_numbers") == [] for u in bound_writing)):
             continue
         title = _plain(str(section.get("title") or "")).strip()

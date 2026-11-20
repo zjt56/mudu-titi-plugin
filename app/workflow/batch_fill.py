@@ -283,7 +283,7 @@ def _source_token(row, binding):
 
 def _fill_new_source_aliases(target, fresh):
     """Fill source metadata newly proven by the current paper without replacing set values."""
-    from .metadata_policy import known
+    from .metadata_policy import known, parse_year
     filters = target.get("filterMetadata") or {}
     changed = False
     for key in ("source", "source_type"):
@@ -291,6 +291,11 @@ def _fill_new_source_aliases(target, fresh):
             target[key] = copy.deepcopy(fresh[key])
             target.setdefault("filterMetadata", {})[key] = copy.deepcopy(fresh[key])
             changed = True
+    fresh_year = parse_year(fresh.get("year"))
+    if fresh_year is not None and parse_year(target.get("year")) is None and parse_year(filters.get("year")) is None:
+        target["year"] = fresh_year
+        target.setdefault("filterMetadata", {})["year"] = fresh_year
+        changed = True
     children = _children(fresh)
     for child in target.get("subquestions") or []:
         if counterpart := children.get(_number(child["number"])):

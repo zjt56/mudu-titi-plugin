@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import re
 
 MISSING = "未提供"
 PAPER_TEXT_FIELDS = ("paper_title", "source", "source_type")
@@ -12,6 +13,37 @@ SOURCE_ALIAS_FIELDS = ("source", "source_type", "year")
 # 不是编造标签；只有连文件名都没有时才落到「未提供」占位。
 FILE_NAME_FIELDS = ("paper_title", "source")
 PAPER_FILE_SUFFIXES = ("docx", "doc", "pdf")
+
+
+def parse_year(value) -> int | None:
+    """Return a valid 4-digit year integer (1990..2100), else None."""
+    if isinstance(value, bool) or value is None:
+        return None
+    text = str(value).strip()
+    if not text.isdigit():
+        return None
+    number = int(text)
+    return number if 1990 <= number <= 2100 else None
+
+
+def extract_filename_year(value) -> int | None:
+    """从原卷文件名提取明确年份：支持四位年份与「两位+年/春/秋」，不把序号前缀当年份。
+
+    例：2025年七上... -> 2025，2025-2026学年... -> 2025，15年安徽中考... -> 2015，
+    11 26秋 七上... -> 2026，02七上... / 22九上... -> None。
+    """
+    name = filename_name(value)
+    if not name:
+        return None
+    match = re.search(r"(?<!\d)(199\d|20\d{2})(?!\d)", name)
+    if match:
+        return parse_year(match.group(1))
+    match = re.search(r"(?<!\d)(\d{2})\s*(?:年|[春秋])", name)
+    if match:
+        yy = int(match.group(1))
+        year = 1900 + yy if 90 <= yy <= 99 else (2000 + yy if 0 <= yy <= 50 else None)
+        return parse_year(year)
+    return None
 
 
 def with_placeholders(metadata: dict | None) -> dict:
@@ -84,29 +116,66 @@ def original_filename(batch_dir) -> str:
     return ""
 
 
+def upload_entry_year(batch_dir) -> int | None:
+    """上传入口表单填写的年份（attachments/batch.json），填写了就直接使用。"""
+    payload = _load_json(Path(batch_dir) / "attachments" / "batch.json")
+    return parse_year(payload.get("year"))
+
+
+def _manifest_meta_year(batch_dir) -> int | None:
+    state = _load_json(Path(batch_dir) / "workflow" / "manifest.json")
+    meta = state.get("meta") if isinstance(state.get("meta"), dict) else {}
+    return parse_year(meta.get("year"))
+
+
 def identified_paper_meta(batch_dir) -> dict:
-    """`01_source/metadata.json` 里已识别并通过证据落盘的卷面文字字段。"""
+    """`01_source/metadata.json` 里已识别并通过证据落盘的卷面字段。"""
     payload = _load_json(Path(batch_dir) / "01_source" / "metadata.json")
-    return {key: payload[key].strip() for key in PAPER_TEXT_FIELDS
-            if known(payload.get(key))}
+    result = {key: payload[key].strip() for key in PAPER_TEXT_FIELDS
+              if known(payload.get(key))}
+    year = parse_year(payload.get("year"))
+    if year is not None:
+        result["year"] = year
+    return result
 
 
 def paper_meta(metadata: dict | None, batch_dir=None) -> dict:
-    """卷面来源文本：已有值 → 已识别元数据 → 原卷文件名 → 占位。
+    """卷面来源文本与年份：
+    - 文本字段：已有值 → 已识别元数据 → 原卷文件名 → 占位；
+    - 年份：上传入口填写值（最高优先级）→ 已有值 → 已识别元数据 → manifest.meta → 原卷文件名；缺省留空不编造。
 
     结构闸门只从正文卷头取 meta，课时拆分件正文没有卷头，若直接占位就会把
     已识别的来源和文件名一起丢掉；这里按证据强度补齐，绝不反过来覆盖识别值。
     """
     result = dict(metadata or {})
+    current_year = parse_year(result.get("year"))
+    if current_year is not None:
+        result["year"] = current_year
+    elif "year" in result:
+        result.pop("year", None)
     if batch_dir is not None:
-        for key, value in identified_paper_meta(batch_dir).items():
-            if not known(result.get(key)):
-                result[key] = value
+        entry_year = upload_entry_year(batch_dir)
+        if entry_year is not None:
+            result["year"] = entry_year
+        identified = identified_paper_meta(batch_dir)
+        for key in PAPER_TEXT_FIELDS:
+            if key in identified and not known(result.get(key)):
+                result[key] = identified[key]
+        if "year" not in result and "year" in identified:
+            result["year"] = identified["year"]
+        if "year" not in result:
+            manifest_year = _manifest_meta_year(batch_dir)
+            if manifest_year is not None:
+                result["year"] = manifest_year
         name = original_filename(batch_dir)
         if name:
             for key in FILE_NAME_FIELDS:
                 if not known(result.get(key)):
                     result[key] = name
+            if "year" not in result:
+                file_year = extract_filename_year(name)
+                if file_year is not None:
+                    result["year"] = file_year
     return with_placeholders(result)
 
 

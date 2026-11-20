@@ -3,10 +3,15 @@ stage: knowledge
 artifact: 04_knowledge/knowledge.json
 
 ## 职责
-仅按知识点目录为单元/子题标注叶子路径与对应 ID。教材匹配暂停，不做教材定位。
+按知识点目录为单元/子题标注叶子路径与对应 ID；当 `textbook_matching.enabled == true`（同步练习/单元测验）时，同时按 `textbook_index` 标注教材位置 `textbook`。
 
 ## 权限边界
-- 只写 `unit_id`、`knowledge`、`knowledgeIds`、`subquestions`、`evidence`；不输出 `textbook`。
+- 只写 `unit_id`、`knowledge`、`knowledgeIds`、`subquestions`、`evidence`，以及同步来源时的可选 `textbook`。
+- 教材匹配规则（仅 `textbook_matching.enabled == true` 时）：
+  - `version`/`book`/`unit`（以及有明确对应课时时的 `section`）必须逐字复制自 `textbook_index`，并附真实原文 `evidence`。
+  - **单元话题写作、综合阅读提升、Reading Plus、单元测验、单元复习**等与课时平级但不属于具体课时的版块，**省略 `section` 直接挂在具体单元下**，严禁沿用上一课时的 `section`。
+  - 原卷缺少教材版本或单元线索时**留空省略 `textbook`**，不得猜测编造。
+- 非同步来源（`textbook_matching.enabled == false`）不输出 `textbook`。
 - 不写答案、解析、大意（由上游产物逐字注入，写了也会被覆盖）。
 - 不改题型、不改题号、不改单元边界。
 
@@ -21,7 +26,7 @@ artifact: 04_knowledge/knowledge.json
 - [ ] **单词拼写的词汇维度不用「词汇/词汇辨析」子类**：落 `词汇/拼写与词形`（派生构词用 `词汇/构词法/*`）。打 `词汇/词汇辨析/<词性>辨析` 会被判越界。
 - [ ] 提交目录叶子的完整路径。听力关键词语选择按共用规则直接提交「语音/基本读音」节点。
 - [ ] 只有在该题型不要求、且目录里确实没有合法叶子时，才留空对应维度，没有硬凑。
-- [ ] 未做教材定位、未输出 `textbook`，无论原卷是否为同步练习或单元测验。
+- [ ] 同步来源（`textbook_matching.enabled == true`）已按原文证据逐字标注 `textbook`（单元话题写作/综合阅读提升等非具体课时版块省略 `section` 直接挂单元；无证据留空）；非同步来源未输出 `textbook`。
 
 ## 常见错误
 自造叶子、把"语用/情景交际"扩写成不存在的子类、给阅读组每个小题单独打标、给「完成句子/改错」挂「语用/情景交际」（只允许词汇·语法）、给「单词拼写」挂主题、给「单词拼写」打「词汇/词汇辨析/x辨析」（单词拼写不用词汇辨析，落 词汇/拼写与词形）、主题路径写错字（如「社会服务与人沟通」实为「社会服务与人际沟通」）。

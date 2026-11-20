@@ -387,27 +387,33 @@ class AgentTasksTest(unittest.TestCase):
             self.assertIn(field, example)
         self.assertFalse(set(example["answers"]) & set(example["missing"]))
 
-    def test_knowledge_task_pauses_textbook_for_lesson_sources(self):
+    def test_knowledge_task_enables_textbook_for_lesson_sources(self):
         self.write("01_source/metadata.json", {"source_type": "同步练习"})
         task = tasks.build_task(self.batch, "knowledge")
         prompt = task["prompt"]
-        self.assertIn("textbook matching is paused for all sources", prompt)
-        self.assertNotIn('"textbook_index":', prompt)
-        self.assertFalse(any("textbook-catalog" in key for key in task["input_hashes"]))
+        self.assertIn('"enabled":true', prompt)
+        self.assertIn('"textbook_index":', prompt)
+        self.assertTrue(any("textbook-catalog" in key for key in task["input_hashes"]))
         tail = prompt.split("Complete valid JSON syntax example", 1)[1]
         result = json.loads(tail.split("\n", 1)[1].split("\nPreconditions:", 1)[0])
         payload = result["artifacts"][tasks.ARTIFACTS["knowledge"]]
-        self.assertFalse({"answer", "explanation", "articleSummary", "textbook"} & set(payload["items"][0]))
-        for legacy in ({"evidence": "old invalid candidate"}, None, []):
-            with self.subTest(legacy=legacy):
-                candidate = copy.deepcopy(payload)
-                candidate["items"][0]["textbook"] = legacy
-                report = self.accept("knowledge", candidate)
-                self.assertTrue(report["completed"])
-                self.assertTrue(any("教材匹配暂停" in note for note in report["notes"]))
-                saved = json.loads((self.batch / tasks.ARTIFACTS["knowledge"]).read_text(encoding="utf-8"))
-                self.assertNotIn("textbook", saved["items"][0])
-                self.assertEqual(saved["items"][0]["knowledge"], payload["items"][0]["knowledge"])
+        self.assertFalse({"answer", "explanation", "articleSummary"} & set(payload["items"][0]))
+        self.assertIn("textbook", payload["items"][0])
+        # 同步练习无教材线索时允许留空放行
+        report = self.accept("knowledge", copy.deepcopy(payload))
+        self.assertTrue(report["completed"])
+        # 合法教材位置被验收保留
+        candidate = copy.deepcopy(payload)
+        candidate["items"][0]["textbook"] = {
+            "version": "人教版", "book": "人教版七年级上册",
+            "unit": "Unit 1 You and Me", "section": "第一课时 Section A (1a-1d)",
+            "evidence": ["正文 L1：Unit 1 You and Me"],
+        }
+        report = self.accept("knowledge", candidate)
+        self.assertTrue(report["completed"])
+        saved = json.loads((self.batch / tasks.ARTIFACTS["knowledge"]).read_text(encoding="utf-8"))
+        self.assertEqual(saved["items"][0]["textbook"]["unit"], "Unit 1 You and Me")
+        self.assertEqual(saved["items"][0]["textbook"]["section"], "第一课时 Section A (1a-1d)")
 
     def test_knowledge_prompt_without_textbook_index_omits_placement_example(self):
         task = tasks.build_task(self.batch, "knowledge")

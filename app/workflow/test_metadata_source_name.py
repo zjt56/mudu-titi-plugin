@@ -4,6 +4,8 @@
 结构闸门如果只从正文取 meta，就会把已经按文件名识别出的来源整体写成占位，
 工作台卡片、题目 filterMetadata 和上传载荷都跟着变成「未提供」。
 """
+from __future__ import annotations
+
 import json
 import tempfile
 import unittest
@@ -19,7 +21,7 @@ BODY = ("Ⅰ.单项填空(共1小题)\n"
 
 
 def _write_batch(root: Path, *, original: str = "", source_path: str = "",
-                 identified: dict | None = None) -> Path:
+                 identified: dict | None = None, entry_year: int | None = None) -> Path:
     batch = root / "batch"
     (batch / "01_source").mkdir(parents=True)
     (batch / "workflow").mkdir()
@@ -31,8 +33,10 @@ def _write_batch(root: Path, *, original: str = "", source_path: str = "",
     }, ensure_ascii=False), encoding="utf-8")
     manifest = {"inputs": {"source": {"path": source_path}}}
     (batch / "workflow/manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (batch / "attachments/batch.json").write_text(json.dumps(
-        {"original_filenames": {"source": original}} if original else {}), encoding="utf-8")
+    descriptor = {"original_filenames": {"source": original}} if original else {}
+    if entry_year is not None:
+        descriptor["year"] = entry_year
+    (batch / "attachments/batch.json").write_text(json.dumps(descriptor, ensure_ascii=False), encoding="utf-8")
     if identified is not None:
         (batch / "01_source/metadata.json").write_text(
             json.dumps(identified, ensure_ascii=False), encoding="utf-8")
@@ -172,6 +176,46 @@ class GateAndAssemblyTest(unittest.TestCase):
                                                          "source_type": "中考真题"}}, {})
             self.assertEqual(result["source"], "2024年安徽省中考")
             self.assertEqual(result["source_type"], "中考真题")
+
+    def test_year_extraction_and_upload_entry_precedence(self):
+        self.assertEqual(metadata_policy.extract_filename_year("2025年七上人教版课时A计划.docx"), 2025)
+        self.assertEqual(metadata_policy.extract_filename_year("2025-2026学年七上英语.docx"), 2025)
+        self.assertEqual(metadata_policy.extract_filename_year("25年七上人教版课时A计划.docx"), 2025)
+        self.assertEqual(metadata_policy.extract_filename_year("【木牍教育】15年安徽中考英语.docx"), 2015)
+        self.assertIsNone(metadata_policy.extract_filename_year("02七上人教版课时A计划.docx"))
+        self.assertIsNone(metadata_policy.extract_filename_year("22九上人教版课时A计划.docx"))
+        self.assertEqual(metadata_policy.extract_filename_year("26秋《课时A计划》七上英语RJ正文(学用).docx"), 2026)
+        self.assertEqual(metadata_policy.extract_filename_year(
+            "11 26秋 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx"), 2026)
+        self.assertEqual(metadata_policy.extract_filename_year("25春八下人教版课时A计划.docx"), 2025)
+
+        with tempfile.TemporaryDirectory() as temp:
+            batch = _write_batch(Path(temp),
+                                 original="2025年七上人教版课时A计划 Unit 1 课时1.docx",
+                                 entry_year=2026)
+            meta = metadata_policy.paper_meta({"year": 2024}, batch)
+            self.assertEqual(meta["year"], 2026)
+            info = server.paper_info(batch, {"meta": {"source": "七上人教版课时A计划", "year": 2024}}, {})
+            self.assertEqual(info["year"], 2026)
+
+        with tempfile.TemporaryDirectory() as temp:
+            batch = _write_batch(Path(temp),
+                                 original="2025年七上人教版课时A计划 Unit 3 第一课时.docx")
+            confirmed = {"meta": {"source": "未提供", "paper_title": "未提供", "source_type": "未提供"},
+                         "identity_version": "scoped-v1", "units": []}
+            for rel in (assemble_local.STRUCTURE, assemble_local.KNOWLEDGE, assemble_local.EXPLANATIONS,
+                        assemble_local.TYPES, assemble_local.ANSWERS):
+                payload = confirmed if rel == assemble_local.STRUCTURE else {}
+                target = batch / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            draft = {"items": [{"unit_id": "u1", "unit_kind": "standalone", "number": 1}],
+                     "source_bindings": {"u1": {"start_line": 2}}}
+            with mock.patch("workflow.question_draft.ensure", return_value=draft):
+                payload = assemble_local._initial_payload(batch)
+            row = payload["items"][0]
+            self.assertEqual(row["filterMetadata"]["year"], 2025)
+            self.assertEqual(batch_fill._source_meta(batch)["year"], 2025)
 
 
 if __name__ == "__main__":

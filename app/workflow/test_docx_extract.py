@@ -221,6 +221,38 @@ class DocxExtractTests(unittest.TestCase):
             self.run_extract()
         self.assertFalse((self.root / "x.png").exists())
 
+    def test_word_automatic_numbering_restored_and_bullets_ignored(self):
+        numbering = (
+            f'<w:numbering xmlns:w="{W}">'
+            '<w:abstractNum w:abstractNumId="0">'
+            '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>'
+            '</w:abstractNum>'
+            '<w:abstractNum w:abstractNumId="1">'
+            '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="·"/></w:lvl>'
+            '</w:abstractNum>'
+            '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+            '<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>'
+            '</w:numbering>'
+        )
+        body = (
+            '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+            + image() + '</w:p>'
+            '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+            '<w:r><w:t>second item</w:t></w:r></w:p>'
+            '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr>'
+            '<w:r><w:t>bullet item</w:t></w:r></w:p>'
+            '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p>'
+        )
+        self.make_docx(body, f'<Relationship Id="image1" Type="{R}/image" Target="media/x.png"/>',
+                       parts={"word/media/x.png": b"image", "word/numbering.xml": numbering})
+        result = self.run_extract()
+        self.assertEqual(result["text"].split("\n"), [
+            "1.[IMG x.png]",
+            "2.\tsecond item",
+            "bullet item",
+            "",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

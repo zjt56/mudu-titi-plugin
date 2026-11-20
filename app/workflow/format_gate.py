@@ -32,8 +32,8 @@ RULE_FILES = (Path(__file__), Path(upload_payload.__file__),
                Path(__file__).with_name('upload_content.py'),
                *(Path(__file__).resolve().parents[1] / check.script for check in checks.FINAL_FORMAT_CHECKS),
                *LABEL_RULE_FILES)
-DEFERRED_CODES = frozenset({"CATALOG_REQUIRED", "TEXTBOOK_CATALOG_UNSUPPORTED",
-                            "TEXTBOOK_KNOWLEDGE_INVALID"})
+DEFERRED_CODES = frozenset({"CATALOG_REQUIRED", "TEXTBOOK_CATALOG_REQUIRED",
+                            "TEXTBOOK_CATALOG_UNSUPPORTED", "TEXTBOOK_KNOWLEDGE_INVALID"})
 
 
 def _safe(path):

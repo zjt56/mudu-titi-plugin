@@ -409,3 +409,177 @@ class UploadFlowTest(unittest.TestCase):
         self.assertEqual(result['state'], 'staged')
         self.assertEqual(self.client.return_value.submit.call_count, 1)
         self.assertEqual(self.client.return_value.append_evidence.call_count, 2)
+
+    def test_prepare_ensures_missing_answer_points_under_tested_vocab_and_freezes(self):
+        from copy import deepcopy
+        initial = deepcopy(self.catalog)
+        vocab = next(p for p in initial['points'] if p['parent_id'] is None and p['name'] == '词汇')
+        branch_id = 'REMOTE-TESTED-VOCAB'
+        initial['points'].append({
+            'id': branch_id, 'name': '考察词汇', 'parent_id': vocab['id'],
+            'version_id': initial['version']['id'], 'active': True, 'subject_id': 'english',
+        })
+        refreshed = deepcopy(initial)
+        refreshed['points'].append({
+            'id': 'REMOTE-PEOPLE', 'name': 'people', 'parent_id': branch_id,
+            'version_id': initial['version']['id'], 'active': True, 'subject_id': 'english',
+        })
+        self.client.return_value.fetch_catalog.side_effect = [initial, refreshed]
+        self.client.return_value.ensure_knowledge_points.return_value = [{
+            'id': 'REMOTE-PEOPLE', 'name': 'people', 'parent_id': branch_id,
+            'version_id': initial['version']['id'], 'active': True,
+        }]
+        with patch('workbench.server.answer_point_tags', return_value=['people']):
+            report = upload.prepare(self.batch, config=self.settings)
+        self.assertTrue(report['passed'], report.get('errors'))
+        self.client.return_value.ensure_knowledge_points.assert_called_once()
+        call_args = self.client.return_value.ensure_knowledge_points.call_args
+        self.assertEqual(call_args.args[:3], (initial['version']['id'], branch_id, ['people']))
+        self.assertTrue(call_args.kwargs['idempotency_key'].startswith('ap-ensure-'))
+        payload = json.loads((self.batch / report['payload_file']).read_text(encoding='utf-8'))
+        wire_item = payload['items'][0]
+        self.assertIn('词汇/考察词汇/people', wire_item['knowledge'])
+        self.assertIn('REMOTE-PEOPLE', wire_item['knowledge_ids'])
+        with patch('workbench.server.answer_point_tags', return_value=['people']):
+            verified = upload.verify(self.batch, config=self.settings)
+        self.assertEqual(verified['plan']['payload_sha256'], report['payload_sha256'])
+
+    def test_prepare_blocks_when_ensure_permission_is_denied(self):
+        from copy import deepcopy
+        initial = deepcopy(self.catalog)
+        vocab = next(p for p in initial['points'] if p['parent_id'] is None and p['name'] == '词汇')
+        initial['points'].append({
+            'id': 'REMOTE-TESTED-VOCAB', 'name': '考察词汇', 'parent_id': vocab['id'],
+            'version_id': initial['version']['id'], 'active': True, 'subject_id': 'english',
+        })
+        self.client.return_value.fetch_catalog.side_effect = None
+        self.client.return_value.fetch_catalog.return_value = initial
+        self.client.return_value.ensure_knowledge_points.side_effect = upload_client.APIError(
+            'knowledge_ensure_denied', 403, {'error': 'knowledge_ensure_denied'},
+        )
+        with patch('workbench.server.answer_point_tags', return_value=['people']):
+            with self.assertRaises(upload_client.APIError) as caught:
+                upload.prepare(self.batch, config=self.settings)
+        self.assertEqual(caught.exception.code, 'knowledge_ensure_denied')
+        preflight = json.loads((self.batch / '07_upload/preflight.json').read_text(encoding='utf-8'))
+        self.assertFalse(preflight['passed'])
+        self.assertEqual(preflight['errors'][0]['code'], 'knowledge_ensure_denied')
+        self.assertIn('词汇/考察词汇', preflight['errors'][0]['message'])
+
+    def test_stale_validate_does_not_block_unreviewed_mark_or_upload(self):
+        self.prepare()
+        self.state['stages']['validate']['status'] = mf.COMPLETED
+        mf.save(self.batch, self.state)
+        resolved = self.batch.resolve()
+        summary = runner.unreviewed_summary(resolved, mf.load(resolved))
+        mark_args = argparse.Namespace(
+            batch_dir=str(resolved), stage='upload_gate', status=mf.APPROVED,
+            actor='operator', note='approve with stale validate',
+            allow_missing=False, invalidate_downstream=False,
+            unreviewed_revision=summary['revision'], unreviewed_attempt='tok-1',
+        )
+        real_is_stale = mf.is_stale
+
+        def fake_is_stale(batch_dir, manifest, stage):
+            if stage.id == 'validate':
+                return True, '上游交付内容已变化：06_batch/batch.json'
+            return real_is_stale(batch_dir, manifest, stage)
+
+        with patch.object(mf, 'is_stale', side_effect=fake_is_stale), \
+             patch('workflow.label_audit.inspect_file', return_value={'passed': True, 'errors': []}), \
+             patch.object(runner, 'flowchart_checks', return_value={'passed': True, 'errors': []}):
+            self.assertEqual(runner.cmd_mark(mark_args), 0)
+            up_args = argparse.Namespace(
+                batch_dir=str(resolved), yes=True, dry_run=False, unreviewed_attempt='tok-1',
+            )
+            self.assertEqual(runner.cmd_upload(up_args), 0)
+        self.assertEqual(mf.load(resolved)['stages']['upload']['status'], mf.COMPLETED)
+
+    def test_submit_approved_merges_textbook_catalog_when_frozen_has_textbooks(self):
+        tb_catalog = {
+            'textbooks': [{
+                'id': 'TB-EN-PEP-NEW', 'name': '人教版（新教材）', 'subject_id': 'english', 'active': 1,
+                'books': [{'grade': '7年级上册', 'name': '人教版七年级上册', 'sort_order': 1}],
+            }],
+            'curriculum_nodes': {
+                'TB-EN-PEP-NEW': [{
+                    'id': 'PEP7A-CH-01', 'name': 'Starter Unit 1 Hello!', 'grade': '7年级上册',
+                    'node_type': 'chapter', 'parent_id': None, 'textbook_id': 'TB-EN-PEP-NEW', 'active': 1,
+                }],
+            },
+        }
+        self.client.return_value.fetch_textbook_catalog.side_effect = lambda: deepcopy(tb_catalog)
+        source = valid_batch()
+        source['items'][0]['textbook'] = {
+            'version': '人教版', 'book': '人教版七年级上册', 'unit': 'Starter Unit 1 Hello!',
+            'evidence': ['人教版七年级上册 Starter Unit 1 Hello!'],
+        }
+        self.source.write_text(json.dumps(source, ensure_ascii=False))
+        report = upload.prepare(self.batch, config=self.settings)
+        self.assertTrue(report['passed'], report)
+        self.approve()
+        result = upload.submit_approved(self.batch, self.state, config=self.settings)
+        self.assertEqual(result['id'], 'STAGE-123')
+        self.assertEqual(self.client.return_value.fetch_textbook_catalog.call_count, 2)
+
+    def test_prepare_skips_remote_ensure_when_local_validation_fails(self):
+        initial = deepcopy(self.catalog)
+        vocab = next(p for p in initial['points'] if p['parent_id'] is None and p['name'] == '词汇')
+        initial['points'].append({
+            'id': 'REMOTE-TESTED-VOCAB', 'name': '考察词汇', 'parent_id': vocab['id'],
+            'version_id': initial['version']['id'], 'active': True, 'subject_id': 'english',
+        })
+        self.client.return_value.fetch_catalog.side_effect = lambda: deepcopy(initial)
+        bad_src = valid_batch()
+        bad_src['items'][0]['source_type'] = '非法题源'
+        self.source.write_text(json.dumps(bad_src, ensure_ascii=False))
+        with patch('workbench.server.answer_point_tags', return_value=['people']):
+            report = upload.prepare(self.batch, config=self.settings)
+        self.assertFalse(report['passed'])
+        self.assertIn('SOURCE_TYPE_INVALID', {e['code'] for e in report['errors']})
+        self.client.return_value.ensure_knowledge_points.assert_not_called()
+
+        bad_content = valid_batch()
+        bad_content['items'][0]['explanation'] = '未在原卷出现的伪造解析'
+        self.source.write_text(json.dumps(bad_content, ensure_ascii=False))
+        with patch('workbench.server.answer_point_tags', return_value=['people']):
+            report2 = upload.prepare(self.batch, config=self.settings)
+        self.assertFalse(report2['passed'])
+        self.client.return_value.ensure_knowledge_points.assert_not_called()
+
+        self.source.write_text(json.dumps(valid_batch(), ensure_ascii=False))
+        with patch('workbench.server.answer_point_tags', return_value=['people']):
+            report3 = upload.prepare(self.batch, config=self.settings, ensure_catalog=False)
+        self.assertFalse(report3['passed'])
+        self.assertIn('REMOTE_KNOWLEDGE_MISSING', {e['code'] for e in report3['errors']})
+        self.client.return_value.ensure_knowledge_points.assert_not_called()
+
+    def test_ensure_idempotency_key_binds_reason_across_batches(self):
+        initial = deepcopy(self.catalog)
+        vocab = next(p for p in initial['points'] if p['parent_id'] is None and p['name'] == '词汇')
+        initial['points'].append({
+            'id': 'REMOTE-TESTED-VOCAB', 'name': '考察词汇', 'parent_id': vocab['id'],
+            'version_id': initial['version']['id'], 'active': True, 'subject_id': 'english',
+        })
+        seen_keys = {}
+
+        def strict_ensure(version_id, parent_id, names, *, reason=None, idempotency_key=None):
+            body = (version_id, parent_id, tuple(names), reason)
+            if idempotency_key in seen_keys and seen_keys[idempotency_key] != body:
+                raise upload_client.APIError('knowledge_ensure_key_conflict', 409)
+            seen_keys[idempotency_key] = body
+            return [{'id': 'REMOTE-PEOPLE', 'name': 'people', 'parent_id': parent_id}]
+
+        self.client.return_value.ensure_knowledge_points.side_effect = strict_ensure
+        self.client.return_value.fetch_catalog.side_effect = lambda: deepcopy(initial)
+        batch_b = self.root / 'batch-b'; batch_b.mkdir()
+        (batch_b / '06_batch').mkdir()
+        (batch_b / '06_batch' / 'batch_meta.json').write_text(json.dumps(valid_batch(), ensure_ascii=False))
+        source_data = valid_batch()
+        with patch('workbench.server.answer_point_tags', return_value=['people']):
+            upload._ensure_answer_points_in_catalog(self.client.return_value, initial, source_data, self.batch)
+            upload._ensure_answer_points_in_catalog(self.client.return_value, initial, source_data, self.batch)
+            upload._ensure_answer_points_in_catalog(self.client.return_value, initial, source_data, batch_b)
+        calls = self.client.return_value.ensure_knowledge_points.call_args_list
+        self.assertEqual(calls[0].kwargs['idempotency_key'], calls[1].kwargs['idempotency_key'])
+        self.assertNotEqual(calls[0].kwargs['idempotency_key'], calls[2].kwargs['idempotency_key'])

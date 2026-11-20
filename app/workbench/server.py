@@ -634,12 +634,13 @@ def paper_info(folder: Path, report, manifest) -> dict:
                              meta.get("paper_title"), detected.get("source"), descriptor.get("title")),
         "source": known(batch.get("source"), meta.get("source"), detected.get("source")),
         "source_type": known(batch.get("source_type"), meta.get("source_type"), detected.get("source_type")),
+        "year": batch.get("year") or meta.get("year") or detected.get("year"),
     }, folder)
     return {"title": str(resolved.get("paper_title") or MISSING),
             "batch": str(batch.get("batch") or folder.name),
             "source": str(resolved.get("source") or MISSING),
             "source_type": str(resolved.get("source_type") or MISSING),
-            "folder": folder.name, "year": batch.get("year") or meta.get("year") or detected.get("year"),
+            "folder": folder.name, "year": resolved.get("year"),
             "region": batch.get("region") or meta.get("region") or detected.get("region"),
             "subject": batch.get("subject") or meta.get("subject") or "english"}
 
@@ -2853,11 +2854,35 @@ def _run_batch_upload(name, actor, unreviewed_revision='', attempt_token=''):
         _check_upload_preconditions(folder, unreviewed_revision, attempt_token)
         job["step"] = "暂存引用的媒体"
         staged = _stage_upload_media(folder)
+        preflight_path = folder / "07_upload" / "preflight.json"
+        try:
+            preflight_before = preflight_path.stat().st_mtime_ns
+        except OSError:
+            preflight_before = None
+
+        def _fresh_preflight():
+            try:
+                if preflight_path.stat().st_mtime_ns == preflight_before:
+                    return None
+            except OSError:
+                return None
+            data = load(preflight_path)
+            if isinstance(data, dict) and (data.get("passed") is False or data.get("errors")):
+                return data
+            return None
+
         if staged:
             from workflow import upload as upload_flow
             mapping, source_hash = staged
             job["step"] = "准备上传（冻结请求）"
-            report = upload_flow.prepare(folder, media_map=mapping)
+            try:
+                report = upload_flow.prepare(folder, media_map=mapping)
+            except Exception:
+                fresh = _fresh_preflight()
+                if fresh is not None:
+                    job.update(ok=False, error=_prepare_failure_summary(fresh), output="")
+                    return
+                raise
             if report.get('source_sha256') != source_hash:
                 raise ValueError('正式批次在媒体暂存后发生变化，请重新上传')
             rc = 0 if report.get('passed') is True else 1
@@ -2871,6 +2896,8 @@ def _run_batch_upload(name, actor, unreviewed_revision='', attempt_token=''):
                 report = json.loads(stdout)
             except (ValueError, TypeError):
                 report = None
+            if not (isinstance(report, dict) and (report.get("passed") is False or report.get("errors"))):
+                report = _fresh_preflight()
             if isinstance(report, dict) and (report.get("passed") is False or report.get("errors")):
                 job.update(ok=False, error=_prepare_failure_summary(report), output="")
             else:
@@ -3544,6 +3571,37 @@ def paper_uses_bulk_bold(lines):
     ) >= 0.85 * len(body)
 
 
+def paper_preview(name: str) -> dict:
+    """Return full-paper preview data (title, metadata tags, ordered assembled items)."""
+    from workflow.metadata_policy import MISSING
+    from workflow import wire_format
+    folder = batch_dir(name)
+    batch = load(folder / "06_batch" / "batch_meta.json") or load(folder / "06_batch" / "batch.json") or {}
+    meta = load(folder / "01_source" / "metadata.json", {}) or {}
+    items = batch.get("items") if isinstance(batch.get("items"), list) else []
+    src_path = folder / "01_source" / "正文.txt"
+    source_txt = src_path.read_text(encoding="utf-8", errors="replace") if src_path.is_file() else ""
+    if source_txt and "[IMG" in source_txt:
+        for it in items:
+            if isinstance(it, dict) and isinstance(it.get("materialBlocks"), list):
+                wire_format.restore_table_cell_images(it["materialBlocks"], source_txt)
+    first = next((it for it in items if isinstance(it, dict)), {})
+    filters = first.get("filterMetadata") if isinstance(first.get("filterMetadata"), dict) else {}
+    title = str(batch.get("title") or meta.get("paper_title") or meta.get("title") or folder.name).strip()
+    source_type = str(first.get("source_type") or filters.get("source_type") or batch.get("source_type") or meta.get("source_type") or "").strip()
+    year = str(first.get("year") or filters.get("year") or batch.get("year") or meta.get("year") or "").strip()
+    categories = filters.get("categories") or batch.get("categories") or meta.get("categories") or []
+    if isinstance(categories, str):
+        categories = [c.strip() for c in categories.split(",") if c.strip()]
+    return {
+        "title": title,
+        "source_type": source_type,
+        "year": year,
+        "categories": [str(c) for c in categories if str(c).strip() and str(c).strip() != MISSING],
+        "items": items,
+    }
+
+
 def detail(name, unit_id):
     folder = batch_dir(name)
     report, manifest, queue = report_for(folder)
@@ -3916,6 +3974,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"name": parts[2], **advance_state(parts[2])})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "upload-status":
                 return self.send_json(upload_state(parts[2]))
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "ai-supplement":
+                from workflow import ai_supplement
+                return self.send_json({"ok": True, **ai_supplement.read_progress(batch_dir(parts[2]))})
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "paper-preview":
+                return self.send_json(paper_preview(parts[2]))
             self.send_json({"error": "not found"}, 404)
         except (ValueError, KeyError) as exc:
             self.send_json({"error": str(exc)}, 400)
@@ -4036,11 +4099,60 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("缺少这些字段修改前的正式内容，请重新打开本题")
                 saved = self.save_units(folder, unit_id, items, labels, unit_edit, expected)
                 return self.send_json({"ok": True, **saved})
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "ai-supplement":
+                folder = batch_dir(parts[2])
+                mode = str(payload.get("mode") or "").strip()
+                if mode not in ("articleSummary", "explanation"):
+                    raise ValueError("mode 必须是 articleSummary 或 explanation")
+                result = self.run_ai_supplement(folder, mode)
+                return self.send_json({"ok": True, **result})
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "content-edit":
+                from workflow import ai_supplement
+                folder = batch_dir(parts[2])
+                unit_id = str(payload.get("unit_id") or "").strip()
+                try:
+                    result = self.save_content_edit(folder, unit_id, payload)
+                except ai_supplement.ContentEditConflictError as exc:
+                    return self.send_json({
+                        "error": str(exc),
+                        "code": "content_edit_conflict",
+                        "conflicts": exc.conflicts,
+                    }, 409)
+                return self.send_json({"ok": True, **result})
             self.send_json({"error": "not found"}, 404)
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             self.send_json({"error": str(exc)}, 400)
         except Exception as exc:  # noqa: BLE001
             self.send_json({"error": str(exc)}, 500)
+
+    @staticmethod
+    def run_ai_supplement(folder: Path, mode: str) -> dict:
+        from workflow import ai_supplement
+        return ai_supplement.start_background(folder, mode)
+
+    @staticmethod
+    @serialized
+    def save_content_edit(folder: Path, unit_id: str, patch: dict) -> dict:
+        from contextlib import ExitStack
+        from workflow import ai_supplement, supervisor
+        from workflow.agent_tasks import _safe_path
+        from workflow.local_agent import _agent_lock, AgentError
+
+        if not folder.is_dir() or folder.is_symlink():
+            raise ValueError("批次不存在或已归档，请刷新列表")
+        run_lock = _safe_path(folder, "workflow/.run.lock")
+        busy = f"批次「{folder.name}」正在运行（{folder}），本次未保存"
+        with ExitStack() as locks:
+            if not locks.enter_context(supervisor._try_file_lock(supervisor._auto_lock_path(folder))):
+                raise ValueError(busy)
+            run_lock.parent.mkdir(parents=True, exist_ok=True)
+            if not locks.enter_context(supervisor._try_file_lock(run_lock)):
+                raise ValueError(busy)
+            try:
+                locks.enter_context(_agent_lock(0))
+            except AgentError as exc:
+                raise ValueError(busy) from exc
+            return ai_supplement.save_content_edit(folder, unit_id, patch)
 
     @staticmethod
     @serialized

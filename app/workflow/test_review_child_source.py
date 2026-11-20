@@ -341,6 +341,134 @@ class ScopedChildSourceTest(unittest.TestCase):
         self.assertIsInstance(current, dict)
         self.assertEqual(legacy, source)
 
+    def test_unnumbered_writing_single_line_and_multiline_with_guardrails(self):
+        from workflow import denoise, extract
+        from workflow.structure_gate import _build_scoped_units, _scoped_source_errors
+        from workflow.upload_numbering import project_batch
+
+        # 1) 一行标题即题干，紧接写作指导：结构闸门与二审都应通过，且上传题号保持 null/null
+        single_raw = (
+            "七上 · 人教版 · 课时A计划\n"
+            "**Unit 2　We’re Family!**\n"
+            "**单元话题写作**\n"
+            "**【第3步 典例分析】**\n"
+            "家是我们最熟悉的地方。假如你是李华,请写一篇60词左右的英语短文向校英语报投稿。\n"
+            "[IMG image59.jpeg]审题思路[IMG image60.jpeg]\n"
+            "**1.**体裁:说明文。\n"
+        )
+        st, body, _ = extract.infer_structure(single_raw)
+        raw_body = body if body.endswith("\n") else body + "\n"
+        cleaned, _, _ = denoise.clean_body(raw_body)
+        ps = denoise.project_structure(st, raw_body, cleaned)
+        single_lines = cleaned.splitlines()
+        single_units = _build_scoped_units(ps["sections"], ps.get("groups") or [], single_lines)
+        self.assertEqual(_scoped_source_errors(single_units, ps["sections"], single_lines), [])
+        self.assertEqual(len(single_units), 1)
+        single_unit = single_units[0]
+        self.assertEqual(single_unit["source_span"]["start_line"], single_unit["source_section"]["start_line"])
+        self.assertEqual(single_unit["source_span"]["end_line"], single_unit["source_section"]["start_line"])
+        proof = prove_child(cleaned, single_unit, 1)
+        self.assertEqual(proof["status"], "proven", proof)
+        self.assertEqual(proof["method"], "scoped-unnumbered-writing/v1")
+        self.assertNotIn("审题思路", proof["text"])
+        import json, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp)
+            (bdir / "01_source").mkdir(parents=True)
+            (bdir / "01_source" / "正文.txt").write_text(raw_body, encoding="utf-8")
+            (bdir / "01_source" / "structure.json").write_text(
+                json.dumps(st, ensure_ascii=False), encoding="utf-8"
+            )
+            (bdir / "01_source" / "structure.confirmed.json").write_text(
+                json.dumps({"units": [single_unit]}, ensure_ascii=False), encoding="utf-8"
+            )
+            proj = project_batch(
+                {"items": [{
+                    "unit_id": single_unit["unit_id"],
+                    "section_id": single_unit["section_id"],
+                    "identity_version": "scoped-v1",
+                    "question_ids": single_unit["question_ids"],
+                    "question_type": "书面表达",
+                    "unit_kind": "standalone",
+                    "number": 1,
+                    "numbers": [1],
+                    "printed_number": False,
+                    "original_number": None,
+                    "stem": single_unit["stem"],
+                    "subquestions": [],
+                }]},
+                bdir,
+            )
+            self.assertEqual(proj["errors"], [])
+            self.assertIsNone(proj["items"][0]["numberStart"])
+            self.assertIsNone(proj["items"][0]["numberEnd"])
+
+        # 2) 多行题干紧接写作指导：同样通过二审且不吞入指导/范文
+        multi_raw = (
+            "七上 · 人教版 · 课时A计划\n"
+            "**Unit 2　We’re Family!**\n"
+            "**单元话题写作**\n"
+            "**【第3步 典例分析】**\n"
+            "假设你是李华，请写一篇英语短文介绍你的学校。\n"
+            "要求：1. 介绍学校环境；2. 词数80左右。\n"
+            "[IMG image59.jpeg]审题思路[IMG image60.jpeg]\n"
+            "先总述再分述。\n"
+        )
+        st_m, body_m, _ = extract.infer_structure(multi_raw)
+        raw_body_m = body_m if body_m.endswith("\n") else body_m + "\n"
+        cleaned_m, _, _ = denoise.clean_body(raw_body_m)
+        ps_m = denoise.project_structure(st_m, raw_body_m, cleaned_m)
+        multi_lines = cleaned_m.splitlines()
+        multi_units = _build_scoped_units(ps_m["sections"], ps_m.get("groups") or [], multi_lines)
+        self.assertEqual(_scoped_source_errors(multi_units, ps_m["sections"], multi_lines), [])
+        self.assertEqual(len(multi_units), 1)
+        multi_unit = multi_units[0]
+        self.assertEqual(multi_unit["source_span"]["start_line"], multi_unit["source_section"]["start_line"] + 1)
+        multi_proof = prove_child(cleaned_m, multi_unit, 1)
+        self.assertEqual(multi_proof["status"], "proven", multi_proof)
+        self.assertIn("要求：1. 介绍学校环境", multi_proof["text"])
+        self.assertNotIn("审题思路", multi_proof["text"])
+
+        # 3) 截断题干、引用范文、跨大题错绑必须继续失败
+        truncated = deepcopy(single_unit)
+        truncated["stem"] = "家是我们最熟悉的地方。"
+        self.assertEqual(prove_child(cleaned, truncated, 1)["status"], "uncertain")
+
+        leaked_guide = deepcopy(single_unit)
+        leaked_guide["source_span"]["end_line"] = single_unit["source_span"]["end_line"] + 1
+        lo = leaked_guide["source_span"]["start_line"] - 1
+        hi = leaked_guide["source_span"]["end_line"]
+        leaked_guide["stem"] = "\n".join(single_lines[lo:hi]).strip()
+        self.assertEqual(prove_child(cleaned, leaked_guide, 1)["status"], "uncertain")
+
+        # 两个相似标题分属不同大题：把第一处的 span 错绑到第二处行号必须拒绝
+        dup_raw = (
+            "七上 · 人教版 · 课时A计划\n"
+            "**Unit 1　Hello!**\n"
+            "**第一课时**\n"
+            "假设你是李华，请写一篇英语短文介绍你的朋友。\n"
+            "[IMG image59.jpeg]审题思路[IMG image60.jpeg]\n"
+            "点题。\n"
+            "**第二课时**\n"
+            "假设你是李华，请写一篇英语短文介绍你的朋友。\n"
+            "[IMG image59.jpeg]审题思路[IMG image60.jpeg]\n"
+            "收尾。\n"
+        )
+        st_d, body_d, _ = extract.infer_structure(dup_raw)
+        raw_body_d = body_d if body_d.endswith("\n") else body_d + "\n"
+        cleaned_d, _, _ = denoise.clean_body(raw_body_d)
+        ps_d = denoise.project_structure(st_d, raw_body_d, cleaned_d)
+        dup_lines = cleaned_d.splitlines()
+        dup_units = _build_scoped_units(ps_d["sections"], ps_d.get("groups") or [], dup_lines)
+        self.assertEqual(len(dup_units), 2)
+        self.assertEqual(prove_child(cleaned_d, dup_units[0], 1)["status"], "proven")
+        self.assertEqual(prove_child(cleaned_d, dup_units[1], 1)["status"], "proven")
+        cross_bound = deepcopy(dup_units[0])
+        cross_bound["source_span"]["start_line"] = dup_units[1]["source_span"]["start_line"]
+        cross_bound["source_span"]["end_line"] = dup_units[1]["source_span"]["end_line"]
+        self.assertEqual(prove_child(cleaned_d, cross_bound, 1)["status"], "uncertain")
+
 
 if __name__ == '__main__':
     unittest.main()

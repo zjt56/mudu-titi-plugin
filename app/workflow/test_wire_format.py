@@ -111,5 +111,30 @@ class WireFormatTest(unittest.TestCase):
         for raw in ["<u>i______</u>", "<u>t______</u>"]:
             self.assertNotRegex(normalize_blank_text(raw), r"<u>[^<]*_{3,}")
 
+    def test_blank_normalization_preserves_fullwidth_column_separators(self):
+        # 多栏并排的小题号与选项之间的全角空格是列分隔符，不能改写成 ______，
+        # 否则下游 source_anchors 会丢失同行第 2/3/5 题锚点，引发 scoped answer 绑定失败。
+        self.assertEqual(
+            normalize_blank_text("c____/æ/t\u3000\u30002.[IMG image36.jpeg]"),
+            "c____/æ/t\u3000\u30002.[IMG image36.jpeg]",
+        )
+        self.assertEqual(
+            normalize_blank_text("____/e/gg\u3000\u3000**3.**[IMG image37.jpeg]"),
+            "____/e/gg\u3000\u3000**3.**[IMG image37.jpeg]",
+        )
+        self.assertEqual(
+            normalize_blank_text("1. foo\u3000\u3000(　)2. bar"),
+            "1. foo\u3000\u3000(　)2. bar",
+        )
+        self.assertEqual(
+            normalize_blank_text("A. map\u3000\u3000B. apple\u3000\u3000C. cat"),
+            "A. map\u3000\u3000B. apple\u3000\u3000C. cat",
+        )
+        # 真正的句中全角空格空档仍正常归一为 ______，不影响同行后面的题号分隔。
+        self.assertEqual(
+            normalize_blank_text("1. My name is \u3000\u3000.\u3000\u30002. Her name is \u3000\u3000."),
+            "1. My name is ______.\u3000\u30002. Her name is ______.",
+        )
+
 if __name__ == "__main__":
     unittest.main()

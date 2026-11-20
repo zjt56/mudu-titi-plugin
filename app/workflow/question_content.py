@@ -89,7 +89,10 @@ def unnumbered_text_responses(lines: list[str]) -> list[tuple[int, int]]:
     nonempty = [(i, line) for i, line in enumerate(lines) if line.strip()]
     if not nonempty or any(OPTION.search(line) for _, line in nonempty):
         return []
-    if len(nonempty) == 1 and readable(nonempty[0][1]) and len(_response_blanks(text)) == 1:
+    if len(nonempty) == 1 and readable(nonempty[0][1]) and (
+        len(_response_blanks(text)) == 1
+        or bool(re.search(r"<u>\s*[A-Za-z][A-Za-z\s'-]*\s*</u>", quoted_cloze_blank.sub(" ", nonempty[0][1])))
+    ):
         return [(0, len(lines) - 1)]
     # All readable rows have their own terminal response area: each source row
     # proves one item. Multiple blanks within a row do not prove multiple items.
@@ -98,6 +101,14 @@ def unnumbered_text_responses(lines: list[str]) -> list[tuple[int, int]]:
         starts = [0] + [i for i, _ in nonempty[1:]]
         return [(lo, starts[n + 1] - 1 if n + 1 < len(starts) else len(lines) - 1)
                 for n, lo in enumerate(starts)]
+    # A multi-line single prompt followed by dedicated response-blank line(s) at the end
+    # (e.g. ☆佳句仿写: example sentence + "仿写:..." + trailing response blank line(s)).
+    blank_start = next((idx for idx, (_, line) in enumerate(nonempty) if not readable(line)), None)
+    if (blank_start is not None and blank_start >= 1
+            and all(readable(line) and not _response_blanks(line) for _, line in nonempty[:blank_start])
+            and all(not readable(line) and len(_response_blanks(line)) == 1 and terminal.search(line)
+                    for _, line in nonempty[blank_start:])):
+        return [(0, len(lines) - 1)]
     # A single complete wrapped paragraph has just one answer area overall.
     if (len(_response_blanks(text)) == 1 and terminal.search(nonempty[-1][1])
             and all(readable(line) for _, line in nonempty)

@@ -1,10 +1,15 @@
 # 教材目录（课时同步练习）
 
-`references/textbook-catalog-1.0.md` 收录人教版、外研版、译林版初中英语新教材目录：3 个版本、18 册、128 个单元（含 Starter），以及各单元 Section 与课时条目。`references/textbook-catalog.json` 是它的结构化产物，由脚本生成，不要手改。
+`references/textbook-catalog-1.0.md` 收录人教版、外研版、牛津译林版初中英语新教材目录：3 个版本、18 册、128 个单元（含 Starter）、781 个课时节点，与远端 `/api/catalog/textbooks` 和 `/api/catalog/curriculum-nodes` 对齐。`references/textbook-catalog.json` 是它的结构化产物，由脚本生成，不要手改。
 
-## 当前状态：自动匹配暂停
+## 当前状态：同步练习自动匹配已启用
 
-2026-11-11 用户要求先只匹配知识点标签，教材尚未就绪。所有来源的知识点任务均不提供教材索引、不生成教材位置；旧候选的本地 `textbook` 在正常验收时省略，组装不传播。知识点目录与证据校验继续有效。目录数据及以下独立查询、校验工具保留供后续建设，不能据此重新启用自动教材匹配。
+- **适用来源**：仅同步课时类来源（`同步练习`、`单元测验`）在 `knowledge` 阶段注入教材目录并匹配 `textbook`；真题、模拟卷等非同步来源不触发教材匹配。
+- **两级挂载**：
+  - 明确属于具体课时的题目：填写 `version` / `book` / `unit` / `section` / `evidence`，上传映射为 `7年级上册 · Unit 1 You and Me · 第一课时 Section A (1a-1d)`。
+  - 与课时平级但不属于具体课时的单元级版块（`单元话题写作`、`综合阅读提升`、`Reading Plus`、`单元测验`、`单元复习`）：**省略 `section` 直接挂在具体单元下**（上传映射为 `7年级上册 · Unit 1 You and Me`），禁止顺延挂到上一课时。
+- **缺证据留空放行**：原卷确实缺少教材版本或单元线索时允许省略 `textbook`，不编造、不阻断流程与上传。
+- **上传映射**：`prepare-upload` 在批次含 `textbook` 时自动拉取远端 `/catalog/textbooks` 与 `/catalog/curriculum-nodes`，将本地 `textbook` 确定性映射为 `textbook_id`、`curriculum` 与 `textbookMappings[]`（复用通用知识点版本 `KCV-ENGLISH-KNOWLEDGE-1-1` 与本题 `knowledgeIds`）。
 
 ## 生成与校验
 

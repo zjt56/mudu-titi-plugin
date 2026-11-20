@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "references" / "textbook-catalog-1.0.md"
 OUTPUT = ROOT / "references" / "textbook-catalog.json"
-EXPECTED = {"versions": 3, "books": 18, "units": 138}
+EXPECTED = {"versions": 3, "books": 18, "units": 128}
 
 LINE = re.compile(r"^( *)- (.*?)\s*$")
 TOPIC = re.compile(r"^(.*?)（(.*)）$")

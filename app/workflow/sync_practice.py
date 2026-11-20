@@ -369,6 +369,19 @@ def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[di
             context = plain
         hit = heading_hit(raw, path)
         if hit:
+            if (rows
+                    and rows[-1]["type"] == hit["type"]
+                    and hit["type"] in {"任务型阅读", "阅读理解"}
+                    and rows[-1]["context"] == context
+                    and not _ROMAN_HEADING.match(plain)
+                    and not re.match(r"^[一二三四五六七八九十]+[、.．]", plain)
+                    and re.match(r"^(?:请?\s*根据(?:以上|上面|下面|短文|材料|对话)|阅读(?:以上|上面|下面)?(?:短文|材料))", plain)
+                    and not any(is_column_banner(lines[k]) for k in range(rows[-1]["start_line"], index - 1))):
+                from .structure_gate import _scope_anchors
+                if not _scope_anchors(lines[rows[-1]["start_line"]:index - 1]):
+                    if not rows[-1].get("subtype") and hit.get("subtype"):
+                        rows[-1]["subtype"] = hit["subtype"]
+                    continue
             rows.append({"occurrence": len(rows) + 1, "start_line": index,
                          "title": raw, "context": context, **{k: hit[k] for k in ("type", "subtype", "kind", "rule")}})
     for pos, row in enumerate(rows):

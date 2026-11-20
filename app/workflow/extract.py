@@ -71,7 +71,7 @@ def blank_numbers(line: str) -> list[int]:
     plain = strip_visual_markup(plain)
     normalized = plain.replace("\xa0", "\u3000")
     numbers = [int(n) for n in re.findall(
-        r"(?:_{2,}|\u3000|__|_)\s*(\d{1,3})(?![\d.．:：、)])", normalized)]
+        r"(?<![\d_])(?:\u3000\s*|_{1,8})(\d{1,3})_*(?![\d.．:：、,)A-Za-z%℃°])", normalized)]
     numbers.extend(int(n) for n in IMAGE_HINT_BLANK.findall(normalized))
     return sorted(set(numbers))
 
@@ -496,7 +496,7 @@ def infer_structure(text: str, skip_lines=None) -> tuple[dict, str, str]:
         # _weak_numbers）。两类都要收全，否则表格空/图注空/题号在前的空会被漏掉。
         if (is_sync and active.get('candidate_unit_kind') == 'group'
                 and active['type'] in {'补全对话', '完形填空', '选词填空', '短文填空',
-                                       '教材语篇填空', '听力信息转换', '任务型阅读', '读写综合'}):
+                                       '教材语篇填空', '听力信息转换', '任务型阅读', '读写综合', '阅读理解'}):
             from workflow.preview import _weak_numbers
             numbers = sorted(set(numbers) | set(_weak_numbers(raw)))
         for number in numbers:

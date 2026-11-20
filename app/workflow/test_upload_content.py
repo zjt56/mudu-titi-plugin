@@ -674,3 +674,21 @@ class UploadContentTest(unittest.TestCase):
     def test_formatting_and_whitespace_do_not_make_source_untraceable(self):
         report = inspect_content(self.batch, self.group(articleSummary='**南极文章。**', explanation='【文章大意】\n 南极文章。'))
         self.assertTrue(report['passed'], report)
+
+    def test_generalizable_answer_parsing_and_outline_headings(self):
+        from workflow import lesson_bands, upload_content as uc
+        self.assertEqual(lesson_bands.extract_outline_heading("**【三、Pronunciation】**"), "Pronunciation")
+        self.assertEqual(lesson_bands.extract_outline_heading("**三、Pronunciation**"), "Pronunciation")
+        self.assertEqual(
+            uc._answer_items("1.everyday/daily life\u30002.20⁃minute walk"),
+            [(1, "everyday/daily life"), (2, "20⁃minute walk")],
+        )
+        blocks = uc._compact_answer_blocks([
+            "Ⅰ.1~5 ABCDE",
+            "**☆****拓展设问**",
+            "6.Yes, I do.",
+            "活页部分",
+        ])
+        self.assertEqual(len(blocks), 1)
+        self.assertFalse(blocks[0]["invalid"])
+        self.assertEqual([r[0] for r in blocks[0]["rows"]], [1, 2, 3, 4, 5, 6])

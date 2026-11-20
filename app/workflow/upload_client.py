@@ -199,9 +199,12 @@ class ApiClient:
             raise APIError("missing_api_key")
         return secret
 
-    def _request(self, method, route, payload=None, *, media=False, secret=None):
+    def _request(self, method, route, payload=None, *, media=False, secret=None, extra_headers=None):
         allowed = ((method == "GET" and route == "/catalog/knowledge-versions") or
                    (method == "GET" and route.startswith("/catalog/knowledge-points?version_id=")) or
+                   (method == "POST" and route == "/catalog/knowledge-points/ensure") or
+                   (method == "GET" and route == "/catalog/textbooks") or
+                   (method == "GET" and route.startswith("/catalog/curriculum-nodes?textbook_id=")) or
                    (method == "POST" and route == "/uploads") or
                    (method == "GET" and (route == "/uploads/capabilities" or
                     re.fullmatch(r"/uploads/[A-Za-z0-9._-]{1,200}/receipt", route))))
@@ -215,9 +218,11 @@ class ApiClient:
             headers["Authorization"] = "Bearer " + secret
         if payload is not None:
             headers["Content-Type"] = "application/json"
+        if extra_headers:
+            headers.update(extra_headers)
         req = request.Request((self._origin if media else self._base) + route,
                               data=payload, headers=headers, method=method)
-        submitting = method == "POST"
+        submitting = method == "POST" and route == "/uploads"
         try:
             with self._opener.open(req, timeout=self.config["timeout_seconds"]) as response:
                 status = response.status
@@ -250,6 +255,11 @@ class ApiClient:
                 code = "unsafe_redirect"
             elif submitting and (status >= 500 or status in {408, 425, 429}):
                 code = "submission_unknown"
+            elif method == "POST" and route == "/catalog/knowledge-points/ensure":
+                api_code = (details.get("error") or details.get("code") or "").strip() if isinstance(details, dict) else ""
+                code = api_code if api_code in {
+                    "knowledge_ensure_denied", "knowledge_point_inactive", "knowledge_ensure_key_conflict",
+                } else "knowledge_ensure_failed"
             else:
                 code = "rejected" if submitting else "http_error"
             raise APIError(code, status, details) from None
@@ -311,6 +321,75 @@ class ApiClient:
         # leaf/path validation; do not manufacture missing metadata.
         return {"version": version, "points": points,
                 "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+    def ensure_knowledge_points(self, version_id, parent_id, names, *, reason, idempotency_key):
+        """在已授权父节点（如 词汇/考察词汇）下幂等批量注册 1–200 个子节点。"""
+        if (not isinstance(version_id, str) or not version_id.strip()
+                or not isinstance(parent_id, str) or not parent_id.strip()
+                or not isinstance(idempotency_key, str) or not idempotency_key.strip()):
+            raise APIError("invalid_ensure_request")
+        clean_names = [n.strip() for n in (names or []) if isinstance(n, str) and n.strip()]
+        clean_names = list(dict.fromkeys(clean_names))
+        if not clean_names:
+            return []
+        reason_text = (str(reason or "").strip() or "answer_point_tags")[:2000]
+        ensured = []
+        chunk_size = 200
+        for idx in range(0, len(clean_names), chunk_size):
+            chunk = clean_names[idx:idx + chunk_size]
+            chunk_key = idempotency_key if len(clean_names) <= chunk_size else f"{idempotency_key}-p{idx // chunk_size + 1}"
+            body = json.dumps({
+                "version_id": version_id,
+                "parent_id": parent_id,
+                "names": chunk,
+                "reason": reason_text,
+            }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            response = self._request(
+                "POST",
+                "/catalog/knowledge-points/ensure",
+                payload=body,
+                extra_headers={"Idempotency-Key": chunk_key},
+            )
+            items = response.get("items") if isinstance(response, dict) else None
+            if not isinstance(items, list) or len(items) != len(chunk):
+                raise APIError("unsupported_catalog_shape")
+            for point in items:
+                if (not isinstance(point, dict)
+                        or not isinstance(point.get("id"), str) or not point["id"].strip()
+                        or not isinstance(point.get("name"), str) or not point["name"].strip()
+                        or point.get("parent_id") != parent_id
+                        or ("version_id" in point and point["version_id"] != version_id)):
+                    raise APIError("unsupported_catalog_shape")
+                active = point.get("active")
+                if active is False or active == 0:
+                    raise APIError("knowledge_point_inactive")
+                ensured.append(point)
+        return ensured
+
+    def fetch_textbook_catalog(self):
+        """拉取远端启用的教材目录与各教材章节/课时节点（只读）。"""
+        raw_books = _rows(self._request("GET", "/catalog/textbooks"), ("textbooks", "items"))
+        textbooks = []
+        for row in raw_books:
+            active = row.get("active")
+            if active is False or active == 0:
+                continue
+            if "subject_id" in row and row["subject_id"] != self.config["subject_id"]:
+                continue
+            if not isinstance(row.get("name"), str) or not row["name"].strip():
+                raise APIError("unsupported_catalog_shape")
+            textbooks.append(row)
+        curriculum_nodes = {}
+        for tb in textbooks:
+            tid = tb["id"]
+            route = "/catalog/curriculum-nodes?" + parse.urlencode({"textbook_id": tid})
+            nodes = _rows(self._request("GET", route), ("nodes", "items", "curriculum_nodes"))
+            for node in nodes:
+                if (not isinstance(node.get("name"), str) or not node["name"].strip() or
+                        (node.get("parent_id") is not None and not isinstance(node["parent_id"], str))):
+                    raise APIError("unsupported_catalog_shape")
+            curriculum_nodes[tid] = nodes
+        return {"textbooks": textbooks, "curriculum_nodes": curriculum_nodes}
 
     def _login(self):
         """Create a human session when admin account/password are configured."""

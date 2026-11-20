@@ -248,6 +248,45 @@ class UploadClientTests(unittest.TestCase):
         self.assertNotIn("Authorization", self.server.calls[0][2])
         self.assert_code("media_type_mismatch", self.client.check_media, self.origin + "/source-media/clip.mp3", kind="image")
 
+    def test_ensure_knowledge_points_sends_idempotency_key_and_handles_errors(self):
+        def reply(method, path, body):
+            if method == "POST" and path == "/api/catalog/knowledge-points/ensure":
+                req = json.loads(body)
+                return 200, {}, {
+                    "items": [
+                        {"id": f"KP-{i}", "name": name, "parent_id": req["parent_id"],
+                         "version_id": req["version_id"], "active": True}
+                        for i, name in enumerate(req["names"], 1)
+                    ],
+                    "version": {"id": req["version_id"]},
+                    "catalog_revision": "rev-2",
+                }
+            return default_reply(method, path, body)
+        self.server.reply = reply
+        items = self.client.ensure_knowledge_points(
+            "english-v1", "KP-VOCAB-TESTED", ["take care of", "people", "people"],
+            reason="batch:unit1", idempotency_key="ap-ensure-001",
+        )
+        self.assertEqual([it["name"] for it in items], ["take care of", "people"])
+        method, path, headers, body = self.server.calls[-1]
+        self.assertEqual((method, path), ("POST", "/api/catalog/knowledge-points/ensure"))
+        self.assertEqual(headers["Idempotency-Key"], "ap-ensure-001")
+        self.assertEqual(headers["Authorization"], "Bearer " + TOKEN)
+        self.assertEqual(json.loads(body)["names"], ["take care of", "people"])
+
+        self.server.reply = lambda *args: (403, {}, {"error": "knowledge_ensure_denied"})
+        self.assert_code("knowledge_ensure_denied", self.client.ensure_knowledge_points,
+                         "english-v1", "KP-VOCAB-TESTED", ["people"],
+                         reason="batch:unit1", idempotency_key="ap-ensure-002")
+
+        self.server.reply = lambda *args: (200, {}, {
+            "items": [{"id": "KP-1", "name": "people", "parent_id": "KP-VOCAB-TESTED",
+                       "version_id": "english-v1", "active": 0}],
+        })
+        self.assert_code("knowledge_point_inactive", self.client.ensure_knowledge_points,
+                         "english-v1", "KP-VOCAB-TESTED", ["people"],
+                         reason="batch:unit1", idempotency_key="ap-ensure-003")
+
     def test_media_relative_path_resolves_against_origin(self):
         result = self.client.check_media("/source-media/clip.mp3", kind="audio")
         self.assertEqual(result["url"], self.origin + "/source-media/clip.mp3")

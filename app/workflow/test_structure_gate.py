@@ -395,6 +395,98 @@ class StructureGateTest(unittest.TestCase):
         self.assertNotIn("SOURCE_DUPLICATE_NUMBERS", codes)
         self.assertNotIn("QUESTION_NOT_FOUND", codes)
 
+    def test_side_by_side_fullwidth_space_questions_preserve_all_anchors(self):
+        # 同步课时语音题常把 1/2/3 或 4/5 用两个全角空格并排在同一行；
+        # 规范化空档后不能吃掉全角列分隔，否则 2/3/5 题号丢失，导致整课时答案无法唯一绑定。
+        from workflow import structure_gate as sg
+        lines = [
+            "**Ⅰ. 根据图片及所给音标写出下列单词所缺的字母**",
+            "**1.**[IMG image35.jpeg]",
+            "c____/æ/t\u3000\u30002.[IMG image36.jpeg]",
+            "____/e/gg\u3000\u30003.[IMG image37.jpeg]",
+            "p____/ɪ/g",
+            "**4.**[IMG image38.jpeg]",
+            "b____/ɒ/x\u3000\u30005.[IMG image39.jpeg]",
+            "s____/ʌ/n",
+        ]
+        anchors = sg._scope_anchors(lines)
+        self.assertEqual([n for _, n in anchors], [1, 2, 3, 4, 5], anchors)
+
+    def test_denoise_preserves_numbered_question_with_exam_source_tag(self):
+        from workflow import denoise, extract
+        text = (
+            "八上 · 人教版 · 课时A计划\n"
+            "**Unit 1　Happy Holiday**\n"
+            "**第三课时**　Grammar Focus\n"
+            "**Ⅰ. 单项填空**\n"
+            "**1.**—Where did you go?\n"
+            "A.Home.\tB.School.\n"
+            "**2****.**[2025·蚌埠模拟]—Did you buy anything special?\n"
+            "A.Yes.\tB.No.\n"
+        )
+        structure, body, _ = extract.infer_structure(text)
+        raw_body = body if body.endswith("\n") else body + "\n"
+        cleaned, _, _ = denoise.clean_body(raw_body)
+        projected = denoise.project_structure(structure, raw_body, cleaned)
+        self.assertEqual(projected["sections"][0]["questions"], [1, 2])
+
+    def test_blank_before_ordinal_date_or_number_is_not_printed_anchor(self):
+        from workflow import preview, structure_gate as sg
+        self.assertEqual(preview._weak_numbers("My birthday is on ________12th March."), [])
+        self.assertEqual(preview._weak_numbers("He only __10__ 15 dollars for lunch."), [10])
+        self.assertEqual(preview._weak_numbers("They can ________________________8,000 ________."), [])
+        anchors = sg._scope_anchors([
+            "**1.**My birthday is on ________12th March.",
+            "**2.**They can ________________________8,000 ________.",
+        ])
+        self.assertEqual([n for _, n in anchors], [1, 2])
+
+    def test_unnumbered_imitation_and_quoted_cloze_word_meaning_pass_scoped_gate(self):
+        from workflow import extract, denoise, structure_gate as sg
+        text = (
+            "九上 · 人教版 · 课时A计划\n"
+            "**Unit 4　Our Memory**\n"
+            "**第四课时**　Section B (1a-1e)\n"
+            "**Ⅰ. 单项填空**\n"
+            "**1.**He has a good memory.\n"
+            "A.Yes\tB.No\n"
+            "**☆****佳句仿写**\n"
+            "As I was looking at it,the __<u>2</u>__ memory of that day came back to me.\n"
+            "仿写:当我听到这首老歌时,校园生活的美好回忆涌上心头。\n"
+            "___________________________________________________________________________________\n"
+            "**熟词生义**\n"
+            "**写出下面画线词的汉语意思**\n"
+            "Then they __<u>3</u>__ the students 40 <u>seconds</u> to memorize them.\n"
+        )
+        structure, body, _ = extract.infer_structure(text)
+        raw_body = body if body.endswith("\n") else body + "\n"
+        cleaned, _, _ = denoise.clean_body(raw_body)
+        ps = denoise.project_structure(structure, raw_body, cleaned)
+        lines = cleaned.splitlines()
+        units = sg._build_units(ps["sections"], ps.get("groups") or [], lines)
+        errors = sg._scoped_source_errors(units, ps["sections"], lines)
+        self.assertEqual(errors, [])
+
+    def test_single_line_writing_prompt_before_guide_heading_passes_scoped_gate(self):
+        from workflow import extract, denoise, structure_gate as sg
+        text = (
+            "七上 · 人教版 · 课时A计划\n"
+            "**Unit 2　We’re Family!**\n"
+            "**单元话题写作**\n"
+            "**【第3步 典例分析】**\n"
+            "家是我们最熟悉的地方。假如你是李华,请写一篇60词左右的英语短文向校英语报投稿。\n"
+            "[IMG image59.jpeg]审题思路[IMG image60.jpeg]\n"
+            "**1.**体裁:说明文。\n"
+        )
+        structure, body, _ = extract.infer_structure(text)
+        raw_body = body if body.endswith("\n") else body + "\n"
+        cleaned, _, _ = denoise.clean_body(raw_body)
+        ps = denoise.project_structure(structure, raw_body, cleaned)
+        lines = cleaned.splitlines()
+        units = sg._build_units(ps["sections"], ps.get("groups") or [], lines)
+        errors = sg._scoped_source_errors(units, ps["sections"], lines)
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -116,8 +116,8 @@ test('书面表达按规则不要求解析与大意，不显示成内容缺失',
 
 test('内容预览卡挂在原卷预览卡片之后、右栏之前，并按题重挂载', () => {
   const previewButton = source.indexOf("}, '原卷修改'),");
-  const mount = source.indexOf("h(ContentPreviewCard, { key: 'content:'");
-  const rightColumn = source.indexOf('// 右：标签审核');
+  const mount = source.indexOf('h(ContentPreviewCard, {');
+  const rightColumn = source.indexOf('// 右：悬浮等宽三按钮 + 标签审核');
   assert.ok(previewButton > 0 && mount > previewButton && rightColumn > mount,
     '卡片必须紧跟原卷预览，且不进入右侧标签审核栏');
   assert.ok(source.includes("key: 'content:' + String(detail.unit_id || detail.label || '')"));
@@ -125,21 +125,21 @@ test('内容预览卡挂在原卷预览卡片之后、右栏之前，并按题�
 
 test('内容预览只读：不调用写接口、不出现可编辑控件', () => {
   const start = source.indexOf('    function ContentPreviewCard(');
-  const end = source.indexOf('    // 审阅视图', start);
+  const end = source.indexOf('    function ContentEditModal(', start);
   assert.ok(start > 0 && end > start, '内容预览组件应可定位');
   const block = source.slice(start, end);
   assert.doesNotMatch(block, /jpost\(|jget\(|onChange|contentEditable/);
   assert.doesNotMatch(block, /h\('(input|textarea|select)'/);
-  assert.match(block, /只读/);
   assert.match(block, /aria-expanded/);
   assert.match(block, /文章大意/);
-  assert.match(block, /解析/);
+  assert.match(block, /答案解析/);
 });
 
 test('占位与缺失口径写死在预览卡：整串「无/未提供/未填写」不当正文', () => {
   assert.ok(source.includes("const CONTENT_PLACEHOLDERS = new Set(['无', '未提供', '未填写', 'n/a', 'none']);"));
-  assert.ok(source.includes("'无解析 ' + model.missing + ' 条'"));
-  assert.ok(source.includes('本题无原卷解析与文章大意，未生成占位内容。'));
+  assert.ok(source.includes("'已填 ' + model.withText + '/' + model.rows.length"));
+  assert.ok(source.includes("'暂无文章大意'"));
+  assert.ok(source.includes("'暂无答案解析'"));
 });
 
 test('内容预览样式走既有 token，长文按行数截断', () => {
@@ -156,10 +156,10 @@ test('任务型阅读长答案换行，逐题解析和缺失提示都独占正�
     Fragment: 'fragment',
     useState: (initial) => [typeof initial === 'boolean' ? true : initial, () => {}],
   };
-  const block = source.slice(from, source.indexOf('    // 审阅视图', to));
+  const block = source.slice(from, source.indexOf('    function ContentEditModal(', to));
   const { ContentPreviewCard } = vm.runInNewContext(block + '\n({ ContentPreviewCard })', {
     require: () => React,
-    T: { badge: () => ({}) }, TEXT: {}, markLine: (text) => text,
+    T: { badge: () => ({}), hint: {} }, TEXT: {}, markLine: (text) => text,
   });
   const answer = 'Never give up./Face difficulties bravely./' + 'LongUnbrokenAnswer'.repeat(12);
   const explanation = '根据原文末段可知。'.repeat(20);
@@ -177,10 +177,10 @@ test('任务型阅读长答案换行，逐题解析和缺失提示都独占正�
     assert.equal(row.children.length, 2);
     const body = row.children[1];
     assert.equal(body.props.className, 'wf-content-row-body');
-    assert.equal(body.children[0].children[0], answer);
+    assert.equal(body.children[0].children[0].children[0], '答案：' + answer);
   }
-  assert.equal(rows[0].children[1].children[1].children[0].props.dangerouslySetInnerHTML.__html, explanation);
-  assert.equal(rows[1].children[1].children[1].children[0], '原卷未提供');
+  assert.equal(rows[0].children[1].children[1].props.dangerouslySetInnerHTML.__html, explanation);
+  assert.equal(rows[1].children[1].children[1].children[0], '暂无解析');
   assert.match(source, /\.wf-content-row\{display:grid;grid-template-columns:max-content minmax\(0,1fr\)/);
   assert.match(source, /\.wf-content-ans\{[^}]*max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere/);
 });

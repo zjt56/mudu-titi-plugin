@@ -251,8 +251,12 @@ def _project_unit_to_body_file(unit, clean_to_raw, body):
     lo, hi = span.get('start_line'), span.get('end_line')
     if (span.get('basis') == 'cleaned_source' and expected and type(lo) is int
             and type(hi) is int and 1 <= lo <= hi):
-        current_numbers = [n for _, n in _printed_item_anchors(body[lo - 1:min(hi, len(body))])]
-        if current_numbers != expected:
+        section_slice = body[lo - 1:min(hi, len(body))]
+        current_numbers = [n for _, n in _printed_item_anchors(section_slice)]
+        has_table = any('[TABLE' in line for line in section_slice)
+        if not (current_numbers == expected
+                or (has_table and len(current_numbers) == len(set(current_numbers)) == len(expected)
+                    and sorted(current_numbers) == sorted(expected))):
             mapped_lo, mapped_hi = clean_to_raw.get(lo), clean_to_raw.get(hi)
             if (type(mapped_lo) is int and type(mapped_hi) is int
                     and owners[0]['start_line'] <= mapped_lo <= mapped_hi <= owners[0]['end_line']):
@@ -274,9 +278,13 @@ def _project_unit_to_body_file(unit, clean_to_raw, body):
                 # 的第2、4题）挤进本单元区间时，只是结构待核验缺陷，不能让本单元
                 # 已声明题号的原文坐标整体失效；只要求声明题号按序落位，未声明
                 # 题号仍由结构闸门报告，绝不借此猜配或补造题目。
-                projected_numbers = [n for _, n in _printed_item_anchors(body[mapped_lo - 1:end])
+                proj_slice = body[mapped_lo - 1:end]
+                projected_numbers = [n for _, n in _printed_item_anchors(proj_slice)
                                      if n in expected]
-                if projected_numbers == expected:
+                proj_table = any('[TABLE' in line for line in proj_slice)
+                if (projected_numbers == expected
+                        or (proj_table and len(projected_numbers) == len(set(projected_numbers)) == len(expected)
+                            and sorted(projected_numbers) == sorted(expected))):
                     projected_span = dict(span, start_line=mapped_lo, end_line=end)
 
     return dict(unit, source_span=projected_span, source_section=projected_section)
@@ -428,8 +436,20 @@ def scoped_source_matches(unit, number, path, line, source_lines, *, equivalent_
         # numbers within a wholly unnumbered section.
         binding = span.get('number_binding')
         unit_nums = [int(x) for x in (unit.get('numbers') or []) if str(x).isdigit()]
-        section_clean = (not local_anchors
-                         and not _printed_item_anchors(body[owners[0]['start_line'] - 1:owners[0]['end_line']])
+        from .preview import _strong_number
+        owner_slice = body[owners[0]['start_line'] - 1:owners[0]['end_line']]
+        effective_local_anchors = (
+            [] if (binding == 'unnumbered_section' and span.get('printed_numbers') == []
+                   and not any(_strong_number(line) is not None for line in owner_slice))
+            else local_anchors
+        )
+        effective_owner_anchors = (
+            [] if (binding == 'unnumbered_section' and span.get('printed_numbers') == []
+                   and not any(_strong_number(line) is not None for line in owner_slice))
+            else _printed_item_anchors(owner_slice)
+        )
+        section_clean = (not effective_local_anchors
+                         and not effective_owner_anchors
                          and not any(row.strip() for row in (body[owners[0]['start_line']:start - 1]
                                                              + body[end:owners[0]['end_line']])))
         inferred_ok = (binding == ANSWER_INFERRED_BINDING and span.get('printed_numbers') == []
@@ -565,7 +585,10 @@ _WORD_SEQUENCE = re.compile(r'(?=.*[A-Za-z]{2})[A-Za-z]+(?:\s*[,，]\s*[A-Za-z]+
 # answer item's material (multi-line task-reading / cloze keys).
 _SUBITEM_CONT = re.compile(r'^[(（]\s*\d{1,3}\s*[)）]')
 _ROMAN_TITLE = re.compile(rf'^{ORD_PREFIX}([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫIVX]+)[.．、]')
-_ANSWER_ITEM = re.compile(r'(?:^|(?<=\s))(\d{1,3})[.．、](?!\d)')
+_ANSWER_ITEM = re.compile(
+    r'(?:^|(?<=[\u3000\t])|(?<=  ))(\d{1,3})[.．、]'
+    r'|(?<=\s)(\d{1,3})[.．、](?!\d)'
+)
 _COMPACT_RANGE = re.compile(r'^\s*(\d{1,3})\s*[~～—–-]\s*(\d{1,3})\s+([A-Za-z]+)\s*$')
 # One compact-key token: either a whole-task range ``1~5 ABC`` or a single
 # numbered item ``6.D``. Used to parse Roman lines mixing both forms.
@@ -601,11 +624,11 @@ def _answer_items(text):
     # multi-word answer such as ``4.do you spell`` is not truncated.
     matches = list(_ANSWER_ITEM.finditer(text))
     if matches and matches[0].start() == 0:
-        numbers = [int(match[1]) for match in matches]
+        numbers = [int(match[1] or match[2]) for match in matches]
         if len(matches) == 1 and '~' in text and not _ANSWER_TOKEN.fullmatch(text.strip()):
             return []
         if numbers == sorted(set(numbers)):
-            return [(int(match[1]), re.sub(r'^【答案】\s*', '', text[match.end():
+            return [(int(match[1] or match[2]), re.sub(r'^【答案】\s*', '', text[match.end():
                      matches[pos + 1].start() if pos + 1 < len(matches) else len(text)]).strip())
                     for pos, match in enumerate(matches)]
         return []
@@ -711,7 +734,11 @@ def _compact_answer_blocks(lines, features=(), outline_bands=()):
         # ☆拓展设问 / 拓展设问 is a sub-heading that belongs to the preceding group
         # task (rule: it is not a new numbered question). It must not poison or
         # split the current answer block.
-        if re.fullmatch(r'[☆★]?\s*拓展设问\s*', text.strip()):
+        if re.fullmatch(r'[☆★]?\s*拓展设问\s*', visible) or re.fullmatch(r'[☆★]?\s*拓展设问\s*', text.strip()):
+            continue
+        # 书末/单元末的活页分隔标题（如「活页部分」）不属于上一大题答案，遇到时结束当前块而不污染它。
+        if re.fullmatch(r'活页(?:部分|测试|练习|试卷|检测)?', visible):
+            active = None
             continue
         sub_col = _SUB_COLUMN_ANSWER.match(visible)
         sub_col_label = (sub_col.group(1) or sub_col.group(2)) if sub_col else ''
@@ -883,27 +910,19 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, bat
     body = source_lines.get(body_path, [])
     sections = sections if sections is not None else [dict(r) for r in _cached_heading_candidates(tuple(body))]
     section_outline_bands, outline_bands = _body_outline_tree(body, sections)
+    # 两层板块模型：区分一级硬隔离容器（foundation/extension）与正文装饰/题材标签（如【三、时文阅读】）。
+    # classic_bands 仅追踪经典大板块，不被正文题材/特色标签冲掉；当附录省略该题材标签、仅印父容器时，
+    # 该大题自动回落到所属 classic_band，并继续受全卷顺序罗马骨架与印刷题号 1:1 严格核验。
+    classic_bands = _answer_section_bands(sections, body, extra_labels=())
     body_bands = _answer_section_bands(sections, body, extra_labels=outline_bands)
-    if 'invalid' in body_bands:
+    if 'invalid' in body_bands or 'invalid' in classic_bands:
         return []
     accepted_bands: list[set[str]] = [{b} if b else set() for b in body_bands]
-    # 同一大题前（上一大题之后）连续叠加的多层板块横幅（如【三、B 能力提升】+【四、时文阅读】）
-    # 共同修饰该大题：附录可能只写父板块（三、能力提升）或只写子横幅（时文阅读），两者均纳入合法集合。
-    for index, section in enumerate(sections):
-        prev_start = sections[index - 1]['start_line'] if index > 0 else 0
-        for line_no in range(prev_start + 1, section['start_line']):
-            b_lbl, b_kind = match_banner(body[line_no - 1], extra_labels=outline_bands)
-            if b_lbl and b_kind != 'invalid':
-                mapped = _answer_band(b_lbl, extra_labels=outline_bands)
-                if mapped:
-                    accepted_bands[index].add(mapped)
     for index, section in enumerate(sections):
         verified = section.get('lesson_band') or {}
         if verified.get('label'):
             label = _answer_band(verified['label'], extra_labels=outline_bands)
             if body_bands[index] and body_bands[index].startswith('outline:'):
-                # 正文显式子栏目横幅（如【四、时文阅读】/【三、词义猜测】）位于经典 A/B 容器内时，
-                # 附录可能写父板块（三、能力提升）或写子栏目（☆词义猜测），两者均合法，不再二选一。
                 if label:
                     accepted_bands[index].add(label)
                 continue
@@ -942,6 +961,17 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, bat
         and all(band and band != 'pronunciation' for band in unnumbered_bands)
         and len(set(unnumbered_bands)) == len(unnumbered_bands)
     )
+    def _is_sub_column_section(sec):
+        t = plain_text(sec.get('title') or '').strip()
+        return bool(_SUB_COLUMN_ANSWER.match(t) or '画线词' in t or '佳句仿写' in t or '熟词生义' in t)
+    non_sub_unnumbered = [i for i in unnumbered if not _is_sub_column_section(sections[i])]
+    non_sub_bands = [body_bands[i] for i in non_sub_unnumbered]
+    sub_column_scoped = bool(
+        unnumbered
+        and any(_is_sub_column_section(sections[i]) for i in unnumbered)
+        and all(band and band != 'pronunciation' for band in non_sub_bands)
+        and len(set(non_sub_bands)) == len(non_sub_bands)
+    )
     owner = unit.get('source_section') or {}
     from .lesson_bands import strip_decorative_images
 
@@ -961,7 +991,7 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, bat
                 and sum(1 for b in body_bands if b == cur_band) == 1):
             unique_section_band = True
     if (not all(ordinals) and not trailing and not verified_extension
-            and not band_scoped_unnumbered and not unique_section_band):
+            and not band_scoped_unnumbered and not sub_column_scoped and not unique_section_band):
         return []
     # An unrecognized printed Roman heading must not silently disappear from the
     # skeleton and shift every later foundation/extension occurrence.
@@ -987,11 +1017,17 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, bat
         return []
     # A companion row cannot disambiguate repeated passage numbers in one section.
     section = sections[positions[0]]
-    anchors = _printed_item_anchors(body[section['start_line'] - 1:section['end_line']])
+    sec_lines = body[section['start_line'] - 1:section['end_line']]
+    anchors = _printed_item_anchors(sec_lines)
+    span = unit.get('source_span') or {}
+    from .preview import _strong_number
+    if (span.get('number_binding') == 'unnumbered_section'
+            and span.get('printed_numbers') == []
+            and not any(_strong_number(line) is not None for line in sec_lines)):
+        anchors = []
     if sum(n == int(number) for _, n in anchors) > 1:
         return []
     skeleton = [_norm(match[1]) if match else None for match in ordinals]
-    span = unit.get('source_span') or {}
     # An explicitly source-bound standalone may also represent one whole task
     # without printed child numbers. Keep the older group path, and require the
     # stronger span/printed-number proof plus a narrow word-list value below for
@@ -1004,7 +1040,7 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, bat
              and (unit.get('unit_kind') == 'group' or whole_standalone) and not anchors)
     inferred = (span.get('number_binding') == ANSWER_INFERRED_BINDING
                 and span.get('printed_numbers') == [] and not anchors)
-    if (whole or inferred) and len(lesson_markers) != 1:
+    if (whole or inferred) and not (len(lesson_markers) == 1 or (len(lesson_markers) == 0 and len(topic_contexts) == 1)):
         return []  # A Unit heading alone cannot prove a whole unnumbered lesson task.
     result = []
     unit_hint = _source_unit_hint(batch_dir)
@@ -1026,9 +1062,36 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, bat
                 or explicit_units and explicit_units != body_units):
             continue
         blocks = _cached_compact_blocks(tuple(lines), tuple(features), tuple(outline_bands))
-        if [block['ordinal'] for block in blocks] != skeleton:
+        companion_outlines = {
+            _answer_band(block['band'], extra_labels=outline_bands)
+            for block in blocks if block['band']
+        }
+        effective_accepted = [
+            (ab | {classic}) if (band.startswith('outline:')
+                                 and band not in companion_outlines
+                                 and classic in {'foundation', 'extension'}) else ab
+            for band, classic, ab in zip(body_bands, classic_bands, accepted_bands)
+        ]
+        def _skeleton_matches(cand_blocks):
+            if [b['ordinal'] for b in cand_blocks] == skeleton:
+                return True
+            if len(cand_blocks) != len(skeleton):
+                return False
+            for idx_b, (sk_ord, blk) in enumerate(zip(skeleton, cand_blocks)):
+                if blk['ordinal'] == sk_ord:
+                    continue
+                b_band = body_bands[idx_b]
+                if ({sk_ord, blk['ordinal']} == {'I', None}
+                        and b_band and b_band != 'pronunciation'
+                        and body_bands.count(b_band) == 1
+                        and sum(1 for cb in cand_blocks
+                                if _answer_band(cb['band'], extra_labels=outline_bands) in effective_accepted[idx_b]) == 1):
+                    continue
+                return False
+            return True
+        if not _skeleton_matches(blocks):
             without_sub_col = [block for block in blocks if not block.get('sub_column')]
-            if [block['ordinal'] for block in without_sub_col] == skeleton:
+            if _skeleton_matches(without_sub_col):
                 blocks = without_sub_col
             else:
                 continue
@@ -1052,7 +1115,7 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, bat
         if (any(block['band'] == 'invalid' for block in blocks)
                 or any(band and band != 'pronunciation'
                        and _answer_band(block['band'], extra_labels=outline_bands) not in ab
-                       for band, ab, block in zip(body_bands, accepted_bands, blocks))):
+                       for band, ab, block in zip(body_bands, effective_accepted, blocks))):
             continue
         # The complete sequence is the ownership proof, so a malformed peer
         # cannot silently help assign a later same-number key by elimination.
@@ -1073,21 +1136,26 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, bat
                             == [(n, value) for n, _, value in chunks[0]] for chunk in chunks))
             if block['invalid'] or duplicates:
                 raise ValueError('scoped answer source scope unbound: duplicate or malformed compact answer block')
-        if any(body_bands) or any(topics):
+        if any(body_bands) or any(topics) or sub_column_scoped:
             complete = True
-            for peer_section, peer, body_band, ab in zip(sections, blocks, body_bands, accepted_bands):
+            for peer_section, peer, body_band, ab in zip(sections, blocks, body_bands, effective_accepted):
                 key_band = _answer_band(peer['band'], extra_labels=outline_bands)
                 if body_band and key_band not in ab:
                     complete = False
                     break
-                printed = [n for _, n in _printed_item_anchors(
-                    body[peer_section['start_line'] - 1:peer_section['end_line']])]
+                if _is_sub_column_section(peer_section) and not peer.get('sub_column'):
+                    complete = False
+                    break
+                sec_slice = body[peer_section['start_line'] - 1:peer_section['end_line']]
+                printed = [n for _, n in _printed_item_anchors(sec_slice)]
                 keyed = list(dict.fromkeys(n for n, _, _ in peer['rows']))
+                has_table = any('[TABLE' in line for line in sec_slice)
+                order_ok = (keyed == printed) or (has_table and sorted(keyed) == sorted(printed))
                 if peer.get('sub_column') and peer['literal']:
                     if not peer['raw']:
                         complete = False
                         break
-                elif (printed and (len(printed) != len(set(printed)) or keyed != printed)
+                elif (printed and (len(printed) != len(set(printed)) or not order_ok)
                         or not printed and not peer['raw']):
                     complete = False
                     break
@@ -1100,7 +1168,7 @@ def _compact_scoped_candidates(unit, number, source_lines, *, sections=None, bat
             # 正文末尾为显式小栏目、附录对应显式小栏目答案块（如 ☆熟词生义 / ☆短语翻译 / 【微练】）
             # 且前面已通过全卷板块与印刷题号完整性核验时，按答案块形态反向对齐：
             # 无号文字答案块直接通过，带编号答案块仍要求题号与正文一致。
-            if (tail.get('sub_column') and tail['raw'] and (any(body_bands) or any(topics))
+            if (tail.get('sub_column') and tail['raw'] and (any(body_bands) or any(topics) or sub_column_scoped)
                     and (tail['literal'] or (expected and [n for n, _, _ in tail['rows']] == expected))):
                 pass
             else:
@@ -1301,37 +1369,99 @@ def _shortened_band_window(owner_span, annotated):
 
 
 def _topic_writing_sentence_answers(unit, number, lines, sections):
-    """Bind a labelled Word key to the sole numbered task in a writing section."""
+    """Bind a labelled Word key to the numbered sentence-training task(s) in a writing section."""
+    from .lesson_bands import strip_decorative_images
     from .sync_practice import plain_text, writing_prompt
+
+    def _clean_heading(raw):
+        return strip_decorative_images(plain_text(raw)).strip()
 
     body_path, key_path = '01_source/正文.txt', '01_source/附录.txt'
     body, appendix = lines.get(body_path, []), lines.get(key_path, [])
-    if (len(sections) < 2 or unit.get('type') != '完成句子'
+    if (len(sections) < 2 or unit.get('type') not in ('完成句子', '翻译')
             or any(row.get('context') != '单元话题写作' for row in sections)
-            or sum(plain_text(line).strip() == '单元话题写作' for line in body) != 1):
+            or sum(_clean_heading(line) == '单元话题写作' for line in body) != 1):
         return []
-    section, *writing = sections
-    if (section['type'] != '完成句子'
+    first_writing = next((i for i, row in enumerate(sections) if row.get('type') == '书面表达'), len(sections))
+    sentence_secs = sections[:first_writing]
+    writing = sections[first_writing:]
+    if (not sentence_secs or not writing
+            or any(row['type'] not in ('完成句子', '翻译') for row in sentence_secs)
             or any(row['type'] != '书面表达' or not writing_prompt(row['title']) for row in writing)
             or not scoped_source_matches(unit, number, body_path, unit['source_span']['start_line'],
                                          lines, _file_coordinates=True)):
         return []
-    anchors = _printed_item_anchors(body[section['start_line']:section['end_line']])
-    printed = [n for _, n in anchors]
-    headings = [i for i, row in enumerate(appendix) if plain_text(row).strip() == '句型训练']
-    if (not printed or printed != sorted(set(printed)) or len(headings) != 1
-            or not any(plain_text(row).strip() == '参考答案' for row in appendix[:headings[0]])):
+    headings = [i for i, row in enumerate(appendix) if _clean_heading(row) == '句型训练']
+    if (len(headings) != 1
+            or not any(_clean_heading(row) == '参考答案' for row in appendix[:headings[0]])):
         return []
     following = [(i, row) for i, row in enumerate(appendix[headings[0] + 1:], headings[0] + 2)
-                 if plain_text(row).strip()]
+                 if _clean_heading(row)]
     if not following:
         return []
-    line, text = following[0]
-    parsed = _answer_items(text)
-    if ([n for n, _ in parsed] != printed or any(not value for _, value in parsed)
-            or any(_answer_items(row) for _, row in following[1:])):
+    key_lines = []
+    for line, text in following:
+        if _clean_heading(text) in ('实战演练', '典例分析', '词汇积累'):
+            break
+        key_lines.append((line, text))
+    if not key_lines:
         return []
-    return [(key_path, line, value) for n, value in parsed if n == int(number)]
+    owner = unit.get('source_section') or {}
+    target_idx = next(
+        (i for i, row in enumerate(sentence_secs)
+         if row.get('start_line') == owner.get('start_line')
+         and row.get('occurrence') == owner.get('occurrence')),
+        None,
+    )
+    if target_idx is None:
+        return []
+    if len(sentence_secs) == 1:
+        section = sentence_secs[0]
+        anchors = _printed_item_anchors(body[section['start_line']:section['end_line']])
+        printed = [n for _, n in anchors]
+        if not printed or printed != sorted(set(printed)):
+            return []
+        parsed = []
+        for line, text in key_lines:
+            txt = text
+            m_rom = _ROMAN_ANSWER.match(txt)
+            if m_rom:
+                txt = txt[m_rom.end():]
+            row_items = _answer_items(txt)
+            if not row_items:
+                return []
+            parsed.extend((n, line, value) for n, value in row_items)
+        if ([n for n, _, _ in parsed] != printed or any(not value for _, _, value in parsed)):
+            return []
+        return [(key_path, line, value) for n, line, value in parsed if n == int(number)]
+    # Multiple Roman-numbered sentence-training sections (e.g. Ⅰ.同义句转换 + Ⅱ.汉译英)
+    ordinals = [_ROMAN_TITLE.match(_structural_line(_source_line(row['title']))) for row in sentence_secs]
+    if not all(ordinals):
+        return []
+    expected_ords = [_norm(m[1]) for m in ordinals]
+    sub_blocks = []
+    active = None
+    for line, text in key_lines:
+        m_rom = _ROMAN_ANSWER.match(text)
+        if m_rom:
+            active = {'ordinal': _norm(m_rom[1]), 'rows': []}
+            sub_blocks.append(active)
+            text = text[m_rom.end():]
+        if active is None:
+            return []
+        row_items = _answer_items(text)
+        if not row_items:
+            return []
+        active['rows'].extend((n, line, value) for n, value in row_items)
+    if [b['ordinal'] for b in sub_blocks] != expected_ords:
+        return []
+    for sec, blk in zip(sentence_secs, sub_blocks):
+        printed = [n for _, n in _printed_item_anchors(body[sec['start_line']:sec['end_line']])]
+        if (not printed or printed != sorted(set(printed))
+                or [n for n, _, _ in blk['rows']] != printed
+                or any(not val for _, _, val in blk['rows'])):
+            return []
+    return [(key_path, line, value) for n, line, value in sub_blocks[target_idx]['rows'] if n == int(number)]
 
 
 def _sub_column_reverse_candidates(unit, number, source_lines, sections, *, batch_dir=None, features=()):
@@ -2321,7 +2451,10 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             for field, value in (('explanation', explanation), ('articleSummary', summary)):
                 if not isinstance(value, str):
                     error('CONTENT_TYPE_INVALID', '解析/大意必须是字符串', uid, field)
-                elif AI_MARK in value:
+                elif AI_MARK in value and not (
+                    manual_value(uid, field, value)
+                    and reference_problem(item, numbers, field, value) is None
+                ):
                     error('AI_CONTENT_FORBIDDEN', '禁止 AI 生成解析或文章大意；不得用标记代替原文', uid, field)
             if not writing_unit and not explanation and (child or not item.get('subquestions')):
                 originals = [row for row in questions if row['number'] in numbers and row['text'] and not is_placeholder(row['text'])
@@ -2350,7 +2483,11 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                         and unique_summary(row) for row in matches)
             # 允许两种：可逐字溯源到该题组材料，或明确标注为 AI 生成待校对（F3/F5）。
             owned = owned and reference_problem(item, numbers, 'articleSummary', summary) is None
-            if not marked and not owned:
+            if marked and not owned:
+                if not child and manual_value(uid, 'articleSummary', summary) and reference_problem(item, numbers, 'articleSummary', summary) is None:
+                    warning('MANUAL_EDITED_CONTENT', '文章大意为工作台 AI 补充并确认，按用户确认接受',
+                            uid, 'articleSummary', [manual_content.RELATIVE])
+            elif not marked and not owned:
                 if not child and manual_value(uid, 'articleSummary', summary) and reference_problem(item, numbers, 'articleSummary', summary) is None:
                     warning('MANUAL_EDITED_CONTENT', '文章大意为工作台人工修改，按用户确认接受',
                             uid, 'articleSummary', [manual_content.RELATIVE])
@@ -2389,8 +2526,12 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                 if hint and value == hint:
                     traceable = True
             traceable = traceable and reference_problem(item, numbers, 'explanation', explanation) is None
-            if not marked and not traceable:
-                if not child and manual_value(uid, 'explanation', item.get('explanation')) and reference_problem(item, numbers, 'explanation', explanation) is None:
+            if marked and not traceable:
+                if manual_value(uid, 'explanation', item.get('explanation')) and reference_problem(item, numbers, 'explanation', explanation) is None:
+                    warning('MANUAL_EDITED_CONTENT', '解析为工作台 AI 补充并确认，按用户确认接受',
+                            uid, 'explanation', [manual_content.RELATIVE])
+            elif not marked and not traceable:
+                if manual_value(uid, 'explanation', item.get('explanation')) and reference_problem(item, numbers, 'explanation', explanation) is None:
                     warning('MANUAL_EDITED_CONTENT', '解析为工作台人工修改，按用户确认接受',
                             uid, 'explanation', [manual_content.RELATIVE])
                 else:

@@ -371,7 +371,8 @@ def _check_labels(values, prefixes=None):
         allowed = _allowed_prefixes(main_type) if prefixes is None else prefixes
         bad = [path for path in paths
                if not knowledge_path_allowed(path, main_type, allowed)
-               or (main_type in ("完成句子", "短文填空", "选词填空", "教材语篇填空") and _under(path, "词汇/答案考点"))]
+               or (main_type in ("完成句子", "短文填空", "选词填空", "教材语篇填空")
+                   and (_under(path, "词汇/考察词汇") or _under(path, "词汇/答案考点")))]
         if bad:
             problems.append(f"「{main_type}」知识点超出允许维度/范围（{'、'.join([*allowed, *sorted(exact_knowledge_paths(main_type))])}）：{bad}")
     return problems

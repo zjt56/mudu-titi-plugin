@@ -187,13 +187,13 @@ def clean_body(text: str) -> tuple[str, list[dict], list[dict]]:
         if meta_hits:
             # 卷名/年份/地区页眉可能同时含题号，保守起见只在明确是整卷说明时剔除
             normalized = re.sub(r"<[^>]+>", "", stripped).replace("**", "").strip()
-            numbered_header = (bool(_numbered_title(normalized)) and
-                               any(e.startswith(f"正文第{index}行：") for e in meta.get("evidence", [])))
+            in_header_evidence = any(e.startswith(f"正文第{index}行：") for e in meta.get("evidence", []))
+            numbered_header = bool(_numbered_title(normalized)) and in_header_evidence
             if _looks_like_question_line(stripped) and not numbered_header:
                 kept.append(line)
                 continue
-            # 只剔除一次卷名，避免把重复出现相同文字的正常题干误删
-            if "paper_title" in meta_hits and seen_title and not _strong_meta(stripped):
+            # paper_title 仅允许在卷头证据行内剔除一次；进入大题/题目正文后出现“模拟/中考”字样属于正文或真题来源标签，绝不误删。
+            if "paper_title" in meta_hits and not _strong_meta(stripped) and (seen_title or not in_header_evidence):
                 kept.append(line)
                 continue
             if "paper_title" in meta_hits:
@@ -212,8 +212,9 @@ def _strong_meta(stripped: str) -> bool:
 
 
 def _looks_like_question_line(stripped: str) -> bool:
-    """带明确题号（`12.` 或 `( )12.`）的行属于题目，不当作元信息剔除。"""
-    return bool(re.search(r"(?:[(（]\s*[)）]\s*)?\b\d{1,3}\s*[.．、]\s*\S", stripped))
+    """带明确题号（`12.`、`**2****.**` 或 `( )12.`）的行属于题目，不当作元信息剔除。"""
+    normalized = re.sub(r"<[^>]+>", "", stripped).replace("**", "").strip()
+    return bool(re.search(r"(?:[(（]\s*[)）]\s*)?\b\d{1,3}\s*[.．、]\s*\S", normalized))
 
 
 def deletion_map(lines: list[str]) -> tuple[dict[int, int], dict[int, int]]:

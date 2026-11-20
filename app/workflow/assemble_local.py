@@ -201,8 +201,11 @@ def available(batch_dir) -> bool:
 
 
 def _overlay_labels(target: dict, source: dict, main_type=None) -> None:
-    # 教材匹配暂停：刷新知识点时不沿用历史自动匹配的教材候选。
-    target.pop("textbook", None)
+    tb = source.get("textbook") if isinstance(source, dict) else None
+    if isinstance(tb, dict) and tb:
+        target["textbook"] = copy.deepcopy(tb)
+    else:
+        target.pop("textbook", None)
     if "knowledge" not in source:
         return
     target["knowledge"] = list(source.get("knowledge") or [])
@@ -354,8 +357,9 @@ def build(batch_dir) -> dict:
     from .question_identity import question_key, fields as identity_fields
     units = {u["unit_id"]: u for u in confirmed_units(batch)}
     meta = _load(batch / STRUCTURE).get("meta") or {}
-    from .metadata_policy import resolved_paper_meta
+    from .metadata_policy import original_filename, resolved_paper_meta
     meta = resolved_paper_meta(meta, batch)
+    orig_name = original_filename(batch)
     from .wire_format import _year
     marked_rows = {}
     marked_path = batch / "06_batch/batch_meta.json"
@@ -417,6 +421,22 @@ def build(batch_dir) -> dict:
         row_know = know.get(uid) or {}
         row_expl = expl.get(uid) or {}
         _overlay_labels(item, row_know)
+        if not item.get("textbook"):
+            from workbench import textbook
+            inferred_tb = textbook.infer_placement(batch, unit=unit)
+            if inferred_tb is not None:
+                item["textbook"] = inferred_tb
+        filters = item.get("filterMetadata")
+        if not isinstance(filters, dict) or not filters.get("semesters"):
+            from workbench import textbook
+            tb = item.get("textbook")
+            semester = (
+                (textbook.book_semester(tb.get("book")) if isinstance(tb, dict) and tb.get("book") else "")
+                or textbook.book_semester(item.get("source") or meta.get("source") or "")
+                or textbook.book_semester(orig_name)
+            )
+            if semester:
+                item.setdefault("filterMetadata", {})["semesters"] = [semester]
         _overlay_text(item, row_expl, row_know, "explanation")
         _overlay_text(item, row_expl, row_know, "articleSummary")
 

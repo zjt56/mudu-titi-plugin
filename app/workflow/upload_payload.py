@@ -16,7 +16,7 @@ import math
 import re
 from urllib.parse import unquote, urlsplit
 
-from workbench import taxonomy
+from workbench import taxonomy, textbook
 from workflow import label_audit
 from workflow.metadata_policy import MISSING
 from workflow.question_content import material_blank_numbers
@@ -42,7 +42,7 @@ LOCAL_FIELDS = {"unit_id", "number", "numbers", "status", "warnings", "knowledge
                 "optionColumns", "subquestionOptionColumns", "paperId", "paperOrder", "paperSection", "paperInstruction",
                 "subtypes", "categories", "audio", "images", "image", "audio_map", "image_map",
                  "identity_version", "section_id", "source_section", "question_ids", "question_id",
-                 "original_number", "printed_number", "printed_numbers", "source_span"}
+                 "original_number", "printed_number", "printed_numbers", "source_span", "textbook"}
 
 
 def _path(value):
@@ -312,6 +312,10 @@ class _Builder:
         self.remote_ids = {}
         self.leaves = set()
         self.catalog_sha256 = None
+        self.has_textbook_catalog = False
+        self.textbooks = {}
+        self.curriculum_units = {}
+        self.curriculum_lessons = {}
 
     def error(self, code, message, uid=""):
         self.errors.append({"code": code, "message": message, "unit_id": str(uid)})
@@ -319,12 +323,59 @@ class _Builder:
     def warning(self, code, message, uid=""):
         self.warnings.append({"code": code, "message": message, "unit_id": str(uid)})
 
+    def _load_textbook_catalog(self, snapshot):
+        if "textbooks" not in snapshot and "curriculum_nodes" not in snapshot:
+            return
+        books = snapshot.get("textbooks")
+        nodes_map = snapshot.get("curriculum_nodes")
+        if not isinstance(books, list) or not isinstance(nodes_map, dict):
+            self.error("TEXTBOOK_CATALOG_INVALID", "远端教材目录快照需要 textbooks 数组和 curriculum_nodes 对象")
+            return
+        for row in books:
+            if not isinstance(row, dict) or not _nonempty(row.get("id")) or not _nonempty(row.get("name")):
+                self.error("TEXTBOOK_CATALOG_INVALID", "远端教材条目缺少字符串 id 或 name")
+                continue
+            active = row.get("active")
+            if active is False or active == 0:
+                continue
+            tid = row["id"]
+            full_name = row["name"].strip()
+            for alias in (full_name, "译林版" if full_name.startswith("牛津译林版") else "", re.sub(r"（.*?）$", "", full_name).strip()):
+                if alias:
+                    bucket = self.textbooks.setdefault(alias, [])
+                    if tid not in bucket:
+                        bucket.append(tid)
+        for tid, nodes in nodes_map.items():
+            if not isinstance(nodes, list):
+                self.error("TEXTBOOK_CATALOG_INVALID", f"教材 {tid} 的 curriculum_nodes 必须是数组")
+                continue
+            for node in nodes:
+                if not isinstance(node, dict) or not _nonempty(node.get("id")) or not _nonempty(node.get("name")):
+                    continue
+                if node.get("active") is False or node.get("active") == 0:
+                    continue
+                nid = node["id"]
+                name = node["name"].strip()
+                pid = node.get("parent_id")
+                if pid in (None, ""):
+                    grade = str(node.get("grade") or "").strip()
+                    self.curriculum_units.setdefault((tid, grade, name), []).append(nid)
+                else:
+                    self.curriculum_lessons.setdefault((tid, pid, name), []).append(nid)
+        self.has_textbook_catalog = True
+
     def catalog(self, snapshot):
         if snapshot is None:
             self.error("CATALOG_REQUIRED", "上传前必须读取当前启用通用知识点版本及完整节点快照")
             return
         try:
-            content = {"version": snapshot.get("version"), "points": snapshot.get("points")} if isinstance(snapshot, dict) else snapshot
+            if isinstance(snapshot, dict):
+                content = {"version": snapshot.get("version"), "points": snapshot.get("points")}
+                if "textbooks" in snapshot or "curriculum_nodes" in snapshot:
+                    content["textbooks"] = snapshot.get("textbooks")
+                    content["curriculum_nodes"] = snapshot.get("curriculum_nodes")
+            else:
+                content = snapshot
             canonical = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
             self.catalog_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         except (TypeError, ValueError):
@@ -333,6 +384,7 @@ class _Builder:
         if not isinstance(snapshot, dict) or not isinstance(snapshot.get("version"), dict) or not isinstance(snapshot.get("points"), list):
             self.error("CATALOG_INVALID", "目录快照需要 version 对象和 points 数组")
             return
+        self._load_textbook_catalog(snapshot)
         version = snapshot["version"]
         if (not _nonempty(version.get("id")) or version.get("textbook_id") not in (None, "")
                 or not (version.get("status") == "active" or version.get("active") is True)
@@ -443,14 +495,14 @@ class _Builder:
             output["knowledge"] = []
             return
         if not isinstance(paths, list) or any(not _nonempty(p) for p in paths):
-            self.error("KNOWLEDGE_REQUIRED", "knowledge 必须是完整叶子路径数组", uid)
+            self.error("KNOWLEDGE_REQUIRED", "knowledge 必须是完整路径数组", uid)
             return
         if not paths:
             # 整篇/整组题型只在组级打知识点；子题为空是本地既定规则。
             if allow_empty:
                 output["knowledge"] = []
                 return
-            self.error("KNOWLEDGE_REQUIRED", "knowledge 必须是非空完整叶子路径数组", uid)
+            self.error("KNOWLEDGE_REQUIRED", "knowledge 必须是非空完整路径数组", uid)
             return
         paths = [_path(p) for p in paths]
         if len(paths) != len(set(paths)):
@@ -469,8 +521,6 @@ class _Builder:
                 self.error("REMOTE_KNOWLEDGE_MISSING", f"远端目录无完整路径：{path}", uid)
             elif len(matches) != 1:
                 self.error("REMOTE_KNOWLEDGE_AMBIGUOUS", f"远端完整路径不唯一：{path}", uid)
-            elif matches[0] not in self.leaves:
-                self.error("REMOTE_KNOWLEDGE_NOT_LEAF", f"远端路径不是叶子：{path}", uid)
             else:
                 ids.append(matches[0])
         output["knowledge_ids"] = list(dict.fromkeys(ids))
@@ -500,12 +550,76 @@ class _Builder:
                 self.error("TEXTBOOK_CATALOG_UNSUPPORTED", "教材映射所用版本缺少对应目录快照；当前仅有通用版本，不能丢弃或改绑映射", uid)
             if not isinstance(ids, list) or any(not _nonempty(i) for i in ids) or len(ids) != len(set(i for i in ids if isinstance(i, str))):
                 self.error("TEXTBOOK_MAPPINGS_INVALID", "教材映射 knowledgeIds 必须是无重复的 ID 数组", uid)
-            elif any(i not in self.leaves for i in ids):
-                self.error("TEXTBOOK_KNOWLEDGE_INVALID", "教材映射 ID 必须是所选远端版本的叶子节点", uid)
+            elif any(i not in self.remote_ids for i in ids):
+                self.error("TEXTBOOK_KNOWLEDGE_INVALID", "教材映射 ID 必须是所选远端版本的启用节点", uid)
         # Preserve all mappings, including repeated textbook positions, without rewriting IDs.
         output["textbookMappings"] = [{k: deepcopy(v) for k, v in mapping.items()
                                       if k in {"textbookId", "knowledgeVersionId", "knowledgeIds", "curriculum"}}
                                      for mapping in mappings if isinstance(mapping, dict)]
+
+    def project_local_textbook(self, raw, output, uid):
+        """将本地 textbook 候选（版本/册/单元/可选课时）确定性映射为远端教材字段。"""
+        tb = raw.get("textbook") if isinstance(raw, dict) else None
+        if tb in (None, "", {}):
+            return
+        try:
+            normalized = textbook.validate_placement(tb)
+        except ValueError as exc:
+            self.error("TEXTBOOK_PLACEMENT_INVALID", f"本地教材位置不合法：{exc}", uid)
+            return
+        if not self.has_textbook_catalog:
+            self.error("TEXTBOOK_CATALOG_REQUIRED", "题目包含本地教材位置，上传前必须读取远端教材及课时目录快照", uid)
+            return
+        tids = self.textbooks.get(normalized["version"], [])
+        if not tids:
+            self.error("REMOTE_TEXTBOOK_MISSING", f"远端教材目录未找到版本：{normalized['version']}", uid)
+            return
+        if len(tids) != 1:
+            self.error("REMOTE_TEXTBOOK_AMBIGUOUS", f"远端教材目录版本简称不唯一：{normalized['version']}", uid)
+            return
+        tid = tids[0]
+        grade = textbook.book_grade(normalized["book"])
+        unit_ids = self.curriculum_units.get((tid, grade, normalized["unit"]), [])
+        if not unit_ids:
+            self.error("REMOTE_CURRICULUM_MISSING",
+                       f"远端章节目录未找到单元：{normalized['version']} / {grade} / {normalized['unit']}", uid)
+            return
+        if len(unit_ids) != 1:
+            self.error("REMOTE_CURRICULUM_AMBIGUOUS",
+                       f"远端章节目录单元不唯一：{normalized['version']} / {grade} / {normalized['unit']}", uid)
+            return
+        section = normalized.get("section")
+        if section:
+            lesson_ids = self.curriculum_lessons.get((tid, unit_ids[0], section), [])
+            if not lesson_ids:
+                self.error("REMOTE_CURRICULUM_MISSING",
+                           f"远端章节目录未找到课时：{normalized['version']} / {grade} / {normalized['unit']} / {section}", uid)
+                return
+            if len(lesson_ids) != 1:
+                self.error("REMOTE_CURRICULUM_AMBIGUOUS",
+                           f"远端章节目录课时不唯一：{normalized['version']} / {grade} / {normalized['unit']} / {section}", uid)
+                return
+        curriculum_str = textbook.curriculum_path(normalized)
+        if "textbook_id" in output and output["textbook_id"] != tid:
+            self.error("ALIAS_CONFLICT", "显式 textbook_id 与本地 textbook 映射结果不一致", uid)
+            return
+        if "curriculum" in output and output["curriculum"] != curriculum_str:
+            self.error("ALIAS_CONFLICT", "显式 curriculum 与本地 textbook 映射结果不一致", uid)
+            return
+        output["textbook_id"] = tid
+        output["curriculum"] = curriculum_str
+        semester = textbook.book_semester(normalized["book"])
+        if semester:
+            filters = output.setdefault("filterMetadata", {})
+            if isinstance(filters, dict) and not filters.get("semesters"):
+                filters["semesters"] = [semester]
+        if "textbookMappings" not in output and self.version:
+            output["textbookMappings"] = [{
+                "textbookId": tid,
+                "knowledgeVersionId": self.version,
+                "knowledgeIds": list(output.get("knowledge_ids") or []),
+                "curriculum": curriculum_str,
+            }]
 
     def collect_media_sources(self, value):
         """Collect distinct source URLs before mapping, including child attachments."""
@@ -691,16 +805,20 @@ class _Builder:
             data["source_type"] = SOURCE_ALIASES.get(data["source_type"], data["source_type"])
         # Original numbers are projected explicitly at the top level before
         # allowlisting. location remains source prose and never supplies a number.
+        # 用户规则：AI 生成的解析/大意一律不采用，按缺失处理；仅匹配 AI 标记，避免误伤含「AI生成」字样的正常正文。
+        for key in ("explanation", "articleSummary"):
+            val = data.get(key)
+            if isinstance(val, str) and (
+                    AI_MARK in val
+                    or re.search(r"[（(]\s*AI\s*生成[^）)]*[）)]", val)
+                    or re.match(r"^\s*AI\s*生成(?:\s*$|待校对|[:：，,])", val)):
+                data[key] = ""
         # 用户规则：缺答案/缺解析不阻断，显式填「无答案」「无解析」占位。
         if not _nonempty(data.get("answer")) and not (
                 not child and data.get("unit_kind") == "group" and data.get("subquestions")):
             data["answer"] = "无答案"
         if not _nonempty(data.get("explanation")):
             data["explanation"] = "无解析"
-        # 用户规则：AI 生成的解析/大意一律不采用，按缺失处理，不再做 AI 标记校验。
-        for key in ("explanation", "articleSummary"):
-            if isinstance(data.get(key), str) and ("AI生成" in data[key] or "AI 生成" in data[key]):
-                data[key] = ""
         output = {k: deepcopy(v) for k, v in data.items() if k in WIRE_FIELDS or k == "textbookMappings"}
         if child:
             output.pop("numberStart", None)
@@ -949,18 +1067,30 @@ class _Builder:
             self.summary["questions"] += len(children)
         elif not child:
             self.summary["questions"] += 1
-        # 空档统一成库侧写法：<u>　26　</u> → __26__，纯空档 → ______。
-        # 装配阶段已归一化；这里兜底历史批次，避免把 <u> 原样写进题库。
+        if not child:
+            self.project_local_textbook(raw, output, uid)
+            filters = output.get("filterMetadata")
+            if not isinstance(filters, dict) or not filters.get("semesters"):
+                semester = (
+                    (textbook.book_semester(output["curriculum"]) if isinstance(output.get("curriculum"), str) else "")
+                    or (textbook.season_semester(output["source"]) if isinstance(output.get("source"), str) else "")
+                )
+                if semester:
+                    output.setdefault("filterMetadata", {})["semesters"] = [semester]
+        # 空档统一成库侧写法：<u>　26　</u> → __26__，纯空档 → ______；同时剥离题干/材料/选项里残留的粗体星号 **。
+        # 装配阶段已归一化；这里兜底历史批次，避免把 <u> 或 ** 原样写进题库。
         for key in ("stem", "material"):
             if isinstance(output.get(key), str):
-                output[key] = normalize_blank_text(output[key])
+                output[key] = normalize_blank_text(re.sub(r"\*{2,}", "", output[key]).strip())
+        if isinstance(output.get("options"), list):
+            output["options"] = [re.sub(r"\*{2,}", "", opt) if isinstance(opt, str) else opt for opt in output["options"]]
         blocks = output.get("materialBlocks")
         if isinstance(blocks, list):
             for block in blocks:
                 for row in block.get("rows", []) if isinstance(block, dict) else []:
                     for cell in row.get("cells", []) if isinstance(row, dict) else []:
                         if isinstance(cell.get("text"), str):
-                            cell["text"] = normalize_blank_text(cell["text"])
+                            cell["text"] = normalize_blank_text(re.sub(r"\*{2,}", "", cell["text"]))
         self.scan_media({k: v for k, v in output.items() if k not in {"attachments", "subquestions"}}, uid)
         return output
 
@@ -999,22 +1129,55 @@ def _source_table_stems(batch, batch_dir):
     return result
 
 
-def _project_answer_point_tags(batch, batch_dir):
-    """Add verified original answer points to the upload-only copy."""
+ANSWER_POINT_CONTAINER_PATH = "词汇/考察词汇"
+_ANSWER_POINT_UNIT_SCOPED_TYPES = frozenset({"听力信息转换"})
+
+
+def collect_answer_point_names(batch, batch_dir) -> list[str]:
+    """按出现顺序去重收集当前批次待随题上传的全部答案考点词条短名。"""
     from workbench.server import answer_point_tags
 
-    result = deepcopy(batch)
-    items = result.get("items") if isinstance(result, dict) else None
+    items = batch.get("items") if isinstance(batch, dict) else None
     if not isinstance(items, list):
-        return result
-    unit_scoped_types = {"听力信息转换"}
+        return []
+    collected: list[str] = []
+    seen: set[str] = set()
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("unit_id"), str):
             continue
         unit_id = item["unit_id"]
         children = item.get("subquestions")
         if item.get("unit_kind") == "group" and isinstance(children, list) and children:
-            if (item.get("question_type") or item.get("type")) in unit_scoped_types:
+            if (item.get("question_type") or item.get("type")) in _ANSWER_POINT_UNIT_SCOPED_TYPES:
+                batches = [answer_point_tags(batch_dir, unit_id)]
+            else:
+                batches = [answer_point_tags(batch_dir, unit_id, number=child.get("number"))
+                           for child in children if isinstance(child, dict)]
+        else:
+            batches = [answer_point_tags(batch_dir, unit_id)]
+        for names in batches:
+            for name in names or []:
+                if isinstance(name, str) and name.strip() and name.strip() not in seen:
+                    seen.add(name.strip())
+                    collected.append(name.strip())
+    return collected
+
+
+def _project_answer_point_tags(batch, batch_dir):
+    """Add verified original answer points to the upload-only copy under 词汇/考察词汇."""
+    from workbench.server import answer_point_tags
+
+    result = deepcopy(batch)
+    items = result.get("items") if isinstance(result, dict) else None
+    if not isinstance(items, list):
+        return result
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("unit_id"), str):
+            continue
+        unit_id = item["unit_id"]
+        children = item.get("subquestions")
+        if item.get("unit_kind") == "group" and isinstance(children, list) and children:
+            if (item.get("question_type") or item.get("type")) in _ANSWER_POINT_UNIT_SCOPED_TYPES:
                 names = answer_point_tags(batch_dir, unit_id)
                 targets = [(item, names)]
             else:
@@ -1026,7 +1189,7 @@ def _project_answer_point_tags(batch, batch_dir):
         for target, names in targets:
             paths = list(target.get("knowledge") or [])
             for name in names:
-                path = "词汇/答案考点/" + name
+                path = ANSWER_POINT_CONTAINER_PATH + "/" + name
                 if path not in paths:
                     paths.append(path)
             if names:

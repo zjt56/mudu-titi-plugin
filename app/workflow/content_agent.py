@@ -338,6 +338,8 @@ def _child_prompt(prompt, context, stage, media):
                 files[path] = {"total_lines": len(value.splitlines())}
             elif path == CATALOG and isinstance(value, dict):
                 summary["catalog"] = {"path": CATALOG, "entries": len(value.get("points", value.get("paths", [])))}
+            elif path == "textbook_index" and stage == "knowledge":
+                summary["textbook_index"] = value
             elif path not in ("confirmed_units_with_stable_ids", "source_fragment_index"):
                 # Small metadata/type maps are task requirements, not evidence bulk.
                 if len(_json(value)) <= 6000 and not (isinstance(value, dict) and
@@ -374,6 +376,13 @@ def _child_prompt(prompt, context, stage, media):
                 "Call read_unit only for other selected IDs or use read_source for evidence not supplied inline. "
                 "Keep enough tool calls to stage the completed units and submit the candidate.\n"
             )
+            if (context.get("textbook_matching") or {}).get("enabled"):
+                header += (
+                    "When textbook_matching.enabled is true, also fill textbook on each unit using exact "
+                    "version/book/unit (and section for lesson units; omit section for unit-level containers "
+                    "such as 单元话题写作/综合阅读提升/Reading Plus) from textbook_index with real source evidence; "
+                    "omit textbook only when the source provides no textbook version or unit clue.\n"
+                )
     summary["task_reference_files"] = [{"path": path, "total_lines": len(lines),
         "read_with": "read_source", "max_lines_per_read": 500}
         for path in context if (lines := _reference_lines(context, path)) is not None]

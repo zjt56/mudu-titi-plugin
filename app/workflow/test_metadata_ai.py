@@ -51,7 +51,7 @@ class SourceRulesTest(unittest.TestCase):
         self.assertEqual(found["section"], "Section A")
         self.assertEqual(found["source_scope"], "lesson")
         self.assertEqual(found["source_evidence"]["lesson"]["text"], "**第一课时** Section** **A (1a-2d)")
-        self.assertNotIn("year", found)
+        self.assertEqual(found["year"], 2026)
         self.assertNotIn("region", found)
 
     def test_starter_unit_is_not_ordinary_unit(self):
@@ -272,7 +272,7 @@ class SyncAutoIdentifyTest(unittest.TestCase):
         result = metadata_ai.auto_identify(self.batch, invoke_fn=lambda *args: {"response": {
             "source": "2025期中月考", "paper_title": "2025期中月考", "source_type": "中考真题", "year": 2025, "region": "芜湖"}})
         self.assertEqual(result["identified"]["source_type"], "同步练习")
-        self.assertNotIn("year", result["identified"])
+        self.assertEqual(result["identified"]["year"], 2026)
         self.assertNotIn("region", result["identified"])
 
     def test_cache_binds_original_filename_and_rules(self):
@@ -309,6 +309,51 @@ class SyncAutoIdentifyTest(unittest.TestCase):
         self.assertTrue(result["ran"])
         self.assertIn("transport failed", result["reason"])
         self.assertEqual(result["identified"]["lesson"], "课时1")
+
+    def test_filename_year_is_extracted_for_sync_and_non_sync(self):
+        found = metadata_ai.identify_source(
+            self.body, "2025年七上人教版课时A计划 Unit 1 课时1.docx")
+        self.assertEqual(found["year"], 2025)
+        self.assertEqual(found["source_evidence"]["year"]["origin"], "filename")
+
+        found_short = metadata_ai.identify_source(
+            self.body, "25年七上人教版课时A计划 Unit 1 课时1.docx")
+        self.assertEqual(found_short["year"], 2025)
+
+        found_season = metadata_ai.identify_source(
+            self.body, "11 26秋 七上 人教版 课时A计划 Starter Unit 3 Welcome! 第三课时 Section B (1a-1e).docx")
+        self.assertEqual(found_season["year"], 2026)
+
+        for negative in (
+            "02七上人教版课时A计划 Unit 1 课时1.docx",
+            "22九上人教版课时A计划 Unit 1 课时1.docx",
+        ):
+            self.assertNotIn("year", metadata_ai.identify_source(self.body, negative), negative)
+
+    def test_upload_entry_year_overrides_filename_and_model_for_sync(self):
+        self.descriptor.write_text(json.dumps({
+            "year": 2026,
+            "original_filenames": {"source": "2025年七上人教版课时A计划 Unit 1 课时1.docx"},
+        }, ensure_ascii=False), encoding="utf-8")
+        result = metadata_ai.auto_identify(self.batch, invoke_fn=lambda *args: {"response": {
+            "source": "2024期中", "paper_title": "2024期中", "source_type": "中考真题", "year": 2024}})
+        self.assertEqual(result["identified"]["year"], 2026)
+        self.assertEqual(result["identified"]["source_type"], "同步练习")
+        data = json.loads((self.batch / "01_source/metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["year"], 2026)
+        self.assertEqual(mf.load(self.batch)["meta"]["year"], 2026)
+
+    def test_upload_entry_year_and_filename_year_preserve_non_sync_model_fields(self):
+        self.source.write_text("安徽省初中毕业学业考试\n1. Choose the best answer.\n", encoding="utf-8")
+        self.descriptor.write_text(json.dumps({
+            "original_filenames": {"source": "【木牍教育】15年安徽中考英语.docx"},
+        }, ensure_ascii=False), encoding="utf-8")
+        result = metadata_ai.auto_identify(self.batch, invoke_fn=lambda *args: {"response": {
+            "paper_title": "安徽省初中毕业学业考试", "source": "安徽省初中毕业学业考试",
+            "source_type": "中考真题", "region": "安徽省", "year": 2020}})
+        self.assertEqual(result["identified"]["year"], 2015)
+        self.assertEqual(result["identified"]["source_type"], "中考真题")
+        self.assertEqual(result["identified"]["region"], "安徽省")
 
 
 class RunnerCommandTest(unittest.TestCase):

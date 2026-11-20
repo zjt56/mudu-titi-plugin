@@ -155,7 +155,7 @@ class UploadPayloadTest(unittest.TestCase):
             vocabulary = next(point for point in catalog["points"]
                               if point["parent_id"] is None and point["name"] == "词汇")
             branch_id = "REMOTE-ANSWER-POINTS"
-            catalog["points"].append({"id": branch_id, "name": "答案考点",
+            catalog["points"].append({"id": branch_id, "name": "考察词汇",
                                       "parent_id": vocabulary["id"], "version_id": "REMOTE-V1",
                                       "active": True, "subject_id": "english"})
             catalog["points"].append({"id": "REMOTE-PEOPLE", "name": "people",
@@ -167,7 +167,7 @@ class UploadPayloadTest(unittest.TestCase):
                 report = self.build(source, catalog=catalog, batch_dir=Path(directory))
             self.assertTrue(report["passed"], report["errors"])
             wire = report["payload"]["items"][0]
-            self.assertEqual(wire["knowledge"][-1], "词汇/答案考点/people")
+            self.assertEqual(wire["knowledge"][-1], "词汇/考察词汇/people")
             self.assertIn("REMOTE-PEOPLE", wire["knowledge_ids"])
             self.assertEqual(source, original)
 
@@ -184,7 +184,7 @@ class UploadPayloadTest(unittest.TestCase):
             vocabulary = next(point for point in catalog["points"]
                               if point["parent_id"] is None and point["name"] == "词汇")
             branch_id = "REMOTE-ANSWER-POINTS"
-            catalog["points"].append({"id": branch_id, "name": "答案考点",
+            catalog["points"].append({"id": branch_id, "name": "考察词汇",
                                       "parent_id": vocabulary["id"], "version_id": "REMOTE-V1",
                                       "active": True, "subject_id": "english"})
             catalog["points"].extend([
@@ -205,9 +205,9 @@ class UploadPayloadTest(unittest.TestCase):
             self.assertTrue(report["passed"], report["errors"])
             group = report["payload"]["items"][0]
             children = {child["number"]: child for child in group["subquestions"]}
-            self.assertIn("词汇/答案考点/first", children[56]["knowledge"])
-            self.assertIn("词汇/答案考点/second", children[57]["knowledge"])
-            self.assertNotIn("词汇/答案考点/second", children[56]["knowledge"])
+            self.assertIn("词汇/考察词汇/first", children[56]["knowledge"])
+            self.assertIn("词汇/考察词汇/second", children[57]["knowledge"])
+            self.assertNotIn("词汇/考察词汇/second", children[56]["knowledge"])
 
     def test_group_audits_local_before_wire_union(self):
         data = batch(reading_group())
@@ -440,7 +440,10 @@ class UploadPayloadTest(unittest.TestCase):
         self.assertIn("REMOTE_KNOWLEDGE_AMBIGUOUS", self.codes(self.build(catalog=catalog)))
         catalog = deepcopy(self.catalog)
         catalog["points"].append({"id": "extra", "name": "child", "parent_id": remote_id})
-        self.assertIn("REMOTE_KNOWLEDGE_NOT_LEAF", self.codes(self.build(catalog=catalog)))
+        report = self.build(catalog=catalog)
+        self.assertTrue(report["passed"], report["errors"])
+        self.assertNotIn("REMOTE_KNOWLEDGE_NOT_LEAF", self.codes(report))
+        self.assertEqual(report["payload"]["items"][0]["knowledge_ids"], [remote_id])
 
     def test_catalog_parent_missing_cycle_and_duplicates(self):
         for extra, code in (({"id": "extra", "name": "bad", "parent_id": "missing"}, "CATALOG_TREE_INVALID"),
@@ -1089,3 +1092,36 @@ class AliasAlignmentTests(unittest.TestCase):
         self.assertIn("精品题源", taxonomy.sources())
         self.assertIn("课本原创", taxonomy.sources())
         self.assertEqual(len(taxonomy.sources()), 13)
+
+    def test_ambiguous_textbook_short_name_blocks_instead_of_overwriting(self):
+        from workbench import textbook
+        catalog = deepcopy(self.catalog)
+        catalog["textbooks"] = [
+            {"id": "TB-1", "name": "人教版（2024）", "active": True},
+            {"id": "TB-2", "name": "人教版（2012）", "active": True},
+        ]
+        catalog["curriculum_nodes"] = {}
+        entry = textbook.books("人教版")[0]
+        item = question()
+        item["textbook"] = {
+            "version": "人教版",
+            "book": entry["book"],
+            "unit": entry["units"][0]["unit"],
+            "evidence": ["正文 L1"],
+        }
+        report = upload_payload.build_payload(batch(item), catalog)
+        self.assertFalse(report["passed"])
+        self.assertIn("REMOTE_TEXTBOOK_AMBIGUOUS", {e["code"] for e in report["errors"]})
+
+    def test_prose_mentioning_ai_generation_is_preserved_and_ai_mark_explanation_falls_back(self):
+        item = reading_group()
+        item["articleSummary"] = "本文讨论了AI生成技术对学习方式的影响。"
+        item["subquestions"][0]["explanation"] = "本文提到AI生成内容在课堂上的应用。"
+        item["subquestions"][1]["explanation"] = "根据第一段可知选A。（AI生成，待校对）"
+        report = upload_payload.build_payload(batch(item), self.catalog)
+        self.assertTrue(report["passed"], report["errors"])
+        wire = report["payload"]["items"][0]
+        self.assertEqual(wire["articleSummary"], "本文讨论了AI生成技术对学习方式的影响。")
+        self.assertEqual(wire["subquestions"][0]["explanation"], "本文提到AI生成内容在课堂上的应用。")
+        self.assertEqual(wire["subquestions"][1]["explanation"], "无解析")
+

@@ -133,6 +133,20 @@ class DeliveryChecklistTest(unittest.TestCase):
         tampered_marked = {'items': [{'unit_id': 'q-1', 'stem': '<u>原文</u>', 'options': ['B']}]}
         with self.assertRaises(ValueError):
             handoff._assert_underline_projection(base, tampered_marked)
+        sec_base = {'items': [{'unit_id': 'q-1', 'stem': '原文', 'source_section': {
+            'title': '阅读理解', 'start_line': 49, 'end_line': 79,
+            'lesson_band': {'label': '能力提升', 'start_line': 47, 'end_line': 79},
+            'lesson_container_end_line': 79,
+        }}]}
+        sec_refreshed = {'items': [{'unit_id': 'q-1', 'stem': '<u>原文</u>', 'source_section': {
+            'title': '阅读理解', 'start_line': 49, 'end_line': 79,
+        }}]}
+        handoff._assert_underline_projection(sec_base, sec_refreshed)
+        sec_tampered = {'items': [{'unit_id': 'q-1', 'stem': '<u>原文</u>', 'source_section': {
+            'title': '完形填空', 'start_line': 49, 'end_line': 79,
+        }}]}
+        with self.assertRaises(ValueError):
+            handoff._assert_underline_projection(sec_base, sec_tampered)
 
     def test_meta_accepts_only_policy_authorized_source_normalization(self):
         from workflow import handoff

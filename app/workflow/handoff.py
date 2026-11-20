@@ -100,6 +100,15 @@ def _source_projection(value):
             aliases = {key: filters[key] for key in SOURCE_ALIAS_FIELDS if key in filters}
             if aliases:
                 row['filterMetadata'] = aliases
+        sec = row.get('source_section')
+        if isinstance(sec, dict):
+            # lesson_band / lesson_container_end_line 是容器辅助元数据，assemble 会按当前
+            # structure.confirmed.json 同步刷新；仅保留大题身份核心字段做投影比对，避免
+            # underlines 与 assemble 互相覆盖引发无限重跑死循环。
+            row['source_section'] = {
+                k: v for k, v in sec.items()
+                if k not in ('lesson_band', 'lesson_container_end_line')
+            }
         for child in row.get('subquestions') or []:
             row_projection(child)
 

@@ -32,6 +32,7 @@ COMMON_COLUMN_LABELS = BAND_LABELS + (
     "考点突破", "考点集训", "中考链接", "真题演练", "中考真题演练",
     "综合提升", "综合训练", "分层训练", "语篇提能", "阅读提能",
     "写作专练", "新考法专练", "题型专练", "巩固提升", "达标训练", "过关训练",
+    "熟词生义",
 )
 
 # 非板块目录的常见答案/解析/附注/知识梳理/写作指导标签，动态目录抽取必须排除。
@@ -71,7 +72,7 @@ def normalize_band_text(text):
 def strip_band_marker(text):
     """剥离可选的 A/B 板块标记，返回 (marker, label_body)。"""
     norm = normalize_band_text(text)
-    match = re.fullmatch(r"([ABab])?[.．、:：]?(.*)", norm)
+    match = re.fullmatch(r"([ABab](?![A-Za-z]))?[.．、:：]?(.*)", norm)
     if not match:
         return "", norm
     return (match.group(1) or "").upper(), match.group(2)
@@ -134,18 +135,18 @@ def extract_outline_heading(text):
         inner = _STEP_PREFIX.sub("", inner, count=1).strip()
     if not explicit:
         return ""
-    inner = re.sub(r"^[ABＡＢab][.．、:：\s]*", "", inner)
+    inner = re.sub(r"^[ABＡＢab](?![A-Za-z])[.．、:：\s]*", "", inner)
     inner = re.sub(r"\s+", "", inner)
     if inner in _NON_OUTLINE_LABELS or inner.endswith(_NON_OUTLINE_SUFFIXES):
         return ""
-    if re.fullmatch(r"[\u4e00-\u9fff]{2,12}", inner):
+    if re.fullmatch(r"[\u4e00-\u9fffA-Za-z]{2,20}", inner):
         return inner
     return ""
 
 
 def _is_step_banner(text) -> bool:
     """显式方括号步骤/环节横幅（如 `【第1步 词汇积累】`、`【第3步 典例分析】`、`【Step 1 ...】`），
-    以及带中文一级序号的显式方括号栏目横幅（如 `【三、熟词生义】`）。"""
+    以及带中文一级序号的显式方括号栏目横幅（如 `【三、熟词生义】`、`【三、Pronunciation】`）。"""
     cleaned = IMG.sub("", str(text or ""))
     cleaned = re.sub(r"^\s*#{1,6}\s*", "", cleaned)
     cleaned = re.sub(r"<[^>]+>|\*", "", cleaned).strip()
@@ -158,7 +159,7 @@ def _is_step_banner(text) -> bool:
         return bool(re.fullmatch(r"[\u4e00-\u9fffA-Za-z]{2,16}", rest))
     if _CHINESE_ORDINAL_PREFIX.match(inner):
         rest = re.sub(r"\s+", "", _CHINESE_ORDINAL_PREFIX.sub("", inner, count=1))
-        return bool(re.fullmatch(r"[\u4e00-\u9fff]{2,12}", rest))
+        return bool(re.fullmatch(r"[\u4e00-\u9fffA-Za-z]{2,20}", rest))
     return False
 
 

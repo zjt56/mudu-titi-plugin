@@ -18,7 +18,7 @@ MARKER = "workflow/metadata-ai.json"
 FIELDS = ("paper_title", "source", "source_type", "region", "year")
 PLACEHOLDER = "未提供"
 HEAD_CHARS = 4000
-RULES_VERSION = "sync-source-v1"
+RULES_VERSION = "sync-source-v2"
 
 
 def _basename(value) -> str:
@@ -52,6 +52,7 @@ def _number(text: str) -> str:
 
 def identify_source(text: str, filename: str = "", *, source_path: str = "") -> dict:
     """只用明确原名与独立章节标题识别同步材料，不据题内年份/考试标注推断。"""
+    from .metadata_policy import extract_filename_year
     found, evidence = {}, {}
     lines = [(_plain(line).strip(), line) for line in text.splitlines()]
 
@@ -74,6 +75,9 @@ def identify_source(text: str, filename: str = "", *, source_path: str = "") -> 
         series = re.search(r"课时\s*A\s*计划", candidate, re.I)
         if series and "series" not in found:
             put("series", "课时A计划", where, quote)
+        year = extract_filename_year(quote)
+        if year and "year" not in found:
+            put("year", year, where, quote)
 
     unit_pattern = r"(?<![A-Za-z])(?:(Starter)\s+)?(?:Unit|uint)\s*(\d+)\b"
     lesson_pattern = r"(?:第\s*([一二三四五六七八九十零〇\d]+)\s*课时|课时\s*(\d+))"
@@ -286,31 +290,47 @@ def auto_identify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
     if not text.strip():
         return {"ran": False, "reason": "正文为空"}
     from . import manifest as mf
+    from .metadata_policy import extract_filename_year, upload_entry_year
     state = mf.load(batch)
     source_path = str(((state.get("inputs") or {}).get("source") or {}).get("path") or "")
     filename = filename if filename is not None else source_filename(batch, state)
+    entry_year = upload_entry_year(batch)
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     cache_key = hashlib.sha256(json.dumps(
-        [digest, filename, source_path, RULES_VERSION], ensure_ascii=False).encode("utf-8")).hexdigest()
+        [digest, filename, source_path, entry_year, RULES_VERSION], ensure_ascii=False).encode("utf-8")).hexdigest()
     marker_path = batch / MARKER
     marker = _load(marker_path)
-    deterministic = identify_source(text, filename, source_path=source_path)
+    sync_deterministic = identify_source(text, filename, source_path=source_path)
+    local_deterministic = dict(sync_deterministic)
+    local_evidence = dict(sync_deterministic.get("source_evidence") or {})
+    if entry_year is not None:
+        local_deterministic["year"] = entry_year
+        local_evidence["year"] = {"origin": "upload_entry", "text": str(entry_year)}
+    elif "year" not in local_deterministic:
+        for where, quote in (("filename", str(filename)), ("source_path", str(source_path))):
+            year = extract_filename_year(quote)
+            if year is not None:
+                local_deterministic["year"] = year
+                local_evidence["year"] = {"origin": where, "text": quote}
+                break
+    if local_evidence:
+        local_deterministic["source_evidence"] = local_evidence
     if isinstance(marker, dict) and marker.get("cache_key") == cache_key and marker.get("model_completed"):
         # 本地确定证据始终可补缺，不依赖曾经模型识别成功或缓存安装状态。
-        result = merge_metadata(batch, deterministic, origin="来源规则") if deterministic else {"applied": [], "kept": []}
+        result = merge_metadata(batch, local_deterministic, origin="来源规则") if local_deterministic else {"applied": [], "kept": []}
         return {"ran": bool(result["applied"]), "reason": "已识别过当前正文和原名", **result,
                 "identified": marker.get("identified") or {}}
-    local_result = merge_metadata(batch, deterministic, origin="来源规则") if deterministic else {"applied": [], "kept": []}
+    local_result = merge_metadata(batch, local_deterministic, origin="来源规则") if local_deterministic else {"applied": [], "kept": []}
 
     def local_only(reason):
-        if deterministic:
+        if local_deterministic:
             marker_path.parent.mkdir(parents=True, exist_ok=True)
             marker_path.write_text(json.dumps({
                 "source_sha256": digest, "cache_key": cache_key, "filename": filename,
-                "rules_version": RULES_VERSION, "identified": deterministic, **local_result},
+                "rules_version": RULES_VERSION, "identified": local_deterministic, **local_result},
                 ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
         return {"ran": bool(local_result["applied"]), "reason": reason, **local_result,
-                "identified": deterministic}
+                "identified": local_deterministic}
 
     try:
         from workbench import taxonomy
@@ -320,7 +340,7 @@ def auto_identify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
     if invoke_fn is None:
         from . import agent as agent_entry, local_agent
         if not agent_entry.configured():
-            return local_only("模型未配置；已应用可确定来源证据" if deterministic else "模型未配置")
+            return local_only("模型未配置；已应用可确定来源证据" if local_deterministic else "模型未配置")
         try:
             config = config or local_agent.load_config()
         except (OSError, ValueError, RuntimeError) as exc:
@@ -337,11 +357,16 @@ def auto_identify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
         from .model_admission import deferral
         return {**local_only("识别调用失败：" + str(exc)[:160]), **deferral(exc)}
     found = sanitize(extract_metadata(reply), source_types)
-    if deterministic:
+    if sync_deterministic:
         # 同步材料的来源和题内考试引用不能由模型改写已确定的册/课时范围。
         for key in ("paper_title", "source", "source_type", "year", "region"):
             found.pop(key, None)
-        found.update(deterministic)
+        found.update(local_deterministic)
+    elif "year" in local_deterministic:
+        # 非同步卷保留模型识别的卷名/分类/地区，但上传入口填写或文件名明确标出的年份优先直接使用。
+        found["year"] = local_deterministic["year"]
+        if "year" in (local_deterministic.get("source_evidence") or {}):
+            found.setdefault("source_evidence", {})["year"] = local_deterministic["source_evidence"]["year"]
     result = merge_metadata(batch, found)
     result["applied"] = list(dict.fromkeys(local_result["applied"] + result["applied"]))
     result["kept"] = [key for key in result["kept"] if key not in result["applied"]]

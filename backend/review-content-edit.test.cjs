@@ -36,3 +36,14 @@ test('保存内容复用 /units 保存接口，且失败留在弹窗内提示', 
   assert.match(save, /\/units\//);
   assert.match(save, /setContentError\(String\(e\.message \|\| e\)\)/, '失败不能换成整页错误');
 });
+
+test('ContentEditModal 仅提交实际改动的字段并携带 expected 原值防覆盖', () => {
+  const start = source.indexOf('    function ContentEditModal(props)');
+  const end = source.indexOf('    function PaperPreviewModal(props)', start);
+  assert.ok(start > 0 && end > start);
+  const modal = source.slice(start, end);
+  assert.match(modal, /summary !== initial\.summary/);
+  assert.match(modal, /expected\.articleSummary = initial\.summary/);
+  assert.match(modal, /subPatch\.expected = subExpected/);
+  assert.match(modal, /if \(Object\.keys\(patch\)\.length <= 1\)/);
+});

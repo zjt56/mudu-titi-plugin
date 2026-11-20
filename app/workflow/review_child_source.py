@@ -242,11 +242,14 @@ def _prove_scoped_child(source, unit, number, result):
         from .sync_practice import writing_prompt, writing_prompt_end
         heading, first, last = context['heading'], context['first'], context['last']
         lines = context['lines']
-        task_end = heading + writing_prompt_end(lines[heading:context['end']])
+        tail_len = writing_prompt_end(lines[heading:context['end']])
+        has_tail = tail_len > 0 and any(line.strip() for line in lines[heading:heading + tail_len])
+        expected_first = heading + 1 if has_tail else heading
+        task_end = heading + tail_len if has_tail else heading
         stem = '\n'.join(lines[first - 1:last]).strip()
         if (unit.get('type') != '书面表达' or unit.get('unit_kind') != 'standalone'
                 or unit.get('numbers') != [1] or not writing_prompt(lines[heading - 1])
-                or first != heading + 1 or last != task_end or stem != unit['stem'].strip()):
+                or first != expected_first or last != task_end or stem != unit['stem'].strip()):
             return dict(result, reason='scoped 无号作文来源窗口未完整验证')
         start, end = context['scope_start'], context['matched'][-1][2]
         return dict(result, status='proven', reason='', start=start, end=end,
