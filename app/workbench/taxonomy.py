@@ -128,10 +128,29 @@ def knowledge_index():
     return _knowledge_index(KNOWLEDGE_PATH.stat().st_mtime)
 
 
-def knowledge_tree():
-    """完整目录树；按真实目录前缀找父节点，名称里的斜线不是新层级。"""
+_DISALLOWED_VOCAB_TYPES = ("完成句子", "短文填空", "选词填空", "教材语篇填空")
+
+
+def _is_selectable_for_type(path: str, main_type: str | None, leaves: set[str],
+                            allowed_prefixes=None, exact_paths=None) -> bool:
+    """判定某目录路径在指定题型下是否可选为最终知识点。"""
+    if not main_type or main_type not in types():
+        return path in leaves
+    if main_type in _DISALLOWED_VOCAB_TYPES and (
+            _under(path, "词汇/考察词汇") or _under(path, "词汇/答案考点")):
+        return False
+    if exact_paths is None:
+        exact_paths = exact_knowledge_paths(main_type)
+    if exact_paths:
+        return path in exact_paths and not any(
+            _under(path, excluded) for excluded in _excluded_prefixes(main_type))
+    return path in leaves and knowledge_path_allowed(path, main_type, allowed_prefixes)
+
+
+def knowledge_tree(main_type: str | None = None):
+    """目录树；传 main_type 时只保留该题型允许的知识点分支，名称里的斜线不是新层级。"""
     by_path, leaves = knowledge_index()
-    nodes = {path: {**point, "leaf": path in leaves, "children": []}
+    nodes = {path: {**point, "leaf": path in leaves, "selectable": path in leaves, "children": []}
              for path, point in by_path.items()}
     roots = []
     for path, node in nodes.items():
@@ -139,8 +158,53 @@ def knowledge_tree():
         while parent and parent not in nodes:
             parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
         (nodes[parent]["children"] if parent else roots).append(node)
-    return {"version": knowledge_version(), "complete": True, "total": len(nodes),
-            "leaf_total": len(leaves), "items": roots}
+    clean_type = main_type.strip() if isinstance(main_type, str) else ""
+    scoped = bool(clean_type and clean_type in types())
+    if not scoped:
+        return {"version": knowledge_version(), "complete": True, "scoped": False,
+                "type": "", "allowed_prefixes": [], "total": len(nodes),
+                "selectable_total": len(leaves), "leaf_total": len(leaves), "items": roots}
+    allowed = _allowed_prefixes(clean_type)
+    exact = exact_knowledge_paths(clean_type)
+    excluded = _excluded_prefixes(clean_type)
+
+    def prune(node):
+        path = node["path"]
+        if any(_under(path, ex) for ex in excluded):
+            return None
+        if clean_type in _DISALLOWED_VOCAB_TYPES and (
+                _under(path, "词汇/考察词汇") or _under(path, "词汇/答案考点")):
+            return None
+        if exact and path in exact:
+            return {**node, "leaf": True, "selectable": True, "children": []}
+        children = []
+        for child in node["children"]:
+            kept = prune(child)
+            if kept is not None:
+                children.append(kept)
+        is_sel = _is_selectable_for_type(path, clean_type, leaves, allowed, exact)
+        if not is_sel and not children:
+            return None
+        return {**node, "selectable": is_sel, "children": children}
+
+    def count_tree(items):
+        total = 0
+        selectable = 0
+        for item in items:
+            total += 1
+            if item.get("selectable"):
+                selectable += 1
+            sub_t, sub_s = count_tree(item.get("children") or [])
+            total += sub_t
+            selectable += sub_s
+        return total, selectable
+
+    pruned_roots = [kept for root in roots if (kept := prune(root)) is not None]
+    total_nodes, selectable_count = count_tree(pruned_roots)
+    return {"version": knowledge_version(), "complete": False, "scoped": True,
+            "type": clean_type, "allowed_prefixes": [*allowed, *sorted(exact)],
+            "total": total_nodes, "selectable_total": selectable_count,
+            "leaf_total": selectable_count, "items": pruned_roots}
 
 
 def knowledge_catalog_for_prompt():
@@ -178,12 +242,22 @@ def require_knowledge(paths, main_type=None):
     return list(dict.fromkeys(point["path"] for point in resolved["resolved"]))
 
 
-def knowledge_search(query: str = "", limit: int = 40):
-    """只返回叶子：目录非叶节点不能作为知识点入库。"""
+def knowledge_search(query: str = "", limit: int = 40, main_type: str | None = None):
+    """只返回可选知识点：按题型限定范围（含精确路径节点），目录非叶节点不入库。"""
     by_path, leaves = knowledge_index()
+    clean_type = main_type.strip() if isinstance(main_type, str) else ""
+    scoped = bool(clean_type and clean_type in types())
+    if scoped:
+        allowed = _allowed_prefixes(clean_type)
+        exact = exact_knowledge_paths(clean_type)
+        candidates = sorted(
+            path for path in by_path
+            if _is_selectable_for_type(path, clean_type, leaves, allowed, exact))
+    else:
+        candidates = sorted(leaves)
     keyword = (query or "").strip().lower()
     result = []
-    for path in sorted(leaves):
+    for path in candidates:
         if keyword and keyword not in path.lower():
             continue
         result.append(dict(by_path[path]))

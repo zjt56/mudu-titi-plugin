@@ -47,7 +47,7 @@ STEPS = {
     "underlines": (("underlines", "画线补全"),),
     "validate": tuple((Path(c.script).stem, c.name) for c in CONTENT_CHECKS)
                 + (("source_audit", "原卷逐题覆盖与材料归属 source_audit"),),
-    "review": (("labels", "第一轮标签审核"), ("sample", "第二轮抽检"), ("coverage", "审核覆盖")),
+    "review": (("labels", "一审标签审核"), ("coverage", "审核覆盖")),
     "review_gate": (("differences", "差异归集"), ("conclusion", "执行质量结论")),
     "format_gate": _check_steps(FINAL_FORMAT_CHECKS)
                    + (("fields", "字段"), ("media", "媒体"), ("serialization", "序列化"),
@@ -156,10 +156,10 @@ def _details(sid, report, read):
             result["ocr"] = "skipped"
     elif sid == "review":
         for row in _rows(report.get("rounds")):
-            if isinstance(row, dict) and row.get("round_id") in {"labels", "sample"}:
+            if isinstance(row, dict) and row.get("round_id") == "labels":
                 result[row["round_id"]] = "completed" if row.get("completed") is True else "pending"
         for rid in _object(report.get("execution_failures")):
-            if rid in {"labels", "sample"}:
+            if rid == "labels":
                 result[rid] = "failed"
         if report.get("execution_completed") is True:
             result["coverage"] = "completed"
@@ -205,7 +205,7 @@ TERMS = {
     "audio": {"transcription": ("transcrib", "转写", "asr", "align"), "segments": ("cut", "segment", "切段", "切片"),
               "mapping": ("映射", "mapping"), "evidence": ("证据验收",)},
     "explanations": {"listening_script": ("听力录音材料直抄",)},
-    "review": {"labels": ("labels", "一审", "第一轮"), "sample": ("sample", "二审", "第二轮"),
+    "review": {"labels": ("labels", "一审", "第一轮"),
                "coverage": ("审核覆盖",)},
 }
 

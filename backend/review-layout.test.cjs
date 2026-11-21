@@ -56,8 +56,9 @@ test('上下键切题不重建审阅视图，列表滚动跟随当前题', () =>
   // 按 unitId 作 key 会每次切题重挂载，把所有滚动条重置到顶端。
   assert.doesNotMatch(client, /key: active\.unitId/);
   assert.match(client, /key: 'review:' \+ active\.name/);
-  // 切题时显式清掉上一题状态，避免新题短暂显示旧题数据。
-  assert.match(client, /setDetail\(null\);[\s\S]{0,400}setLabelDlg\(false\)/);
+  // 切题时用 detailPair 键校验防旧题闪烁，并显式收起上一题的标签编辑弹窗。
+  assert.match(client, /const detail = \(detailPair && detailPair\.key === cacheKey\) \? detailPair\.data : getCachedUnit\(batchName, unitId\);/);
+  assert.match(client, /setLabelDlg\(false\);/);
   // 列表容器挂 ref、行挂 data-unit，选中行滚进可视区而不是整体跳回顶部。
   assert.match(client, /const listScrollRef = React\.useRef\(null\)/);
   assert.match(client, /ref: listScrollRef/);
@@ -77,8 +78,12 @@ test('全局中性色板：无蓝色，按钮浅白底 + 中性灰文字', () =>
   assert.match(client, /--wf-sel-border:var\(--dsw-alias-label-secondary\)/);
   // 主按钮字重与普通按钮一致（不再加粗）。
   assert.doesNotMatch(client, /btnPrimary: \{[^}]*fontWeight: 600/);
-  // 全站不再使用绿色成功色；通过态用中性色 + ✓ 表达。
-  assert.doesNotMatch(client, /--dsw-alias-state-success-primary/);
+  // 主题色与常规样式不使用绿色成功色（仅 AI 批量生成完成进度条例外）。
+  const greenMatches = client.match(/--dsw-alias-state-success-primary/g) || [];
+  assert.ok(greenMatches.length <= 1);
+  if (greenMatches.length === 1) {
+    assert.match(client, /aiModal\.status === 'done' \? 'var\(--dsw-alias-state-success-primary\)'/);
+  }
 });
 
 test('左侧题目列表：每题有独立边框分隔，选中态加深并带强调条', () => {

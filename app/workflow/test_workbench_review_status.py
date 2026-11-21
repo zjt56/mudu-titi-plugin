@@ -72,12 +72,12 @@ class ReviewStatusOverviewTest(unittest.TestCase):
                     "checked_rounds": [], "execution_completed": False, "passed": False}):
                 status, records = server.review_snapshot(folder)
             self.assertEqual(records, {})
-            first, second = status["rounds"]
+            self.assertEqual(len(status["rounds"]), 1)
+            first = status["rounds"][0]
             self.assertEqual(first["state"], "needs_refresh")
             self.assertEqual(first["historical_reviewed"], 1)
             self.assertFalse(first["completed"])
             self.assertEqual(first["reviewed"], 0)
-            self.assertEqual(second["state"], "not_started")
             with patch("workflow.review.evaluate_rounds", return_value={
                     "checked_rounds": ["labels"], "execution_completed": False, "passed": False}):
                 status, records = server.review_snapshot(folder)

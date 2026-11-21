@@ -40,39 +40,30 @@ class ComparisonTest(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         payload = fixture.payload()
-        # 阅读理解是整组题型：二审整组抽取一个目标，显示为整组范围而非某小题。
-        sample_checks = payload['rounds'][1]['checks']
-        self.assertEqual(len(sample_checks), 1)
-        self.assertIsNone(sample_checks[0].get('number'))
-        selected = '3'  # 组内任一小题都由整组判断覆盖
+        # 已取消二审抽样，仅保留一审全量盲判（labels）。
+        self.assertEqual(len(payload['rounds']), 1)
+        selected = '3'
         payload['rounds'][0]['checks'][0]['assessment']['difficulty'][int(selected) - 1]['value'] = '困难'
-        payload['rounds'][1]['checks'][0]['assessment']['type'] = '阅读理解'
         # This display fixture synthesizes assessments, so only provenance
         # verification is stubbed; plan and input binding validation stay real.
         with patch('workflow.review._verify_round_sources'):
-            self.assertEqual(review.evaluate_rounds(fixture.batch, payload)['checked_rounds'], ['labels', 'sample'])
+            self.assertEqual(review.evaluate_rounds(fixture.batch, payload)['checked_rounds'], ['labels'])
             fixture.write('07_review/review-rounds.json', payload)
             comparison = review_comparison(fixture.batch, 'group-1-6', list(range(1, 7)))
-        self.assertEqual([c["scope"] for c in comparison["rounds"][1]["checks"]], ["unit"])
+        self.assertEqual(len(comparison['rounds']), 1)
         finding = {'unit_id': 'group-1-6', 'field': 'difficulty', 'reason': '第%s题难度不一致' % selected}
         result = finding_comparison(finding, comparison, list(range(1, 7)), {})
         self.assertEqual(result['original'], '容易')
-        self.assertEqual([r['checks'][0]['value'] for r in result['rounds']], ['困难', '容易'])
-        self.assertIsNone(result['rounds'][1]['checks'][0]['number'])
+        self.assertEqual([r['checks'][0]['value'] for r in result['rounds']], ['困难'])
         group = finding_comparison({'unit_id': 'group-1-6', 'field': 'knowledge'}, comparison, list(range(1, 7)), {})
         self.assertEqual(group['rounds'][0]['checks'][0]['value'], fixture.knowledge['knowledge'])
-        self.assertEqual(len(group['rounds'][1]['checks']), 1)
-        self.assertGreater(len(group['rounds'][1]['checks'][0]['assessment']['subquestions']), 1)
         self.assertEqual(finding_bucket({'field': 'child_knowledge'}), 'label')
         child = finding_comparison({'unit_id': 'group-1-6', 'field': 'child_knowledge',
                                     'reason': '第2题知识点不一致'}, comparison, list(range(1, 7)), {})
         self.assertEqual(child['original'], ['设题角度/阅读/细节理解'])
         self.assertEqual(child['rounds'][0]['checks'][0]['value'], child['original'])
-        # 整组二审覆盖组内全部小题：小题知识点取自组级判断里的对应子题。
-        self.assertEqual(child['rounds'][1]['status'], '已提供')
-        self.assertEqual(child['rounds'][1]['checks'][0]['value'], ['设题角度/阅读/细节理解'])
         type_comparison = finding_comparison({'unit_id': 'group-1-6', 'field': 'type'}, comparison, list(range(1, 7)), {})
-        self.assertEqual(type_comparison['rounds'][1]['checks'][0]['value'], '阅读理解')
+        self.assertEqual(type_comparison['rounds'][0]['checks'][0]['value'], '阅读理解')
         self.assertIsNone(finding_comparison({'unit_id': 'group-1-6', 'field': 'difficulty', 'reason': '无题号'}, comparison, list(range(1, 7)), {}))
         self.assertIsNone(finding_comparison({'unit_id': 'other', 'field': 'knowledge'}, comparison, list(range(1, 7)), {}))
         self.assertIsNone(finding_comparison({'unit_id': 'a', 'field': 'knowledge'}, comparison, list(range(1, 7)), {'a': '1', 'b': '1'}))
@@ -94,13 +85,13 @@ class ComparisonTest(unittest.TestCase):
         payload['rounds'][0]['checks'][0]['assessment']['knowledge'] = ['主题/人与社会/细节理解']
         fixture.write('07_review/review-rounds.json', payload)
         with patch('workflow.review.evaluate_rounds', return_value={
-                'checked_rounds': ['labels', 'sample'], 'plan': fixture.plan}):
+                'checked_rounds': ['labels'], 'plan': fixture.plan}):
             result = review_comparison(fixture.batch, 'group-1-6', list(range(1, 7)))
         first = result['rounds'][0]['checks'][0]
         self.assertEqual(first['verdict'], 'ok')
         self.assertEqual([d['field'] for d in first['differences']], ['knowledge'])
         self.assertEqual(first['differences'][0]['original'], fixture.knowledge['knowledge'])
-        self.assertEqual(result['rounds'][1]['checks'][0]['differences'], [])
+        self.assertEqual(len(result['rounds']), 1)
 
     def test_detail_api_reports_untrusted_history_without_exposing_results(self):
         from workbench import server
@@ -123,11 +114,11 @@ class ComparisonTest(unittest.TestCase):
             with patch.object(server, 'WORKFLOWS', root):
                 result = invoke('GET', '/api/batches/batch_fixture/units/FX-001')
             self.assertEqual([r['status'] for r in result['comparison']['rounds']],
-                             ['待重新审核', '待重新审核'])
+                             ['待重新审核'])
             self.assertTrue(all(not r['checks'] for r in result['comparison']['rounds']))
             self.assertNotIn('历史秘密值', json.dumps(result, ensure_ascii=False))
             finding_rounds = result['label_findings'][0]['comparison']['rounds']
-            self.assertEqual([r['status'] for r in finding_rounds], ['待重新审核', '待重新审核'])
+            self.assertEqual([r['status'] for r in finding_rounds], ['待重新审核'])
 
     def test_unverified_history_is_directory_wide_and_never_exposes_contents(self):
         from workbench import server
@@ -149,8 +140,8 @@ class ComparisonTest(unittest.TestCase):
                 archive.write_text(json.dumps(old, ensure_ascii=False), encoding='utf-8')
                 with patch.object(server, 'WORKFLOWS', root):
                     result = invoke('GET', '/api/batches/batch_fixture/units/FX-001')
-                self.assertEqual([r['status'] for r in result['comparison']['rounds']], ['历史来源未验证'] * 2)
-                self.assertEqual([r['status'] for r in result['label_findings'][0]['comparison']['rounds']], ['历史来源未验证'] * 2)
+                self.assertEqual([r['status'] for r in result['comparison']['rounds']], ['历史来源未验证'])
+                self.assertEqual([r['status'] for r in result['label_findings'][0]['comparison']['rounds']], ['历史来源未验证'])
                 self.assertNotIn('历史秘密值', json.dumps(result, ensure_ascii=False))
                 self.assertTrue(all(not r['checks'] for r in result['comparison']['rounds']))
 
@@ -224,7 +215,7 @@ class ComparisonTest(unittest.TestCase):
             result = review_comparison(self.folder, 'group-1', [1])
         self.assertIsNone(result['original']['source'])
         self.assertEqual(result['original']['labels'], {})
-        self.assertEqual([r['status'] for r in result['rounds']], ['未提供', '待重新审核'])
+        self.assertEqual([r['status'] for r in result['rounds']], ['未提供'])
         self.assertTrue(all(not r['checks'] for r in result['rounds']))
 
 

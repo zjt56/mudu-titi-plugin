@@ -54,7 +54,7 @@ test('definitive rejected request permits status refresh instead of unknown subm
 });
 
 test('upload notification exposes accessible live feedback', () => {
-  assert.match(client, /role: 'dialog', 'aria-label': '上传通知'/);
-  assert.match(client, /'aria-live': upload\.state/);
+  assert.match(client, /role: 'dialog', 'aria-label': noticeTitle/);
+  assert.match(client, /'aria-live': isErrorNotice \? 'assertive' : 'polite'/);
   assert.match(client, /查看上传通知/);
 });

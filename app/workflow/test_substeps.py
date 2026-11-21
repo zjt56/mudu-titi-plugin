@@ -154,11 +154,11 @@ class SubstepsTest(unittest.TestCase):
 
     def test_review_uses_actual_summary_rounds_and_execution_not_quality(self):
         self.put("07_review/overall-review-report.json", {"execution_completed": False, "quality_passed": False,
-            "rounds": [{"round_id": "labels", "completed": True}, {"round_id": "sample", "completed": False}]})
+            "rounds": [{"round_id": "labels", "completed": True}]})
         states = self.states("review", "needs_review")
-        self.assertEqual(states, {"labels": "completed", "sample": "pending", "coverage": "pending"})
+        self.assertEqual(states, {"labels": "completed", "coverage": "pending"})
         self.put("07_review/overall-review-report.json", {"execution_completed": True, "quality_passed": False,
-            "rounds": [{"round_id": r, "completed": True} for r in ("labels", "sample")]})
+            "rounds": [{"round_id": "labels", "completed": True}]})
         self.assertEqual(set(self.states("review", "needs_review").values()), {"completed"})
         self.put("07_review/review-gate.json", {"passed": False, "manual_only": True, "rounds": {"execution_completed": True}})
         self.assertEqual(self.states("review_gate", "needs_review"), {"differences": "completed", "conclusion": "needs_review"})

@@ -31,10 +31,10 @@ MANUAL_REVIEW_SCOPE = "label_and_basic_differences_only"
 _CAPABILITY_GAP = re.compile(r"图片|占位|图像|音频|听不|看不见|看不到|无法(?:核对|确认|查看).{0,8}(?:图|音频|图图)")
 _LABEL_CONFLICT = re.compile(r"不一致|不同|冲突|不符|错误|矛盾|判断有出入|与原(?:标)?注")
 ROUND_FILE = "review-rounds.json"
-# 两轮审核：一审全量盲判 + 二审抽样复核（不再单独跑全量知识点轮）。
-# 抽样口径：整组题型（阅读/完形/补全对话/信息转换等）按整组抽、只做组级核对；
-# 其余题型按小题抽，抽样数 ceil(小题数 × 20%)。
-ROUND_IDS = ("labels", "sample")
+# 审核轮次：仅执行一审全量盲判；取消二审抽样复核，改为确定性知识点「标签合并」。
+ROUND_IDS = ("labels",)
+# 兼容历史旧批次里已留档的 sample（二审）记录，不将其判为未知轮次。
+LEGACY_ROUND_IDS = frozenset({"sample"})
 ROUND_PROTOCOL = "upload-workflow.review-rounds/v3"
 ROUND_INPUTS = (
     "01_source/正文.txt", "01_source/structure.confirmed.json",
@@ -1936,12 +1936,13 @@ def evaluate_rounds(batch_dir, payload=None) -> dict:
             checked.append(round_id)
         except (ValueError, OSError, KeyError, TypeError, AttributeError) as exc:
             errors.append(_round_issue(round_id, str(exc)))
-    if any(not isinstance(r, dict) or r.get("round_id") not in ROUND_IDS for r in records):
+    if any(not isinstance(r, dict) or r.get("round_id") not in (*ROUND_IDS, *LEGACY_ROUND_IDS) for r in records):
         errors.append(_round_issue("unknown", "Unknown review round"))
     if checked == list(ROUND_IDS) and not errors:
         try:
             from .review_consensus import compare
-            findings.extend(compare(batch, plan, records))
+            active_records = [r for r in records if isinstance(r, dict) and r.get("round_id") in ROUND_IDS]
+            findings.extend(compare(batch, plan, active_records))
         except (ValueError, OSError, KeyError, TypeError) as exc:
             errors.append(_round_issue("comparison", str(exc)))
     # 用户规则：只有“与原标注不一致”才送人工。抽查/一审模型常因看不到图片占位

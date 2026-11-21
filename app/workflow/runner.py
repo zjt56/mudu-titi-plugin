@@ -531,6 +531,15 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
             # A stale, partial or failed report must not borrow exit 6 to become
             # a successful wait acknowledgement (especially unknown POST).
             code, err = 1, "OCR等待报告无效、陈旧、来源不匹配或包含失败；未交付提取结果"
+        if stage.id == "review" and code == 8:
+            if current.get("stages", {}).get("review", {}).get("status") == mf.PENDING:
+                mf.save(batch_dir, current)
+                if current is not manifest:
+                    manifest.clear()
+                    manifest.update(current)
+                print("  ⏳ 非听力审核分片已完成并缓存，等待听力切段完成后补跑听力分片")
+                return 8
+            code, err = 1, "审核等待听力状态无效；未交付审核结果"
         current.get("stages", {}).get(stage.id, {}).pop("ocr_wait", None)
         if stage.id == "extract":
             reconciliation = ocr_reconciliation_state(batch_dir, current, since=attempt_started) if code else {}
@@ -1584,7 +1593,9 @@ def cmd_run(args) -> int:
         return 3
     managed_ocr = code != 0 and (bool(ocr_wait_state(batch_dir, mf.load(batch_dir)))
                                 or bool(ocr_reconciliation_state(batch_dir, mf.load(batch_dir))))
-    if code != 0 and not managed_ocr and not getattr(args, "dry_run", False):
+    waiting_review_audio = (code == 8
+                            and mf.load(batch_dir).get("stages", {}).get("review", {}).get("status") == mf.PENDING)
+    if code != 0 and not managed_ocr and not waiting_review_audio and not getattr(args, "dry_run", False):
         try:
             from . import operations
             operations.handoff_if_available(batch_dir)

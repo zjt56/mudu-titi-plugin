@@ -941,6 +941,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     audio_future = None
     deferred_audio = False
     deferred_audio_model = False
+    review_requeued_for_audio = False
     audio_allowed = (stop_at is None or stop_at in contracts.STAGE_ORDER
                      and contracts.STAGE_ORDER.index(stop_at) > contracts.STAGE_ORDER.index("audio"))
     def has_independent_runnable_stage(current_stage):
@@ -975,7 +976,22 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
         return False
 
     stages = list(contracts.STAGES)
+    stage_pos = -1
+
+    def _defer_audio_after_review(audio_stage):
+        nonlocal review_requeued_for_audio
+        review_stage = contracts.STAGE_BY_ID['review']
+        next_review = stages.index(review_stage, stage_pos + 1)
+        if stop_at == 'review' or review_requeued_for_audio:
+            stages.insert(next_review, audio_stage)
+        else:
+            # 先让 review 跑第一趟非听力分片并缓存，紧接着再等 audio 汇合并补跑听力分片。
+            stages.insert(next_review + 1, audio_stage)
+            stages.insert(next_review + 2, review_stage)
+            review_requeued_for_audio = True
+
     for stage in stages:
+        stage_pos += 1
         # 用户删除请求：只在阶段边界检查，让本轮干净退出、释放锁，绝不中断
         # 正在执行的阶段（那样会留下半写产物）。删除流程随后会真正清除目录。
         if cancel_requested(batch_dir):
@@ -993,12 +1009,14 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
             except (OSError, ValueError, RuntimeError, KeyError, TypeError):
                 pass  # Optional operations must never stop ordinary execution.
         if pending_audio:
+            wait_audio_model = stage.id == 'audio' and deferred_audio_model
             for collect in pending_audio:
-                parallel_done.update(collect(wait=stage.id == 'audio' and deferred_audio_model))
+                parallel_done.update(collect(wait=wait_audio_model))
+            if wait_audio_model:
+                deferred_audio_model = False
             manifest = mf.load(batch_dir)
         if stage.id == 'audio' and pending_audio and 'audio' not in parallel_done:
-            review_index = stages.index(contracts.STAGE_BY_ID['review'])
-            stages.insert(review_index, stage)
+            _defer_audio_after_review(stage)
             deferred_audio_model = True
             continue
         # Defer only the audio stage, preserving the existing consumer/import
@@ -1021,10 +1039,10 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
         elif audio_future is not None:
             audio_prep = {'status': 'running', 'message': '听力切段运行中；文字流程继续'}
         if stage.id == 'audio' and audio_future is not None and not audio_future.done():
-            # A second visit occurs before review; neither old files nor merely
-            # scheduling a worker count as an accepted audio delivery.
-            review_index = stages.index(contracts.STAGE_BY_ID['review'])
-            stages.insert(review_index, stage)
+            # A second visit occurs after review's first non-listening pass (or
+            # before review when stop_at == 'review'); neither old files nor
+            # merely scheduling a worker count as an accepted audio delivery.
+            _defer_audio_after_review(stage)
             deferred_audio = True
             continue
         if stop_at and stage.id == stop_at:
@@ -1276,8 +1294,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                     parallel_done.update(results)
                     manifest = mf.load(batch_dir)
                     if stage.id == 'audio' and pending_audio and 'audio' not in results:
-                        review_index = stages.index(contracts.STAGE_BY_ID['review'])
-                        stages.insert(review_index, stage)
+                        _defer_audio_after_review(stage)
                         deferred_audio_model = True
                         continue
                     if stage.id in results:
@@ -1306,6 +1323,11 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
             prior_runs = set(attempts.glob(stage.id + '-*')) if attempts.is_dir() else set()
             code = rn._execute_command(batch_dir, manifest, executable)
             if code != 0:
+                if stage.id == "review" and code == 8:
+                    if deferred_audio or deferred_audio_model:
+                        continue
+                    blocked("review", "非听力审核分片已完成并缓存，等待听力切段完成后补跑听力分片", "waiting")
+                    continue
                 pending = code == 3 and manifest["stages"][stage.id].get("status") == mf.NEEDS_REVIEW
                 note = ""
                 try:

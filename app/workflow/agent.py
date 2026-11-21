@@ -12,6 +12,7 @@ import uuid
 
 
 PROTOCOL_COMMANDS = {'export', 'import', 'next', 'dispatch'}
+REVIEW_WAITING_AUDIO_EXIT = 8
 
 
 def configured() -> bool:
@@ -79,10 +80,10 @@ def _retain_partial_ai(first, batch_dir):
     return True
 
 
-def _review_inputs_ready(batch_dir):
+def _review_inputs_ready(batch_dir, *, allow_pending_audio=False):
     from . import agent_tasks, contracts, manifest as mf
     batch = Path(batch_dir)
-    _, _, missing, _ = agent_tasks._collect(batch, "review")
+    _, _, missing, _ = agent_tasks._collect(batch, "review", allow_pending_audio=allow_pending_audio)
     if missing:
         return False
     if mf.manifest_path(batch).is_file():
@@ -273,7 +274,7 @@ def _run_review_rounds(batch_dir, config_path=None):
     try:
         from . import contracts, manifest as mf, review, review_rounds
         from .local_agent import _agent_lock, load_config
-        if not _review_inputs_ready(batch_dir):
+        if not _review_inputs_ready(batch_dir, allow_pending_audio=review_rounds._audio_pending(batch_dir)):
             print(json.dumps({"action": "blocked", "completed": False,
                               "reason": "审核输入或上游阶段未就绪"}, ensure_ascii=False))
             return 3
@@ -302,7 +303,7 @@ def _run_review_rounds(batch_dir, config_path=None):
                           "execution_completed": execution_completed, "quality_passed": gate["passed"],
                           "summary": rounds.get("summary"),
                           "status": "waiting_audio" if waiting_audio else ("completed" if execution_completed else "needs_review")}, ensure_ascii=False))
-        return 0 if (execution_completed or waiting_audio) else 3
+        return REVIEW_WAITING_AUDIO_EXIT if waiting_audio else (0 if execution_completed else 3)
     except (ValueError, OSError, RuntimeError) as exc:
         print(json.dumps({"completed": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

@@ -17,6 +17,7 @@ function harness(get) {
     uploadChecks: { current: {} },
     uploadStatesRef: { current: {} },
     setUploadState(name, value) { context.uploadStatesRef.current[name] = value; },
+    loadBatches() {},
   });
   vm.runInContext(code, context);
   return context;
@@ -67,7 +68,8 @@ test('stale checks cannot overwrite a new upload attempt', async () => {
 });
 
 test('review renders per-batch feedback and gates submission until status is known', () => {
-  assert.match(client, /role: upload\.state === 'failed'/);
+  assert.match(client, /const isErrorNotice = upload\.state === 'failed' \|\| upload\.state === 'unknown';/);
+  assert.match(client, /role: isErrorNotice \? 'alert' : 'status'/);
   assert.match(client, /!\['idle', 'failed'\]\.includes\(upload\.state\)/);
   assert.match(client, /current\.state !== 'idle' && current\.state !== 'failed'/);
   assert.match(client, /setInterval\(\(\) => checkUpload\(name\), 3000\)/);

@@ -994,7 +994,8 @@ def _write_part_package(batch, state, state_path, plan, input_hashes, index, fro
     assessment_schemas = {r: dict(common_assessment) for r in review.ROUND_IDS}
     for assessment_schema in assessment_schemas.values():
         assessment_schema["answer_points"] = string_list
-    assessment_schemas['sample']['source_comparison'] = {"type": "string", "minLength": 1}
+    if 'sample' in assessment_schemas:
+        assessment_schemas['sample']['source_comparison'] = {"type": "string", "minLength": 1}
     properties = {"unit_id": {"type": "string"}, "verdict": {"enum": ["ok", "error", "uncertain"]},
                   "rationale": {"type": "string", "minLength": 1},
                   "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": False,
@@ -1028,7 +1029,7 @@ def _write_part_package(batch, state, state_path, plan, input_hashes, index, fro
 
 
 def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_per_part=None,
-                 only_round=None):
+                 only_round=None, allow_pending_audio=False):
     batch = Path(batch_dir)
     _recover_installs(batch, only_round=only_round, skip_rounds=skip_rounds)
     plan = _effective_round_plan(batch)
@@ -1047,7 +1048,8 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
     # Every part is pre-bound once so independent parts can be executed without
     # waiting for earlier results; installation still happens in order.
     prior_rounds = {r["round_id"]: review._digest(r) for r in _existing(batch, plan)["rounds"]}
-    base = agent_tasks.build_task(batch, "review", max_input_chars=sys.maxsize)
+    base = agent_tasks.build_task(batch, "review", max_input_chars=sys.maxsize,
+                                  allow_pending_audio=allow_pending_audio)
     if base["preconditions"]:
         return {"action": "blocked", "completed": False, "preconditions": base["preconditions"]}
     input_hashes = {p: digest for p, digest in base["input_hashes"].items()
@@ -1083,17 +1085,25 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
     else:
         budget = max_input_chars
         listening_uids = set()
+        try:
+            for unit in agent_tasks.confirmed_units(batch):
+                uid = unit.get("unit_id")
+                utype = unit.get("type")
+                if isinstance(uid, str) and (not isinstance(utype, str) or not utype.strip() or utype.strip().startswith("听力")):
+                    listening_uids.add(uid)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         types_file = _path(batch, agent_tasks.ARTIFACTS["types"])
         if types_file.is_file():
             try:
                 t_doc = _load(types_file.read_bytes())
-                listening_uids = {
+                listening_uids.update({
                     row["unit_id"] for row in (t_doc.get("items") or [])
                     if isinstance(row, dict) and isinstance(row.get("unit_id"), str)
                     and str(row.get("type") or "").startswith("听力")
-                }
+                })
             except (OSError, ValueError):
-                listening_uids = set()
+                pass
         while True:
             reused_keys = {review._check_key(ref, round_id) for ref in reuse}
             pending = ([q for q in plan['sample'] if review._check_key(q, round_id) not in reused_keys]
@@ -1126,6 +1136,8 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
             part["task_id"] = "round-" + uuid.uuid4().hex
         state = {"plan": plan, "round_id": round_id, "prior_rounds": prior_rounds,
                  "input_hashes": input_hashes,
+                 "prompt_digest": prompt_digest,
+                 "generation_nonce": generation["nonce"] if generation else None,
                  "execution_id": "round-group-" + uuid.uuid4().hex, "parts": parts, "completed": [],
                  "reuse": reuse, "reused_checks": reused_checks}
         frozen_digest = review.frozen_partition_digest(state)
@@ -1152,10 +1164,11 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
 
 
 def export_group(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_per_part=None,
-                 only_round=None):
+                 only_round=None, allow_pending_audio=False):
     """Export every pending partition of the current round for parallel calls."""
     with _agent_lock(60):
-        first = _export_task(batch_dir, max_input_chars, skip_rounds, max_units_per_part, only_round)
+        first = _export_task(batch_dir, max_input_chars, skip_rounds, max_units_per_part, only_round,
+                             allow_pending_audio=allow_pending_audio)
         if first.get("action") != "exported":
             return first
         batch = Path(batch_dir)
@@ -1169,7 +1182,10 @@ def export_group(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
                           "part_index": index + 1, "part_count": len(state["parts"]),
                           "has_listening": bool(sp.get("has_listening")),
                           "unit_ids": list(sp.get("unit_ids") or []),
+                          "targets": list(sp.get("targets") or []),
                           "input_hashes": state.get("input_hashes") or {},
+                          "prompt_digest": state.get("prompt_digest"),
+                          "generation_nonce": state.get("generation_nonce"),
                           "prompt_chars": len(sp["prompt"]),
                           "package_dir": str(batch / "workflow/review-tasks" / task_id)})
         return {"action": "exported", "round_id": state["round_id"], "parts": parts}
@@ -1200,10 +1216,21 @@ def _audio_pending(batch_dir):
     return audio_status not in mf.TERMINAL_OK
 
 
-def _nonlistening_cache_path(round_id, part, input_hashes):
+def _has_nonlistening_cache(batch_dir):
+    try:
+        folder = _path(Path(batch_dir), "workflow/review-pending-nl/.probe").parent
+        return folder.is_dir() and any(folder.glob("nl-*.json"))
+    except (OSError, ValueError):
+        return False
+
+
+def _nonlistening_cache_path(round_id, part, input_hashes, *, prompt_digest=None, generation_nonce=None):
     non_audio = {k: v for k, v in (input_hashes or {}).items()
                  if not str(k).startswith("02_audio/")}
-    key = [round_id, part.get("unit_ids") or [], non_audio, CONTEXT_VERSION, PROMPT_VERSION]
+    p_digest = prompt_digest if prompt_digest is not None else part.get("prompt_digest")
+    g_nonce = generation_nonce if generation_nonce is not None else part.get("generation_nonce")
+    key = [round_id, part.get("unit_ids") or [], part.get("targets") or [],
+           non_audio, CONTEXT_VERSION, PROMPT_VERSION, p_digest, g_nonce]
     return "workflow/review-pending-nl/nl-" + review._digest(key) + ".json"
 
 
@@ -1572,19 +1599,21 @@ def write_summary(batch_dir, failures=None):
                "required_unchecked_count": gate["counts"]["required_unchecked"],
                "execution_failures": failures or {},
                "rounds_history": "07_review/rounds-history.jsonl",
-               "coverage_note": "一审覆盖所有单元；二审仅覆盖计划抽中的目标（整组题型整组核对，独立单题按小题），未抽中的目标不声称已核验。"}
+               "coverage_note": "一审覆盖所有单元；已取消二审抽样，原标签与一审知识点自动合并为「标签合并」。"}
     _save(batch, "07_review/overall-review-report.json", summary)
-    lines = ["# 整卷审核报告", "", "审核执行：" + ("两轮已全部完成" if summary["execution_completed"] else "仍有轮次未完成"),
+    lines = ["# 整卷审核报告", "", "审核执行：" + ("一审已完成（已进入标签合并）" if summary["execution_completed"] else "仍有轮次未完成"),
              "质量结论：" + ("分轮未发现问题" if summary["quality_passed"] else "存在问题或未核验项目"),
              f"覆盖范围：{summary['unit_count']}个单元，{summary['question_count']}道小题。", "",
              "| 轮次 | 执行 | 已审/计划 | 无异常 | 错误 | 待核验 |", "| --- | --- | --- | --- | --- | --- |"]
     for row in rows:
         state = "已完成" if row["completed"] else "未完成"
         lines.append(f"| {row['name']} | {state} | {row['reviewed']}/{row['expected']} | {row['ok']} | {row['error']} | {row['uncertain']} |")
-    lines += ["", summary["coverage_note"], "", "抽样对象：" + "、".join(
-                  (q["number"] if q.get("number") is not None else "整组(" + str(q.get("unit_id")) + ")")
-                  for q in summary["sample"]),
-              "", f"待处理问题：{len(open_items)}项。"]
+    lines += ["", summary["coverage_note"]]
+    if "sample" in review.ROUND_IDS:
+        lines += ["", "抽样对象：" + "、".join(
+                      (q["number"] if q.get("number") is not None else "整组(" + str(q.get("unit_id")) + ")")
+                      for q in summary["sample"])]
+    lines += ["", f"待处理问题：{len(open_items)}项。"]
     for item in open_items:
         lines += ["", f"- {item.get('finding_id', '')}（{item.get('unit_id') or '整卷'}）：{item.get('reason') or item.get('question') or '见问题记录'}"]
     lines += ["", f"历史已处理记录：{len(resolved_items)}项（含重复发现及误报处理，数量不代表独立错误数）。"]
@@ -1814,6 +1843,12 @@ def restart_rounds(batch_dir):
         _save(batch, pointer, generation)
         if archived_rounds is not None:
             active.unlink()
+        nl_folder = _path(batch, 'workflow/review-pending-nl/.probe').parent
+        if nl_folder.is_dir():
+            for entry in sorted(nl_folder.glob('nl-*.json')):
+                nl_file = _path(batch, 'workflow/review-pending-nl/' + entry.name)
+                _atomic(_path(batch, relative + '/review-pending-nl/' + entry.name), nl_file.read_bytes())
+                nl_file.unlink()
         return {'archive_path': str(_path(batch, relative + '/generation.json').parent),
                 'rounds_archive': str(_path(batch, archived_rounds)) if archived_rounds else None,
                 'generation': nonce, 'retired_partitions': len(retired)}
@@ -2060,18 +2095,20 @@ def _run(batch_dir, config=None, portable_max_input_chars=None, *, blocked_round
                                             config.get("part_concurrency", 1))
         # 官方 API 支持高并发；这里只保留本机进程数的安全边界，不再按接口限流。
         parallel = max(1, min(64, int(configured_parallel or 1)))
-        if parallel > 1:
+        if parallel > 1 or _audio_pending(batch_dir) or _has_nonlistening_cache(batch_dir):
             # Run every independently payable round at the same time. The two
             # rounds judge the same bound source and never read each other's
             # results, so they can be invoked concurrently; installation still
             # happens in ROUND_IDS order.
+            audio_pending = _audio_pending(batch_dir)
             invokable = []
             blocked = None
             for rid in review.ROUND_IDS:
                 try:
                     group = export_group(batch_dir, max_input_chars=config.get("max_input_chars", 600000),
                                          skip_rounds=failures, only_round=rid,
-                                         max_units_per_part=_part_units(config))
+                                         max_units_per_part=_part_units(config),
+                                         allow_pending_audio=audio_pending)
                 except ReviewInputsChanged:
                     raise
                 except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
@@ -2099,7 +2136,6 @@ def _run(batch_dir, config=None, portable_max_input_chars=None, *, blocked_round
             queues = [sorted(group["parts"], key=lambda part: -part.get("prompt_chars", 0))
                       for group in invokable]
             all_parts = [part for wave in zip_longest(*queues) for part in wave if part is not None]
-            audio_pending = _audio_pending(batch_dir)
             for part in all_parts:
                 if not part.get("has_listening") and _load_pending(batch_dir, part["task_id"]) is None:
                     nl_rel = _nonlistening_cache_path(part["round_id"], part, part.get("input_hashes"))
@@ -2128,6 +2164,21 @@ def _run(batch_dir, config=None, portable_max_input_chars=None, *, blocked_round
                         if done_resp is not None:
                             nl_rel = _nonlistening_cache_path(part["round_id"], part, part.get("input_hashes"))
                             _save(batch_dir, nl_rel, done_resp)
+                if outcomes:
+                    for group in invokable:
+                        rid = group["round_id"]
+                        for part in group["parts"]:
+                            if part["task_id"] in outcomes:
+                                failures[rid] = {
+                                    "attempts": retries,
+                                    "reason": outcomes[part["task_id"]],
+                                    "error_code": getattr(outcomes, "error_codes", {}).get(part["task_id"]),
+                                }
+                                break
+                    summary = write_summary(batch_dir, failures)
+                    return {"action": "blocked", "completed": False, "waiting_audio": True,
+                            "reason": "非听力审核分片存在失败，已缓存成功分片；请先排查失败分片（听力仍待切段完成）",
+                            "failures": failures, "summary": summary}
                 summary = write_summary(batch_dir, failures)
                 return {"action": "waiting_audio", "completed": False, "waiting_audio": True,
                         "reason": "非听力审核分片已完成并缓存，等待听力切段完成后补跑听力分片",

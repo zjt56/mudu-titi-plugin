@@ -73,6 +73,16 @@ def _has_image(row: dict) -> bool:
     return any("[IMG" in t.upper() for t in texts)
 
 
+def _options_have_image(row: dict) -> bool:
+    for opt in _options(row):
+        if isinstance(opt, dict) and (opt.get("image") or opt.get("attachments")):
+            return True
+        text = opt if isinstance(opt, str) else str((opt or {}).get("text") or "")
+        if "[IMG" in text.upper():
+            return True
+    return False
+
+
 def _children(row: dict) -> list[dict]:
     subs = row.get("subquestions")
     return [c for c in subs if isinstance(c, dict)] if isinstance(subs, list) else []
@@ -98,9 +108,9 @@ def _classify_one(unit: dict, draft: dict) -> tuple[str, list[str]] | None:
                 return main_type, []
             return None
         if main_type == "听力短对话理解":
-            if _has_image(draft):
+            if _options_have_image(draft) or (_has_image(draft) and len(opts) < 3):
                 return main_type, ["选图片"]
-            if len(opts) >= 3:
+            if len(opts) >= 3 and not _has_image(draft):
                 return main_type, ["选文字"]
             return None
         if main_type == "单项填空":
@@ -115,8 +125,10 @@ def _classify_one(unit: dict, draft: dict) -> tuple[str, list[str]] | None:
             return None
         if main_type == "书面表达":
             if (not opts and not _has_image(draft)
+                    and not (draft.get("attachments") or [])
                     and "[TABLE" not in stem.upper() and "[TABLE" not in material.upper()
-                    and not _WRITING_EXCLUDE_RE.search(stem)):
+                    and not _WRITING_EXCLUDE_RE.search(stem)
+                    and not _WRITING_EXCLUDE_RE.search(material)):
                 bullet_bodies = []
                 for raw_line in stem.splitlines():
                     line = raw_line.strip()

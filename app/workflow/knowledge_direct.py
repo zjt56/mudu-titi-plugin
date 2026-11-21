@@ -60,7 +60,11 @@ def tag_units(batch_dir: Path | str, units: list[dict] | None = None) -> dict[st
         row = {
             "unit_id": uid,
             "knowledge": [fixed_path],
-            "subquestions": [],
+            "subquestions": (
+                [{"number": str(n), "knowledge": []} for n in (unit.get("numbers") or [])]
+                if unit.get("unit_kind") == "group"
+                else []
+            ),
             "evidence": [f"固定题型规则直标：{main_type} -> {fixed_path}"],
         }
         if taxonomy.check_labels({**row, "type": main_type}):

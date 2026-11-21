@@ -204,23 +204,36 @@ def candidates_by_number(folder, *, unit_id=None):
     return mapping
 
 
-def candidate(folder, unit_id):
-    safe = str(unit_id).replace("/", "_").replace("\\", "_")
-    path = folder / "candidates" / f"{safe}.json"
-    draft = load(path)
+def _batch_units_map(folder):
     batch = load(folder / "06_batch" / "batch_meta.json") or load(folder / "06_batch" / "batch.json") or {}
     units = batch if isinstance(batch, list) else batch.get("units", batch.get("items", []))
     # Current source partitions take precedence over obsolete merged batches
     # for the review display; formal data is not silently rewritten.
     if isinstance(units, list) and source_group_candidates is not None:
         units = source_group_candidates(folder, units)
+    mapping = {}
     for item in units if isinstance(units, list) else []:
-        if str(item.get("unit_id") or item.get("id")) == str(unit_id):
-            if isinstance(draft, dict):
-                draft_fields = {key: value for key, value in draft.items()
-                                if key not in ("explanation", "articleSummary")}
-                return {**item, **draft_fields}, path
-            return item, None
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("unit_id") or item.get("id"))
+        if key not in mapping:
+            mapping[key] = item
+    return mapping
+
+
+def candidate(folder, unit_id, *, batch_map=None):
+    safe = str(unit_id).replace("/", "_").replace("\\", "_")
+    path = folder / "candidates" / f"{safe}.json"
+    draft = load(path)
+    if batch_map is None:
+        batch_map = _batch_units_map(folder)
+    item = batch_map.get(str(unit_id))
+    if item is not None:
+        if isinstance(draft, dict):
+            draft_fields = {key: value for key, value in draft.items()
+                            if key not in ("explanation", "articleSummary")}
+            return {**item, **draft_fields}, path
+        return item, None
     return (draft, path) if isinstance(draft, dict) else ({}, None)
 
 
@@ -461,9 +474,10 @@ def audio_map(folder: Path) -> dict:
     return mapping
 
 
-def audio_blocks(folder: Path, name: str, unit_ids) -> list:
+def audio_blocks(folder: Path, name: str, unit_ids, *, mapping=None) -> list:
     """把单元的听力片段作为附件块，供题目详情播放与下载。"""
-    mapping = audio_map(folder)
+    if mapping is None:
+        mapping = audio_map(folder)
     blocks = []
     for uid in unit_ids:
         info = mapping.get(str(uid))
@@ -2034,7 +2048,7 @@ def _review_snapshot_uncached(folder):
                if isinstance(r, dict) and r.get("round_id") in checked}
     plan = evaluated.get("plan") or {}
     rounds = []
-    for rid, name in (("labels", "一审"), ("sample", "二审")):
+    for rid, name in (("labels", "一审"),):
         checks = records.get(rid, {}).get("checks", [])
         historical = [r for r in payload.get("rounds", [])
                       if isinstance(r, dict) and r.get("round_id") == rid
@@ -2080,12 +2094,15 @@ def _row_subtype(row):
     return str(row.get("subtype") or "").strip()
 
 
-def decorate_review_rows(folder, rows):
+def decorate_review_rows(folder, rows, *, snapshot=None, source_text=None, is_sync_practice=None):
     """把真实分轮结果与“跳过听力”口径落到行上；总览与单元详情共用。"""
-    try:
-        review_status, records = review_snapshot(folder)
-    except (ImportError, OSError, ValueError, TypeError, KeyError):
-        review_status, records = {}, {}
+    if snapshot is not None:
+        review_status, records = snapshot
+    else:
+        try:
+            review_status, records = review_snapshot(folder)
+        except (ImportError, OSError, ValueError, TypeError, KeyError):
+            review_status, records = {}, {}
     skip_listening = (folder / "02_audio" / "SKIP_LISTENING").is_file()
     # 审核页要直接展示目录题型（语音题/单词拼写/阅读理解…），不能让人对着题干猜。
     # 只有题型/子类确实缺失时，才按同步练习册的确定性口径从本行大题标题反查一次；
@@ -2094,8 +2111,10 @@ def decorate_review_rows(folder, rows):
            or (str(row.get("type") or "").strip() and not _row_subtype(row)) for row in rows):
         try:
             from workflow import sync_practice
-            text = "\n".join(source_lines(folder))
-            if sync_practice.looks_like_sync_practice(text):
+            if is_sync_practice is None:
+                text = source_text if source_text is not None else "\n".join(source_lines(folder))
+                is_sync_practice = sync_practice.looks_like_sync_practice(text)
+            if is_sync_practice:
                 for row in rows:
                     title = str((row.get("source_section") or {}).get("title") or "")
                     hit = sync_practice.classify(title) if title else None
@@ -2215,8 +2234,11 @@ def _overview_key(folder):
                      "07_review/content-review.json", "07_review/metadata-review.json",
                      "07_review/unchecked.json", "06_batch/batch_meta.json", "06_batch/batch.json",
                      "01_source/structure.confirmed.json",
+                     "07_review/extraction-report.json", "07_review/structure-gate.json",
+                     "07_review/validation-report.json", "07_review/overall-review-report.json",
                      "07_review/upload-format.json", "07_review/review-gate.json",
-                     "receipt.json", "07_upload/receipt.json"):
+                     "02_audio/audio_map.json",
+                     "receipt.json", "07_upload/receipt.json", "07_upload/preflight.json"):
         path = folder / relative
         try:
             stat = path.stat()
@@ -2262,8 +2284,9 @@ def _live_overview(value, name, folder):
     value = dict(value)
     advance = advance_state(name)
     value["advance"] = advance
-    value["upload_status"] = upload_state(name)
-    manifest = load(folder / "workflow/manifest.json", {})
+    upload = upload_state(name)
+    value["upload_status"] = upload
+    manifest = load(folder / "workflow/manifest.json", {}) or {}
     work = activity.read(folder)
     audio = {}
     if ((manifest.get("inputs") or {}).get("audio") or {}).get("path"):
@@ -2285,19 +2308,41 @@ def _live_overview(value, name, folder):
             card["substeps"] = projected.get(card.get("id"), [])
     if audio.get("running") and not audio.get("stale"):
         for card in stage["items"]:
-            if card.get("id") == "audio":
+            if card.get("id") == "audio" and card.get("status") not in TERMINAL_OK:
                 card["active"] = True
     if work:
+        matched_active = False
         for card in stage["items"]:
-            if card.get("id") == work["stage"]:
+            if card.get("id") == work["stage"] and card.get("status") not in TERMINAL_OK:
                 card.update(active=True, activity_detail=work.get("detail", ""))
                 stage["current"] = card
                 stage["hint"] = work.get("detail") or "工作台正在处理"
-        stage["activity"] = work
+                matched_active = True
+        if matched_active:
+            stage["activity"] = work
+    if (stage.get("current") or {}).get("id") == "review_gate" and value.get("open_findings"):
+        stage["hint"] = f"审核已执行；{value['open_findings']} 项标签差异待人工决定"
     stage["running_unknown"] = bool((manifest.get("status") == "running"
                                     or any(c.get("status") == "running" for c in stage["items"]))
                                     and not advance.get("running") and not work)
     value["stage"] = stage
+    # 始终用最新 manifest / upload_status 刷新顶层完成态，避免 stage 已完成而 flow_done/status 仍停在旧缓存。
+    if manifest.get("stages"):
+        upload_stage_done = str(((manifest.get("stages") or {}).get("upload") or {}).get("status") or "") == "completed"
+        receipt = (upload or {}).get("receipt") or load(folder / "receipt.json", {})
+        upload_pending = bool(isinstance(receipt, dict) and (receipt.get("remote_confirmation_required")
+                              or receipt.get("stage") == "pending_confirmation"))
+        value["status"] = manifest.get("status", value.get("status", "unknown"))
+        value["flow_done"] = bool(final_format_complete(folder, manifest) or upload_stage_done)
+        value["uploaded"] = bool(upload_stage_done and not upload_pending)
+        value["upload_pending_confirmation"] = upload_pending
+        flow_started_at, flow_finished_at, flow_minutes = _flow_timing(manifest)
+        value["flow_started_at"] = flow_started_at
+        value["flow_finished_at"] = flow_finished_at
+        value["flow_minutes"] = flow_minutes
+        if manifest.get("updated_at"):
+            value["updated_at"] = manifest.get("updated_at")
+    value["queue_removed"] = queue_removed(folder)
     from datetime import timezone
     value["observed_at"] = datetime.now(timezone.utc).isoformat()
     return value
@@ -2497,8 +2542,42 @@ def operations_work_state():
     return {"has_work": bool(active), "batches": active[:40]}
 
 
+def _batches_live_fingerprint():
+    """Cheap stat + in-memory state fingerprint so status changes bust the 2s list snapshot immediately."""
+    disk = []
+    try:
+        if not WORKFLOWS.is_symlink() and WORKFLOWS.is_dir():
+            for folder in sorted(WORKFLOWS.iterdir()):
+                if folder.is_symlink() or not folder.is_dir() or folder.name.startswith("."):
+                    continue
+                if not (folder / "workflow" / "manifest.json").is_file():
+                    continue
+                row = [folder.name]
+                for rel in ("workflow/manifest.json", "workflow/activity.json",
+                            "workflow/self-heal-status.json", "workflow/supervisor.json",
+                            "07_review/upload-format.json", "07_review/review-gate.json",
+                            "07_upload/receipt.json", "receipt.json", QUEUE_REMOVED):
+                    try:
+                        st = (folder / rel).stat()
+                        row.append((st.st_mtime_ns, st.st_size))
+                    except OSError:
+                        row.append(None)
+                disk.append(tuple(row))
+    except OSError:
+        pass
+    with _lock:
+        adv = tuple(sorted(
+            (k, bool(v.get("running")), bool(v.get("queued")), bool(v.get("waiting")), v.get("finished_at"))
+            for k, v in _advance_state.items() if isinstance(v, dict)))
+        upl = tuple(sorted(
+            (k, bool(v.get("running")), v.get("ok"), v.get("step"), v.get("finished_at"))
+            for k, v in _upload_jobs.items() if isinstance(v, dict)))
+        aud = (bool(_audio_job.get("running")), _audio_job.get("kind"), _audio_job.get("batch"))
+    return (str(WORKFLOWS), str(INBOX), tuple(disk), adv, upl, aud)
+
+
 def cached_list_batches():
-    """Coalesce overlapping HTTP list reads; writes invalidate immediately.
+    """Coalesce overlapping HTTP list reads; any stage/status change invalidates immediately.
 
     Older loaded hosts use this endpoint as a readiness probe. A short snapshot
     prevents those parallel probes from repeating all media audits per image.
@@ -2508,15 +2587,15 @@ def cached_list_batches():
     # Coalesce list readers without holding the scheduler/mutation lock during
     # full question/media projection. HTTP polling must not starve dispatch.
     with _batches_read_lock:
+        key = _batches_live_fingerprint()
         with _lock:
-            key = (str(WORKFLOWS), str(INBOX))
             if (_batches_snapshot is not None and _batches_snapshot[0] == key
                     and monotonic() < _batches_snapshot[1]):
                 return _batches_snapshot[2]
             epoch = _batches_epoch
         result = list_batches()
         with _lock:
-            if epoch == _batches_epoch and key == (str(WORKFLOWS), str(INBOX)):
+            if epoch == _batches_epoch and key == _batches_live_fingerprint():
                 _batches_snapshot = (key, monotonic() + 2.0, result)
         return result
 
@@ -3153,10 +3232,9 @@ def _answer_point_terms(answer, options):
     return terms
 
 
-def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None):
-    """Project original answer points from the accepted keys and final options."""
-    from workflow.agent_tasks import _answer_comparison_text, confirmed_units
-    from workflow.question_identity import question_key
+def _prepare_answer_point_ctx(folder):
+    """Pre-load batch-level inputs for answer_point_tags so bulk detail avoids N*disk reads."""
+    from workflow.agent_tasks import confirmed_units
 
     answer_path = '01_source_ans/answers.json'
     type_path = '03_types/types.json'
@@ -3167,19 +3245,91 @@ def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None):
         if (record.get('status') != wf_manifest.COMPLETED or record.get('rebuild_required')
                 or not (record.get('output_hashes') or {}).get(answer_path)
                 or wf_manifest.is_stale(folder, manifest, wf_contracts.STAGE_BY_ID['answers'])[0]):
-            return []
-        if review_hashes is not None and any(
-                not review_hashes.get(relative)
-                or review_hashes[relative] != wf_manifest.sha256_file(folder / relative)
-                for relative in (answer_path, type_path, batch_path)):
-            return []
-        unit = next((row for row in confirmed_units(folder) if row['unit_id'] == unit_id), None)
+            return {'status': 'empty'}
+        c_units = confirmed_units(folder)
         batch = load(folder / batch_path, {})
         type_data = load(folder / type_path, {})
+        answers_obj = load(folder / answer_path, {})
         rows = batch.get('items', []) if isinstance(batch, dict) else []
         type_rows = type_data.get('items', []) if isinstance(type_data, dict) else []
-        matches = [item for item in rows if isinstance(item, dict) and item.get('unit_id') == unit_id]
-        type_matches = [item for item in type_rows if isinstance(item, dict) and item.get('unit_id') == unit_id]
+        by_uid = {}
+        for item in rows:
+            if isinstance(item, dict) and item.get('unit_id') is not None:
+                by_uid.setdefault(item.get('unit_id'), []).append(item)
+        types_by_uid = {}
+        for item in type_rows:
+            if isinstance(item, dict) and item.get('unit_id') is not None:
+                types_by_uid.setdefault(item.get('unit_id'), []).append(item)
+        units_by_uid = {}
+        for row in c_units:
+            if isinstance(row, dict) and row.get('unit_id') not in units_by_uid:
+                units_by_uid[row.get('unit_id')] = row
+        file_hashes = {}
+        for relative in (answer_path, type_path, batch_path):
+            try:
+                file_hashes[relative] = wf_manifest.sha256_file(folder / relative)
+            except OSError:
+                file_hashes[relative] = None
+        return {
+            'status': 'ready',
+            'units_by_uid': units_by_uid,
+            'by_uid': by_uid,
+            'types_by_uid': types_by_uid,
+            'answers': answers_obj.get('answers', {}) if isinstance(answers_obj, dict) else {},
+            'rules': taxonomy.type_knowledge_rules(),
+            'file_hashes': file_hashes,
+        }
+    except FileNotFoundError:
+        return {'status': 'pending'}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {'status': 'empty'}
+
+
+def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None, ap_ctx=None):
+    """Project original answer points from the accepted keys and final options."""
+    from workflow.agent_tasks import _answer_comparison_text, confirmed_units
+    from workflow.question_identity import question_key
+
+    answer_path = '01_source_ans/answers.json'
+    type_path = '03_types/types.json'
+    batch_path = '06_batch/batch_meta.json'
+    try:
+        if ap_ctx is not None:
+            if ap_ctx.get('status') == 'pending':
+                return _pending_answer_point_tags(folder, unit_id, number=number, review_hashes=review_hashes)
+            if ap_ctx.get('status') != 'ready':
+                return []
+            if review_hashes is not None and any(
+                    not review_hashes.get(relative)
+                    or review_hashes[relative] != ap_ctx['file_hashes'].get(relative)
+                    for relative in (answer_path, type_path, batch_path)):
+                return []
+            unit = ap_ctx['units_by_uid'].get(unit_id)
+            matches = ap_ctx['by_uid'].get(unit_id, [])
+            type_matches = ap_ctx['types_by_uid'].get(unit_id, [])
+            rules = ap_ctx['rules']
+            answers = ap_ctx['answers']
+        else:
+            manifest = wf_manifest.load(folder)
+            record = manifest['stages']['answers']
+            if (record.get('status') != wf_manifest.COMPLETED or record.get('rebuild_required')
+                    or not (record.get('output_hashes') or {}).get(answer_path)
+                    or wf_manifest.is_stale(folder, manifest, wf_contracts.STAGE_BY_ID['answers'])[0]):
+                return []
+            if review_hashes is not None and any(
+                    not review_hashes.get(relative)
+                    or review_hashes[relative] != wf_manifest.sha256_file(folder / relative)
+                    for relative in (answer_path, type_path, batch_path)):
+                return []
+            unit = next((row for row in confirmed_units(folder) if row['unit_id'] == unit_id), None)
+            batch = load(folder / batch_path, {})
+            type_data = load(folder / type_path, {})
+            rows = batch.get('items', []) if isinstance(batch, dict) else []
+            type_rows = type_data.get('items', []) if isinstance(type_data, dict) else []
+            matches = [item for item in rows if isinstance(item, dict) and item.get('unit_id') == unit_id]
+            type_matches = [item for item in type_rows if isinstance(item, dict) and item.get('unit_id') == unit_id]
+            rules = taxonomy.type_knowledge_rules()
+            answers = load(folder / answer_path, {}).get('answers', {})
         if unit is None or len(matches) != 1 or len(type_matches) != 1:
             return []
         item = matches[0]
@@ -3188,9 +3338,8 @@ def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None):
         if (item.get('question_type') or item.get('type')) != main_type:
             return []
         if not any(dim.get('dim') == '答案考点'
-                   for dim in taxonomy.type_knowledge_rules().get(main_type, {}).get('dims', [])):
+                   for dim in rules.get(main_type, {}).get('dims', [])):
             return []
-        answers = load(folder / answer_path, {}).get('answers', {})
         children = item.get('subquestions') if unit['unit_kind'] == 'group' else [item]
         terms = []
         for child_number in unit['numbers']:
@@ -3215,7 +3364,7 @@ def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None):
         return []
 
 
-def label_payload(row, batch_item, subs, folder, unit_id=None):
+def label_payload(row, batch_item, subs, folder, unit_id=None, *, ap_ctx=None):
     """当前标签值 + 目录校验结果，供人工核对/修改。
 
     优先级：单元标签草稿（人工改过的）> 批次单元 > 行汇总 > 子题。
@@ -3248,6 +3397,13 @@ def label_payload(row, batch_item, subs, folder, unit_id=None):
                     knowledge.append(str(path).strip())
     main_type = (unit_labels.get("type") or item.get("question_type") or item.get("type")
                  or row.get("question_type") or row.get("type") or "")
+    from workflow import label_merge
+    uid_key = str(unit_id or row.get("unit_id") or "")
+    merged_info = label_merge.merged_unit_knowledge(
+        folder, uid_key, knowledge, main_type=main_type, manual_labels=unit_labels
+    ) if uid_key else {"knowledge": knowledge, "auto_merged": knowledge, "added_from_round1": [], "has_round1": False, "manually_edited": explicit_knowledge}
+    if not explicit_knowledge and merged_info.get("has_round1"):
+        knowledge = list(merged_info["knowledge"])
     resolved = taxonomy.resolve_knowledge(knowledge, main_type)
     # 旧批次可能保存不带顶级维度的叶子路径；展示和维度校验统一使用
     # 唯一解析出的当前目录全路径，避免加载时误报目录外路径。
@@ -3277,10 +3433,11 @@ def label_payload(row, batch_item, subs, folder, unit_id=None):
         warnings.append(item.get("source_notice") or row["source_notice"])
     values["scope"] = "unit"
     values["unit_id"] = str(unit_id or row.get("unit_id") or "")
-    values["answer_point_tags"] = answer_point_tags(folder, values["unit_id"])
+    values["answer_point_tags"] = answer_point_tags(folder, values["unit_id"], ap_ctx=ap_ctx)
     values["subquestion_count"] = len([s for s in subs if s.get("stem") or s.get("options")])
     values["knowledge_editable"] = True
     values["knowledge_manually_saved"] = explicit_knowledge
+    values["knowledge_merged_from_round1"] = merged_info.get("added_from_round1", [])
     values["stored_in"] = (str(unit_label_path(folder, unit_id or row.get("unit_id")).relative_to(folder))
                            if (unit_id or row.get("unit_id")) else None)
     values["resolvedKnowledge"] = [{"path": p["path"], "id": p["id"], "name": p["name"]}
@@ -3381,18 +3538,16 @@ def has_unverified_review_history(folder: Path) -> bool:
     return False
 
 
-def review_comparison(folder: Path, unit_id, numbers):
-    """读取输入绑定有效的两轮判断及其原始标签，保留逐题抽样范围。"""
-    uid = str(unit_id or "")
+def _prepare_review_comparison_ctx(folder: Path):
+    """Load batch-level review snapshot, bound inputs, and round indices once."""
     snapshot = load(folder / "07_review/review-comparison.json", {})
     snapshot_valid = (isinstance(snapshot, dict) and snapshot.get("version") == 1
                       and snapshot.get("execution_completed") is True
                       and isinstance(snapshot.get("plan"), dict)
                       and isinstance(snapshot.get("rounds"), list))
     if snapshot_valid:
-        payload = snapshot
         records = snapshot.get("rounds", [])
-        checked = {"labels", "sample"}
+        checked = {"labels"}
         plan = snapshot.get("plan") or {}
         snapshot_original = snapshot.get("original") or {}
         source_name = "07_review/review-comparison.json"
@@ -3416,22 +3571,52 @@ def review_comparison(folder: Path, unit_id, numbers):
         snapshot_original = {}
         source_name = "07_review/review-rounds.json"
 
-    # Prefer the last successful immutable snapshot. Current review rounds may
-    # be stale/in-progress after an input change; that must not blank the UI.
     hashes = plan.get("input_hashes") or {}
+
     def bound(relative):
         if snapshot_valid:
             key = {"03_types/types.json": "types", "04_knowledge/knowledge.json": "knowledge",
                    "01_source_ans/answers.json": "answers"}.get(relative)
             return snapshot_original.get(key, {}) if key else {}
         return load(folder / relative, {}) if checked and relative in hashes else {}
-    def unique_row(data):
+
+    def index_unique(data):
         rows = data.get("items", []) if isinstance(data, dict) else []
-        matches = [row for row in rows if isinstance(row, dict) and str(row.get("unit_id") or "") == uid]
-        return matches[0] if len(matches) == 1 else {}
-    types = unique_row(bound("03_types/types.json"))
-    knowledge = unique_row(bound("04_knowledge/knowledge.json"))
-    answers = bound("01_source_ans/answers.json")
+        grouped = {}
+        for row in rows:
+            if isinstance(row, dict):
+                key = str(row.get("unit_id") or "")
+                grouped.setdefault(key, []).append(row)
+        return {k: v[0] for k, v in grouped.items() if len(v) == 1}
+
+    return {
+        "records": records,
+        "checked": checked,
+        "hashes": hashes,
+        "snapshot_stale": bool(snapshot_stale),
+        "source_name": source_name,
+        "types_by_uid": index_unique(bound("03_types/types.json")),
+        "knowledge_by_uid": index_unique(bound("04_knowledge/knowledge.json")),
+        "answers": bound("01_source_ans/answers.json"),
+        "history_exists": has_unverified_review_history(folder),
+        "rules": taxonomy.type_knowledge_rules(),
+    }
+
+
+def review_comparison(folder: Path, unit_id, numbers, *, rc_ctx=None, ap_ctx=None):
+    """读取输入绑定有效的两轮判断及其原始标签，保留逐题抽样范围。"""
+    uid = str(unit_id or "")
+    if rc_ctx is None:
+        rc_ctx = _prepare_review_comparison_ctx(folder)
+    records = rc_ctx["records"]
+    checked = rc_ctx["checked"]
+    hashes = rc_ctx["hashes"]
+    snapshot_stale = rc_ctx["snapshot_stale"]
+    source_name = rc_ctx["source_name"]
+    types = rc_ctx["types_by_uid"].get(uid, {})
+    knowledge = rc_ctx["knowledge_by_uid"].get(uid, {})
+    answers = rc_ctx["answers"]
+    rules = rc_ctx["rules"]
     labels = {key: row[key] for key, row in (("type", types), ("subtypes", types), ("knowledge", knowledge)) if key in row}
     children = {}
     for child in knowledge.get("subquestions", []) if isinstance(knowledge.get("subquestions"), list) else []:
@@ -3449,8 +3634,8 @@ def review_comparison(folder: Path, unit_id, numbers):
               "stale": bool(snapshot_stale),
               "snapshot_source": source_name}
     wanted = {str(int(n)) for n in numbers if str(n).isdigit()}
-    history_exists = has_unverified_review_history(folder)
-    for rid, name in (("labels", "一审"), ("sample", "二审")):
+    history_exists = rc_ctx["history_exists"]
+    for rid, name in (("labels", "一审"),):
         matches = [r for r in records if isinstance(r, dict) and r.get("round_id") == rid] if isinstance(records, list) else []
         entry = {"round_id": rid, "name": name,
                  "status": ("上一版审核快照" if snapshot_stale else
@@ -3469,7 +3654,7 @@ def review_comparison(folder: Path, unit_id, numbers):
                             continue
                     # 整组抽样：number 为空表示整组核对，覆盖本单元全部小题。
                 assessment = check.get("assessment") if isinstance(check.get("assessment"), dict) else {}
-                expected_answers = answer_point_tags(folder, uid, number=check.get("number"), review_hashes=hashes)
+                expected_answers = answer_point_tags(folder, uid, number=check.get("number"), review_hashes=hashes, ap_ctx=ap_ctx)
                 reviewed_answers = assessment.get("answer_points")
                 if reviewed_answers is None and assessment and check.get("verdict") == "ok" and expected_answers:
                     # Older runs already stated some answers in their reasons.
@@ -3480,14 +3665,13 @@ def review_comparison(folder: Path, unit_id, numbers):
                                                      rationale)]
                 if isinstance(reviewed_answers, list):
                     assessment = {**assessment, "answer_points": reviewed_answers}
-                rules = taxonomy.type_knowledge_rules()
                 def _ap_disabled(t):
                     rule = rules.get(t.strip()) if isinstance(t, str) and t.strip() else None
                     return bool(rule and not any(dim.get("dim") == "答案考点" for dim in rule.get("dims", [])))
                 if _ap_disabled(labels.get("type")) or _ap_disabled(assessment.get("type")):
                     assessment = {key: value for key, value in assessment.items() if key != "answer_points"}
                     expected_answers = []
-                elif not expected_answers and not answer_point_tags(folder, uid, number=check.get("number")):
+                elif not expected_answers and not answer_point_tags(folder, uid, number=check.get("number"), ap_ctx=ap_ctx):
                     assessment = {key: value for key, value in assessment.items() if key != "answer_points"}
                 entry["checks"].append({"unit_id": uid, "number": check.get("number"),
                                         "scope": ("subquestion" if str(check.get("number") or "").strip()
@@ -3505,6 +3689,16 @@ def review_comparison(folder: Path, unit_id, numbers):
             entry["source"] = source_name
             entry["execution_id"] = record.get("execution_id")
         result["rounds"].append(entry)
+    from workflow import label_merge
+    r1_entry = next((r for r in result["rounds"] if r.get("round_id") == "labels"), None)
+    r1_unit_check = next((c for c in (r1_entry or {}).get("checks", []) if isinstance(c, dict) and isinstance(c.get("assessment"), dict)), None)
+    result["merged"] = label_merge.merged_unit_knowledge(
+        folder,
+        uid,
+        labels.get("knowledge") or [],
+        main_type=labels.get("type"),
+        round1_assessment=(r1_unit_check or {}).get("assessment"),
+    )
     return result
 
 
@@ -3623,8 +3817,8 @@ def paper_preview(name: str) -> dict:
     }
 
 
-def detail(name, unit_id):
-    folder = batch_dir(name)
+def _prepare_batch_detail_context(folder: Path, name: str):
+    """Load whole-paper shared inputs once for detail() and units_bundle()."""
     report, manifest, queue = report_for(folder)
     base = question_rows(folder, report)
     number_map = number_of_unit(base)
@@ -3632,23 +3826,107 @@ def detail(name, unit_id):
     confirmed = load(folder / "01_source/structure.confirmed.json", {}) or {}
     scoped_units = [u for u in confirmed.get("units", []) if isinstance(u, dict)
                     and u.get("identity_version") == "scoped-v1"]
+    scoped_by_uid = {}
+    for u in scoped_units:
+        scoped_by_uid.setdefault(str(u.get("unit_id")), []).append(u)
     has_scoped = bool(scoped_units) or any(r.get("identity_version") == "scoped-v1" for r in rows)
-    row = next((r for r in rows if str(r.get("unit_id")) == str(unit_id)), None)
+    lines = source_lines(folder)
+    source_text = "\n".join(lines)
+    try:
+        from workflow import sync_practice
+        is_sync_practice = sync_practice.looks_like_sync_practice(source_text)
+    except (ImportError, OSError, ValueError, TypeError, KeyError):
+        is_sync_practice = False
+    try:
+        extraction = load(folder / "01_source" / "extraction.json", {})
+    except (UnicodeError, ValueError, TypeError):
+        extraction = {}
+    audio_mapping = audio_map(folder)
+    all_numbers = [int(n) for r in rows for n in (r.get("numbers") or []) if str(n).isdigit()]
+    try:
+        media = media_audit.audit(folder, all_numbers)
+    except (OSError, ValueError, KeyError):
+        media = None
+    try:
+        snapshot_pair = review_snapshot(folder)
+    except (ImportError, OSError, ValueError, TypeError, KeyError):
+        snapshot_pair = ({}, {})
+    batch_map = _batch_units_map(folder)
+    all_cands_by_num = {}
+    scoped_cands_by_uid = {}
+    cand_dir = folder / "candidates"
+    for path in sorted(cand_dir.glob("*.json")) if cand_dir.is_dir() else []:
+        item = load(path, {}) or {}
+        number = str(item.get("number") or "").strip()
+        if number.isdigit():
+            all_cands_by_num[number] = (item, path)
+            uid_key = str(item.get("unit_id") or "")
+            scoped_cands_by_uid.setdefault(uid_key, {})[number] = (item, path)
+    ap_ctx = _prepare_answer_point_ctx(folder)
+    rc_ctx = _prepare_review_comparison_ctx(folder)
+    adv_running = bool(advance_state(name).get("running"))
+    shared = {
+        "batch": name,
+        "meta": report.get("meta", manifest.get("meta", {})),
+        "paper": paper_info(folder, report, manifest),
+        "stage": stage_cards(manifest, bool(all_numbers), adv_running),
+        "paper_bulk_bold": paper_uses_bulk_bold(lines),
+        "manifest": {"status": manifest.get("status", "unknown"), "stages": manifest.get("stages", {})},
+        "taxonomy": {
+            "types": taxonomy.types(), "subtypes": taxonomy.subtype_map(),
+            "difficulties": taxonomy.difficulties(), "categories": taxonomy.categories(),
+            "sources": taxonomy.sources(), "years": taxonomy.years(),
+            "regions": taxonomy.regions(), "knowledge": taxonomy.knowledge_version(),
+        },
+    }
+    return {
+        "report": report, "manifest": manifest, "queue": queue,
+        "base": base, "number_map": number_map, "rows": rows,
+        "scoped_units": scoped_units, "scoped_by_uid": scoped_by_uid, "has_scoped": has_scoped,
+        "lines": lines, "source_text": source_text, "is_sync_practice": is_sync_practice,
+        "extraction": extraction, "audio_mapping": audio_mapping,
+        "all_numbers": all_numbers, "media": media,
+        "snapshot_pair": snapshot_pair, "batch_map": batch_map,
+        "all_cands_by_num": all_cands_by_num, "scoped_cands_by_uid": scoped_cands_by_uid,
+        "ap_ctx": ap_ctx, "rc_ctx": rc_ctx,
+        "adv_running": adv_running, "shared": shared,
+    }
+
+
+def _build_unit_detail(folder: Path, name: str, unit_id, ctx: dict, *, row_override=None, for_bundle: bool = False):
+    manifest = ctx["manifest"]
+    queue = ctx["queue"]
+    base = ctx["base"]
+    number_map = ctx["number_map"]
+    rows = ctx["rows"]
+    scoped_by_uid = ctx["scoped_by_uid"]
+    has_scoped = ctx["has_scoped"]
+    lines = ctx["lines"]
+    extraction = ctx["extraction"]
+    audio_mapping = ctx["audio_mapping"]
+    media = ctx["media"]
+    batch_map = ctx["batch_map"]
+    ap_ctx = ctx["ap_ctx"]
+    rc_ctx = ctx["rc_ctx"]
+
+    row = row_override
     if row is None:
-        # Previously bookmarked merged group opens its first current partition.
-        row = next((r for r in rows if r.get("source_parent_id") == str(unit_id)), None)
-    if row is None and not has_scoped:
-        alias = re.sub(r"\D", "", str(unit_id))
-        if alias:
-            row = next((r for r in rows if int(alias) in (r.get("numbers") or [])), None)
-    if row is None:
-        row = {} if has_scoped else next((r for r in rows if str(r.get("number")) == str(unit_id)), {})
-    bound_units = [u for u in scoped_units if str(u.get("unit_id")) == str(row.get("unit_id") or unit_id)]
+        row = next((r for r in rows if str(r.get("unit_id")) == str(unit_id)), None)
+        if row is None:
+            # Previously bookmarked merged group opens its first current partition.
+            row = next((r for r in rows if r.get("source_parent_id") == str(unit_id)), None)
+        if row is None and not has_scoped:
+            alias = re.sub(r"\D", "", str(unit_id))
+            if alias:
+                row = next((r for r in rows if int(alias) in (r.get("numbers") or [])), None)
+        if row is None:
+            row = {} if has_scoped else next((r for r in rows if str(r.get("number")) == str(unit_id)), {})
+    row = dict(row)
+    selected_uid = str(row.get("unit_id") or unit_id)
+    bound_units = scoped_by_uid.get(selected_uid, [])
     bound_unit = bound_units[0] if len(bound_units) == 1 else {}
     scoped = has_scoped or row.get("identity_version") == "scoped-v1" or bool(bound_unit)
-    selected_uid = str(row.get("unit_id") or unit_id)
     if scoped:
-        row = dict(row)
         for key in ("identity_version", "section_id", "source_section", "question_ids", "printed_numbers"):
             if key in bound_unit:
                 row[key] = bound_unit[key]
@@ -3663,14 +3941,16 @@ def detail(name, unit_id):
                                   if isinstance(f, dict) and str(f.get("unit_id") or "") == selected_uid])
         base = [r for r in base if str(r.get("unit_id") or "") == selected_uid]
     try:
-        decorate_review_rows(folder, [row])
+        decorate_review_rows(folder, [row], snapshot=ctx["snapshot_pair"],
+                             source_text=ctx["source_text"], is_sync_practice=ctx["is_sync_practice"])
     except (ImportError, OSError, ValueError, TypeError, KeyError):
         pass
     numbers = [int(n) for n in (row.get("numbers") or [row.get("number")]) if str(n).isdigit()]
     if not numbers:
-        fallback = number_map.get(str(row.get("unit_id") or unit_id))
+        fallback = number_map.get(selected_uid)
         if str(fallback or "").strip().isdigit():
             numbers = [int(fallback)]
+
     def detail_findings(wanted_numbers):
         if not scoped:
             return findings_for(queue, wanted_numbers, number_map)
@@ -3678,7 +3958,6 @@ def detail(name, unit_id):
         return [f for f in queue.get("items", [])
                 if not str(f.get("number") or "").strip() or str(f.get("number")) in wanted]
 
-    lines = source_lines(folder)
     if source_slice is not None and lines and numbers:
         chunk = source_slice(folder, numbers, lines, unit_id=selected_uid)
         if scoped and chunk:
@@ -3701,24 +3980,20 @@ def detail(name, unit_id):
         chunk = slice_text(lines, numbers[0])
     else:
         chunk = []
-    try:
-        extraction = load(folder / "01_source" / "extraction.json", {})
-    except (UnicodeError, ValueError, TypeError):
-        extraction = {}
     blocks = attach_media(source_blocks(chunk, extraction=extraction), folder, name)
     audio_units = [row.get("unit_id") or unit_id]
     if row.get("source_parent_id"):
         audio_units.append(row["source_parent_id"])
-    audio_blocks_list = audio_blocks(folder, name, audio_units)
+    audio_blocks_list = audio_blocks(folder, name, audio_units, mapping=audio_mapping)
     if audio_blocks_list:
         blocks = audio_blocks_list + blocks
     text = "\n".join(chunk)
     if not blocks and text:
         blocks = [{"type": "text", "text": text}]
 
-    by_number = candidates_by_number(folder, unit_id=selected_uid if scoped else None)
+    by_number = ctx["scoped_cands_by_uid"].get(selected_uid, {}) if scoped else ctx["all_cands_by_num"]
     valid_identity = not scoped or bool(row.get("unit_id") or bound_unit)
-    batch_item, _ = candidate(folder, row.get("unit_id") or unit_id) if valid_identity else ({}, None)
+    batch_item, _ = candidate(folder, row.get("unit_id") or unit_id, batch_map=batch_map) if valid_identity else ({}, None)
     subs = []
     for number in numbers:
         cand, path = by_number.get(str(number), ({}, None))
@@ -3726,7 +4001,6 @@ def detail(name, unit_id):
                          if str(s.get("number")) == str(number)), {})
         if not base_sub and len(numbers) == 1:
             base_sub = batch_item
-        source = base_sub or cand
         state = next((r.get("state") for r in base if str(r.get("number")) == str(number)), "unverified")
         item = {
             "number": number,
@@ -3748,7 +4022,7 @@ def detail(name, unit_id):
         subs.append(item)
 
     if not subs and valid_identity:
-        fallback_cand, fallback_path = candidate(folder, row.get("unit_id") or unit_id)
+        fallback_cand, fallback_path = candidate(folder, row.get("unit_id") or unit_id, batch_map=batch_map)
         if fallback_cand:
             fallback_number = fallback_cand.get("number")
             if not numbers and str(fallback_number or "").strip().isdigit():
@@ -3771,8 +4045,8 @@ def detail(name, unit_id):
     whole_unit = taxonomy.whole_unit_type(row.get("type") or batch_item.get("type") or "")
     label_open = group_duplicate_findings(label_findings, whole_unit=whole_unit)
     format_open = [f for f in format_findings if is_open(f)] + [f for f in other_findings if is_open(f)]
-    labels = label_payload(row, batch_item, subs, folder, row.get("unit_id") or unit_id)
-    comparison = review_comparison(folder, row.get("unit_id") or unit_id, numbers)
+    labels = label_payload(row, batch_item, subs, folder, row.get("unit_id") or unit_id, ap_ctx=ap_ctx)
+    comparison = review_comparison(folder, row.get("unit_id") or unit_id, numbers, rc_ctx=rc_ctx, ap_ctx=ap_ctx)
     # 每条意见带上“这是哪道题、当前值是什么”，人不用再翻原卷猜问题指的是什么。
     for finding in label_open:
         finding["scope"] = (f"第 {row.get('label') or '-'.join(str(n) for n in numbers)} 题组（{len(numbers)} 小题）"
@@ -3782,12 +4056,10 @@ def detail(name, unit_id):
             finding["merged_count"] = len(finding["member_ids"])
         finding["current"] = finding_current(finding, labels, subs, numbers)
         finding["comparison"] = finding_comparison(finding, comparison, numbers, number_map)
-    try:
-        all_numbers = [int(n) for r in rows for n in (r.get("numbers") or []) if str(n).isdigit()]
-        media = media_audit.audit(folder, all_numbers)
+    if media is not None:
         shown = {Path(m.group(1).strip()).name for line in chunk for m in media_audit.IMG_REF.finditer(line)}
         media_items = [m for m in media["items"] if m["name"] in shown]
-    except (OSError, ValueError, KeyError):
+    else:
         media_items = []
     # 卷头、栏目图、已排除的图不是题目内容，预览里不显示，避免被当成题目图片保存。
     drop = {item["name"] for item in media_items
@@ -3796,36 +4068,62 @@ def detail(name, unit_id):
         blocks = [block for block in blocks if not (block.get("type") == "image" and block.get("name") in drop)]
     if scoped and row.get("printed_numbers") == [] and (bound_unit.get("source_span") or row.get("source_span") or {}).get("number_binding") != "answer_inferred_image_group":
         subs = [dict(sub, display_number=None, internal_number=sub.get("number")) for sub in subs]
-    return {"batch": name, "meta": report.get("meta", manifest.get("meta", {})),
-            "paper": paper_info(folder, report, manifest),
-            "stage": stage_cards(manifest, bool(numbers), bool(advance_state(name).get("running"))),
-            "preview_blocks": blocks, "source_preview": text,
-            "paper_bulk_bold": paper_uses_bulk_bold(lines),
-            "audio": audio_blocks_list,
-            "hidden_media": sorted(drop),
-            "manifest": {"status": manifest.get("status", "unknown"), "stages": manifest.get("stages", {})},
-            "row": row, "item": batch_item,
-            "unit_id": row.get("unit_id", unit_id), "label": row.get("label") or "-".join(str(n) for n in numbers),
-            "unit_kind": row.get("unit_kind", "standalone"), "numbers": numbers,
-            "type": row.get("type") or batch_item.get("type", ""),
-            "subtypes": (labels.get("subtypes") if isinstance(labels.get("subtypes"), list) and labels.get("subtypes")
-                         else row.get("subtypes") if isinstance(row.get("subtypes"), list)
-                         else ([_row_subtype(row)] if _row_subtype(row) else [])),
-            "source_section": row.get("source_section") or {},
-            "printed_numbers": row.get("printed_numbers"),
-            "material": batch_item.get("material") or row.get("material") or "",
-            "stem": row.get("stem") or batch_item.get("stem") or "",
-            "labels": labels, "comparison": comparison, "label_warnings": labels.get("warnings", []),
-            "preview_labels": preview_labels(labels, subs, batch_item, row),
-            "media": media_items,
-            "subquestions": subs, "findings": findings,
-            "label_findings": label_open, "format_findings": format_open,
-            "open_findings": len(label_open), "format_open": len(format_open),
-            "needs_human": bool(label_open),
-            "taxonomy": {"types": taxonomy.types(), "subtypes": taxonomy.subtype_map(),
-                         "difficulties": taxonomy.difficulties(), "categories": taxonomy.categories(),
-                         "sources": taxonomy.sources(), "years": taxonomy.years(),
-                         "regions": taxonomy.regions(), "knowledge": taxonomy.knowledge_version()}}
+    unit_payload = {
+        "preview_blocks": blocks, "source_preview": text,
+        "audio": audio_blocks_list,
+        "hidden_media": sorted(drop),
+        "row": row, "item": batch_item,
+        "unit_id": row.get("unit_id", unit_id), "label": row.get("label") or "-".join(str(n) for n in numbers),
+        "unit_kind": row.get("unit_kind", "standalone"), "numbers": numbers,
+        "type": row.get("type") or batch_item.get("type", ""),
+        "subtypes": (labels.get("subtypes") if isinstance(labels.get("subtypes"), list) and labels.get("subtypes")
+                     else row.get("subtypes") if isinstance(row.get("subtypes"), list)
+                     else ([_row_subtype(row)] if _row_subtype(row) else [])),
+        "source_section": row.get("source_section") or {},
+        "printed_numbers": row.get("printed_numbers"),
+        "material": batch_item.get("material") or row.get("material") or "",
+        "stem": row.get("stem") or batch_item.get("stem") or "",
+        "labels": labels, "comparison": comparison, "label_warnings": labels.get("warnings", []),
+        "preview_labels": preview_labels(labels, subs, batch_item, row),
+        "media": media_items,
+        "subquestions": subs, "findings": findings,
+        "label_findings": label_open, "format_findings": format_open,
+        "open_findings": len(label_open), "format_open": len(format_open),
+        "needs_human": bool(label_open),
+    }
+    if bool(numbers) != bool(ctx["all_numbers"]):
+        unit_payload["stage"] = stage_cards(manifest, bool(numbers), ctx["adv_running"])
+    if for_bundle:
+        return unit_payload
+    result = dict(ctx["shared"])
+    result.update(unit_payload)
+    return result
+
+
+def detail(name, unit_id):
+    folder = batch_dir(name)
+    ctx = _prepare_batch_detail_context(folder, name)
+    return _build_unit_detail(folder, name, unit_id, ctx, for_bundle=False)
+
+
+def units_bundle(name):
+    """一次性返回整份试卷全部单元详情（共享字段只传一次），供前端切题零延迟命中缓存。"""
+    folder = batch_dir(name)
+    ctx = _prepare_batch_detail_context(folder, name)
+    units = {}
+    order = []
+    for row in ctx["rows"]:
+        uid = str(row.get("unit_id") or row.get("number") or "")
+        if not uid or uid in units:
+            continue
+        units[uid] = _build_unit_detail(folder, name, uid, ctx, row_override=row, for_bundle=True)
+        order.append(uid)
+    return {
+        "batch": name,
+        "shared": ctx["shared"],
+        "units": units,
+        "order": order,
+    }
 
 
 MANUAL_CONTENT_FIELDS = ("explanation", "articleSummary")
@@ -3935,16 +4233,19 @@ class Handler(BaseHTTPRequestHandler):
             if decoded_path == "/api/taxonomy":
                 return self.send_json(taxonomy.taxonomy())
             if decoded_path == "/api/knowledge/tree":
-                return self.send_json(taxonomy.knowledge_tree())
+                main_type = (parse_qs(parsed.query).get("type") or [""])[0].strip() or None
+                return self.send_json(taxonomy.knowledge_tree(main_type=main_type))
             if decoded_path == "/api/knowledge":
-                query = parse_qs(parsed.query).get("q", [""])[0]
-                limit = parse_qs(parsed.query).get("limit", ["40"])[0]
+                qs = parse_qs(parsed.query)
+                query = qs.get("q", [""])[0]
+                limit = qs.get("limit", ["40"])[0]
+                main_type = (qs.get("type") or [""])[0].strip() or None
                 try:
                     limit = int(limit)
                 except ValueError:
                     limit = 40
                 return self.send_json({"version": taxonomy.knowledge_version(),
-                                       "items": taxonomy.knowledge_search(query, limit)})
+                                       "items": taxonomy.knowledge_search(query, limit, main_type=main_type)})
             parts = decoded_path.strip("/").split("/")
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "operations":
                 from workflow import operations
@@ -3995,6 +4296,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Accept-Ranges", "bytes")
                 self.end_headers()
                 return self.wfile.write(data)
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "units":
+                return self.send_json(units_bundle(parts[2]))
             if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "units":
                 return self.send_json(detail(parts[2], parts[4]))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "pipeline":
@@ -4354,8 +4657,8 @@ class Handler(BaseHTTPRequestHandler):
             applied["skipped"].append("items")
             warnings.append("小题改动仅保存为草稿")
         if files and current is not None:
-            if not applied["applied"]:
-                wf_manifest.invalidate_downstream(folder, current, "review", "工作台编辑了题面或标签，旧审核结果失效")
+            if not applied["applied"] and (unit or items):
+                wf_manifest.invalidate_downstream(folder, current, "review", "工作台编辑了题面，旧审核结果失效")
             current["updated_at"] = wf_manifest.now_iso()
             files[manifest_rel] = current
         if files:

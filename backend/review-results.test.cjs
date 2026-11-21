@@ -35,47 +35,48 @@ test('二审小题记录保留，不能当作整组assessment', () => {
  assert.equal(round.checks.length,1);
  assert.equal(round.checks[0].number,'77');
 });
-test('二审标签逐条呈现抽查题号，保留多条结果和核对说明', () => {
- const d=detail([{number:'77',rationale:'依据第一段',assessment:{knowledge:['主题/新标签'],source_comparison:'与答案一致',difficulty:[{number:'77',value:'适中'}]}},
-                 {number:'79',assessment:{knowledge:['主题/另一标签']}}]);
- const rendered=text(labelAuditPanels(d));
- assert.match(rendered,/抽查第 77 题/);
- assert.match(rendered,/抽查第 79 题/);
- assert.match(rendered,/新标签/);
- assert.match(rendered,/另一标签/);
- // 审核说明只保留一句简短原因（越简单越好），不堆原文核对。
- const notes=auditNotes(d).join(' ');
- assert.match(notes,/差异原因：/);
- assert.ok(notes.replace('差异原因：','').length <= 60+4);
+test('标签合并将原标签与一审知识点去重合并，且不再展示二审标签', () => {
+ const d = detail([], '未覆盖');
+ d.comparison.rounds[0].checks[0].rationale = '依据第一段补充社区生活知识点';
+ d.comparison.rounds[0].checks[0].assessment.knowledge = ['主题/原标签', '主题/新标签'];
+ const rendered = text(labelAuditPanels(d));
+ assert.match(rendered, /原标签 原标签/);
+ assert.match(rendered, /一审标签 原标签\s*、\s*新标签/);
+ assert.match(rendered, /标签合并 原标签、新标签/);
+ assert.doesNotMatch(rendered, /二审标签|未抽中/);
+ assert.equal(hasErrorColor(labelAuditPanels(d)), true);
+ const notes = auditNotes(d).join(' ');
+ assert.match(notes, /差异原因：/);
+ assert.ok(notes.replace('差异原因：', '').length <= 60 + 4);
 });
-test('未抽中的单元显示未抽中，不伪装为待审核或已通过', () => {
- const rendered=text(labelAuditPanels(detail([], '未覆盖')));
- assert.match(rendered,/未抽中，未做二审/);
- assert.doesNotMatch(rendered,/待审核/);
+test('一审未完成时标签合并显示待审核占位，不显示二审', () => {
+ const d = { unit_kind: 'standalone', labels: { knowledge: ['主题/原标签'] },
+   comparison: { original: { labels: { knowledge: ['主题/原标签'] } }, rounds: [] } };
+ const rendered = text(labelAuditPanels(d));
+ assert.match(rendered, /标签合并/);
+ assert.doesNotMatch(rendered, /二审/);
 });
 
-test('答案词显示在原标签，已绑定和待绑定的同一路径只显示一次', () => {
-  const d = detail([{number:'77',assessment:{knowledge:['主题/原标签']}}]);
+test('答案词显示在原标签与标签合并，已绑定和待绑定的同一路径只显示一次', () => {
+  const d = detail([], '未覆盖');
   d.labels.knowledge.push('词汇/答案考点/pencil');
   d.labels.answer_point_tags = ['pencil', 'each other'];
   d.comparison.stale = true;
   const rendered = text(labelAuditPanels(d));
   assert.match(rendered, /原标签 原标签、pencil、each other/);
   assert.match(rendered, /一审标签/);
-  assert.match(rendered, /二审标签/);
-  assert.doesNotMatch(rendered, /答案考点|历史一审|历史二审/);
+  assert.match(rendered, /标签合并 原标签、pencil、each other/);
+  assert.doesNotMatch(rendered, /答案考点|历史一审|历史二审|二审标签/);
   assert.doesNotMatch(rendered, /不一致/);
   assert.equal(hasKnowledgeDiff(d), false);
 });
 
-test('答案考点按各轮实际判断显示，漏标和不同答案参与比较', () => {
-  const sample = {number:'77',expected_answer_points:['have seen'],
-    assessment:{knowledge:['主题/原标签'],answer_points:['have seen']}};
-  const d = detail([sample]);
+test('答案考点按一审实际判断显示，漏标和不同答案参与比较', () => {
+  const d = detail([], '未覆盖');
   const first = d.comparison.rounds[0].checks[0];
   first.expected_answer_points = ['have seen'];
   first.assessment.answer_points = ['have seen'];
-  assert.match(text(labelAuditPanels(d)), /一审标签 原标签、have seen.*二审标签 原标签、have seen/);
+  assert.match(text(labelAuditPanels(d)), /一审标签 原标签、have seen.*标签合并/);
   assert.equal(hasKnowledgeDiff(d), false);
   first.assessment.answer_points = [];
   assert.equal(hasKnowledgeDiff(d), true);
@@ -168,14 +169,15 @@ test('完整路径集合相同，顺序和重复项不产生差异', () => {
   assert.deepEqual(Array.from(auditNotes(d)), []);
 });
 
-test('人工修改后原标签行显示当前标签及已修改，审核仍对比原始快照', () => {
+test('人工修改后标签合并行显示修改结果及已修改，原标签保留原始快照', () => {
   const d = detail([], '未覆盖');
   d.labels = { knowledge: ['主题/修改后'], knowledge_manually_saved: true };
   const rendered = text(labelAuditPanels(d));
-  assert.match(rendered, /原标签 修改后 已修改/);
+  assert.match(rendered, /原标签 原标签/);
+  assert.match(rendered, /标签合并 修改后 已修改/);
   assert.doesNotMatch(rendered, /当前标签/);
   assert.equal(hasKnowledgeDiff(d), false);
-  d.labels.knowledge = ['主题/原标签'];
+  d.labels = { knowledge: ['主题/原标签'], knowledge_manually_saved: false };
   assert.doesNotMatch(text(labelAuditPanels(d)), /已修改/);
 });
 

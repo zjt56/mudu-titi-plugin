@@ -9,7 +9,7 @@ const host = fs.readFileSync(path.join(root, 'lib/index.js'), 'utf8');
 const settings = client.slice(client.indexOf('function SettingsTab()'));
 
 test('设置页用左侧五项导航（含初始化引导），顺序固定', () => {
-  assert.match(settings, /const sections = \[\['onboarding', '初始化引导'\], \['models', '大模型配置'\], \['api', '上传设置'\], \['ocr', 'OCR 识别'\], \['audio', '听力切分'\]\]/);
+  assert.match(settings, /const sections = \[\['onboarding', '初始化引导'\], \['models', '模型设置'\], \['api', '上传设置'\], \['ocr', 'OCR 识别'\], \['audio', '听力切分'\]\]/);
   // 新装用户默认落在引导页，第一眼看到要装/要配什么。
   assert.match(settings, /React\.useState\('onboarding'\)/);
   assert.match(settings, /id: 'wf-settings-panel-onboarding'/);

@@ -1233,6 +1233,10 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
         layout = layout_issues(batch_dir, items)
         builder.errors.extend(layout["errors"])
         builder.warnings.extend(layout["warnings"])
+    # 上传使用「标签合并」后的知识点（若人工通过修改标签编辑过，则以人工保存为准）。
+    if batch_dir is not None:
+        from . import label_merge
+        batch = label_merge.project_batch_merged_knowledge(batch, batch_dir)
     # Audit the local labels before any remote ID replacement or group union.
     audit = label_audit.inspect_batch(_local_audit_view(batch))
     builder.errors.extend({"unit_id": "", **error} for error in audit["errors"])

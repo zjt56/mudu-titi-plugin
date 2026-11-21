@@ -23,6 +23,9 @@ LEDGER = "operations.json"
 LEASE_SECONDS = 180
 SERVICE_TTL = 20
 STALE_RUNNING_SECONDS = int(os.environ.get("WF_OPERATIONS_STALE_RUNNING_SECONDS") or 120)
+REVIEW_STALE_RUNNING_SECONDS = int(
+    os.environ.get("WF_OPERATIONS_REVIEW_STALE_RUNNING_SECONDS") or max(600, STALE_RUNNING_SECONDS)
+)
 ORPHAN_RUNNING_GRACE_SECONDS = int(os.environ.get("WF_OPERATIONS_ORPHAN_RUNNING_GRACE_SECONDS") or 15)
 TRANSIENT_ESCALATION_THRESHOLD = int(os.environ.get("WF_OPERATIONS_TRANSIENT_THRESHOLD") or 3)
 TRANSIENT_STREAK_MIN_GAP_SECONDS = int(os.environ.get("WF_OPERATIONS_TRANSIENT_GAP_SECONDS") or 30)
@@ -146,7 +149,7 @@ def _recent_stage_activity(folder, stage_id, window=STALE_RUNNING_SECONDS):
     now = time.time()
     dirs = []
     if stage_id == "review":
-        dirs.append(wf / "review-attempts")
+        dirs.extend([wf / "review-attempts", wf / "review-pending", wf / "review-pending-nl"])
     else:
         dirs.append(wf / "agent-runs")
     dirs.append(wf / "logs")
@@ -157,7 +160,12 @@ def _recent_stage_activity(folder, stage_id, window=STALE_RUNNING_SECONDS):
             for entry in base.rglob("*"):
                 if not entry.is_file():
                     continue
-                if stage_id != "review" and base.name == "agent-runs" and stage_id not in str(entry.relative_to(base)):
+                if base.name == "logs":
+                    if not (entry.stem == stage_id
+                            or entry.name.startswith(stage_id + ".")
+                            or entry.name.startswith(stage_id + "-")):
+                        continue
+                elif stage_id != "review" and base.name == "agent-runs" and stage_id not in str(entry.relative_to(base)):
                     continue
                 if now - entry.stat().st_mtime < window:
                     return True
@@ -180,7 +188,7 @@ def _stale_running_candidate(folder, manifest, *, force=False):
         if not busy and (force or (age is not None and age >= ORPHAN_RUNNING_GRACE_SECONDS)):
             detail = f"阶段 {spec.id} 处于运行中但无活跃执行锁（已滞留 {int(age) if age is not None else 0}s），疑似僵死"
             return spec.id, detail
-        stale_limit = 600 if spec.id == "review" else STALE_RUNNING_SECONDS
+        stale_limit = REVIEW_STALE_RUNNING_SECONDS if spec.id == "review" else STALE_RUNNING_SECONDS
         if age is not None and age >= stale_limit:
             if busy and not force and _recent_stage_activity(folder, spec.id, stale_limit):
                 continue

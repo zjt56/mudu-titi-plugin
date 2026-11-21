@@ -297,7 +297,7 @@ def retire_stale_feedback(batch, unit_ids, *, stages=None):
     return retired
 
 
-def _collect(batch, stage, speculative=False):
+def _collect(batch, stage, speculative=False, allow_pending_audio=False):
     stage = "types" if stage == "preassemble" else stage
     batch = Path(batch).resolve()
     contexts, hashes, missing = {}, {}, []
@@ -546,7 +546,7 @@ def _collect(batch, stage, speculative=False):
         audio_context = dict(manifest, batch_dir=str(batch))
         skip_listening = bool(mf.skip_reason(audio_context, contracts.STAGE_BY_ID["audio"]))
         if stage == "review":
-            add(ARTIFACTS["audio"], bool(inputs.get("audio")) and not skip_listening)
+            add(ARTIFACTS["audio"], bool(inputs.get("audio")) and not skip_listening and not allow_pending_audio)
         add("01_source/附录.txt", False)
         add("01_source/extraction.json", False)
     if stage == "review":
@@ -698,7 +698,7 @@ def _preassembly_prompt(prompt):
                      agent_roles.section("preassemble", ARTIFACTS["preassemble"]), 1))
 
 
-def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _speculative=False, slim=False):
+def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _speculative=False, slim=False, allow_pending_audio=False):
     """Return a self-contained task and trusted input hashes, without writes.
 
     Missing readable inputs return completed=False/status=needs_review and a
@@ -723,7 +723,7 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
         raise ValueError("max_input_chars must be a positive integer")
     if _speculative and stage not in ("types", "answers", "explanations", "knowledge"):
         raise ValueError("Unsupported speculative stage")
-    context, hashes, missing, units = _collect(batch_dir, stage, speculative=_speculative)
+    context, hashes, missing, units = _collect(batch_dir, stage, speculative=_speculative, allow_pending_audio=allow_pending_audio)
     if stage == 'types':
         # preassemble、兼容 types 和局部修正共同消费同一课时口径；整卷正文判身份，
         # 再由后续分片投影，不能因为某片没有课时标题而丢规则。

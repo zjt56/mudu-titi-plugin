@@ -280,7 +280,7 @@ class ReviewRoundsTest(unittest.TestCase):
                 self.assertIn('leafTerminal', point)
 
     def test_knowledge_schema_allows_empty_whole_group_child_labels(self):
-        exported = review_rounds.export_task(self.batch, skip_rounds=('labels',))
+        exported = review_rounds.export_task(self.batch)
         schema = json.loads((Path(exported['package_dir']) / 'response.schema.json').read_text())
         check = schema['properties']['artifacts']['properties']['review_round']['properties']['checks']['items']
         assessment = check['properties']['assessment']
@@ -313,7 +313,7 @@ class ReviewRoundsTest(unittest.TestCase):
     def test_no_records_is_three_unchecked_and_never_fake_evidence(self):
         result = review.evaluate_rounds(self.batch)
         self.assertFalse(result["passed"])
-        self.assertEqual(len(result["unchecked"]), 2)
+        self.assertEqual(len(result["unchecked"]), len(review.ROUND_IDS))
         self.assertEqual(result["findings"], [])
         self.assertFalse((self.batch / "07_review").exists())
 
@@ -344,7 +344,7 @@ class ReviewRoundsTest(unittest.TestCase):
                 review_rounds.import_result(self.batch, exported['task_id'], response)
         self.assertTrue((self.batch / '07_review/review-rounds.json').exists())
         # A subsequent export must complete the pending transaction before advancing.
-        self.assertEqual(review_rounds.export_task(self.batch)['round_id'], 'sample')
+        self.assertEqual(review_rounds.export_task(self.batch)['action'], 'complete')
         items = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]['status'], 'open')
@@ -420,7 +420,7 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(len(record['checks']), 16)
         self.assertEqual(report.get('part_completed'), 1)
         self.assertEqual(report.get('action'), 'continue')
-        self.assertEqual(review_rounds.export_task(self.batch)['round_id'], 'sample')
+        self.assertEqual(review_rounds.export_task(self.batch)['action'], 'complete')
 
     def test_review_partition_drops_duplicated_extraction_text(self):
         self.write("01_source/extraction.json", {
@@ -479,24 +479,20 @@ class ReviewRoundsTest(unittest.TestCase):
 
     def test_sample_retained_empty_standalone_children_replay(self):
         self._parallel_batch()
-        task = review_rounds.export_task(self.batch, only_round='sample')
+        task = review_rounds.export_task(self.batch, only_round='labels')
         binding = review_rounds._check_bound_inputs(self.batch, task['task_id'])
-        response = self._part_response(binding['task']['prompt'], 'sample')
+        response = self._part_response(binding['task']['prompt'], 'labels')
         for check in response['artifacts']['review_round']['checks']:
-            check['assessment']['subquestions'] = [{'number': check['number'], 'knowledge': []}]
+            check['assessment']['subquestions'] = []
         saved = copy.deepcopy(response)
         review_rounds.import_result(self.batch, task['task_id'], response)
         self.assertEqual(response, saved)
-        self.assertIn('sample', review.evaluate_rounds(self.batch)['checked_rounds'])
+        self.assertIn('labels', review.evaluate_rounds(self.batch)['checked_rounds'])
 
     def test_four_parts_complete_after_earlier_evidence_path_correction(self):
         self._parallel_batch()
         self.write('01_source/附录.txt', '1~4 AAAA\n')
         self.plan = review.prepare_round_plan(self.batch)
-        sample = review_rounds.export_task(self.batch, only_round='sample')
-        sample_task = review_rounds._check_bound_inputs(self.batch, sample['task_id'])['task']
-        review_rounds.import_result(self.batch, sample['task_id'],
-                                   self._part_response(sample_task['prompt'], 'sample'))
         group = review_rounds.export_group(self.batch, max_units_per_part=1,
                                            only_round='labels')
         self.assertEqual(len(group['parts']), 4)
@@ -563,14 +559,15 @@ class ReviewRoundsTest(unittest.TestCase):
             import re
             round_id = re.search(r"ROUND: (\w+)", prompt).group(1)
             seen.append(round_id)
-            barrier.wait()  # both rounds must be in flight together
+            barrier.wait()  # both partitions must be in flight together
             return {'response': self._part_response(prompt, round_id)}
 
         with patch.object(review_rounds, 'invoke', side_effect=invoke):
             result = review_rounds.run(self.batch, config={'provider': 'fixture',
-                                                           'review_part_parallel': 2})
+                                                           'review_part_parallel': 2,
+                                                           'review_max_units_per_part': 2})
         self.assertTrue(result['completed'], result)
-        self.assertEqual(sorted(seen), sorted(review.ROUND_IDS))
+        self.assertEqual(seen, ['labels', 'labels'])
         self.assertEqual(review.evaluate_rounds(self.batch)['checked_rounds'], list(review.ROUND_IDS))
 
     def test_near_verbatim_quote_is_localized_without_retry(self):
@@ -945,11 +942,7 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual((first['round_id'], first['part_index'], first['part_count']),
                          ('labels', 1, 2))
         review_rounds.import_result(self.batch, first['task_id'], answer(first))
-        knowledge = review_rounds.export_task(self.batch, skip_rounds=('labels',))
-        self.assertEqual(knowledge['round_id'], 'sample')
-        self.assertEqual(knowledge['part_count'], 1)
-        review_rounds.import_result(self.batch, knowledge['task_id'], answer(knowledge))
-        # Another round finishing must not discard the finished labels part.
+        # Finished labels part must remain resumable on subsequent exports.
         resumed = review_rounds.export_task(self.batch, max_units_per_part=15)
         self.assertEqual((resumed['round_id'], resumed['part_index'], resumed['part_count']),
                          ('labels', 2, 2))
@@ -967,14 +960,14 @@ class ReviewRoundsTest(unittest.TestCase):
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_sample_partition_provenance_requires_exact_nonoverlapping_targets(self):
         payload = self.payload()
-        record = payload['rounds'][1]
-        # 组题整组抽取后只有一个目标：单个分片完整覆盖它是有效的。
-        record['parts'] = [{'execution_id': 'sample-a', 'targets': [self.plan['sample'][0]]}]
+        record = payload['rounds'][0]
+        # 单个分片完整覆盖目标是有效的。
+        record['parts'] = [{'execution_id': 'labels-a', 'targets': ['group-1-6']}]
         self.assertTrue(review.evaluate_rounds(self.batch, payload)['passed'])
         # 同一个目标再出现在第二个分片里即重叠，必须被拒绝。
-        record['parts'] = [{'execution_id': 'sample-a', 'targets': [self.plan['sample'][0]]},
-                           {'execution_id': 'sample-b', 'targets': [self.plan['sample'][0]]}]
-        self.assertNotIn('sample', review.evaluate_rounds(self.batch, payload)['checked_rounds'])
+        record['parts'] = [{'execution_id': 'labels-a', 'targets': ['group-1-6']},
+                           {'execution_id': 'labels-b', 'targets': ['group-1-6']}]
+        self.assertNotIn('labels', review.evaluate_rounds(self.batch, payload)['checked_rounds'])
 
     def test_group_type_sampled_as_one_whole_group_target(self):
         # 阅读理解是整组题型：二审整组抽取、只做组级核对，number=None，不拆小题。
@@ -1023,48 +1016,48 @@ class ReviewRoundsTest(unittest.TestCase):
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_catalog_labels_do_not_prove_knowledge_semantics(self):
         payload = self.payload()
-        check = payload["rounds"][1]["checks"][0]
+        check = payload["rounds"][0]["checks"][0]
         check["assessment"] = {"valid_taxonomy": True}
         self.assertFalse(review.evaluate_rounds(self.batch, payload)["passed"])
         # 盲判允许与原标注不同：差异由程序记为意见，不再判为无效轮次。
         payload = self.payload()
-        payload["rounds"][1]["checks"][0]["assessment"]["knowledge"] = ["语篇体裁/说明文/介绍类短文", "主题/人与自我/生活与学习/日常起居"]
+        payload["rounds"][0]["checks"][0]["assessment"]["knowledge"] = ["语篇体裁/说明文/介绍类短文", "主题/人与自我/生活与学习/日常起居"]
         result = review.evaluate_rounds(self.batch, payload)
-        self.assertIn("sample", result["checked_rounds"])
+        self.assertIn("labels", result["checked_rounds"])
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_visual_gap_uncertain_is_informational_not_manual(self):
         # 图片占位/看不到图这类“能力受限、无法确认图文对应”不是标签差异：
         # 只作提示，不进人工队列、不阻断闸门。
         payload = self.payload()
-        sample = payload["rounds"][1]["checks"][0]
-        sample["verdict"] = "uncertain"
-        sample["rationale"] = "选项为图片占位，无法确认图文对应。"
+        check = payload["rounds"][0]["checks"][0]
+        check["verdict"] = "uncertain"
+        check["rationale"] = "选项为图片占位，无法确认图文对应。"
         result = review.evaluate_rounds(self.batch, payload)
-        codes = [e["code"] for e in result["errors"] if e.get("unit_id") == sample["unit_id"]]
+        codes = [e["code"] for e in result["errors"] if e.get("unit_id") == check["unit_id"]]
         self.assertNotIn("REVIEW_ROUND_FINDING", codes)
-        self.assertTrue(any(str(i.get("unit_id")) == sample["unit_id"] for i in result.get("informational") or []))
+        self.assertTrue(any(str(i.get("unit_id")) == check["unit_id"] for i in result.get("informational") or []))
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_uncertain_label_conflict_is_a_manual_finding(self):
         # 真正点名“与原标签不一致/答案冲突”的不确定仍要送人工。
         payload = self.payload()
-        sample = payload["rounds"][1]["checks"][0]
-        sample["verdict"] = "uncertain"
-        sample["rationale"] = "知识点与原标签不一致：疑似应为说明文主题。"
+        check = payload["rounds"][0]["checks"][0]
+        check["verdict"] = "uncertain"
+        check["rationale"] = "知识点与原标签不一致：疑似应为说明文主题。"
         result = review.evaluate_rounds(self.batch, payload)
         self.assertIn("REVIEW_ROUND_FINDING",
-                      [e["code"] for e in result["errors"] if e.get("unit_id") == sample["unit_id"]])
+                      [e["code"] for e in result["errors"] if e.get("unit_id") == check["unit_id"]])
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_stale_inputs_and_added_answer_evidence_invalidate(self):
         payload = self.payload()
         self.write("01_source_ans/正文.txt", "1. A")
-        self.assertEqual(len(review.evaluate_rounds(self.batch, payload)["unchecked"]), 2)
+        self.assertEqual(len(review.evaluate_rounds(self.batch, payload)["unchecked"]), len(review.ROUND_IDS))
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_fake_quote_missing_source_and_shared_execution_fail(self):
-        # 伪造或缺少原文证据不能证明该轮完成，各轮还必须独立执行。
+        # 伪造或缺少原文证据不能证明该轮完成，重复轮次记录也必须被拒绝。
         payload = self.payload()
         payload["rounds"][0]["checks"][0]["evidence"][0]["quote"] = "fabricated quote"
         self.assertFalse(review.evaluate_rounds(self.batch, payload)["passed"])
@@ -1072,7 +1065,7 @@ class ReviewRoundsTest(unittest.TestCase):
         payload["rounds"][0]["checks"][0]["evidence"] = []
         self.assertFalse(review.evaluate_rounds(self.batch, payload)["passed"])
         payload = self.payload()
-        payload["rounds"][1]["execution_id"] = payload["rounds"][0]["execution_id"]
+        payload["rounds"].append(copy.deepcopy(payload["rounds"][0]))
         self.assertFalse(review.evaluate_rounds(self.batch, payload)["passed"])
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
@@ -1129,14 +1122,15 @@ class ReviewRoundsTest(unittest.TestCase):
     def test_partial_round_snapshot_only_counts_when_it_carries_differences(self):
         self.write('07_review/review-rounds.json', self.payload())
         path = self.batch / '07_review/rounds-history.jsonl'
-        # 只跑完 labels、且没有差异：审核途中态，不得记成「这一轮没差异」。
-        partial = {'plan': self.plan, 'checked_rounds': ['labels'], 'passed': False, 'findings': []}
-        self.assertIsNone(review_rounds.record_rounds_history(self.batch, partial))
+        # 尚未完成任何轮次：不得写入空快照。
+        empty = {'plan': self.plan, 'checked_rounds': [], 'passed': False, 'findings': []}
+        self.assertIsNone(review_rounds.record_rounds_history(self.batch, empty))
         self.assertFalse(path.exists())
-        # 同样的部分轮次但确有差异：必须留证，哪怕是中途快照。
-        partial['findings'] = [{'unit_id': 'q-1', 'field': 'knowledge', 'severity': 'major',
-                                'reason': '标签与原标注不一致', 'round_sources': [{'round_id': 'labels'}]}]
-        self.assertIsNotNone(review_rounds.record_rounds_history(self.batch, partial))
+        # 完成一审且确有差异：必须留证。
+        done = {'plan': self.plan, 'checked_rounds': ['labels'], 'passed': False,
+                'findings': [{'unit_id': 'q-1', 'field': 'knowledge', 'severity': 'major',
+                              'reason': '标签与原标注不一致', 'round_sources': [{'round_id': 'labels'}]}]}
+        self.assertIsNotNone(review_rounds.record_rounds_history(self.batch, done))
         rows = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
         self.assertEqual(rows[-1]['checked_rounds'], ['labels'])
         self.assertEqual(rows[-1]['findings'][0]['unit_id'], 'q-1')
@@ -1171,7 +1165,7 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertTrue(any(r['finding_id'] == 'WF-9901' for r in retired))
 
     def test_two_round_review_ids(self):
-        self.assertEqual(review.ROUND_IDS, ('labels', 'sample'))
+        self.assertEqual(review.ROUND_IDS, ('labels',))
         self.assertTrue(review.ROUND_PROTOCOL.endswith('/v3'))
 
     def test_removed_round_sources_are_retired_from_queue(self):
@@ -1201,23 +1195,23 @@ class ReviewRoundsTest(unittest.TestCase):
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_sample_missing_duplicate_or_wrong_question_blocks(self):
-        # 缺题、重复和题号异常都不能声称抽样完成。
+        # 缺题、重复和单元号异常都不能声称审核完成。
         for mode in ("missing", "duplicate", "wrong"):
             payload = self.payload()
-            checks = payload["rounds"][1]["checks"]
+            checks = payload["rounds"][0]["checks"]
             if mode == "missing":
                 checks.pop()
             elif mode == "duplicate":
                 checks.append(copy.deepcopy(checks[0]))
             else:
-                checks[0]["number"] = "999"
+                checks[0]["unit_id"] = "unknown-unit"
             self.assertFalse(review.evaluate_rounds(self.batch, payload)["passed"])
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_exact_evidenced_decision_resolves_observation_without_rewriting_round(self):
         from workbench.server import apply_decision
         payload = self.payload()
-        payload['rounds'][1]['checks'][0].update(verdict='uncertain', rationale='候选知识点存在歧义，需核原文。')
+        payload['rounds'][0]['checks'][0].update(verdict='uncertain', rationale='候选知识点存在歧义，需核原文。')
         ingest.build_review_files(self.batch, {'review_rounds': payload})
         queue_path = self.batch / '07_review/manual-review-queue.json'
         queue = json.loads(queue_path.read_text())
@@ -1231,7 +1225,7 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertTrue(result['passed'])
         self.assertEqual(len(result['resolved_findings']), 1)
         raw = json.loads((self.batch / '07_review/review-rounds.json').read_text())
-        self.assertEqual(raw['rounds'][1]['checks'][0]['verdict'], 'uncertain')
+        self.assertEqual(raw['rounds'][0]['checks'][0]['verdict'], 'uncertain')
         queue = json.loads(queue_path.read_text())
         queue['items'][0]['reason'] = '另一个问题'
         self.write('07_review/manual-review-queue.json', queue)
@@ -1239,18 +1233,18 @@ class ReviewRoundsTest(unittest.TestCase):
 
     def test_identical_cross_round_findings_preserve_sources_and_decision(self):
         from workbench.server import apply_decision
-        payload = self.payload()
-        for record in payload['rounds'][:2]:
-            record['checks'][0].update(verdict='uncertain', rationale='原文存在同一处歧义。', issue_key='题1答案与原文矛盾')
-        first = {'plan': self.plan, 'rounds': payload['rounds'][:1]}
-        self.write('07_review/review-rounds.json', first)
-        ingest.build_review_files(self.batch, {'findings': review._round_checks(first['rounds'][0], 'labels', self.plan, self.batch)})
+        first_rec = self.payload()['rounds'][0]
+        first_rec['checks'][0].update(verdict='uncertain', rationale='原文存在同一处歧义。', issue_key='题1答案与原文矛盾')
+        second_rec = copy.deepcopy(first_rec)
+        second_rec['execution_id'] = 'fixture-separate-labels-2'
+        self.write('07_review/review-rounds.json', {'plan': self.plan, 'rounds': [first_rec]})
+        ingest.build_review_files(self.batch, {'findings': review._round_checks(first_rec, 'labels', self.plan, self.batch)})
         queue_path = self.batch / '07_review/manual-review-queue.json'
         fid = json.loads(queue_path.read_text())['items'][0]['finding_id']
         apply_decision(self.batch, {'finding_id': fid, 'status': 'fixed',
             'resolution_note': '已核对原文并确认歧义。'}, 'reviewer')
-        self.write('07_review/review-rounds.json', payload)
-        findings = review._round_checks(payload['rounds'][1], 'sample', self.plan, self.batch)
+        self.write('07_review/review-rounds.json', {'plan': self.plan, 'rounds': [second_rec]})
+        findings = review._round_checks(second_rec, 'labels', self.plan, self.batch)
         ingest.build_review_files(self.batch, {'findings': findings})
         ingest.build_review_files(self.batch, {'findings': findings})
         items = json.loads(queue_path.read_text())['items']
@@ -1258,17 +1252,19 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(items[0]['status'], 'fixed')
         self.assertEqual(items[0]['decided_by'], 'reviewer')
         self.assertEqual(items[1]['status'], 'open')
-        self.assertEqual(items[1]['round_sources'][0]['evidence'], payload['rounds'][1]['checks'][0]['evidence'])
+        self.assertEqual(items[1]['round_sources'][0]['evidence'], second_rec['checks'][0]['evidence'])
         self.assertFalse(review.evaluate_rounds(self.batch)['passed'])
 
     def test_different_assessments_merge_only_with_same_explicit_resolution(self):
-        payload = self.payload()
-        for record in payload['rounds'][:2]:
+        labels_rec = self.payload()['rounds'][0]
+        sample_rec = {'round_id': 'sample', 'input_binding': self.plan['input_binding'],
+                      'execution_id': 'fixture-separate-sample', 'checks': self.checks('sample')}
+        for record in (labels_rec, sample_rec):
             record['checks'][0].update(verdict='uncertain', rationale='原文存在同一处歧义。',
                                        issue_key='题1答案冲突', resolution_key='核对题1答案原文')
-        payload['rounds'][1]['checks'][0]['assessment']['difficulty'][0]['value'] = '困难'
+        sample_rec['checks'][0]['assessment']['difficulty'][0]['value'] = '困难'
         findings = [review._round_checks(record, record['round_id'], self.plan, self.batch)[0]
-                    for record in payload['rounds'][:2]]
+                    for record in (labels_rec, sample_rec)]
         self.assertNotEqual(findings[0]['round_sources'][0]['assessment'], findings[1]['round_sources'][0]['assessment'])
         ingest.build_review_files(self.batch, {'findings': findings})
         ingest.build_review_files(self.batch, {'findings': findings})
@@ -1329,16 +1325,16 @@ class ReviewRoundsTest(unittest.TestCase):
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_distinct_cross_round_observations_remain_separate(self):
-        payload = self.payload()
-        for record in payload['rounds']:
-            for check in record['checks']:
-                check.update(verdict='uncertain', rationale='原文存在歧义。', issue_key='答案与原文冲突')
+        first_rec = self.payload()['rounds'][0]
+        first_rec['checks'][0].update(verdict='uncertain', rationale='原文存在歧义。', issue_key='答案与原文冲突')
+        second_rec = copy.deepcopy(first_rec)
+        second_rec['execution_id'] = 'fixture-separate-labels-2'
         # Same words but a different quote are not enough to identify the issue.
-        payload['rounds'][1]['checks'][0]['evidence'][0]['quote'] = (
-            'A. book1 B. pen1 C. map1 D. bag1')
-        ingest.build_review_files(self.batch, {'review_rounds': payload})
+        second_rec['checks'][0]['evidence'][0]['quote'] = 'A. book1 B. pen1 C. map1 D. bag1'
+        findings = (review._round_checks(first_rec, 'labels', self.plan, self.batch)
+                    + review._round_checks(second_rec, 'labels', self.plan, self.batch))
+        ingest.build_review_files(self.batch, {'findings': findings})
         items = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
-        # 一审一条组级发现 + 二审整组一条发现：引证不同，不合并。
         self.assertEqual(len(items), 2)
         self.assertEqual(len({item['finding_id'] for item in items}), 2)
 
@@ -1347,8 +1343,8 @@ class ReviewRoundsTest(unittest.TestCase):
         payload = self.payload()
         ingest.build_review_files(self.batch, {"review_rounds": payload})
         self.assertEqual(json.loads((self.batch / "07_review/manual-review-queue.json").read_text())["items"], [])
-        payload["rounds"][1]["checks"][0]["verdict"] = "uncertain"
-        payload["rounds"][1]["checks"][0]["rationale"] = "The question could test either detail or inference; source answer evidence conflicts."
+        payload["rounds"][0]["checks"][0]["verdict"] = "uncertain"
+        payload["rounds"][0]["checks"][0]["rationale"] = "The question could test either detail or inference; source answer evidence conflicts."
         ingest.build_review_files(self.batch, {"review_rounds": payload})
         items = json.loads((self.batch / "07_review/manual-review-queue.json").read_text())["items"]
         self.assertEqual(len(items), 1)
@@ -1401,7 +1397,7 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertTrue(result["completed"])
         self.assertEqual(review_rounds.export_task(self.batch)["action"], "complete")
         stored = json.loads((self.batch / "07_review/review-rounds.json").read_text())
-        self.assertEqual(len({r["execution_id"] for r in stored["rounds"]}), 2)
+        self.assertEqual(len({r["execution_id"] for r in stored["rounds"]}), len(review.ROUND_IDS))
         self.assertEqual(json.loads((self.batch / "07_review/manual-review-queue.json").read_text())["items"], [])
 
     def test_invalid_needs_review_and_stale_import_retain_candidates(self):
@@ -1442,16 +1438,11 @@ class ReviewRoundsTest(unittest.TestCase):
             review_rounds.import_result(self.batch, exported["task_id"], response)
 
     def test_prior_round_records_and_budget_are_bound(self):
-        exported = review_rounds.export_task(self.batch)
-        review_rounds.import_result(self.batch, exported["task_id"], self.response("labels"))
-        second = review_rounds.export_task(self.batch)
-        payload = json.loads((self.batch / "07_review/review-rounds.json").read_text())
-        payload["rounds"][0]["checks"][0]["rationale"] = "Changed earlier review"
-        self.write("07_review/review-rounds.json", payload)
-        with self.assertRaisesRegex(ValueError, "Earlier round records changed"):
-            review_rounds.import_result(self.batch, second["task_id"], self.response("knowledge"))
         with self.assertRaisesRegex(ValueError, "exceed(?:ing|s) max_input_chars"):
             review_rounds.export_task(self.batch, max_input_chars=100)
+        exported = review_rounds.export_task(self.batch)
+        review_rounds.import_result(self.batch, exported["task_id"], self.response("labels"))
+        self.assertEqual(review_rounds.export_task(self.batch)["action"], "complete")
 
     def test_conflict_keeps_findings_and_continues_later_round_export(self):
         exported = review_rounds.export_task(self.batch)
@@ -1459,18 +1450,20 @@ class ReviewRoundsTest(unittest.TestCase):
         response["artifacts"]["review_round"]["checks"][0]["verdict"] = "error"
         response["artifacts"]["review_round"]["checks"][0]["assessment"]["subtypes"] = ["阅读匹配"]
         result = review_rounds.import_result(self.batch, exported["task_id"], response)
-        self.assertEqual(result["action"], "continue")
-        self.assertEqual(review_rounds.export_task(self.batch)["round_id"], "sample")
-        self.assertEqual(len(result["review"]["unchecked"]), 1)
+        self.assertEqual(result["action"], "complete")
+        self.assertEqual(review_rounds.export_task(self.batch)["action"], "complete")
+        self.assertEqual(len(result["review"]["unchecked"]), 0)
         self.assertFalse(result["quality_passed"])
-        self.assertEqual(len(json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']), 1)
+        items = json.loads((self.batch / '07_review/manual-review-queue.json').read_text())['items']
+        self.assertEqual(len(items), 2)
+        self.assertIn('subtypes', {item.get('field') for item in items})
 
     def test_real_ai_findings_do_not_stop_independent_rounds(self):
         self.write("07_review/manual-review-queue.json", {"items": [
             {"finding_id": "actual-conflict", "unit_id": "group-1-6", "status": "open", "reason": "Conflicting source answer"}]})
         self.assertEqual(review_rounds.export_task(self.batch)["round_id"], "labels")
         self.assertTrue((self.batch / "workflow/review-tasks").exists())
-        self.assertEqual(len(review.evaluate_rounds(self.batch)["unchecked"]), 2)
+        self.assertEqual(len(review.evaluate_rounds(self.batch)["unchecked"]), len(review.ROUND_IDS))
 
     def test_run_invokes_separate_process_attempts_in_order(self):
         seen = []
@@ -1482,7 +1475,7 @@ class ReviewRoundsTest(unittest.TestCase):
         with patch.object(review_rounds, "invoke", side_effect=invoke):
             result = review_rounds.run(self.batch, config={"provider": "fixture"})
         self.assertTrue(result["completed"])
-        self.assertEqual(len(set(seen)), 2)
+        self.assertEqual(len(set(seen)), len(review.ROUND_IDS))
 
     def test_findings_allow_all_rounds_but_do_not_pass_quality(self):
         seen = []
@@ -1497,7 +1490,7 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertTrue(result['completed'])
         self.assertFalse(result['quality_passed'])
         self.assertEqual(seen, list(review.ROUND_IDS))
-        self.assertEqual(result['summary']['open_count'], 2)
+        self.assertEqual(result['summary']['open_count'], len(review.ROUND_IDS))
         self.assertFalse(result['summary']['release_ready'])
 
     def test_exhausted_round_failure_does_not_skip_other_rounds(self):
@@ -1511,8 +1504,8 @@ class ReviewRoundsTest(unittest.TestCase):
         with patch.object(review_rounds, 'invoke', side_effect=invoke):
             result = review_rounds.run(self.batch, config={'provider': 'fixture', 'review_max_attempts': 2})
         self.assertFalse(result['completed'])
-        self.assertEqual(seen, ['labels', 'labels', 'sample'])
-        self.assertEqual(result['review']['checked_rounds'], ['sample'])
+        self.assertEqual(seen, ['labels', 'labels'])
+        self.assertEqual(result['review']['checked_rounds'], [])
         self.assertIn('labels', result['summary']['execution_failures'])
         # A new invocation retries only the unfinished round.
         with patch.object(review_rounds, 'invoke', return_value={'response': self.response('labels')}):
@@ -1648,8 +1641,6 @@ class ReviewRoundsTest(unittest.TestCase):
                 result = review_rounds.run(self.batch, config)
             self.assertTrue(result['repair_required'])
             self.assertEqual(seen.count('labels'), 3)
-            self.assertEqual(seen.count('sample'), 1)
-            self.assertIn('sample', review.evaluate_rounds(self.batch)['checked_rounds'])
             review_rounds.run(self.batch, dict(config, model='explicit-new-route'))
             review_rounds.run(self.batch, config)
         self.assertEqual(seen.count('labels'), 4, 'A new route gets a fresh budget; reverting cannot reset the old one')
@@ -1675,17 +1666,16 @@ class ReviewRoundsTest(unittest.TestCase):
             with patch.object(review_rounds, 'import_result', side_effect=stalled_import):
                 first = review_rounds.run(self.batch, config)
             self.assertEqual(first['stall']['error_code'], 'review_consumer')
-            self.assertIn('sample', review.evaluate_rounds(self.batch)['checked_rounds'])
             self.assertEqual(len(list((self.batch / 'workflow/review-pending').glob('*.json'))), 1)
             with patch.object(review_rounds, 'import_result', side_effect=stalled_import):
                 second = review_rounds.run(self.batch, config)
             self.assertTrue(second['repair_required'])
-            self.assertEqual(sorted(calls), ['labels', 'sample'])
+            self.assertEqual(calls, ['labels'])
             # Restored local acceptance can replay retained evidence even with an
             # unchanged budget scope. The guard stops paid calls, not recovery.
             repaired = review_rounds.run(self.batch, config)
             self.assertTrue(repaired['completed'], repaired)
-            self.assertEqual(sorted(calls), ['labels', 'sample'])
+            self.assertEqual(calls, ['labels'])
 
     def test_stall_accounting_does_not_mask_disappearing_inputs(self):
         calls = []
@@ -1720,7 +1710,6 @@ class ReviewRoundsTest(unittest.TestCase):
         label_prompts = [p for rid, p in seen if rid == 'labels']
         self.assertEqual(len(label_prompts), 2)
         self.assertIn("absent=['findings', 'notes']", label_prompts[-1])
-        self.assertEqual(sum(rid == 'sample' for rid, _ in seen), 1)
 
     def test_install_provenance_failure_never_publishes_round_or_success_receipt(self):
         exported = review_rounds.export_task(self.batch, only_round='labels')
@@ -1760,10 +1749,10 @@ class ReviewRoundsTest(unittest.TestCase):
         with patch.object(review_rounds, 'invoke', side_effect=invoke):
             first = review_rounds.run(self.batch, config)
             self.assertFalse(first['completed'])
-            self.assertEqual([rid for rid, _ in seen], ['sample'])
+            self.assertEqual([rid for rid, _ in seen], [])
             result = review_rounds.run(self.batch, config)
         self.assertTrue(result['completed'], result)
-        self.assertEqual([rid for rid, _ in seen], ['sample', 'labels'])
+        self.assertEqual([rid for rid, _ in seen], ['labels'])
         self.assertIn("absent=['findings', 'notes']", seen[-1][1])
         failure = json.loads((self.batch / 'workflow/review-failures' / (part['task_id'] + '.json')).read_text())
         self.assertEqual(failure['input_binding'], self.plan['input_binding'])
