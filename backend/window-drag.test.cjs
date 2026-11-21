@@ -8,12 +8,13 @@ const source = readFileSync(path.join(__dirname, '../lib/client.js'), 'utf8').re
 
 test('Harness window drag is limited to the recording panel header', () => {
   const component = source.match(/    function WfPanel\(props\) \{[\s\S]*?\n    \}/)[0];
+  const tabbar = source.match(/      tabbar: (\{[\s\S]*?\n      \}),/)[1];
   const render = vm.runInNewContext(component + '\nWfPanel', {
     require: () => ({
       useState: value => [value, () => {}],
       createElement: (tag, props, ...children) => ({ tag, props, children }),
     }),
-    T: { tab: () => ({}) },
+    T: { tab: () => ({}), tabbar: vm.runInNewContext('(' + tabbar + ')') },
     TEXT: {},
     docIcon() {},
     closeIcon() {},
@@ -25,6 +26,8 @@ test('Harness window drag is limited to the recording panel header', () => {
   const panel = render({ closePanel });
   const [header, body] = panel.children;
   assert.equal(header.props['data-window-drag'], '');
+  assert.equal(header.props.style.paddingInlineStart, 'max(18px, var(--dsh-frame-leading-clearance, 0px))');
+  assert.equal(header.props.style.paddingInlineEnd, 18);
   assert.ok(!('data-window-drag' in panel.props));
   assert.ok(!('data-window-drag' in body.props));
   const tabList = header.children.find(child => child.props.role === 'tablist');
