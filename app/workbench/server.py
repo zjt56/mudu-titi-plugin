@@ -1235,16 +1235,27 @@ def work_in_flight() -> bool:
     返回 True。
     """
     try:
-        with _lock:
+        # 不阻塞在全局写锁上：若 _lock 正被保存/复验长时间持有，说明后端正在忙，
+        # 立刻返回 True，避免 /api/health 超时被宿主误判为空闲。
+        acquired = _lock.acquire(timeout=0.05)
+        if not acquired:
+            return True
+        try:
             if any(isinstance(row, dict) and row.get("running")
                    for row in _advance_state.values()):
                 return True
             if any(isinstance(job, dict) and job.get("running")
                    for job in _upload_jobs.values()):
                 return True
-        with _advance_queue_lock:
+        finally:
+            _lock.release()
+        if not _advance_queue_lock.acquire(timeout=0.05):
+            return True
+        try:
             if _advance_queue:
                 return True
+        finally:
+            _advance_queue_lock.release()
     except (RuntimeError, TypeError):
         return True
     with _audio_job["lock"]:
@@ -3067,23 +3078,10 @@ def _prepare_failure_summary(report):
     return "\n".join(lines)
 
 
-def _validate_ever_passed(validate_stage, manifest_mod):
+def _validate_ever_passed(validate_stage, manifest_mod=None):
     """Return True if validate is completed or was invalidated after passing."""
-    if not isinstance(validate_stage, dict):
-        return False
-    status = validate_stage.get('status')
-    if status == manifest_mod.COMPLETED:
-        return True
-    if status != manifest_mod.INVALIDATED:
-        return False
-    history = validate_stage.get('history') or []
-    return any(
-        isinstance(entry, dict) and (
-            entry.get('from') == manifest_mod.COMPLETED
-            or entry.get('to') == manifest_mod.COMPLETED
-        )
-        for entry in history
-    )
+    from workflow.execution_state import validate_ever_passed
+    return validate_ever_passed(validate_stage)
 
 
 def _check_upload_preconditions(folder, unreviewed_revision, attempt_token):

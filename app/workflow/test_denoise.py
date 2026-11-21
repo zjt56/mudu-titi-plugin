@@ -194,6 +194,32 @@ class DenoiseTest(unittest.TestCase):
         self.assertNotIn("初中学业水平考试", cleaned2)
         self.assertIn("A. x", cleaned2)
 
+    def test_leading_image_marker_in_numbered_header_is_stripped_from_source(self):
+        raw = "[IMG image3.jpeg]1.2025年安徽省初中学业水平考试"
+        meta = denoise.extract_meta([raw, "英语", "Ⅰ.听力", "1. What?"])
+        self.assertEqual(meta["source"], "2025年安徽省初中学业水平考试")
+        self.assertEqual(meta["paper_title"], "2025年安徽省初中学业水平考试")
+        self.assertNotIn("[IMG", meta["source"])
+        self.assertEqual(meta["year"], 2025)
+        self.assertEqual(meta["region"], "安徽省")
+        self.assertEqual(meta["evidence"], ["正文第1行：" + raw])
+
+    def test_leading_image_header_and_answer_book_link_are_removed_by_clean_body(self):
+        text = "\n".join([
+            "[IMG image3.jpeg]1.2025年安徽省初中学业水平考试",
+            "答案链接☞答案册P1",
+            "[IMG image4.jpeg]",
+            "扫码练听力",
+            "Ⅰ.短对话理解(共1小题)",
+            "( )1.What is Sandy's hobby?",
+        ])
+        cleaned, meta, _ = denoise.clean_body(text)
+        self.assertEqual(meta["paper_title"], "2025年安徽省初中学业水平考试")
+        self.assertNotIn("image3.jpeg", cleaned)
+        self.assertNotIn("答案链接", cleaned)
+        self.assertNotIn("扫码练听力", cleaned)
+        self.assertIn("What is Sandy's hobby?", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()

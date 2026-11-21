@@ -305,6 +305,8 @@ def project_final_view(batch_dir, payload: dict) -> dict:
                         merged.append(copy.deepcopy(att))
                 if merged or 'attachments' in early:
                     target['attachments'] = merged
+                else:
+                    target.pop('attachments', None)
                 continue
             if key in early:
                 target[key] = copy.deepcopy(early[key])

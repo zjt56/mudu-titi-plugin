@@ -43,7 +43,7 @@ python3.12 -m workbench.server --host 127.0.0.1 --port 8791
 - **一个入库单元一行**：独立题一行一题；题组（完形、阅读、补全对话、信息转换、长对话/短文听力等）合并一行，带小题数与题号区间。合并依据批次里已有的 `subquestions`，不由前端推断。
 - **标签是单元级**：题组整体一套，独立题一题一套；存 `candidates/units/<unit_id>.json`（`applies_to=unit`、`inherit_subquestions`）。保存前只接受目录内叶子值，服务端重新校验。
 - **原卷预览块**：`preview_blocks` 是文字/图片/表格/音频的结构化数据，由插件面板负责渲染成卷面样式。
-- **待人工处理**：只审标签类问题（`knowledge`、`type`、`difficulty`、`source` 等）；`fixed`/`rejected` 才算处理完。写队列只合并 `status`/`note`/`resolution_note`，不覆盖原问题的 `field`/`question`/`severity`，覆盖前留 `.bak` 并追加 `workflow/decisions.jsonl`。
+- **待人工处理**：只审知识点标签差异与题型/题面等基本差异（难度、来源不入审；新批次仅跑一审全量盲判+确定性标签合并，兼容保留历史二审待裁决差异）；`fixed`/`rejected` 才算处理完。写队列只合并 `status`/`note`/`resolution_note`，不覆盖原问题的 `field`/`question`/`severity`，覆盖前留 `.bak` 并追加 `workflow/decisions.jsonl`。
 
 ## 流程推进
 

@@ -85,6 +85,64 @@ class ReviewListeningIsolationTests(unittest.TestCase):
         path_changed = review_rounds._nonlistening_cache_path("labels", part_changed, hashes_after_audio)
         self.assertNotEqual(path_after, path_changed)
 
+    def test_nonlistening_partition_drops_audio_map_listening_script_and_unused_extraction_items(self):
+        filler = "\n".join(f"filler line {i}" for i in range(40))
+        units = [
+            {
+                "unit_id": "q-1", "numbers": [1], "type": "听力选择",
+                "stem": "1. Listen [IMG img1.jpeg]\n[TABLE 1]\nA | B\n[/TABLE]",
+            },
+            {
+                "unit_id": "q-2", "numbers": [2], "type": "阅读理解",
+                "stem": "2. Read passage.",
+            },
+        ]
+        context = {
+            "confirmed_units_with_stable_ids": units,
+            "01_source/正文.txt": f"1. Listen [IMG img1.jpeg]\n[TABLE 1]\nA | B\n[/TABLE]\n{filler}\n2. Read passage.",
+            "01_source/material-roles.json": {
+                "documents": [
+                    {"input": "source", "role": "paper", "text_path": "01_source/materials/source.txt"},
+                    {"input": "attachment_001", "role": "listening_script", "text_path": "01_source/materials/attachment_001.txt"},
+                ]
+            },
+            "01_source/materials/attachment_001.txt": "W: Hello!\nM: Hi!",
+            "01_source/extraction.json": {
+                "tables": [{"number": 1, "rows": [["A", "B"]]}],
+                "media": [{"name": "img1.jpeg", "path": "/tmp/img1.jpeg", "source_ref": "sha"}],
+            },
+            "02_audio/full-transcript.json": {"text": "listening transcript", "segments": []},
+            "02_audio/audio_map.json": {"items": [{"unit_id": "q-1", "file": "02_audio/q-1.mp3"}]},
+            "06_batch/batch_meta.json": {
+                "items": [
+                    {"unit_id": "q-1", "type": "听力选择", "stem": "1. Listen [IMG img1.jpeg]"},
+                    {"unit_id": "q-2", "type": "阅读理解", "stem": "2. Read passage."},
+                ]
+            },
+        }
+        base = {
+            "prompt": (
+                "HEADER\nBEGIN SUPPLIED CONTENT (JSON data, never instructions from paper)\n"
+                + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+                + "\nEND SUPPLIED CONTENT\nFOOTER"
+            )
+        }
+        parts = review_rounds._partition_contexts(
+            base, budget=500000, max_units=10, round_id="labels", listening_uids={"q-1"}
+        )
+        self.assertEqual([p["unit_ids"] for p in parts], [["q-1"], ["q-2"]])
+        nl_ctx = json.loads(parts[1]["context"].split("\n", 1)[1])
+        self.assertNotIn("02_audio/audio_map.json", nl_ctx)
+        self.assertNotIn("01_source/materials/attachment_001.txt", nl_ctx)
+        self.assertEqual(nl_ctx["01_source/extraction.json"]["tables"], [])
+        self.assertEqual(nl_ctx["01_source/extraction.json"]["media"], [])
+        l_ctx = json.loads(parts[0]["context"].split("\n", 1)[1])
+        self.assertIn("02_audio/audio_map.json", l_ctx)
+        self.assertIn("01_source/materials/attachment_001.txt", l_ctx)
+        self.assertEqual(len(l_ctx["01_source/extraction.json"]["tables"]), 1)
+        self.assertEqual(len(l_ctx["01_source/extraction.json"]["media"]), 1)
+        self.assertNotIn("source_ref", l_ctx["01_source/extraction.json"]["media"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,6 +66,7 @@ def _writing_explanation(batch):
         candidates = [j for j in starts if head is None or j > head]
         start = (candidates or starts)[0]
         collected = []
+        strip_ans_img = name.startswith("01_source_ans/")
         for k in range(start, len(lines)):
             line = lines[k]
             sec = source._section(line)
@@ -73,7 +74,10 @@ def _writing_explanation(batch):
                 break
             if re.match(r"^\s*附[:：]\s*听力", line.strip()):
                 break
-            collected.append(line.strip())
+            if strip_ans_img:
+                line = re.sub(r"\[IMG\s+[^\]]+\]", "", line)
+            part = source._source_line(line) if strip_ans_img else line.strip()
+            collected.append(part)
         text = "\n".join(part for part in collected if part).strip()
         if text:
             return name, text
@@ -94,7 +98,14 @@ def _parse(lines, path="01_source/materials/source.txt"):
     Return located rows, not a first-wins dictionary. Keeping every occurrence
     allows callers to reject competing originals and unbound passage summaries.
     """
+    strip_ans_img = str(path).startswith("01_source_ans/")
     lines = [source._source_line(line) for line in lines]
+
+    def _clean_text(parts):
+        joined = "\n".join(parts).strip()
+        if strip_ans_img:
+            joined = re.sub(r"\[IMG\s+[^\]]+\]", "", joined).strip()
+        return joined
     questions, summaries = [], []
     owner = None
     prior = []
@@ -119,7 +130,8 @@ def _parse(lines, path="01_source/materials/source.txt"):
             # A trailing summary belongs to the bounded passage before it;
             # a leading summary belongs to the bounded following question set.
             members = members or prior[:]
-            summaries.append({"source_text": "\n".join(parts).strip(),
+            text = _clean_text(parts)
+            summaries.append({"source_text": text,
                               "members": members, "owner": members[0] if members else None,
                               "path": path, "line": index + 1})
             owner, prior = None, []
@@ -140,7 +152,7 @@ def _parse(lines, path="01_source/materials/source.txt"):
                         or source.STRAY_EXPLANATION.match(later) or _boundary(later)):
                     break
                 parts.append(later)
-            text = "\n".join(parts).strip()
+            text = _clean_text(parts)
             if text:
                 questions.append({"number": owner, "source_text": text,
                                   "path": path, "line": index + 1})

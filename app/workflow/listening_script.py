@@ -1,4 +1,5 @@
 """Copy source listening scripts only when their ownership is provable."""
+from difflib import SequenceMatcher
 import json
 import re
 from pathlib import Path
@@ -7,7 +8,7 @@ HEADER = re.compile(r'^\s*(?:附(?:录)?\s*[:：]?\s*)?(?:听力(?:录音)?(?:�
 SECTION = re.compile(r'^\s*(?:(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩIVX]+|[一二三四五六七八九十]+|\d+)[.．、:：)）]\s*|(?:第[一二三四五六七八九十\d]+(?:节|部分|大题))\s*[:：、.．]?\s*)(\S.*)$', re.I)
 NUMBER = re.compile(r'^\s*(?:[（(]\s*(\d{1,3})\s*[）)]|(\d{1,3})[.．、)）])\s*(.*)$')
 RANGE = re.compile(r'(?:回答|完成|questions?\s*)\s*(?:第\s*)?(\d+)\s*(?:至|到|[-—～~–])\s*(\d+)\s*(?:小)?题?', re.I)
-PAIR_RANGE = re.compile(r'(?:回答|完成|questions?\s*)\s*(?:第\s*)?(\d+)\s*[、,，和与]\s*(\d+)\s*(?:小)?题?', re.I)
+PAIR_RANGE = re.compile(r'(?:回答|完成|questions?\s*)\s*(?:第\s*)?(\d+(?:\s*(?:[、,，和与]|\band\b)\s*\d+)+)\s*(?:小)?题?', re.I)
 RUBRIC = re.compile(r'^\s*(?:你将听到.+?读[一两三]遍|每段(?:对话|短文|材料)读[一两三]遍)')
 END = re.compile(r'^\s*(?:参考答案|答案与解析|答案及解析|答案解析|试题解析|书面表达|笔试部分|笔试|阅读理解)\s*[:：]?\s*$', re.I)
 MARK = '听力录音材料：\n'
@@ -126,10 +127,10 @@ def extract(batch, units):
                 continue
             pair = PAIR_RANGE.search(plain)
             if pair:
-                a, b = map(int, pair.groups())
-                if b == a + 1:
+                nums = [int(x) for x in re.findall(r'\d+', pair.group(1))]
+                if 2 <= len(nums) <= 30 and nums == list(range(nums[0], nums[0] + len(nums))):
                     flush()
-                    current = {'numbers': (str(a), str(b)), 'type': category, 'lines': [], 'line': i + 2}
+                    current = {'numbers': tuple(str(n) for n in nums), 'type': category, 'lines': [], 'line': i + 2}
                     continue
             match = NUMBER.match(plain)
             if match:
@@ -149,7 +150,33 @@ def extract(batch, units):
                 eligible = []
             if len(eligible) == 1:
                 found.setdefault(eligible[0]['unit_id'], []).append((block['text'], name, block['line']))
-    return {uid: rows[0] for uid, rows in found.items() if len({row[0] for row in rows}) == 1}
+    def _source_rank(src_name: str) -> tuple[int, int]:
+        # 优先采用原生文本来源（显式 listening_script 角色或原生正文/附录），
+        # 仅在同份听力稿出现轻微 OCR/标点差异时按优先级择优，避免整段丢弃。
+        lower = src_name.lower()
+        is_ocr = 'ocr' in lower or lower.endswith('.ocr.txt')
+        if src_name in role_scripts and not is_ocr:
+            return (0, 0)
+        if src_name in SOURCES:
+            return (1, SOURCES.index(src_name))
+        return (2 if is_ocr else 1, 99)
+
+    def _norm_cmp(txt: str) -> str:
+        return re.sub(r'[\s\u3000]+', '', txt or '')
+
+    resolved = {}
+    for uid, rows in found.items():
+        unique_texts = {row[0] for row in rows}
+        if len(unique_texts) == 1:
+            resolved[uid] = rows[0]
+            continue
+        ordered = sorted(rows, key=lambda r: _source_rank(r[1]))
+        best = ordered[0]
+        best_norm = _norm_cmp(best[0])
+        # 仅当其余来源与最高优先级来源属于同一段听力稿的轻微差异（如 OCR 错一字）时择优保留。
+        if best_norm and all(SequenceMatcher(None, best_norm, _norm_cmp(r[0])).ratio() >= 0.85 for r in ordered[1:]):
+            resolved[uid] = best
+    return resolved
 
 
 def combine(original, script):

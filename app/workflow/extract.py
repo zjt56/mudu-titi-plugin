@@ -284,9 +284,11 @@ def _is_inline_answer_after_question(line: str, previous: str) -> bool:
 
 
 def _title_key(line: str) -> str:
-    plain = re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", _plain(line)))
-    # 卷名行可能带列表前缀（如 **1**.**2017**年…），那不是题号，也不能让文末重复卷名漏删。
-    return re.sub(r"^\d{1,3}[.．、]", "", plain)
+    no_img = re.sub(r"\[IMG\s+[^\]\r\n]+\]", "", _plain(line))
+    plain = re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", no_img))
+    # 卷名行可能带列表前缀（如 **1**.**2017**年…）或粘贴缺点的数字前缀（如 12024年…），
+    # 那不是题号，也不能让文末重复卷名漏删。
+    return re.sub(r"^\d{1,3}(?:[.．、]|(?=(?:19|20)\d{2}\D))", "", plain)
 
 
 def _is_trailing_answer_block(lines: list[str], start: int, seen_headings=None) -> bool:

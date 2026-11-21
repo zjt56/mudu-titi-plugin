@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
-from . import question_draft
+from . import question_draft, wire_format
 from .wire_format import FILTER_KEYS, SOURCE_KEYS
 
 BATCH = "06_batch/batch.json"
@@ -136,12 +136,15 @@ def _children(row):
 
 def _body(row):
     result = {k: copy.deepcopy(row[k]) for k in BODY if k in row}
-    # Audio and explanation-placed images are owned by their respective stages;
+    # Audio and answer/explanation-placed images are owned by their respective stages;
     # source question/option/material image attachments remain protected.
     if isinstance(result.get("attachments"), list):
         result["attachments"] = [
             a for a in result["attachments"]
-            if not (isinstance(a, dict) and (a.get("kind") == "audio" or a.get("placement") == "explanation"))
+            if not (isinstance(a, dict) and (
+                a.get("kind") == "audio"
+                or a.get("placement") in ("explanation", "answer")
+            ))
         ]
     if not result.get("attachments"):
         result.pop("attachments", None)
@@ -382,8 +385,9 @@ def _result(status, payload, **extra):
     return dict(status=status, payload=payload, **extra)
 
 
-def _sync_media_attachments(kept, fresh, batch_name=None):
-    """沿用未变单元的旧对象时，补齐 draft 权威对象里存在、旧对象缺失的图片/音频附件。
+def _sync_media_attachments(kept, fresh, batch_name=None, decorative_names=None):
+    """沿用未变单元的旧对象时，补齐 draft 权威对象里存在、旧对象缺失的图片/音频附件，
+    并清理已识别为装饰图标/横幅水印的陈旧附件。
 
     旧 batch.json 可能因历史清洗丢过附件（如组级共享材料图），而 draft（_source_base）的
     媒体绑定才是权威。这里按 kind+name 并集补入：以 fresh 的附件为准补缺，不动题干/标签。
@@ -393,10 +397,15 @@ def _sync_media_attachments(kept, fresh, batch_name=None):
     """
     from urllib.parse import quote
     base = quote(batch_name, safe='') if batch_name else None
+    decor = {str(n) for n in (decorative_names or ()) if n}
+
+    def _att_name(a):
+        url = a.get("url")
+        return str(a.get("name") or (str(url).rsplit("/", 1)[-1] if url else "")).strip()
 
     def _norm_url(a):
         url = a.get("url")
-        name = a.get("name") or (str(url).rsplit("/", 1)[-1] if url else "")
+        name = _att_name(a)
         if base and (not isinstance(url, str) or not url.startswith("/source-media/")):
             a = dict(a)
             a["url"] = "/source-media/" + base + "/" + quote(name, safe='')
@@ -409,16 +418,21 @@ def _sync_media_attachments(kept, fresh, batch_name=None):
         if (src.get('identity_version') == 'scoped-v1' and src.get('source_span')
                 and dst.get('question_type') == '语音题'):
             dst['source_span'] = copy.deepcopy(src['source_span'])
-        # 先把旧对象里已有的本地相对 url 附件规范成 /source-media/...（历史遗留）。
-        if base and isinstance(dst.get("attachments"), list):
-            dst["attachments"] = [_norm_url(a) if isinstance(a, dict) else a
-                                  for a in dst["attachments"]]
-        have = {(a.get("kind"), a.get("name") or str(a.get("url", "")).rsplit("/", 1)[-1])
+        # 先把旧对象里已有的装饰陈旧附件剔除，并把本地相对 url 规范成 /source-media/...。
+        if isinstance(dst.get("attachments"), list):
+            cleaned = [a for a in dst["attachments"]
+                       if not (isinstance(a, dict) and _att_name(a) in decor)]
+            dst["attachments"] = [_norm_url(a) if (base and isinstance(a, dict)) else a
+                                  for a in cleaned]
+        have = {(a.get("kind"), _att_name(a))
                 for a in (dst.get("attachments") or []) if isinstance(a, dict)}
         for a in (src.get("attachments") or []):
             if not isinstance(a, dict) or a.get("kind") not in ("image", "audio"):
                 continue
-            key = (a.get("kind"), a.get("name") or str(a.get("url", "")).rsplit("/", 1)[-1])
+            name = _att_name(a)
+            if name in decor:
+                continue
+            key = (a.get("kind"), name)
             if key not in have:
                 dst.setdefault("attachments", []).append(_norm_url(a))
                 have.add(key)
@@ -502,6 +516,7 @@ def initialize(batch_dir) -> dict:
     for uid in rows:
         _validate_binding(root, bindings.get(uid))
     meta = _source_meta(root)
+    decorative = wire_format.decorative_names(root)
     if state is not None and state["mode"] == "finalized":
         unchanged = set(rows) == set(state["units"]) and all(
             _source_token(_base(row), bindings[uid]) == state["units"][uid]["source_sha256"]
@@ -509,17 +524,17 @@ def initialize(batch_dir) -> dict:
         if unchanged and not any(
                 _fill_new_source_aliases(copy.deepcopy(state["units"][uid]["base"]), _base(row, meta))
                 for uid, row in rows.items()):
-            # 即便整体已完成且源未变，也要把 draft 权威媒体附件补齐到旧对象：历史清洗
-            # 可能丢过图片附件（如组级共享材料图），否则上传会报 SOURCE_IMAGE_MISSING。
+            # 即便整体已完成且源未变，也要把 draft 权威媒体附件补齐到旧对象并清理陈旧装饰附件，
+            # 否则既可能报 SOURCE_IMAGE_MISSING，也可能把页眉水印/新考法图带进题库。
             media_changed = False
             by_uid = {it.get("unit_id") or it.get("id"): it for it in (payload.get("items") or [])}
             for uid, row in rows.items():
                 fresh = _base(row, meta)
                 target = by_uid.get(uid)
                 if target is not None:
-                    before = copy.deepcopy(target.get("attachments"))
-                    _sync_media_attachments(target, fresh, root.name)
-                    if target.get("attachments") != before:
+                    before = _body(target)
+                    _sync_media_attachments(target, fresh, root.name, decorative_names=decorative or None)
+                    if _body(target) != before:
                         media_changed = True
             if media_changed:
                 # 附件补齐改变了对象正文，必须同步 finalized_bodies，否则 _managed 会
@@ -564,7 +579,7 @@ def initialize(batch_dir) -> dict:
                          and _canonical_body(old_base) != _canonical_body(fresh))
             if refreshed:
                 kept = _refresh_row(kept, fresh, preserve_fill=True)
-            _sync_media_attachments(kept, fresh, root.name)
+            _sync_media_attachments(kept, fresh, root.name, decorative_names=decorative or None)
             installed = _body(kept)
             if installed != original:
                 # 附件补齐/URL 规范化/来源投影修正改写了本对象正文，必须同步托管正文，

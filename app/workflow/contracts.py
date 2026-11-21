@@ -181,7 +181,7 @@ STAGES: tuple[Stage, ...] = (
     ),
     Stage(
         id="review",
-        title="两轮审核（一审全量+二审抽20%）",
+        title="一审全量盲判+标签合并",
         kind=AGENT,
         # 非听力审核分片在 validate 通过后即可与 audio 并行；仅含听力的分片等待 audio，
         # 最终由 format_gate 统一等待 review_gate 与 audio 全部完成。
@@ -190,7 +190,7 @@ STAGES: tuple[Stage, ...] = (
                   "07_review/content-review.json", "07_review/metadata-review.json",
                   "07_review/manual-review-queue.json", "07_review/unchecked.json"),
         docs=("references/review-workflow.md", "codex-skills/mudu-question-review/SKILL.md"),
-        description="分别执行标签重判与抽样复核（整组题型按整组抽检、只做组级核对）；绑定真实分轮证据，只有具体冲突或不确定项进人工队列。",
+        description="执行一审全量独立盲判并配合确定性知识点标签合并（新批次不再启动二审，兼容保留历史二审记录与待裁决差异）；绑定真实分轮证据，只有具体冲突或不确定项进人工队列。",
     ),
     Stage(
         id="review_gate",

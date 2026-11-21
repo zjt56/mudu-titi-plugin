@@ -14,6 +14,8 @@ metadata or left empty (and reported by the upload mapper), never guessed.
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
 import re
 
 from workbench import taxonomy
@@ -60,7 +62,25 @@ def safe_blocks(blocks):
     return result
 
 
-def _walk_images(node, media_map, attachments, skip=("attachments", "subquestions"),
+_METADATA_IMAGE_SKIP = frozenset((
+    "attachments", "subquestions", "filterMetadata", "paper_title",
+    "source_section", "source_span", "evidence", "difficultyEvidence",
+    *SOURCE_KEYS,
+))
+
+
+def _strip_metadata_img_tags(value):
+    """剥离元信息字段里残留的 [IMG ...] 装饰锚点，不生成题目附件。"""
+    if isinstance(value, str):
+        return IMAGE.sub("", value).strip()
+    if isinstance(value, dict):
+        return {k: _strip_metadata_img_tags(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_metadata_img_tags(v) for v in value]
+    return value
+
+
+def _walk_images(node, media_map, attachments, skip=_METADATA_IMAGE_SKIP,
                  placement="question", decorative_names=None):
     if isinstance(node, dict):
         for key, value in node.items():
@@ -179,6 +199,82 @@ def option_strings(values):
     return result
 
 
+def _attachment_name(entry: dict) -> str:
+    return str(entry.get("name") or str(entry.get("url", "")).rsplit("/", 1)[-1] or "").strip()
+
+
+def _safe_json(path: Path):
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+
+
+def decorative_names(batch_dir, extraction=None) -> set[str]:
+    """收集批次里的装饰图片文件名（花边图标、新考法/熟词生义胶囊、卷头横幅/水印与扫码图），统一过滤。"""
+    names: set[str] = set()
+    if extraction is None and batch_dir is not None:
+        extraction = _safe_json(Path(batch_dir) / "01_source" / "extraction.json")
+    if isinstance(extraction, dict):
+        for media_entry in extraction.get("media") or []:
+            if isinstance(media_entry, dict) and media_entry.get("decorative") and media_entry.get("name"):
+                names.add(str(media_entry["name"]))
+    if batch_dir is None:
+        return names
+    root = Path(batch_dir)
+    protected: set[str] = set()
+    confirmed = _safe_json(root / "01_source" / "structure.confirmed.json")
+    if isinstance(confirmed, dict):
+        for unit in confirmed.get("units") or []:
+            if not isinstance(unit, dict):
+                continue
+            match = re.fullmatch(r"\[IMG\s+([^\]]+)\]", str(unit.get("stem") or "").strip())
+            if match:
+                protected.add(Path(match.group(1).strip()).name)
+    meta = _safe_json(root / "01_source" / "metadata.json")
+    if isinstance(meta, dict):
+        for key in ("source", "paper_title", "evidence"):
+            val = meta.get(key)
+            texts = val if isinstance(val, list) else ([val] if isinstance(val, str) else [])
+            for text in texts:
+                if isinstance(text, str):
+                    for match in IMAGE.finditer(text):
+                        nm = Path(match.group(1).strip()).name
+                        if nm not in protected:
+                            names.add(nm)
+    media_dir = root / "01_source" / "media"
+    if media_dir.is_dir():
+        from workflow import docx_extract
+        for path in media_dir.iterdir():
+            if (not path.is_file() or path.name in protected or path.name in names
+                    or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}):
+                continue
+            dim = docx_extract.image_dimensions(path)
+            if dim and docx_extract.is_decorative_media(dim[0], dim[1], path.stat().st_size, 1):
+                names.add(path.name)
+    # 卷头「扫码练听力」等扫码行紧邻的二维码图标同样不属于试题图片。
+    for rel in ("01_source/正文.txt", "01_source/原始正文.txt"):
+        body_path = root / rel
+        if not body_path.is_file():
+            continue
+        try:
+            head_lines = body_path.read_text(encoding="utf-8-sig").splitlines()[:30]
+        except OSError:
+            continue
+        for idx, line in enumerate(head_lines):
+            if re.search(r"扫码(?:练|听|查看|观看|获取)", line):
+                window = head_lines[max(0, idx - 1):min(len(head_lines), idx + 2)]
+                for wline in window:
+                    for match in IMAGE.finditer(wline):
+                        nm = Path(match.group(1).strip()).name
+                        if nm not in protected:
+                            names.add(nm)
+        break
+    return names
+
+
 def replace_images(text, placement, option_key, media_map, attachments, *, decorative_names=None):
     if not isinstance(text, str) or not media_map:
         return text
@@ -188,9 +284,9 @@ def replace_images(text, placement, option_key, media_map, attachments, *, decor
         url = media_map.get(name)
         if not url:
             return match.group(0)
-        # 解析中的小尺寸装饰花边图标（如 [IMG image9.jpg]审题思路[IMG image10.jpg]）
-        # 仅剥离文本占位，不挂入正式解析附件；实质配图（如写作提纲导图）正常保留。
-        if placement == "explanation" and decorative_names and name in decorative_names:
+        # 装饰花边图标（如 审题思路/熟词生义）、栏目胶囊（新考法）与页眉水印：
+        # 在任意展示位（题干/材料/选项/解析）只剥离文本占位，不挂入正式附件。
+        if decorative_names and name in decorative_names:
             return ""
         entry = {"kind": "image", "url": url, "name": name, "placement": placement}
         if option_key:
@@ -276,13 +372,18 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None, 
     # 不再有 [IMG] 标记，若在此清空 image/audio 再"从文本重建"会把它们整批丢掉
     # （导致上传报 SOURCE_IMAGE_MISSING）。改为：保留原附件 + 从文本/音频追加，最后
     # 统一按身份去重，既幂等去重又不会误删已挂好的图片。
-    existing = [a for a in (data.get("attachments") or []) if isinstance(a, dict)]
+    # 现有附件优先，避免既有附件与同归属的文本 [IMG] 各存一份导致重复；
+    # 同时剔除装饰图标/横幅水印发出的陈旧附件。
+    decor = {str(n) for n in (decorative_names or ()) if n}
+    existing = [a for a in (data.get("attachments") or [])
+                if isinstance(a, dict) and _attachment_name(a) not in decor]
     attachments = list(existing)
     # 题库只认 question/option/answer/explanation；材料里的图没有独立位置，
     # 上传后随题干显示（放在 material 位置会被服务端判 invalid_attachment）。
     for key, placement in (("stem", "question"), ("material", "question")):
         if isinstance(data.get(key), str):
-            data[key] = replace_images(data[key], placement, None, media_map, attachments)
+            data[key] = replace_images(data[key], placement, None, media_map, attachments,
+                                       decorative_names=decor or None)
 
     if isinstance(data.get("options"), list):
         result = []
@@ -292,24 +393,34 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None, 
             if isinstance(option, dict):
                 key = str(option.get("key") or option.get("label") or "").strip().rstrip(".．、")
                 text = replace_images(str(option.get("text") or ""), "option", key or None,
-                                      media_map, attachments)
+                                      media_map, attachments, decorative_names=decor or None)
                 result.append(f"{key}. {text}".rstrip() if key else text)
                 continue
             match = OPTION_PREFIX.match(option)
             if match:
                 text = replace_images(option[match.end():], "option", match.group(1),
-                                       media_map, attachments)
+                                       media_map, attachments, decorative_names=decor or None)
                 result.append(f"{match.group(1)}. {text}".rstrip())
             else:
-                result.append(replace_images(option, "option", None, media_map, attachments))
+                result.append(replace_images(option, "option", None, media_map, attachments,
+                                             decorative_names=decor or None))
         data["options"] = result
 
+    # 来源元信息字段（source/location/filterMetadata）不是题面正文字段：
+    # 若旧批次卷头残留 [IMG ...] 图标锚点，仅剥离标记、绝不转成 placement=question 附件。
+    for key in SOURCE_KEYS:
+        if isinstance(data.get(key), str) and "[IMG" in data[key]:
+            data[key] = _strip_metadata_img_tags(data[key])
     if filters:
+        for key in SOURCE_KEYS:
+            if isinstance(filters.get(key), str) and "[IMG" in filters[key]:
+                filters[key] = _strip_metadata_img_tags(filters[key])
         data["filterMetadata"] = filters
     else:
         data.pop("filterMetadata", None)
 
-    # 其余文本字段里的 [IMG] 标记（来源行、解析、答案、大意等）一并转换。
+    # 其余正文字段里的 [IMG] 标记（materialBlocks、解析、答案、大意等）一并转换；
+    # 元信息字段由 _METADATA_IMAGE_SKIP 排除，不生成题目附件。
     if media_map:
         data = _walk_images(data, media_map, attachments, decorative_names=decorative_names)
 

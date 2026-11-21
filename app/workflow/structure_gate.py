@@ -1495,6 +1495,18 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
                 blockers[0]["affected_numbers"] = nums
         return blockers, checks, resolved_notes, warnings, deferred, units, meta, metadata_missing, source_diagnostic
 
+    extraction_warnings_nonblocking = False
+    ext_path = batch_dir / "01_source" / "extraction.json"
+    if ext_path.is_file():
+        try:
+            ext_data = json.loads(ext_path.read_text(encoding="utf-8-sig"))
+            ext_warn_list = ext_data.get("warnings") if isinstance(ext_data, dict) else None
+            if isinstance(ext_warn_list, list):
+                from . import docx_extract
+                extraction_warnings_nonblocking = not docx_extract.blocking_warnings(ext_warn_list)
+        except (OSError, ValueError, TypeError):
+            extraction_warnings_nonblocking = False
+
     force_ai = str(os.environ.get("WF_FORCE_STRUCTURE_AI", "")).strip().lower() in ("1", "true", "yes")
     has_ai_marker = (batch_dir / "01_source" / "structure.ai.classified.json").is_file()
     ai_enabled = str(os.environ.get("WF_STRUCTURE_AI", "1")).strip().lower() not in ("0", "false", "no")
@@ -1502,16 +1514,24 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         item.get("code") for item in (structure.get("unresolved") or [])
         if isinstance(item, dict) and not item.get("resolved")
     }
-    non_clean_unresolved = unresolved_codes - {
+    clean_allowed = {
         "SOURCE_METADATA_MISSING", "ANSWER_APPENDIX_DETECTED",
         "INLINE_ANSWER_BLOCK", "QUESTION_NUMBER_INFERRED",
     }
+    if extraction_warnings_nonblocking:
+        clean_allowed.add("EXTRACTION_WARNING")
+    non_clean_unresolved = unresolved_codes - clean_allowed
     chosen = None
     if not force_ai and not scoped and not has_ai_marker and ai_enabled and not non_clean_unresolved:
         det = _run_structural_pass(ai_classified=None)
         det_blockers, _, _, det_warnings, _, det_units, _, _, _ = det
-        only_inferred = all(b.get("code") == "QUESTION_NUMBER_INFERRED" for b in det_blockers)
-        if det_units and only_inferred and not any(w.get("status") == "layout_review_required" for w in det_warnings):
+        blocking_layout_warnings = [
+            w for w in det_warnings
+            if w.get("status") == "layout_review_required"
+            and not (extraction_warnings_nonblocking and w.get("code") == "EXTRACTION_WARNING")
+        ]
+        # 仅在确定性结构无任何未解决阻断项（含未核实的 QUESTION_NUMBER_INFERRED）时走直过快路径。
+        if det_units and not det_blockers and not blocking_layout_warnings:
             det[3].append({
                 "code": "AI_STRUCTURE_SKIPPED",
                 "blocking": False,

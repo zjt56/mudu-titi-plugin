@@ -79,8 +79,9 @@ def _existing(batch, plan):
     # Corrupt/duplicate records are not evidence, but must not prevent fresh
     # independent work. The original file is archived when a new result lands.
     evaluated = review.evaluate_rounds(batch, payload)
+    kept_ids = set(evaluated["checked_rounds"]) | set(review.LEGACY_ROUND_IDS)
     return {"plan": plan, "rounds": [r for r in payload["rounds"]
-            if isinstance(r, dict) and r.get("round_id") in evaluated["checked_rounds"]]}
+            if isinstance(r, dict) and r.get("round_id") in kept_ids]}
 
 
 def _prior_unchanged(rounds, prior):
@@ -102,7 +103,8 @@ def _next(batch, plan, skip_rounds=()):
     payload = _existing(batch, plan)
     evaluated = review.evaluate_rounds(batch, payload)
     present = [r.get("round_id") for r in payload.get("rounds", []) if isinstance(r, dict)]
-    if len(present) != len(set(present)) or any(r not in evaluated["checked_rounds"] for r in present):
+    allowed_present = set(evaluated["checked_rounds"]) | set(review.LEGACY_ROUND_IDS)
+    if len(present) != len(set(present)) or any(r not in allowed_present for r in present):
         return None, {"action": "blocked", "completed": False, "review": evaluated}
     for round_id in review.ROUND_IDS:
         if round_id not in evaluated["checked_rounds"] and round_id not in skip_rounds:
@@ -437,6 +439,14 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
     if isinstance(base_static.get(extraction_key), dict):
         from . import unit_tasks
         base_static[extraction_key] = unit_tasks.compact_extraction(base_static[extraction_key])
+    extraction_base = base_static.get(extraction_key)
+
+    listening_script_paths = set()
+    material_roles_doc = context.get('01_source/material-roles.json')
+    if isinstance(material_roles_doc, dict):
+        for doc in material_roles_doc.get('documents') or []:
+            if isinstance(doc, dict) and doc.get('role') == 'listening_script' and doc.get('text_path'):
+                listening_script_paths.add(str(doc['text_path']))
 
     if is_blind:
         base_static = agent_tasks._blind_context(base_static)
@@ -533,9 +543,10 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
         listening_chosen = {u['unit_id'] for u in selected
                             if str(u.get('type') or '').startswith('听力')}
         if known_scope and not listening_chosen:
-            subset.pop(transcript_key, None)
-            subset.pop('02_audio/segment-evidence.json', None)
-            subset.pop('02_audio/audio_map.json', None)
+            for audio_key in [k for k in list(subset) if k.startswith('02_audio/')]:
+                subset.pop(audio_key, None)
+            for ls_path in listening_script_paths:
+                subset.pop(ls_path, None)
         elif transcript_key in subset and transcript_raw is not None:
             excerpted = _transcript_excerpt(
                 transcript_raw, segment_evidence,
@@ -551,6 +562,8 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
             subset[transcript_key] = excerpted
 
         for art_key, shell in artifact_shells.items():
+            if art_key not in subset:
+                continue
             by_uid = artifact_by_unit[art_key]
             items = [r for u in selected for r in by_uid.get(u['unit_id'], ())]
             subset[art_key] = {**shell, 'items': items}
@@ -559,6 +572,50 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
             by_uid = batch_by_unit[bkey]
             items = [r for u in selected for r in by_uid.get(u['unit_id'], ())]
             subset[bkey] = {**shell, 'items': items}
+
+        if is_blind and isinstance(extraction_base, dict) and extraction_key in subset:
+            is_partial = len(selected) < len(units)
+            shard_blob = json.dumps(
+                {
+                    'src': subset.get('01_source/正文.txt', ''),
+                    'units': subset.get('confirmed_units_with_stable_ids', []),
+                    'bm': subset.get('06_batch/batch_meta.json', {}),
+                    'bj': subset.get('06_batch/batch.json', {}),
+                },
+                ensure_ascii=False,
+                separators=(',', ':'),
+            )
+            ext_copy = dict(extraction_base)
+            if is_partial and isinstance(ext_copy.get('tables'), list):
+                table_nums = {int(n) for n in re.findall(r'\[TABLE\s+(\d+)\]', shard_blob)}
+                has_table_block = '"type":"table"' in shard_blob
+                if table_nums:
+                    ext_copy['tables'] = [
+                        t for idx, t in enumerate(ext_copy['tables'], 1)
+                        if not (isinstance(t, dict) and t.get('number') is not None)
+                        or t.get('number') in table_nums or idx in table_nums
+                    ]
+                elif not has_table_block:
+                    ext_copy['tables'] = [
+                        t for t in ext_copy['tables']
+                        if not (isinstance(t, dict) and t.get('number') is not None)
+                    ]
+            if isinstance(ext_copy.get('media'), list):
+                kept_media = []
+                for m in ext_copy['media']:
+                    if not isinstance(m, dict):
+                        kept_media.append(m)
+                        continue
+                    mname = m.get('name')
+                    if is_partial and isinstance(mname, str) and mname not in shard_blob:
+                        continue
+                    compact_m = {
+                        k: v for k, v in m.items()
+                        if k not in ('source_ref', 'relationship_id', 'source_part', 'occurrence', 'block_index')
+                    }
+                    kept_media.append(compact_m)
+                ext_copy['media'] = kept_media
+            subset[extraction_key] = ext_copy
 
         if structure_shell is not None and structure_by_unit is not None:
             s_units = [r for u in selected for r in structure_by_unit.get(u['unit_id'], ())]
@@ -1055,7 +1112,12 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
     _recover_installs(batch, only_round=only_round, skip_rounds=skip_rounds)
     plan = _effective_round_plan(batch)
     if only_round is not None:
+        if only_round not in review.ROUND_IDS and only_round not in review.LEGACY_ROUND_IDS:
+            raise ValueError(f"Unknown review round: {only_round}")
         evaluated = review.evaluate_rounds(batch)
+        if only_round in review.LEGACY_ROUND_IDS and only_round not in review.ROUND_IDS:
+            return {"action": "complete", "completed": evaluated["execution_completed"],
+                    "round_id": only_round, "retired": True, "review": evaluated}
         if only_round in evaluated["checked_rounds"] or only_round in skip_rounds:
             return {"action": "complete", "completed": evaluated["execution_completed"],
                     "round_id": only_round, "review": evaluated}
@@ -1127,7 +1189,7 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
                 pass
         while True:
             reused_keys = {review._check_key(ref, round_id) for ref in reuse}
-            pending = ([q for q in plan['sample'] if review._check_key(q, round_id) not in reused_keys]
+            pending = ([q for q in (plan.get('sample') or []) if review._check_key(q, round_id) not in reused_keys]
                        if round_id == 'sample' else [uid for uid in plan['units'] if (uid, None) not in reused_keys])
             pending_units = {q['unit_id'] for q in pending} if round_id == 'sample' else set(pending)
             unit_parts = _partition_contexts(base, budget, max_units_per_part, round_id,

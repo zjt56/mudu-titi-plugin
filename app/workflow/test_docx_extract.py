@@ -1,5 +1,6 @@
 """Synthetic, dependency-free native DOCX extraction checks."""
 import hashlib
+import struct
 import tempfile
 import unittest
 import zipfile
@@ -252,6 +253,31 @@ class DocxExtractTests(unittest.TestCase):
             "bullet item",
             "",
         ])
+
+    def test_decorative_banners_and_pill_badges_are_tagged_while_option_pics_stay_clean(self):
+        def fake_png(width, height, total_bytes):
+            head = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", width, height)
+            return head + b"\x00" * max(0, total_bytes - len(head))
+
+        rels = "".join(
+            f'<Relationship Id="r{i}" Type="{R}/image" Target="media/{name}"/>'
+            for i, name in enumerate(["banner.png", "pill.png", "capsule.png", "option.png", "passage.png"], 1)
+        )
+        body = "".join(f"<w:p>{image(f'r{i}')}</w:p>" for i in range(1, 6))
+        self.make_docx(body, rels=rels, parts={
+            "word/media/banner.png": fake_png(1091, 191, 13450),   # 页眉横幅水印 -> decorative
+            "word/media/pill.png": fake_png(260, 43, 4002),        # 新考法徽章 -> decorative
+            "word/media/capsule.png": fake_png(194, 58, 12372),    # 熟词生义胶囊 -> decorative
+            "word/media/option.png": fake_png(199, 69, 4500),      # 听力选项图 -> real
+            "word/media/passage.png": fake_png(1091, 676, 150000), # 阅读插图 -> real
+        })
+        result = extract_docx(self.source, self.out)
+        by_name = {m["name"]: m for m in result["media"]}
+        self.assertTrue(by_name["banner.png"].get("decorative"))
+        self.assertTrue(by_name["pill.png"].get("decorative"))
+        self.assertTrue(by_name["capsule.png"].get("decorative"))
+        self.assertFalse(by_name["option.png"].get("decorative"))
+        self.assertFalse(by_name["passage.png"].get("decorative"))
 
 
 if __name__ == "__main__":

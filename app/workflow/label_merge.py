@@ -88,31 +88,40 @@ def _validated_round1_checks(folder: Path, data: dict) -> list[dict]:
 
     effective_plan, _ = review.resolve_round_plan(folder, current_plan, data)
     current_units = set(effective_plan.get("units") or [])
-    current_bindings = effective_plan.get("unit_bindings") or {}
-    old_plan = data.get("plan")
 
-    if isinstance(old_plan, dict):
-        if old_plan == effective_plan:
-            return [c for c in raw_checks if str(c.get("unit_id") or "").strip() in current_units]
-        old_bindings = old_plan.get("unit_bindings")
-        if isinstance(old_bindings, dict):
-            acceptable = review.acceptable_unit_bindings(folder, effective_plan)
-            valid_uids = {
-                uid
-                for uid in current_bindings
-                if review._unit_binding_matches(folder, old_plan, effective_plan, uid, accepted=acceptable)
-            }
-            return [c for c in raw_checks if str(c.get("unit_id") or "").strip() in valid_uids]
-        if old_plan.get("input_binding") == effective_plan.get("input_binding"):
-            return [c for c in raw_checks if str(c.get("unit_id") or "").strip() in current_units]
-        return []
-
+    rebased = data
+    if isinstance(data, dict) and data.get("plan") != effective_plan:
+        rebased = review.rebase_rounds(folder, data, effective_plan)
     if (
-        isinstance(data.get("input_binding"), str)
-        and data["input_binding"] == effective_plan.get("input_binding")
+        not isinstance(rebased, dict)
+        or set(rebased) != {"plan", "rounds"}
+        or rebased.get("plan") != effective_plan
+        or not isinstance(rebased.get("rounds"), list)
     ):
-        return [c for c in raw_checks if str(c.get("unit_id") or "").strip() in current_units]
-    return []
+        return []
+    matches = [r for r in rebased["rounds"] if isinstance(r, dict) and r.get("round_id") == "labels"]
+    if len(matches) != 1:
+        return []
+    record = matches[0]
+    try:
+        if not isinstance(record.get("execution_id"), str) or not record["execution_id"].strip():
+            return []
+        present_uids = {
+            str(c.get("unit_id") or "").strip()
+            for c in (record.get("checks") or [])
+            if isinstance(c, dict) and str(c.get("unit_id") or "").strip() in current_units
+        }
+        if not present_uids:
+            return []
+        check_plan = dict(effective_plan, units=[u for u in (effective_plan.get("units") or []) if u in present_uids])
+        review._round_checks(record, "labels", check_plan, folder, lenient=True, require_coverage=False)
+        review._verify_round_sources(folder, effective_plan, record)
+    except (ValueError, OSError, KeyError, TypeError, AttributeError):
+        return []
+    return [
+        c for c in (record.get("checks") or [])
+        if isinstance(c, dict) and str(c.get("unit_id") or "").strip() in current_units
+    ]
 
 
 def load_round1_assessments(batch_dir: Path) -> dict[str, dict]:
@@ -193,22 +202,25 @@ def _sync_knowledge_ids(target: dict, paths: list[str], main_type: str | None) -
             target[key] = list(ids)
 
 
+_UNSET = object()
+
+
 def merged_unit_knowledge(
     batch_dir: Path | None,
     unit_id: str,
     orig_knowledge,
     *,
     main_type: str | None = None,
-    manual_labels: dict | None = None,
-    round1_assessment: dict | None = None,
+    manual_labels=_UNSET,
+    round1_assessment=_UNSET,
     is_group: bool = False,
 ) -> dict:
     """Compute merged knowledge for a unit, honoring manual edits over auto-merge."""
-    if manual_labels is None and batch_dir is not None and unit_id:
+    if manual_labels is _UNSET and batch_dir is not None and unit_id:
         manual_labels = load_manual_unit_labels(Path(batch_dir), unit_id)
     manual_labels = manual_labels if isinstance(manual_labels, dict) else {}
 
-    if round1_assessment is None and batch_dir is not None and unit_id:
+    if round1_assessment is _UNSET and batch_dir is not None and unit_id:
         round1_assessment = load_round1_assessments(Path(batch_dir)).get(str(unit_id))
     has_round1 = isinstance(round1_assessment, dict) and isinstance(round1_assessment.get("knowledge"), list)
     r1_knowledge = round1_assessment.get("knowledge") if has_round1 else []

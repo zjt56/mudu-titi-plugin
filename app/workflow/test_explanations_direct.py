@@ -219,6 +219,35 @@ class ExplanationsDirectTest(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload['items'][0]['subquestions'][0]['explanation'], '原解析。')
 
+    def test_answers_docx_source_strips_unowned_img_tags(self):
+        ans_dir = self.batch / "01_source_ans"
+        ans_dir.mkdir(parents=True, exist_ok=True)
+        (ans_dir / "正文.txt").write_text(
+            "Ⅷ.阅读理解\nA\n"
+            "56.A [IMG image6.jpeg]解析[IMG image9.jpeg]选A。\n"
+            "57.B [解析]第二题。\n58.C [解析]第三题。\n"
+            "Ⅹ.书面表达\n"
+            "【思路点拨】[IMG image10.jpeg]审题要点。\n"
+            "【参考范文】Dear Li Hua, ...\n",
+            encoding="utf-8")
+        (self.batch / "01_source/正文.txt").write_text(
+            "Ⅷ.阅读理解\nA\n56. Q56?\n57. Q57?\n58. Q58?\nⅩ.书面表达\n81. Write.\n",
+            encoding="utf-8")
+        units = json.loads((self.batch / "01_source/structure.confirmed.json").read_text(encoding="utf-8"))["units"]
+        units.append({"unit_id": "u81", "section_id": "s2", "unit_kind": "standalone",
+                      "type": "书面表达", "numbers": [81]})
+        (self.batch / "01_source/structure.confirmed.json").write_text(
+            json.dumps({"units": units}), encoding="utf-8")
+        kind, writing = explanations_direct._writing_explanation(self.batch)
+        self.assertEqual(kind, "01_source_ans/正文.txt")
+        self.assertNotIn("[IMG", writing)
+        questions, _ = explanations_direct._parse(
+            ["56.A [IMG image6.jpeg]解析[IMG image9.jpeg]选A。详见 [IMG image7.jpeg]"],
+            path="01_source_ans/正文.txt")
+        self.assertEqual(len(questions), 1)
+        self.assertNotIn("[IMG", questions[0]["source_text"])
+        self.assertEqual(questions[0]["source_text"], "选A。详见")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -406,6 +406,11 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
             sources = item.get("round_sources") or []
             if not (_open(item) and sources):
                 return False
+            # 停止新二审后，历史有效 sample（LEGACY_ROUND_IDS）待裁决差异仍需保留，
+            # 不能因新轮次不再执行 sample 就把当前绑定下的历史差异标为过期。
+            if any(isinstance(s, dict) and s.get("round_id") in review.LEGACY_ROUND_IDS
+                   and s.get("input_binding") == current_binding for s in sources):
+                return False
             # 抽样发现可能没有 field，只用 round_id 标识来源；按 round_id 或 field
             # 绑定到当前输入即可判定是否属于本轮可重投影的范围。
             def bound(src):

@@ -230,7 +230,11 @@ def _run_final_format_checks(root, final, report, inputs):
     return result
 
 
-def run(batch_dir) -> dict:
+def write_report_file(batch_dir, report: dict) -> None:
+    _write_report(_safe(Path(batch_dir) / REPORT_PATH), report)
+
+
+def run(batch_dir, *, write_report: bool = True) -> dict:
     report = {"passed": False, "status": "failed", "scope": "local_upload_format",
               "rule": RULE_VERSION, "rule_sha256": {p.name: _sha(p.read_bytes()) for p in RULE_FILES},
               "final_path": FINAL_PATH, "final_sha256": None, "input_sha256": {},
@@ -314,11 +318,12 @@ def run(batch_dir) -> dict:
     attach(report, path=REPORT_PATH, stage="format_gate")
     report["passed"] = not report["errors"]
     report["status"] = "passed" if report["passed"] else "failed"
-    try:
-        _write_report(_safe(Path(batch_dir) / REPORT_PATH), report)
-    except (OSError, ValueError) as exc:
-        report["errors"].append({"code": "FORMAT_REPORT_WRITE_FAILED", "message": str(exc)})
-        report["passed"], report["status"] = False, "failed"
+    if write_report:
+        try:
+            write_report_file(batch_dir, report)
+        except (OSError, ValueError) as exc:
+            report["errors"].append({"code": "FORMAT_REPORT_WRITE_FAILED", "message": str(exc)})
+            report["passed"], report["status"] = False, "failed"
     return report
 
 

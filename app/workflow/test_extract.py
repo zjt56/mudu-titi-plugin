@@ -298,6 +298,26 @@ class StructureCandidateTest(unittest.TestCase):
         structure, main, appendix = extract.infer_structure(body)
         self.assertEqual(main.splitlines()[-1], 'Write about your town.')
         self.assertTrue(appendix.startswith('Ⅰ.关键词语选择'))
+
+    def test_trailing_repeated_paper_title_with_glued_digit_cuts_answer_table(self):
+        # 2024 安徽卷文末重复卷名写成无点号的 `12024年...`，后面紧跟题号/答案汇总表，
+        # 必须从卷名处切进附录，绝不能把答案表留在书面表达题干里。
+        body = ('1.2024年安徽省初中学业水平考试\n'
+                'Ⅰ.短对话理解(共1小题)\n'
+                '( )1.A.a B.b C.c\n'
+                'Ⅹ.书面表达(共1小题)\n'
+                'Write a short passage.\n'
+                '12024年安徽省初中学业水平考试\n\n'
+                '[TABLE 3]\n'
+                '题号 | 1~5 | 6~10\n'
+                '答案 | CCAAB | BAABC\n'
+                '[/TABLE]\n')
+        structure, main, appendix = extract.infer_structure(body)
+        self.assertEqual(main.splitlines()[-1], 'Write a short passage.')
+        self.assertNotIn('[TABLE 3]', main)
+        self.assertIn('[TABLE 3]', appendix)
+        self.assertIn('12024年安徽省初中学业水平考试', appendix)
+        self.assertIn('ANSWER_APPENDIX_DETECTED', {x['code'] for x in structure['unresolved']})
         self.assertEqual(structure['sections'][-1]['questions'], [2])
 
     def test_reading_material_headings_split_groups(self):

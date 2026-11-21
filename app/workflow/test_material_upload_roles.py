@@ -217,3 +217,46 @@ class MaterialUploadRoleTests(unittest.TestCase):
                 self.assertEqual(updated['user_roles'].get(extra_path), 'structure_reference')
                 self.assertTrue(updated['rerun']['started'])
                 launch_mock.assert_called_once()
+
+    def test_high_confidence_multi_document_bundle_skips_model_and_ambiguous_runs_parallel(self):
+        paper = (
+            '2025年安徽省初中学业水平考试\n'
+            'Ⅴ.单项填空\n'
+            '21. Q1?\nA. a B. b C. c D. d\n'
+            '22. Q2?\nA. a B. b C. c D. d\n'
+            '23. Q3?\nA. a B. b C. c D. d\n'
+            '24. Q4?\nA. a B. b C. c D. d\n'
+        )
+        answers = (
+            '参考答案\n'
+            '21. A 【解析】解析一。\n'
+            '22. B 【解析】解析二。\n'
+            '23. C 【解析】解析三。\n'
+            '24. D 【解析】解析四。\n'
+            '25. A 【解析】解析五。\n'
+        )
+        script = (
+            '2025年安徽省初中学业水平考试听力录音材料\n'
+            'Ⅰ.短对话理解\n'
+            '1.W: What do you like?\nM: I like music.\n'
+            '2.W: Where is Tim?\nM: In the library.\n'
+        )
+        state = {'inputs': {
+            'source': self.file('s.docx', paper),
+            'answers': self.file('a.docx', answers),
+            'attachment_001': self.file('l.docx', script),
+        }}
+        called = []
+        def fail_if_called(prompt, run_dir, cfg):
+            called.append(prompt[:40])
+            raise AssertionError('High-confidence documents must not invoke model')
+        with patch.object(roles, '_document_text', side_effect=lambda b, p: Path(p).read_text()):
+            result = roles.classify_documents(self.root, invoke_fn=fail_if_called, manifest=state)
+        self.assertEqual(called, [])
+        by_key = {row['input']: row for row in result['documents']}
+        self.assertEqual(by_key['source']['role'], 'paper')
+        self.assertEqual(by_key['source']['source'], 'deterministic')
+        self.assertEqual(by_key['answers']['role'], 'answers')
+        self.assertEqual(by_key['answers']['source'], 'deterministic')
+        self.assertEqual(by_key['attachment_001']['role'], 'listening_script')
+        self.assertEqual(by_key['attachment_001']['source'], 'deterministic')

@@ -919,11 +919,22 @@ def _refresh_post_edit_gates(batch: Path, *, lock_held: bool = False) -> tuple[i
             validate_code = runner.do_validate(batch, current, lock_held=True, refresh_only=True)
             format_passed: bool | None = None
             if was_format_done:
-                report = format_gate.run(batch)
+                # 先在内存跑 format_gate，校验通过再覆盖落盘；失败时绝不覆写磁盘上已通过的
+                # 07_review/upload-format.json，避免 execution_state 把已完成批次误判回排队区。
+                report_file = batch / format_gate.REPORT_PATH
+                prev_report_bytes = report_file.read_bytes() if report_file.is_file() else None
+                deferred_write = False
+                try:
+                    report = format_gate.run(batch, write_report=False)
+                    deferred_write = True
+                except TypeError:
+                    report = format_gate.run(batch)
                 format_passed = bool(report.get("passed") is True)
                 fresh = mf.load(batch)
                 spec = contracts.STAGE_BY_ID["format_gate"]
                 if format_passed and validate_code == 0:
+                    if deferred_write:
+                        format_gate.write_report_file(batch, report)
                     mf.touch_stage(
                         fresh, "format_gate", mf.COMPLETED,
                         input_hashes=mf.input_hashes(batch, fresh, spec),
@@ -933,6 +944,8 @@ def _refresh_post_edit_gates(batch: Path, *, lock_held: bool = False) -> tuple[i
                     mf.record_semantics(batch, fresh, spec)
                 else:
                     # Keep already-completed batch in review workbench instead of kicking it back to queue.
+                    if not deferred_write and prev_report_bytes is not None:
+                        _atomic_write_bytes(report_file, prev_report_bytes)
                     if prev_validate is not None and validate_code != 0:
                         fresh.setdefault("stages", {})["validate"] = prev_validate
                     if prev_format is not None:
@@ -946,7 +959,7 @@ def _refresh_post_edit_gates(batch: Path, *, lock_held: bool = False) -> tuple[i
                 mf.save(batch, fresh)
             return validate_code, format_passed
     except RuntimeError:
-        return None, None
+        return "deferred", None
 
 
 def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None = None,
@@ -1206,12 +1219,14 @@ def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None
             }, batch_identity=identity)
             validate_code, format_passed = _refresh_post_edit_gates(batch, lock_held=False)
 
+        recheck_deferred = validate_code == "deferred"
         label = "听力材料转录" if mode == "listeningScript" else ("文章大意" if mode == "articleSummary" else "解析")
         skip_note = f"（跳过 {skipped_changed} 项已变更题目）" if skipped_changed else ""
+        recheck_note = "（后台复验因主流程占锁暂未执行，内容已写回）" if recheck_deferred else ""
         done_msg = (
-            f"已完成 {len(applied_keys)} 项听力材料 AI 转录补全并标注（AI转录）{skip_note}"
+            f"已完成 {len(applied_keys)} 项听力材料 AI 转录补全并标注（AI转录）{skip_note}{recheck_note}"
             if mode == "listeningScript"
-            else f"已完成 {len(applied_keys)} 项 AI {label}生成并标注{skip_note}"
+            else f"已完成 {len(applied_keys)} 项 AI {label}生成并标注{skip_note}{recheck_note}"
         )
         res = {
             **meta_fields,
@@ -1222,8 +1237,9 @@ def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None
             "completed": total,
             "mode": mode,
             "keys": applied_keys,
-            "validate_passed": validate_code == 0 if validate_code is not None else None,
+            "validate_passed": (validate_code == 0) if isinstance(validate_code, int) else None,
             "format_gate_passed": format_passed,
+            "recheck_deferred": recheck_deferred,
             "message": done_msg,
             "error": "",
         }

@@ -74,6 +74,13 @@ def _has_image(row: dict) -> bool:
 
 
 def _options_have_image(row: dict) -> bool:
+    for att in (row.get("attachments") or []):
+        if not isinstance(att, dict):
+            continue
+        placement = str(att.get("placement") or "").strip().lower()
+        kind = str(att.get("kind") or att.get("type") or "").strip().lower()
+        if placement == "option" and (not kind or kind.startswith("image")):
+            return True
     for opt in _options(row):
         if isinstance(opt, dict) and (opt.get("image") or opt.get("attachments")):
             return True

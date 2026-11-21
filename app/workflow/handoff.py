@@ -129,7 +129,7 @@ def _without_underline_tags(value):
 
 
 def _without_audio_fields(value):
-    """Drop derived audio wiring from a projected metadata/content view."""
+    """Drop derived media wiring (audio & answer/explanation images) from a projected view."""
     projected = copy.deepcopy(value)
     def row(item):
         if not isinstance(item, dict):
@@ -137,8 +137,13 @@ def _without_audio_fields(value):
         item.pop('audio', None)
         item.pop('audioFile', None)
         if isinstance(item.get('attachments'), list):
-            item['attachments'] = [a for a in item['attachments']
-                                   if not (isinstance(a, dict) and a.get('kind') == 'audio')]
+            item['attachments'] = [
+                a for a in item['attachments']
+                if not (isinstance(a, dict) and (
+                    a.get('kind') == 'audio'
+                    or a.get('placement') in ('explanation', 'answer')
+                ))
+            ]
             if not item['attachments']:
                 item.pop('attachments')
         for child in item.get('subquestions') or []:

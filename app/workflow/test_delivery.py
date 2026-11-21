@@ -147,6 +147,19 @@ class DeliveryChecklistTest(unittest.TestCase):
         }}]}
         with self.assertRaises(ValueError):
             handoff._assert_underline_projection(sec_base, sec_tampered)
+        # Late assembly adds explanation/answer/audio attachments to batch_meta.json;
+        # underline projection must ignore derived attachments while still rejecting tampered question images.
+        derived = {'items': [{'unit_id': 'q-1', 'stem': '<u>原文</u>', 'options': ['A'], 'attachments': [
+            {'kind': 'image', 'url': '/source-media/b/e1.jpeg', 'name': 'e1.jpeg', 'placement': 'explanation'},
+            {'kind': 'image', 'url': '/source-media/b/a1.jpeg', 'name': 'a1.jpeg', 'placement': 'answer'},
+            {'kind': 'audio', 'url': '/source-media/b/seg-1.mp3', 'name': 'seg-1.mp3'},
+        ]}]}
+        handoff._assert_underline_projection(base, derived)
+        tampered_img = {'items': [{'unit_id': 'q-1', 'stem': '<u>原文</u>', 'options': ['A'], 'attachments': [
+            {'kind': 'image', 'url': '/source-media/b/bogus.jpeg', 'name': 'bogus.jpeg', 'placement': 'question'},
+        ]}]}
+        with self.assertRaises(ValueError):
+            handoff._assert_underline_projection(base, tampered_img)
 
     def test_meta_accepts_only_policy_authorized_source_normalization(self):
         from workflow import handoff

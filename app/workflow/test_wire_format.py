@@ -1,7 +1,11 @@
 """装配产物与题库线上格式的确定性映射。"""
+import json
+from pathlib import Path
+import struct
+import tempfile
 import unittest
 
-from workflow.wire_format import normalize_item, normalize_blank_text
+from workflow.wire_format import decorative_names, normalize_item, normalize_blank_text
 
 
 class WireFormatTest(unittest.TestCase):
@@ -135,6 +139,75 @@ class WireFormatTest(unittest.TestCase):
             normalize_blank_text("1. My name is \u3000\u3000.\u3000\u30002. Her name is \u3000\u3000."),
             "1. My name is ______.\u3000\u30002. Her name is ______.",
         )
+
+    def test_metadata_img_markers_are_stripped_without_creating_question_attachments(self):
+        item = {
+            "unit_kind": "standalone",
+            "source": "[IMG image3.jpeg]1.2025年安徽省初中学业水平考试",
+            "filterMetadata": {"source": "[IMG image3.jpeg]1.2025年安徽省初中学业水平考试"},
+            "stem": "How long does it take John to get home?",
+            "explanation": "见配图 [IMG image6.jpeg]",
+        }
+        media = {
+            "image3.jpeg": "/source-media/b/image3.jpeg",
+            "image6.jpeg": "/source-media/b/image6.jpeg",
+        }
+        out = normalize_item(item, media_map=media)
+        self.assertEqual(out["source"], "1.2025年安徽省初中学业水平考试")
+        self.assertEqual(out["filterMetadata"]["source"], "1.2025年安徽省初中学业水平考试")
+        # image3.jpeg 只在元信息 source 中出现，绝不能生成 placement=question 附件；
+        # image6.jpeg 在 explanation 中出现，保留为 placement=explanation 附件。
+        atts = out.get("attachments") or []
+        self.assertEqual([(a["name"], a["placement"]) for a in atts], [("image6.jpeg", "explanation")])
+
+    def test_decorative_banners_pills_and_qr_filtered_across_all_placements_and_stale_attachments(self):
+        def fake_png(width, height, total_bytes):
+            head = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", width, height)
+            return head + b"\x00" * max(0, total_bytes - len(head))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            source = batch / "01_source"
+            media = source / "media"
+            media.mkdir(parents=True)
+            (media / "image3.png").write_bytes(fake_png(1091, 191, 13450))
+            (media / "image4.png").write_bytes(fake_png(130, 130, 7956))
+            (media / "image11.png").write_bytes(fake_png(260, 43, 4002))
+            (media / "image10.png").write_bytes(fake_png(199, 69, 4500))
+            (media / "image_pure.png").write_bytes(fake_png(1000, 100, 12000))
+            (source / "metadata.json").write_text(json.dumps({
+                "source": "[IMG image3.png]1.2025年安徽省初中学业水平考试",
+                "paper_title": "[IMG image3.png]1.2025年安徽省初中学业水平考试",
+            }), encoding="utf-8")
+            (source / "正文.txt").write_text(
+                "[IMG image4.png]\n扫码练听力\nⅠ.语音题(共1小题)\n[IMG image_pure.png]\n",
+                encoding="utf-8")
+            (source / "structure.confirmed.json").write_text(json.dumps({
+                "units": [{"unit_id": "u-pure", "stem": "[IMG image_pure.png]", "numbers": [1]}]
+            }), encoding="utf-8")
+
+            decor = decorative_names(batch)
+            self.assertEqual(decor, {"image3.png", "image4.png", "image11.png"})
+            self.assertNotIn("image10.png", decor)
+            self.assertNotIn("image_pure.png", decor)
+
+            media_map = {p.name: f"/source-media/b/{p.name}" for p in media.iterdir()}
+            item = {
+                "unit_kind": "standalone",
+                "stem": "[IMG image11.png]Which picture is on page 15?",
+                "material": "A[IMG image11.png]",
+                "options": ["A.[IMG image10.png]", "B.[IMG image11.png]"],
+                "attachments": [
+                    {"kind": "image", "name": "image3.png", "url": "/source-media/b/image3.png", "placement": "question"},
+                    {"kind": "image", "name": "image11.png", "url": "/source-media/b/image11.png", "placement": "question"},
+                ],
+            }
+            out = normalize_item(item, media_map=media_map, decorative_names=decor)
+            self.assertEqual(out["stem"], "Which picture is on page 15?")
+            self.assertEqual(out["material"], "A")
+            self.assertEqual(out["options"], ["A.", "B."])
+            atts = [(a["name"], a["placement"], a.get("optionKey")) for a in out.get("attachments") or []]
+            self.assertEqual(atts, [("image10.png", "option", "A")])
 
 if __name__ == "__main__":
     unittest.main()

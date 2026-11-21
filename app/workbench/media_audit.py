@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import json
 import re
-import struct
 from pathlib import Path
+
+from workflow.docx_extract import image_dimensions as image_size, is_decorative_media
 
 IMG_REF = re.compile(r"\[IMG\s+([^\]]+)\]")
 EXCLUSIONS = "media-exclusions.json"
@@ -25,70 +26,6 @@ try:  # preview 里有题号识别规则，复用同一套，避免两套题号�
     from workflow.preview import _find  # type: ignore[attr-defined]
 except Exception:  # pragma: no cover - 直接运行且路径没配好时退化为不判定卷头
     _find = None
-
-
-def _png_size(data: bytes):
-    if data[:8] != b"\x89PNG\r\n\x1a\n" or len(data) < 24:
-        return None
-    return struct.unpack(">II", data[16:24])
-
-
-def _gif_size(data: bytes):
-    if not data.startswith((b"GIF87a", b"GIF89a")) or len(data) < 10:
-        return None
-    return struct.unpack("<HH", data[6:10])
-
-
-def _jpeg_size(data: bytes):
-    if not data.startswith(b"\xff\xd8"):
-        return None
-    index = 2
-    length = len(data)
-    while index + 9 < length:
-        if data[index] != 0xFF:
-            index += 1
-            continue
-        marker = data[index + 1]
-        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
-            index += 2
-            continue
-        segment = struct.unpack(">H", data[index + 2:index + 4])[0]
-        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
-            height, width = struct.unpack(">HH", data[index + 5:index + 9])
-            return width, height
-        index += 2 + segment
-    return None
-
-
-def _webp_size(data: bytes):
-    if data[:4] != b"RIFF" or data[8:12] != b"WEBP" or len(data) < 30:
-        return None
-    chunk = data[12:16]
-    if chunk == b"VP8 ":
-        width, height = struct.unpack("<HH", data[26:30])
-        return width & 0x3FFF, height & 0x3FFF
-    if chunk == b"VP8L":
-        bits = struct.unpack("<I", data[21:25])[0]
-        return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
-    if chunk == b"VP8X":
-        width = int.from_bytes(data[24:27], "little") + 1
-        height = int.from_bytes(data[27:30], "little") + 1
-        return width, height
-    return None
-
-
-def image_size(path: Path):
-    """只读文件头拿宽高，不引入 Pillow 依赖；认不出就返回 None。"""
-    try:
-        with path.open("rb") as handle:
-            head = handle.read(64 * 1024)
-    except OSError:
-        return None
-    for reader in (_png_size, _gif_size, _jpeg_size, _webp_size):
-        size = reader(head)
-        if size and size[0] and size[1]:
-            return int(size[0]), int(size[1])
-    return None
 
 
 def load_exclusions(folder: Path):
@@ -206,6 +143,7 @@ def audit(folder: Path, numbers=None):
         if path.suffix.lower() not in IMAGE_SUFFIXES:
             continue
         size = image_size(path)
+        file_bytes = path.stat().st_size
         ratio = round(size[0] / size[1], 2) if size else None
         positions = refs.get(path.name, [])
         owners = sorted({n for n in (_owner(i, starts) for i in positions) if n})
@@ -217,11 +155,16 @@ def audit(folder: Path, numbers=None):
             verdict, reason = "question", "已由 scoped 单元的有效来源切片证明图片归属"
         elif positions and starts and min(positions) < starts[0][0]:
             verdict, reason = "header", "只出现在第一道题之前，属于卷头/说明区"
-        elif ratio is not None and ratio >= 5:
-            verdict, reason = "banner", f"长宽比 {ratio}:1，像横幅广告而不是题目配图"
+        elif is_decorative_media(size[0] if size else None, size[1] if size else None, file_bytes, len(positions)):
+            reason = (f"装饰胶囊/徽章（{size[0]}×{size[1]}）"
+                      if size and size[1] <= 62 else
+                      f"高频小图标（{len(positions)} 次）"
+                      if len(positions) >= 2 and (not size or size[1] <= 120) else
+                      f"长宽比 {ratio}:1，像横幅广告/水印而不是题目配图")
+            verdict = "banner"
         else:
             verdict, reason = "question", "被正文引用且落在题目范围内"
-        items.append({"name": path.name, "bytes": path.stat().st_size,
+        items.append({"name": path.name, "bytes": file_bytes,
                       "width": size[0] if size else None, "height": size[1] if size else None,
                       "ratio": ratio, "lines": [i + 1 for i in positions], "numbers": owners,
                       "unit_ids": scoped_owners.get(path.name, []),

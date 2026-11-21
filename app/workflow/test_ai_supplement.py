@@ -1616,6 +1616,41 @@ class AiSupplementTest(unittest.TestCase):
         self.assertEqual(prog["validate_passed"], True)
         self.assertEqual(prog["format_gate_passed"], True)
 
+    def test_provenance_and_check_explanations_accept_ai_transcript_mark(self):
+        import importlib.util
+        from workflow import agent_tasks
+        row = {
+            "answer": "A",
+            "explanation": f"听力录音材料：\nM: Good morning.\n{upload_content.AI_TRANSCRIPT_MARK}",
+        }
+        # Assemble provenance accepts AI_TRANSCRIPT_MARK only when backed by verified workbench transcript record
+        agent_tasks._provenance(
+            row, source_text="1. A", expected_answer="A",
+            verified_transcript_explanations={row["explanation"]},
+        )
+        # Unverified AI_TRANSCRIPT_MARK without workbench transcript record must be rejected
+        with self.assertRaises(ValueError):
+            agent_tasks._provenance(row, source_text="1. A", expected_answer="A")
+        # Unsourced answer cannot be bypassed via AI_TRANSCRIPT_MARK
+        with self.assertRaises(ValueError):
+            agent_tasks._provenance(
+                {"answer": "Z", "explanation": row["explanation"]},
+                source_text="1. A",
+                verified_transcript_explanations={row["explanation"]},
+            )
+        # But AI_TRANSCRIPT_MARK is never allowed inside answer
+        with self.assertRaises(ValueError):
+            agent_tasks._provenance({"answer": f"A{upload_content.AI_TRANSCRIPT_MARK}", "explanation": "无"}, "1. A")
+        # check_explanations.audit counts AI_TRANSCRIPT_MARK under stat['transcript'] without flagging unverified
+        mod_path = Path(__file__).resolve().parents[1] / "scripts" / "06-upload" / "check_explanations.py"
+        spec = importlib.util.spec_from_file_location("check_explanations_mod", mod_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        stat, bad = mod.audit([{"unit_id": "q-1", "explanation": row["explanation"], "articleSummary": "无"}], source="")
+        self.assertEqual(stat["transcript"], 1)
+        self.assertEqual(stat["unverified"], 0)
+        self.assertEqual(bad, [])
+
 
 if __name__ == "__main__":
     unittest.main()

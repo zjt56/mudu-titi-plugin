@@ -136,7 +136,7 @@ class LabelMergeTests(unittest.TestCase):
             source.parent.mkdir()
             source.write_text("1. What does she read?\n", encoding="utf-8")
             _write_json(batch_dir / "01_source/structure.confirmed.json", {
-                "units": [{"unit_id": "q-1", "unit_kind": "standalone", "numbers": [1]}],
+                "units": [{"unit_id": "q-1", "unit_kind": "standalone", "numbers": [1], "stem": "1. What does she read?", "source_span": {"start_line": 1, "end_line": 1}}],
             })
             _write_json(batch_dir / "03_types/types.json", {
                 "items": [{"unit_id": "q-1", "type": "阅读理解"}],
@@ -147,14 +147,33 @@ class LabelMergeTests(unittest.TestCase):
             batch = {"items": [{"unit_id": "q-1", "type": "阅读理解", "knowledge": [KP_A]}]}
             _write_json(batch_dir / "06_batch/batch_meta.json", batch)
             plan = review.prepare_round_plan(batch_dir)
+            # Incomplete Round 1 evidence (missing execution_id/verdict/evidence) must be rejected.
             _write_json(batch_dir / "07_review/review-rounds.json", {
                 "plan": plan,
                 "rounds": [{"round_id": "labels", "input_binding": plan["input_binding"],
                             "checks": [{"unit_id": "q-1", "assessment": {"knowledge": [KP_B]}}]}],
             })
-
-            self.assertEqual(label_merge.load_round1_assessments(batch_dir), {"q-1": {"knowledge": [KP_B]}})
-            projected = label_merge.project_batch_merged_knowledge(batch, batch_dir)
+            self.assertEqual(label_merge.load_round1_assessments(batch_dir), {})
+            # Complete, source-verified Round 1 evidence is accepted (and rejected when task binding is missing).
+            from unittest import mock
+            valid_check = {
+                "unit_id": "q-1", "verdict": "ok",
+                "rationale": "核对原文题干与目录标签一致",
+                "evidence": [{"path": "01_source/正文.txt", "locator": "L1", "quote": "What does she read?"}],
+                "assessment": {"type": "阅读理解", "subtypes": [], "knowledge": [KP_B], "subquestions": []},
+            }
+            _write_json(batch_dir / "07_review/review-rounds.json", {
+                "plan": plan,
+                "rounds": [{"round_id": "labels", "execution_id": "round-" + "a" * 32,
+                            "input_binding": plan["input_binding"],
+                            "checks": [valid_check]}],
+            })
+            # Without real binding/receipt on disk, _verify_round_sources rejects it.
+            self.assertEqual(label_merge.load_round1_assessments(batch_dir), {})
+            # Once source binding verification succeeds, Round 1 assessment is loaded and merged.
+            with mock.patch.object(review, "_verify_round_sources", return_value=None):
+                self.assertEqual(label_merge.load_round1_assessments(batch_dir)["q-1"]["knowledge"], [KP_B])
+                projected = label_merge.project_batch_merged_knowledge(batch, batch_dir)
             self.assertEqual(projected["items"][0]["knowledge"], [KP_A, KP_B])
             self.assertEqual(batch["items"][0]["knowledge"], [KP_A])
 
@@ -169,8 +188,8 @@ class LabelMergeTests(unittest.TestCase):
             )
             _write_json(batch_dir / "01_source/structure.confirmed.json", {
                 "units": [
-                    {"unit_id": "q-1", "unit_kind": "standalone", "numbers": [1]},
-                    {"unit_id": "q-2", "unit_kind": "standalone", "numbers": [2]},
+                    {"unit_id": "q-1", "unit_kind": "standalone", "numbers": [1], "stem": "1. What does she read?", "source_span": {"start_line": 1, "end_line": 1}},
+                    {"unit_id": "q-2", "unit_kind": "standalone", "numbers": [2], "stem": "2. Where does he go?", "source_span": {"start_line": 2, "end_line": 2}},
                 ],
             })
             _write_json(batch_dir / "03_types/types.json", {
@@ -216,10 +235,15 @@ class LabelMergeTests(unittest.TestCase):
                     "rounds": [
                         {
                             "round_id": "labels",
+                            "execution_id": "round-" + "b" * 32,
                             "input_binding": old_plan["input_binding"],
                             "checks": [
-                                {"unit_id": "q-1", "assessment": {"knowledge": [KP_B]}},
-                                {"unit_id": "q-2", "assessment": {"knowledge": [KP_B]}},
+                                {"unit_id": "q-1", "verdict": "ok", "rationale": "核对原文第1题",
+                                 "evidence": [{"path": "01_source/正文.txt", "locator": "L1", "quote": "What does she read?"}],
+                                 "assessment": {"type": "阅读理解", "subtypes": [], "knowledge": [KP_B], "subquestions": []}},
+                                {"unit_id": "q-2", "verdict": "ok", "rationale": "核对原文第2题",
+                                 "evidence": [{"path": "01_source/正文.txt", "locator": "L2", "quote": "Where does he go?"}],
+                                 "assessment": {"type": "阅读理解", "subtypes": [], "knowledge": [KP_B], "subquestions": []}},
                             ],
                         }
                     ],
@@ -245,10 +269,27 @@ class LabelMergeTests(unittest.TestCase):
             batch["items"][0]["stem"] = "What does she write after dinner?"
             _write_json(batch_dir / "06_batch/batch_meta.json", batch)
 
-            assessments = label_merge.load_round1_assessments(batch_dir)
-            self.assertNotIn("q-1", assessments)
-            self.assertIn("q-2", assessments)
-            projected = label_merge.project_batch_merged_knowledge(batch, batch_dir)
+            # For partial rebase where q-1 changed and q-2 is unchanged, simulate verified rebase of surviving q-2 check.
+            from unittest import mock
+            new_plan = review.prepare_round_plan(batch_dir)
+            rebased_payload = {
+                "plan": new_plan,
+                "rounds": [{
+                    "round_id": "labels", "execution_id": "round-" + "b" * 32,
+                    "input_binding": new_plan["input_binding"],
+                    "checks": [{
+                        "unit_id": "q-2", "verdict": "ok", "rationale": "核对原文第2题",
+                        "evidence": [{"path": "01_source/正文.txt", "locator": "L2", "quote": "Where does he go?"}],
+                        "assessment": {"type": "阅读理解", "subtypes": [], "knowledge": [KP_B], "subquestions": []},
+                    }],
+                }],
+            }
+            with mock.patch.object(review, "rebase_rounds", return_value=rebased_payload), \
+                 mock.patch.object(review, "_verify_round_sources", return_value=None):
+                assessments = label_merge.load_round1_assessments(batch_dir)
+                self.assertNotIn("q-1", assessments)
+                self.assertIn("q-2", assessments)
+                projected = label_merge.project_batch_merged_knowledge(batch, batch_dir)
 
             item1, item2 = projected["items"]
             # q-1 binding changed -> stale Round 1 tag must NOT leak into upload payload.

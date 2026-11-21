@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 from pathlib import Path
@@ -165,7 +166,7 @@ def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=
         if path and Path(path).suffix.lower() in (".docx", ".pdf", ".doc") and identity not in seen:
             seen[identity] = key
             docs.append((key, path))
-    results = []
+    prepared = []
     for key, path in docs:
         source_path = Path(path).expanduser()
         if not source_path.is_absolute():
@@ -180,9 +181,56 @@ def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=
         text = (prior_texts[prior['path']] if prior else
                 (_document_text(batch, str(source_path)) if ocr_report is None else
                  _document_text(batch, str(source_path), ocr_report=ocr_report)))
+        reference = word_authority and source_path.suffix.lower() == ".pdf"
+        reusable_prior = prior if (prior and prior.get('source') != 'user') else None
+        prepared.append({
+            "key": key, "path": path, "source_path": source_path,
+            "orig_name": orig_name, "explicit_role": explicit_role,
+            "reusable_prior": reusable_prior, "text": text, "reference": reference,
+        })
+
+    # 对需要自动分类的文档：优先高置信度确定性快速分类（毫秒级、零模型调用），
+    # 仅对确实存在歧义/混排/短文本的文档并发调用模型，避免多文档串行等待。
+    need_auto = [
+        idx for idx, item in enumerate(prepared)
+        if item["text"] is not None and not item["explicit_role"] and not item["reusable_prior"]
+    ]
+    auto_results: dict[int, tuple[str, str]] = {}
+    need_model: list[int] = []
+    for idx in need_auto:
+        fast = _classify_high_confidence(prepared[idx]["text"])
+        if fast is not None:
+            auto_results[idx] = (fast, "deterministic")
+        else:
+            need_model.append(idx)
+    if need_model:
+        if invoke_fn is not None and len(need_model) > 1:
+            with ThreadPoolExecutor(max_workers=min(4, len(need_model))) as pool:
+                futures = {
+                    pool.submit(_classify_one, prepared[idx]["text"], invoke_fn, config,
+                                filename=prepared[idx]["orig_name"]): idx
+                    for idx in need_model
+                }
+                for fut, idx in futures.items():
+                    auto_results[idx] = fut.result()
+        else:
+            for idx in need_model:
+                auto_results[idx] = _classify_one(
+                    prepared[idx]["text"], invoke_fn, config, filename=prepared[idx]["orig_name"]
+                )
+
+    results = []
+    for idx, item in enumerate(prepared):
+        key = item["key"]
+        path = item["path"]
+        source_path = item["source_path"]
+        orig_name = item["orig_name"]
+        explicit_role = item["explicit_role"]
+        reusable_prior = item["reusable_prior"]
+        text = item["text"]
+        reference = item["reference"]
         # Input authority is independent of the detected text role. Keep answer
         # text available by input/text_path while PDF wording cannot replace Word.
-        reference = word_authority and source_path.suffix.lower() == ".pdf"
         authority = {'content_authority': False, 'authority_input': key}
         if text is None:
             results.append({"input": key, "path": path, "original_filename": orig_name,
@@ -198,9 +246,8 @@ def classify_documents(batch_dir: Path, invoke_fn=None, config=None, ocr_report=
                 authority = {'content_authority': role in ('paper', 'mix', 'answers', 'explanations', 'listening_script'),
                              'authority_input': key}
         else:
-            reusable_prior = prior if (prior and prior.get('source') != 'user') else None
             role, source = ((reusable_prior.get('content_role') or reusable_prior['role'], reusable_prior['source'])
-                            if reusable_prior else _classify_one(text, invoke_fn, config, filename=orig_name))
+                            if reusable_prior else auto_results[idx])
             authority = {'content_authority': role in ('paper', 'mix', 'answers', 'explanations', 'listening_script'),
                          'authority_input': key}
             if word_authority and role in ('paper', 'mix'):
@@ -267,7 +314,10 @@ def select_document_roles(batch, manifest, roles):
               if key not in {row['input'] for row in docs} and key != 'docx'}
     mapped['source'] = deepcopy(inputs[chosen['input']])
     remaining = [row for row in docs if row['input'] != chosen['input']]
-    primary_answer = min(answer_rows, key=lambda row: source_policy.rank(row['path'])) if answer_rows else None
+    primary_answer = (
+        min(answer_rows, key=lambda row: (source_policy.rank(row['path']), 0 if detected(row) == 'answers' else 1))
+        if answer_rows else None
+    )
     if primary_answer is not None:
         mapped['answers'] = deepcopy(inputs[primary_answer['input']])
     extras = [row for row in remaining if primary_answer is None or row['input'] != primary_answer['input']]
@@ -280,22 +330,38 @@ def select_document_roles(batch, manifest, roles):
     return updated
 
 
+_DOC_TEXT_CACHE: dict[tuple, str] = {}
+
+
 def _document_text(batch: Path, source: str, ocr_report=None) -> str | None:
     """把一份文档的文字层提取出来（答案卷在 answers/explanations 时用原始正文）。"""
     try:
         from . import extract
         import tempfile
         src = Path(source).expanduser().resolve(strict=True)
+        st = src.stat()
+        ocr_key = id(ocr_report) if ocr_report is not None else 0
+        cache_key = (str(src), st.st_mtime_ns, st.st_size, ocr_key)
+        cached = _DOC_TEXT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         ocr_result, warning = (None, None)
         if src.suffix.lower() == ".pdf":
             ocr_result, warning = extract._pdf_ocr_for_source(batch, src, ocr_report)
         with tempfile.TemporaryDirectory(prefix="role-") as tmp:
             report = extract.extract_source(src, Path(tmp), ocr_result=ocr_result, ocr_warning=warning)
+            text = None
             for name in ("原始正文.txt", "正文.txt"):
                 cand = Path(tmp) / name
                 if cand.is_file():
-                    return cand.read_text(encoding="utf-8-sig")
-            return report.get("text") or ""
+                    text = cand.read_text(encoding="utf-8-sig")
+                    break
+            if text is None:
+                text = report.get("text") or ""
+        if len(_DOC_TEXT_CACHE) >= 64:
+            _DOC_TEXT_CACHE.clear()
+        _DOC_TEXT_CACHE[cache_key] = text
+        return text
     except Exception:  # noqa: BLE001 - 分类失败不阻断主流程，交给确定性兜底
         return None
 
@@ -389,6 +455,7 @@ def _looks_like_listening_script(text: str) -> bool:
     joined = "\n".join(plain)
     if (_count_option_evidence(plain) > 0
             or _has_question_blanks(raw_lines)
+            or _has_exam_questions(text)
             or re.search(r"\[IMG\s+[^\]]+\]", text or "")
             or _WRITTEN_SECTION_RE.search(joined)
             or _count_answer_rows(plain) >= 3
@@ -421,13 +488,80 @@ def _filename_role_hint(filename: str) -> str | None:
     return None
 
 
+def _classify_high_confidence(text: str) -> str | None:
+    """高置信度确定性快速分类：仅在内容特征压倒性且无歧义时跳过模型调用。
+
+    短文本、混排（正文夹答案）、OCR 残缺或特征不够充分的文档返回 None，
+    交由模型（必要时并发）判断。
+    """
+    raw_lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if len(raw_lines) < 4:
+        return None
+    plain = _plain_lines(text)
+    joined = "\n".join(plain)
+
+    # 1) 独立听力录音材料：无选项/无空位/无图片/无笔试大题/无答案解析，且有明确听力稿信号
+    if _looks_like_listening_script(text):
+        explicit_header = any(_LISTENING_SCRIPT_HEADER_RE.search(line) for line in plain[:8])
+        speaker_turns = sum(1 for line in plain if _SPEAKER_TURN_RE.match(line))
+        listening_cues = sum(1 for line in plain if _LISTENING_CUE_RE.search(line))
+        if explicit_header or speaker_turns >= 4 or (speaker_turns >= 2 and listening_cues >= 2):
+            return "listening_script"
+
+    option_rows = _count_option_evidence(plain)
+    has_blanks = _has_question_blanks(raw_lines)
+    has_questions = _has_exam_questions(text)
+    answer_rows = _count_answer_rows(plain)
+    answer_key_lines = sum(1 for line in plain if _ANSWER_KEY_LINE_RE.match(line) or _ANSWER_RANGE_RE.search(line))
+    explanation_lines = sum(1 for line in plain if _EXPLANATION_LINE_RE.search(line))
+    answer_heading = any(re.search(r"参考答案|答案[及与和]解析|答案速查|answer\s*key", line, re.I) for line in plain)
+    pure_answer_heading = any(re.search(r"参考答案|答案速查|answer\s*key", line, re.I) for line in plain)
+    question_rows = sum(
+        1 for line in plain
+        if _QUESTION_PROMPT_LINE_RE.match(line) and not _SPEAKER_TURN_RE.match(line)
+    )
+
+    # 2) 独立答案卷 / 解析卷：无待作答试题、无选项、无空位，且有充分答案/解析密度
+    if not has_questions and option_rows == 0 and not has_blanks:
+        from .source_answer_only import detect_source_answer_only
+        diagnostic = detect_source_answer_only(text)
+        numbered = sum(bool(re.search(r"(?<!\d)\d{1,3}\s*[.．、]\s*\S", line)) for line in plain)
+        strong_answers = (
+            answer_rows >= 5
+            or (diagnostic["classification"] == "source_answer_only" and len(plain) >= 5)
+            or (answer_heading and (answer_rows >= 3 or numbered >= 5))
+        )
+        if strong_answers:
+            if explanation_lines >= 5 and answer_key_lines == 0 and not pure_answer_heading:
+                return "explanations"
+            return "answers"
+
+    # 3) 试卷正文 / 正文与答案混排：具备明确试题/选项信号
+    if has_questions and (option_rows >= 4 or question_rows >= 8):
+        if (answer_rows == 0
+                and explanation_lines == 0
+                and not answer_heading
+                and not _ANSWER_RANGE_RE.search(joined)):
+            return "paper"
+        if answer_rows >= 5 or (explanation_lines >= 5 and answer_rows >= 2):
+            return "mix"
+
+    return None
+
+
 def _classify_one(text: str, invoke_fn, config, *, filename: str = "") -> tuple[str, str]:
+    fast = _classify_high_confidence(text)
+    if fast is not None:
+        return fast, "deterministic"
     prompt = _ROLE_PROMPT.format(text=text[:60000])
     if invoke_fn is not None:
         try:
             import tempfile
             with tempfile.TemporaryDirectory(prefix="role-run-") as run_dir:
-                reply = invoke_fn(prompt, Path(run_dir), config or {})
+                if invoke_fn is local_agent.invoke:
+                    reply = invoke_fn(prompt, Path(run_dir), config or {}, permit_parallel=True)
+                else:
+                    reply = invoke_fn(prompt, Path(run_dir), config or {})
             data = _parse_json(reply)
             if isinstance(data, dict) and isinstance(data.get("artifacts"), dict):
                 data = data["artifacts"].get("classification", {}) if data.get("status") == "completed" else {}

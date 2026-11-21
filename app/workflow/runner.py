@@ -1458,13 +1458,14 @@ def _cmd_mark_locked(batch_dir: Path, args) -> int:
         if unreviewed_revision:
             if unreviewed_summary(batch_dir, manifest)['revision'] != unreviewed_revision:
                 print('✗ 审核状态已变化，请重新查看并确认'); return 2
+            from workflow.execution_state import validate_ever_passed
             from workflow.label_audit import inspect_file
             labels = inspect_file(batch_dir / '06_batch' / 'batch_meta.json')
             flow = flowchart_checks(batch_dir, manifest)
-            # 与 workbench/server.py 一致：validate 的 is_stale 不阻碍上传，
-            # 只要 validate 曾通过（completed）且实时标签/结构校验通过即可放行。
+            # 与 workbench/server.py 一致：validate 曾通过（completed 或从 completed
+            # 变为 invalidated）且实时标签/结构校验通过即可放行。
             if (not labels['passed'] or not flow['passed']
-                    or manifest['stages'].get('validate', {}).get('status') != mf.COMPLETED):
+                    or not validate_ever_passed(manifest)):
                 detail = (labels.get('errors') or flow.get('errors')
                           or '请先完成本地体检（validate）')
                 print('✗ 数据、结构或校验未通过：' + str(detail)); return 2
@@ -1927,8 +1928,9 @@ def _cmd_upload_locked(batch_dir: Path, args) -> int:
         print("✗ 审核闸门未通过，拒绝上传；先处理 07_review/manual-review-queue.json")
         return 1
     if unreviewed:
+        from workflow.execution_state import validate_ever_passed
         from workflow.label_audit import inspect_file
-        if (manifest['stages'].get('validate', {}).get('status') != mf.COMPLETED
+        if (not validate_ever_passed(manifest)
                 or not inspect_file(batch_dir / '06_batch' / 'batch_meta.json')['passed']):
             print('✗ 数据校验或标签审计未通过'); return 1
         # Consume before submitting: a failed or interrupted attempt needs a new click.

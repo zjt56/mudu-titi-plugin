@@ -687,6 +687,7 @@ def build(batch_dir, *, units=None):
     evidence = lesson_bands.for_text(root, cleaned)
     sections = lesson_bands.annotate_sections(structure.get("sections") or [], evidence)
     fresh = _build_units(sections, structure.get("groups") or [], cleaned.splitlines(), batch_dir=root)
+    decorative = wire_format.decorative_names(root, extraction=extraction)
     items, bindings, issues, media = [], {}, [], set()
     layout_diagnostics = []
     inspected_media = {}
@@ -865,7 +866,8 @@ def build(batch_dir, *, units=None):
                     media_map[name] = relative  # Local evidence only; never a deployed/verified URL.
                 else:
                     issues.append({"unit_id": uid, "code": "MEDIA_MISSING", "reason": "原文图片文件缺失：" + name})
-            row = wire_format.normalize_item(row, media_map=media_map, meta=confirmed.get("meta") or {})
+            row = wire_format.normalize_item(row, media_map=media_map, meta=confirmed.get("meta") or {},
+                                             decorative_names=decorative or None)
             if proof.get("layout_items"):
                 # 图片引用移到附件的占位会留下换行；网格归属重绑后的题干只保留自己的词形行。
                 for child in row["subquestions"]:

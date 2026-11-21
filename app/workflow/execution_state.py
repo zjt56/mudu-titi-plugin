@@ -119,13 +119,49 @@ def local_complete(folder, manifest):
         report = json.loads(report_path.read_text(encoding="utf-8-sig"))
         if not isinstance(report, dict) or report.get("passed") is not True:
             return False
-        digest = hashlib.sha256()
-        with final_path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return bool(report.get("final_sha256") and report["final_sha256"] == digest.hexdigest())
+        st = final_path.stat()
+        cache_key = (str(final_path), st.st_mtime_ns, st.st_size)
+        cached_sha = _FINAL_SHA_CACHE.get(cache_key)
+        if cached_sha is None:
+            digest = hashlib.sha256()
+            with final_path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            cached_sha = digest.hexdigest()
+            if len(_FINAL_SHA_CACHE) >= 512:
+                _FINAL_SHA_CACHE.clear()
+            _FINAL_SHA_CACHE[cache_key] = cached_sha
+        return bool(report.get("final_sha256") and report["final_sha256"] == cached_sha)
     except (OSError, ValueError, UnicodeError):
         return False
+
+
+_FINAL_SHA_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def validate_ever_passed(manifest_or_stage) -> bool:
+    """Return True if validate is completed or was invalidated after passing."""
+    if not isinstance(manifest_or_stage, dict):
+        return False
+    if "stages" in manifest_or_stage and isinstance(manifest_or_stage.get("stages"), dict):
+        stage = manifest_or_stage["stages"].get("validate")
+    else:
+        stage = manifest_or_stage
+    if not isinstance(stage, dict):
+        return False
+    status = stage.get("status")
+    if status == COMPLETED:
+        return True
+    if status != INVALIDATED:
+        return False
+    history = stage.get("history") or []
+    return any(
+        isinstance(entry, dict) and (
+            entry.get("from") == COMPLETED
+            or entry.get("to") == COMPLETED
+        )
+        for entry in history
+    )
 
 
 def derive_status(manifest):

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _common import load_batch, units  # noqa: E402
 from workflow.content_rules import AI_MARK, is_placeholder  # noqa: E402
+from workflow.workflow_constants import AI_TRANSCRIPT_MARK  # noqa: E402
 from workflow.upload_content import inspect_content  # noqa: E402
 
 ABSENT = '无'
@@ -63,6 +64,8 @@ def audit(items, source):
             elif AI_MARK in text:
                 stat['ai'] += 1
                 bad.append(f'{uid} {where}: 禁止 AI 生成解析/文章大意')
+            elif AI_TRANSCRIPT_MARK in text:
+                stat['transcript'] += 1
             elif norm(text) and norm(text) in source:
                 stat['source'] += 1
             else:

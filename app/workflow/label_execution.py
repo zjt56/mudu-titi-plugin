@@ -291,6 +291,27 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
             accepted[uid] = candidate
             private_label_baseline.store(batch, stage, uid, candidate, strict_hashes)
 
+    if stage == 'knowledge' and config.get("knowledge_direct", True):
+        has_feedback = (batch / "workflow" / "repair-feedback" / "knowledge.json").is_file()
+        if not has_feedback:
+            from . import knowledge_direct
+            try:
+                direct_k = knowledge_direct.tag_units(batch, units)
+            except (OSError, ValueError, TypeError, KeyError):
+                direct_k = {}
+            local_agent._check_input_hashes(batch, strict_hashes)
+            for uid, row in direct_k.items():
+                if uid not in singleton or uid in accepted or uid in deterministic:
+                    continue
+                payload = {"items": [row]}
+                try:
+                    candidate = validate(uid, payload)
+                except ValueError:
+                    continue
+                candidate['notes'].append('按固定大题规则直标知识点')
+                accepted[uid] = candidate
+                private_label_baseline.store(batch, stage, uid, candidate, strict_hashes)
+
     rounds = []
     concurrency = local_agent._part_concurrency(config)
     # The whole-packet protocol keeps cross-section context. Native calls

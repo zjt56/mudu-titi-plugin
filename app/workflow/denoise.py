@@ -34,7 +34,7 @@ META_PATTERNS = (
 NOISE_PATTERNS = (
     re.compile(r"扫码(?:练|听|查看|观看|获取)"),
     # 只丢弃完整的答案册标签或明确链接；自由文本可能是题干或选项。
-    re.compile(r"^(?:答案册|答案见答案册|答案(?:册)?链接\s*[:：]\s*https?://[^\s]+)\s*$", re.I),
+    re.compile(r"^(?:答案册|答案见答案册|答案(?:册)?链接\s*(?:☞\s*答案册\S*|[:：]\s*(?:https?://[^\s]+|答案册\S*)))\s*$", re.I),
     # 纯分隔线只认装饰字符。下划线是本流水线的作答空位标记（`_{2,}`）：
     # 整行等宽下划线是无号题（如古诗画线题）的作答区，属于题目内容；
     # 当分隔线丢掉会让该大题窗口失去作答证据，进而整道题不产出来源单元。
@@ -78,6 +78,12 @@ def _clean_lines(text: str) -> list[str]:
     return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
+def _plain_line(raw: str) -> str:
+    """剥离行内 [IMG]、HTML 标签与加粗星号，用于识别元信息或题号结构（不改原文本）。"""
+    no_img = re.sub(r"\[IMG\s+[^\]]+\]", "", raw)
+    return re.sub(r"<[^>]+>", "", no_img).replace("**", "").strip()
+
+
 def extract_meta(lines: list[str]) -> dict:
     """从卷头若干行里抽取元信息，不假设一定存在，抽不到就不写该键。"""
     # 只看卷头；题目中的年份、地名不能覆盖试卷来源。移除排版标记后再识别。
@@ -89,7 +95,9 @@ def extract_meta(lines: list[str]) -> dict:
             # Workbook topic containers introduce content. Their introductory
             # prose can mention arbitrary cities without setting paper region.
             break
-        text = re.sub(r"<[^>]+>", "", raw).replace("**", "").strip()
+        # 卷头行首偶尔带装饰性图标占位（如 `[IMG image3.jpeg]1.2025年安徽省初中学业水平考试`），
+        # 提取纯文本元信息前先剥离 [IMG ...]，避免把页眉图标带进 source/paper_title 并污染下游附件。
+        text = _plain_line(raw)
         title = _numbered_title(text)
         if re.match(r"^(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+[.．、]|[（(]\s*[）)]\s*\d+[.．、]|\d+[.．、]\s*\S)", text) and not title:
             break
@@ -153,7 +161,8 @@ def is_noise_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
-    return any(pattern.search(stripped) for pattern in NOISE_PATTERNS)
+    plain = _plain_line(stripped)
+    return any(pattern.search(stripped) or (plain and pattern.search(plain)) for pattern in NOISE_PATTERNS)
 
 
 def clean_body(text: str) -> tuple[str, list[dict], list[dict]]:
@@ -186,7 +195,7 @@ def clean_body(text: str) -> tuple[str, list[dict], list[dict]]:
         meta_hits = is_meta_line(line)
         if meta_hits:
             # 卷名/年份/地区页眉可能同时含题号，保守起见只在明确是整卷说明时剔除
-            normalized = re.sub(r"<[^>]+>", "", stripped).replace("**", "").strip()
+            normalized = _plain_line(stripped)
             in_header_evidence = any(e.startswith(f"正文第{index}行：") for e in meta.get("evidence", []))
             numbered_header = bool(_numbered_title(normalized)) and in_header_evidence
             if _looks_like_question_line(stripped) and not numbered_header:
@@ -213,7 +222,7 @@ def _strong_meta(stripped: str) -> bool:
 
 def _looks_like_question_line(stripped: str) -> bool:
     """带明确题号（`12.`、`**2****.**` 或 `( )12.`）的行属于题目，不当作元信息剔除。"""
-    normalized = re.sub(r"<[^>]+>", "", stripped).replace("**", "").strip()
+    normalized = _plain_line(stripped)
     return bool(re.search(r"(?:[(（]\s*[)）]\s*)?\b\d{1,3}\s*[.．、]\s*\S", normalized))
 
 

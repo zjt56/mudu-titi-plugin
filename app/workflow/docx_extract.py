@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import posixpath
 import re
+import struct
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -67,6 +68,95 @@ def blocking_warnings(warnings) -> list:
     return [w for w in (warnings or [])
             if _warning_text(w) != RAW_PRESERVED_GLYPH_WARNING
             and _warning_text(w) not in LAYOUT_ORDER_WARNINGS]
+
+
+def _png_size(data: bytes):
+    if data[:8] != b"\x89PNG\r\n\x1a\n" or len(data) < 24:
+        return None
+    return struct.unpack(">II", data[16:24])
+
+
+def _gif_size(data: bytes):
+    if not data.startswith((b"GIF87a", b"GIF89a")) or len(data) < 10:
+        return None
+    return struct.unpack("<HH", data[6:10])
+
+
+def _jpeg_size(data: bytes):
+    if not data.startswith(b"\xff\xd8"):
+        return None
+    index = 2
+    length = len(data)
+    while index + 9 < length:
+        if data[index] != 0xFF:
+            index += 1
+            continue
+        marker = data[index + 1]
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+            index += 2
+            continue
+        segment = struct.unpack(">H", data[index + 2:index + 4])[0]
+        if segment < 2:
+            break
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            height, width = struct.unpack(">HH", data[index + 5:index + 9])
+            return width, height
+        index += 2 + segment
+    return None
+
+
+def _webp_size(data: bytes):
+    if data[:4] != b"RIFF" or data[8:12] != b"WEBP" or len(data) < 30:
+        return None
+    chunk = data[12:16]
+    if chunk == b"VP8 ":
+        width, height = struct.unpack("<HH", data[26:30])
+        return width & 0x3FFF, height & 0x3FFF
+    if chunk == b"VP8L":
+        bits = struct.unpack("<I", data[21:25])[0]
+        return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+    if chunk == b"VP8X":
+        width = int.from_bytes(data[24:27], "little") + 1
+        height = int.from_bytes(data[27:30], "little") + 1
+        return width, height
+    return None
+
+
+def image_dimensions_from_bytes(data: bytes) -> tuple[int, int] | None:
+    """从图片字节头解析宽高（px），不引入 Pillow 依赖；认不出时返回 None。"""
+    if not data:
+        return None
+    for reader in (_png_size, _gif_size, _jpeg_size, _webp_size):
+        size = reader(data)
+        if size and size[0] and size[1]:
+            return int(size[0]), int(size[1])
+    return None
+
+
+def image_dimensions(path: Path) -> tuple[int, int] | None:
+    """只读文件头前 64KB 拿宽高（px）；无法读取或认不出格式时返回 None。"""
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(64 * 1024)
+    except OSError:
+        return None
+    return image_dimensions_from_bytes(head)
+
+
+def is_decorative_media(width: int | None, height: int | None, size: int, count: int = 1) -> bool:
+    """识别页眉横幅、栏目装饰胶囊（新考法/熟词生义等）及高频小图标，供提取与下游过滤共用。"""
+    if count >= 2 and 0 < size <= 20480 and (height is None or height <= 120):
+        return True
+    if width and height and height > 0:
+        ratio = width / height
+        # 横向小胶囊/栏目徽章（如 新考法 260x43、熟词生义 194x58、记笔记 151x58），
+        # 实质听力选项图最小高度通常 >= 69px，62px 以下扁长图签稳定属于装饰徽章。
+        if height <= 62 and ratio >= 2.4 and size <= 32768:
+            return True
+        # 卷头水印横幅或分隔条幅（如 木牍中考 46套 1091x191，长宽比 >= 4.8）。
+        if ratio >= 4.8 and (height <= 220 or size <= 300000):
+            return True
+    return False
 
 
 def _w(name):
@@ -330,21 +420,26 @@ class _Extractor:
             directory.mkdir(parents=True, exist_ok=True)
             if directory.is_symlink():
                 raise ValueError("Media output directory must not be a symlink")
+            raw_bytes = self.archive.read(member)
             number = 1
             while True:
                 name = base if number == 1 else f"{Path(base).stem}_{number}{Path(base).suffix}"
                 path = directory / name
                 try:
                     with path.open("xb") as handle:
-                        handle.write(self.archive.read(member))
+                        handle.write(raw_bytes)
                     break
                 except FileExistsError:
                     number += 1
-            self.saved[member] = (name, str(path), self.archive.getinfo(member).file_size)
-        name, path, size = self.saved[member]
-        self.media.append({"name": name, "path": path, "source_part": member,
-                           "relationship_id": rel_id, "block_index": self.block_index,
-                           "size": size, "occurrence": len(self.media)})
+            dim = image_dimensions_from_bytes(raw_bytes)
+            self.saved[member] = (name, str(path), self.archive.getinfo(member).file_size, dim)
+        name, path, size, dim = self.saved[member]
+        entry = {"name": name, "path": path, "source_part": member,
+                 "relationship_id": rel_id, "block_index": self.block_index,
+                 "size": size, "occurrence": len(self.media)}
+        if dim:
+            entry["width"], entry["height"] = dim
+        self.media.append(entry)
         return f"[IMG {name}]"
 
     def inline(self, node, style, breaks):
@@ -536,8 +631,8 @@ def extract_docx(source: Path, output_dir: Path) -> dict:
                     elif child.tag == _w("altChunk"):
                         extractor.warn("Embedded alternate document content was not extracted")
             append_content(body)
-            # 源头标记高频小尺寸装饰花边图标（<=3KB 且在正文/标题重复出现 >=2 次），
-            # 供下游在解析/标题剥离时与实质内容配图（如写作提纲、插图）区分，不删原文件。
+            # 源头标记高频小图标、扁平栏目徽章（如 新考法/熟词生义）及横幅水印，
+            # 供下游在提干/材料/解析/标题剥离时与实质内容配图区分，不删原文件。
             counts: dict[str, int] = {}
             for entry in extractor.media:
                 nm = entry.get("name") or ""
@@ -545,7 +640,8 @@ def extract_docx(source: Path, output_dir: Path) -> dict:
             for entry in extractor.media:
                 nm = entry.get("name") or ""
                 size = entry.get("size") or 0
-                if isinstance(size, int) and 0 < size <= 3072 and counts.get(nm, 0) >= 2:
+                if isinstance(size, int) and is_decorative_media(
+                        entry.get("width"), entry.get("height"), size, counts.get(nm, 0)):
                     entry["decorative"] = True
             from .source_objects import attach
             result = {"text": "\n".join(block["text"] for block in blocks),

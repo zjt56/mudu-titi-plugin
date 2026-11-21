@@ -23,6 +23,7 @@ _TASK_TEMPLATE_CACHE = TaskCache()
 
 from .workflow_constants import (
     AI_MARK,
+    AI_TRANSCRIPT_MARK,
     ANSWERS_ALLOWED,
     ARTIFACTS,
     CONTENT_OPTIONAL_INPUTS,
@@ -1076,13 +1077,13 @@ def _provenance_text(value):
     """
     text = str(value or "")
     text = re.sub(r"</?(?:u|b|strong|em|i|sup|sub)(?:\s[^>]*)?>", "", text, flags=re.I)
-    text = text.replace(AI_MARK, "")
+    text = text.replace(AI_MARK, "").replace(AI_TRANSCRIPT_MARK, "")
     quotes = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
     text = text.translate(quotes)
     return re.sub(r"[\s\u3000\*]+", "", text)
 
 
-def _provenance(row, source_text, expected_answer=None):
+def _provenance(row, source_text, expected_answer=None, *, verified_transcript_explanations=None):
     answer, explanation = row.get("answer"), row.get("explanation")
     if not isinstance(answer, str) or not isinstance(explanation, str):
         raise ValueError("answer and explanation must be strings")
@@ -1091,10 +1092,11 @@ def _provenance(row, source_text, expected_answer=None):
     normalized_answer = _answer_comparison_text(answer)
     if answer and not normalized_answer:
         raise ValueError("Answer has no content after formatting normalization")
-    if answer and AI_MARK in answer:
-        raise ValueError("AI provenance belongs in answer, never answer")
+    if answer and (AI_MARK in answer or AI_TRANSCRIPT_MARK in answer):
+        raise ValueError("AI provenance belongs in explanation, never answer")
     if answer and expected_answer and normalized_answer != _answer_comparison_text(expected_answer):
         raise ValueError("Answer differs from validated supplied answers")
+    # （AI转录）仅适用于工作台真实补全的听力转录解析，绝不可用于豁免未溯源的答案。
     if (answer and not expected_answer
             and not _answer_in_source(answer, source_text)
             and not explanation.endswith(AI_MARK)):
@@ -1103,15 +1105,20 @@ def _provenance(row, source_text, expected_answer=None):
     # 「（AI生成，待校对）」标记；缺失填「无」。解析只需在文本归一化后能在材料中找到
     # （原卷正文/答案册/附录），允许带入 <u> 画线、首尾标点与全半角差异。
     if explanation and not content_rules.is_placeholder(explanation):
-        # 明确标注的 AI 生成解析仍允许（历史能力，末尾带标记即可）；
-        if not explanation.endswith(AI_MARK):
-            norm_src = _provenance_text(source_text)
-            # 原卷听力稿按要求逐字补进解析时带「听力录音材料：」标识，该标识本身
-            # 不在原卷正文里；逐段核对，标识以外的每个片段都必须能回到来源原文。
-            for piece in re.split(r"\n*\s*听力录音材料\s*[：:]\s*\n?", explanation):
-                norm_ex = _provenance_text(piece)
-                if norm_ex and norm_ex not in norm_src:
-                    raise ValueError("Explanation not found in supplied source material (verbatim after normalizing marks)")
+        if explanation.endswith(AI_MARK):
+            return
+        if explanation.endswith(AI_TRANSCRIPT_MARK):
+            # 转录豁免必须绑定工作台真实写入的听力转录记录，不能仅凭后缀放行任意未溯源文本。
+            if not (verified_transcript_explanations and explanation in verified_transcript_explanations):
+                raise ValueError("AI transcript provenance requires verified workbench listening transcript record")
+            return
+        norm_src = _provenance_text(source_text)
+        # 原卷听力稿按要求逐字补进解析时带「听力录音材料：」标识，该标识本身
+        # 不在原卷正文里；逐段核对，标识以外的每个片段都必须能回到来源原文。
+        for piece in re.split(r"\n*\s*听力录音材料\s*[：:]\s*\n?", explanation):
+            norm_ex = _provenance_text(piece)
+            if norm_ex and norm_ex not in norm_src:
+                raise ValueError("Explanation not found in supplied source material (verbatim after normalizing marks)")
 
 
 def _normalize_blank_text(text):
@@ -1624,12 +1631,23 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             problems = taxonomy.check_question_labels(label_row)
             if problems:
                 raise ValueError(f"{unit['unit_id']}: Invalid knowledge labels: " + "; ".join(problems))
+            verified_tx = set()
+            if str(row.get("type") or unit.get("type") or "").startswith("听力"):
+                from . import manual_content as _mc
+                _mc_edits = (_mc.load(batch) or {}).get("edits") or {}
+                _u_edit = _mc_edits.get(unit["unit_id"])
+                if (isinstance(_u_edit, dict) and _u_edit.get("ai_supplement") is True
+                        and isinstance(_u_edit.get("explanation"), str)
+                        and _u_edit["explanation"].endswith(AI_TRANSCRIPT_MARK)):
+                    verified_tx.add(_u_edit["explanation"])
             if unit["unit_kind"] == "standalone":
-                _provenance(row, source_text, answers.get(question_key(unit, unit["numbers"][0])))
+                _provenance(row, source_text, answers.get(question_key(unit, unit["numbers"][0])),
+                            verified_transcript_explanations=verified_tx)
             elif not isinstance(row.get("answer"), str) or not isinstance(row.get("explanation"), str):
                 raise ValueError("Group answer/explanation must be strings")
             for child in children:
-                _provenance(child, source_text, answers.get(question_key(unit, child["number"])))
+                _provenance(child, source_text, answers.get(question_key(unit, child["number"])),
+                            verified_transcript_explanations=verified_tx)
         if stage == "assemble":
             from .question_content import (apply_required_writing_stem, audit_batch_source,
                                            restore_source_fidelity, restore_source_stems)
@@ -1693,7 +1711,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             # 本地批次必须与题库线上格式一致：来源字段提到顶层、选项转字符串数组、
             # 分类只保留固定目录值、[IMG] 按媒体映射转 attachments。全部校验通过后
             # 再做确定性规范化，不改变任何已通过的语义内容。
-            from .wire_format import normalize_item
+            from .wire_format import decorative_names as _collect_decorative, normalize_item
             media_map = _media_map(Path(batch))
             confirmed = context.get("01_source/structure.confirmed.json", {})
             meta = confirmed.get("meta", {}) if isinstance(confirmed, dict) else {}
@@ -1722,15 +1740,10 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 for entry in audio_rows:
                     if isinstance(entry, dict) and isinstance(entry.get("file"), str):
                         audio[str(entry.get("unit_id"))] = entry["file"]
-            decorative_names = set()
-            ext_data = context.get("01_source/extraction.json")
-            if isinstance(ext_data, dict):
-                for media_entry in ext_data.get("media") or []:
-                    if isinstance(media_entry, dict) and media_entry.get("decorative") and media_entry.get("name"):
-                        decorative_names.add(str(media_entry["name"]))
+            decorative = _collect_decorative(batch, extraction=context.get("01_source/extraction.json"))
             for row in payload.get("items", []):
                 normalized = normalize_item(row, media_map, meta, materials, audio,
-                                            decorative_names=decorative_names or None)
+                                            decorative_names=decorative or None)
                 row.clear()
                 row.update(normalized)
         return

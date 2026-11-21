@@ -508,6 +508,31 @@ class StructureGateTest(unittest.TestCase):
             structure_gate.run_gate(batch)
         ai_forced.assert_called_once()
 
+    def test_nonblocking_floating_object_extraction_warning_still_skips_structure_ai(self):
+        import os
+        from unittest.mock import patch
+        structure = {
+            "sections": [{"type": "单项填空", "questions": [1, 2]}],
+            "unresolved": [{"code": "EXTRACTION_WARNING", "message": "原生/OCR 提取有警告，详见 extraction.json"}],
+        }
+        body = "2025年安徽省初中学业水平考试\n1. First?\nA. a  B. b\n2. Second?\nA. c  B. d\n"
+        batch = make_batch(self.root, structure, body)
+        (batch / "01_source" / "extraction.json").write_text(
+            json.dumps({
+                "warnings": ["Floating object encountered; XML anchor order may differ from visual order"]
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"WF_STRUCTURE_AI": "1"}), \
+             patch("workflow.structure_ai.auto_classify") as ai_call:
+            report = structure_gate.run_gate(batch)
+        ai_call.assert_not_called()
+        self.assertTrue(report["passed"], report["blockers"])
+        codes = {w.get("code") for w in report["warnings"]}
+        self.assertIn("AI_STRUCTURE_SKIPPED", codes)
+        self.assertIn("EXTRACTION_WARNING", codes)
+        self.assertTrue(report["layout_required"])
+
 
 if __name__ == "__main__":
     unittest.main()
