@@ -15,8 +15,8 @@ test('Harness window drag is limited to the recording panel header', () => {
       createElement: (tag, props, ...children) => ({ tag, props, children }),
     }),
     T: { tab: () => ({}), tabbar: vm.runInNewContext('(' + tabbar + ')') },
-    TEXT: {},
-    docIcon() {},
+    TEXT: vm.runInNewContext('(' + source.match(/var TEXT = (\{[\s\S]*?\n    \});/)[1] + ')'),
+    BRAND_LOGO: source.match(/var BRAND_LOGO = '([^']+)'/)[1],
     closeIcon() {},
     UploadView() {},
     WorkbenchTab() {},
@@ -28,6 +28,11 @@ test('Harness window drag is limited to the recording panel header', () => {
   assert.equal(header.props['data-window-drag'], '');
   assert.equal(header.props.style.paddingInlineStart, 'max(18px, var(--dsh-frame-leading-clearance, 0px))');
   assert.equal(header.props.style.paddingInlineEnd, 18);
+  const [logo, title] = header.children[0].children;
+  assert.equal(title.children[0], '木牍题库系统');
+  assert.equal(logo.tag, 'img');
+  assert.match(logo.props.src, /^data:image\/webp;base64,UklGR/);
+  assert.equal(logo.props.draggable, false);
   assert.ok(!('data-window-drag' in panel.props));
   assert.ok(!('data-window-drag' in body.props));
   const tabList = header.children.find(child => child.props.role === 'tablist');
