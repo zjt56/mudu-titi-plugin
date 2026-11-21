@@ -85,3 +85,31 @@ test('shipped router has no pinned provider or model', () => {
   const router = JSON.parse(fs.readFileSync(path.join(root, 'config/model-router.json'), 'utf8'));
   assert.deepEqual(router.default, {});
 });
+
+test('articleSummary & explanation model card supports follow-default and per-item custom override', () => {
+  const client = fs.readFileSync(path.join(root, 'lib/client.js'), 'utf8');
+  assert.match(client, /aiSupplementModels:\s*'文章大意、答案解析模型'/);
+  assert.match(client, /\['ai_summary',\s*'文章大意'\]/);
+  assert.match(client, /\['ai_explanation',\s*'答案解析'\]/);
+  assert.match(client, /当前模型/);
+
+  const start = client.indexOf('      const inferProfile = () =>');
+  const end = client.indexOf('      function ModelSelect(', start);
+  let saved = null;
+  const context = vm.createContext({
+    router: {
+      default: { provider: 'magpie', model: 'auto/deepseek-v4.1-flash' },
+      roles: {
+        ai_summary: { provider: 'magpie', model: 'auto/deepseek-v4.1-flash' },
+        ai_explanation: { provider: 'other', model: 'custom-exp' },
+      },
+      stages: {},
+      review: { rounds: {} },
+    },
+    persist: (next) => { saved = next; },
+  });
+  vm.runInContext(client.slice(start, end) + '\nthis.setDefault = setDefault;', context);
+  context.setDefault({ provider: 'deepseek-official', model: 'deepseek-chat' });
+  assert.equal(saved.roles.ai_summary, undefined, 'ai_summary following old default should follow new default');
+  assert.equal(saved.roles.ai_explanation.model, 'custom-exp', 'custom ai_explanation should stay pinned');
+});

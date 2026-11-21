@@ -1203,6 +1203,12 @@ def work_in_flight() -> bool:
     with _audio_job["lock"]:
         if _audio_job.get("running"):
             return True
+    try:
+        from workflow import ai_supplement
+        if ai_supplement.has_active_jobs():
+            return True
+    except (ImportError, OSError, RuntimeError):
+        return True
     return _operations_leased()
 
 
@@ -1874,13 +1880,14 @@ def purge_batch(name: str, confirm_name: str) -> dict:
         raise ValueError("收件箱根目录越出工作区")
     if name in _RECYCLE_DIRS:
         raise ValueError("拒绝删除共享回收目录")
-    from workflow import supervisor as wf_supervisor
+    from workflow import ai_supplement, supervisor as wf_supervisor
     with wf_supervisor.advance_claim(folder) as acquired:
         if not acquired:
             raise ValueError("批次正在运行或执行运维动作，请稍后删除")
         if ((_advance_state.get(name) or {}).get("running")
                 or (_upload_jobs.get(name) or {}).get("running")
-                or (_audio_job.get("running") and _audio_job.get("batch") == name)):
+                or (_audio_job.get("running") and _audio_job.get("batch") == name)
+                or ai_supplement.is_running(folder)):
             raise ValueError("批次正在运行，请等待任务结束后再删除")
         targets = [path for path in (folder, INBOX / name) if path.exists() or path.is_symlink()]
         targets.extend(_purge_archive_targets(root, name))
@@ -4152,6 +4159,7 @@ class Handler(BaseHTTPRequestHandler):
                 locks.enter_context(_agent_lock(0))
             except AgentError as exc:
                 raise ValueError(busy) from exc
+            locks.enter_context(ai_supplement.content_write_lock(folder, timeout=5.0))
             return ai_supplement.save_content_edit(folder, unit_id, patch)
 
     @staticmethod

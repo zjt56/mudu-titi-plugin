@@ -230,15 +230,23 @@ def _scoped_context(source, unit, *, strict_end=True):
 
 
 def _prove_scoped_child(source, unit, number, result):
-    from .question_identity import printed_anchors
+    from .question_identity import (
+        ANSWER_INFERRED_IMAGE_BINDING,
+        SINGLE_WRITING_BINDING,
+        UNNUMBERED_SECTION_BINDING,
+        printed_anchors,
+    )
 
     context = _scoped_context(source, unit)
     if context is None:
         return dict(result, reason='scoped 来源窗口或逐字题干未验证')
     span = unit.get('source_span') or {}
-    # The scoped identity uses 1 as an internal alias for this writing task.
-    # Numbered instructions inside the prompt must not become child anchors.
-    if span.get('number_binding') == 'single_writing_section' and span.get('printed_numbers') == []:
+    binding = span.get('number_binding')
+    # All scoped-v1 unnumbered bindings (single_writing_section, unnumbered_section,
+    # answer_inferred_image_group) use internal/inferred aliases instead of printed
+    # body numbers; each must prove its exact source window and fail closed on
+    # truncation, injected printed numbers, or cross-section spoofing.
+    if binding == SINGLE_WRITING_BINDING and span.get('printed_numbers') == []:
         from .sync_practice import writing_prompt, writing_prompt_end
         heading, first, last = context['heading'], context['first'], context['last']
         lines = context['lines']
@@ -255,6 +263,70 @@ def _prove_scoped_child(source, unit, number, result):
         return dict(result, status='proven', reason='', start=start, end=end,
                     text=source[start:end], method='scoped-unnumbered-writing/v1',
                     scope_start=start, scope_end=end)
+    if binding == UNNUMBERED_SECTION_BINDING and span.get('printed_numbers') == []:
+        from .preview import _strong_number
+        heading, first, last, sec_end = (
+            context['heading'], context['first'], context['last'], context['end'],
+        )
+        lines = context['lines']
+        stem = '\n'.join(lines[first - 1:last]).strip()
+        whole_body = (
+            heading < first <= last <= sec_end
+            and not any(line.strip() for line in lines[heading:first - 1])
+            and not any(line.strip() for line in lines[last:sec_end])
+        )
+        standalone_response = False
+        if not whole_body and unit.get('unit_kind') == 'standalone' and heading < first <= last <= sec_end:
+            from .question_content import unnumbered_text_responses
+            windows = unnumbered_text_responses(lines[heading:sec_end])
+            standalone_response = any(
+                (first, last) == (heading + lo + 1, heading + hi + 1)
+                for lo, hi in windows
+            )
+        body_lines = lines[first - 1:last]
+        has_strong_number = any(_strong_number(line) is not None for line in body_lines)
+        has_group_anchors = unit.get('unit_kind') == 'group' and bool(printed_anchors(body_lines))
+        if (unit.get('numbers') != [1] or number != '1'
+                or not (whole_body or standalone_response)
+                or stem != unit['stem'].strip()
+                or has_strong_number or has_group_anchors):
+            return dict(result, reason='scoped 无号大题来源窗口未完整验证')
+        start = context['scope_start'] if whole_body else context['matched'][0][1]
+        end = context['matched'][-1][2]
+        return dict(result, status='proven', reason='', start=start, end=end,
+                    text=source[start:end], method='scoped-unnumbered-section/v1',
+                    scope_start=context['scope_start'], scope_end=context['scope_end'])
+    if binding == ANSWER_INFERRED_IMAGE_BINDING and span.get('printed_numbers') == []:
+        heading, first, last, sec_end = (
+            context['heading'], context['first'], context['last'], context['end'],
+        )
+        lines = context['lines']
+        inferred = span.get('inferred_numbers')
+        evidence = span.get('inferred_evidence')
+        valid_inferred = (
+            isinstance(inferred, list) and bool(inferred)
+            and all(type(n) is int and n >= 1 for n in inferred)
+            and len(set(inferred)) == len(inferred)
+            and inferred == list(unit.get('numbers') or [])
+            and int(number) in inferred
+            and isinstance(evidence, list) and bool(evidence)
+        )
+        whole_body = (
+            heading < first <= last <= sec_end
+            and not any(line.strip() for line in lines[heading:first - 1])
+            and not any(line.strip() for line in lines[last:sec_end])
+        )
+        body_lines = lines[first - 1:last]
+        stem = '\n'.join(body_lines).strip()
+        has_media = any(tag in line for line in body_lines for tag in ('[IMG ', '[TABLE'))
+        if (not valid_inferred or not whole_body or not has_media
+                or stem != unit['stem'].strip()
+                or bool(printed_anchors(lines[heading:sec_end]))):
+            return dict(result, reason='scoped 图片反推题组来源窗口未完整验证')
+        start, end = context['scope_start'], context['matched'][-1][2]
+        return dict(result, status='proven', reason='', start=start, end=end,
+                    text=source[start:end], method='scoped-answer-inferred-image-group/v1',
+                    scope_start=context['scope_start'], scope_end=context['scope_end'])
     # A duplicate printed target anywhere in this section is ambiguous, even if
     # one occurrence happens to match the persisted stem or narrower unit span.
     if _blank_marker(number).search(source[context['scope_start']:context['scope_end']]):

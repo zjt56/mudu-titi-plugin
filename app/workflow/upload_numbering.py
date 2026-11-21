@@ -12,8 +12,14 @@ import hashlib
 import json
 from pathlib import Path
 
+from .question_identity import (
+    ANSWER_INFERRED_IMAGE_BINDING,
+    SINGLE_WRITING_BINDING,
+    UNNUMBERED_SECTION_BINDING,
+)
+
 VERSION = "upload-workflow.upload-numbering/v1"
-_UNNUMBERED = {"single_writing_section", "unnumbered_section"}
+_UNNUMBERED = {SINGLE_WRITING_BINDING, UNNUMBERED_SECTION_BINDING}
 
 
 def _positive(value):
@@ -104,7 +110,7 @@ def _prove_unnumbered(unit, context):
         rebuilt_text, _ = question_draft._bound_source(matches[0], context["source"], context["cleaned"], context["fresh"])
         if not text or not rebuilt_text or "".join(text.split()) != "".join(rebuilt_text.split()):
             return None, "确认无号窗口与当前来源重建不一致"
-        if _binding(unit) == "unnumbered_section" and (unit.get("source_span") or {}).get("printed_numbers") != []:
+        if _binding(unit) == UNNUMBERED_SECTION_BINDING and (unit.get("source_span") or {}).get("printed_numbers") != []:
             return None, "unnumbered_section 必须明确 printed_numbers=[]"
         proof["source_text_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
         return proof, None
@@ -134,8 +140,8 @@ def project_batch(batch_dict, batch_dir=None):
         kind = item.get("unit_kind", "group" if children else "standalone")
         values = _numbers(item)
         candidates = by_id.get(uid, [])
-        inferred_binding = (_binding(item) == "answer_inferred_image_group"
-                            or any(_binding(u) == "answer_inferred_image_group" for u in candidates))
+        inferred_binding = (_binding(item) == ANSWER_INFERRED_IMAGE_BINDING
+                            or any(_binding(u) == ANSWER_INFERRED_IMAGE_BINDING for u in candidates))
         marked = _binding(item) in _UNNUMBERED or any(_binding(u) in _UNNUMBERED for u in candidates)
         unnumbered = False
         proof = None
@@ -148,7 +154,7 @@ def project_batch(batch_dict, batch_dir=None):
                 inferred_nums = span.get("inferred_numbers")
                 same = (confirmed.get("unit_kind") == kind and _numbers(confirmed) == values
                         and inferred_nums == values
-                        and _binding(confirmed) == "answer_inferred_image_group"
+                        and _binding(confirmed) == ANSWER_INFERRED_IMAGE_BINDING
                         and all(key not in item or item[key] == confirmed.get(key)
                                 for key in ("section_id", "question_ids"))
                         and ("source_span" not in item or item["source_span"] == confirmed.get("source_span"))

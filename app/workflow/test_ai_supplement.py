@@ -394,6 +394,254 @@ class AiSupplementTest(unittest.TestCase):
             upload_content.collect_source_index = orig_collect
         self.assertEqual([t["key"] for t in targets], ["sec2-u1"])
 
+    def test_prompt_emits_agent_header_and_resolves_custom_or_default_model(self):
+        import os
+        targets = ai_supplement.eligible_targets(self.batch, "articleSummary")
+        p_sum = ai_supplement._build_prompt("articleSummary", targets)
+        self.assertIn("Stage: ai_supplement\nAgent: ai_summary\n", p_sum)
+
+        exp_targets = ai_supplement.eligible_targets(self.batch, "explanation")
+        p_exp = ai_supplement._build_prompt("explanation", exp_targets)
+        self.assertIn("Stage: ai_supplement\nAgent: ai_explanation\n", p_exp)
+
+        router_path = self.batch / "router.json"
+        router_path.write_text(json.dumps({
+            "default": {"provider": "deepseek-official", "model": "deepseek-chat"},
+            "roles": {
+                "ai_summary": {"provider": "opencode-go", "model": "fast-summary-model"},
+            },
+        }), encoding="utf-8")
+        old_env = os.environ.get("WF_ROUTER_FILE")
+        os.environ["WF_ROUTER_FILE"] = str(router_path)
+        try:
+            sum_info = ai_supplement.resolve_model_info("articleSummary")
+            exp_info = ai_supplement.resolve_model_info("explanation")
+        finally:
+            if old_env is None:
+                os.environ.pop("WF_ROUTER_FILE", None)
+            else:
+                os.environ["WF_ROUTER_FILE"] = old_env
+
+        self.assertEqual(sum_info["model"], "fast-summary-model")
+        self.assertEqual(sum_info["provider"], "opencode-go")
+        self.assertEqual(sum_info["model_source"], "custom")
+        self.assertEqual(exp_info["model"], "deepseek-chat")
+        self.assertEqual(exp_info["provider"], "deepseek-official")
+        self.assertEqual(exp_info["model_source"], "default")
+
+    def test_start_background_runs_independently_while_pipeline_holds_agent_lock(self):
+        import time
+        from workflow import local_agent, supervisor
+
+        # Simulate main upload pipeline holding global _agent_lock AND auto lock on this batch
+        with local_agent._agent_lock(0), supervisor._try_file_lock(supervisor._auto_lock_path(self.batch)):
+            initial = ai_supplement.start_background(
+                self.batch,
+                "articleSummary",
+                invoke_fn=lambda p, d: {"result": {"items": [{"key": "u-reading", "text": "独立任务大意。"}]}},
+            )
+            self.assertEqual(initial["status"], "running")
+            self.assertIn("job_id", initial)
+
+            deadline = time.monotonic() + 5.0
+            prog = initial
+            while time.monotonic() < deadline:
+                prog = ai_supplement.read_progress(self.batch)
+                if prog["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+        self.assertEqual(prog["status"], "done", prog)
+        self.assertEqual(prog["applied"], 1)
+        updated = json.loads((self.batch / "06_batch/batch_meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(updated["items"][0]["articleSummary"], "独立任务大意。" + upload_content.AI_MARK)
+
+    def test_supplement_preserves_manual_edit_saved_during_generation(self):
+        def fake_invoke(prompt, run_dir):
+            # User manually edits articleSummary while AI is still generating
+            ai_supplement.save_content_edit(self.batch, "u-reading", {
+                "articleSummary": "人工刚写好的正式大意。",
+            })
+            return {"result": {"items": [{"key": "u-reading", "text": "AI晚到的大意。"}]}}
+
+        res = ai_supplement.supplement(self.batch, "articleSummary", invoke_fn=fake_invoke)
+        self.assertEqual(res["applied"], 0)
+        updated = json.loads((self.batch / "06_batch/batch_meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(updated["items"][0]["articleSummary"], "人工刚写好的正式大意。")
+
+    def test_read_progress_recovers_stale_running_status(self):
+        prog_path = self.batch / ai_supplement.PROGRESS_REL
+        prog_path.parent.mkdir(parents=True, exist_ok=True)
+        prog_path.write_text(json.dumps({
+            "status": "running",
+            "mode": "articleSummary",
+            "total": 1,
+            "completed": 0,
+            "applied": 0,
+            "pid": 99999999,
+            "message": "正在准备生成（共 1 项）…",
+        }, ensure_ascii=False), encoding="utf-8")
+        prog = ai_supplement.read_progress(self.batch)
+        self.assertEqual(prog["status"], "error")
+        self.assertIn("中断", prog["message"])
+
+    def test_duplicate_start_background_does_not_deadlock(self):
+        import threading
+        import time
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_invoke(prompt, run_dir):
+            started.set()
+            release.wait(timeout=5.0)
+            return {"result": {"items": [{"key": "u-reading", "text": "防重复大意。"}]}}
+
+        first = ai_supplement.start_background(self.batch, "articleSummary", invoke_fn=slow_invoke)
+        self.assertEqual(first["status"], "running")
+        self.assertTrue(started.wait(timeout=3.0))
+
+        # Second request on the same batch must return immediately without deadlocking _JOBS_LOCK
+        second = ai_supplement.start_background(self.batch, "articleSummary", invoke_fn=slow_invoke)
+        self.assertEqual(second["status"], "running")
+        self.assertEqual(second["job_id"], first["job_id"])
+
+        release.set()
+        deadline = time.monotonic() + 5.0
+        prog = second
+        while time.monotonic() < deadline:
+            prog = ai_supplement.read_progress(self.batch)
+            if prog["status"] != "running":
+                break
+            time.sleep(0.05)
+        self.assertEqual(prog["status"], "done", prog)
+        self.assertEqual(prog["applied"], 1)
+
+    def test_answer_change_during_generation_skips_changed_target_only(self):
+        def fake_invoke(prompt, run_dir):
+            # While AI generates explanation for u-short (answer='is'), user changes answer to 'was'
+            ai_supplement.save_content_edit(self.batch, "u-short", {"answer": "was"})
+            return {
+                "result": {
+                    "items": [
+                        {"key": "u-reading/1", "text": "根据首句可知选A。"},
+                        {"key": "u-short", "text": "主语单三一般现在时填is。"},
+                    ]
+                }
+            }
+
+        res = ai_supplement.supplement(self.batch, "explanation", invoke_fn=fake_invoke)
+        self.assertEqual(res["applied"], 1)
+        self.assertEqual(res["skipped_changed"], 1)
+        updated = json.loads((self.batch / "06_batch/batch_meta.json").read_text(encoding="utf-8"))
+        # Unchanged target u-reading/1 is committed
+        self.assertEqual(updated["items"][0]["subquestions"][0]["explanation"], "根据首句可知选A。" + upload_content.AI_MARK)
+        # Changed target u-short keeps its new answer 'was' and refuses stale 'is' explanation
+        self.assertEqual(updated["items"][2]["answer"], "was")
+        self.assertEqual(updated["items"][2]["explanation"], "无")
+
+    def test_deleted_batch_is_not_recreated_by_background_worker_and_work_in_flight(self):
+        import shutil
+        import threading
+        import time
+        from workbench import server
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_invoke(prompt, run_dir):
+            started.set()
+            release.wait(timeout=5.0)
+            return {"result": {"items": [{"key": "u-reading", "text": "删除后的幽灵大意。"}]}}
+
+        ai_supplement.start_background(self.batch, "articleSummary", invoke_fn=slow_invoke)
+        self.assertTrue(started.wait(timeout=3.0))
+        self.assertTrue(ai_supplement.is_running(self.batch))
+        self.assertTrue(ai_supplement.has_active_jobs())
+        self.assertTrue(server.work_in_flight())
+
+        # Force-delete the batch directory mid-flight; worker must NOT recreate it on exit
+        shutil.rmtree(self.batch)
+        self.assertFalse(self.batch.exists())
+        release.set()
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and ai_supplement.has_active_jobs():
+            time.sleep(0.05)
+
+        self.assertFalse(self.batch.exists(), "background worker must not recreate deleted batch dir")
+        self.assertFalse(ai_supplement.has_active_jobs())
+
+    def test_busy_run_lock_caches_pending_candidates_and_reuses_without_reinvoking(self):
+        from workflow import supervisor
+
+        run_lock = self.batch / "workflow" / ".run.lock"
+        run_lock.parent.mkdir(parents=True, exist_ok=True)
+        run_lock.touch()
+
+        calls = []
+        def first_invoke(prompt, run_dir):
+            calls.append(1)
+            return {"result": {"items": [{"key": "u-reading", "text": "暂存的珍贵大意。"}]}}
+
+        with supervisor._try_file_lock(run_lock):
+            with self.assertRaises(ValueError) as ctx:
+                ai_supplement.supplement(self.batch, "articleSummary", invoke_fn=first_invoke)
+        self.assertIn("已暂存", str(ctx.exception))
+        self.assertEqual(len(calls), 1)
+        prog = ai_supplement.read_progress(self.batch)
+        self.assertEqual(prog["completed"], 1)
+        self.assertEqual(prog["pending_saved"], 1)
+        self.assertTrue((self.batch / ai_supplement.PENDING_REL).is_file())
+
+        # Now .run.lock is free: retrying commits cached candidate with ZERO model calls
+        def should_not_be_called(prompt, run_dir):
+            raise AssertionError("model should not be re-invoked when bound pending candidate matches")
+
+        res = ai_supplement.supplement(self.batch, "articleSummary", invoke_fn=should_not_be_called)
+        self.assertEqual(res["applied"], 1)
+        self.assertFalse((self.batch / ai_supplement.PENDING_REL).exists())
+        updated = json.loads((self.batch / "06_batch/batch_meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(updated["items"][0]["articleSummary"], "暂存的珍贵大意。" + upload_content.AI_MARK)
+
+    def test_validate_runs_outside_content_write_lock_and_pid_uses_operations(self):
+        import os
+        from workflow import manifest as mf, operations, runner
+
+        self.assertIs(ai_supplement._pid_alive(os.getpid()), True)
+        orig_op_alive = operations._pid_alive
+        seen_pids = []
+        operations._pid_alive = lambda pid: (seen_pids.append(pid) or False)
+        try:
+            self.assertFalse(ai_supplement._pid_alive(123456))
+            self.assertEqual(seen_pids, [123456])
+        finally:
+            operations._pid_alive = orig_op_alive
+
+        # Verify runner.do_validate executes AFTER content_write_lock is released
+        (self.batch / "workflow").mkdir(exist_ok=True)
+        (self.batch / "attachments").mkdir(exist_ok=True)
+        doc = self.batch / "attachments" / "s.docx"
+        doc.write_bytes(b"x")
+        mf.save(self.batch, mf.new_manifest("b1", self.batch, {"source": {"path": str(doc), "exists": True}}, {}))
+
+        lock_free_during_validate = []
+        orig_validate = runner.do_validate
+        def fake_validate(batch_dir, current):
+            with ai_supplement.content_write_lock(batch_dir, timeout=0.0):
+                lock_free_during_validate.append(True)
+            return 0
+        runner.do_validate = fake_validate
+        try:
+            res = ai_supplement.supplement(
+                self.batch, "articleSummary",
+                invoke_fn=lambda p, d: {"result": {"items": [{"key": "u-reading", "text": "无锁体检大意。"}]}},
+            )
+        finally:
+            runner.do_validate = orig_validate
+        self.assertEqual(res["applied"], 1)
+        self.assertEqual(lock_free_during_validate, [True])
+
 
 if __name__ == "__main__":
     unittest.main()

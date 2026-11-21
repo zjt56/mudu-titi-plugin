@@ -12,6 +12,27 @@ import re
 
 VERSION = "scoped-v1"
 FIELDS = ("identity_version", "section_id", "source_section", "question_ids")
+SINGLE_WRITING_BINDING = "single_writing_section"
+UNNUMBERED_SECTION_BINDING = "unnumbered_section"
+ANSWER_INFERRED_IMAGE_BINDING = "answer_inferred_image_group"
+UNNUMBERED_BINDINGS = frozenset({
+    SINGLE_WRITING_BINDING,
+    UNNUMBERED_SECTION_BINDING,
+    ANSWER_INFERRED_IMAGE_BINDING,
+})
+
+
+def number_binding(unit: dict) -> str | None:
+    span = unit.get("source_span") if isinstance(unit, dict) else None
+    value = span.get("number_binding") if isinstance(span, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def is_unnumbered_binding(unit: dict) -> bool:
+    span = unit.get("source_span") if isinstance(unit, dict) else None
+    return (isinstance(span, dict)
+            and span.get("number_binding") in UNNUMBERED_BINDINGS
+            and span.get("printed_numbers") == [])
 
 
 def question_key(unit: dict, number) -> str:
@@ -103,7 +124,7 @@ def _anchor(unit, lines):
     if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
         raise ValueError("scoped identity requires a valid source span")
     span = unit.get("source_span") or {}
-    if span.get("number_binding") == "single_writing_section" and span.get("printed_numbers") == []:
+    if span.get("number_binding") == SINGLE_WRITING_BINDING and span.get("printed_numbers") == []:
         return start
     wanted = set(unit.get("numbers") or [])
     for index, number in printed_anchors(lines[start - 1:end]):
@@ -111,8 +132,7 @@ def _anchor(unit, lines):
             return start + index
     # Unnumbered source tasks (including answer-inferred image groups) are bound
     # to an explicit original section window.
-    if (unit.get("source_span") or {}).get("number_binding") in {
-            "single_writing_section", "unnumbered_section", "answer_inferred_image_group"}:
+    if span.get("number_binding") in UNNUMBERED_BINDINGS:
         return start
     raise ValueError("scoped identity requires a printed question anchor")
 
@@ -226,9 +246,7 @@ def assign_scoped(units, source_lines, sections=None, previous=None, visual_colu
         qids = {}
         for n in row.get('numbers') or []:
             local = lines[start - 1:end]
-            span = row.get("source_span") or {}
-            pos = (None if span.get("number_binding") in {"single_writing_section", "answer_inferred_image_group"}
-                   and span.get("printed_numbers") == [] else question_position(local, n))
+            pos = (None if is_unnumbered_binding(row) else question_position(local, n))
             qanchor = start + pos if pos is not None else anchor
             qids[str(n)] = existing.get(str(n)) or f'{sid}-l{qanchor}{column_suffix}-q{n}'
         row['question_ids'] = qids

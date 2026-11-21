@@ -469,6 +469,153 @@ class ScopedChildSourceTest(unittest.TestCase):
         cross_bound["source_span"]["end_line"] = dup_units[1]["source_span"]["end_line"]
         self.assertEqual(prove_child(cleaned_d, cross_bound, 1)["status"], "uncertain")
 
+    def test_unnumbered_section_and_answer_inferred_image_group_contract_parity(self):
+        from workflow import upload_numbering
+        from workflow.question_identity import (
+            ANSWER_INFERRED_IMAGE_BINDING,
+            SINGLE_WRITING_BINDING,
+            UNNUMBERED_BINDINGS,
+            UNNUMBERED_SECTION_BINDING,
+            is_unnumbered_binding,
+        )
+        from workflow.structure_gate import _build_scoped_units, _scoped_source_errors
+
+        # 契约一致性：所有无印刷题号绑定口径由 question_identity 统一定义并被下游共享
+        self.assertEqual(
+            UNNUMBERED_BINDINGS,
+            frozenset({SINGLE_WRITING_BINDING, UNNUMBERED_SECTION_BINDING, ANSWER_INFERRED_IMAGE_BINDING}),
+        )
+        self.assertEqual(
+            upload_numbering._UNNUMBERED | {ANSWER_INFERRED_IMAGE_BINDING},
+            UNNUMBERED_BINDINGS,
+        )
+
+        # 1) unnumbered_section（整段图片题组，复现 0226 第二课时Pro u67 形态）
+        img_source = (
+            "Ⅲ. 根据所给汉语提示完成表格中的填词游戏,并补充第6题中所缺的字母\n"
+            "[IMG image2.jpeg]\n"
+        )
+        img_lines = img_source.splitlines()
+        img_sections = [{
+            "title": img_lines[0],
+            "source_line": 1,
+            "source_end_line": 2,
+            "type": "阅读理解",
+            "questions": [],
+        }]
+        img_units = _build_scoped_units(img_sections, [], img_lines)
+        self.assertEqual(_scoped_source_errors(img_units, img_sections, img_lines), [])
+        self.assertEqual(len(img_units), 1)
+        img_unit = img_units[0]
+        self.assertTrue(is_unnumbered_binding(img_unit))
+        proof = prove_child(img_source, img_unit, 1)
+        self.assertEqual(proof["status"], "proven", proof)
+        self.assertEqual(proof["method"], "scoped-unnumbered-section/v1")
+        self.assertIn("[IMG image2.jpeg]", proof["text"])
+        self.assertEqual(img_source[proof["start"]:proof["end"]], proof["text"])
+
+        # 护栏：截断题干、伪造 printed_numbers、越界小题号、正文中出现印刷题号必须拒绝
+        truncated = deepcopy(img_unit)
+        truncated["stem"] = "[IMG image2"
+        self.assertEqual(prove_child(img_source, truncated, 1)["status"], "uncertain")
+
+        forged_printed = deepcopy(img_unit)
+        forged_printed["source_span"]["printed_numbers"] = [1]
+        self.assertEqual(prove_child(img_source, forged_printed, 1)["status"], "uncertain")
+
+        self.assertEqual(prove_child(img_source, img_unit, 2)["status"], "uncertain")
+
+        injected_source = img_source + "1. Real printed question\n"
+        injected_unit = deepcopy(img_unit)
+        injected_unit["source_section"]["end_line"] = 3
+        injected_unit["source_span"]["end_line"] = 3
+        injected_unit["stem"] = "[IMG image2.jpeg]\n1. Real printed question"
+        self.assertEqual(prove_child(injected_source, injected_unit, 1)["status"], "uncertain")
+
+        # 2) unnumbered_section（多道独立无号作答行）：每题仅证明自身窗口，隔离相邻题
+        multi_source = (
+            "Ⅱ.根据汉语提示完成句子\n"
+            "Write letter A: ________\n"
+            "Write letter B: ________\n"
+        )
+        multi_lines = multi_source.splitlines()
+        multi_sections = [{
+            "title": multi_lines[0],
+            "source_line": 1,
+            "source_end_line": 3,
+            "type": "完成句子",
+            "questions": [],
+        }]
+        multi_units = _build_scoped_units(multi_sections, [], multi_lines)
+        self.assertEqual(_scoped_source_errors(multi_units, multi_sections, multi_lines), [])
+        self.assertEqual(len(multi_units), 2)
+        p0 = prove_child(multi_source, multi_units[0], 1)
+        p1 = prove_child(multi_source, multi_units[1], 1)
+        self.assertEqual(p0["status"], "proven", p0)
+        self.assertEqual(p1["status"], "proven", p1)
+        self.assertIn("Write letter A:", p0["text"])
+        self.assertNotIn("Write letter B:", p0["text"])
+        self.assertIn("Write letter B:", p1["text"])
+        self.assertNotIn("Write letter A:", p1["text"])
+
+        # 3) assign_scoped 回归：unnumbered_section 题干里含数字（如 "6."）不得被误判为印刷题号锚点
+        stray_digit_source = "Ⅳ.根据汉语提示完成单词\n请根据提示补全第6.处字母。\n"
+        stray_unit = assign_scoped([{
+            "unit_kind": "standalone",
+            "type": "词汇运用",
+            "numbers": [1],
+            "stem": "请根据提示补全第6.处字母。",
+            "source_span": {
+                "basis": "cleaned_source",
+                "start_line": 2,
+                "end_line": 2,
+                "number_binding": UNNUMBERED_SECTION_BINDING,
+                "printed_numbers": [],
+            },
+        }], stray_digit_source)[0]
+        self.assertTrue(is_unnumbered_binding(stray_unit))
+        self.assertEqual(prove_child(stray_digit_source, stray_unit, 1)["status"], "proven")
+
+        # 4) answer_inferred_image_group：由答案推断小题号的图片大题
+        inferred_source = "Ⅴ.看图写单词\n[IMG image9.jpeg]\n"
+        inferred_unit = assign_scoped([{
+            "unit_kind": "group",
+            "type": "词汇运用",
+            "numbers": [1, 2, 3],
+            "stem": "[IMG image9.jpeg]",
+            "source_span": {
+                "basis": "cleaned_source",
+                "start_line": 2,
+                "end_line": 2,
+                "number_binding": ANSWER_INFERRED_IMAGE_BINDING,
+                "printed_numbers": [],
+                "inferred_numbers": [1, 2, 3],
+                "inferred_evidence": ["Ⅴ. 1. apple 2. book 3. cat"],
+            },
+        }], inferred_source)[0]
+        self.assertTrue(is_unnumbered_binding(inferred_unit))
+        inf_proof = prove_child(inferred_source, inferred_unit, 2)
+        self.assertEqual(inf_proof["status"], "proven", inf_proof)
+        self.assertEqual(inf_proof["method"], "scoped-answer-inferred-image-group/v1")
+        self.assertIn("[IMG image9.jpeg]", inf_proof["text"])
+        self.assertEqual(inferred_source[inf_proof["start"]:inf_proof["end"]], inf_proof["text"])
+
+        # 护栏：缺 inferred_evidence、无图片/表格媒体、越界小题号、伪造 printed_numbers、含印刷题号必须拒绝
+        no_ev = deepcopy(inferred_unit)
+        no_ev["source_span"]["inferred_evidence"] = []
+        self.assertEqual(prove_child(inferred_source, no_ev, 2)["status"], "uncertain")
+
+        self.assertEqual(prove_child(inferred_source, inferred_unit, 4)["status"], "uncertain")
+
+        bad_printed = deepcopy(inferred_unit)
+        bad_printed["source_span"]["printed_numbers"] = [1, 2, 3]
+        self.assertEqual(prove_child(inferred_source, bad_printed, 2)["status"], "uncertain")
+
+        non_media_source = "Ⅴ. 看图写单词\nPlain text without image\n"
+        non_media_unit = deepcopy(inferred_unit)
+        non_media_unit["stem"] = "Plain text without image"
+        self.assertEqual(prove_child(non_media_source, non_media_unit, 2)["status"], "uncertain")
+
 
 if __name__ == '__main__':
     unittest.main()
