@@ -541,7 +541,7 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False, co
                 native_settings["_content_input_hashes"] = agent_tasks.build_task(
                     Path(batch), stage, max_input_chars=sys.maxsize)["input_hashes"]
             if not native_settings.get("_content_route_identity"):
-                native_settings["_content_route_identity"] = _selected_content_route()
+                native_settings["_content_route_identity"] = _selected_content_route(stage)
             return content_agent.invoke(prompt, root, native_settings, permit_parallel=permit_parallel)
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -807,13 +807,40 @@ def _harness_default_route():
     return None, None
 
 
-def _selected_content_route():
+def _router_selected_route(stage=None, *, plugin=None):
+    """Read explicit provider/model from model-router.json (role > stage > default)."""
+    router = _router_file(plugin or Path(__file__).resolve().parents[2])
+    try:
+        data = json.loads(router.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    candidates = []
+    roles = data.get("roles")
+    if stage and isinstance(roles, dict):
+        candidates.append(roles.get(stage))
+    stages = data.get("stages")
+    if stage and isinstance(stages, dict):
+        candidates.append(stages.get(stage))
+    candidates.append(data.get("default"))
+    for entry in candidates:
+        if (isinstance(entry, dict)
+                and isinstance(entry.get("provider"), str) and entry["provider"].strip()
+                and isinstance(entry.get("model"), str) and entry["model"].strip()):
+            return {"provider": entry["provider"].strip(), "model": entry["model"].strip()}
+    return None
+
+
+def _selected_content_route(stage=None):
     """Selected host model for native content tasks (provider/model only).
 
-    Visual transport used to expose the route; after visual removal the native
-    content path still needs a route identity for task binding. Read the same
-    Harness agent-default-model selection the rest of this module follows.
+    Prefer the user's explicit model-router.json selection (stage override or
+    default) before falling back to the Harness desktop agent-default-model.
     """
+    explicit = _router_selected_route(stage)
+    if explicit:
+        return explicit
     route, _profile = _harness_default_route()
     if not route:
         return None

@@ -255,7 +255,7 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
 
     native = config.get("native_agent") or {}
     native_enabled = native.get("enabled") is True and stage in native.get("stages", ["knowledge"])
-    route = (config.get("_content_route_identity") or local_agent._selected_content_route()) if native_enabled else None
+    route = (config.get("_content_route_identity") or local_agent._selected_content_route(stage)) if native_enabled else None
 
     def recover_budget_receipts():
         receipts = content_agent.tool_budget_receipts(batch.resolve(), stage, strict_hashes, route)

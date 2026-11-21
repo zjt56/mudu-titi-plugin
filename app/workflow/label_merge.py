@@ -76,12 +76,15 @@ def _validated_round1_checks(folder: Path, data: dict) -> list[dict]:
     if not raw_checks:
         return []
 
+    has_structure = (folder / "01_source" / "structure.confirmed.json").is_file()
     try:
         from . import review
         current_plan = review.prepare_round_plan(folder)
     except (OSError, ValueError, KeyError, TypeError):
         # Lightweight unit-test fixtures without 01_source/structure.confirmed.json.
-        return raw_checks
+        if not has_structure and not isinstance(data.get("plan"), dict) and not data.get("input_binding"):
+            return raw_checks
+        return []
 
     effective_plan, _ = review.resolve_round_plan(folder, current_plan, data)
     current_units = set(effective_plan.get("units") or [])

@@ -671,8 +671,8 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
                 from . import content_agent
                 native_selected = native.get("mode", "strict") == "strict" or content_agent.available()
             if harness_route or native_selected:
-                # 视觉图片路由解析已停用；结构归类本身是文字任务，仍按配置继续。
-                route_binding["actual_route"] = {"provider": config.get("provider"), "model": config.get("model")}
+                selected = local_agent._selected_content_route("structure_gate")
+                route_binding["actual_route"] = selected or {"provider": config.get("provider"), "model": config.get("model")}
             if native_selected:
                 from . import content_structure
                 prepared = content_structure.prepare(batch_dir=batch, raw=raw, candidate=candidate, pdf_ocr=pdf_ocr)

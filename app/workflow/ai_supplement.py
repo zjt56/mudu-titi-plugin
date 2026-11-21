@@ -11,11 +11,14 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 
 from . import (
     content_rules,
+    contracts,
+    format_gate,
+    listening_script,
     local_agent,
     manifest as mf,
     manual_content,
@@ -42,6 +45,7 @@ DEFAULT_SUPPLEMENT_CONCURRENCY = 3
 AGENT_BY_MODE = {
     "articleSummary": "ai_summary",
     "explanation": "ai_explanation",
+    "listeningScript": "ai_listening_script",
 }
 
 _ENGLISH_WORD = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
@@ -75,7 +79,21 @@ def _is_replaceable(value) -> bool:
     """Missing/placeholder OR previously AI-generated content can be generated/regenerated."""
     if _is_absent(value):
         return True
-    return isinstance(value, str) and upload_content.AI_MARK in value
+    return isinstance(value, str) and (
+        upload_content.AI_MARK in value or upload_content.AI_TRANSCRIPT_MARK in value
+    )
+
+
+def _is_listening_script_replaceable(value) -> bool:
+    """True when a listening unit has no original listening script (or only an AI-transcribed one)."""
+    if _is_absent(value):
+        return True
+    if not isinstance(value, str):
+        return False
+    if listening_script.MARK in value:
+        script_part = value.split(listening_script.MARK, 1)[1]
+        return upload_content.AI_TRANSCRIPT_MARK in script_part
+    return True
 
 
 def _word_count(text: str) -> int:
@@ -107,6 +125,95 @@ def _format_ai_text(text: str) -> str:
     if not body:
         return ""
     return f"{body}{upload_content.AI_MARK}"
+
+
+def _clean_listening_script_body(text: str) -> str:
+    cleaned = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    cleaned = re.sub(r"^(?:听力录音材料|听力原文|录音原文)\s*[:：]\s*", "", cleaned)
+    for mark in (upload_content.AI_TRANSCRIPT_MARK, upload_content.AI_MARK, "（AI转录）", "(AI转录)"):
+        if cleaned.endswith(mark):
+            cleaned = cleaned[:-len(mark)].strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
+
+
+def _format_listening_script(raw_text: str, existing_explanation: str = "") -> str:
+    body = _clean_listening_script_body(raw_text)
+    if not body:
+        return ""
+    marked_script = f"{body}\n{upload_content.AI_TRANSCRIPT_MARK}"
+    prefix = ""
+    if isinstance(existing_explanation, str) and not _is_absent(existing_explanation):
+        if listening_script.MARK in existing_explanation:
+            prefix = existing_explanation.split(listening_script.MARK, 1)[0].strip()
+        elif upload_content.AI_TRANSCRIPT_MARK not in existing_explanation:
+            prefix = existing_explanation.strip()
+    return listening_script.combine(prefix, marked_script)
+
+
+def _extract_unit_transcript(batch_dir: Path, unit_id: str) -> dict | None:
+    """Extract timed ASR transcript segments for a listening unit from 02_audio/."""
+    batch = Path(batch_dir)
+    ev_path = batch / "02_audio" / "segment-evidence.json"
+    if not ev_path.is_file():
+        return None
+    try:
+        ev_doc = json.loads(ev_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    rows = ev_doc.get("items") if isinstance(ev_doc, dict) else None
+    if not isinstance(rows, list):
+        return None
+    matched = next((r for r in rows if isinstance(r, dict) and str(r.get("unit_id") or "") == unit_id), None)
+    if not isinstance(matched, dict):
+        return None
+    start, end = matched.get("start"), matched.get("end")
+    if any(isinstance(n, bool) or not isinstance(n, (int, float)) for n in (start, end)) or not (0 <= start < end):
+        return None
+
+    tx_path = None
+    sources = ev_doc.get("sources") if isinstance(ev_doc.get("sources"), dict) else {}
+    for key_field in ("source_key", "source_audio", "source_path"):
+        sval = matched.get(key_field)
+        if isinstance(sval, str) and sval in sources and isinstance(sources[sval], dict):
+            rel = sources[sval].get("transcript")
+            if isinstance(rel, str) and (batch / rel).is_file():
+                tx_path = batch / rel
+                break
+    if tx_path is None:
+        default_tx = batch / "02_audio" / "full-transcript.json"
+        if default_tx.is_file():
+            tx_path = default_tx
+    if tx_path is None:
+        return None
+    try:
+        tx_doc = json.loads(tx_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    segments = tx_doc.get("segments") if isinstance(tx_doc, dict) else (tx_doc if isinstance(tx_doc, list) else None)
+    lines: list[str] = []
+    if isinstance(segments, list):
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            s0, s1 = seg.get("start"), seg.get("end")
+            if any(isinstance(n, bool) or not isinstance(n, (int, float)) for n in (s0, s1)):
+                continue
+            if s0 < end and s1 > start:
+                txt = str(seg.get("text") or "").strip()
+                if txt:
+                    lines.append(f"[{s0:.1f}s-{s1:.1f}s] {txt}")
+    raw_text = "\n".join(lines).strip()
+    if not raw_text and isinstance(tx_doc, dict) and len(rows) == 1:
+        raw_text = str(tx_doc.get("text") or "").strip()
+    if not raw_text:
+        return None
+    return {
+        "raw_text": raw_text,
+        "start": float(start),
+        "end": float(end),
+        "verified": bool(matched.get("verified") is True),
+    }
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -173,7 +280,7 @@ def has_active_jobs() -> bool:
         return any(thread.is_alive() for thread in _ACTIVE_JOBS.values())
 
 
-def _target_input_fingerprint(mode: str, item: dict, sub: dict | None = None) -> str:
+def _target_input_fingerprint(mode: str, item: dict, sub: dict | None = None, *, transcript_text: str = "") -> str:
     uid = str(item.get("unit_id") or item.get("id") or "").strip()
     qtype = str(item.get("question_type") or item.get("type") or "").strip()
     material = str(item.get("material") or "").strip()
@@ -184,6 +291,27 @@ def _target_input_fingerprint(mode: str, item: dict, sub: dict | None = None) ->
             "question_type": qtype,
             "material": material,
             "stem": str(item.get("stem") or "").strip(),
+        }
+    elif mode == "listeningScript":
+        subs = [
+            {
+                "number": s.get("number"),
+                "stem": str(s.get("stem") or "").strip(),
+                "options": s.get("options") or [],
+                "answer": s.get("answer") or "",
+            }
+            for s in (item.get("subquestions") or [])
+            if isinstance(s, dict)
+        ]
+        body = {
+            "mode": mode,
+            "unit_id": uid,
+            "question_type": qtype,
+            "stem": str(item.get("stem") or "").strip(),
+            "options": item.get("options") or [],
+            "answer": item.get("answer") or "",
+            "subquestions": subs,
+            "transcript": transcript_text,
         }
     else:
         number = sub.get("number") if isinstance(sub, dict) else item.get("number")
@@ -448,7 +576,7 @@ def _item_question_id(item: dict, sub: dict | None, uid: str, number) -> str:
 
 def eligible_targets(batch_dir: Path, mode: str) -> list[dict]:
     """Identify eligible missing or AI-generated targets in ``06_batch/batch_meta.json``."""
-    if mode not in ("articleSummary", "explanation"):
+    if mode not in ("articleSummary", "explanation", "listeningScript"):
         raise ValueError("不支持的补充模式：" + str(mode))
     batch_path = Path(batch_dir) / "06_batch" / "batch_meta.json"
     if not batch_path.is_file():
@@ -459,6 +587,13 @@ def eligible_targets(batch_dir: Path, mode: str) -> list[dict]:
         raise ValueError("06_batch/batch_meta.json 格式无效")
 
     coverage = _source_coverage(Path(batch_dir))
+    original_listening_scripts: dict = {}
+    if mode == "listeningScript":
+        try:
+            from .workflow_primitives import confirmed_units as load_confirmed_units
+            original_listening_scripts = listening_script.extract(Path(batch_dir), load_confirmed_units(Path(batch_dir)))
+        except (OSError, ValueError, KeyError, TypeError):
+            original_listening_scripts = {}
     targets: list[dict] = []
 
     for item in items:
@@ -471,7 +606,44 @@ def eligible_targets(batch_dir: Path, mode: str) -> list[dict]:
         material = str(item.get("material") or "").strip()
         item_scoped = coverage["scoped"] or item.get("identity_version") == "scoped-v1"
 
-        if mode == "articleSummary":
+        if mode == "listeningScript":
+            if not qtype.startswith("听力"):
+                continue
+            if uid in original_listening_scripts:
+                continue
+            cur_expl = item.get("explanation", "")
+            if not _is_listening_script_replaceable(cur_expl):
+                continue
+            excerpt = _extract_unit_transcript(Path(batch_dir), uid)
+            if not excerpt:
+                continue
+            subs_ref = [
+                {
+                    "number": s.get("number"),
+                    "stem": str(s.get("stem") or "").strip()[:400],
+                    "options": s.get("options") or [],
+                    "answer": s.get("answer") or "",
+                }
+                for s in (item.get("subquestions") or [])
+                if isinstance(s, dict)
+            ]
+            targets.append({
+                "key": uid,
+                "unit_id": uid,
+                "number": item.get("number"),
+                "question_type": qtype,
+                "stem": str(item.get("stem") or "").strip()[:600],
+                "options": item.get("options") or [],
+                "answer": item.get("answer") or "",
+                "subquestions": subs_ref,
+                "transcript": excerpt["raw_text"],
+                "transcript_verified": excerpt["verified"],
+                "existing_explanation": str(cur_expl or ""),
+                "input_fingerprint": _target_input_fingerprint(
+                    "listeningScript", item, None, transcript_text=excerpt["raw_text"]
+                ),
+            })
+        elif mode == "articleSummary":
             if item.get("unit_kind") != "group" and not item.get("subquestions"):
                 continue
             words = _word_count(material)
@@ -554,7 +726,35 @@ def eligible_targets(batch_dir: Path, mode: str) -> list[dict]:
 
 def _build_prompt(mode: str, targets: list[dict]) -> str:
     agent = AGENT_BY_MODE.get(mode, "ai_supplement")
-    if mode == "articleSummary":
+    if mode == "listeningScript":
+        instruction = (
+            "Stage: ai_supplement\n"
+            f"Agent: {agent}\n"
+            "任务：根据本地语音转写片段（transcript），为以下缺少听力原文的中考英语听力题整理干净、完整的英文听力原文。\n"
+            "硬性要求：\n"
+            "1. 只返回严格 JSON 对象：{\"status\": \"completed\", \"artifacts\": {}, \"result\": {\"items\": [{\"key\": \"...\", \"text\": \"...\"}]}}\n"
+            "2. **读两遍去重（核心）**：中考听力录音通常会把同一段对话或短文连续朗读两遍，且两遍转写可能略有词差。请比对两遍转写，合并去重为完整的一遍原文，择优保留更准确的一遍，绝不能输出重复两遍的内容。\n"
+            "3. **去除考场播报与时间戳**：删除所有中英文指令播报（如「第一节」「听下面一段对话」「回答第X至Y小题」「Question N」「Now you have 5 seconds...」「下面请听第二遍」等）及时间戳标记。\n"
+            "4. **规范排版**：短对话/长对话按说话人换行整理（如 M: ... / W: ...，无法确认性别时可按轮次换行）；短文/信息转换整理为通顺自然段并补全标点。不要截断正文。\n"
+            "5. **忠实于录音转写**：严禁脱离转写凭空编造句子；可结合题干/选项/答案对人名、地名、数字、同音词做最小纠错，确保与录音原意一致。若 transcript_verified 为 false（切片边界为等分推算），请重点依据题干/选项剔除混入的邻题句子。\n"
+            "6. 只输出整理后的英文听力原文正文，不要输出「听力录音材料：」前缀，也不要输出「（AI转录，待校对）」后缀（程序会统一标注）。\n\n"
+            "BEGIN SUPPLIED CONTENT\n"
+        )
+        payload = [
+            {
+                "key": t["key"],
+                "question_type": t["question_type"],
+                "number": t.get("number"),
+                "stem": t.get("stem") or "",
+                "options": t.get("options") or [],
+                "answer": t.get("answer") or "",
+                "subquestions": t.get("subquestions") or [],
+                "transcript_verified": bool(t.get("transcript_verified")),
+                "transcript": str(t.get("transcript") or "")[:6000],
+            }
+            for t in targets
+        ]
+    elif mode == "articleSummary":
         instruction = (
             "Stage: ai_supplement\n"
             f"Agent: {agent}\n"
@@ -621,7 +821,7 @@ def _unwrap_payload(resp):
     return cur
 
 
-def _parse_generated(result: dict) -> dict[str, str]:
+def _parse_generated(result: dict, mode: str = "explanation") -> dict[str, str]:
     rows = result.get("items") if isinstance(result, dict) else None
     if not isinstance(rows, list):
         raise ValueError("模型返回格式无效：缺少 items 列表")
@@ -630,7 +830,8 @@ def _parse_generated(result: dict) -> dict[str, str]:
         if not isinstance(row, dict):
             continue
         key = str(row.get("key") or "").strip()
-        text = _format_ai_text(str(row.get("text") or ""))
+        raw_val = str(row.get("text") or "")
+        text = _clean_listening_script_body(raw_val) if mode == "listeningScript" else _format_ai_text(raw_val)
         if key and text:
             out[key] = text
     return out
@@ -648,6 +849,7 @@ def _sync_explanations_artifact(batch: Path, updates: dict[str, str], mode: str)
     if not isinstance(items, list):
         return
     by_uid = {str(it.get("unit_id")): it for it in items if isinstance(it, dict) and it.get("unit_id")}
+    target_field = "explanation" if mode == "listeningScript" else mode
     changed = False
     for key, text in updates.items():
         if "/" in key:
@@ -662,7 +864,7 @@ def _sync_explanations_artifact(batch: Path, updates: dict[str, str], mode: str)
         else:
             row = by_uid.get(key)
             if row:
-                row[mode] = text
+                row[target_field] = text
                 changed = True
     if not changed:
         return
@@ -690,6 +892,37 @@ def _check_upload_editable(batch: Path) -> None:
         if (stages.get("upload_gate", {}).get("status") == mf.APPROVED
                 or stages.get("upload", {}).get("status") == mf.COMPLETED):
             raise ValueError("此批次已批准上传或已上传，不能补充覆盖已绑定内容")
+
+
+def _refresh_post_edit_gates(batch: Path, *, lock_held: bool = False) -> tuple[int | None, bool | None]:
+    """Re-run validate and refresh format_gate when already completed so local_complete stays intact."""
+    manifest_path = batch / "workflow" / "manifest.json"
+    if not manifest_path.is_file():
+        return None, None
+    current = mf.load(batch)
+    was_format_done = (current.get("stages", {}).get("format_gate", {}) or {}).get("status") == mf.COMPLETED
+    validate_code = runner.do_validate(batch, current, lock_held=lock_held, refresh_only=True)
+    format_passed: bool | None = None
+    if was_format_done:
+        report = format_gate.run(batch)
+        format_passed = bool(report.get("passed") is True)
+        with (nullcontext() if lock_held else local_agent._agent_lock(1500)):
+            fresh = mf.load(batch)
+            spec = contracts.STAGE_BY_ID["format_gate"]
+            if format_passed:
+                mf.touch_stage(
+                    fresh, "format_gate", mf.COMPLETED,
+                    input_hashes=mf.input_hashes(batch, fresh, spec),
+                    output_hashes=mf.output_hashes(batch, spec),
+                    exit_code=0, kind=spec.kind, notes="",
+                )
+                mf.record_semantics(batch, fresh, spec)
+            else:
+                errors = report.get("errors") or []
+                first_msg = str((errors[0] or {}).get("message") or "格式检查未通过") if errors else "格式检查未通过"
+                mf.touch_stage(fresh, "format_gate", mf.FAILED, exit_code=1, notes=first_msg[:300])
+            mf.save(batch, fresh)
+    return validate_code, format_passed
 
 
 def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None = None,
@@ -759,7 +992,7 @@ def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None
                         permit_parallel=True, coordinated_imports=True,
                     )
 
-            chunk_size = 10 if mode == "explanation" else 5
+            chunk_size = 10 if mode == "explanation" else (4 if mode == "listeningScript" else 5)
             chunks = [remaining_targets[idx:idx + chunk_size] for idx in range(0, len(remaining_targets), chunk_size)]
             progress_lock = threading.Lock()
             try:
@@ -769,7 +1002,7 @@ def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None
                         run_dir = Path(tmp) / f"chunk_{chunk_idx}"
                         resp = caller(prompt, run_dir)
                         payload = _unwrap_payload(resp)
-                        return len(chunk), _parse_generated(payload)
+                        return len(chunk), _parse_generated(payload, mode=mode)
 
                     if len(chunks) <= 1 or max_workers <= 1:
                         for chunk_idx, chunk in enumerate(chunks):
@@ -889,14 +1122,27 @@ def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None
                     item = by_uid.get(key)
                     if not item:
                         continue
-                    field = mode
-                    if _target_input_fingerprint(field, item, None) != target["input_fingerprint"]:
-                        skipped_changed += 1
-                        continue
-                    cur_val = item.get("articleSummary", item.get("article_summary", "")) if field == "articleSummary" else item.get("explanation", "")
-                    if not _is_replaceable(cur_val):
-                        continue
-                    item[field] = text
+                    if mode == "listeningScript":
+                        field = "explanation"
+                        if _target_input_fingerprint("listeningScript", item, None, transcript_text=target.get("transcript", "")) != target["input_fingerprint"]:
+                            skipped_changed += 1
+                            continue
+                        cur_val = item.get("explanation", "")
+                        if not _is_listening_script_replaceable(cur_val):
+                            continue
+                        text = _format_listening_script(text, cur_val)
+                        if not text:
+                            continue
+                        item[field] = text
+                    else:
+                        field = mode
+                        if _target_input_fingerprint(field, item, None) != target["input_fingerprint"]:
+                            skipped_changed += 1
+                            continue
+                        cur_val = item.get("articleSummary", item.get("article_summary", "")) if field == "articleSummary" else item.get("explanation", "")
+                        if not _is_replaceable(cur_val):
+                            continue
+                        item[field] = text
                 previous = manual_data["edits"].get(key)
                 fields = {k: previous[k] for k in manual_content.FIELDS if k in previous} if (
                     isinstance(previous, dict) and previous.get("source_binding") == binding) else {}
@@ -925,14 +1171,19 @@ def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None
             _atomic_write_text(manual_path, json.dumps(manual_data, ensure_ascii=False, indent=2) + "\n")
             _sync_explanations_artifact(batch, applied_updates, mode)
 
-        # Run validation outside the short write lock so waiting on _agent_lock never blocks content edits.
+        # Run validation & format_gate refresh outside the short write lock so waiting on _agent_lock never blocks content edits.
         validate_code = None
+        format_passed = None
         if _batch_still_same(batch, identity) and manifest_path.is_file():
-            current = mf.load(batch)
-            validate_code = runner.do_validate(batch, current)
+            validate_code, format_passed = _refresh_post_edit_gates(batch, lock_held=False)
 
-        label = "文章大意" if mode == "articleSummary" else "解析"
+        label = "听力材料转录" if mode == "listeningScript" else ("文章大意" if mode == "articleSummary" else "解析")
         skip_note = f"（跳过 {skipped_changed} 项已变更题目）" if skipped_changed else ""
+        done_msg = (
+            f"已完成 {len(applied_keys)} 项听力材料 AI 转录补全并标注（AI转录）{skip_note}"
+            if mode == "listeningScript"
+            else f"已完成 {len(applied_keys)} 项 AI {label}生成并标注{skip_note}"
+        )
         res = {
             **meta_fields,
             "status": "done",
@@ -943,7 +1194,8 @@ def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None
             "mode": mode,
             "keys": applied_keys,
             "validate_passed": validate_code == 0 if validate_code is not None else None,
-            "message": f"已完成 {len(applied_keys)} 项 AI {label}生成并标注{skip_note}",
+            "format_gate_passed": format_passed,
+            "message": done_msg,
             "error": "",
         }
         _write_progress(batch, res, batch_identity=identity)
@@ -1022,7 +1274,7 @@ def start_background(batch_dir: Path, mode: str, *, invoke_fn=None) -> dict:
     return read_progress(batch)
 
 
-def save_content_edit(batch_dir: Path, unit_id: str, patch: dict) -> dict:
+def save_content_edit(batch_dir: Path, unit_id: str, patch: dict, *, lock_held: bool = False) -> dict:
     """Directly persist workbench edits to articleSummary / explanation / answer."""
     batch = Path(batch_dir).resolve()
     _check_upload_editable(batch)
@@ -1170,15 +1422,12 @@ def save_content_edit(batch_dir: Path, unit_id: str, patch: dict) -> dict:
         if exp_expl_updates:
             _sync_explanations_artifact(batch, exp_expl_updates, "explanation")
 
-    manifest_path = batch / "workflow" / "manifest.json"
-    validate_code = None
-    if manifest_path.is_file():
-        current = mf.load(batch)
-        validate_code = runner.do_validate(batch, current)
+    validate_code, format_passed = _refresh_post_edit_gates(batch, lock_held=lock_held)
 
     return {
         "applied": True,
         "validate_passed": validate_code == 0 if validate_code is not None else None,
+        "format_gate_passed": format_passed,
         "message": "已保存修改",
     }
 

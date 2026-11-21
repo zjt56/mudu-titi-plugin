@@ -43,6 +43,7 @@ ANSWERS_ALLOWED = EXAMPLE_REQUIRED["answers"] + ("difficulty", "difficultyEviden
 REVIEW_FILES = ("content-review.json", "metadata-review.json", "manual-review-queue.json")
 
 AI_MARK = "（AI生成，待校对）"
+AI_TRANSCRIPT_MARK = "（AI转录，待校对）"
 
 # Fixed stage-only inputs: feedback cannot nominate files or another stage.
 REPAIR_FEEDBACK_INPUTS = frozenset(f"workflow/repair-feedback/{stage}.json" for stage in ARTIFACTS)

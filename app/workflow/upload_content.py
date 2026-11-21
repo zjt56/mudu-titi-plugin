@@ -11,7 +11,7 @@ import unicodedata
 from .workflow_primitives import _safe_path
 from .content_labels import IMG, EXPLANATION_LABEL, SUMMARY_LABEL
 
-from .workflow_constants import AI_MARK
+from .workflow_constants import AI_MARK, AI_TRANSCRIPT_MARK
 
 SOURCES = ('01_source/附录.txt', '01_source_ans/正文.txt', '01_source/正文.txt')
 ANSWER_INFERRED_BINDING = 'answer_inferred_image_group'
@@ -2343,7 +2343,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
 
     def restore_field(item, uid, numbers, field):
         value = item.get(field)
-        if not restore or not isinstance(value, str) or AI_MARK in value or manual_value(uid, field, value):
+        if not restore or not isinstance(value, str) or AI_MARK in value or AI_TRANSCRIPT_MARK in value or manual_value(uid, field, value):
             return
         candidates = []
         if active_unit.get('identity_version') == 'scoped-v1':
@@ -2452,7 +2452,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
             for field, value in (('explanation', explanation), ('articleSummary', summary)):
                 if not isinstance(value, str):
                     error('CONTENT_TYPE_INVALID', '解析/大意必须是字符串', uid, field)
-                elif AI_MARK in value and not (
+                elif (AI_MARK in value or AI_TRANSCRIPT_MARK in value) and not (
                     manual_value(uid, field, value)
                     and reference_problem(item, numbers, field, value) is None
                 ):
@@ -2499,8 +2499,9 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                                uid, 'articleSummary', numbers, summary, item, warn=writing_unit)
         if isinstance(explanation, str) and explanation.strip():
             value = _norm(explanation)
-            marked = AI_MARK in explanation
-            if marked and (not explanation.strip().endswith(AI_MARK) or not _norm(explanation.strip()[:-len(AI_MARK)])):
+            active_mark = AI_TRANSCRIPT_MARK if AI_TRANSCRIPT_MARK in explanation else (AI_MARK if AI_MARK in explanation else '')
+            marked = bool(active_mark)
+            if marked and (not explanation.strip().endswith(active_mark) or not _norm(explanation.strip()[:-len(active_mark)])):
                 warning('AI_PROVENANCE_IGNORED', '解析的 AI 来源标记无效；严格校验禁止生成内容', uid, 'explanation')
             traceable = bool(value) and any(row['number'] in numbers and (_verbatim(explanation) == row['verbatim'] if strict else value in row['text'])
                             and unique_anchor(row['number'], row['path'], row['line'], expected=explanation)

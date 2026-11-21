@@ -30,6 +30,19 @@ UPSTREAM_RETRY_COOLDOWN = 60
 UPSTREAM_MAX_REDISPATCHES = 3
 _UPSTREAM_TRANSIENT_ERRORS = frozenset(("Upstream HTTP/2 stream failed",
                                          "Upstream service temporarily unavailable"))
+
+
+def _is_upstream_transient_error(error):
+    if not isinstance(error, str):
+        return False
+    if error in _UPSTREAM_TRANSIENT_ERRORS:
+        return True
+    # 第三方中转站偶发的通用 400 网关拒收（无具体字段校验错误，且未产出任何候选）
+    if ("第三方中转站" in error
+            and "The request could not be processed. Please check the request parameters." in error
+            and "HTTP 400" in error):
+        return True
+    return False
 _THREAD_LOCK = threading.RLock()
 SUPPORTED_STAGES = frozenset(("knowledge", "answers", "explanations", "types", "preassemble", "structure_gate"))
 PART_STAGES = SUPPORTED_STAGES - {"structure_gate"}
@@ -247,7 +260,7 @@ def prune_terminal_tasks(*, max_age_seconds=7 * 86400, max_keep=100):
                 continue
             # Preserve recent transient upstream failures that may still be redispatched.
             if (meta.get("status") == "failed"
-                    and meta.get("error") in _UPSTREAM_TRANSIENT_ERRORS
+                    and _is_upstream_transient_error(meta.get("error"))
                     and age < UPSTREAM_RETRY_COOLDOWN * 10):
                 continue
             try:
@@ -720,9 +733,23 @@ def _validate(task, candidate):
     elif task["partial"]:
         stage = "types" if task["stage"] == "preassemble" else task["stage"]
         checked = unit_tasks.validate_part(batch, stage, {"unit_ids": task["unit_ids"]}, response)
-        if checked.get("status") != "completed" or any(
-                row.get("severity") in ("blocker", "major") for row in checked.get("findings", [])):
-            raise ValueError("Partition candidate is not completed")
+        blocking = [row for row in checked.get("findings", []) if row.get("severity") in ("blocker", "major")]
+        if checked.get("status") != "completed" or blocking:
+            reasons = []
+            if checked.get("status") != "completed":
+                reasons.append(f"status={checked.get('status')!r} (must be 'completed')")
+            if blocking:
+                units_desc = ", ".join(
+                    f"{row.get('unit_id') or '?'}:{row.get('severity')}({str(row.get('reason') or '')[:80]})"
+                    for row in blocking[:5]
+                )
+                reasons.append("blocking findings=" + units_desc)
+            raise ValueError(
+                "Partition candidate is not completed: " + "; ".join(reasons)
+                + ". If only missing listening audio/transcript/image limits deeper tagging, "
+                + "keep supported tags, record the limitation in notes (not blocker/major findings), "
+                + "and set status='completed'."
+            )
         # Partition coverage alone is not semantic acceptance. Mirror the bounded
         # producer's per-unit source/catalog checks without installing anything.
         validation_context, _, missing, all_units = agent_tasks._collect(batch, stage)
@@ -1147,7 +1174,7 @@ def _retryable_upstream_task(task):
     stamp = task.get("updated_at")
     if (task.get("protocol") != PROTOCOL or task.get("status") != "failed"
             or not isinstance(task.get("session_id"), str) or not task["session_id"].strip()
-            or task.get("error") not in _UPSTREAM_TRANSIENT_ERRORS
+            or not _is_upstream_transient_error(task.get("error"))
             or task.get("error_code") not in (None, "failed")
             or task.get("failure_class") is not None
             or task.get("accepted") is not False or task.get("attempts") != []

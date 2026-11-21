@@ -621,7 +621,8 @@ def _validate_inputs(batch_dir: Path, manifest: dict) -> tuple:
 
 
 @activity.observed("validate", "正在执行本地内容体检")
-def do_validate(batch_dir: Path, manifest: dict) -> int:
+def do_validate(batch_dir: Path, manifest: dict, *, lock_held: bool = False,
+                refresh_only: bool = False) -> int:
     batch_json = batch_dir / "06_batch" / "batch_meta.json"
     if not batch_json.is_file():
         report = {"passed": False, "error": "最终校验对象 batch_meta.json 不存在",
@@ -707,7 +708,7 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
         print(f"    · {item['check']} 跳过（{item['reason']}）")
     # 提交前在锁内重读台账并复核实际证据；并发的无关更新必须保留。
     from .local_agent import _agent_lock
-    with _agent_lock(1500):
+    with (contextlib.nullcontext() if lock_held else _agent_lock(1500)):
         try:
             current = mf.load(batch_dir)
         except FileNotFoundError:
@@ -729,8 +730,18 @@ def do_validate(batch_dir: Path, manifest: dict) -> int:
         # 只在证据未变时发布报告，避免用过期结论覆盖并发结果。
         target = checks.write_report(batch_dir, report)
         if report.get("passed"):
-            _record_success(batch_dir, current, stage)
-            current["stages"]["validate"]["notes"] = f"报告：{target.relative_to(batch_dir)}"
+            if refresh_only:
+                mf.touch_stage(
+                    current, "validate", mf.COMPLETED,
+                    input_hashes=mf.input_hashes(batch_dir, current, stage),
+                    output_hashes=mf.output_hashes(batch_dir, stage),
+                    exit_code=0, kind=stage.kind,
+                    notes=f"报告：{target.relative_to(batch_dir)}",
+                )
+                mf.record_semantics(batch_dir, current, stage)
+            else:
+                _record_success(batch_dir, current, stage)
+                current["stages"]["validate"]["notes"] = f"报告：{target.relative_to(batch_dir)}"
         else:
             mf.touch_stage(current, "validate", mf.FAILED,
                            notes="阻断项：" + "、".join(report.get("blocking_failures", [])))

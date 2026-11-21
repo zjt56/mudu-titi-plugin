@@ -19,7 +19,7 @@ import stat
 import subprocess
 import sys
 import threading
-from time import monotonic, time
+from time import monotonic, time, time_ns
 from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default as email_policy
@@ -829,8 +829,41 @@ def restore_queue(name: str) -> dict:
     return {"restored": True, "batch": name, "batch_dir": str(folder)}
 
 
+_last_upload_order_ns = 0
+
+
+def _next_upload_order_ns() -> int:
+    global _last_upload_order_ns
+    now_ns = time_ns()
+    if now_ns <= _last_upload_order_ns:
+        now_ns = _last_upload_order_ns + 1
+    _last_upload_order_ns = now_ns
+    return now_ns
+
+
+def _batch_upload_order_ns(folder: Path, manifest: dict | None = None) -> int:
+    """Stable upload-order timestamp (ns): descriptor uploaded_at_ns > manifest.created_at > folder stat."""
+    desc = load(folder / 'attachments' / 'batch.json', {}) or {}
+    if isinstance(desc, dict):
+        raw = desc.get('uploaded_at_ns')
+        if isinstance(raw, int) and raw > 0:
+            return raw
+    if isinstance(manifest, dict):
+        dt = _parse_iso(manifest.get('created_at'))
+        if dt is not None:
+            return int(dt.timestamp() * 1_000_000_000)
+    try:
+        st = folder.stat()
+        birth = getattr(st, 'st_birthtime', None)
+        if birth:
+            return int(birth * 1_000_000_000)
+        return int(st.st_ctime_ns)
+    except OSError:
+        return 0
+
+
 def _queue_batch_order() -> list[str]:
-    """Batches still in 排队区 (not uploaded, not flow_done), earliest first.
+    """Batches still in 排队区 (not uploaded, not flow_done), earliest uploaded first.
 
     Serial execution must follow this order: a later batch may not start until
     every earlier queued batch is fully complete and has left the queue. Without
@@ -864,9 +897,9 @@ def _queue_batch_order() -> list[str]:
                 continue  # automated flow finished → removed from 排队区
         except (OSError, ValueError, KeyError, TypeError):
             pass
-        order.append((str(manifest.get('created_at') or ''), folder.name))
+        order.append((_batch_upload_order_ns(folder, manifest), str(manifest.get('created_at') or ''), folder.name))
     order.sort()
-    return [name for _, name in order]
+    return [name for _, _, name in order]
 
 
 def _queue_head():
@@ -1589,6 +1622,7 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
     saved_extras = [_save_part(folder, item, f"attachment_{index:03d}")
                     for index, item in enumerate(extra_docs, 1)]
     descriptor = {"workflow_id": name, "subject": subject, "title": title or None,
+                  "uploaded_at_ns": _next_upload_order_ns(),
                   "year": int(year) if year.isdigit() else None, "region": region or None,
                   "source_type": source_type or None, "grade": grade or None,
                   "source": saved_source.name, "answers": saved_answer.name if saved_answer else None,
@@ -2467,7 +2501,8 @@ def _overview_uncached(name, folder):
             # 流程开始/完成绝对时间与总耗时（分钟）；审核页卡片展示完成时间与耗时。
             "flow_started_at": flow_started_at, "flow_finished_at": flow_finished_at,
             "flow_minutes": flow_minutes,
-            # 试卷审核列表按“最新”排序：完成/最近进度优先，其次批次更新时间。
+            # 试卷审核列表按“最新”排序：完成/最近进度优先，其次批次更新时间；排队区严格按上传顺序排序。
+            "queue_order_ts": _batch_upload_order_ns(folder, manifest),
             "created_at": manifest.get("created_at"),
             "updated_at": manifest.get("updated_at"),
             # 已写入云端上传暂存的批次视为完成，试卷审核列表不再展示。
@@ -3806,6 +3841,113 @@ def paper_uses_bulk_bold(lines):
     ) >= 0.85 * len(body)
 
 
+def _clean_preview_heading(text: str) -> str:
+    s = re.sub(r"\[IMG\s+[^\]]+\]", "", str(text or ""), flags=re.I)
+    s = re.sub(r"\*{2,}", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _extract_preview_section_meta(source_txt: str, sections: list) -> list[dict]:
+    """Attach optional part header and section-level instruction from 正文.txt to each section."""
+    if not sections:
+        return []
+    raw_lines = [ln.strip() for ln in str(source_txt or "").replace("\r\n", "\n").split("\n")]
+    clean_lines = [_clean_preview_heading(ln) for ln in raw_lines]
+    norm_lines = [re.sub(r"[\s\u3000]+", "", cl) for cl in clean_lines]
+    part_re = re.compile(r"^第[一二三四五六七八九十\d]+部分")
+    q_start_re = re.compile(r"^(?:[（(]\s*[)）]\s*)?\d{1,3}\s*[.．、)]")
+    group_lead_re = re.compile(r"^(?:听下面|阅读(?:下列|下面)|根据(?:对话|短文)|[A-E]$)")
+    sec_head_re = re.compile(r"^(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]|[IVX]{1,4}|[一二三四五六七八九十]+)\s*[.．、]")
+
+    enriched = []
+    cursor = 0
+    for sec in sections:
+        if not isinstance(sec, dict):
+            continue
+        title = _clean_preview_heading(sec.get("title") or "")
+        if not title:
+            continue
+        target_norm = re.sub(r"[\s\u3000]+", "", title)
+        hit = -1
+        for idx in range(cursor, len(norm_lines)):
+            if norm_lines[idx] == target_norm or (target_norm and target_norm in norm_lines[idx]):
+                hit = idx
+                break
+        part_title = ""
+        instruction_lines = []
+        if hit >= 0:
+            cursor = hit + 1
+            for back in range(hit - 1, max(-1, hit - 5), -1):
+                if not clean_lines[back]:
+                    continue
+                if part_re.match(clean_lines[back]):
+                    part_title = clean_lines[back]
+                    break
+                if sec_head_re.match(clean_lines[back]) or q_start_re.match(clean_lines[back]):
+                    break
+            if "书面表达" not in title:
+                for fwd in range(hit + 1, min(len(raw_lines), hit + 8)):
+                    raw_ln = raw_lines[fwd]
+                    cl = clean_lines[fwd]
+                    if not cl or cl == "扫码练听力":
+                        continue
+                    if "[TABLE" in raw_ln.upper():
+                        break
+                    if "[IMG" in raw_ln.upper():
+                        continue
+                    if not re.search(r"[\u4e00-\u9fff]", cl):
+                        break
+                    if (q_start_re.match(cl) or part_re.match(cl) or sec_head_re.match(cl)
+                            or group_lead_re.match(cl)):
+                        break
+                    instruction_lines.append(cl)
+        qs = [int(n) for n in (sec.get("questions") or []) if str(n).isdigit()]
+        enriched.append({
+            "title": title,
+            "part": part_title,
+            "instruction": "\n".join(instruction_lines).strip(),
+            "questions": qs,
+        })
+    return enriched
+
+
+def _clean_preview_band_title(text: str) -> str:
+    s = _clean_preview_heading(text)
+    while len(s) >= 2 and (
+        (s[0] == "【" and s[-1] == "】")
+        or (s[0] == "[" and s[-1] == "]")
+        or (s[0] == "(" and s[-1] == ")")
+        or (s[0] == "（" and s[-1] == "）")
+    ):
+        s = s[1:-1].strip()
+    return s
+
+
+def _extract_preview_lesson_bands(source_txt: str) -> list[tuple[int, str]]:
+    """Extract lesson-practice band headers (e.g. 【一、A 基础巩固】/【二、B 能力提升】/【二、B 创新阅读专练】) with 1-based line numbers."""
+    if not source_txt:
+        return []
+    bracket_re = re.compile(r"^(?:【[^】]{2,32}】|\[[^\]]{2,32}\]|（[^）]{2,32}）|\([^)]{2,32}\))$")
+    bracket_skip_re = re.compile(r"^(?:答案|参考答案|解析|文章大意|听力原文|评分标准|提示|注意)$")
+    plain_band_re = re.compile(
+        r"^(?:(?:[一二三四五六七八九十]+[、.．]\s*)?(?:[A-Z]\s*[.．、]?\s*)?)?"
+        r"(?:基础巩固|基础过关|基础达标|基础训练|能力提升|能力突破|能力训练|"
+        r"创新性训练|创新训练|创新阅读专练|重要考点集训|考点集训|素养提升|"
+        r"拓展提升|拓展训练|综合提升|综合训练|语篇提能|培优提升|思维拓展|达标训练|核心素养)$"
+    )
+    bands = []
+    for idx, raw_ln in enumerate(str(source_txt).replace("\r\n", "\n").split("\n"), 1):
+        cl = _clean_preview_heading(raw_ln)
+        if not cl:
+            continue
+        stripped = _clean_preview_band_title(cl)
+        if not stripped or bracket_skip_re.match(stripped):
+            continue
+        if (bracket_re.match(cl) and re.search(r"[\u4e00-\u9fff]", stripped)) or plain_band_re.match(stripped):
+            bands.append((idx, stripped))
+    return bands
+
+
 def paper_preview(name: str) -> dict:
     """Return full-paper preview data (title, metadata tags, ordered assembled items)."""
     from workflow.metadata_policy import MISSING
@@ -3813,13 +3955,77 @@ def paper_preview(name: str) -> dict:
     folder = batch_dir(name)
     batch = load(folder / "06_batch" / "batch_meta.json") or load(folder / "06_batch" / "batch.json") or {}
     meta = load(folder / "01_source" / "metadata.json", {}) or {}
-    items = batch.get("items") if isinstance(batch.get("items"), list) else []
+    raw_items = batch.get("items") if isinstance(batch.get("items"), list) else []
     src_path = folder / "01_source" / "正文.txt"
     source_txt = src_path.read_text(encoding="utf-8", errors="replace") if src_path.is_file() else ""
-    if source_txt and "[IMG" in source_txt:
-        for it in items:
-            if isinstance(it, dict) and isinstance(it.get("materialBlocks"), list):
-                wire_format.restore_table_cell_images(it["materialBlocks"], source_txt)
+    src_lines = source_txt.replace("\r\n", "\n").split("\n") if source_txt else []
+    structure = load(folder / "01_source" / "structure.json", {}) or {}
+    sec_list = _extract_preview_section_meta(source_txt, structure.get("sections") or [])
+    lesson_bands = _extract_preview_lesson_bands(source_txt)
+    num_to_sec = {}
+    for sec in sec_list:
+        for qn in sec["questions"]:
+            num_to_sec.setdefault(qn, sec)
+
+    items = []
+    for raw_it in raw_items:
+        if not isinstance(raw_it, dict):
+            continue
+        it = dict(raw_it)
+        if source_txt and "[IMG" in source_txt and isinstance(it.get("materialBlocks"), list):
+            wire_format.restore_table_cell_images(it["materialBlocks"], source_txt)
+        existing_sec = it.get("source_section")
+        if isinstance(existing_sec, dict) and str(existing_sec.get("title") or "").strip():
+            sec_copy = dict(existing_sec)
+            band_title = ""
+            lb = sec_copy.get("lesson_band")
+            if isinstance(lb, dict):
+                sl = lb.get("start_line")
+                if isinstance(sl, int) and 1 <= sl <= len(src_lines):
+                    cand = _clean_preview_band_title(src_lines[sl - 1])
+                    if cand:
+                        band_title = cand
+                if not band_title:
+                    band_title = _clean_preview_band_title(lb.get("label") or "")
+            elif lesson_bands:
+                sec_start = sec_copy.get("start_line")
+                if isinstance(sec_start, int):
+                    for b_line, b_title in lesson_bands:
+                        if b_line <= sec_start:
+                            band_title = b_title
+                        else:
+                            break
+            if band_title:
+                sec_copy["band"] = band_title
+            it["source_section"] = sec_copy
+        else:
+            first_num = None
+            if str(it.get("number") or "").isdigit():
+                first_num = int(it["number"])
+            elif isinstance(it.get("numbers"), list):
+                for n in it["numbers"]:
+                    if str(n).isdigit():
+                        first_num = int(n)
+                        break
+            if first_num is None and isinstance(it.get("subquestions"), list):
+                for sub in it["subquestions"]:
+                    if isinstance(sub, dict) and str(sub.get("number") or "").isdigit():
+                        first_num = int(sub["number"])
+                        break
+            matched_sec = num_to_sec.get(first_num) if first_num is not None else None
+            if matched_sec:
+                inst = matched_sec["instruction"]
+                stem_norm = re.sub(r"[\s\u3000]+", "", _clean_preview_heading(it.get("stem") or ""))
+                inst_norm = re.sub(r"[\s\u3000]+", "", inst)
+                if inst_norm and stem_norm and (inst_norm in stem_norm or stem_norm in inst_norm):
+                    inst = ""
+                it["source_section"] = {
+                    "title": matched_sec["title"],
+                    "part": matched_sec["part"],
+                    "instruction": inst,
+                }
+        items.append(it)
+
     first = next((it for it in items if isinstance(it, dict)), {})
     filters = first.get("filterMetadata") if isinstance(first.get("filterMetadata"), dict) else {}
     title = str(batch.get("title") or meta.get("paper_title") or meta.get("title") or folder.name).strip()
@@ -4461,8 +4667,8 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "ai-supplement":
                 folder = batch_dir(parts[2])
                 mode = str(payload.get("mode") or "").strip()
-                if mode not in ("articleSummary", "explanation"):
-                    raise ValueError("mode 必须是 articleSummary 或 explanation")
+                if mode not in ("articleSummary", "explanation", "listeningScript"):
+                    raise ValueError("mode 必须是 articleSummary、explanation 或 listeningScript")
                 result = self.run_ai_supplement(folder, mode)
                 return self.send_json({"ok": True, **result})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "content-edit":
@@ -4512,7 +4718,7 @@ class Handler(BaseHTTPRequestHandler):
             except AgentError as exc:
                 raise ValueError(busy) from exc
             locks.enter_context(ai_supplement.content_write_lock(folder, timeout=5.0))
-            return ai_supplement.save_content_edit(folder, unit_id, patch)
+            return ai_supplement.save_content_edit(folder, unit_id, patch, lock_held=True)
 
     @staticmethod
     @serialized
