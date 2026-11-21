@@ -352,6 +352,6 @@ python -m workflow.doctor
 
 ## 材料分类与对齐（2026-11 重设计）
 
-结构阶段不再“一上来按题号硬切、切不准就整段否定”。`workflow/material_classify.py` 配合提取链逐份读取 Word 原文或 PDF 整卷 OCR 内容，判定文件角色（`paper` 正文 / `answers` 答案 / `explanations` 解析 / `mix` 混排 / `other`），结果写入 `01_source/material-roles.json`；识别出的答案材料写入 `01_source_ans/正文.txt` 供答案阶段使用。同角色内 Word 优先，不能以 PDF 原生文字层代替必需 OCR，不能按上传顺序把第二份文档直接认作答案。模型不可用时确定性规则只作证据或保底，来源身份不明、PDF OCR 未完成或消费者验收失败仍如实保留未完成状态。
+结构阶段不再“一上来按题号硬切、切不准就整段否定”。`workflow/material_classify.py` 配合提取链逐份读取 Word 原文或 PDF 整卷 OCR 内容，判定文件角色（`paper` 正文 / `answers` 答案 / `explanations` 解析 / `listening_script` 听力录音材料 / `mix` 混排 / `other`），结果写入 `01_source/material-roles.json`；识别出的答案材料写入 `01_source_ans/正文.txt` 供答案阶段使用，独立听力录音材料则由 `workflow/listening_script.py` 消费并在 `upload_content` 答案/解析锚点解析时隔离。同角色内 Word 优先，不能以 PDF 原生文字层代替必需 OCR，不能按上传顺序把第二份文档直接认作答案。模型不可用时确定性规则只作证据或保底，来源身份不明、PDF OCR 未完成或消费者验收失败仍如实保留未完成状态。
 
 多篇材料（A/B/C/第X篇…）的阅读/对话分区由确定性规则给出边界，`material_classify.partition_paper` 可在有模型时确认每篇包含的题号（严格校验恰好覆盖全部题号才采信，否则回退规则）。段落标签带插图（如 `A[IMG image11.jpeg]`）也按材料标识别，避免首篇材料漏切导致整段被当成一个题组。

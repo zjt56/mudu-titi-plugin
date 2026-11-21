@@ -574,7 +574,10 @@ def _child_prompt(prompt, context, stage, media):
         for path in context if (lines := _reference_lines(context, path)) is not None]
     summary["source_files"] = files
     summary["media"] = media
-    summary["evidence_tools"] = ["read_unit", "read_source", "read_catalog", "search_catalog", "list_media", "inspect_media", "submit_candidate"]
+    if stage == "structure_gate":
+        summary["evidence_tools"] = ["read_unit", "read_source", "list_media", "inspect_media", "submit_candidate"]
+    else:
+        summary["evidence_tools"] = ["read_unit", "read_source", "read_catalog", "search_catalog", "list_media", "inspect_media", "submit_candidate"]
     if stage in PART_STAGES:
         summary["evidence_tools"].append("stage_candidate")
         header += (
@@ -588,6 +591,13 @@ def _child_prompt(prompt, context, stage, media):
             "the durable parts and runs the original full validator. Do not retype the whole candidate. "
             "To correct a part, replace the same unit ID set; do not overlap different partitions. "
             "On resume, retain staged units and fill only missing units. Content rules and final full coverage remain mandatory.\n"
+        )
+    elif stage == "structure_gate":
+        header += (
+            "\nNative candidate transport for structure: there is NO stage_candidate for this stage. "
+            "Read only the evidence you need, then call content_submit_candidate exactly once with "
+            "{candidate:{status, artifacts:{structure:{units:[...]}}, notes, findings}} covering the whole paper. "
+            "Do not draft the structure inside any other tool call; a long candidate must be written only once.\n"
         )
     return header + unit_tasks._BEGIN + _json(summary) + unit_tasks._END + suffix
 
@@ -940,6 +950,20 @@ def _tool(task, action, args):
             }
         return _submit(task, candidate)
     if action == "stage_candidate":
+        if task["stage"] not in PART_STAGES:
+            # 结构确认只有整卷候选一种交付方式。模型若误用暂存入口提交了完整
+            # 整卷候选，直接走同一个整卷验收，不丢弃已生成的长输出逼它重写。
+            candidate = args.get("candidate") if isinstance(args, dict) else None
+            if (isinstance(candidate, dict) and candidate.get("status") in ("completed", "needs_review")
+                    and isinstance(candidate.get("artifacts"), dict)):
+                result = _submit(task, candidate)
+                if isinstance(result, dict):
+                    result = {**result, "routed_from": "stage_candidate",
+                              "note": "结构确认没有分片暂存；已按整卷 submit_candidate 验收此候选"}
+                return result
+            return {"staged": False, "accepted": False, "retryable": True, "code": "whole_paper_only",
+                    "error": ("结构确认没有分片暂存：请直接调用 content_submit_candidate，"
+                              "参数 {candidate:{status,artifacts:{structure:{units:[...]}},notes,findings}} 一次提交整卷候选")}
         try:
             return _stage_candidate(task, args)
         except (ValueError, TypeError, KeyError) as exc:
@@ -963,6 +987,9 @@ def _tool(task, action, args):
         unit = next(row for row in task["context"]["confirmed_units_with_stable_ids"] if row["unit_id"] == uid)
         return copy.deepcopy(_unit_evidence(task["context"], unit))
     if action in ("search_catalog", "read_catalog"):
+        if task["stage"] == "structure_gate":
+            return {"accepted": False, "retryable": True, "code": "tool_not_applicable",
+                    "error": "结构确认阶段无需查询知识点目录，请直接调用 content_submit_candidate 提交整卷结构候选"}
         offset, limit = _page(args)
         if action == "read_catalog" and args.get("path", CATALOG) != CATALOG:
             raise ValueError("Catalog path is not whitelisted")

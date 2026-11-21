@@ -943,6 +943,21 @@ class UploadPayloadTest(unittest.TestCase):
                 self.assertEqual(report["payload"]["items"][0]["stem"], value)
                 self.assertNotIn("attachments", report["payload"]["items"][0])
 
+    def test_provenance_image_anchor_is_not_embedded_media(self):
+        # 原卷出处里的 [IMG 页图] 锚点属于来源散文，不是题目正文媒体；
+        # 否则每道题的 source 都带页图锚点，整份批次会被误判成未部署媒体。
+        q = question()
+        q["source"] = "[IMG image3.jpeg]1.2025年安徽省初中学业水平考试"
+        q["location"] = "[IMG image3.jpeg]第 1 页"
+        q["filterMetadata"]["source"] = q["source"]
+        report = self.build(batch(q))
+        self.assertNotIn("UNRESOLVED_MEDIA_REFERENCE", self.codes(report), report["errors"])
+        self.assertEqual(report["payload"]["items"][0]["source"], q["source"])
+        q["stem"] = "Look at [IMG image3.jpeg]"
+        report = self.build(batch(q))
+        self.assertEqual([e["unit_id"] for e in report["errors"]
+                          if e["code"] == "UNRESOLVED_MEDIA_REFERENCE"], ["Q1"])
+
     def test_child_and_nested_table_embedded_media_are_rejected(self):
         q = reading_group()
         q["subquestions"][0]["options"] = ["<audio src=https://example.com/a.mp3>", "B. Park"]

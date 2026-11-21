@@ -1409,6 +1409,162 @@ def start_rerun(name: str, mode: str) -> dict:
     return result
 
 
+ALLOWED_MATERIAL_ROLES = (
+    "paper", "answers", "explanations", "listening_script",
+    "mix", "structure_reference", "other",
+)
+
+
+def _batch_document_entries(folder: Path) -> tuple[dict, list[dict]]:
+    """汇总批次内所有上传文档（去重），返回 (descriptor, entries)。"""
+    def _load_json_safe(path: Path) -> dict:
+        try:
+            if path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+                return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            pass
+        return {}
+
+    desc_path = folder / "attachments" / "batch.json"
+    descriptor = _load_json_safe(desc_path)
+    manifest = wf_manifest.load(folder) if wf_manifest else {}
+    roles_data = _load_json_safe(folder / "01_source" / "material-roles.json")
+    classified_by_name = {}
+    classified_by_input = {}
+    for row in roles_data.get("documents") or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("path"):
+            classified_by_name[Path(str(row["path"])).name] = row
+        if row.get("input"):
+            classified_by_input[str(row["input"])] = row
+    raw_user_roles = descriptor.get("user_roles") if isinstance(descriptor.get("user_roles"), dict) else {}
+    orig_map = descriptor.get("original_filenames") if isinstance(descriptor.get("original_filenames"), dict) else {}
+    ordered: list[tuple[str, str, str]] = []  # (input_key, saved_name, original_filename)
+    seen_files: set[str] = set()
+
+    def _add(input_key: str, saved_name: str, orig_name: str = ""):
+        if not saved_name:
+            return
+        fname = Path(str(saved_name)).name
+        if Path(fname).suffix.lower() not in DOC_SUFFIXES or fname in seen_files:
+            return
+        seen_files.add(fname)
+        ordered.append((input_key, fname, str(orig_name or fname)))
+
+    if descriptor.get("source"):
+        _add("source", descriptor["source"], orig_map.get("source") or descriptor["source"])
+    if descriptor.get("answers"):
+        _add("answers", descriptor["answers"], orig_map.get("answers") or descriptor["answers"])
+    for idx, row in enumerate(descriptor.get("extra_documents") or [], 1):
+        if isinstance(row, dict) and row.get("path"):
+            _add(f"attachment_{idx:03d}", row["path"], row.get("original_filename") or row["path"])
+    for key, entry in (manifest.get("inputs") or {}).items():
+        if key == "docx" or not isinstance(entry, dict):
+            continue
+        p = str(entry.get("path") or "")
+        if p:
+            _add(str(key), p, entry.get("original_filename") or Path(p).name)
+    for row in roles_data.get("documents") or []:
+        if isinstance(row, dict) and row.get("path"):
+            _add(str(row.get("input") or ""), str(row["path"]), row.get("original_filename") or Path(str(row["path"])).name)
+
+    entries = []
+    for input_key, saved_name, orig_name in ordered:
+        crow = classified_by_name.get(saved_name) or classified_by_input.get(input_key) or {}
+        detected_role = str(crow.get("role") or "")
+        detected_source = str(crow.get("source") or "")
+        user_role = str(raw_user_roles.get(saved_name) or raw_user_roles.get(input_key) or raw_user_roles.get(orig_name) or "").strip()
+        if user_role not in ALLOWED_MATERIAL_ROLES:
+            user_role = ""
+        entries.append({
+            "file": saved_name,
+            "input": str(crow.get("input") or input_key),
+            "original_filename": str(crow.get("original_filename") or orig_name or saved_name),
+            "detected_role": detected_role,
+            "detected_source": detected_source,
+            "user_role": user_role,
+            "effective_role": user_role or detected_role or "other",
+            "chars": crow.get("chars"),
+            "error": crow.get("error") or "",
+        })
+    return descriptor, entries
+
+
+def get_material_roles(name: str) -> dict:
+    """返回批次下全部上传文档的当前识别角色与用户显式角色。"""
+    folder = batch_dir(name)
+    descriptor, entries = _batch_document_entries(folder)
+    raw_roles = descriptor.get("user_roles") if isinstance(descriptor.get("user_roles"), dict) else {}
+    return {
+        "ok": True,
+        "name": name,
+        "documents": entries,
+        "user_roles": {str(k): str(v) for k, v in raw_roles.items() if str(v) in ALLOWED_MATERIAL_ROLES},
+        "allowed_roles": list(ALLOWED_MATERIAL_ROLES),
+    }
+
+
+@serialized
+def set_material_roles(name: str, roles: dict, rerun: bool = False) -> dict:
+    """保存用户显式指定的材料角色，并可选从原卷提取阶段起重新执行。"""
+    if not isinstance(roles, dict):
+        raise ValueError("roles 参数必须为对象")
+    folder = batch_dir(name)
+    descriptor, entries = _batch_document_entries(folder)
+    alias_to_file: dict[str, str] = {}
+    for row in entries:
+        fname = row["file"]
+        alias_to_file[fname] = fname
+        if row.get("input"):
+            alias_to_file[row["input"]] = fname
+        if row.get("original_filename"):
+            alias_to_file[row["original_filename"]] = fname
+    user_roles = dict(descriptor.get("user_roles") or {}) if isinstance(descriptor.get("user_roles"), dict) else {}
+    for raw_key, raw_val in roles.items():
+        key_str = str(raw_key or "").strip()
+        if not key_str:
+            continue
+        target = alias_to_file.get(key_str, key_str)
+        val = str(raw_val or "").strip()
+        if not val or val == "auto":
+            user_roles.pop(target, None)
+            user_roles.pop(key_str, None)
+            continue
+        if val not in ALLOWED_MATERIAL_ROLES:
+            raise ValueError(f"不支持的材料角色：{val}")
+        user_roles[target] = val
+    descriptor["user_roles"] = user_roles
+    desc_path = folder / "attachments" / "batch.json"
+    desc_path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(desc_path, descriptor)
+
+    rerun_result = None
+    if rerun:
+        if auto_flow is None or wf_manifest is None:
+            raise ValueError("流水线模块不可用")
+        prepared = {}
+
+        def prepare():
+            manifest = wf_manifest.load(folder)
+            changed = wf_manifest.invalidate_downstream(
+                folder, manifest, "extract", "用户调整材料角色后重跑提取",
+            )
+            wf_manifest.save(folder, manifest)
+            prepared.update(mode="extract", invalidated=changed)
+            return prepared
+
+        rerun_result = _launch_advance(name, folder, prepare=prepare, reset_budget=True)
+        if rerun_result.get("started"):
+            rerun_result.update(prepared, **{"from": "extract"})
+
+    payload = get_material_roles(name)
+    if rerun_result is not None:
+        payload["rerun"] = rerun_result
+    return payload
+
+
 def _slug(text, fallback: str = "新试卷") -> str:
     cleaned = re.sub(r'[\\/:*?"<>|\s]+', "", str(text or "")).strip(".")
     return cleaned[:40] or fallback
@@ -1559,12 +1715,45 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
                    if Path(f["filename"]).suffix.lower() not in DOC_SUFFIXES + AUDIO_SUFFIXES]
     if unsupported:
         raise ValueError("不支持的附件：" + "、".join(unsupported) + "；请使用 DOCX、PDF 或音频，未保存任何文件")
+    raw_file_roles = {}
+    file_roles_text = str(fields.get("file_roles") or "").strip()
+    if file_roles_text:
+        try:
+            parsed_roles = json.loads(file_roles_text)
+            if isinstance(parsed_roles, dict):
+                raw_file_roles = parsed_roles
+        except ValueError as exc:
+            raise ValueError("file_roles 格式无效，应为 JSON 对象") from exc
+    explicit_by_id = {}
+    for idx, item in enumerate(files):
+        if item not in docs:
+            continue
+        chosen_role = ""
+        for key in (Path(item["filename"]).name, item["filename"], str(idx)):
+            val = str(raw_file_roles.get(key) or "").strip()
+            if val and val != "auto":
+                if val not in ALLOWED_MATERIAL_ROLES:
+                    raise ValueError(f"不支持的材料角色：{val}")
+                chosen_role = val
+                break
+        if chosen_role:
+            explicit_by_id[id(item)] = chosen_role
     audio_files = [f for f in files if Path(f["filename"]).suffix.lower() in AUDIO_SUFFIXES]
     audio = audio_files[0] if audio_files else None
     extra_audio = audio_files[1:]
-    answer_candidates = [f for f in docs if re.search(r"答案|answer|解析", Path(f["filename"]).stem, re.I)]
+    explicit_answers = [f for f in docs if explicit_by_id.get(id(f)) in ("answers", "explanations")]
+    answer_candidates = explicit_answers or [
+        f for f in docs
+        if not explicit_by_id.get(id(f)) and re.search(r"答案|answer|解析", Path(f["filename"]).stem, re.I)
+    ]
     answer = answer_candidates[0] if answer_candidates else None
-    main_candidates = [f for f in docs if f is not answer]
+    main_pool = [f for f in docs if f is not answer]
+    explicit_papers = [f for f in main_pool if explicit_by_id.get(id(f)) in ("paper", "mix")]
+    if explicit_papers:
+        main_candidates = explicit_papers
+    else:
+        non_aux = [f for f in main_pool if explicit_by_id.get(id(f)) not in ("listening_script", "structure_reference", "other")]
+        main_candidates = non_aux or main_pool
     # 来源优先级（用户 2026-11-11 确认）：Word 原卷 > 带文字层 PDF > 扫描件。
     # 同一批上传同时含 Word 与 PDF 时，Word 一定是提取主源，PDF 只作版面核对。
     source = (wf_source_policy.select_primary(main_candidates)
@@ -1621,6 +1810,14 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
     extra_docs = [f for f in docs if f is not source and f is not answer]
     saved_extras = [_save_part(folder, item, f"attachment_{index:03d}")
                     for index, item in enumerate(extra_docs, 1)]
+    user_roles = {}
+    if explicit_by_id.get(id(source)):
+        user_roles[saved_source.name] = explicit_by_id[id(source)]
+    if answer and saved_answer and explicit_by_id.get(id(answer)):
+        user_roles[saved_answer.name] = explicit_by_id[id(answer)]
+    for path, item in zip(saved_extras, extra_docs):
+        if explicit_by_id.get(id(item)):
+            user_roles[path.name] = explicit_by_id[id(item)]
     descriptor = {"workflow_id": name, "subject": subject, "title": title or None,
                   "uploaded_at_ns": _next_upload_order_ns(),
                   "year": int(year) if year.isdigit() else None, "region": region or None,
@@ -1634,6 +1831,8 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
                   "original_filenames": {"source": Path(source["filename"]).name,
                                          "answers": Path(answer["filename"]).name if answer else None,
                                          "audio": Path(audio["filename"]).name if audio else None}}
+    if user_roles:
+        descriptor["user_roles"] = user_roles
     save_json(folder / "batch.json", descriptor)
     candidate = {"name": name, "folder": str(folder), "subject": subject,
                  "title": descriptor["title"], "year": descriptor["year"], "region": descriptor["region"],
@@ -4535,6 +4734,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, **ai_supplement.read_progress(batch_dir(parts[2]))})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "paper-preview":
                 return self.send_json(paper_preview(parts[2]))
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "material-roles":
+                return self.send_json(get_material_roles(parts[2]))
             self.send_json({"error": "not found"}, 404)
         except (ValueError, KeyError) as exc:
             self.send_json({"error": str(exc)}, 400)
@@ -4607,6 +4808,8 @@ class Handler(BaseHTTPRequestHandler):
                     "segment", {"folder": str(folder), "audio": payload.get("audio")})})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "rerun":
                 return self.send_json({"ok": True, **start_rerun(parts[2], str(payload.get("mode") or ""))})
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "material-roles":
+                return self.send_json(set_material_roles(parts[2], payload.get("roles") or {}, bool(payload.get("rerun"))))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "archive":
                 return self.send_json(archive_batch(parts[2], payload.get("confirm_name")))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "purge":

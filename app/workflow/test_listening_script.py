@@ -110,3 +110,38 @@ class ListeningScriptTest(unittest.TestCase):
         batch_fill._overlay(item, {'explanation': source}, 'explanations')
         report = upload_payload.build_payload(batch(item), catalog_snapshot())
         self.assertEqual(report['payload']['items'][0]['explanation'], source)
+
+    def test_independent_listening_script_attachment_extracts_and_ignores_answer_anchors(self):
+        units = [
+            {'unit_id': 'q-1', 'unit_kind': 'standalone', 'numbers': [1], 'type': '听力短对话理解'},
+            {'unit_id': 'group-6-7', 'unit_kind': 'group', 'numbers': [6, 7], 'type': '听力长对话理解'},
+            {'unit_id': 'group-11-15', 'unit_kind': 'group', 'numbers': [11, 12, 13, 14, 15], 'type': '听力短文理解'},
+        ]
+        self.put('01_source/structure.confirmed.json', json.dumps({'units': units}, ensure_ascii=False))
+        self.put('01_source/附录.txt', '')
+        self.put('01_source/正文.txt', 'Ⅰ.短对话理解\n1. Q1?\nA. A B. B C. C\n')
+        self.put('01_source_ans/正文.txt', 'Ⅰ.短对话理解\n1. C 【解析】原解析。\n')
+        self.put('01_source/materials/attachment_001.txt',
+                 '**2025年安徽省初中学业水平考试**\n'
+                 '**Ⅰ****.****短对话理解**\n'
+                 '**你将听到五段对话。每段对话读两遍。**\n'
+                 '1.W:What is your hobby?\nM:Reading.\n'
+                 '**Ⅱ****.****长对话理解**\n'
+                 '听下面一段对话，回答第6、7题。\n'
+                 'M:We missed the bus.\nW:Take it easy.\n'
+                 'Ⅲ.短文理解\n'
+                 '**你将听到一篇短文。短文读两遍。**\n'
+                 'Today is the cleaning day.\n')
+        self.put('01_source/material-roles.json', json.dumps({'documents': [
+            {'input': 'source', 'role': 'paper', 'content_authority': True, 'text_path': '01_source/materials/source.txt'},
+            {'input': 'answers', 'role': 'answers', 'content_authority': True, 'text_path': '01_source/materials/answers.txt'},
+            {'input': 'attachment_001', 'role': 'listening_script', 'content_authority': True, 'text_path': '01_source/materials/attachment_001.txt'},
+        ]}, ensure_ascii=False))
+        result = listening_script.extract(self.batch, units)
+        self.assertEqual(result['q-1'][0], 'W:What is your hobby?\nM:Reading.')
+        self.assertEqual(result['group-6-7'][0], 'M:We missed the bus.\nW:Take it easy.')
+        self.assertEqual(result['group-11-15'][0], 'Today is the cleaning day.')
+        item = dict(units[0], question_type='听力短对话理解',
+                    explanation=listening_script.combine('原解析。', result['q-1'][0]))
+        report = upload_content.inspect_content(self.batch, {'items': [item]}, strict=True)
+        self.assertTrue(report['passed'], report['errors'])

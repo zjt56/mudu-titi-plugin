@@ -2,6 +2,7 @@
 """Workbench on-demand AI supplement for missing/AI-generated articleSummary & explanation."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -895,34 +896,57 @@ def _check_upload_editable(batch: Path) -> None:
 
 
 def _refresh_post_edit_gates(batch: Path, *, lock_held: bool = False) -> tuple[int | None, bool | None]:
-    """Re-run validate and refresh format_gate when already completed so local_complete stays intact."""
+    """Re-run validate and refresh format_gate when already completed so local_complete stays intact.
+
+    Uses only the per-batch `.run.lock` (never the global cross-batch `_agent_lock`)
+    so model runs on unrelated batches never stall post-edit validation.
+    Post-completion AI supplements must never demote an already-finished batch back
+    into the processing queue (排队区) when validation/format_gate hits an unrelated
+    or pre-existing check failure.
+    """
     manifest_path = batch / "workflow" / "manifest.json"
     if not manifest_path.is_file():
         return None, None
-    current = mf.load(batch)
-    was_format_done = (current.get("stages", {}).get("format_gate", {}) or {}).get("status") == mf.COMPLETED
-    validate_code = runner.do_validate(batch, current, lock_held=lock_held, refresh_only=True)
-    format_passed: bool | None = None
-    if was_format_done:
-        report = format_gate.run(batch)
-        format_passed = bool(report.get("passed") is True)
-        with (nullcontext() if lock_held else local_agent._agent_lock(1500)):
-            fresh = mf.load(batch)
-            spec = contracts.STAGE_BY_ID["format_gate"]
-            if format_passed:
-                mf.touch_stage(
-                    fresh, "format_gate", mf.COMPLETED,
-                    input_hashes=mf.input_hashes(batch, fresh, spec),
-                    output_hashes=mf.output_hashes(batch, spec),
-                    exit_code=0, kind=spec.kind, notes="",
-                )
-                mf.record_semantics(batch, fresh, spec)
-            else:
-                errors = report.get("errors") or []
-                first_msg = str((errors[0] or {}).get("message") or "格式检查未通过") if errors else "格式检查未通过"
-                mf.touch_stage(fresh, "format_gate", mf.FAILED, exit_code=1, notes=first_msg[:300])
-            mf.save(batch, fresh)
-    return validate_code, format_passed
+    try:
+        lock_ctx = nullcontext() if lock_held else runner._single_run_lock(batch, timeout=5.0)
+        with lock_ctx:
+            current = mf.load(batch)
+            stages = current.get("stages") or {}
+            was_validate_done = (stages.get("validate") or {}).get("status") == mf.COMPLETED
+            was_format_done = (stages.get("format_gate") or {}).get("status") == mf.COMPLETED
+            prev_validate = copy.deepcopy(stages.get("validate")) if was_validate_done else None
+            prev_format = copy.deepcopy(stages.get("format_gate")) if was_format_done else None
+            validate_code = runner.do_validate(batch, current, lock_held=True, refresh_only=True)
+            format_passed: bool | None = None
+            if was_format_done:
+                report = format_gate.run(batch)
+                format_passed = bool(report.get("passed") is True)
+                fresh = mf.load(batch)
+                spec = contracts.STAGE_BY_ID["format_gate"]
+                if format_passed and validate_code == 0:
+                    mf.touch_stage(
+                        fresh, "format_gate", mf.COMPLETED,
+                        input_hashes=mf.input_hashes(batch, fresh, spec),
+                        output_hashes=mf.output_hashes(batch, spec),
+                        exit_code=0, kind=spec.kind, notes="",
+                    )
+                    mf.record_semantics(batch, fresh, spec)
+                else:
+                    # Keep already-completed batch in review workbench instead of kicking it back to queue.
+                    if prev_validate is not None and validate_code != 0:
+                        fresh.setdefault("stages", {})["validate"] = prev_validate
+                    if prev_format is not None:
+                        fresh.setdefault("stages", {})["format_gate"] = prev_format
+                    fresh["status"] = mf.derive_status(fresh)
+                mf.save(batch, fresh)
+            elif prev_validate is not None and validate_code != 0:
+                fresh = mf.load(batch)
+                fresh.setdefault("stages", {})["validate"] = prev_validate
+                fresh["status"] = mf.derive_status(fresh)
+                mf.save(batch, fresh)
+            return validate_code, format_passed
+    except RuntimeError:
+        return None, None
 
 
 def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None = None,
@@ -1171,10 +1195,15 @@ def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None
             _atomic_write_text(manual_path, json.dumps(manual_data, ensure_ascii=False, indent=2) + "\n")
             _sync_explanations_artifact(batch, applied_updates, mode)
 
-        # Run validation & format_gate refresh outside the short write lock so waiting on _agent_lock never blocks content edits.
+        # Run validation & format_gate refresh outside the short write lock so waiting never blocks content edits.
         validate_code = None
         format_passed = None
         if _batch_still_same(batch, identity) and manifest_path.is_file():
+            _write_progress(batch, {
+                **meta_fields, "status": "running", "mode": mode, "total": total,
+                "completed": total, "applied": len(applied_keys),
+                "message": f"已写入 {len(applied_keys)} 项，正在刷新本地体检与格式检查…", "error": "",
+            }, batch_identity=identity)
             validate_code, format_passed = _refresh_post_edit_gates(batch, lock_held=False)
 
         label = "听力材料转录" if mode == "listeningScript" else ("文章大意" if mode == "articleSummary" else "解析")

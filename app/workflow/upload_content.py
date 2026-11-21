@@ -181,11 +181,35 @@ def _cached_source_file_lines(path_str: str, mtime_ns: int, size: int, anchor_vi
     return tuple(_source_line(s, anchor_view=anchor_view) for s in raw)
 
 
+def listening_script_sources(batch_dir):
+    """Independent listening-script attachments classified by material-roles.json.
+
+    They supply listening transcripts via listening_script.extract, and must not
+    compete with answer sheets or explanation anchors.
+    """
+    path = Path(batch_dir) / '01_source' / 'material-roles.json'
+    if not path.is_file():
+        return frozenset()
+    try:
+        data = json.loads(path.read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError, UnicodeError):
+        return frozenset()
+    result = set()
+    for doc in (data.get('documents') or []) if isinstance(data, dict) else []:
+        if not isinstance(doc, dict) or doc.get('content_authority') is False:
+            continue
+        role = doc.get('content_role') or doc.get('role')
+        text_path = doc.get('text_path')
+        if role == 'listening_script' and isinstance(text_path, str) and text_path:
+            result.add(text_path)
+    return frozenset(result)
+
+
 def _load_source_lines(batch: Path, paths: list[str]) -> dict[str, list[str]]:
-    ref_only = reference_only_sources(batch)
+    excluded = reference_only_sources(batch) | listening_script_sources(batch)
     result: dict[str, list[str]] = {}
     for rel in paths:
-        if rel in ref_only:
+        if rel in excluded:
             continue
         fp = batch / rel
         if not fp.is_file():
@@ -1256,10 +1280,10 @@ def infer_image_group_numbers(batch_dir, section_start_line: int, section_end_li
     paths = [*SOURCES, *(p.relative_to(batch).as_posix() for p in sorted(
         (batch / '01_source/materials').glob('attachment_*.txt'))
         if re.fullmatch(r'attachment_\d{3,}\.txt', p.name))]
-    ref_only = reference_only_sources(batch)
+    excluded = reference_only_sources(batch) | listening_script_sources(batch)
     source_lines = {path: [_source_line(s, anchor_view=path == '01_source/正文.txt')
                            for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
-                    for path in paths if (batch / path).is_file() and path not in ref_only}
+                    for path in paths if (batch / path).is_file() and path not in excluded}
     body_path = '01_source/正文.txt'
     body = source_lines.get(body_path, [])
     if not body or not (1 <= section_start_line < section_end_line <= len(body)):
@@ -1752,8 +1776,9 @@ def validate_scoped_missing(batch_dir, unit, number, evidence=None):
     batch = Path(batch_dir)
     paths = [*SOURCES, *(p.relative_to(batch).as_posix() for p in (batch / '01_source/materials').glob('attachment_*.txt')
                         if re.fullmatch(r'attachment_\d{3,}\.txt', p.name))]
+    excluded = reference_only_sources(batch) | listening_script_sources(batch)
     source_lines = {path: [_source_line(s, anchor_view=path == '01_source/正文.txt') for s in (batch / path).read_text(encoding='utf-8-sig').splitlines()]
-                    for path in paths if (batch / path).is_file() and path not in reference_only_sources(batch)}
+                    for path in paths if (batch / path).is_file() and path not in excluded}
     confirmed = batch / '01_source/structure.confirmed.json'
     units = json.loads(confirmed.read_text(encoding='utf-8-sig')).get('units', []) if confirmed.is_file() else [unit]
     from .content_rules import is_placeholder
@@ -1822,6 +1847,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
     source_lines, raw_source_lines = {}, {}
     material_dir = batch / '01_source/materials'
     reference_only = reference_only_sources(batch)
+    listening_only = listening_script_sources(batch)
     extra_sources = [p.relative_to(batch).as_posix() for p in sorted(material_dir.glob('attachment_*.txt'))
                      if re.fullmatch(r'attachment_\d{3,}\.txt', p.name)] if material_dir.is_dir() else []
     for relative in (*SOURCES, *extra_sources):
@@ -1835,8 +1861,8 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
         raw_source_lines[relative] = text.splitlines()
         lines = [_source_line(line, anchor_view=relative == '01_source/正文.txt') for line in raw_source_lines[relative]]
         source_lines[relative] = lines
-        if relative in reference_only:
-            continue  # Corroborating copies never supply or compete for content.
+        if relative in reference_only or relative in listening_only:
+            continue  # Corroborating copies and listening scripts never compete for answer/explanation anchors.
         lines = list(listening_script.without_scripts(lines))
         section = None
         for index, line in enumerate(lines):

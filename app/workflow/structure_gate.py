@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 from collections import Counter
@@ -1098,405 +1099,440 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
               "structure_sha256": mf.sha256_file(structure_path) if structure_path.is_file() else None,
               "original_sha256": mf.sha256_file(original_path) if original_path and original_path.is_file() else None,
               "visual_columns_sha256": None}
-    blockers: list[dict] = []
-    checks: dict[str, str] = {}
-    resolved_notes: list[dict] = []
-    warnings: list[dict] = []
-    deferred: list[dict] = []
-    # 无视觉证据：栏目归属检查不适用，缺视觉不阻断。
-    checks['column_ownership'] = 'not_required'
-    ai_classified = None
-    try:
-        from . import structure_ai
-        ai_classified = structure_ai.auto_classify(batch_dir)
-        if ai_classified.get("units"):
-            warnings.append({"code": "AI_STRUCTURE_CLASSIFIED", "blocking": False,
-                             "status": "candidate", "message": ai_classified.get("reason", "AI结构归类已采用")})
-    except (OSError, ValueError, RuntimeError, TypeError) as exc:
-        warnings.append({"code": "AI_STRUCTURE_UNAVAILABLE", "blocking": False,
-                         "status": "fallback", "message": str(exc)[:160]})
-    # 复合提取器显式提出的 OCR/题号/分组歧义不能被数量自检抹掉。
-    # 已经人工/原卷核对、并附带 resolution 依据的条目可放行，但仍记入报告留痕。
-    for issue in structure.get("unresolved") or []:
-        if isinstance(issue, dict):
-            if issue.get("code") == "SOURCE_METADATA_MISSING":
-                # 兼容旧提取报告：来源缺失采用占位，不作为结构错误或人工必审项。
-                warnings.append({**issue, "blocking": False, "status": "placeholder"})
-                continue
-            evidence = issue.get("resolution_evidence") or {}
-            bound = (isinstance(evidence, dict) and hashes["source_sha256"] and hashes["original_sha256"]
-                     and evidence.get("source_sha256") == hashes["source_sha256"]
-                     and evidence.get("original_sha256") == hashes["original_sha256"]
-                     and isinstance(evidence.get("evidence"), list)
-                     and any(isinstance(ref, str) and ref.strip() for ref in evidence["evidence"]))
-            if issue.get("resolved") is True and str(issue.get("resolution") or "").strip() and bound:
-                resolved_notes.append({"code": issue.get("code", "EXTRACTION_UNRESOLVED"),
-                                       "message": issue.get("message", "提取结果待核验"),
-                                       "resolution": issue.get("resolution")})
-                continue
-            if issue.get("code") == "ANSWER_APPENDIX_DETECTED":
-                # 答案册特征（题号+答案字母/解析）是确定性事实：分离为附录候选，不阻断正文切题。
-                resolved_notes.append({"code": issue.get("code"),
-                                       "message": issue.get("message", "文末答案附录"),
-                                       "resolution": "文末重复标题之后按题号+答案字母/解析判定为答案册，保留为答案附录候选"})
-                continue
-            if issue.get("code") in ("EXTRACTION_WARNING", "OCR_VISUAL_REVIEW", "IMAGE_SECTION_UNNUMBERED"):
-                # 提取告警/OCR复核结果/图片题都是“版面与能力”层面，不是结构（题号/选项/材料）错误：
-                # 保留为非阻断告警，并强制 layout_required 走整页渲染/版面复核（上传前必过），
-                # 不让 OCR 补充证据反过来阻断结构切题。
-                warnings.append({**issue, "blocking": False, "status": "layout_review_required"})
-                continue
-            if issue.get("code") == "INLINE_ANSWER_BLOCK":
-                # 解析版把答案插在大题之间（听力答案后接笔试）：答案移入附录、
-                # 正文继续解析是确定性切分，不构成结构歧义。
-                resolved_notes.append({"code": issue.get("code"),
-                                       "message": issue.get("message", "分段答案"),
-                                       "resolution": "重复大题后是分段答案、随后仍有新大题；答案移入附录，正文继续解析"})
-                continue
-            # 听力稿只负责保留材料和诊断；边界由后续模型结构化阶段判断。
-            if model_structure_only:
-                warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
-            else:
-                blockers.append({"code": issue.get("code", "EXTRACTION_UNRESOLVED"),
-                                 "message": issue.get("message", "提取结果待核验"),
-                                 "source_line": issue.get("line")})
-    checks["extraction_evidence"] = "passed" if model_structure_only or not blockers else "failed"
+    base_sections = list(sections)
+    base_meta = dict(meta) if isinstance(meta, dict) else meta
 
-    if not raw_text.strip():
-        blockers.append({"code": "SOURCE_EMPTY", "message": "正文为空，无法结构化"})
-        checks["source_present"] = "failed"
-        sections = []
-    else:
-        checks["source_present"] = "passed"
+    def _run_structural_pass(ai_classified=None, initial_warnings=None):
+        sections = list(base_sections)
+        meta = dict(base_meta) if isinstance(base_meta, dict) else base_meta
+        blockers: list[dict] = []
+        checks: dict[str, str] = {"column_ownership": "not_required"}
+        resolved_notes: list[dict] = []
+        warnings: list[dict] = list(initial_warnings or [])
+        deferred: list[dict] = []
+        source_diagnostic = None
+        # 复合提取器显式提出的 OCR/题号/分组歧义不能被数量自检抹掉。
+        # 已经人工/原卷核对、并附带 resolution 依据的条目可放行，但仍记入报告留痕。
+        for issue in structure.get("unresolved") or []:
+            if isinstance(issue, dict):
+                if issue.get("code") == "SOURCE_METADATA_MISSING":
+                    # 兼容旧提取报告：来源缺失采用占位，不作为结构错误或人工必审项。
+                    warnings.append({**issue, "blocking": False, "status": "placeholder"})
+                    continue
+                evidence = issue.get("resolution_evidence") or {}
+                bound = (isinstance(evidence, dict) and hashes["source_sha256"] and hashes["original_sha256"]
+                         and evidence.get("source_sha256") == hashes["source_sha256"]
+                         and evidence.get("original_sha256") == hashes["original_sha256"]
+                         and isinstance(evidence.get("evidence"), list)
+                         and any(isinstance(ref, str) and ref.strip() for ref in evidence["evidence"]))
+                if issue.get("resolved") is True and str(issue.get("resolution") or "").strip() and bound:
+                    resolved_notes.append({"code": issue.get("code", "EXTRACTION_UNRESOLVED"),
+                                           "message": issue.get("message", "提取结果待核验"),
+                                           "resolution": issue.get("resolution")})
+                    continue
+                if issue.get("code") == "ANSWER_APPENDIX_DETECTED":
+                    # 答案册特征（题号+答案字母/解析）是确定性事实：分离为附录候选，不阻断正文切题。
+                    resolved_notes.append({"code": issue.get("code"),
+                                           "message": issue.get("message", "文末答案附录"),
+                                           "resolution": "文末重复标题之后按题号+答案字母/解析判定为答案册，保留为答案附录候选"})
+                    continue
+                if issue.get("code") in ("EXTRACTION_WARNING", "OCR_VISUAL_REVIEW", "IMAGE_SECTION_UNNUMBERED"):
+                    # 提取告警/OCR复核结果/图片题都是“版面与能力”层面，不是结构（题号/选项/材料）错误：
+                    # 保留为非阻断告警，并强制 layout_required 走整页渲染/版面复核（上传前必过），
+                    # 不让 OCR 补充证据反过来阻断结构切题。
+                    warnings.append({**issue, "blocking": False, "status": "layout_review_required"})
+                    continue
+                if issue.get("code") == "INLINE_ANSWER_BLOCK":
+                    # 解析版把答案插在大题之间（听力答案后接笔试）：答案移入附录、
+                    # 正文继续解析是确定性切分，不构成结构歧义。
+                    resolved_notes.append({"code": issue.get("code"),
+                                           "message": issue.get("message", "分段答案"),
+                                           "resolution": "重复大题后是分段答案、随后仍有新大题；答案移入附录，正文继续解析"})
+                    continue
+                # 听力稿只负责保留材料和诊断；边界由后续模型结构化阶段判断。
+                if model_structure_only:
+                    warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
+                else:
+                    blockers.append({"code": issue.get("code", "EXTRACTION_UNRESOLVED"),
+                                     "message": issue.get("message", "提取结果待核验"),
+                                     "source_line": issue.get("line")})
+        checks["extraction_evidence"] = "passed" if model_structure_only or not blockers else "failed"
 
-    if not sections and not any(c.get("role") == "question" for c in columns):
-        blockers.append({"code": "NO_SECTIONS", "message": "structure.json 缺少 sections，无法拆分题组"})
-        checks["sections_present"] = "failed"
-        sections = []
-    else:
-        checks["sections_present"] = "passed"
-
-    for section in sections:
-        nums = _section_numbers(section)
-        count = section.get("declared_count")
-        unnumbered_writing = "书面表达" in str(section.get("type") or "") and not nums
-        if count is not None and count != len(nums) and not unnumbered_writing:
-            issue = {"code": "QUESTION_COUNT_MISMATCH", "message": f"大题 {section.get('title') or section.get('type')} 声明 {count} 小题，当前提取定位 {len(nums)} 题；交模型结构化"}
-            if model_structure_only:
-                warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
-            else:
-                blockers.append(issue)
-    units = _build_units(sections, groups, source_lines, columns, batch_dir=batch_dir) if sections else []
-    if isinstance(ai_classified, dict) and ai_classified.get("units"):
-        units = _merge_visual_units(units, ai_classified["units"], columns, source_lines, sections)
-    # A stale candidate group may differ from the final AI grouping. Only the
-    # same complete Word-bound proof used by the downstream source audit can
-    # make that candidate boundary comparison obsolete.
-    ai_bound = False
-    if isinstance(ai_classified, dict) and ai_classified.get("units"):
-        from .question_content import _validated_ai_units
-        ai_units = ai_classified["units"]
-        if _validated_ai_units(ai_units, units, source_lines) is not None:
-            ai_bound = True
-            units = ai_units
+        if not raw_text.strip():
+            blockers.append({"code": "SOURCE_EMPTY", "message": "正文为空，无法结构化"})
+            checks["source_present"] = "failed"
+            sections = []
         else:
-            # An AI grouping that cannot be bound to the source per question must
-            # never become the confirmed structure: keep the deterministic units
-            # and let the per-question source audit judge them. Downstream still
-            # re-checks every unit, so this is a fallback, not a silent approval.
-            warnings.append({"code": "AI_STRUCTURE_REJECTED", "blocking": False,
-                             "status": "fallback",
-                             "message": "AI 结构单元无法逐题绑定原文；已改用确定性结构，后续仍逐题核对原卷"})
+            checks["source_present"] = "passed"
 
-    declared = sorted({n for section in sections for n in _section_numbers(section)})
-    from .preview import _strong_number
-    if scoped:
-        from . import question_content
-        from .question_content import audit_source_unit
-        scoped_problems = _scoped_source_errors(units, sections, source_lines, columns)
-        blockers.extend(scoped_problems)
-        checks["coverage"] = checks["source_number_coverage"] = checks["grouping"] = "failed" if scoped_problems else "passed"
-        content_problems = []
-        _visual_sem = None
-        for unit in units:
-            span = unit.get("source_span") or {}
-            lo, hi = span.get("start_line", 0), span.get("end_line", 0)
-            if not 1 <= lo <= hi <= len(source_lines):
-                content_problems.append({"code": "SOURCE_SPAN_INVALID", "message": "单元缺少有效局部来源窗口"})
-                continue
-            local = source_lines[lo - 1:hi]
-            local_unit = {**unit, "source_span": {**span, "start_line": 1, "end_line": len(local)}}
-            unit_issues = audit_source_unit(local_unit, local)["issues"]
-            # 图片选项题：正则对 `[IMG x]A.` 前置排版切割错位会误报缺选项；用原文
-            # `[IMG]` 计数 + 视觉语义佐证证明“选项是图、图都在”时降级为留痕，不阻断。
-            if _visual_sem is not None:
-                kept = []
-                for issue in unit_issues:
-                    if issue.get("code") == "SOURCE_OPTIONS_INCOMPLETE":
-                        ev = question_content.image_option_evidence(local_unit, local, _visual_sem)
-                        if ev and ev.get("is_image_option"):
-                            visual_notes.append({
-                                "unit_id": unit.get("unit_id"), "number": issue.get("number"),
-                                "resolution": "图片选项题：窗口内图片数与选项匹配（视觉佐证），非缺项",
-                                "image_count": ev["image_count"], "expected": ev["expected"]})
-                            continue
-                    kept.append(issue)
-                unit_issues = kept
-            content_problems.extend(unit_issues)
-        blockers.extend(content_problems)
-        checks["source_content"] = "failed" if content_problems else "passed"
-        checks["group_guides"] = "failed" if any(p["code"] == "GUIDE_GROUP_MISMATCH" for p in scoped_problems) else "passed"
-        checks["denoise"] = "passed"
-        # A valid section restart is independent of an unrelated section's
-        # failure. Each participating occurrence must still prove its own scope.
-        from .question_content import legitimate_source_shape
-        unnumbered_boundaries = []
-        for issue in blockers:
-            if issue.get("code") != "QUESTION_BOUNDARY_MISSING":
-                continue
-            at = issue.get("source_line")
-            owned = [u for u in units if (u.get("source_section") or {}).get("start_line") == at]
-            if (owned and all(legitimate_source_shape(u)
-                              and u.get("source_span", {}).get("number_binding") == "unnumbered_section"
-                              and _proven_unnumbered_scope(u, sections, source_lines) for u in owned)
-                    and not any(type(p.get("source_line")) is int
-                                and at <= p["source_line"] <= max(u["source_span"]["end_line"] for u in owned)
-                                for p in scoped_problems)
-                    and all(_proven_unnumbered_scope(u, sections, source_lines, columns) for u in owned)):
-                unnumbered_boundaries.append(issue)
-        # Full reconciliation above still retains every other section's errors.
-        blockers[:] = [b for b in blockers if b not in unnumbered_boundaries]
-        resolved_notes.extend({**b, "resolution": "完整无编号来源窗口及合法原卷作答形态已验证，内部别名不作为印刷题号"} for b in unnumbered_boundaries)
-        restarts = [b for b in blockers if b.get("code") == "NUMBERING_RESTART"
-                    and _proven_scoped_restart(b.get("source_line"), units, sections, source_lines, scoped_problems, columns)]
-        blockers[:] = [b for b in blockers if b not in restarts]
-        resolved_notes.extend({**b, "resolution": "当前大题及前序同号大题的来源位置、出现序次和身份均已独立重建验证"} for b in restarts)
-        # Only positional source proof can resolve extraction's global-number assumptions.
-        if not scoped_problems and not content_problems:
-            positional_codes = {"DUPLICATE_QUESTION_NUMBER", "GROUP_BOUNDARY_REVIEW", "QUESTION_BOUNDARY_MISSING"}
-            resolved = [b for b in blockers if b.get("code") in positional_codes]
-            blockers[:] = [b for b in blockers if b.get("code") not in positional_codes]
-            resolved_notes.extend({**b, "resolution": "每个原题位置已唯一绑定到本大题/材料局部窗口"} for b in resolved)
-            checks["extraction_evidence"] = "failed" if any(b.get("source_line") for b in blockers) else "passed"
-    else:
-        # 题号覆盖：section 声明的题号应被 units 完整覆盖，无重复
-        declared = sorted({n for s in sections for n in _section_numbers(s)})
-        unit_numbers = [n for u in units for n in u["numbers"]]
-        dup = {n for n in unit_numbers if unit_numbers.count(n) > 1}
-        missing = sorted(set(declared) - set(unit_numbers))
-        if dup:
-            blockers.append({"code": "DUPLICATE_NUMBERS", "message": "题号重复归属：" + ", ".join(map(str, sorted(dup)))})
-            checks["coverage"] = "failed"
-        elif missing:
-            blockers.append({"code": "MISSING_NUMBERS", "message": "题号未覆盖：" + ", ".join(map(str, missing))})
-            checks["coverage"] = "failed"
-        elif declared:
-            checks["coverage"] = "passed"
+        if not sections and not any(c.get("role") == "question" for c in columns):
+            blockers.append({"code": "NO_SECTIONS", "message": "structure.json 缺少 sections，无法拆分题组"})
+            checks["sections_present"] = "failed"
+            sections = []
+        else:
+            checks["sections_present"] = "passed"
 
-        # 对照实际原文题号/空位，而不是仅比较结构声明与由声明生成的单元。
-        from .preview import _strong_number, _weak_numbers, SECTION
-        from .question_content import audit_source_unit
-        writing_lines = set()
-        for unit in units:
-            span = unit.get("source_span") or {}
-            if span.get("number_binding") == "single_writing_section":
-                writing_lines.update(range(span["start_line"] - 1, span["end_line"]))
-        # 显式编号作文的连续内容要点也不是试卷题号；异常序列仍参与对账。
-        writing_points = set()
+        for section in sections:
+            nums = _section_numbers(section)
+            count = section.get("declared_count")
+            unnumbered_writing = "书面表达" in str(section.get("type") or "") and not nums
+            if count is not None and count != len(nums) and not unnumbered_writing:
+                issue = {"code": "QUESTION_COUNT_MISMATCH", "message": f"大题 {section.get('title') or section.get('type')} 声明 {count} 小题，当前提取定位 {len(nums)} 题；交模型结构化"}
+                if model_structure_only:
+                    warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
+                else:
+                    blockers.append(issue)
+        units = _build_units(sections, groups, source_lines, columns, batch_dir=batch_dir) if sections else []
+        if isinstance(ai_classified, dict) and ai_classified.get("units"):
+            units = _merge_visual_units(units, ai_classified["units"], columns, source_lines, sections)
+        # A stale candidate group may differ from the final AI grouping. Only the
+        # same complete Word-bound proof used by the downstream source audit can
+        # make that candidate boundary comparison obsolete.
+        ai_bound = False
+        if isinstance(ai_classified, dict) and ai_classified.get("units"):
+            from .question_content import _validated_ai_units
+            ai_units = ai_classified["units"]
+            if _validated_ai_units(ai_units, units, source_lines) is not None:
+                ai_bound = True
+                units = ai_units
+            else:
+                # An AI grouping that cannot be bound to the source per question must
+                # never become the confirmed structure: keep the deterministic units
+                # and let the per-question source audit judge them. Downstream still
+                # re-checks every unit, so this is a fallback, not a silent approval.
+                warnings.append({"code": "AI_STRUCTURE_REJECTED", "blocking": False,
+                                 "status": "fallback",
+                                 "message": "AI 结构单元无法逐题绑定原文；已改用确定性结构，后续仍逐题核对原卷"})
+
+        declared = sorted({n for section in sections for n in _section_numbers(section)})
+        from .preview import _strong_number
+        if scoped:
+            from . import question_content
+            from .question_content import audit_source_unit
+            scoped_problems = _scoped_source_errors(units, sections, source_lines, columns)
+            blockers.extend(scoped_problems)
+            checks["coverage"] = checks["source_number_coverage"] = checks["grouping"] = "failed" if scoped_problems else "passed"
+            content_problems = []
+            _visual_sem = None
+            for unit in units:
+                span = unit.get("source_span") or {}
+                lo, hi = span.get("start_line", 0), span.get("end_line", 0)
+                if not 1 <= lo <= hi <= len(source_lines):
+                    content_problems.append({"code": "SOURCE_SPAN_INVALID", "message": "单元缺少有效局部来源窗口"})
+                    continue
+                local = source_lines[lo - 1:hi]
+                local_unit = {**unit, "source_span": {**span, "start_line": 1, "end_line": len(local)}}
+                unit_issues = audit_source_unit(local_unit, local)["issues"]
+                # 图片选项题：正则对 `[IMG x]A.` 前置排版切割错位会误报缺选项；用原文
+                # `[IMG]` 计数 + 视觉语义佐证证明“选项是图、图都在”时降级为留痕，不阻断。
+                if _visual_sem is not None:
+                    kept = []
+                    for issue in unit_issues:
+                        if issue.get("code") == "SOURCE_OPTIONS_INCOMPLETE":
+                            ev = question_content.image_option_evidence(local_unit, local, _visual_sem)
+                            if ev and ev.get("is_image_option"):
+                                visual_notes.append({
+                                    "unit_id": unit.get("unit_id"), "number": issue.get("number"),
+                                    "resolution": "图片选项题：窗口内图片数与选项匹配（视觉佐证），非缺项",
+                                    "image_count": ev["image_count"], "expected": ev["expected"]})
+                                continue
+                        kept.append(issue)
+                    unit_issues = kept
+                content_problems.extend(unit_issues)
+            blockers.extend(content_problems)
+            checks["source_content"] = "failed" if content_problems else "passed"
+            checks["group_guides"] = "failed" if any(p["code"] == "GUIDE_GROUP_MISMATCH" for p in scoped_problems) else "passed"
+            checks["denoise"] = "passed"
+            # A valid section restart is independent of an unrelated section's
+            # failure. Each participating occurrence must still prove its own scope.
+            from .question_content import legitimate_source_shape
+            unnumbered_boundaries = []
+            for issue in blockers:
+                if issue.get("code") != "QUESTION_BOUNDARY_MISSING":
+                    continue
+                at = issue.get("source_line")
+                owned = [u for u in units if (u.get("source_section") or {}).get("start_line") == at]
+                if (owned and all(legitimate_source_shape(u)
+                                  and u.get("source_span", {}).get("number_binding") == "unnumbered_section"
+                                  and _proven_unnumbered_scope(u, sections, source_lines) for u in owned)
+                        and not any(type(p.get("source_line")) is int
+                                    and at <= p["source_line"] <= max(u["source_span"]["end_line"] for u in owned)
+                                    for p in scoped_problems)
+                        and all(_proven_unnumbered_scope(u, sections, source_lines, columns) for u in owned)):
+                    unnumbered_boundaries.append(issue)
+            # Full reconciliation above still retains every other section's errors.
+            blockers[:] = [b for b in blockers if b not in unnumbered_boundaries]
+            resolved_notes.extend({**b, "resolution": "完整无编号来源窗口及合法原卷作答形态已验证，内部别名不作为印刷题号"} for b in unnumbered_boundaries)
+            restarts = [b for b in blockers if b.get("code") == "NUMBERING_RESTART"
+                        and _proven_scoped_restart(b.get("source_line"), units, sections, source_lines, scoped_problems, columns)]
+            blockers[:] = [b for b in blockers if b not in restarts]
+            resolved_notes.extend({**b, "resolution": "当前大题及前序同号大题的来源位置、出现序次和身份均已独立重建验证"} for b in restarts)
+            # Only positional source proof can resolve extraction's global-number assumptions.
+            if not scoped_problems and not content_problems:
+                positional_codes = {"DUPLICATE_QUESTION_NUMBER", "GROUP_BOUNDARY_REVIEW", "QUESTION_BOUNDARY_MISSING"}
+                resolved = [b for b in blockers if b.get("code") in positional_codes]
+                blockers[:] = [b for b in blockers if b.get("code") not in positional_codes]
+                resolved_notes.extend({**b, "resolution": "每个原题位置已唯一绑定到本大题/材料局部窗口"} for b in resolved)
+                checks["extraction_evidence"] = "failed" if any(b.get("source_line") for b in blockers) else "passed"
+        else:
+            # 题号覆盖：section 声明的题号应被 units 完整覆盖，无重复
+            declared = sorted({n for s in sections for n in _section_numbers(s)})
+            unit_numbers = [n for u in units for n in u["numbers"]]
+            dup = {n for n in unit_numbers if unit_numbers.count(n) > 1}
+            missing = sorted(set(declared) - set(unit_numbers))
+            if dup:
+                blockers.append({"code": "DUPLICATE_NUMBERS", "message": "题号重复归属：" + ", ".join(map(str, sorted(dup)))})
+                checks["coverage"] = "failed"
+            elif missing:
+                blockers.append({"code": "MISSING_NUMBERS", "message": "题号未覆盖：" + ", ".join(map(str, missing))})
+                checks["coverage"] = "failed"
+            elif declared:
+                checks["coverage"] = "passed"
+
+            # 对照实际原文题号/空位，而不是仅比较结构声明与由声明生成的单元。
+            from .preview import _strong_number, _weak_numbers, SECTION
+            from .question_content import audit_source_unit
+            writing_lines = set()
+            for unit in units:
+                span = unit.get("source_span") or {}
+                if span.get("number_binding") == "single_writing_section":
+                    writing_lines.update(range(span["start_line"] - 1, span["end_line"]))
+            # 显式编号作文的连续内容要点也不是试卷题号；异常序列仍参与对账。
+            writing_points = set()
+            for section in sections:
+                if "书面表达" not in str(section.get("type")):
+                    continue
+                title = _plain(str(section.get("title") or "")).strip()
+                starts = [i for i, line in enumerate(source_lines) if title and _plain(line).strip() == title]
+                if len(starts) != 1:
+                    continue
+                start = starts[0]
+                end = next((i for i in range(start + 1, len(source_lines)) if SECTION.match(_plain(source_lines[i]))), len(source_lines))
+                first = next((i for i in range(start + 1, end) if _plain(source_lines[i]).strip()), None)
+                if first is None or _strong_number(source_lines[first]) not in _section_numbers(section):
+                    continue
+                if not re.search(r"(?:\bwrite\s+\S.+|请[^\n]*写[^\n]*\S|写一[篇封].+)", _plain(source_lines[first]), re.I):
+                    continue
+                points = [(i, _strong_number(source_lines[i])) for i in range(first + 1, end)
+                          if _strong_number(source_lines[i]) is not None]
+                if [n for _, n in points] == list(range(1, len(points) + 1)):
+                    writing_points.update(i for i, _ in points)
+            observed = set()
+            strong_occurrences = {}
+            for index, line in enumerate(source_lines):
+                if index in writing_lines or SECTION.match(_plain(line)):
+                    continue
+                n = _strong_number(line)
+                if n is not None and index not in writing_points:
+                    observed.add(n)
+                    strong_occurrences[n] = strong_occurrences.get(n, 0) + 1
+                observed.update(_weak_numbers(line))
+            writing_numbers = {n for u in units if u.get("source_span", {}).get("number_binding") == "single_writing_section" for n in u["numbers"]}
+            duplicate_source = sorted(n for n, count in strong_occurrences.items() if count > 1)
+            if duplicate_source:
+                blockers.append({"code": "SOURCE_DUPLICATE_NUMBERS", "message": f"原文实际题号重复：{duplicate_source}"})
+            unseen = sorted(set(declared) - observed - writing_numbers)
+            extra = sorted(observed - set(declared))
+            if unseen:
+                issue = {"code": "SOURCE_NUMBERS_MISSING", "message": f"结构声明但原文未定位到实际题号/空位：{unseen}"}
+                (warnings if model_structure_only else blockers).append({**issue, "blocking": False, "status": "model_structure_pending"} if model_structure_only else issue)
+            if extra:
+                issue = {"code": "SOURCE_NUMBERS_UNDECLARED", "message": f"原文实际题号未纳入结构：{extra}"}
+                (warnings if model_structure_only else blockers).append({**issue, "blocking": False, "status": "model_structure_pending"} if model_structure_only else issue)
+            checks["source_number_coverage"] = "passed" if model_structure_only and not duplicate_source else ("warning" if duplicate_source else "failed" if unseen or extra else "passed")
+            content_problems = []
+            for unit in units:
+                if not unit["stem"].strip():
+                    content_problems.append({"code": "SOURCE_UNIT_EMPTY", "message": f"源头单元 {unit['numbers']} 内容为空"})
+                content_problems.extend(audit_source_unit(unit, source_lines)["issues"])
+            # 听力稿可能只有材料；题干/选项由模型从其他材料合并。
+            if model_structure_only:
+                for problem in content_problems:
+                    warnings.append({**problem, "blocking": False, "status": "model_structure_pending"})
+                checks["source_content"] = "passed"
+            else:
+                blockers.extend(content_problems)
+                checks["source_content"] = "failed" if content_problems else "passed"
+
+            # 导语里的范围也必须被完整定位，不能把缺少第 10 题的 8–10 导语当成 8–9 一组。
+            guide_problems = []
+            for line in source_lines:
+                refs = guide_numbers(line)
+                if refs and (not set(refs).issubset(observed) or not any(set(u["numbers"]) == set(refs) for u in units)):
+                    guide_problems.append({"code": "GUIDE_GROUP_MISMATCH", "message": f"分段导语与实际独立题组不一致：{line.strip()}"})
+            if model_structure_only:
+                for problem in guide_problems:
+                    warnings.append({**problem, "blocking": False, "status": "model_structure_pending"})
+                checks["group_guides"] = "passed"
+            else:
+                blockers.extend(guide_problems)
+                checks["group_guides"] = "failed" if guide_problems else "passed"
+
+            # 去噪自检：切片里不应再残留元信息/噪声 行
+            residual = []
+            if source_lines:
+                from .question_content import audit_question
+                for number in declared:
+                    audit = audit_question(source_lines, number)
+                    for issue in audit.get("issues") or []:
+                        if issue.get("code") == "IRRELEVANT_HEADER":
+                            residual.append(issue)
+            if residual:
+                for item in residual:
+                    blockers.append({"code": "RESIDUAL_HEADER", "message": item["message"]})
+                checks["denoise"] = "failed"
+            elif declared:
+                checks["denoise"] = "passed"
+
+            # 组合题自检：声明的 group 必须由合法 section 题号组成
+            bad_group = []
+            seen_group_numbers = set()
+            for group in groups:
+                nums = _section_numbers(group)
+                overlap = seen_group_numbers.intersection(nums)
+                if overlap:
+                    blockers.append({"code": "DUPLICATE_GROUP_NUMBERS", "message": f"题号重复归属题组：{sorted(overlap)}"})
+                seen_group_numbers.update(nums)
+                outside = [n for n in nums if n not in declared]
+                if outside:
+                    bad_group.append(outside)
+                elif nums and not any(set(nums).issubset(_section_numbers(section)) for section in sections):
+                    blockers.append({"code": "GROUP_CROSSES_SECTION", "message": f"题组跨越不同大题：{nums}"})
+                for section in sections:
+                    section_nums = _section_numbers(section)
+                    partitions = source_group_partitions(source_lines, section_nums) if is_group_type(section.get("type")) else []
+                    if (not ai_bound and partitions and set(nums).issubset(section_nums)
+                            and not any(set(nums) == set(p["questions"]) for p in partitions)):
+                        issue = {"code": "GROUP_BOUNDARY_MISMATCH", "message": f"题组 {nums} 与原文材料/分段导语的独立范围不一致"}
+                        if model_structure_only:
+                            warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
+                        else:
+                            blockers.append(issue)
+            if bad_group:
+                blockers.append({"code": "GROUP_OUT_OF_SECTION",
+                                 "message": "题组题号不属于任何大题：" + str(bad_group)})
+                checks["grouping"] = "failed"
+            elif groups:
+                checks["grouping"] = "passed"
+
+        for conflict in meta.get("conflicts") or []:
+            blockers.append({"code": "SOURCE_METADATA_CONFLICT", "message": str(conflict)})
+        from .metadata_policy import missing_source_fields, paper_meta
+        # 正文卷头只是证据之一：课时拆分件没有卷头，已识别来源和原卷文件名必须补回，
+        # 不能因为正文没写就把试卷名/来源整体变成占位。
+        meta = paper_meta(meta, batch_dir)
+        metadata_missing = missing_source_fields(meta)
+        checks["source_metadata"] = "placeholder" if metadata_missing else "passed"
+        if metadata_missing:
+            warnings.append({"code": "SOURCE_METADATA_MISSING", "blocking": False,
+                             "status": "placeholder", "fields": metadata_missing,
+                             "message": "试卷来源信息未可靠识别，缺失文本字段使用「未提供」占位；继续后续打标签和审核。"})
+        from .source_answer_only import detect_source_answer_only
+        raw_path = batch_dir / "01_source" / "原始正文.txt"
+        source_diagnostic = detect_source_answer_only(_read_text(raw_path)) if raw_path.is_file() else None
+        if source_diagnostic is not None:
+            source_diagnostic["source_sha256"] = mf.sha256_file(raw_path)
+            if source_diagnostic["classification"] == "source_answer_only":
+                blockers.append({"code": "SOURCE_ANSWER_ONLY", "message": source_diagnostic["message"]})
+                checks["source_paper_presence"] = "failed"
+        # Legacy candidates can omit the extractor's inference issue entirely.
+        # A section-bound unprinted number still requires independent proof.
+        bound_writing = [u for u in units if u.get("source_span", {}).get("number_binding") == "single_writing_section"]
         for section in sections:
             if "书面表达" not in str(section.get("type")):
                 continue
+            nums = _section_numbers(section)
+            if (type(section.get("source_line")) is int and 1 <= section["source_line"] <= len(source_lines)
+                    and _inline_unnumbered_writing(section, source_lines)
+                    and any(u["source_span"]["start_line"] in (section["source_line"], section["source_line"] + 1)
+                            and u["source_span"].get("printed_numbers") == [] for u in bound_writing)):
+                continue
             title = _plain(str(section.get("title") or "")).strip()
             starts = [i for i, line in enumerate(source_lines) if title and _plain(line).strip() == title]
-            if len(starts) != 1:
-                continue
-            start = starts[0]
-            end = next((i for i in range(start + 1, len(source_lines)) if SECTION.match(_plain(source_lines[i]))), len(source_lines))
-            first = next((i for i in range(start + 1, end) if _plain(source_lines[i]).strip()), None)
-            if first is None or _strong_number(source_lines[first]) not in _section_numbers(section):
-                continue
-            if not re.search(r"(?:\bwrite\s+\S.+|请[^\n]*写[^\n]*\S|写一[篇封].+)", _plain(source_lines[first]), re.I):
-                continue
-            points = [(i, _strong_number(source_lines[i])) for i in range(first + 1, end)
-                      if _strong_number(source_lines[i]) is not None]
-            if [n for _, n in points] == list(range(1, len(points) + 1)):
-                writing_points.update(i for i, _ in points)
-        observed = set()
-        strong_occurrences = {}
-        for index, line in enumerate(source_lines):
-            if index in writing_lines or SECTION.match(_plain(line)):
-                continue
-            n = _strong_number(line)
-            if n is not None and index not in writing_points:
-                observed.add(n)
-                strong_occurrences[n] = strong_occurrences.get(n, 0) + 1
-            observed.update(_weak_numbers(line))
-        writing_numbers = {n for u in units if u.get("source_span", {}).get("number_binding") == "single_writing_section" for n in u["numbers"]}
-        duplicate_source = sorted(n for n, count in strong_occurrences.items() if count > 1)
-        if duplicate_source:
-            blockers.append({"code": "SOURCE_DUPLICATE_NUMBERS", "message": f"原文实际题号重复：{duplicate_source}"})
-        unseen = sorted(set(declared) - observed - writing_numbers)
-        extra = sorted(observed - set(declared))
-        if unseen:
-            issue = {"code": "SOURCE_NUMBERS_MISSING", "message": f"结构声明但原文未定位到实际题号/空位：{unseen}"}
-            (warnings if model_structure_only else blockers).append({**issue, "blocking": False, "status": "model_structure_pending"} if model_structure_only else issue)
-        if extra:
-            issue = {"code": "SOURCE_NUMBERS_UNDECLARED", "message": f"原文实际题号未纳入结构：{extra}"}
-            (warnings if model_structure_only else blockers).append({**issue, "blocking": False, "status": "model_structure_pending"} if model_structure_only else issue)
-        checks["source_number_coverage"] = "passed" if model_structure_only and not duplicate_source else ("warning" if duplicate_source else "failed" if unseen or extra else "passed")
-        content_problems = []
-        for unit in units:
-            if not unit["stem"].strip():
-                content_problems.append({"code": "SOURCE_UNIT_EMPTY", "message": f"源头单元 {unit['numbers']} 内容为空"})
-            content_problems.extend(audit_source_unit(unit, source_lines)["issues"])
-        # 听力稿可能只有材料；题干/选项由模型从其他材料合并。
-        if model_structure_only:
-            for problem in content_problems:
-                warnings.append({**problem, "blocking": False, "status": "model_structure_pending"})
-            checks["source_content"] = "passed"
-        else:
-            blockers.extend(content_problems)
-            checks["source_content"] = "failed" if content_problems else "passed"
+            first = next((_plain(line).strip() for line in source_lines[starts[0] + 1:] if _plain(line).strip()), "") if len(starts) == 1 else ""
+            explicit = (len(nums) == 1 and _strong_number(first) == nums[0]
+                        and bool(re.search(r"(?:\bwrite\s+\S.+|请[^\n]*写[^\n]*\S|写一[篇封].+)", first, re.I)))
+            if not explicit and not any(u["numbers"] == nums for u in bound_writing):
+                blockers.append({"code": "WRITING_NUMBER_UNBOUND", "message": "作文题号未可靠定位，须核对原卷及节边界"})
+        inferred = [x for x in structure.get("unresolved") or []
+                    if isinstance(x, dict) and x.get("code") == "QUESTION_NUMBER_INFERRED"]
+        if any(u["source_span"].get("printed_numbers") != [] for u in bound_writing) and not inferred:
+            writing_sections = [s for s in sections if "书面表达" in str(s.get("type"))]
+            inferred = [{"code": "QUESTION_NUMBER_INFERRED",
+                         "line": writing_sections[0].get("source_line") if len(writing_sections) == 1 else None,
+                         "message": "作文没有可核实的印刷题号，顺延编号须核对原卷"}]
+            blockers.append({"code": "QUESTION_NUMBER_INFERRED", "message": inferred[0]["message"],
+                             "source_line": inferred[0]["line"]})
+            checks["extraction_evidence"] = "failed"
+        # Resolve only this one deterministic ambiguity after all independent gate checks pass.
+        if len(blockers) == 1 and blockers[0]["code"] == "QUESTION_NUMBER_INFERRED" and len(inferred) == 1:
+            note = _prove_single_writing_number(original_path, raw_text, sections, inferred[0], hashes,
+                                               allow_warnings=True)
+            if note and mf.sha256_file(source_path) == hashes["source_sha256"]:
+                resolved_notes.append(note)
+                blockers.clear()
+                checks["extraction_evidence"] = "passed"
+        # A locally scoped candidate is not a resolution or gate approval.
+        # Do not localize an inference while any other structural issue remains.
+        if len(blockers) == 1 and blockers[0].get("code") == "QUESTION_NUMBER_INFERRED" and len(inferred) == 1:
+            from .preview import SECTION
+            writing_sections = [s for s in sections if "书面表达" in str(s.get("type"))]
+            section = writing_sections[0] if len(writing_sections) == 1 else None
+            line = blockers[0].get("source_line")
+            raw_lines = raw_text.splitlines()
+            headings = [i for i, text in enumerate(raw_lines) if SECTION.match(_plain(text))]
+            nums = _section_numbers(section) if section else []
+            matched = [u for u in units if u.get("numbers") == nums]
+            if (section is not None and sections[-1] is section and type(line) is int
+                    and 1 <= line <= len(raw_lines) and headings and headings[-1] == line - 1
+                    and _plain(raw_lines[line - 1]).strip() == _plain(str(section.get("title") or "")).strip()
+                    and re.findall(r"共\s*(\d+)\s*小题", _plain(raw_lines[line - 1])) == ["1"]
+                    and line == section.get("source_line") and len(nums) == 1 and nums[0] > 0
+                    and len(matched) == 1 and matched[0].get("unit_kind") == "standalone"
+                    and matched[0].get("source_span", {}).get("number_binding") == "single_writing_section"
+                    and all(value != "failed" for key, value in checks.items() if key != "extraction_evidence")
+                    and _original_matches_cleaned(original_path, cleaned_text, hashes["original_sha256"])):
+                blockers[0]["affected_numbers"] = nums
+        return blockers, checks, resolved_notes, warnings, deferred, units, meta, metadata_missing, source_diagnostic
 
-        # 导语里的范围也必须被完整定位，不能把缺少第 10 题的 8–10 导语当成 8–9 一组。
-        guide_problems = []
-        for line in source_lines:
-            refs = guide_numbers(line)
-            if refs and (not set(refs).issubset(observed) or not any(set(u["numbers"]) == set(refs) for u in units)):
-                guide_problems.append({"code": "GUIDE_GROUP_MISMATCH", "message": f"分段导语与实际独立题组不一致：{line.strip()}"})
-        if model_structure_only:
-            for problem in guide_problems:
-                warnings.append({**problem, "blocking": False, "status": "model_structure_pending"})
-            checks["group_guides"] = "passed"
-        else:
-            blockers.extend(guide_problems)
-            checks["group_guides"] = "failed" if guide_problems else "passed"
-
-        # 去噪自检：切片里不应再残留元信息/噪声 行
-        residual = []
-        if source_lines:
-            from .question_content import audit_question
-            for number in declared:
-                audit = audit_question(source_lines, number)
-                for issue in audit.get("issues") or []:
-                    if issue.get("code") == "IRRELEVANT_HEADER":
-                        residual.append(issue)
-        if residual:
-            for item in residual:
-                blockers.append({"code": "RESIDUAL_HEADER", "message": item["message"]})
-            checks["denoise"] = "failed"
-        elif declared:
-            checks["denoise"] = "passed"
-
-        # 组合题自检：声明的 group 必须由合法 section 题号组成
-        bad_group = []
-        seen_group_numbers = set()
-        for group in groups:
-            nums = _section_numbers(group)
-            overlap = seen_group_numbers.intersection(nums)
-            if overlap:
-                blockers.append({"code": "DUPLICATE_GROUP_NUMBERS", "message": f"题号重复归属题组：{sorted(overlap)}"})
-            seen_group_numbers.update(nums)
-            outside = [n for n in nums if n not in declared]
-            if outside:
-                bad_group.append(outside)
-            elif nums and not any(set(nums).issubset(_section_numbers(section)) for section in sections):
-                blockers.append({"code": "GROUP_CROSSES_SECTION", "message": f"题组跨越不同大题：{nums}"})
-            for section in sections:
-                section_nums = _section_numbers(section)
-                partitions = source_group_partitions(source_lines, section_nums) if is_group_type(section.get("type")) else []
-                if (not ai_bound and partitions and set(nums).issubset(section_nums)
-                        and not any(set(nums) == set(p["questions"]) for p in partitions)):
-                    issue = {"code": "GROUP_BOUNDARY_MISMATCH", "message": f"题组 {nums} 与原文材料/分段导语的独立范围不一致"}
-                    if model_structure_only:
-                        warnings.append({**issue, "blocking": False, "status": "model_structure_pending"})
-                    else:
-                        blockers.append(issue)
-        if bad_group:
-            blockers.append({"code": "GROUP_OUT_OF_SECTION",
-                             "message": "题组题号不属于任何大题：" + str(bad_group)})
-            checks["grouping"] = "failed"
-        elif groups:
-            checks["grouping"] = "passed"
-
-    for conflict in meta.get("conflicts") or []:
-        blockers.append({"code": "SOURCE_METADATA_CONFLICT", "message": str(conflict)})
-    from .metadata_policy import missing_source_fields, paper_meta
-    # 正文卷头只是证据之一：课时拆分件没有卷头，已识别来源和原卷文件名必须补回，
-    # 不能因为正文没写就把试卷名/来源整体变成占位。
-    meta = paper_meta(meta, batch_dir)
-    metadata_missing = missing_source_fields(meta)
-    checks["source_metadata"] = "placeholder" if metadata_missing else "passed"
-    if metadata_missing:
-        warnings.append({"code": "SOURCE_METADATA_MISSING", "blocking": False,
-                         "status": "placeholder", "fields": metadata_missing,
-                         "message": "试卷来源信息未可靠识别，缺失文本字段使用「未提供」占位；继续后续打标签和审核。"})
-    from .source_answer_only import detect_source_answer_only
-    raw_path = batch_dir / "01_source" / "原始正文.txt"
-    source_diagnostic = detect_source_answer_only(_read_text(raw_path)) if raw_path.is_file() else None
-    if source_diagnostic is not None:
-        source_diagnostic["source_sha256"] = mf.sha256_file(raw_path)
-        if source_diagnostic["classification"] == "source_answer_only":
-            blockers.append({"code": "SOURCE_ANSWER_ONLY", "message": source_diagnostic["message"]})
-            checks["source_paper_presence"] = "failed"
-    # Legacy candidates can omit the extractor's inference issue entirely.
-    # A section-bound unprinted number still requires independent proof.
-    bound_writing = [u for u in units if u.get("source_span", {}).get("number_binding") == "single_writing_section"]
-    for section in sections:
-        if "书面表达" not in str(section.get("type")):
-            continue
-        nums = _section_numbers(section)
-        if (type(section.get("source_line")) is int and 1 <= section["source_line"] <= len(source_lines)
-                and _inline_unnumbered_writing(section, source_lines)
-                and any(u["source_span"]["start_line"] in (section["source_line"], section["source_line"] + 1)
-                        and u["source_span"].get("printed_numbers") == [] for u in bound_writing)):
-            continue
-        title = _plain(str(section.get("title") or "")).strip()
-        starts = [i for i, line in enumerate(source_lines) if title and _plain(line).strip() == title]
-        first = next((_plain(line).strip() for line in source_lines[starts[0] + 1:] if _plain(line).strip()), "") if len(starts) == 1 else ""
-        explicit = (len(nums) == 1 and _strong_number(first) == nums[0]
-                    and bool(re.search(r"(?:\bwrite\s+\S.+|请[^\n]*写[^\n]*\S|写一[篇封].+)", first, re.I)))
-        if not explicit and not any(u["numbers"] == nums for u in bound_writing):
-            blockers.append({"code": "WRITING_NUMBER_UNBOUND", "message": "作文题号未可靠定位，须核对原卷及节边界"})
-    inferred = [x for x in structure.get("unresolved") or []
-                if isinstance(x, dict) and x.get("code") == "QUESTION_NUMBER_INFERRED"]
-    if any(u["source_span"].get("printed_numbers") != [] for u in bound_writing) and not inferred:
-        writing_sections = [s for s in sections if "书面表达" in str(s.get("type"))]
-        inferred = [{"code": "QUESTION_NUMBER_INFERRED",
-                     "line": writing_sections[0].get("source_line") if len(writing_sections) == 1 else None,
-                     "message": "作文没有可核实的印刷题号，顺延编号须核对原卷"}]
-        blockers.append({"code": "QUESTION_NUMBER_INFERRED", "message": inferred[0]["message"],
-                         "source_line": inferred[0]["line"]})
-        checks["extraction_evidence"] = "failed"
-    # Resolve only this one deterministic ambiguity after all independent gate checks pass.
-    if len(blockers) == 1 and blockers[0]["code"] == "QUESTION_NUMBER_INFERRED" and len(inferred) == 1:
-        note = _prove_single_writing_number(original_path, raw_text, sections, inferred[0], hashes,
-                                           allow_warnings=True)
-        if note and mf.sha256_file(source_path) == hashes["source_sha256"]:
-            resolved_notes.append(note)
-            blockers.clear()
-            checks["extraction_evidence"] = "passed"
-    # A locally scoped candidate is not a resolution or gate approval.
-    # Do not localize an inference while any other structural issue remains.
-    if len(blockers) == 1 and blockers[0].get("code") == "QUESTION_NUMBER_INFERRED" and len(inferred) == 1:
-        from .preview import SECTION
-        writing_sections = [s for s in sections if "书面表达" in str(s.get("type"))]
-        section = writing_sections[0] if len(writing_sections) == 1 else None
-        line = blockers[0].get("source_line")
-        raw_lines = raw_text.splitlines()
-        headings = [i for i, text in enumerate(raw_lines) if SECTION.match(_plain(text))]
-        nums = _section_numbers(section) if section else []
-        matched = [u for u in units if u.get("numbers") == nums]
-        if (section is not None and sections[-1] is section and type(line) is int
-                and 1 <= line <= len(raw_lines) and headings and headings[-1] == line - 1
-                and _plain(raw_lines[line - 1]).strip() == _plain(str(section.get("title") or "")).strip()
-                and re.findall(r"共\s*(\d+)\s*小题", _plain(raw_lines[line - 1])) == ["1"]
-                and line == section.get("source_line") and len(nums) == 1 and nums[0] > 0
-                and len(matched) == 1 and matched[0].get("unit_kind") == "standalone"
-                and matched[0].get("source_span", {}).get("number_binding") == "single_writing_section"
-                and all(value != "failed" for key, value in checks.items() if key != "extraction_evidence")
-                and _original_matches_cleaned(original_path, cleaned_text, hashes["original_sha256"])):
-            blockers[0]["affected_numbers"] = nums
+    force_ai = str(os.environ.get("WF_FORCE_STRUCTURE_AI", "")).strip().lower() in ("1", "true", "yes")
+    has_ai_marker = (batch_dir / "01_source" / "structure.ai.classified.json").is_file()
+    ai_enabled = str(os.environ.get("WF_STRUCTURE_AI", "1")).strip().lower() not in ("0", "false", "no")
+    unresolved_codes = {
+        item.get("code") for item in (structure.get("unresolved") or [])
+        if isinstance(item, dict) and not item.get("resolved")
+    }
+    non_clean_unresolved = unresolved_codes - {
+        "SOURCE_METADATA_MISSING", "ANSWER_APPENDIX_DETECTED",
+        "INLINE_ANSWER_BLOCK", "QUESTION_NUMBER_INFERRED",
+    }
+    chosen = None
+    if not force_ai and not scoped and not has_ai_marker and ai_enabled and not non_clean_unresolved:
+        det = _run_structural_pass(ai_classified=None)
+        det_blockers, _, _, det_warnings, _, det_units, _, _, _ = det
+        only_inferred = all(b.get("code") == "QUESTION_NUMBER_INFERRED" for b in det_blockers)
+        if det_units and only_inferred and not any(w.get("status") == "layout_review_required" for w in det_warnings):
+            det[3].append({
+                "code": "AI_STRUCTURE_SKIPPED",
+                "blocking": False,
+                "status": "deterministic_clean",
+                "message": "确定性结构提取与全卷核验已完整通过，直接采用确定性结构",
+            })
+            chosen = det
+    if chosen is None:
+        ai_classified = None
+        ai_warnings = []
+        try:
+            from . import structure_ai
+            ai_classified = structure_ai.auto_classify(batch_dir)
+            if ai_classified.get("units"):
+                ai_warnings.append({"code": "AI_STRUCTURE_CLASSIFIED", "blocking": False,
+                                    "status": "candidate", "message": ai_classified.get("reason", "AI结构归类已采用")})
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
+            ai_warnings.append({"code": "AI_STRUCTURE_UNAVAILABLE", "blocking": False,
+                                "status": "fallback", "message": str(exc)[:160]})
+        chosen = _run_structural_pass(ai_classified=ai_classified, initial_warnings=ai_warnings)
+    blockers, checks, resolved_notes, warnings, deferred, units, meta, metadata_missing, source_diagnostic = chosen
     layout_required = ("[IMG " in raw_text or "[TABLE" in raw_text
                        or any(w.get("code") in {"OCR_VISUAL_REVIEW", "EXTRACTION_WARNING"}
                               for w in warnings)

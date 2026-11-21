@@ -117,3 +117,47 @@ test('a later candidate rejection is not reclassified as a prior provider timeou
   assert.equal(f.failed.failure_class, undefined);
   assert.match(f.failed.error, /Candidate rejected/);
 });
+
+test('silent stream inactivity triggers idle watchdog before full 25m attempt deadline', async () => {
+  const { createContentAgentManager } = await ready;
+  const calls = [], tools = new Map(), listeners = new Map();
+  const session = { id: 'idle-session' };
+  const agent = {
+    model: { select() {} }, inbox: {},
+    followup() {
+      listeners.get('session/event')?.(session, { type: 'step/start', time: Date.now(), data: {} });
+    },
+    whenIdle: () => new Promise(() => {}), cancel() {},
+  };
+  const manager = createContentAgentManager({
+    ctx: { agents: {
+      resume() { throw new Error('Unexpected resume'); },
+      async create(init) {
+        init.setup({
+          tools: { restrict: () => () => {}, guard: () => () => {},
+            register: tool => { tools.set(tool.name, tool); return () => tools.delete(tool.name); } },
+          systemPrompt: { section: () => () => {} },
+          on: (name, listener) => { listeners.set(name, listener); return () => listeners.delete(name); },
+        }, agent);
+        return { dispose: async () => {} };
+      },
+    } },
+    cwd: '/mock/plugin', intervalMs: 60000, maxAttemptMs: 5000, idleTimeoutMs: 40,
+    makeSessionId: () => session.id,
+    resolveRoute: () => ({ provider: 'mock-provider', model: 'mock-model' }),
+    async request(path, init = {}) {
+      calls.push({ path, ...init });
+      const task = { task_id: 'idle-task', stage: 'structure_gate', prompt: 'Inspect paper.',
+        budgets: { max_attempt_ms: 1500000 }, deadline: Date.now() / 1000 + 1500 };
+      if (path === '/api/content-agent/tasks') return { tasks: [task] };
+      if (path.endsWith('/claim')) return { task: { ...task, session_id: session.id } };
+      return { ok: true };
+    },
+  });
+  manager.start(); await manager.tick(); await manager.drain();
+  const failed = calls.find(call => call.body?.status === 'failed')?.body;
+  await manager.dispose();
+  assert.equal(failed.error_code, 'timeout');
+  assert.equal(failed.failure_class, 'model_timeout');
+  assert.equal(failed.phase, 'model_stream');
+});

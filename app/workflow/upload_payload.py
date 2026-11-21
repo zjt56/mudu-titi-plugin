@@ -30,6 +30,10 @@ TYPE_ALIASES = {"单项选择": "单项填空", "短对话理解": "听力短对
 DIFFICULTIES = {"容易": "易", "适中": "中", "困难": "难", "易": "易", "中": "中", "难": "难"}
 SOURCE_FIELDS = ("source_type", "source", "location", "version", "authorization", "year", "institution", "school", "regional_version")
 FILTER_FIELDS = {"subtypes", "categories", "region", "city", "district", "semesters", "difficultyValue"}
+# 只有这些正文字段会渲染到题库；内嵌媒体引用只可能出现在这里。
+# 来源出处（source/location 等）是原卷散文，常带 [IMG 页图] 锚点，不能当媒体拦截。
+CONTENT_MEDIA_FIELDS = ("stem", "material", "options", "materialBlocks", "answer", "explanation",
+                        "articleSummary", "title")
 ALIASES = {"question_type": "type", "filter_metadata": "filterMetadata", "knowledgeIds": "knowledge_ids",
            "material_blocks": "materialBlocks", "article_summary": "articleSummary", "textbook_mappings": "textbookMappings"}
 WIRE_FIELDS = {"id", "title", "unit_kind", "stem", "options", "answer", "explanation", "curriculum", "textbook_id",
@@ -1091,7 +1095,9 @@ class _Builder:
                     for cell in row.get("cells", []) if isinstance(row, dict) else []:
                         if isinstance(cell.get("text"), str):
                             cell["text"] = normalize_blank_text(re.sub(r"\*{2,}", "", cell["text"]))
-        self.scan_media({k: v for k, v in output.items() if k not in {"attachments", "subquestions"}}, uid)
+        # 只扫描会落到题库展示的正文；来源出处字段保留原卷标注（例如 [IMG 页图] 锚点），
+        # 它们是来源散文而不是内嵌媒体，否则整份批次会被误判成未部署媒体。
+        self.scan_media({k: output[k] for k in CONTENT_MEDIA_FIELDS if k in output}, uid)
         return output
 
 

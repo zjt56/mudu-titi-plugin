@@ -49,3 +49,13 @@ test('ContentEditModal 仅提交实际改动的字段并携带 expected 原值�
   assert.match(modal, /subPatch\.expected = subExpected/);
   assert.match(modal, /if \(Object\.keys\(patch\)\.length <= 1\)/);
 });
+
+test('AI 补充生成弹窗支持随时后台关闭与重开，且完成 100% 不误显示 99%', () => {
+  assert.match(source, /const \[aiModalOpen, setAiModalOpen\] = React\.useState\(false\)/);
+  assert.doesNotMatch(source, /onClose:\s*\(\)\s*=>\s*\{\s*if\s*\(aiModal\.status !== 'running'\)/);
+  assert.doesNotMatch(source, /disabled:\s*aiModal\.status === 'running'/);
+  assert.match(source, /onClose: \(\) => setAiModalOpen\(false\)/);
+  assert.match(source, /aiModal\.status === 'running' \? '后台运行并关闭' : '完成'/);
+  assert.match(source, /后台生成中（\$\{Number\(aiModal\.completed \|\| 0\)\}\/\$\{Number\(aiModal\.total \|\| 0\)\}）· 查看进度/);
+  assert.match(source, /completed >= total \? 100 : Math\.min\(99/);
+});

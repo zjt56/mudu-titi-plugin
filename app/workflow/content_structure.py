@@ -154,7 +154,9 @@ def read_source(prepared, source="body", start_line=1, end_line=None, around=0):
     else:
         raise ValueError("Unknown structure source")
     lines = text.splitlines()
-    end_line = min(len(lines), start_line + 99) if end_line is None and type(start_line) is int else end_line
+    if end_line is None and type(start_line) is int:
+        span = max(0, 499 - (around * 2 if type(around) is int and around > 0 else 0))
+        end_line = min(len(lines), start_line + span)
     if (type(start_line) is not int or type(end_line) is not int or type(around) is not int
             or start_line < 1 or end_line < start_line or start_line > len(lines)
             or around < 0 or around > 100):

@@ -764,3 +764,20 @@ test('failed purge ticket is reported and never enables arbitrary model tools', 
   await f.run(); assert.equal(receipt.status, 'failed'); assert.match(receipt.error, /absolute batch_dir/);
   assert.equal((await fs.stat(stored.owned)).isDirectory(), true); await f.manager.dispose();
 });
+
+test('whole-paper structure tasks never expose the staging or catalog tools', async () => {
+  const f = await fixture({ rows: [task({ stage: 'structure_gate' })], program: async a => {
+    assert.equal(a.tools.has('content_stage_candidate'), false);
+    assert.equal(a.tools.has('content_read_catalog'), false);
+    assert.equal(a.tools.has('content_search_catalog'), false);
+    assert.equal(a.tools.has('content_submit_candidate'), true);
+    assert.equal(a.tools.size, 5);
+    assert.equal(a.guards[0]({ name: 'content_stage_candidate' }), 'Only task-scoped content tools are allowed');
+    assert.equal(a.guards[0]({ name: 'content_read_catalog' }), 'Only task-scoped content tools are allowed');
+    assert.equal(a.guards[0]({ name: 'content_submit_candidate' }), undefined);
+    await a.call('submit_candidate', { candidate: { status: 'completed', artifacts: { structure: { units: [] } } } });
+  } });
+  await f.run();
+  assert.deepEqual(states(f), ['running', 'completed']);
+  await f.manager.dispose();
+});

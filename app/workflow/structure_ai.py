@@ -723,7 +723,12 @@ def auto_classify(batch_dir, invoke_fn=None, config=None, *, force: bool = False
         try:
             if native_selected:
                 from . import content_agent, content_structure
-                settings = dict(config, _content_batch_dir=str(batch.resolve()),
+                native_cfg = dict(config.get("native_agent") or {})
+                configured_timeout = native_cfg.get("timeout_seconds", config.get("timeout_seconds", 420))
+                if isinstance(configured_timeout, (int, float)) and not isinstance(configured_timeout, bool) and configured_timeout > 420:
+                    native_cfg["timeout_seconds"] = 420
+                settings = dict(config, native_agent=native_cfg,
+                                _content_batch_dir=str(batch.resolve()),
                                 _content_input_hashes=prepared["input_binding"],
                                 _content_route_identity=route_binding["actual_route"])
                 response = content_agent.invoke(prepared["prompt"], run_dir, settings)

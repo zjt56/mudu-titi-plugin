@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from workflow.docx_extract import extract_docx, blocking_warnings
+from workflow.docx_extract import extract_docx, blocking_warnings, layout_hint_warnings
 from workflow.extract import infer_structure
 
 MARK = re.compile(r"<u>(.*?)</u>", re.S)
@@ -30,12 +30,18 @@ LAYOUT = re.compile(r"<u>[^\S\r\n]+</u>|_{2,}|<[^>]*>|\*\*")
 def extraction_gate(warnings, auto_ocr: bool) -> dict:
     """原生 DOCX 提取告警是否阻断画线恢复。
 
-    「原码位保留、仅缺字体映射」的私用区字形不构成字面改动，不阻断；
+    「原码位保留、仅缺字体映射」的私用区字形与浮动对象/文本框的版面顺序提示都
+    不构成字面改动，不阻断（顺序核对由 layout_review_required 的整页版面复核负责）；
     Symbol 字体/符号字形可能改写字面，仍阻断，除非 OCR 自动复核已留下补充证据。
     """
     blocking = blocking_warnings(warnings)
-    return {"code": "DOCX_EXTRACTION_UNCERTAIN", "message": list(warnings or []),
+    hints = layout_hint_warnings(warnings)
+    gate = {"code": "DOCX_EXTRACTION_UNCERTAIN", "message": list(warnings or []),
             "blocking": bool(blocking) and not auto_ocr}
+    if hints:
+        gate["layout_hints"] = hints
+        gate["status"] = "layout_review_required"
+    return gate
 
 
 def visible(text, *, normalize_blanks=False):

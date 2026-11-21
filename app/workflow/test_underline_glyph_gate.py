@@ -41,6 +41,17 @@ class BlockingWarningClassificationTest(unittest.TestCase):
     def test_ocr_evidence_downgrades_every_warning(self):
         self.assertFalse(mark_underline.extraction_gate([SYMBOL_FONT], True)["blocking"])
 
+    def test_layout_order_hint_does_not_block_underline_restore(self):
+        floating = "Floating object encountered; XML anchor order may differ from visual order"
+        textbox = "Textbox encountered; XML anchor order may differ from visual reading order"
+        self.assertEqual(docx_extract.blocking_warnings([floating, textbox]), [])
+        self.assertEqual(docx_extract.layout_hint_warnings([floating, textbox]), [floating, textbox])
+        issue = mark_underline.extraction_gate([floating], False)
+        self.assertFalse(issue["blocking"])
+        self.assertEqual(issue["message"], [floating])
+        self.assertEqual(issue.get("status"), "layout_review_required")
+        self.assertTrue(mark_underline.extraction_gate([floating, SYMBOL_FONT], False)["blocking"])
+
     def test_check_underline_and_mark_underline_share_one_rule(self):
         for warnings in ([RAW_PRESERVED], [SYMBOL_FONT], [RAW_PRESERVED, SYMBOL_FONT], []):
             self.assertEqual(check_underline.blocking_warnings(warnings),

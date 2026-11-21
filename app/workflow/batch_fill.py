@@ -136,9 +136,13 @@ def _children(row):
 
 def _body(row):
     result = {k: copy.deepcopy(row[k]) for k in BODY if k in row}
-    # Audio is owned by its stage; source image attachments remain protected.
-    if "attachments" in result:
-        result["attachments"] = [a for a in result["attachments"] if a.get("kind") != "audio"]
+    # Audio and explanation-placed images are owned by their respective stages;
+    # source question/option/material image attachments remain protected.
+    if isinstance(result.get("attachments"), list):
+        result["attachments"] = [
+            a for a in result["attachments"]
+            if not (isinstance(a, dict) and (a.get("kind") == "audio" or a.get("placement") == "explanation"))
+        ]
     if not result.get("attachments"):
         result.pop("attachments", None)
     result["subquestions"] = [_body(c) for c in row.get("subquestions", [])]

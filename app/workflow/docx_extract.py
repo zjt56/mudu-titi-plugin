@@ -38,9 +38,35 @@ MAX_GRID = 100000
 RAW_PRESERVED_GLYPH_WARNING = "Private-use glyph encountered; raw character preserved without font mapping"
 
 
+# 版面顺序提示：浮动对象/文本框只说明 XML 锚点顺序可能与视觉顺序不同，并不改写
+# 字面。上游结构闸门已把这类告警降级为 layout_review_required 并交由整页版面复核，
+# 画线恢复本身只接受唯一且完整的上下文匹配，因此这里与结构闸门口径一致：
+# 保留原告警供版面复核，但不作为画线/体检的阻断项。
+LAYOUT_ORDER_WARNINGS = (
+    "Floating object encountered; XML anchor order may differ from visual order",
+    "Textbox encountered; XML anchor order may differ from visual reading order",
+)
+
+
+def _warning_text(warning) -> str:
+    """兼容字符串告警与结构告警，统一取可比较的说明文字。"""
+    if isinstance(warning, str):
+        return warning
+    if isinstance(warning, dict):
+        return str(warning.get("message") or warning.get("detail") or "")
+    return ""
+
+
+def layout_hint_warnings(warnings) -> list:
+    """只返回版面顺序提示类告警（不阻断，需版面复核）。"""
+    return [w for w in (warnings or []) if _warning_text(w) in LAYOUT_ORDER_WARNINGS]
+
+
 def blocking_warnings(warnings) -> list:
-    """过滤掉「原码位保留、仅缺字体映射」的告警，只留下可能改写字面的项。"""
-    return [w for w in (warnings or []) if w != RAW_PRESERVED_GLYPH_WARNING]
+    """过滤掉「原码位保留、仅缺字体映射」与版面顺序提示，只留下可能改写字面的项。"""
+    return [w for w in (warnings or [])
+            if _warning_text(w) != RAW_PRESERVED_GLYPH_WARNING
+            and _warning_text(w) not in LAYOUT_ORDER_WARNINGS]
 
 
 def _w(name):

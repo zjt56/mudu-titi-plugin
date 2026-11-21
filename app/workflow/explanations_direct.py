@@ -30,8 +30,10 @@ def _word_sources(batch):
 
 def _pdf_sources(batch):
     material_dir = Path(batch) / "01_source/materials"
+    listening_only = source.listening_script_sources(batch)
     return [p for p in sorted(material_dir.glob("attachment_*.txt"))
-            if re.fullmatch(r"attachment_\d{3,}\.txt", p.name) and p.is_file()]
+            if re.fullmatch(r"attachment_\d{3,}\.txt", p.name) and p.is_file()
+            and p.relative_to(Path(batch)).as_posix() not in listening_only]
 
 
 _WRITING_START = re.compile(r"^【(?:思路点拨|参考范文)】")

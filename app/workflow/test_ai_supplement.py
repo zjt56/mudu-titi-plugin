@@ -1570,6 +1570,52 @@ class AiSupplementTest(unittest.TestCase):
             )
             self.assertEqual(empty_res["applied"], 0)
 
+    def test_post_edit_gate_refresh_does_not_hang_on_foreign_agent_lock(self):
+        import time
+        from workflow import format_gate, local_agent, manifest as mf, runner
+
+        (self.batch / "workflow").mkdir(exist_ok=True)
+        (self.batch / "attachments").mkdir(exist_ok=True)
+        doc = self.batch / "attachments" / "s.docx"
+        doc.write_bytes(b"x")
+        state = mf.new_manifest("b-lock", self.batch, {"source": {"path": str(doc), "exists": True}}, {})
+        state["stages"]["format_gate"]["status"] = mf.COMPLETED
+        mf.save(self.batch, state)
+
+        seen_lock_held = []
+        orig_validate = runner.do_validate
+        orig_format_run = format_gate.run
+
+        def fake_validate(batch_dir, current, *, lock_held=False, refresh_only=False):
+            seen_lock_held.append(lock_held)
+            return 0
+
+        runner.do_validate = fake_validate
+        format_gate.run = lambda batch_dir: {"passed": True, "errors": []}
+        try:
+            # Simulate an unrelated batch holding global _agent_lock (e.g. review running).
+            with local_agent._agent_lock(0, shared=True):
+                initial = ai_supplement.start_background(
+                    self.batch,
+                    "articleSummary",
+                    invoke_fn=lambda p, d: {"result": {"items": [{"key": "u-reading", "text": "不被他批锁阻塞的大意。"}]}},
+                )
+                deadline = time.monotonic() + 5.0
+                prog = initial
+                while time.monotonic() < deadline:
+                    prog = ai_supplement.read_progress(self.batch)
+                    if prog["status"] != "running":
+                        break
+                    time.sleep(0.05)
+        finally:
+            runner.do_validate = orig_validate
+            format_gate.run = orig_format_run
+
+        self.assertEqual(prog["status"], "done", prog)
+        self.assertEqual(seen_lock_held, [True])
+        self.assertEqual(prog["validate_passed"], True)
+        self.assertEqual(prog["format_gate_passed"], True)
+
 
 if __name__ == "__main__":
     unittest.main()

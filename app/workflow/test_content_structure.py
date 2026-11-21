@@ -57,6 +57,10 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual([r["line"] for r in got["lines"]], [2, 3, 4])
         self.assertIn("Second", got["lines"][1]["text"])
         self.assertIn("layout evidence", json.dumps(adapter.read_source(prepared, "pdf_ocr")))
+        long_raw = "\n".join(f"{i}. Question {i}?" for i in range(1, 251))
+        long_prep = self.prepare(raw=long_raw)
+        whole = adapter.read_source(long_prep)
+        self.assertEqual((whole["start_line"], whole["end_line"], len(whole["lines"])), (1, 250, 250))
 
     def test_invalid_windows_and_snapshot_mutation_fail(self):
         prepared = self.prepare()

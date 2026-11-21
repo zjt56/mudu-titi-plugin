@@ -487,6 +487,27 @@ class StructureGateTest(unittest.TestCase):
         errors = sg._scoped_source_errors(units, ps["sections"], lines)
         self.assertEqual(errors, [])
 
+    def test_clean_standard_exam_skips_redundant_structure_ai(self):
+        import os
+        from unittest.mock import patch
+        structure = {
+            "sections": [
+                {"type": "单项填空", "questions": [1, 2]},
+            ]
+        }
+        body = "2024年安徽省初中学业水平考试\n1. First?\nA. a  B. b\n2. Second?\nA. c  B. d\n"
+        batch = make_batch(self.root, structure, body)
+        with patch.dict(os.environ, {"WF_STRUCTURE_AI": "1"}), \
+             patch("workflow.structure_ai.auto_classify") as ai_call:
+            report = structure_gate.run_gate(batch)
+        ai_call.assert_not_called()
+        self.assertTrue(report["passed"], report["blockers"])
+        self.assertIn("AI_STRUCTURE_SKIPPED", {w.get("code") for w in report["warnings"]})
+        with patch.dict(os.environ, {"WF_STRUCTURE_AI": "1", "WF_FORCE_STRUCTURE_AI": "1"}), \
+             patch("workflow.structure_ai.auto_classify", return_value={"ran": False}) as ai_forced:
+            structure_gate.run_gate(batch)
+        ai_forced.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

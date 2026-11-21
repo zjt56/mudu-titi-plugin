@@ -689,6 +689,31 @@ class ContentAgentTests(unittest.TestCase):
         validate.assert_called_once()
         self.accept.assert_not_called()
 
+    def test_structure_prompt_forbids_staging_and_misrouted_whole_candidate_is_validated_once(self):
+        task, thread, result = self.structure_start()
+        self.assertIn("NO stage_candidate", task["prompt"])
+        self.assertNotIn('"stage_candidate"', task["prompt"])
+        self.assertNotIn('"read_catalog"', task["prompt"])
+        self.assertNotIn('"search_catalog"', task["prompt"])
+        self.claim(task)
+        no_cat = self.tool(task, "search_catalog", {"query": "grammar"})
+        self.assertEqual(no_cat["code"], "tool_not_applicable")
+        self.assertTrue(no_cat["retryable"])
+        # 非整卷候选：明确告知整卷入口，不暂存、不吞掉
+        bad = self.tool(task, "stage_candidate", {"unit_ids": ["candidate-units:1"], "candidate": {"x": 1}})
+        self.assertEqual(bad["code"], "whole_paper_only")
+        self.assertTrue(bad["retryable"])
+        self.assertIn("content_submit_candidate", bad["error"])
+        self.assertNotIn("candidate_parts", broker._read(broker._task_path(task["task_id"])))
+        # 完整整卷候选误走暂存入口：按同一整卷验收直接交付，不逼模型重写
+        with patch.object(broker.content_structure, "validate", return_value={"passed": True}) as validate:
+            routed = self.tool(task, "stage_candidate", {"unit_ids": ["candidate-units:1"], "candidate": self.response})
+        self.assertTrue(routed["accepted"])
+        self.assertEqual(routed["routed_from"], "stage_candidate")
+        validate.assert_called_once()
+        thread.join(3)
+        self.assertNotIn("error", result)
+
     def test_media_snapshot_binding_and_tools(self):
         context = copy.deepcopy(self.context)
         image = self.batch / "01_source/media/picture.png"

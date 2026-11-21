@@ -7,14 +7,21 @@ HEADER = re.compile(r'^\s*(?:附(?:录)?\s*[:：]?\s*)?(?:听力(?:录音)?(?:�
 SECTION = re.compile(r'^\s*(?:(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩIVX]+|[一二三四五六七八九十]+|\d+)[.．、:：)）]\s*|(?:第[一二三四五六七八九十\d]+(?:节|部分|大题))\s*[:：、.．]?\s*)(\S.*)$', re.I)
 NUMBER = re.compile(r'^\s*(?:[（(]\s*(\d{1,3})\s*[）)]|(\d{1,3})[.．、)）])\s*(.*)$')
 RANGE = re.compile(r'(?:回答|完成|questions?\s*)\s*(?:第\s*)?(\d+)\s*(?:至|到|[-—～~–])\s*(\d+)\s*(?:小)?题?', re.I)
+PAIR_RANGE = re.compile(r'(?:回答|完成|questions?\s*)\s*(?:第\s*)?(\d+)\s*[、,，和与]\s*(\d+)\s*(?:小)?题?', re.I)
+RUBRIC = re.compile(r'^\s*(?:你将听到.+?读[一两三]遍|每段(?:对话|短文|材料)读[一两三]遍)')
 END = re.compile(r'^\s*(?:参考答案|答案与解析|答案及解析|答案解析|试题解析|书面表达|笔试部分|笔试|阅读理解)\s*[:：]?\s*$', re.I)
 MARK = '听力录音材料：\n'
 SOURCES = ('01_source/附录.txt', '01_source/正文.txt', '01_source_ans/正文.txt')
 
 
+def _plain(line):
+    return re.sub(r'\*+|<[^>]+>', '', line).strip()
+
+
 def is_end(line):
-    section = SECTION.match(line)
-    return bool(END.fullmatch(line) or section and END.fullmatch(section.group(1)))
+    plain = _plain(line)
+    section = SECTION.match(plain)
+    return bool(END.fullmatch(plain) or section and END.fullmatch(section.group(1)))
 
 
 def without_scripts(lines):
@@ -66,16 +73,24 @@ def extract(batch, units):
     if len(all_numbers) != len(set(all_numbers)):
         return {}
     found = {}
-    from .upload_content import reference_only_sources
+    from .upload_content import listening_script_sources, reference_only_sources
     reference_only = reference_only_sources(batch)
-    for name in SOURCES:
+    role_scripts = listening_script_sources(batch)
+    candidates = list(SOURCES) + [p for p in sorted(role_scripts) if p not in SOURCES]
+    for name in candidates:
         path = batch / name
         if name in reference_only or not path.is_file() or path.is_symlink():
             continue
         lines = path.read_text(encoding='utf-8-sig').splitlines()
-        starts = [i for i, line in enumerate(lines) if HEADER.fullmatch(line)]
-        if len(starts) != 1:
-            continue
+        starts = [i for i, line in enumerate(lines) if HEADER.fullmatch(_plain(line))]
+        if name in role_scripts:
+            if len(starts) > 1:
+                continue
+            start_idx = starts[0] + 1 if len(starts) == 1 else 0
+        else:
+            if len(starts) != 1:
+                continue
+            start_idx = starts[0] + 1
         blocks, current, category = [], None, ''
         def flush():
             nonlocal current
@@ -84,34 +99,44 @@ def extract(batch, units):
                 if current['text']:
                     blocks.append(current)
             current = None
-        for i in range(starts[0] + 1, len(lines)):
+        for i in range(start_idx, len(lines)):
             line = lines[i]
-            if is_end(line):
+            plain = _plain(line)
+            if is_end(plain):
                 flush(); break
-            section = SECTION.match(line)
+            section = SECTION.match(plain)
             if section:
                 classified = _section_type(section.group(1))
                 if classified:
                     flush(); category = classified; continue
                 # An unknown numbered section ends the previous ownership
                 # window; never absorb it into an already-bound recording.
-                if not NUMBER.match(line):
+                if not NUMBER.match(plain):
                     flush(); category = ''; continue
-            elif (len(line.strip()) <= 24 and not re.search(r'[，,。.!！？?]', line)
-                  and not re.match(r'^\s*[A-Za-z]+\s*[:：]', line)):
-                classified = _section_type(line.strip().strip('：:'))
+            elif (len(plain) <= 24 and not re.search(r'[，,。.!！？?]', plain)
+                  and not re.match(r'^\s*[A-Za-z]+\s*[:：]', plain)):
+                classified = _section_type(plain.strip('：:'))
                 if classified:
                     flush(); category = classified; continue
-            match = RANGE.search(line)
+            match = RANGE.search(plain)
             if match:
                 flush(); a, b = map(int, match.groups())
                 if a <= b <= a + 30:
                     current = {'numbers': tuple(str(n) for n in range(a, b + 1)), 'type': category, 'lines': [], 'line': i + 2}
                 continue
-            match = NUMBER.match(line)
+            pair = PAIR_RANGE.search(plain)
+            if pair:
+                a, b = map(int, pair.groups())
+                if b == a + 1:
+                    flush()
+                    current = {'numbers': (str(a), str(b)), 'type': category, 'lines': [], 'line': i + 2}
+                    continue
+            match = NUMBER.match(plain)
             if match:
                 flush(); current = {'numbers': (str(int(match.group(1) or match.group(2))),), 'type': category, 'lines': [match.group(3)], 'line': i + 1}
-            elif line.strip() and current is None and category:
+            elif plain and current is None and category:
+                if RUBRIC.match(plain):
+                    continue
                 current = {'numbers': (), 'type': category, 'lines': [line], 'line': i + 1}
             elif current is not None:
                 current['lines'].append(line)
