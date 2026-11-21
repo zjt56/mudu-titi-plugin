@@ -163,6 +163,57 @@ class UnitContentEditTest(unittest.TestCase):
         self.assertFalse((self.folder / manual_content.RELATIVE).exists())
         self.assertFalse((self.folder / "candidates/q-1.json").exists())
 
+    def test_upload_preconditions_allow_validated_batch_after_manual_content_edit(self):
+        from unittest.mock import patch
+        from workflow import label_audit, runner
+
+        workflow = self.folder / "workflow"
+        workflow.mkdir(parents=True, exist_ok=True)
+        stages = {
+            name: {"status": mf.COMPLETED, "input_hashes": {}, "output_hashes": {}}
+            for name in ("explanations", "assemble", "validate", "review", "upload_gate")
+        }
+        stages["upload"] = {"status": mf.PENDING, "input_hashes": {}, "output_hashes": {}}
+        (workflow / "manifest.json").write_text(
+            json.dumps({"stages": stages, "status": "completed"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        # 人工修改大意会将 validate 标记为 invalidated，但 history 保留了曾经 completed 的记录。
+        self.save({"articleSummary": "人工修订后的文章大意"})
+        current = mf.load(self.folder)
+        self.assertEqual(current["stages"]["validate"]["status"], mf.INVALIDATED)
+
+        with patch.object(runner, "unreviewed_summary", return_value={"revision": "r1"}), \
+                patch.object(label_audit, "inspect_file", return_value={"passed": True}), \
+                patch.object(runner, "flowchart_checks", return_value={"passed": True}):
+            server._check_upload_preconditions(self.folder, None, None)
+
+    def test_upload_preconditions_still_block_if_validate_never_passed(self):
+        from unittest.mock import patch
+        from workflow import label_audit, runner
+
+        workflow = self.folder / "workflow"
+        workflow.mkdir(parents=True, exist_ok=True)
+        stages = {
+            "explanations": {"status": mf.COMPLETED, "input_hashes": {}, "output_hashes": {}},
+            "assemble": {"status": mf.COMPLETED, "input_hashes": {}, "output_hashes": {}},
+            "validate": {"status": mf.FAILED, "input_hashes": {}, "output_hashes": {}},
+        }
+        (workflow / "manifest.json").write_text(
+            json.dumps({"stages": stages, "status": "failed"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        # 即使从未通过体检的批次再经历人工改解析（validate: failed -> invalidated），仍必须拦截上传。
+        self.save({"explanation": "人工修订解析"})
+        current = mf.load(self.folder)
+        self.assertEqual(current["stages"]["validate"]["status"], mf.INVALIDATED)
+
+        with patch.object(runner, "unreviewed_summary", return_value={"revision": "r1"}), \
+                patch.object(label_audit, "inspect_file", return_value={"passed": True}), \
+                patch.object(runner, "flowchart_checks", return_value={"passed": True}):
+            with self.assertRaisesRegex(ValueError, "批次校验未通过"):
+                server._check_upload_preconditions(self.folder, None, None)
+
 
 if __name__ == "__main__":
     unittest.main()

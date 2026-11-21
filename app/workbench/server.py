@@ -2833,6 +2833,25 @@ def _prepare_failure_summary(report):
     return "\n".join(lines)
 
 
+def _validate_ever_passed(validate_stage, manifest_mod):
+    """Return True if validate is completed or was invalidated after passing."""
+    if not isinstance(validate_stage, dict):
+        return False
+    status = validate_stage.get('status')
+    if status == manifest_mod.COMPLETED:
+        return True
+    if status != manifest_mod.INVALIDATED:
+        return False
+    history = validate_stage.get('history') or []
+    return any(
+        isinstance(entry, dict) and (
+            entry.get('from') == manifest_mod.COMPLETED
+            or entry.get('to') == manifest_mod.COMPLETED
+        )
+        for entry in history
+    )
+
+
 def _check_upload_preconditions(folder, unreviewed_revision, attempt_token):
     """Check existing evidence before any remote media is written."""
     from workflow import contracts, manifest, runner
@@ -2843,9 +2862,10 @@ def _check_upload_preconditions(folder, unreviewed_revision, attempt_token):
     # 只在“已带确认令牌但审核revision变了”时提示重新确认，不做硬拦截。
     if attempt_token and (not unreviewed_revision or summary.get('revision') != unreviewed_revision):
         raise ValueError('审核状态已变化，请重新查看并确认上传')
-    # 用户要求：内容过期/变化（is_stale）不阻碍上传——只要 validate 曾通过（completed）
-    # 即可上传；内容正确性由用户自己把关。标签/结构等“内容对不对”的硬校验仍在下面执行。
-    if state.get('stages', {}).get('validate', {}).get('status') != manifest.COMPLETED:
+    # 用户要求：内容过期/变化（is_stale）或人工改解析导致下游失效不阻碍上传——
+    # 只要 validate 曾通过（completed，或从 completed 被标为 invalidated）即可上传；
+    # 标签/结构等“内容对不对”的硬校验仍在下面执行。
+    if not _validate_ever_passed(state.get('stages', {}).get('validate'), manifest):
         raise ValueError('批次校验未通过：请先完成本地体检（validate）')
     labels = inspect_file(folder / '06_batch' / 'batch_meta.json')
     if not labels.get('passed'):

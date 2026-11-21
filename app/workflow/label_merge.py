@@ -61,27 +61,71 @@ def load_manual_unit_labels(batch_dir: Path, unit_id) -> dict:
     return _safe_load_json(path)
 
 
-def load_round1_assessments(batch_dir: Path) -> dict[str, dict]:
-    """Return ``{unit_id: assessment_dict}`` from Round 1 (``labels``) if present."""
-    folder = Path(batch_dir)
-    rounds = None
-    for rel in ("07_review/review-rounds.json", "07_review/review-comparison.json", "07_review/comparison-snapshot.json"):
-        data = _safe_load_json(folder / rel)
-        if isinstance(data.get("rounds"), list):
-            rounds = data["rounds"]
-            break
+def _validated_round1_checks(folder: Path, data: dict) -> list[dict]:
+    """Return Round 1 (``labels``) checks that still match current batch unit bindings."""
+    rounds = data.get("rounds")
     if not isinstance(rounds, list):
-        return {}
+        return []
     labels_round = next(
         (r for r in rounds if isinstance(r, dict) and r.get("round_id") == "labels"),
         None,
     )
     if not isinstance(labels_round, dict):
+        return []
+    raw_checks = [c for c in (labels_round.get("checks") or []) if isinstance(c, dict)]
+    if not raw_checks:
+        return []
+
+    try:
+        from . import review
+        current_plan = review.prepare_round_plan(folder)
+    except (OSError, ValueError, KeyError, TypeError):
+        # Lightweight unit-test fixtures without 01_source/structure.confirmed.json.
+        return raw_checks
+
+    effective_plan, _ = review.resolve_round_plan(folder, current_plan, data)
+    current_units = set(effective_plan.get("units") or [])
+    current_bindings = effective_plan.get("unit_bindings") or {}
+    old_plan = data.get("plan")
+
+    if isinstance(old_plan, dict):
+        if old_plan == effective_plan:
+            return [c for c in raw_checks if str(c.get("unit_id") or "").strip() in current_units]
+        old_bindings = old_plan.get("unit_bindings")
+        if isinstance(old_bindings, dict):
+            acceptable = review.acceptable_unit_bindings(folder, effective_plan)
+            valid_uids = {
+                uid
+                for uid in current_bindings
+                if review._unit_binding_matches(folder, old_plan, effective_plan, uid, accepted=acceptable)
+            }
+            return [c for c in raw_checks if str(c.get("unit_id") or "").strip() in valid_uids]
+        if old_plan.get("input_binding") == effective_plan.get("input_binding"):
+            return [c for c in raw_checks if str(c.get("unit_id") or "").strip() in current_units]
+        return []
+
+    if (
+        isinstance(data.get("input_binding"), str)
+        and data["input_binding"] == effective_plan.get("input_binding")
+    ):
+        return [c for c in raw_checks if str(c.get("unit_id") or "").strip() in current_units]
+    return []
+
+
+def load_round1_assessments(batch_dir: Path) -> dict[str, dict]:
+    """Return validated ``{unit_id: assessment_dict}`` from Round 1 (``labels``) if present."""
+    folder = Path(batch_dir)
+    selected_data = None
+    for rel in ("07_review/review-rounds.json", "07_review/review-comparison.json", "07_review/comparison-snapshot.json"):
+        data = _safe_load_json(folder / rel)
+        if isinstance(data.get("rounds"), list):
+            selected_data = data
+            break
+    if not isinstance(selected_data, dict):
         return {}
+    checks = _validated_round1_checks(folder, selected_data)
     result: dict[str, dict] = {}
-    for check in labels_round.get("checks") or []:
-        if not isinstance(check, dict):
-            continue
+    for check in checks:
         uid = str(check.get("unit_id") or "").strip()
         assessment = check.get("assessment")
         if uid and isinstance(assessment, dict):

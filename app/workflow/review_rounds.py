@@ -391,7 +391,7 @@ _BLIND_REVIEW_DROP_DOCS = frozenset((
 
 
 def _partition_contexts(base, budget, max_units=None, round_id="sample", target_unit_ids=None,
-                       section_types=None):
+                       section_types=None, listening_uids=None):
     """Restrict unit-indexed context without changing source or rule evidence."""
     text = base['prompt'].split('BEGIN SUPPLIED CONTENT', 1)[1].rsplit('END SUPPLIED CONTENT', 1)[0]
     # build_task's delimiter includes this fixed data-label before the JSON.
@@ -632,24 +632,45 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
             idx += best_len
         return result
 
-    # When max_units splits the paper into multiple parts, distribute units evenly
-    # across contiguous slices (e.g. 48 units / max 15 -> [12, 12, 12, 12] instead
-    # of [15, 15, 15, 3]) while keeping source spans and listening units grouped.
-    if max_units is not None and len(units) > max_units:
-        part_count = math.ceil(len(units) / max_units)
-        base_size, extra = divmod(len(units), part_count)
-        chunks = []
-        cursor = 0
-        for i in range(part_count):
-            size = base_size + (1 if i < extra else 0)
-            chunks.append(units[cursor:cursor + size])
-            cursor += size
-        parts = []
-        for chunk in chunks:
-            parts.extend(split_within_budget(chunk))
-        return parts
+    def _is_listening_unit(unit):
+        uid = unit['unit_id']
+        if listening_uids is not None:
+            return uid in listening_uids
+        utype = unit.get('type')
+        if not isinstance(utype, str) or not utype.strip() or utype.strip().startswith('听力'):
+            return True
+        return str(raw_types_by_unit.get(uid) or '').startswith('听力')
 
-    return split_within_budget(units)
+    # Keep listening and non-listening units in separate contiguous runs so
+    # non-listening partitions never wait on pending audio.
+    runs = []
+    for unit in units:
+        flag = _is_listening_unit(unit)
+        if not runs or runs[-1][0] != flag:
+            runs.append((flag, [unit]))
+        else:
+            runs[-1][1].append(unit)
+
+    def split_run(run_units):
+        if max_units is not None and len(run_units) > max_units:
+            part_count = math.ceil(len(run_units) / max_units)
+            base_size, extra = divmod(len(run_units), part_count)
+            chunks = []
+            cursor = 0
+            for i in range(part_count):
+                size = base_size + (1 if i < extra else 0)
+                chunks.append(run_units[cursor:cursor + size])
+                cursor += size
+            out = []
+            for chunk in chunks:
+                out.extend(split_within_budget(chunk))
+            return out
+        return split_within_budget(run_units)
+
+    parts = []
+    for _, run_units in runs:
+        parts.extend(split_run(run_units))
+    return parts
 
 
 def _reject_assessment_contradiction(check):
@@ -1110,7 +1131,8 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
                        if round_id == 'sample' else [uid for uid in plan['units'] if (uid, None) not in reused_keys])
             pending_units = {q['unit_id'] for q in pending} if round_id == 'sample' else set(pending)
             unit_parts = _partition_contexts(base, budget, max_units_per_part, round_id,
-                                             pending_units, section_types)
+                                             pending_units, section_types,
+                                             listening_uids=listening_uids)
             parts = []
             for part in unit_parts:
                 ids = set(part["unit_ids"])
@@ -1185,6 +1207,7 @@ def export_group(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
                           "targets": list(sp.get("targets") or []),
                           "input_hashes": state.get("input_hashes") or {},
                           "prompt_digest": state.get("prompt_digest"),
+                          "part_prompt_digest": review._digest(sp["prompt"]),
                           "generation_nonce": state.get("generation_nonce"),
                           "prompt_chars": len(sp["prompt"]),
                           "package_dir": str(batch / "workflow/review-tasks" / task_id)})
@@ -1224,13 +1247,36 @@ def _has_nonlistening_cache(batch_dir):
         return False
 
 
+_NONLISTENING_CACHE_VOLATILE_FILES = frozenset((
+    "06_batch/batch_meta.json",
+    "06_batch/batch.json",
+    "07_review/validation-report.json",
+    "07_review/structure-gate.json",
+))
+
+
 def _nonlistening_cache_path(round_id, part, input_hashes, *, prompt_digest=None, generation_nonce=None):
-    non_audio = {k: v for k, v in (input_hashes or {}).items()
-                 if not str(k).startswith("02_audio/")}
+    part_prompt_digest = part.get("part_prompt_digest")
+    if part_prompt_digest is None and isinstance(part.get("prompt"), str):
+        part_prompt_digest = review._digest(part["prompt"])
+    if part_prompt_digest is not None:
+        # Audio completion updates 02_audio/* and re-assembles whole-batch files
+        # (batch_meta.json / batch.json / validation-report.json). Because
+        # part_prompt_digest binds the exact serialized prompt for this
+        # non-listening partition, excluding whole-batch volatile files keeps
+        # the cache stable across audio completion while still invalidating on
+        # any change to the non-listening units themselves.
+        non_audio = {
+            k: v for k, v in (input_hashes or {}).items()
+            if not str(k).startswith("02_audio/") and str(k) not in _NONLISTENING_CACHE_VOLATILE_FILES
+        }
+    else:
+        non_audio = {k: v for k, v in (input_hashes or {}).items()
+                     if not str(k).startswith("02_audio/")}
     p_digest = prompt_digest if prompt_digest is not None else part.get("prompt_digest")
     g_nonce = generation_nonce if generation_nonce is not None else part.get("generation_nonce")
     key = [round_id, part.get("unit_ids") or [], part.get("targets") or [],
-           non_audio, CONTEXT_VERSION, PROMPT_VERSION, p_digest, g_nonce]
+           non_audio, CONTEXT_VERSION, PROMPT_VERSION, p_digest, g_nonce, part_prompt_digest]
     return "workflow/review-pending-nl/nl-" + review._digest(key) + ".json"
 
 
