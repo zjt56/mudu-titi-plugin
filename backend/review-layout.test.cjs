@@ -96,6 +96,30 @@ test('左侧题目列表：每题有独立边框分隔，选中态加深并带�
   assert.doesNotMatch(client, /\.wf-paper\.wf-active:hover\{filter:brightness/);
 });
 
+test('左侧题号列表使用橙色问题圆点，正常题使用默认文字色且不展示待审徽标', () => {
+  const from = client.indexOf('filteredRows.map((r) => {');
+  const to = client.indexOf('\n          })),', from);
+  assert.ok(from >= 0 && to > from);
+  const render = new Function('h', 'T', 'unitId', 'onSelectUnit', 'r',
+    client.slice(from + 'filteredRows.map((r) => {'.length, to));
+  const h = (tag, props, ...children) => ({ tag, props, children });
+  const row = (data) => render(h, { paperRow: () => ({}), badge: () => ({}) }, '', () => {},
+    { unit_id: 'q1', number: 1, type: '单项填空', ...data });
+  for (const data of [{ needs_human: true, open_count: 2, open_summary: '知识点差异' },
+                      { state: 'attention' }, { state: 'blocked' }]) {
+    const result = row(data);
+    const dot = result.children.at(-1);
+    assert.equal(dot.props.className, 'wf-review-row-dot');
+    assert.equal(dot.props.style.background, 'var(--dsw-alias-state-warn-primary)');
+    assert.equal(dot.props['aria-label'], '有审核问题');
+    assert.equal(dot.children.length, 0);
+  }
+  assert.equal(row({ needs_human: true, open_summary: '知识点差异' }).children.at(-1).props.title, '知识点差异');
+  assert.equal(row({ state: 'ok' }).children.at(-1).props.style.background, 'var(--dsw-alias-label-primary)');
+  assert.equal(row({ state: 'unverified' }).children.at(-1).props['aria-label'], '尚未核对');
+  assert.equal(row({ excluded: true }).children.at(-1).children[0], '听力跳过');
+});
+
 test('左侧题号列表只显示主题型，不显示子类/子题型/题干', () => {
   // 题号列只放原卷印刷题号；无号题组显示「—」，不把大题标题（像题干）塞进题号列。
   assert.match(client, /Array\.isArray\(r\.printed_numbers\) && r\.printed_numbers\.length === 0\s*\? '—'/);
