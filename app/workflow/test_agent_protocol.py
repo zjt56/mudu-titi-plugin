@@ -394,7 +394,7 @@ print(json.dumps(result, ensure_ascii=False))
         self.assertEqual(mf.load(self.batch)["stages"]["knowledge"]["status"], mf.FAILED)
 
     def test_import_pending_does_not_suppress_self_heal_for_other_failed_stage(self):
-        from workflow import auto, local_agent, self_heal
+        from workflow import auto, local_agent, operations, self_heal
 
         self._saved_knowledge_result()
         manifest = mf.load(self.batch)
@@ -402,6 +402,7 @@ print(json.dumps(result, ensure_ascii=False))
         mf.save(self.batch, manifest)
         with patch.object(protocol, "import_result",
                           side_effect=local_agent.AgentError("lock held", "lock_timeout")), \
+             patch.object(operations, "handoff_if_available", return_value=None), \
              patch.object(self_heal, "recover", return_value={"changed": False, "status": "recorded"}) as heal:
             auto.advance(self.batch, {}, stop_at="assemble")
         heal.assert_called_once()

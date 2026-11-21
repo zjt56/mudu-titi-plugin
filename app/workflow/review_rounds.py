@@ -1082,6 +1082,18 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
             raise ValueError("Invalid review partition binding")
     else:
         budget = max_input_chars
+        listening_uids = set()
+        types_file = _path(batch, agent_tasks.ARTIFACTS["types"])
+        if types_file.is_file():
+            try:
+                t_doc = _load(types_file.read_bytes())
+                listening_uids = {
+                    row["unit_id"] for row in (t_doc.get("items") or [])
+                    if isinstance(row, dict) and isinstance(row.get("unit_id"), str)
+                    and str(row.get("type") or "").startswith("听力")
+                }
+            except (OSError, ValueError):
+                listening_uids = set()
         while True:
             reused_keys = {review._check_key(ref, round_id) for ref in reuse}
             pending = ([q for q in plan['sample'] if review._check_key(q, round_id) not in reused_keys]
@@ -1096,7 +1108,12 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
                            else [uid for uid in pending if uid in ids])
                 if not targets:
                     continue
-                parts.append({"targets": targets, "prompt": _round_prompt(round_id, targets, part["context"])})
+                parts.append({
+                    "targets": targets,
+                    "unit_ids": list(part["unit_ids"]),
+                    "has_listening": bool(ids & listening_uids),
+                    "prompt": _round_prompt(round_id, targets, part["context"]),
+                })
             if not parts:
                 raise ValueError("Review round has no targets")
             excess = max(len(p["prompt"]) for p in parts) - max_input_chars
@@ -1146,10 +1163,14 @@ def export_group(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
         state = _load(_path(batch, binding["state_path"]).read_bytes())
         parts = []
         for index in range(len(state["completed"]), len(state["parts"])):
-            task_id = state["parts"][index]["task_id"]
+            sp = state["parts"][index]
+            task_id = sp["task_id"]
             parts.append({"task_id": task_id, "round_id": state["round_id"],
                           "part_index": index + 1, "part_count": len(state["parts"]),
-                          "prompt_chars": len(state["parts"][index]["prompt"]),
+                          "has_listening": bool(sp.get("has_listening")),
+                          "unit_ids": list(sp.get("unit_ids") or []),
+                          "input_hashes": state.get("input_hashes") or {},
+                          "prompt_chars": len(sp["prompt"]),
                           "package_dir": str(batch / "workflow/review-tasks" / task_id)})
         return {"action": "exported", "round_id": state["round_id"], "parts": parts}
 
@@ -1166,6 +1187,24 @@ def _save_review_failure(batch, task_id, round_id, error, error_code=None, attem
         'state_path': binding['state_path'], 'part_index': binding['part_index'],
         'targets': part['targets'], 'error': str(error), 'error_code': error_code,
         'attempt': attempt})
+
+
+def _audio_pending(batch_dir):
+    """Return True when the batch manifest exists and audio is not yet terminal OK."""
+    path = Path(batch_dir) / "workflow/manifest.json"
+    if not path.is_file():
+        return False
+    from . import manifest as mf
+    manifest = mf.load(batch_dir)
+    audio_status = (manifest.get("stages") or {}).get("audio", {}).get("status")
+    return audio_status not in mf.TERMINAL_OK
+
+
+def _nonlistening_cache_path(round_id, part, input_hashes):
+    non_audio = {k: v for k, v in (input_hashes or {}).items()
+                 if not str(k).startswith("02_audio/")}
+    key = [round_id, part.get("unit_ids") or [], non_audio, CONTEXT_VERSION, PROMPT_VERSION]
+    return "workflow/review-pending-nl/nl-" + review._digest(key) + ".json"
 
 
 def _pending_path(task_id):
@@ -2060,11 +2099,39 @@ def _run(batch_dir, config=None, portable_max_input_chars=None, *, blocked_round
             queues = [sorted(group["parts"], key=lambda part: -part.get("prompt_chars", 0))
                       for group in invokable]
             all_parts = [part for wave in zip_longest(*queues) for part in wave if part is not None]
-            outcomes, quota_hit = _run_parts_parallel(batch_dir, all_parts, config, parallel, retries)
+            audio_pending = _audio_pending(batch_dir)
+            for part in all_parts:
+                if not part.get("has_listening") and _load_pending(batch_dir, part["task_id"]) is None:
+                    nl_rel = _nonlistening_cache_path(part["round_id"], part, part.get("input_hashes"))
+                    nl_path = _path(batch_dir, nl_rel)
+                    if nl_path.is_file():
+                        try:
+                            cached_resp = _load(nl_path.read_bytes())
+                            if isinstance(cached_resp, dict):
+                                _save_pending(batch_dir, part["task_id"], cached_resp)
+                        except (OSError, ValueError):
+                            pass
+            runnable_parts = [p for p in all_parts if not (audio_pending and p.get("has_listening"))]
+            deferred_listening = [p for p in all_parts if audio_pending and p.get("has_listening")]
+            if runnable_parts:
+                outcomes, quota_hit = _run_parts_parallel(batch_dir, runnable_parts, config, parallel, retries)
+            else:
+                outcomes, quota_hit = {}, False
             if quota_hit:
                 summary = write_summary(batch_dir, failures)
                 return {"action": "blocked", "completed": False, "quota": True,
                         "reason": "代理额度/限流不可用，已停止重试", "summary": summary}
+            if deferred_listening:
+                for part in runnable_parts:
+                    if not part.get("has_listening"):
+                        done_resp = _load_pending(batch_dir, part["task_id"])
+                        if done_resp is not None:
+                            nl_rel = _nonlistening_cache_path(part["round_id"], part, part.get("input_hashes"))
+                            _save(batch_dir, nl_rel, done_resp)
+                summary = write_summary(batch_dir, failures)
+                return {"action": "waiting_audio", "completed": False, "waiting_audio": True,
+                        "reason": "非听力审核分片已完成并缓存，等待听力切段完成后补跑听力分片",
+                        "summary": summary}
             # 逐片安装：保留既有"失败时保留其它片 pending 供下次续跑"契约。
             # 调用层的瞬时失败已由 _run_parts_parallel 做有界反馈重试；
             # 安装失败仍按原语义停下并记录，下一轮 run 从 pending 恢复。
@@ -2092,6 +2159,12 @@ def _run(batch_dir, config=None, portable_max_input_chars=None, *, blocked_round
                             raise ReviewInputsChanged(last_error) from exc
                         if isinstance(exc, ValueError) and last_error_code != 'review_consumer':
                             _clear_pending(batch_dir, part['task_id'])
+                            if not part.get("has_listening"):
+                                try:
+                                    _path(batch_dir, _nonlistening_cache_path(
+                                        part["round_id"], part, part.get("input_hashes"))).unlink()
+                                except FileNotFoundError:
+                                    pass
                         _save_review_failure(batch_dir, part['task_id'], round_id,
                                              last_error, last_error_code)
                         break

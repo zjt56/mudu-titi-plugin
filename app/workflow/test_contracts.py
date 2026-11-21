@@ -16,7 +16,7 @@ class ContractMetadataTest(unittest.TestCase):
         self.assertIn("late_bound", metadata["optimization"])
         self.assertIn("external_wait", metadata["defer"])
         self.assertFalse(metadata["optional"])
-        self.assertEqual(contracts.STAGE_BY_ID["format_gate"].depends_on, ("review_gate",))
+        self.assertEqual(contracts.STAGE_BY_ID["format_gate"].depends_on, ("review_gate", "audio"))
         self.assertEqual(contracts.STAGE_BY_ID["meta"].command[2], "{content_snapshot}")
 
     def test_deferred_metadata_does_not_change_hard_dependencies(self):
@@ -31,7 +31,8 @@ class ContractMetadataTest(unittest.TestCase):
         self.assertEqual(contracts.STAGE_BY_ID["assemble"].depends_on,
                          ("preassemble", "answers", "types", "knowledge", "explanations", "underlines"))
         self.assertEqual(contracts.STAGE_BY_ID["validate"].depends_on, ("assemble",))
-        self.assertIn("audio", contracts.STAGE_BY_ID["review"].depends_on)
+        self.assertEqual(contracts.STAGE_BY_ID["review"].depends_on, ("validate",))
+        self.assertIn("audio", contracts.STAGE_BY_ID["format_gate"].depends_on)
 
     def test_unknown_stage_metadata_is_empty(self):
         self.assertEqual(contracts.stage_metadata("missing"), {})
@@ -41,7 +42,7 @@ class ContractMetadataTest(unittest.TestCase):
     def test_invalidation_follows_consumers_without_joining_independent_branches(self):
         self.assertEqual(contracts.downstream_of("extract"), contracts.STAGE_ORDER[1:])
         self.assertEqual(contracts.downstream_of("audio"),
-                         ("review", "review_gate", "format_gate", "upload_gate", "upload", "publish_gate"))
+                         ("format_gate", "upload_gate", "upload", "publish_gate"))
         downstream = contracts.downstream_of("types")
         for consumer in ("answers", "knowledge", "audio", "assemble", "validate", "review"):
             self.assertIn(consumer, downstream)

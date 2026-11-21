@@ -278,6 +278,7 @@ def _run_review_rounds(batch_dir, config_path=None):
                               "reason": "审核输入或上游阶段未就绪"}, ensure_ascii=False))
             return 3
         rounds = review_rounds.run(batch_dir, config=load_config(config_path) if config_path else None)
+        waiting_audio = rounds.get("action") == "waiting_audio"
         execution_completed = bool(rounds.get("completed"))
         gate = review.evaluate(batch_dir)
         batch = Path(batch_dir)
@@ -285,19 +286,23 @@ def _run_review_rounds(batch_dir, config_path=None):
             with _agent_lock(1500):
                 manifest = mf.load(batch)
                 spec = contracts.STAGE_BY_ID["review"]
-                mf.touch_stage(manifest, "review", mf.COMPLETED if execution_completed else mf.NEEDS_REVIEW,
+                next_status = mf.PENDING if waiting_audio else (mf.COMPLETED if execution_completed else mf.NEEDS_REVIEW)
+                note = (rounds.get("reason") or "非听力审核分片已完成并缓存，等待听力切段完成后补跑听力分片"
+                        if waiting_audio else "分轮审核：" + rounds["action"])
+                mf.touch_stage(manifest, "review", next_status,
                                input_hashes=mf.input_hashes(batch, manifest, spec),
                                output_hashes=mf.output_hashes(batch, spec),
-                               notes="分轮审核：" + rounds["action"])
+                               notes=note)
                 if execution_completed:
                     mf.record_delivery(batch, manifest, spec)
                 manifest["status"] = mf.derive_status(manifest)
                 mf.save(batch, manifest)
         print(json.dumps({"review_rounds": rounds, "completed": execution_completed,
+                          "waiting_audio": waiting_audio,
                           "execution_completed": execution_completed, "quality_passed": gate["passed"],
                           "summary": rounds.get("summary"),
-                          "status": "completed" if execution_completed else "needs_review"}, ensure_ascii=False))
-        return 0 if execution_completed else 3
+                          "status": "waiting_audio" if waiting_audio else ("completed" if execution_completed else "needs_review")}, ensure_ascii=False))
+        return 0 if (execution_completed or waiting_audio) else 3
     except (ValueError, OSError, RuntimeError) as exc:
         print(json.dumps({"completed": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

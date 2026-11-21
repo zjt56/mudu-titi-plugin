@@ -149,6 +149,32 @@ class MonitoringOptimizationsTest(unittest.TestCase):
             stage_id, _ = op._stale_running_candidate(self.batch, manifest)
             self.assertIsNone(stage_id)
 
+    def test_review_runs_non_listening_while_audio_pending_and_reuses_cache_after_audio(self):
+        self._put("01_source/正文.txt", "Ⅰ.关键词语选择\n1. A. a B. b C. c\nⅡ.单项填空\n2. She ___.\n")
+        units = [
+            {"unit_id": "q-1", "unit_kind": "standalone", "numbers": [1], "type": "听力关键词语选择"},
+            {"unit_id": "q-2", "unit_kind": "standalone", "numbers": [2], "type": "单项填空"},
+        ]
+        self._put("01_source/structure.confirmed.json", {"units": units})
+        self._put("03_types/types.json", {
+            "items": [
+                {"unit_id": "q-1", "type": "听力关键词语选择", "subtypes": []},
+                {"unit_id": "q-2", "type": "单项填空", "subtypes": ["四个选项"]},
+            ]
+        })
+        manifest = mf.new_manifest("test-opt-a", self.batch, {"source": {"path": str(self.batch / "01_source/正文.txt"), "sha256": "x"}}, {})
+        manifest["stages"]["audio"] = {"status": mf.RUNNING}
+        self._put("workflow/manifest.json", manifest)
+
+        self.assertTrue(review_rounds._audio_pending(self.batch))
+        nl_key = review_rounds._nonlistening_cache_path("labels", {"unit_ids": ["q-2"]}, {"01_source/正文.txt": "h1", "02_audio/full-transcript.json": "missing"})
+        nl_key_after = review_rounds._nonlistening_cache_path("labels", {"unit_ids": ["q-2"]}, {"01_source/正文.txt": "h1", "02_audio/full-transcript.json": "sha256-ready"})
+        self.assertEqual(nl_key, nl_key_after)
+
+        manifest["stages"]["audio"] = {"status": mf.SKIPPED, "notes": "no audio"}
+        self._put("workflow/manifest.json", manifest)
+        self.assertFalse(review_rounds._audio_pending(self.batch))
+
 
 if __name__ == "__main__":
     unittest.main()

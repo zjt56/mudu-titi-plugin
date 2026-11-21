@@ -183,9 +183,9 @@ STAGES: tuple[Stage, ...] = (
         id="review",
         title="两轮审核（一审全量+二审抽20%）",
         kind=AGENT,
-        # 内容审核必须等听力完成：审核要读 02_audio/full-transcript.json 核对听力语义，
-        # 听力未完成时审核不完整（这是唯一需要等待听力完成的下游节点）。
-        depends_on=("validate", "audio"),
+        # 非听力审核分片在 validate 通过后即可与 audio 并行；仅含听力的分片等待 audio，
+        # 最终由 format_gate 统一等待 review_gate 与 audio 全部完成。
+        depends_on=("validate",),
         produces=("07_review/review-rounds.json",
                   "07_review/content-review.json", "07_review/metadata-review.json",
                   "07_review/manual-review-queue.json", "07_review/unchecked.json"),
@@ -205,7 +205,7 @@ STAGES: tuple[Stage, ...] = (
         id="format_gate",
         title="最终上传格式检查",
         kind=COMMAND,
-        depends_on=("review_gate",),
+        depends_on=("review_gate", "audio"),
         produces=("07_review/upload-format.json",),
         command=("{python}", "-m", "workflow.format_gate", "--batch-dir", "{batch_dir}"),
         docs=("docs/pipeline.md", "docs/upload-api.md"),

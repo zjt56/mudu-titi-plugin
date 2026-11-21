@@ -180,10 +180,11 @@ def _stale_running_candidate(folder, manifest, *, force=False):
         if not busy and (force or (age is not None and age >= ORPHAN_RUNNING_GRACE_SECONDS)):
             detail = f"阶段 {spec.id} 处于运行中但无活跃执行锁（已滞留 {int(age) if age is not None else 0}s），疑似僵死"
             return spec.id, detail
-        if age is not None and age >= STALE_RUNNING_SECONDS:
-            if busy and not force and _recent_stage_activity(folder, spec.id, STALE_RUNNING_SECONDS):
+        stale_limit = 600 if spec.id == "review" else STALE_RUNNING_SECONDS
+        if age is not None and age >= stale_limit:
+            if busy and not force and _recent_stage_activity(folder, spec.id, stale_limit):
                 continue
-            detail = f"阶段 {spec.id} 处于运行中已超过 {int(age)}s（阈值 {STALE_RUNNING_SECONDS}s），疑似卡死"
+            detail = f"阶段 {spec.id} 处于运行中已超过 {int(age)}s（阈值 {stale_limit}s），疑似卡死"
             return spec.id, detail
     return None, ""
 
