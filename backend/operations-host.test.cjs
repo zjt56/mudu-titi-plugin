@@ -74,8 +74,8 @@ test('native operations poll advertises usable service before inspecting work wi
   const signal = AbortSignal.timeout(1000);
   const work = await f.options.hasWork({ signal });
   assert.equal(f.ensureCount, 1);
-  assert.deepEqual(f.calls.map(row => row.url.split('/api/')[1]), ['operations/service', 'operations/work-state']);
-  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0].body)), { available: true });
+  assert.deepEqual(f.calls.map(row => row.url.split('/api/')[1]), ['operations/service']);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0].body)), { available: true, include_work_state: true });
   assert.equal(f.calls[0].method, 'POST');
   assert.ok(f.calls.every(row => row.signal === signal));
   assert.equal(work.has_work, true);

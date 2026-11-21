@@ -402,7 +402,7 @@ def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use
         observations = Path(batch_dir) / 'workflow/media-observations.json'
         if observations.is_file():
             try:
-                from .agent_tasks import _safe_path
+                from .workflow_primitives import _safe_path
                 data = json.loads(observations.read_text(encoding='utf-8'))
                 for entry in data.get('observations', []):
                     rel = entry['path']
@@ -861,7 +861,7 @@ def is_stale(batch_dir, manifest: dict, stage: contracts.Stage) -> tuple[bool, s
     # forever after the gate ledger already says completed.
     if stage.id == "structure_gate" and record.get("status") in TERMINAL_OK:
         try:
-            from .agent_tasks import confirmed_units
+            from .workflow_primitives import confirmed_units
             confirmed_units(Path(batch_dir))
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             return True, "结构确认产物不可消费：" + str(exc)[:200]
@@ -1026,7 +1026,7 @@ def skip_reason(manifest: dict, stage: contracts.Stage) -> str:
         if batch_dir:
             # 只有已确认结构中的全部单元都有明确题型，才能证明本卷无听力。
             # 缺文件、空结构、非法成员或未知题型不能被当作无听力证据。
-            from .agent_tasks import confirmed_units
+            from .workflow_primitives import confirmed_units
             try:
                 units = confirmed_units(Path(batch_dir))
             except (OSError, ValueError, TypeError):

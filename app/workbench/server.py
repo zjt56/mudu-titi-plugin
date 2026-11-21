@@ -2483,6 +2483,13 @@ def operations_work_state():
             # Only hash the final artifact when the local records appear done.
             if not local_pending and wf_execution_state:
                 local_pending = not wf_execution_state.local_complete(folder, manifest)
+            if not local_pending:
+                has_running_stage = any(
+                    isinstance(rec, dict) and rec.get('status') == 'running'
+                    for rec in stages.values())
+                adv = _advance_state.get(folder.name) or {}
+                if has_running_stage and not adv.get('running'):
+                    local_pending = True
             if local_pending or operations.pending_incident(folder):
                 active.append(folder.name)
         except (OSError, ValueError, TypeError):
@@ -3473,7 +3480,14 @@ def review_comparison(folder: Path, unit_id, numbers):
                                                      rationale)]
                 if isinstance(reviewed_answers, list):
                     assessment = {**assessment, "answer_points": reviewed_answers}
-                if labels.get("type") in ("完成句子", "短文填空") or assessment.get("type") in ("完成句子", "短文填空"):
+                rules = taxonomy.type_knowledge_rules()
+                def _ap_disabled(t):
+                    rule = rules.get(t.strip()) if isinstance(t, str) and t.strip() else None
+                    return bool(rule and not any(dim.get("dim") == "答案考点" for dim in rule.get("dims", [])))
+                if _ap_disabled(labels.get("type")) or _ap_disabled(assessment.get("type")):
+                    assessment = {key: value for key, value in assessment.items() if key != "answer_points"}
+                    expected_answers = []
+                elif not expected_answers and not answer_point_tags(folder, uid, number=check.get("number")):
                     assessment = {key: value for key, value in assessment.items() if key != "answer_points"}
                 entry["checks"].append({"unit_id": uid, "number": check.get("number"),
                                         "scope": ("subquestion" if str(check.get("number") or "").strip()
@@ -3935,6 +3949,12 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "operations":
                 from workflow import operations
                 return self.send_json(operations.view(WORKFLOWS, batch_dir(parts[2])))
+            if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "operations" and parts[4] == "diff":
+                from workflow import operations
+                return self.send_json(operations.code_repair_diff(WORKFLOWS, batch_dir(parts[2])))
+            if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "operations" and parts[4] == "performance":
+                from workflow import operations
+                return self.send_json(operations.performance_summary(WORKFLOWS, batch_dir(parts[2])))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "media":
                 folder = batch_dir(parts[2])
                 report, manifest, queue = report_for(folder)
@@ -4011,13 +4031,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(content_agent.dispatch("POST", unquote(parsed.path), payload))
             if parts == ["api", "operations", "service"]:
                 from workflow import operations
-                return self.send_json(operations.service_heartbeat(payload.get('available')))
+                result = operations.service_heartbeat(payload.get('available'))
+                if payload.get('include_work_state'):
+                    result.update(operations_work_state())
+                return self.send_json(result)
             if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "operations":
                 from workflow import operations
                 folder = batch_dir(parts[2])
                 try:
                     if parts[4] == "claim":
                         return self.send_json(operations.claim(WORKFLOWS, folder, payload))
+                    if parts[4] == "unfreeze":
+                        return self.send_json(operations.unfreeze(WORKFLOWS, folder))
+                    if parts[4] == "takeover":
+                        return self.send_json(operations.takeover(WORKFLOWS, folder))
+                    if parts[4] == "reconcile-unknown":
+                        return self.send_json(operations.reconcile_unknown(WORKFLOWS, folder, note=payload.get("note", "")))
                     if parts[4] in {"action", "heartbeat", "progress", "release", "cancel"}:
                         if parts[4] != "action":
                             payload = {**payload, "action": parts[4]}

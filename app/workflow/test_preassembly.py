@@ -104,7 +104,7 @@ class PreassemblyTest(unittest.TestCase):
                 mf.touch_stage(state, spec.id, mf.COMPLETED)
             mf.save(batch, state)
             return 0
-        def labels(batch, stages, config, *, while_running):
+        def labels(batch, stages, config, *, while_running, pending_audio=False):
             self.assertTrue(mf.dependency_satisfied(mf.load(batch), 'types'))
             dispatched.extend(s.id for s in stages)
             while_running()

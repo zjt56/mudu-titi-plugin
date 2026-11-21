@@ -671,7 +671,7 @@ def build(batch_dir, *, units=None):
     """
     root = Path(batch_dir).resolve()
     if units is None:
-        from .agent_tasks import confirmed_units
+        from .workflow_primitives import confirmed_units
         units = confirmed_units(root)
 
     source = _safe(root, "01_source/正文.txt").read_text(encoding="utf-8-sig")

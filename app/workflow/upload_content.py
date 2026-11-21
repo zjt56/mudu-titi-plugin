@@ -8,11 +8,12 @@ from pathlib import Path
 import re
 import unicodedata
 
-from .agent_tasks import _safe_path
+from .workflow_primitives import _safe_path
 from .content_labels import IMG, EXPLANATION_LABEL, SUMMARY_LABEL
 
+from .workflow_constants import AI_MARK
+
 SOURCES = ('01_source/附录.txt', '01_source_ans/正文.txt', '01_source/正文.txt')
-AI_MARK = '（AI生成，待校对）'
 ANSWER_INFERRED_BINDING = 'answer_inferred_image_group'
 # Source-title patterns are shared with deterministic extraction and source_ref.
 QUESTION_PREFIX = r'^\s*(?:[（(]\s*[）)]\s*)?(\d{1,3})[.．、]'
@@ -1686,7 +1687,7 @@ def resolve_scoped_answer(batch_dir, unit, number, answer=None):
     """
     if unit.get('identity_version') != 'scoped-v1' or unit.get('type') == '书面表达':
         return None
-    from .agent_tasks import _answer_comparison_text as normalize_answer
+    from .workflow_primitives import _answer_comparison_text as normalize_answer
     from .content_rules import is_placeholder
     batch = Path(batch_dir)
     paths = [*SOURCES, *(p.relative_to(batch).as_posix() for p in sorted(
@@ -1714,7 +1715,7 @@ def validate_scoped_answer(batch_dir, unit, number, answer, evidence):
     from .question_identity import VERSION
     if unit.get('identity_version') != VERSION or unit.get('type') == '书面表达':
         return
-    from .agent_tasks import _answer_comparison_text as normalize_answer
+    from .workflow_primitives import _answer_comparison_text as normalize_answer
     batch = Path(batch_dir)
     paths = list(SOURCES)
     paths.extend(p.relative_to(batch).as_posix() for p in sorted((batch / '01_source/materials').glob('attachment_*.txt'))
@@ -2033,7 +2034,7 @@ def _inspect_content(batch_dir, payload, *, strict=False, restore=False):
                     confirmed_units[str(uid)] = unit
     except (OSError, ValueError):
         confirmed_units = {}
-    from .agent_tasks import confirmed_units as load_confirmed_units
+    from .workflow_primitives import confirmed_units as load_confirmed_units
     try:
         listening_scripts = listening_script.extract(batch, load_confirmed_units(batch))
     except (OSError, ValueError, KeyError, TypeError):

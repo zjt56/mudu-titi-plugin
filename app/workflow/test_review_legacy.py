@@ -115,7 +115,7 @@ class ReviewLegacyTest(unittest.TestCase):
 
     def test_scoped_identities_cannot_reuse_legacy_whole_plan(self):
         current = self.legacy()
-        with patch('workflow.agent_tasks.confirmed_units', return_value=[{'identity_version': 'scoped-v1'}]):
+        with patch('workflow.workflow_primitives.confirmed_units', return_value=[{'identity_version': 'scoped-v1'}]):
             info = review_legacy.compatible_plan(self.batch, current, self.payload)
         self.assertFalse(info['accepted'], info)
         self.assertIn('Scoped question identities', info['reason'])

@@ -37,7 +37,7 @@ REPORTS = ("07_review/upload-format.json", "07_review/validation-report.json",
 # producer stage: it may mention unrelated stages by name.
 PREREQUISITE_UNMET = re.compile(r"Prerequisite\s+([a-z_]+)\s+must have a current")
 BATCH_FILL_CONFLICT = re.compile(r"Batch fill[^\n]*conflict", re.IGNORECASE)
-SOURCE_BINDING_DEFECT = re.compile(r"(?:proven\s+source\s+binding|source\s+binding)", re.IGNORECASE)
+SOURCE_BINDING_DEFECT = re.compile(r"(?:proven[\s_]+source[\s_]+binding|source[\s_]+binding|review_sample_source_unverified|source_unverified)", re.IGNORECASE)
 
 
 def _path(batch: Path) -> Path:
@@ -750,7 +750,9 @@ def _producer_for_issue(issue):
                ("大意", "explanations"), ("知识点", "knowledge"),
                ("knowledge", "knowledge"), ("题型", "types"), ("subtype", "types"),
                ("audio", "audio"), ("听力", "audio")) if token in message}
-    if "source binding" in message or "proven source" in message:
+    if (code in {"review_sample_source_unverified", "source_unverified"}
+            or "source_unverified" in code or "source_binding" in code
+            or "source binding" in message or "proven source" in message):
         return "structure_gate"
     return next(iter(matches)) if len(matches) == 1 else None
 
@@ -1206,6 +1208,11 @@ def recover(batch_dir, *, config: dict | None = None) -> dict:
         return {"changed": True, "status": "requeued", "stage": stage_id,
                 "outcome": "stale_running", "target_stage": stage_id, "verified": False,
                 "reason": "运行记录无活跃执行者，已重排该阶段"}
+    from . import operations
+    if operations.service_available():
+        return {"changed": False, "status": "delegated_to_operations",
+                "stage": stage_id, "retry_after": 10,
+                "reason": "AI运维服务在线，由运维主循环接管诊断与修复"}
     ledger, now = _load(batch), time.time()
     runtime = _runtime_failure(detail)
     if runtime:

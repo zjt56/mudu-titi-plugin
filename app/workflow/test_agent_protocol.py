@@ -229,6 +229,207 @@ print(json.dumps(result, ensure_ascii=False))
         with self.assertRaisesRegex(ValueError, "consumed"):
             protocol.import_result(self.batch, task_id, self.response(task_id, altered))
 
+    def _saved_knowledge_result(self):
+        self.mark_delivered("types")
+        manifest = mf.load(self.batch)
+        mf.reconcile_deliveries(self.batch, manifest)
+        mf.save(self.batch, manifest)
+        task_id = protocol.export_task(self.batch, "knowledge")["task_id"]
+        response = {"status": "completed", "artifacts": {
+            agent_tasks.ARTIFACTS["knowledge"]: {"items": [{
+                "unit_id": "q-1", "knowledge": ["词汇/词汇辨析/动词辨析"],
+                "subquestions": [], "evidence": ["正文 L1"],
+            }]},
+        }, "notes": [], "findings": []}
+        path = protocol.save_portable_result(
+            self.batch / "workflow/agent-runs/knowledge-interrupted", task_id, response)
+        manifest = mf.load(self.batch)
+        mf.touch_stage(manifest, "knowledge", mf.RUNNING)
+        mf.save(self.batch, manifest)
+        return task_id, path
+
+    def test_auto_imports_saved_knowledge_before_recovery_or_model_cooldown(self):
+        from workflow import auto, local_agent, self_heal
+
+        task_id, path = self._saved_knowledge_result()
+        auto._set_cooldown(self.batch, 300)
+        with patch.object(self_heal, "recover") as heal, patch.object(local_agent, "invoke") as invoke:
+            auto.advance(self.batch, {}, stop_at="assemble")
+        heal.assert_not_called()
+        invoke.assert_not_called()
+        self.assertEqual(mf.load(self.batch)["stages"]["knowledge"]["status"], mf.COMPLETED)
+        self.assertTrue(mf.dependency_satisfied(mf.load(self.batch), "knowledge"))
+        receipt = protocol.import_result(self.batch, task_id, path)
+        self.assertTrue(receipt["completed"])
+
+    def test_auto_retries_only_saved_import_after_lock_timeout(self):
+        from workflow import auto, local_agent
+
+        self._saved_knowledge_result()
+        with patch.object(protocol, "import_result",
+                          side_effect=local_agent.AgentError("lock held", "lock_timeout")):
+            outcome = auto.advance(self.batch, {}, stop_at="assemble")
+        self.assertIn("knowledge", {item["stage"] for item in outcome["pending_stages"]
+                                    if item["action"] == "import_pending"})
+        self.assertFalse((self.batch / agent_tasks.ARTIFACTS["knowledge"]).exists())
+        auto.advance(self.batch, {}, stop_at="assemble")
+        self.assertEqual(mf.load(self.batch)["stages"]["knowledge"]["status"], mf.COMPLETED)
+
+    def test_interrupted_candidate_with_changed_task_is_not_imported(self):
+        from workflow import auto
+
+        task_id, path = self._saved_knowledge_result()
+        task = self.batch / f"workflow/agent-tasks/{task_id}/task.json"
+        task.write_bytes(task.read_bytes() + b" ")
+        manifest, waiting = auto._recover_portable_results(self.batch, mf.load(self.batch), None)
+        self.assertFalse(waiting)
+        self.assertEqual(manifest["stages"]["knowledge"]["status"], mf.RUNNING)
+        self.assertFalse((self.batch / agent_tasks.ARTIFACTS["knowledge"]).exists())
+        self.assertTrue(path.is_file())
+
+    def test_auto_recovers_bound_complete_response_before_envelope_was_saved(self):
+        from workflow import auto
+
+        task_id, path = self._saved_knowledge_result()
+        response = json.loads(path.read_text())["result"]
+        path.unlink()
+        (path.parent / "portable-task.json").write_text(
+            json.dumps({"protocol": protocol.PROTOCOL, "task_id": task_id}), encoding="utf-8")
+        raw = path.parent / "response.json"
+        raw.write_text('{"status":"completed",', encoding="utf-8")
+        self.assertEqual(list(protocol.pending_results(self.batch, mf.load(self.batch))), [])
+        raw.write_text(json.dumps(response), encoding="utf-8")
+        auto.advance(self.batch, {}, stop_at="assemble")
+        self.assertTrue(path.is_file())
+        self.assertEqual(mf.load(self.batch)["stages"]["knowledge"]["status"], mf.COMPLETED)
+
+    def test_new_saved_result_wakes_supervisor_once_during_backoff(self):
+        from workflow import supervisor
+
+        self._saved_knowledge_result()
+        manifest = mf.load(self.batch)
+        self.write("workflow/supervisor.json", {
+            "status": "exhausted", "no_progress_attempts": 5,
+            "next_retry_at": 2000, "retry_reservation_at": 2000,
+            "progress": supervisor._progress(manifest),
+        })
+        dispatched = []
+        watch = supervisor.WorkflowSupervisor(
+            self.root, dispatched.append, clock=lambda: 1000, busy=lambda _: False)
+        self.assertEqual(watch.one_tick()["batches"][self.batch.name], "dispatched")
+        self.assertEqual(watch.one_tick()["batches"][self.batch.name], "cooldown")
+        self.assertEqual(dispatched, [self.batch.name])
+
+    def test_parallel_worker_saves_result_before_scheduler_collects_it(self):
+        import threading
+        from workflow import auto, local_agent
+
+        _, saved = self._saved_knowledge_result()
+        response = json.loads(saved.read_text())["result"]
+        saved.unlink()
+        persisted = threading.Event()
+        original_save = protocol.save_portable_result
+
+        def save(run_dir, task_id, result):
+            path = original_save(run_dir, task_id, result)
+            persisted.set()
+            return path
+
+        def check_durable():
+            self.assertTrue(persisted.wait(5))
+            self.assertTrue(list((self.batch / "workflow/agent-runs").glob("knowledge-*/portable-result.json")))
+
+        stage = contracts.STAGE_BY_ID["knowledge"]
+        with patch.object(protocol, "save_portable_result", side_effect=save), \
+             patch.object(local_agent, "invoke", return_value={"response": response}), \
+             patch.object(protocol, "import_result",
+                          side_effect=local_agent.AgentError("lock held", "lock_timeout")):
+            outcome = auto._parallel_ready_agents(
+                self.batch, [stage], {"max_input_chars": 180000, "retries": 0},
+                while_running=check_durable)
+        self.assertEqual(outcome["knowledge"], auto._IMPORT_PENDING)
+        self.assertEqual(mf.load(self.batch)["stages"]["knowledge"]["status"], mf.RUNNING)
+        auto.advance(self.batch, {}, stop_at="assemble")
+        self.assertEqual(mf.load(self.batch)["stages"]["knowledge"]["status"], mf.COMPLETED)
+
+    def test_lock_before_model_dispatch_leaves_stage_pending(self):
+        from workflow import auto, local_agent
+
+        self.mark_delivered("types")
+        stage = contracts.STAGE_BY_ID["knowledge"]
+        with patch.object(protocol, "export_task",
+                          side_effect=local_agent.AgentError("lock held", "lock_timeout")), \
+             patch.object(local_agent, "invoke") as invoke:
+            result = auto._parallel_ready_agents(self.batch, [stage], {"max_input_chars": 180000})
+        invoke.assert_not_called()
+        self.assertEqual(result["knowledge"], auto._LOCK_BUSY)
+        self.assertEqual(mf.load(self.batch)["stages"]["knowledge"]["status"], mf.PENDING)
+
+    def test_only_ready_native_knowledge_uses_portable_delivery(self):
+        from workflow import agent, auto, local_agent
+
+        self.mark_delivered("types")
+        self.mark_delivered("answers")
+        config = {"native_agent": {"enabled": True}}
+        with patch.object(agent, "configured", return_value=True), \
+             patch.object(local_agent, "load_config", return_value=config), \
+             patch.object(auto, "_parallel_ready_agents", return_value={"knowledge": auto._IMPORT_PENDING}) as wave:
+            result = auto.advance(self.batch, auto.load_bridge(), stop_at="content_snapshot")
+        wave.assert_called_once()
+        self.assertEqual([stage.id for stage in wave.call_args.args[1]], ["knowledge"])
+        self.assertEqual(result["action"], "import_pending")
+
+    def test_parallel_import_oserror_fails_stage_instead_of_import_pending(self):
+        from workflow import auto, local_agent
+
+        _, saved = self._saved_knowledge_result()
+        response = json.loads(saved.read_text())["result"]
+        saved.unlink()
+        stage = contracts.STAGE_BY_ID["knowledge"]
+        with patch.object(local_agent, "invoke", return_value={"response": response}), \
+             patch.object(protocol, "import_result", side_effect=FileNotFoundError("missing file")):
+            outcome = auto._parallel_ready_agents(
+                self.batch, [stage], {"max_input_chars": 180000, "retries": 0})
+        self.assertEqual(outcome["knowledge"], 1)
+        self.assertEqual(mf.load(self.batch)["stages"]["knowledge"]["status"], mf.FAILED)
+
+    def test_import_pending_does_not_suppress_self_heal_for_other_failed_stage(self):
+        from workflow import auto, local_agent, self_heal
+
+        self._saved_knowledge_result()
+        manifest = mf.load(self.batch)
+        mf.touch_stage(manifest, "answers", mf.FAILED, exit_code=1, notes="answers failed")
+        mf.save(self.batch, manifest)
+        with patch.object(protocol, "import_result",
+                          side_effect=local_agent.AgentError("lock held", "lock_timeout")), \
+             patch.object(self_heal, "recover", return_value={"changed": False, "status": "recorded"}) as heal:
+            auto.advance(self.batch, {}, stop_at="assemble")
+        heal.assert_called_once()
+
+    def test_supervisor_keeps_portable_recheck_when_dispatch_returns_import_pending(self):
+        from workflow import supervisor
+
+        self._saved_knowledge_result()
+        manifest = mf.load(self.batch)
+        self.write("workflow/supervisor.json", {
+            "status": "exhausted", "no_progress_attempts": 5,
+            "next_retry_at": 2000, "retry_reservation_at": 2000,
+            "progress": supervisor._progress(manifest),
+        })
+        responses = iter([{"action": "import_pending"}, {"action": ""}])
+        dispatched = []
+
+        def fake_dispatch(name):
+            dispatched.append(name)
+            return next(responses)
+
+        watch = supervisor.WorkflowSupervisor(
+            self.root, fake_dispatch, clock=lambda: 1000, busy=lambda _: False)
+        self.assertEqual(watch.one_tick()["batches"][self.batch.name], "dispatched")
+        self.assertEqual(watch.one_tick()["batches"][self.batch.name], "dispatched")
+        self.assertEqual(watch.one_tick()["batches"][self.batch.name], "cooldown")
+        self.assertEqual(dispatched, [self.batch.name, self.batch.name])
+
     @patch.dict(os.environ, {"WF_MODEL_FIRST": "0"})
     def test_needs_review_consumes_task_without_importing_artifact(self):
         task_id = self.export()["task_id"]

@@ -25,15 +25,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import _common  # noqa: E402
+from workflow.workflow_constants import AI_MARK as _AI_MARK  # noqa: E402
 
 _READING_TYPES = {"阅读理解", "任务型阅读", "读写综合"}
 _CLOZE_TYPES = {"完形填空", "语法选择"}
 
 _READING_ANGLE_PREFIX = "设题角度/阅读"
 _GENRE_PREFIX = "语篇体裁"
-_AI_MARK = "（AI生成，待校对）"
 
 
 def _knowledge(obj):

@@ -483,14 +483,70 @@ def write(job, relative, content, *, expected_sha=None):
 def patch_source(job, relative, old_text, new_text, *, expected_sha):
     """CAS a unique literal source fragment, retaining all surrounding bytes."""
     relative, raw = _read_source(job, relative)
-    if expected_sha is None or _sha(raw) != expected_sha:
-        raise ValueError('expected_sha_mismatch')
-    if not isinstance(old_text, str) or not old_text or raw.count(old_text.encode('utf-8')) != 1:
-        raise ValueError('patch_match_not_unique')
+    current_sha = _sha(raw)
+    if expected_sha is None or current_sha != expected_sha:
+        raise ValueError(f'expected_sha_mismatch: current_sha256={current_sha}')
+    if not isinstance(old_text, str) or not old_text:
+        raise ValueError(f'patch_match_not_unique: count=0, current_sha256={current_sha}')
+    needle = old_text.encode('utf-8')
+    count = raw.count(needle)
+    if count != 1:
+        first = next((ln.strip() for ln in old_text.splitlines() if ln.strip()), '')
+        near = []
+        if first:
+            for idx, ln in enumerate(raw.decode('utf-8', 'replace').splitlines(), 1):
+                if first in ln:
+                    near.append(idx)
+                    if len(near) >= 5:
+                        break
+        raise ValueError(f'patch_match_not_unique: count={count}, current_sha256={current_sha}, near_lines={near}')
     if not isinstance(new_text, str):
         raise ValueError('content_invalid')
-    changed = raw.replace(old_text.encode('utf-8'), new_text.encode('utf-8'), 1)
+    changed = raw.replace(needle, new_text.encode('utf-8'), 1)
     return write(job, relative, changed.decode('utf-8'), expected_sha=expected_sha)
+
+
+def patch_lines(job, relative, start_line, end_line, new_text, *, expected_sha):
+    """CAS replace an inclusive 1-based line range [start_line, end_line]."""
+    relative, raw = _read_source(job, relative)
+    current_sha = _sha(raw)
+    if expected_sha is None or current_sha != expected_sha:
+        raise ValueError(f'expected_sha_mismatch: current_sha256={current_sha}')
+    if not isinstance(start_line, int) or not isinstance(end_line, int) or start_line < 1 or end_line < start_line:
+        raise ValueError('line_range_invalid')
+    if not isinstance(new_text, str):
+        raise ValueError('content_invalid')
+    lines = raw.decode('utf-8').splitlines(keepends=True)
+    if start_line > len(lines) + 1 or end_line > len(lines):
+        raise ValueError(f'line_range_out_of_bounds: total_lines={len(lines)}, current_sha256={current_sha}')
+    replacement = new_text
+    if replacement and end_line < len(lines) and not replacement.endswith(('\n', '\r')):
+        replacement += '\n'
+    updated = ''.join(lines[:start_line - 1]) + replacement + ''.join(lines[end_line:])
+    return write(job, relative, updated, expected_sha=expected_sha)
+
+
+def multi_patch(job, relative, edits, *, expected_sha):
+    """CAS apply multiple unique literal replacements atomically in one write."""
+    relative, raw = _read_source(job, relative)
+    current_sha = _sha(raw)
+    if expected_sha is None or current_sha != expected_sha:
+        raise ValueError(f'expected_sha_mismatch: current_sha256={current_sha}')
+    if not isinstance(edits, list) or not edits or len(edits) > 10:
+        raise ValueError('edits_invalid')
+    text = raw.decode('utf-8')
+    for idx, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            raise ValueError(f'edits_invalid: index={idx}')
+        old_text = edit.get('old_text')
+        new_text = edit.get('new_text')
+        if not isinstance(old_text, str) or not old_text or not isinstance(new_text, str):
+            raise ValueError(f'edits_invalid: index={idx}')
+        count = text.count(old_text)
+        if count != 1:
+            raise ValueError(f'multi_patch_match_not_unique: index={idx}, count={count}, current_sha256={current_sha}')
+        text = text.replace(old_text, new_text, 1)
+    return write(job, relative, text, expected_sha=expected_sha)
 
 
 def restore_base(job, relative, *, expected_sha):
@@ -551,6 +607,24 @@ def diff(job):
     return {"files": changes, "patch": patch[:MAX_PATCH_CHARS],
             "truncated": len(patch) > MAX_PATCH_CHARS,
             "fingerprint": fingerprint(job)}
+
+
+def export_patch_bundle(job):
+    """Export workspace diff with hot-reloadability metadata for manual fallback."""
+    bundle = diff(job)
+    files = bundle.get("files") or []
+    non_hot_reloadable = any(
+        not str(item.get("path") or "").startswith("app/") or str(item.get("path") or "").endswith(".js")
+        for item in files
+    )
+    return {
+        **bundle,
+        "available": bool(files),
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "non_hot_reloadable": non_hot_reloadable,
+        "manual_apply_hint": "可在项目根目录保存补丁并通过 git apply 应用" if files else "",
+    }
 
 
 def _base_text(job, relative):
@@ -621,7 +695,7 @@ sys.exit(0 if result.wasSuccessful() and all(counts.values()) else 1)
 '''
 
 
-def run_tests(job, tests, *, timeout=300):
+def run_tests(job, tests, *, timeout=300, fast=False):
     """Run only named unittest modules inside the copy. Fixed argv, no shell."""
     workspace = _workspace(job)
     if not isinstance(tests, list) or not tests or len(tests) > 12:
@@ -631,9 +705,10 @@ def run_tests(job, tests, *, timeout=300):
         if not isinstance(entry, str) or not UNIT_TEST.fullmatch(entry):
             raise ValueError("tests_invalid")
         names.append(entry)
-    required = required_core_regressions(job)
-    _check_core_regression_sources(job, required)
-    names = list(dict.fromkeys([*names, *required]))
+    required = [] if fast else required_core_regressions(job)
+    if required:
+        _check_core_regression_sources(job, required)
+        names = list(dict.fromkeys([*names, *required]))
     home = workspace / ".test-home"
     home.mkdir(exist_ok=True)
     environment = _clean_env(home, workspace / "app")
@@ -662,7 +737,7 @@ def run_tests(job, tests, *, timeout=300):
         if not all(type(core_results.get(module)) is int and core_results[module] > 0 for module in required):
             code = code or -2
             output += "\ncore_regression_execution_incomplete: each mandatory module must execute non-skipped tests"
-    record = {"tests": names, "returncode": code, "passed": code == 0,
+    record = {"tests": names, "returncode": code, "passed": code == 0, "fast": bool(fast),
               "output": output[-8000:], "seconds": round(time.time() - started, 1),
               "fingerprint": fingerprint(job), "at": _now()}
     if required:

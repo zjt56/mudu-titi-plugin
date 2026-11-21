@@ -7,12 +7,42 @@
 from __future__ import annotations
 
 import concurrent.futures
+import importlib
+import importlib.util
+import io
 import json
+import os
 import re
 import subprocess
 import sys
+import threading
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
+
+_ORIG_SUBPROCESS_RUN = subprocess.run
+_INPROCESS_LOCK = threading.Lock()
+_INPROCESS_MODULE_CACHE: dict[tuple[str, int, int], object] = {}
+_INPROCESS_SCRIPTS = frozenset({
+    "workflow/label_audit.py",
+    "scripts/04-knowledge/check_tags.py",
+    "scripts/06-upload/check_text.py",
+    "scripts/06-upload/audit_underlines.py",
+    "scripts/06-upload/check_underline.py",
+    "scripts/06-upload/check_tables.py",
+    "scripts/06-upload/audit_type_layout.py",
+    "scripts/06-upload/audit_batch_integrity.py",
+    "scripts/06-upload/audit_sentence_blanks.py",
+    "scripts/06-upload/check_structure.py",
+    "scripts/06-upload/audit_type_tags.py",
+    "scripts/06-upload/audit_reading.py",
+    "scripts/06-upload/publish_check.py",
+    "scripts/06-upload/check_answers.py",
+    "scripts/06-upload/check_difficulty.py",
+    "scripts/06-upload/check_explanations.py",
+    "scripts/06-upload/audit_source_marks.py",
+    "scripts/06-upload/check_fidelity.py",
+})
 
 
 @dataclass(frozen=True)
@@ -177,30 +207,105 @@ def _output_findings(check: Check, stdout: str, stderr: str, exit_code: int) -> 
     return findings
 
 
+def _can_run_inprocess(check: Check, skill_root: Path) -> bool:
+    """Only run verified stateless scripts in-process when subprocess is unpatched."""
+    if os.environ.get("WF_CHECKS_SUBPROCESS", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    if subprocess.run is not _ORIG_SUBPROCESS_RUN:
+        return False
+    if check.script not in _INPROCESS_SCRIPTS:
+        return False
+    return (skill_root / check.script).is_file()
+
+
+def _load_inprocess_module(check: Check, skill_root: Path):
+    script_path = (skill_root / check.script).resolve()
+    st = script_path.stat()
+    cache_key = (str(script_path), st.st_mtime_ns, st.st_size)
+    cached = _INPROCESS_MODULE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    root_str = str(skill_root.resolve())
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    if check.script == "workflow/label_audit.py":
+        module = importlib.import_module("workflow.label_audit")
+    else:
+        parent_str = str(script_path.parent)
+        if parent_str not in sys.path:
+            sys.path.insert(0, parent_str)
+        mod_name = "_wf_inproc_" + re.sub(r"[^0-9A-Za-z_]", "_", check.script)
+        spec = importlib.util.spec_from_file_location(mod_name, str(script_path))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot create module spec for {script_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    _INPROCESS_MODULE_CACHE[cache_key] = module
+    return module
+
+
+def _run_inprocess(check: Check, skill_root: Path, argv: list[str]) -> tuple[int, str, str]:
+    script_path = (skill_root / check.script).resolve()
+    cli_args = argv[5:] if check.script == "workflow/label_audit.py" else argv[4:]
+    out_buf, err_buf = io.StringIO(), io.StringIO()
+    with _INPROCESS_LOCK:
+        module = _load_inprocess_module(check, skill_root)
+        main_fn = getattr(module, "main", None)
+        if not callable(main_fn):
+            raise AttributeError(f"{check.script} has no callable main()")
+        old_argv = sys.argv
+        try:
+            sys.argv = [str(script_path), *cli_args]
+            with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                try:
+                    ret = main_fn() if check.script == "workflow/label_audit.py" else main_fn(cli_args)
+                    code = int(ret) if isinstance(ret, int) and not isinstance(ret, bool) else 0
+                except SystemExit as exc:
+                    if exc.code is None:
+                        code = 0
+                    elif isinstance(exc.code, int) and not isinstance(exc.code, bool):
+                        code = exc.code
+                    else:
+                        print(exc.code, file=err_buf)
+                        code = 1
+        finally:
+            sys.argv = old_argv
+    return code, out_buf.getvalue(), err_buf.getvalue()
+
+
 def run_check(check: Check, skill_root: Path, batch_json: Path, inputs: dict,
               timeout: int = 180) -> dict:
     argv = _argv(check, skill_root, batch_json, inputs)
-    try:
-        proc = subprocess.run(argv, cwd=str(skill_root), capture_output=True,
-                              text=True, encoding="utf-8", errors="replace",
-                              timeout=timeout)
-        code, out, err = proc.returncode, proc.stdout, proc.stderr
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        timed_out = isinstance(exc, subprocess.TimeoutExpired)
-        message = f"超时（{timeout}s）" if timed_out else f"无法执行：{exc}"
-        out = getattr(exc, "stdout", None) or ""
-        err = getattr(exc, "stderr", None) or ""
-        out = out.decode("utf-8", errors="replace") if isinstance(out, bytes) else out
-        err = err.decode("utf-8", errors="replace") if isinstance(err, bytes) else err
-        findings = [row for row in _output_findings(check, out, err, 1)
-                    if row["code"] != "CHECK_EXIT_NONZERO"]
-        findings.append(_finding(check, message,
-                                 code="CHECK_TIMEOUT" if timed_out else "CHECK_EXECUTION_ERROR"))
-        return {"check": check.name, "script": check.script, "blocking": check.blocking,
-                "phase": check.phase, "passed": False, "exit_code": None,
-                "output": _tail(out), "error": message, "stdout": out, "stderr": err,
-                "warnings": [row["message"] for row in findings if not row["blocking"]],
-                "findings": findings, "note": check.note}
+    code, out, err = None, "", ""
+    ran_inprocess = False
+    if _can_run_inprocess(check, skill_root):
+        try:
+            code, out, err = _run_inprocess(check, skill_root, argv)
+            ran_inprocess = True
+        except Exception:
+            ran_inprocess = False
+    if not ran_inprocess:
+        try:
+            proc = subprocess.run(argv, cwd=str(skill_root), capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace",
+                                  timeout=timeout)
+            code, out, err = proc.returncode, proc.stdout, proc.stderr
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            timed_out = isinstance(exc, subprocess.TimeoutExpired)
+            message = f"超时（{timeout}s）" if timed_out else f"无法执行：{exc}"
+            out = getattr(exc, "stdout", None) or ""
+            err = getattr(exc, "stderr", None) or ""
+            out = out.decode("utf-8", errors="replace") if isinstance(out, bytes) else out
+            err = err.decode("utf-8", errors="replace") if isinstance(err, bytes) else err
+            findings = [row for row in _output_findings(check, out, err, 1)
+                        if row["code"] != "CHECK_EXIT_NONZERO"]
+            findings.append(_finding(check, message,
+                                     code="CHECK_TIMEOUT" if timed_out else "CHECK_EXECUTION_ERROR"))
+            return {"check": check.name, "script": check.script, "blocking": check.blocking,
+                    "phase": check.phase, "passed": False, "exit_code": None,
+                    "output": _tail(out), "error": message, "stdout": out, "stderr": err,
+                    "warnings": [row["message"] for row in findings if not row["blocking"]],
+                    "findings": findings, "note": check.note}
     findings = _output_findings(check, out, err, code)
     # Only the well-formed option count diagnostics are deferrable. E20 also
     # includes letter continuity, which must remain an early identity check.
@@ -281,8 +386,11 @@ def run_all(skill_root: Path, batch_json: Path, inputs: dict,
                                                  code=f"{key.upper()}_INPUT_MISSING", input=key))
             continue
         runnable.append(check)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(runnable))) as pool:
-        results = list(pool.map(lambda c: run_check(c, skill_root, batch_json, effective_inputs), runnable))
+    if runnable and all(_can_run_inprocess(c, skill_root) for c in runnable):
+        results = [run_check(c, skill_root, batch_json, effective_inputs) for c in runnable]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(runnable))) as pool:
+            results = list(pool.map(lambda c: run_check(c, skill_root, batch_json, effective_inputs), runnable))
     if pdf_answers and effective_inputs.get("answers", {}).get("path") != answer_input.get("path"):
         for result in results:
             if result["script"] == "scripts/06-upload/check_answers.py":

@@ -11,7 +11,7 @@ from copy import deepcopy
 import re
 from pathlib import Path
 
-from . import denoise, format_gate, question_content, structure_gate, upload_payload
+from . import denoise, format_gate_core as _fg, question_content, structure_gate, upload_payload
 
 BATCH_PATHS = tuple("06_batch/" + name for name in
                     ("batch.json", "batch_meta.base.json", "batch_meta.json"))
@@ -175,12 +175,12 @@ def _printed_number(row, unit, source):
 
 def _local_format(root, batch):
     report = {"input_sha256": {}}
-    options = format_gate._options(root, batch, report)
+    options = _fg._options(root, batch, report)
     built = upload_payload.build_payload(batch, catalog=None, **options)
-    errors = format_gate._shape(batch) + [e for e in built["errors"]
-                                            if e.get("code") not in format_gate.DEFERRED_CODES]
+    errors = _fg._shape(batch) + [e for e in built["errors"]
+                                    if e.get("code") not in _fg.DEFERRED_CODES]
     return {"passed": not errors, "errors": errors, "warnings": built["warnings"],
-            "deferred": [e for e in built["errors"] if e.get("code") in format_gate.DEFERRED_CODES],
+            "deferred": [e for e in built["errors"] if e.get("code") in _fg.DEFERRED_CODES],
             "scope": "local_upload_format", "prepare_upload_required": True}
 
 
@@ -246,20 +246,20 @@ def prepare(batch_dir) -> dict:
               "checks": {}, "quality_passed": False, "prepare_upload_required": True}
     snapshots, candidates = {}, {}
     try:
-        root = format_gate._safe(batch_dir)
+        root = _fg._safe(batch_dir)
         paths = (*SOURCE_PATHS, *BATCH_PATHS)
         manifest = "workflow/manifest.json"
-        if format_gate._safe(root / manifest).exists():
+        if _fg._safe(root / manifest).exists():
             paths += (manifest,)
         for relative in paths:
-            snapshots[relative] = format_gate._safe(root / relative).read_bytes()
-        result["input_sha256"] = {p: format_gate._sha(raw) for p, raw in snapshots.items()}
+            snapshots[relative] = _fg._safe(root / relative).read_bytes()
+        result["input_sha256"] = {p: _fg._sha(raw) for p, raw in snapshots.items()}
         source = snapshots[SOURCE_PATHS[0]].decode("utf-8-sig")
-        structure = format_gate._load(snapshots[SOURCE_PATHS[1]])
-        confirmed = format_gate._load(snapshots[SOURCE_PATHS[2]])
+        structure = _fg._load(snapshots[SOURCE_PATHS[1]])
+        confirmed = _fg._load(snapshots[SOURCE_PATHS[2]])
         by_key, rebuilt, _ = _source_units(confirmed, structure, source)
         for relative in BATCH_PATHS:
-            original = format_gate._load(snapshots[relative])
+            original = _fg._load(snapshots[relative])
             if not isinstance(original, dict) or not isinstance(original.get("items"), list):
                 raise ValueError(f"{relative} 缺少 items 数组")
             before = question_content.audit_batch_source(root, original)
@@ -313,14 +313,14 @@ def prepare(batch_dir) -> dict:
             result["changes"].extend(file_changes)
             if candidate != original:
                 candidates[relative] = candidate
-            if relative == format_gate.FINAL_PATH:
+            if relative == _fg.FINAL_PATH:
                 final_check = _local_format(root, candidate)
                 result["checks"]["final_format"] = final_check
                 if not final_check["passed"]:
                     result["refused"].append({"file": relative, "reason": "最终候选本地格式未通过",
                                                "issues": final_check["errors"]})
         for relative, raw in snapshots.items():
-            if format_gate._safe(root / relative).read_bytes() != raw:
+            if _fg._safe(root / relative).read_bytes() != raw:
                 result["refused"].append({"file": relative, "reason": "检查期间输入变化"})
         if not result["refused"] and result["checks"].get("final_format", {}).get("passed"):
             result["passed"] = True

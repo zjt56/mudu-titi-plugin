@@ -76,15 +76,15 @@ class PlanInputKeyTest(unittest.TestCase):
             (batch / "01_source/structure.confirmed.json").write_text('{"units": []}', encoding="utf-8")
             calls = []
 
-            from workflow import agent_tasks
+            from workflow import workflow_primitives
 
-            real = agent_tasks.confirmed_units
-            agent_tasks.confirmed_units = lambda _b: (calls.append(1), [])[1]
+            real = workflow_primitives.confirmed_units
+            workflow_primitives.confirmed_units = lambda _b: (calls.append(1), [])[1]
             try:
                 review._units_cached(batch)
                 review._units_cached(batch)
             finally:
-                agent_tasks.confirmed_units = real
+                workflow_primitives.confirmed_units = real
             self.assertEqual(len(calls), 1, "同一结构修订只解析一次")
 
 

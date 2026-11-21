@@ -44,7 +44,9 @@ DEFAULTS = {"provider": "dsh", "timeout_seconds": 900, "max_input_chars": 180000
             "assemble_part_units": 8, "review_part_units": 15, "label_part_units": 1,
             # 标注阶段（题型/解析/知识点）默认整卷一次分析，不再一题一片：
             # 用户明确要求“整张试卷拿去分析”，分片会让每次调用都重复带上整卷上下文。
-            "label_split": False}
+            "label_split": False,
+            # 标准中考大题轻量规则直判默认开启，仅对歧义题型调模型。
+            "types_direct": True}
 
 # Only explicit transport/error fields count; task text can legitimately mention
 # 429, QUOTA or RATE_LIMIT. Never infer a provider failure from those substrings.
@@ -1075,15 +1077,101 @@ def main(argv=None):
         label_split, label_limit = _label_partition_policy(config, args.stage)
         split_enabled = ((label_split if _label_stage else bool(config.get("unit_split", True)))
                          and args.stage in ("assemble", "review", "types", "explanations", "knowledge"))
+        direct_types = {}
+        direct_knowledge = {}
+        direct_order = []
+        if args.stage == "types" and not args.dry_run and config.get("types_direct", False):
+            # 标准中考大题轻量规则直判：有修复反馈时全部交模型重判，确保人工/校验修复不被直判绕过。
+            has_feedback = any((batch_dir / "workflow" / "repair-feedback" / f"{name}.json").is_file()
+                               for name in ("types", "preassemble"))
+            if not has_feedback:
+                try:
+                    from workflow import types_direct
+                    confirmed = agent_tasks.confirmed_units(batch_dir)
+                    direct_order = [u["unit_id"] for u in confirmed]
+                    direct_types = types_direct.classify_units(batch_dir, confirmed)
+                except (OSError, ValueError, TypeError, KeyError):
+                    direct_types = {}
+        elif args.stage == "knowledge" and not args.dry_run and config.get("knowledge_direct", True):
+            has_feedback = (batch_dir / "workflow" / "repair-feedback" / "knowledge.json").is_file()
+            if not has_feedback:
+                try:
+                    from workflow import knowledge_direct
+                    confirmed = agent_tasks.confirmed_units(batch_dir)
+                    direct_order = [u["unit_id"] for u in confirmed]
+                    direct_knowledge = knowledge_direct.tag_units(batch_dir, confirmed)
+                except (OSError, ValueError, TypeError, KeyError):
+                    direct_knowledge = {}
+        selected_ids = None
+        if (direct_types or direct_knowledge) and direct_order:
+            direct_map = direct_types if args.stage == "types" else direct_knowledge
+            remaining_ids = [uid for uid in direct_order if uid not in direct_map]
+            if not remaining_ids and args.stage == "types":
+                # 全部单元已由标准规则直判，零模型调用直接验收落盘。
+                task = agent_tasks.build_task(batch_dir, args.stage, max_input_chars=sys.maxsize, slim=True)
+                if assembling:
+                    base = agent_tasks._safe_path(batch_dir, "06_batch/batch.base.json")
+                    if base.is_file():
+                        task.setdefault("input_hashes", {})["06_batch/batch.base.json"] = hashlib.sha256(base.read_bytes()).hexdigest()
+                    task["input_hashes"].update(preassembly.original_input_hashes(batch_dir))
+                direct_response = {
+                    "status": "completed",
+                    "artifacts": {agent_tasks.ARTIFACTS["types"]: {"items": [direct_types[uid] for uid in direct_order]}},
+                    "notes": [f"标准大题规则直判全部 {len(direct_order)} 个单元，无需调用模型"],
+                    "findings": [],
+                }
+                attempts = batch_dir / "workflow" / "agent-runs"
+                attempts.mkdir(parents=True, exist_ok=True)
+                run_dir = Path(tempfile.mkdtemp(prefix=("preassemble" if assembling else args.stage) + "-", dir=attempts))
+                _json_write(run_dir / "response.json", direct_response)
+                with _agent_lock(config.get("timeout_seconds", 900)):
+                    _check_input_hashes(batch_dir, task.get("input_hashes", {}))
+                    report = agent_tasks.accept_result(batch_dir, accept_stage, direct_response)
+                _json_write(run_dir / "import-report.json", report)
+                print(json.dumps({"attempt_dir": str(run_dir), "status": "completed",
+                                  "direct_types": len(direct_types), "report": report}, ensure_ascii=False))
+                return 0 if report.get("completed") is True else 3
+            if not remaining_ids and args.stage == "knowledge":
+                task = agent_tasks.build_task(batch_dir, args.stage, max_input_chars=sys.maxsize, slim=True)
+                direct_response = {
+                    "status": "completed",
+                    "artifacts": {agent_tasks.ARTIFACTS["knowledge"]: {"items": [direct_knowledge[uid] for uid in direct_order]}},
+                    "notes": [f"固定题型规则直标全部 {len(direct_order)} 个单元，无需调用模型"],
+                    "findings": [],
+                }
+                attempts = batch_dir / "workflow" / "agent-runs"
+                attempts.mkdir(parents=True, exist_ok=True)
+                run_dir = Path(tempfile.mkdtemp(prefix="knowledge-", dir=attempts))
+                _json_write(run_dir / "response.json", direct_response)
+                with _agent_lock(config.get("timeout_seconds", 900)):
+                    _check_input_hashes(batch_dir, task.get("input_hashes", {}))
+                    report = agent_tasks.accept_result(batch_dir, accept_stage, direct_response)
+                _json_write(run_dir / "import-report.json", report)
+                print(json.dumps({"attempt_dir": str(run_dir), "status": "completed",
+                                  "direct_knowledge": len(direct_knowledge), "report": report}, ensure_ascii=False))
+                return 0 if report.get("completed") is True else 3
+            selected_ids = remaining_ids
+            if args.stage == "types":
+                print(f"  标准大题规则直判 {len(direct_types)}/{len(direct_order)} 单元，仅剩余 {len(remaining_ids)} 单元送模型判型", flush=True)
+            else:
+                print(f"  固定题型规则直标 {len(direct_knowledge)}/{len(direct_order)} 单元，仅剩余 {len(remaining_ids)} 单元送模型标注", flush=True)
         try:
-            task = agent_tasks.build_task(batch_dir, args.stage, max_input_chars=config["max_input_chars"],
-                                          slim=not split_enabled)
+            if selected_ids is not None:
+                from workflow import unit_tasks
+                task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
+                                                     max_units=label_limit if _label_stage else _part_units(config, args.stage),
+                                                     selected_ids=selected_ids,
+                                                     balance_work=True)
+            else:
+                task = agent_tasks.build_task(batch_dir, args.stage, max_input_chars=config["max_input_chars"],
+                                              slim=not split_enabled)
         except ValueError as exc:
             if not split_enabled or "exceeding max_input_chars" not in str(exc):
                 raise
             from workflow import unit_tasks
             task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
                                                  max_units=label_limit if _label_stage else _part_units(config, args.stage),
+                                                 selected_ids=selected_ids,
                                                  balance_work=args.stage in ("types", "knowledge"))
         if split_enabled and parts is None and not task.get("preconditions"):
             try:
@@ -1094,6 +1182,7 @@ def main(argv=None):
                 from workflow import unit_tasks
                 task, parts = unit_tasks.build_parts(batch_dir, args.stage, config["max_input_chars"],
                                                      max_units=label_limit if _label_stage else _part_units(config, args.stage),
+                                                     selected_ids=selected_ids,
                                                      balance_work=args.stage in ("types", "knowledge"))
         if assembling:
             base = agent_tasks._safe_path(batch_dir, "06_batch/batch.base.json")
@@ -1236,6 +1325,29 @@ def main(argv=None):
             responses = [row[1] for row in outcomes]
             reused_parts = sum(1 for row in outcomes if row[2])
             response = unit_tasks.merge(args.stage, parts, responses)
+            if (direct_types and args.stage == "types") or (direct_knowledge and args.stage == "knowledge"):
+                direct_map = direct_types if args.stage == "types" else direct_knowledge
+                tpath = agent_tasks.ARTIFACTS[args.stage]
+                model_by_id = {row["unit_id"]: row for row in (response.get("artifacts", {}).get(tpath, {}).get("items") or [])
+                               if isinstance(row, dict) and isinstance(row.get("unit_id"), str)}
+                merged_items = [direct_map[uid] if uid in direct_map else model_by_id[uid]
+                                for uid in direct_order if uid in direct_map or uid in model_by_id]
+                response.setdefault("artifacts", {})[tpath] = {"items": merged_items}
+                label_desc = "标准大题规则直判" if args.stage == "types" else "固定题型规则直标"
+                model_desc = "模型判型" if args.stage == "types" else "模型标注"
+                response.setdefault("notes", []).append(
+                    f"{label_desc} {len(direct_map)} 单元，{model_desc} {len(model_by_id)} 单元")
+            elif args.stage in ("assemble", "types", "explanations", "knowledge"):
+                tpath = agent_tasks.ARTIFACTS[args.stage]
+                try:
+                    order = [u["unit_id"] for u in agent_tasks.confirmed_units(batch_dir)]
+                except (OSError, ValueError):
+                    order = []
+                if order:
+                    rank = {uid: idx for idx, uid in enumerate(order)}
+                    items = response.get("artifacts", {}).get(tpath, {}).get("items")
+                    if isinstance(items, list):
+                        items.sort(key=lambda row: rank.get(row.get("unit_id"), len(rank)))
             _json_write(run_dir / "response.json", response)
             with _agent_lock(config.get("timeout_seconds", 900)):
                 _check_input_hashes(batch_dir, strict_hashes)

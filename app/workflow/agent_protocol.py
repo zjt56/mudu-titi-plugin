@@ -91,6 +91,66 @@ def _atomic(path, raw):
             os.unlink(temporary)
 
 
+def save_portable_result(run_dir, task_id, result):
+    path = run_dir / "portable-result.json"
+    raw = json.dumps({"protocol": PROTOCOL, "task_id": task_id, "result": result},
+                     ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    _atomic(path, raw.encode("utf-8"))
+    return path
+
+
+def _read_saved_result(path):
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_FINAL_BYTES + 1)
+    if len(raw) > MAX_FINAL_BYTES:
+        raise ValueError("Response exceeds 8 MiB")
+    return _load(raw)
+
+
+def pending_results(batch, manifest, stages=None):
+    """Find complete responses from interrupted automatic imports, newest first per stage."""
+    batch = Path(batch).resolve()
+    runs = batch / "workflow/agent-runs"
+    records = manifest["stages"]
+    allowed = [stage.id for stage in contracts.STAGES
+               if stage.kind == contracts.AGENT and stage.id != "review"
+               and (stages is None or stage.id in stages)
+               and records.get(stage.id, {}).get("status") not in mf.TERMINAL_OK]
+    for stage in allowed:
+        candidates = []
+        for entry in runs.glob(stage + "-*"):
+            try:
+                relative = entry.relative_to(batch).as_posix()
+                path = _path(batch, relative + "/portable-result.json")
+                if not path.is_file() and _path(batch, relative + "/portable-task.json").is_file():
+                    path = _path(batch, relative + "/response.json")
+                info = path.stat()
+                if info.st_size <= MAX_FINAL_BYTES:
+                    candidates.append((info.st_mtime_ns, path))
+            except (OSError, ValueError):
+                continue
+        for _, path in sorted(candidates, reverse=True):
+            try:
+                envelope = _read_saved_result(path)
+                if path.name == "response.json":
+                    relative = path.with_name("portable-task.json").relative_to(batch).as_posix()
+                    origin = _read_saved_result(_path(batch, relative))
+                    if not isinstance(origin, dict) or set(origin) != {"protocol", "task_id"}:
+                        continue
+                    envelope = {**origin, "result": envelope}
+                task_id = envelope["task_id"]
+                if str(uuid.UUID(task_id)) != task_id or envelope["protocol"] != PROTOCOL:
+                    continue
+                if envelope["result"]["status"] != "completed":
+                    continue
+                binding = _load(_path(batch, f"workflow/agent-bindings/{task_id}.json").read_bytes())
+                if (binding.get("stage") == stage and binding.get("task_id") == task_id
+                        and binding.get("status") in ("pending", "exported")):
+                    yield stage, task_id, path, envelope
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                continue
+
+
 def _spec(stage):
     spec = contracts.STAGE_BY_ID.get(stage)
     if not spec or (spec.kind != contracts.AGENT and stage != "types") or stage not in agent_tasks.ARTIFACTS:

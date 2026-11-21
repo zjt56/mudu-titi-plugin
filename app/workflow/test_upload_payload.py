@@ -975,10 +975,10 @@ class UploadPayloadTest(unittest.TestCase):
                         wire = report["payload"]["items"][0]
                         self.assertEqual((wire["subquestions"][0] if child else wire)[field], value)
 
-    def test_generated_summary_is_dropped_without_gate(self):
-        # 用户规则：不采用 AI 生成大意，直接按缺失处理，不再校验 AI 标记。
+    def test_bare_ai_marker_placeholder_is_dropped_without_gate(self):
+        # 仅清空无正文的裸标记占位。
         for child in (False, True):
-            for summary in ("AI生成", "AI生成待校对：故事梗概", "摘要（AI生成）"):
+            for summary in ("AI生成", "（AI生成，待校对）", "（AI生成）"):
                 with self.subTest(child=child, summary=summary):
                     q = reading_group()
                     target = q["subquestions"][0] if child else q
@@ -988,16 +988,18 @@ class UploadPayloadTest(unittest.TestCase):
                     wire = report["payload"]["items"][0]
                     self.assertEqual((wire["subquestions"][0] if child else wire)["articleSummary"], "")
 
-    def test_generated_summary_with_full_f5_marker_is_also_dropped(self):
-        # 即使带完整旧标记，也不采用 AI 生成内容。
+    def test_generated_summary_with_ai_mark_is_preserved_for_upload(self):
+        # 用户规则：带「（AI生成，待校对）」的有效文章大意放行上传并保留后缀。
+        expected = "本文讲述一个人靠坚持实现梦想的小故事。（AI生成，待校对）"
         for child in (False, True):
             with self.subTest(child=child):
                 q = reading_group()
                 target = q["subquestions"][0] if child else q
-                target["articleSummary"] = "本文讲述一个人靠坚持实现梦想的小故事。（AI生成，待校对）"
+                target["articleSummary"] = expected
                 report = self.build(batch(q))
+                self.assertTrue(report["passed"], report["errors"])
                 wire = report["payload"]["items"][0]
-                self.assertEqual((wire["subquestions"][0] if child else wire)["articleSummary"], "")
+                self.assertEqual((wire["subquestions"][0] if child else wire)["articleSummary"], expected)
 
     def test_sqlite_active_integers_accept_all_one_reject_selected_zero(self):
         catalog = deepcopy(self.catalog)
@@ -1113,7 +1115,7 @@ class AliasAlignmentTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertIn("REMOTE_TEXTBOOK_AMBIGUOUS", {e["code"] for e in report["errors"]})
 
-    def test_prose_mentioning_ai_generation_is_preserved_and_ai_mark_explanation_falls_back(self):
+    def test_prose_and_ai_mark_explanation_are_preserved_for_upload(self):
         item = reading_group()
         item["articleSummary"] = "本文讨论了AI生成技术对学习方式的影响。"
         item["subquestions"][0]["explanation"] = "本文提到AI生成内容在课堂上的应用。"
@@ -1123,5 +1125,5 @@ class AliasAlignmentTests(unittest.TestCase):
         wire = report["payload"]["items"][0]
         self.assertEqual(wire["articleSummary"], "本文讨论了AI生成技术对学习方式的影响。")
         self.assertEqual(wire["subquestions"][0]["explanation"], "本文提到AI生成内容在课堂上的应用。")
-        self.assertEqual(wire["subquestions"][1]["explanation"], "无解析")
+        self.assertEqual(wire["subquestions"][1]["explanation"], "根据第一段可知选A。（AI生成，待校对）")
 

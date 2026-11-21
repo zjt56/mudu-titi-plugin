@@ -43,6 +43,12 @@ QUEUE_FILE = "_queue.json"
 # 默认桥+已配置本地 Agent 时，可把就绪的 answers/audio/types 只读模型调用并行；
 # 导出、校验和导入仍在 _batch_auto_lock 内串行，互不依赖（都只依赖 structure_gate）。
 PARALLEL_AGENTS_ENABLED = True
+_IMPORT_PENDING = 6
+_LOCK_BUSY = 7
+_PARALLEL_WAITS = {
+    _IMPORT_PENDING: ("import_pending", "模型候选已保存，等待原任务导入复验"),
+    _LOCK_BUSY: ("busy", "执行锁暂忙，等待自动继续"),
+}
 # 零人工续跑：生产由宿主注入 WF_ZERO_TOUCH=1。开启后不再因 needs_review、
 # 人工闸门或体检/审核闸门停住；仍不做远端上传/发布（外部不可逆）。
 ZERO_TOUCH = str(os.environ.get("WF_ZERO_TOUCH", "1")).strip().lower() not in ("0", "false", "no", "off")
@@ -325,6 +331,14 @@ def _cooldown_preflight(batch_dir, stage):
 
 # ---------------------------------------------------------------- 推进
 
+def _is_bounded_knowledge(config: dict | None, stage_id: str) -> bool:
+    if not config or stage_id != "knowledge":
+        return False
+    from . import local_agent
+    return bool((config.get("native_agent") or {}).get("enabled") is True
+                and local_agent._label_partition_policy(config, "knowledge")[0])
+
+
 def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pending_audio=None,
                            while_running=None) -> dict:
     """Export and import serially; only read-only model calls overlap."""
@@ -380,12 +394,15 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
             if not portable["prompt"].startswith(expected + "\nFILE PROTOCOL:"):
                 raise ValueError("Task context changed between export and execution")
             run_dir = Path(tempfile.mkdtemp(prefix=stage.id + "-", dir=attempts))
+            agent_protocol._atomic(run_dir / "portable-task.json", agent_protocol._encoded({
+                "protocol": agent_protocol.PROTOCOL, "task_id": exported["task_id"],
+            }))
             prepared[stage.id] = (exported, task, run_dir)
         except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
-            outcomes[stage.id] = (1, str(exc))
+            outcomes[stage.id] = (_LOCK_BUSY if getattr(exc, "code", "") == "lock_timeout" else 1, str(exc))
 
     def invoke(item):
-        stage_id, (_, task, run_dir) = item
+        stage_id, (exported, task, run_dir) = item
         # Persist actual worker activity so the UI need not pretend every ready
         # stage is already running (idle/queued/cooldown must remain distinct).
         with bookkeeping_lock, agent_protocol._agent_lock(5):
@@ -396,19 +413,23 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
                              _content_input_hashes=task.get("input_hashes", {}))
         if stage_id in {"explanations", "knowledge"}:
             invoke_config["max_input_chars"] = max(int(invoke_config.get("max_input_chars", 180000)), 600000)
-        bounded_knowledge = (stage_id == "knowledge"
-                             and local_agent._label_partition_policy(invoke_config, "knowledge")[0]
-                             and (invoke_config.get("native_agent") or {}).get("enabled") is True)
+        bounded_knowledge = _is_bounded_knowledge(invoke_config, stage_id)
         if stage_id in {"answers", "explanations"} or bounded_knowledge:
             from . import label_execution
-            return label_execution.run(batch_dir, stage_id, invoke_config, run_dir, coordinated_imports=True)
-        return local_agent.invoke(task["prompt"], run_dir, invoke_config, permit_parallel=True, coordinated_imports=True)
+            result = label_execution.run(batch_dir, stage_id, invoke_config, run_dir, coordinated_imports=True)
+        else:
+            result = local_agent.invoke(task["prompt"], run_dir, invoke_config,
+                                        permit_parallel=True, coordinated_imports=True)
+        return agent_protocol.save_portable_result(run_dir, exported["task_id"], result["response"])
 
     authentication_failures = set()
     auth_binding = local_agent.authentication_binding() if prepared else None
 
     def import_outcome(stage):
         code, value = outcomes[stage.id]
+        if code in _PARALLEL_WAITS:
+            outcomes[stage.id] = code
+            return
         imported = False
         if code == 0 and stage.id in deterministic:
             # The shared preflight already validated and recorded delivery.
@@ -418,9 +439,7 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
             try:
                 exported, task, _ = prepared[stage.id]
                 response_path = value
-                bounded_knowledge = (stage.id == "knowledge"
-                                     and local_agent._label_partition_policy(config, "knowledge")[0]
-                                     and (config.get("native_agent") or {}).get("enabled") is True)
+                bounded_knowledge = _is_bounded_knowledge(config, stage.id)
                 for retry in range(1 if stage.id in {"answers", "explanations"} or bounded_knowledge else int(config.get("retries", 0)) + 1):
                     envelope = json.loads(response_path.read_text(encoding="utf-8"))
                     try:
@@ -435,15 +454,20 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
                                     + "\n请修正后重新完整返回一个 JSON 对象；不要省略单元或题号。")
                         prompt = (task["prompt"] + feedback)[:config["max_input_chars"]]
                         run_dir = Path(tempfile.mkdtemp(prefix=stage.id + "-retry-", dir=attempts))
-                        response = local_agent.invoke(prompt, run_dir, config)["response"]
-                        response_path = run_dir / "portable-result.json"
-                        response_path.write_text(json.dumps({"protocol": agent_protocol.PROTOCOL,
-                            "task_id": exported["task_id"], "result": response}, ensure_ascii=False), encoding="utf-8")
+                        agent_protocol._atomic(run_dir / "portable-task.json", agent_protocol._encoded({
+                            "protocol": agent_protocol.PROTOCOL, "task_id": exported["task_id"],
+                        }))
+                        response = local_agent.invoke(
+                            prompt, run_dir, config, permit_parallel=True, coordinated_imports=True)["response"]
+                        response_path = agent_protocol.save_portable_result(run_dir, exported["task_id"], response)
                 with bookkeeping_lock:
                     receipt = agent_protocol.import_result(batch_dir, exported["task_id"], response_path)
                 code = 0 if receipt["completed"] else 3
                 imported = True
             except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+                if getattr(exc, "code", "") == "lock_timeout":
+                    outcomes[stage.id] = _IMPORT_PENDING
+                    return
                 code, value = 1, str(exc)
                 if isinstance(exc, local_agent.AgentError) and exc.code == "authentication":
                     authentication_failures.add(stage.id)
@@ -490,18 +514,14 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
 
     def collect(future):
         sid = futures[future]
-        exported, _, run_dir = prepared[sid]
+        _, _, run_dir = prepared[sid]
         try:
-            response = future.result()["response"]
-            envelope = {"protocol": agent_protocol.PROTOCOL, "task_id": exported["task_id"],
-                        "result": response}
-            result_path = run_dir / "portable-result.json"
-            result_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
-            outcomes[sid] = (0, result_path)
+            outcomes[sid] = (0, future.result())
         except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
             if isinstance(exc, local_agent.AgentError) and exc.code == "authentication":
                 authentication_failures.add(sid)
-            code = (4 if getattr(exc, 'code', '') == 'model_cooldown' else
+            code = (_LOCK_BUSY if getattr(exc, 'code', '') == 'lock_timeout' else
+                    4 if getattr(exc, 'code', '') == 'model_cooldown' else
                     5 if isinstance(exc, local_agent.AgentError) and (
                         exc.code == 'exit' and _is_upstream_call_failure(str(exc))
                         or _is_native_upstream_failure(exc.code, str(exc), exc.artifacts,
@@ -778,12 +798,47 @@ def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -
                 collect(wait=True)
 
 
+def _recover_portable_results(batch_dir, manifest, stop_at):
+    """Replay only the originating task, using the ordinary fenced importer."""
+    from . import agent_protocol
+    from .local_agent import AgentError
+
+    stages = contracts.STAGE_ORDER[:contracts.STAGE_ORDER.index(stop_at)] if stop_at in contracts.STAGE_ORDER else None
+    waiting, completed = set(), set()
+    for stage_id, task_id, path, envelope in agent_protocol.pending_results(batch_dir, manifest, stages):
+        stage = contracts.STAGE_BY_ID[stage_id]
+        if (stage_id in waiting or stage_id in completed or mf.skip_reason(manifest, stage)
+                or agent_protocol._preconditions(manifest, stage)):
+            continue
+        try:
+            if path.name == "response.json":
+                path = agent_protocol.save_portable_result(path.parent, task_id, envelope["result"])
+            receipt = agent_protocol.import_result(batch_dir, task_id, path)
+        except AgentError as exc:
+            if exc.code != "lock_timeout":
+                raise
+            waiting.add(stage_id)
+        except (FileNotFoundError, ValueError, KeyError, TypeError) as exc:
+            print(f"  · {stage_id} 保留无法导入的候选 {path.parent.name}：{exc}")
+        except OSError as exc:
+            print(f"  · {stage_id} 候选导入暂未完成 {path.parent.name}：{exc}")
+            waiting.add(stage_id)
+        else:
+            manifest = mf.load(batch_dir)
+            if receipt.get("completed"):
+                completed.add(stage_id)
+                print(f"  · {stage_id} 已复验并导入留存候选 {path.parent.name}")
+    return manifest, waiting
+
+
 def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, audio_worker,
                   pending_audio=None) -> dict:
     from . import operations
     if operations.lease_active(batch_dir):
         return {"action": "operations_leased", "status": "waiting", "reason": "Harness 运维修复租约生效中"}
     manifest = mf.load(batch_dir)
+    if cancel_requested(batch_dir):
+        return _result(batch_dir, manifest, None, "用户请求删除批次，已在阶段边界停止", "cancelled")
     cooldown = _read_cooldown(batch_dir)
     recovery_wait = {}
     # A submitted OCR job is ordinary external progress, never a repair target.
@@ -799,11 +854,20 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     if _requeue_historical_upstream(batch_dir, manifest, bridge):
         cooldown = _read_cooldown(batch_dir)
         manifest = mf.load(batch_dir)
+    from .supervisor import _remote_boundary
+    import_pending = set()
+    if (manifest["stages"].get("upload_gate", {}).get("status") != mf.APPROVED
+            and not _remote_boundary(batch_dir, manifest)):
+        manifest, import_pending = _recover_portable_results(batch_dir, manifest, stop_at)
     # 卡点自愈：先收集诊断证据，再由已配置模型选择受限的重试动作。
     # 模型不可用或返回非法计划时只留痕，不阻断本轮自动调度。
+    non_pending_failure = any(
+        value.get("status") in (mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW, mf.INVALIDATED)
+        for key, value in manifest.get("stages", {}).items() if key not in import_pending)
     try:
         from . import self_heal
-        healed = ({"changed": False, "status": "waiting_external"}
+        healed = ({"changed": False, "status": "import_pending"} if import_pending and not non_pending_failure else
+                  {"changed": False, "status": "waiting_external"}
                   if external_wait and not other_failure else operations.handoff_if_available(batch_dir))
         if healed is None:
             healed = (self_heal.recover(batch_dir) if cooldown <= 0 else
@@ -879,6 +943,37 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     deferred_audio_model = False
     audio_allowed = (stop_at is None or stop_at in contracts.STAGE_ORDER
                      and contracts.STAGE_ORDER.index(stop_at) > contracts.STAGE_ORDER.index("audio"))
+    def has_independent_runnable_stage(current_stage):
+        blocked_ids = {item["stage"] for item in blockers if item.get("stage")}
+        try:
+            start_idx = stages.index(current_stage)
+        except ValueError:
+            start_idx = 0
+        for candidate in stages[start_idx:]:
+            sid = candidate.id
+            if sid in {"upload_gate", "upload", "publish_gate"}:
+                continue
+            if sid in blocked_ids or sid in parallel_done or sid in projected or sid in recovery_wait or sid in import_pending:
+                continue
+            rec = manifest.get("stages", {}).get(sid) or {}
+            if rec.get("status") in mf.TERMINAL_OK:
+                continue
+            if mf.skip_reason(manifest, candidate):
+                continue
+            deps, frontier = set(), set(candidate.depends_on)
+            while frontier:
+                dep = frontier.pop()
+                if dep in deps:
+                    continue
+                deps.add(dep)
+                spec = contracts.STAGE_BY_ID.get(dep)
+                if spec:
+                    frontier.update(spec.depends_on)
+            if deps & blocked_ids:
+                continue
+            return True
+        return False
+
     stages = list(contracts.STAGES)
     for stage in stages:
         # 用户删除请求：只在阶段边界检查，让本轮干净退出、释放锁，绝不中断
@@ -891,7 +986,10 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
         # artifact repair still requires exclusive admission in operations.
         if any(item["action"] in ("failed", "gate", "review") for item in blockers):
             try:
-                operations.handoff_if_available(batch_dir)
+                handed = operations.handoff_if_available(batch_dir)
+                if (isinstance(handed, dict) and handed.get("status") == "operations_pending"
+                        and not has_independent_runnable_stage(stage)):
+                    break
             except (OSError, ValueError, RuntimeError, KeyError, TypeError):
                 pass  # Optional operations must never stop ordinary execution.
         if pending_audio:
@@ -908,7 +1006,7 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
         if stage.id == 'audio' and deferred_audio:
             audio_prep = audio_future.result()
             deferred_audio = False
-        if (cooldown <= 0 and audio_allowed and audio_future is None
+        if (cooldown <= 0 and audio_allowed and audio_future is None and 'audio' not in import_pending
                 and audio_prep.get("status") == "waiting"
                 and recovery_wait.get('audio', {}).get('status') != 'refused'):
             deps = contracts.STAGE_BY_ID["audio"].depends_on
@@ -931,6 +1029,11 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
             continue
         if stop_at and stage.id == stop_at:
             break
+        if stage.id in import_pending or parallel_done.get(stage.id) in _PARALLEL_WAITS:
+            action, reason = _PARALLEL_WAITS[_IMPORT_PENDING if stage.id in import_pending
+                                             else parallel_done[stage.id]]
+            blocked(stage.id, reason, action, retryable=True)
+            continue
         if stage.id in projected:
             continue
         if (stage.id == 'review' and manifest['stages'].get('validate', {}).get('audio_projection_refresh')
@@ -1147,20 +1250,24 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                     if (bridge.get(candidate.id) == default
                             and manifest["stages"].get(candidate.id, {}).get("status") not in mf.TERMINAL_OK
                             and candidate.id not in parallel_done
+                            and candidate.id not in import_pending
                             and candidate.id not in recovery_wait
                             and not mf.skip_reason(manifest, candidate)
                             and all(dep_ready(dep) for dep in candidate.depends_on)):
                         eligible.append(candidate)
-                if (len(eligible) > 1 or stage.id == 'audio' and eligible) and agent.configured():
+                config = None
+                if eligible and agent.configured():
                     config = local_agent.load_config()
+                single_ready_label = (bool(eligible) and eligible[0].id == stage.id
+                                      and (stage.id in {"answers", "explanations"}
+                                           or _is_bounded_knowledge(config, stage.id)))
+                if config is not None and (len(eligible) > 1 or stage.id == "audio" or single_ready_label):
                     try:
-                        if any(item.id == 'audio' for item in eligible):
-                            results = _parallel_ready_agents(batch_dir, eligible, config,
-                                                             pending_audio=pending_audio,
-                                                             while_running=advance_local_projection)
-                        else:
-                            results = _parallel_ready_agents(batch_dir, eligible, config,
-                                                             while_running=advance_local_projection)
+                        has_audio = any(item.id == 'audio' for item in eligible)
+                        results = _parallel_ready_agents(
+                            batch_dir, eligible, config,
+                            pending_audio=pending_audio if has_audio else None,
+                            while_running=advance_local_projection)
                     except Exception as exc:  # lock contention is "busy", not a failure
                         if getattr(exc, "code", "") != "lock_timeout":
                             raise
@@ -1175,6 +1282,10 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                         continue
                     if stage.id in results:
                         code = results[stage.id]
+                        if code in _PARALLEL_WAITS:
+                            action, reason = _PARALLEL_WAITS[code]
+                            blocked(stage.id, reason, action, retryable=True)
+                            continue
                         if code == 4:
                             cooldown = _read_cooldown(batch_dir)
                             blocked(stage.id,
@@ -1338,6 +1449,8 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     if waits and not outcome["failed_stages"]:
         outcome.update(action="waiting_external", retry_after=min(item["retry_after"] for item in waits),
                        next_retry_at=min(item["next_retry_at"] for item in waits))
+    if first.get("retryable"):
+        outcome["retryable"] = True
     reconciliations = [item for item in blockers if item["action"] in ("reconciling_external", "reconciliation_exhausted")]
     if reconciliations:
         outcome.update(action=reconciliations[0]["action"], retry_after=reconciliations[0]["retry_after"],
@@ -1363,6 +1476,7 @@ def _result(batch_dir: Path, manifest: dict, stage_id, reason: str,
             raise
         return {"status": "busy", "stopped_at": stage_id, "action": "busy",
                 "reason": "另一个执行器正在处理该批次；稍后自动继续",
+                "retryable": True, "error_kind": "lock_timeout",
                 "failed_stages": [], "pending_stages": []}
     observed = {}
     only_external_wait = bool(rn.ocr_wait_state(batch_dir, manifest) or rn.ocr_reconciliation_state(batch_dir, manifest)) and not any(

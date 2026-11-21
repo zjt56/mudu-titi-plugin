@@ -182,7 +182,7 @@ def _units_cached(batch):
     hit = _UNITS_CACHE.get(key)
     if hit is not None:
         return hit
-    from .agent_tasks import confirmed_units
+    from .workflow_primitives import confirmed_units
     value = confirmed_units(batch)
     if len(_UNITS_CACHE) > 64:
         _UNITS_CACHE.clear()
@@ -791,7 +791,7 @@ def prepare_round_plan(batch_dir) -> dict:
             if path.is_file():
                 hashes[prefix + relative] = hashlib.sha256(_read_bound_bytes(path)).hexdigest()
     observations = _load(batch / "workflow/media-observations.json") or {}
-    from .agent_tasks import _safe_path
+    from .workflow_primitives import _safe_path
     for item in observations.get("observations", []):
         relative = item["path"]
         path = _safe_path(batch, relative)
@@ -1423,7 +1423,6 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
         raise ValueError("Review plan must have distinct nonempty targets")
     covered = set()
     bound_texts = _bound_source_texts(batch, plan)
-    from .agent_tasks import confirmed_units
     units = {u["unit_id"]: u for u in _confirmed_review_units(batch)}
     for check in checks:
         if not isinstance(check, dict):

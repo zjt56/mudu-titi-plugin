@@ -24,17 +24,17 @@ def verify_format_equivalence(batch, relative, old_sha256, current_sha256):
     backup/current/source/rule bytes and every reconstructed field must agree.
     No plan, original execution, report or source file is written here.
     """
-    from . import format_gate, legacy_format, question_content, self_heal_actions
+    from . import format_gate_core as _fg, legacy_format, question_content, self_heal_actions
     try:
-        root = format_gate._safe(batch)
+        root = _fg._safe(batch)
         if relative not in legacy_format.BATCH_PATHS or any(
                 not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
                 for digest in (old_sha256, current_sha256)):
             return None
         current_raw = self_heal_actions._path(root, relative).read_bytes()
-        if format_gate._sha(current_raw) != current_sha256:
+        if _fg._sha(current_raw) != current_sha256:
             return None
-        migrations = format_gate._safe(root / self_heal_actions.MIGRATIONS)
+        migrations = _fg._safe(root / self_heal_actions.MIGRATIONS)
         if not migrations.is_dir():
             return None
         sources = self_heal_actions._source_hashes(root)
@@ -43,15 +43,15 @@ def verify_format_equivalence(batch, relative, old_sha256, current_sha256):
                       for rel in legacy_format.SOURCE_PATHS}
         for directory in sorted(migrations.iterdir()):
             try:
-                format_gate._safe(directory)
+                _fg._safe(directory)
                 if not directory.is_dir() or not re.fullmatch(r"[0-9a-f]{32}", directory.name):
                     continue
                 receipt_rel = f"{self_heal_actions.MIGRATIONS}/{directory.name}/receipt.json"
                 receipt_raw = self_heal_actions._path(root, receipt_rel).read_bytes()
-                receipt = format_gate._load(receipt_raw)
+                receipt = _fg._load(receipt_raw)
                 sealed = copy.deepcopy(receipt)
                 seal = sealed.pop("receipt_sha256", None)
-                if (seal != format_gate._sha(self_heal_actions._canonical(sealed))
+                if (seal != _fg._sha(self_heal_actions._canonical(sealed))
                         or receipt.get("version") != self_heal_actions.VERSION
                         or receipt.get("rule") != legacy_format.RULE
                         or receipt.get("migration_id") != directory.name
@@ -80,17 +80,17 @@ def verify_format_equivalence(batch, relative, old_sha256, current_sha256):
                         raise ValueError("Migration backup path mismatch")
                     original_raw = self_heal_actions._path(root, backup).read_bytes()
                     actual_raw = self_heal_actions._path(root, name).read_bytes()
-                    if (format_gate._sha(original_raw) != entry.get("before_sha256")
-                            or format_gate._sha(actual_raw) != entry.get("after_sha256")
+                    if (_fg._sha(original_raw) != entry.get("before_sha256")
+                            or _fg._sha(actual_raw) != entry.get("after_sha256")
                             or self_heal_actions._path(root, candidate_path).read_bytes() != actual_raw
                             or receipt.get("input_sha256", {}).get(name) != entry.get("before_sha256")):
                         raise ValueError("Migration raw hashes do not match")
-                    old = format_gate._load(original_raw)
-                    current = format_gate._load(actual_raw)
+                    old = _fg._load(original_raw)
+                    current = _fg._load(actual_raw)
                     replay = legacy_format.normalize_candidate(old,
                         source=source_raw[legacy_format.SOURCE_PATHS[0]].decode("utf-8-sig"),
-                        structure=format_gate._load(source_raw[legacy_format.SOURCE_PATHS[1]]),
-                        confirmed=format_gate._load(source_raw[legacy_format.SOURCE_PATHS[2]]))
+                        structure=_fg._load(source_raw[legacy_format.SOURCE_PATHS[1]]),
+                        confirmed=_fg._load(source_raw[legacy_format.SOURCE_PATHS[2]]))
                     if (not replay.get("passed") or not replay.get("changes")
                             or self_heal_actions._canonical(replay["candidate"]) != actual_raw
                             or not question_content.audit_batch_source(root, old).get("passed")
@@ -102,7 +102,7 @@ def verify_format_equivalence(batch, relative, old_sha256, current_sha256):
                 order = lambda row: self_heal_actions._canonical(row)
                 if sorted(map(order, replay_changes)) != sorted(map(order, receipt.get("changes", []))):
                     raise ValueError("Migration changes were forged")
-                final = format_gate._load(self_heal_actions._path(root, format_gate.FINAL_PATH).read_bytes())
+                final = _fg._load(self_heal_actions._path(root, _fg.FINAL_PATH).read_bytes())
                 if not legacy_format._local_format(root, final).get("passed"):
                     raise ValueError("Migration final format is no longer valid")
                 if (self_heal_actions._source_hashes(root) != sources
@@ -125,7 +125,7 @@ def verify_format_equivalence(batch, relative, old_sha256, current_sha256):
 
 
 def _file(base, relative):
-    from .agent_tasks import _safe_path
+    from .workflow_primitives import _safe_path
     if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
         raise ValueError("Invalid legacy input path")
     return _safe_path(base, relative)
@@ -162,7 +162,7 @@ def compatible_plan(batch_dir, current, payload):
     try:
         if (review_rounds.CONTEXT_VERSION, review_rounds.PROMPT_VERSION) not in SUPPORTED_CURRENT_CONTRACTS:
             raise ValueError("New prompt/context contract requires fresh review")
-        from .agent_tasks import confirmed_units
+        from .workflow_primitives import confirmed_units
         if any(unit.get("identity_version") == "scoped-v1" for unit in confirmed_units(batch)):
             raise ValueError("Scoped question identities require fresh scoped review; legacy whole-plan reuse is forbidden")
         if not isinstance(payload, dict) or set(payload) != {"plan", "rounds"}:

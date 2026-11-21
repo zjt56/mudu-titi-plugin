@@ -35,7 +35,7 @@ SUPPORTED_STAGES = frozenset(("knowledge", "answers", "explanations", "types", "
 PART_STAGES = SUPPORTED_STAGES - {"structure_gate"}
 MAX_PART_UNITS = 4
 INLINE_CATALOG_CHARS = 16000
-INLINE_UNIT_CHARS = 12000
+INLINE_UNIT_CHARS = 20000
 TOOL_ACTIONS = frozenset(("read_unit", "read_source", "read_catalog", "search_catalog",
                           "list_media", "inspect_media", "stage_candidate", "submit_candidate"))
 TOOL_BUDGET_CODE = "native_tool_budget"
@@ -109,20 +109,171 @@ def _process_lock():
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+_TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_INDEX_CACHE = {}
+_LAST_PRUNE_AT = 0.0
+_PRUNE_INTERVAL_SECONDS = 300.0
+_INDEX_META_KEYS = (
+    "task_id", "status", "identity", "batch_dir", "stage", "route", "protocol",
+    "updated_at", "created_at", "error_code", "error", "accepted", "redispatch_of",
+    "session_id",
+)
+
+
+def _index_entry(task, stat_result):
+    entry = {key: task.get(key) for key in _INDEX_META_KEYS if key in task}
+    entry["mtime_ns"] = stat_result.st_mtime_ns
+    entry["size"] = stat_result.st_size
+    return entry
+
+
+def _index_path():
+    return QUEUE_ROOT / ".task-index.json"
+
+
+def _load_index_cache():
+    root_key = str(QUEUE_ROOT)
+    cached = _INDEX_CACHE.get(root_key)
+    if cached is not None:
+        return cached
+    loaded = {}
+    path = _index_path()
+    if path.is_file():
+        try:
+            raw = _read(path)
+            if isinstance(raw, dict):
+                loaded = {k: v for k, v in raw.items()
+                          if isinstance(k, str) and isinstance(v, dict)}
+        except (OSError, ValueError, TypeError):
+            loaded = {}
+    _INDEX_CACHE[root_key] = loaded
+    return loaded
+
+
+def _save_index_cache(entries):
+    _INDEX_CACHE[str(QUEUE_ROOT)] = entries
+    try:
+        _write(_index_path(), entries)
+    except OSError:
+        pass
+
+
+def _scan_index():
+    """Return mtime/size-validated lightweight metadata for all queued tasks.
+
+    Only reads/parses a task.json when it is new or its (mtime_ns, size)
+    changed on disk, avoiding O(N) full deserialization on every poll while
+    staying 100% consistent with external or test edits to task.json.
+    """
+    cached = _load_index_cache()
+    if not QUEUE_ROOT.is_dir():
+        if cached:
+            _INDEX_CACHE[str(QUEUE_ROOT)] = {}
+        return {}
+    fresh = {}
+    dirty = False
+    try:
+        with os.scandir(QUEUE_ROOT) as it:
+            for entry in it:
+                name = entry.name
+                if not _TASK_ID_RE.match(name) or not entry.is_dir(follow_symlinks=False):
+                    continue
+                task_file = os.path.join(entry.path, "task.json")
+                try:
+                    st = os.stat(task_file)
+                except OSError:
+                    continue
+                prev = cached.get(name)
+                if (prev is not None
+                        and prev.get("mtime_ns") == st.st_mtime_ns
+                        and prev.get("size") == st.st_size):
+                    fresh[name] = prev
+                else:
+                    try:
+                        task = _read(Path(task_file))
+                    except (OSError, ValueError, TypeError):
+                        continue
+                    if isinstance(task, dict):
+                        fresh[name] = _index_entry(task, st)
+                        dirty = True
+    except OSError:
+        return {}
+    if dirty or len(fresh) != len(cached):
+        _save_index_cache(fresh)
+    return fresh
+
+
 def _task_path(task_id):
-    if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
+    if not isinstance(task_id, str) or not _TASK_ID_RE.match(task_id):
         raise local_agent.AgentError("Invalid content task ID", "input")
     return QUEUE_ROOT / task_id / "task.json"
 
 
 def _save(task):
     task["updated_at"] = time.time()
-    _write(_task_path(task["task_id"]), task)
+    target = _task_path(task["task_id"])
+    _write(target, task)
+    try:
+        st = os.stat(target)
+        cached = _load_index_cache()
+        cached[task["task_id"]] = _index_entry(task, st)
+    except OSError:
+        pass
 
 
 def _tasks():
     for path in sorted(QUEUE_ROOT.glob("*/task.json")):
         yield _read(path)
+
+
+def prune_terminal_tasks(*, max_age_seconds=7 * 86400, max_keep=100):
+    """Safely remove old terminal task directories while preserving active and retryable receipts."""
+    now = time.time()
+    removed = 0
+    with _lock():
+        index = _scan_index()
+        terminal = []
+        for task_id, meta in index.items():
+            if meta.get("status") not in TERMINAL:
+                continue
+            updated = meta.get("updated_at") or meta.get("created_at") or 0
+            if isinstance(updated, bool) or not isinstance(updated, (int, float)):
+                updated = 0
+            terminal.append((updated, task_id, meta))
+        terminal.sort(key=lambda row: row[0], reverse=True)
+        for rank, (updated, task_id, meta) in enumerate(terminal):
+            age = now - updated
+            if rank < max_keep and age < max_age_seconds:
+                continue
+            # Preserve recent transient upstream failures that may still be redispatched.
+            if (meta.get("status") == "failed"
+                    and meta.get("error") in _UPSTREAM_TRANSIENT_ERRORS
+                    and age < UPSTREAM_RETRY_COOLDOWN * 10):
+                continue
+            try:
+                target = _task_path(task_id).parent
+                if target.parent.resolve() != QUEUE_ROOT.resolve():
+                    continue
+                shutil.rmtree(target)
+                index.pop(task_id, None)
+                removed += 1
+            except (OSError, local_agent.AgentError):
+                continue
+        if removed:
+            _save_index_cache(index)
+    return {"removed": removed}
+
+
+def _maybe_prune_terminal_tasks():
+    global _LAST_PRUNE_AT
+    now = time.monotonic()
+    if now - _LAST_PRUNE_AT < _PRUNE_INTERVAL_SECONDS:
+        return
+    _LAST_PRUNE_AT = now
+    try:
+        prune_terminal_tasks()
+    except OSError:
+        pass
 
 
 def _tool_budget_receipt(task):
@@ -144,12 +295,20 @@ def tool_budget_receipts(batch, stage, hashes, route):
                 if path not in agent_tasks.REPAIR_FEEDBACK_INPUTS}
 
     current = evidence(hashes)
+    batch_str = str(batch)
     receipts = []
     with _lock():
-        for task in _tasks():
-            if (task.get("protocol") != PROTOCOL or task.get("batch_dir") != str(batch)
-                    or task.get("stage") != stage or task.get("route") != route
-                    or not _tool_budget_receipt(task)):
+        index = _scan_index()
+        candidate_ids = [
+            task_id for task_id, meta in index.items()
+            if (meta.get("protocol") == PROTOCOL and meta.get("batch_dir") == batch_str
+                and meta.get("stage") == stage and meta.get("route") == route
+                and _tool_budget_receipt(meta))
+        ]
+        for task_id in sorted(candidate_ids):
+            try:
+                task = _read(_task_path(task_id))
+            except (OSError, ValueError):
                 continue
             bound = evidence(task.get("input_hashes") or {})
             if any(bound.get(path, agent_tasks.MISSING_INPUT) != digest
@@ -340,6 +499,12 @@ def _child_prompt(prompt, context, stage, media):
                 summary["catalog"] = {"path": CATALOG, "entries": len(value.get("points", value.get("paths", [])))}
             elif path == "textbook_index" and stage == "knowledge":
                 summary["textbook_index"] = value
+            elif path in ("07_review/structure-gate.json", "01_source/structure.confirmed.json"):
+                continue
+            elif _reference_lines(context, path) is not None and not (
+                stage == "knowledge" and path == "references/type-knowledge-map.json"
+            ):
+                continue
             elif path not in ("confirmed_units_with_stable_ids", "source_fragment_index"):
                 # Small metadata/type maps are task requirements, not evidence bulk.
                 if len(_json(value)) <= 6000 and not (isinstance(value, dict) and
@@ -354,11 +519,12 @@ def _child_prompt(prompt, context, stage, media):
                 else:
                     ranges.append([number, number])
             files[source["path"]] = {"supplied_line_ranges": ranges, "sha256": source.get("sha256")}
-        if stage == "knowledge":
-            catalog = context.get(CATALOG)
-            rows = catalog.get("points", catalog.get("paths")) if isinstance(catalog, dict) else None
-            if isinstance(rows, list) and len(_json(rows)) <= INLINE_CATALOG_CHARS:
-                summary["catalog"]["items"] = rows
+        if stage in ("knowledge", "types", "preassemble"):
+            if stage == "knowledge":
+                catalog = context.get(CATALOG)
+                rows = catalog.get("points", catalog.get("paths")) if isinstance(catalog, dict) else None
+                if isinstance(rows, list) and len(_json(rows)) <= INLINE_CATALOG_CHARS:
+                    summary["catalog"]["items"] = rows
             budget = INLINE_UNIT_CHARS
             supplied = []
             for unit in units:
@@ -369,19 +535,26 @@ def _child_prompt(prompt, context, stage, media):
                     budget -= size
             if supplied:
                 summary["supplied_unit_evidence"] = supplied
-            header += (
-                "\nFor knowledge tagging, use exact catalog paths from catalog.items when supplied. "
-                "It is the complete bound catalog; do not search it again to confirm an exact path. "
-                "supplied_unit_evidence is the same evidence as read_unit for those unit IDs. "
-                "Call read_unit only for other selected IDs or use read_source for evidence not supplied inline. "
-                "Keep enough tool calls to stage the completed units and submit the candidate.\n"
-            )
-            if (context.get("textbook_matching") or {}).get("enabled"):
+            if stage == "knowledge":
                 header += (
-                    "When textbook_matching.enabled is true, also fill textbook on each unit using exact "
-                    "version/book/unit (and section for lesson units; omit section for unit-level containers "
-                    "such as 单元话题写作/综合阅读提升/Reading Plus) from textbook_index with real source evidence; "
-                    "omit textbook only when the source provides no textbook version or unit clue.\n"
+                    "\nFor knowledge tagging, use exact catalog paths from catalog.items when supplied. "
+                    "It is the complete bound catalog; do not search it again to confirm an exact path. "
+                    "supplied_unit_evidence is the same evidence as read_unit for those unit IDs. "
+                    "Call read_unit only for other selected IDs or use read_source for evidence not supplied inline. "
+                    "Keep enough tool calls to stage the completed units and submit the candidate.\n"
+                )
+                if (context.get("textbook_matching") or {}).get("enabled"):
+                    header += (
+                        "When textbook_matching.enabled is true, also fill textbook on each unit using exact "
+                        "version/book/unit (and section for lesson units; omit section for unit-level containers "
+                        "such as 单元话题写作/综合阅读提升/Reading Plus) from textbook_index with real source evidence; "
+                        "omit textbook only when the source provides no textbook version or unit clue.\n"
+                    )
+            else:
+                header += (
+                    "\nsupplied_unit_evidence is the same evidence as read_unit for those unit IDs. "
+                    "Do not call read_unit again for unit IDs already in supplied_unit_evidence; "
+                    "call read_unit only for missing IDs or use read_source if additional source lines are needed.\n"
                 )
     summary["task_reference_files"] = [{"path": path, "total_lines": len(lines),
         "read_with": "read_source", "max_lines_per_read": 500}
@@ -435,8 +608,13 @@ def purge_batch(batch_dir, *, wait_seconds=20):
     """
     batch = Path(batch_dir).expanduser().resolve()
     with _lock():
-        tasks = [task for task in _tasks()
-                 if Path(task["batch_dir"]).expanduser().resolve() == batch]
+        index = _scan_index()
+        matching_ids = [
+            task_id for task_id, meta in index.items()
+            if isinstance(meta.get("batch_dir"), str)
+            and Path(meta["batch_dir"]).expanduser().resolve() == batch
+        ]
+        tasks = [_read(_task_path(task_id)) for task_id in sorted(matching_ids)]
         if any(task["status"] not in TERMINAL for task in tasks):
             raise local_agent.AgentError("Cannot purge active content tasks before stage boundary", "busy")
         targets = [_task_path(task["task_id"]).parent for task in tasks]
@@ -473,7 +651,13 @@ def purge_batch(batch_dir, *, wait_seconds=20):
         time.sleep(.05)
     with _lock():
         # Recheck after waiting; never delete freshly activated work.
-        current = [task for task in _tasks() if Path(task["batch_dir"]).resolve() == batch]
+        index = _scan_index()
+        current_ids = [
+            task_id for task_id, meta in index.items()
+            if isinstance(meta.get("batch_dir"), str)
+            and Path(meta["batch_dir"]).resolve() == batch
+        ]
+        current = [_read(_task_path(task_id)) for task_id in sorted(current_ids)]
         if any(task["status"] not in TERMINAL for task in current):
             raise local_agent.AgentError("Content task became active during purge", "busy")
         acknowledged = {row["session_id"] for row in purge[0]["sessions"]} if purge is not None else set()
@@ -484,6 +668,9 @@ def purge_batch(batch_dir, *, wait_seconds=20):
             if target.parent.resolve() != QUEUE_ROOT.resolve():
                 raise local_agent.AgentError("Invalid broker purge target", "input")
             shutil.rmtree(target)
+            index.pop(task["task_id"], None)
+        if current:
+            _save_index_cache(index)
         if purge is not None:
             purge[1].unlink()
         return {"removed": len(current)}
@@ -711,7 +898,20 @@ def _tool(task, action, args):
         agent_tasks._fields(args, ("candidate",), ())
         if "candidate" not in args:
             return _submit_parts(task)
-        return _submit(task, args["candidate"])
+        candidate = args["candidate"]
+        if (isinstance(candidate, dict)
+                and (not candidate
+                     or candidate.get("status") not in ("completed", "needs_review")
+                     or not isinstance(candidate.get("artifacts"), dict))):
+            return {
+                "accepted": False,
+                "retryable": True,
+                "code": "empty_or_invalid_candidate",
+                "error": ("candidate 不能为空，且须包含合法 status（completed/needs_review）与 artifacts；"
+                          "分片阶段请先用 content_stage_candidate 暂存全部单元后再调用 content_submit_candidate({})"),
+                **(_part_progress(task) if task.get("stage") in PART_STAGES else {}),
+            }
+        return _submit(task, candidate)
     if action == "stage_candidate":
         try:
             return _stage_candidate(task, args)
@@ -827,7 +1027,17 @@ def dispatch(method, path, payload=None):
                 return {"available": available(), "ttl_seconds": SERVICE_TTL}
             if path == "/api/content-agent/tasks" and method == "GET":
                 tasks = []
-                for task in _tasks():
+                index = _scan_index()
+                active_ids = [
+                    task_id for task_id, meta in index.items()
+                    if meta.get("status") not in TERMINAL
+                ]
+                active_ids.sort(key=lambda tid: (float(index[tid].get("created_at") or 0.0), tid))
+                for task_id in active_ids:
+                    try:
+                        task = _read(_task_path(task_id))
+                    except (OSError, ValueError):
+                        continue
                     _expire(task)
                     if task["status"] not in TERMINAL:
                         tasks.append(_public(task))
@@ -954,7 +1164,14 @@ def _retryable_upstream_task(task):
 
 def _identity_receipt(identity):
     """Resolve a single intact retry chain; ambiguity preserves the old receipt."""
-    rows = [item for item in _tasks() if item.get("identity") == identity]
+    index = _scan_index()
+    matching_ids = [task_id for task_id, meta in index.items() if meta.get("identity") == identity]
+    rows = []
+    for task_id in sorted(matching_ids):
+        try:
+            rows.append(_read(_task_path(task_id)))
+        except (OSError, ValueError):
+            continue
     if not rows:
         return None, 0
     roots = [item for item in rows if "redispatch_of" not in item]
@@ -1022,6 +1239,7 @@ def invoke(prompt, run_dir, config, *, permit_parallel=False):
                                       {"artifact": agent_tasks.ARTIFACTS[stage],
                                        "rules": agent_tasks.RULES[selected_stage]})})
     root.mkdir(parents=True, exist_ok=True)
+    _maybe_prune_terminal_tasks()
     with _lock():
         task, redispatches = _identity_receipt(identity)
         previous_task_id = None

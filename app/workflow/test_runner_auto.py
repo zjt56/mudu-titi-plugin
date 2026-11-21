@@ -443,6 +443,7 @@ class RunnerAutoTest(unittest.TestCase):
         self.manifest['inputs']['audio'] = {'exists': True, 'path': str(self.batch / 'audio.mp3')}
         mf.save(self.batch, self.manifest)
         audio_started, validated, audio_imported = (threading.Event() for _ in range(3))
+        ledger_lock = threading.RLock()
         calls = []
         def export(batch, stage, **kw):
             package = batch / 'model-packages' / stage
@@ -459,10 +460,11 @@ class RunnerAutoTest(unittest.TestCase):
                 self.assertTrue(validated.is_set())
                 audio_imported.set()
             calls.append(task_id)
-            state = mf.load(batch)
             accepted = task_id != 'audio' or audio_completed
-            mf.touch_stage(state, task_id, mf.COMPLETED if accepted else mf.NEEDS_REVIEW)
-            mf.save(batch, state)
+            with local_agent._agent_lock(5):
+                state = mf.load(batch)
+                mf.touch_stage(state, task_id, mf.COMPLETED if accepted else mf.NEEDS_REVIEW)
+                mf.save(batch, state)
             return {'completed': accepted}
         def command(batch, state, stage):
             if stage.id == 'assemble':
@@ -474,8 +476,12 @@ class RunnerAutoTest(unittest.TestCase):
             if stage.id == 'review':
                 self.assertTrue(audio_imported.is_set(), 'Review ran before audio delivery')
             calls.append(stage.id)
-            mf.touch_stage(state, stage.id, mf.COMPLETED)
-            mf.save(batch, state)
+            with local_agent._agent_lock(5):
+                current = mf.load(batch)
+                mf.touch_stage(current, stage.id, mf.COMPLETED)
+                mf.save(batch, current)
+                state.clear()
+                state.update(current)
             return 0
         def validate(batch, state):
             self.assertFalse(audio_imported.is_set())
@@ -487,6 +493,8 @@ class RunnerAutoTest(unittest.TestCase):
         bridge = auto.load_bridge()
         bridge['assemble'] = bridge['review'] = ['offline']
         with patch.object(auto, 'PARALLEL_AGENTS_ENABLED', True), \
+             patch.object(local_agent, '_agent_lock', return_value=ledger_lock), \
+             patch.object(agent_protocol, '_agent_lock', return_value=ledger_lock), \
              patch.object(auto, '_auto_prepare_audio', return_value={'status': 'ready'}), \
              patch.object(agent, 'configured', return_value=True), \
              patch.object(local_agent, 'load_config', return_value={'max_input_chars': 10000, 'retries': 0}), \

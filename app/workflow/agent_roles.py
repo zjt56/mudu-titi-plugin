@@ -50,7 +50,7 @@ def load(stage: str, artifact: str | None = None) -> dict:
     # 角色只声明插入位置；字段/层级从消费者的现有契约生成，不在 Markdown 复制键集或题型清单。
     replacements = {}
     if stage == "answers":
-        from .agent_tasks import ANSWERS_ALLOWED, EXAMPLE_REQUIRED
+        from .workflow_constants import ANSWERS_ALLOWED, EXAMPLE_REQUIRED
         required = EXAMPLE_REQUIRED[stage]
         optional = tuple(key for key in ANSWERS_ALLOWED if key not in required)
         keys = lambda values: "、".join(f"`{key}`" for key in values)

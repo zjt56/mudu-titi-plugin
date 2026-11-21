@@ -16,6 +16,12 @@ function text(node) {
   if (Array.isArray(node)) return node.map(text).join(' ');
   return text(node.children);
 }
+function hasErrorColor(node) {
+  if (node == null || typeof node !== 'object') return false;
+  if (Array.isArray(node)) return node.some(hasErrorColor);
+  if (node.props && node.props.style && node.props.style.color === 'var(--dsw-alias-state-error-primary)') return true;
+  return hasErrorColor(node.children);
+}
 function detail(checks, status='已提供') {
   return { unit_kind: 'group', labels: { knowledge: ['主题/原标签'] },
     comparison: { original: { labels: { knowledge: ['主题/原标签'] }, subquestions: { '77': { difficulty: '容易' } } },
@@ -73,7 +79,19 @@ test('答案考点按各轮实际判断显示，漏标和不同答案参与比�
   assert.equal(hasKnowledgeDiff(d), false);
   first.assessment.answer_points = [];
   assert.equal(hasKnowledgeDiff(d), true);
-  assert.match(text(labelAuditPanels(d)), /一审标签 原标签.*不一致/);
+  const panels = labelAuditPanels(d);
+  assert.equal(hasErrorColor(panels), true);
+  assert.doesNotMatch(text(panels), /不一致/);
+});
+
+test('后端过滤掉未启用答案考点的answer_points后前端无差异且不标红', () => {
+  const d = detail([], '未覆盖');
+  const first = d.comparison.rounds[0].checks[0];
+  first.expected_answer_points = [];
+  const panels = labelAuditPanels(d);
+  assert.equal(hasErrorColor(panels), false);
+  assert.equal(hasKnowledgeDiff(d), false);
+  assert.doesNotMatch(text(panels), /不一致/);
 });
 
 test('审核面板不展示难度/来源/分类等基本标签（不在审核范畴）', () => {
@@ -102,8 +120,9 @@ test('不再有单独的红色差异块：不一致直接在知识点标签里�
   const rendered = text(labelAuditPanels(d));
   assert.doesNotMatch(rendered, /审核差异/);        // 没有单独的红色差异区
   assert.match(rendered, /知识点标签/);
-  assert.match(rendered, /社区生活/);              // 一审标签行直接展示不一致
-  assert.match(rendered, /不一致/);
+  assert.match(rendered, /社区生活/);              // 一审标签行直接标红展示差异，不再显示“不一致”三字
+  assert.equal(hasErrorColor(labelAuditPanels(d)), true);
+  assert.doesNotMatch(rendered, /不一致/);
   // 难度不在审核范畴，任何位置都不出现。
   assert.doesNotMatch(rendered, /难度/);
   const notes = auditNotes(d).join(' ');
@@ -121,7 +140,8 @@ test('同名叶子不同完整路径：只显示末级，完整路径留在 titl
   assert.equal(hasKnowledgeDiff(d), true);
   const nodes = labelAuditPanels(d);
   const rendered = text(nodes);
-  assert.match(rendered, /不一致/);
+  assert.equal(hasErrorColor(nodes), true);
+  assert.doesNotMatch(rendered, /不一致/);
   // 用户要求：知识点标签只展示到子级，上级不展示。
   assert.doesNotMatch(rendered, /设题角度\/阅读\/细节理解/);
   assert.doesNotMatch(rendered, /主题\/人与社会\/细节理解/);
@@ -143,6 +163,7 @@ test('完整路径集合相同，顺序和重复项不产生差异', () => {
   d.comparison.original.labels.knowledge = ['语法/be动词','词汇/动词辨析'];
   d.comparison.rounds[0].checks[0].assessment.knowledge = ['词汇/动词辨析','语法/be动词','语法/be动词'];
   assert.equal(hasKnowledgeDiff(d), false);
+  assert.equal(hasErrorColor(labelAuditPanels(d)), false);
   assert.doesNotMatch(text(labelAuditPanels(d)), /不一致/);
   assert.deepEqual(Array.from(auditNotes(d)), []);
 });
@@ -162,7 +183,9 @@ test('本轮已提供空知识点是差异，不伪装成待审核', () => {
   const d = detail([],'未覆盖');
   d.comparison.rounds[0].checks[0].assessment.knowledge = [];
   assert.equal(hasKnowledgeDiff(d), true);
-  assert.match(text(labelAuditPanels(d)), /不一致/);
+  const nodes = labelAuditPanels(d);
+  assert.equal(hasErrorColor(nodes), true);
+  assert.doesNotMatch(text(nodes), /不一致/);
 });
 
 test('子类按集合比较且一审理由从实际check读取', () => {

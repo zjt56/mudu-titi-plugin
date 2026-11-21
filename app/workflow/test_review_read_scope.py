@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
-from workflow import review, agent_tasks
+from workflow import review, workflow_primitives
 
 
 class ReviewReadScopeTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class ReviewReadScopeTests(unittest.TestCase):
             self.assertNotEqual(review._confirmed_review_units(self.batch)[0]['stem'], 'mutated return')
             return first
         with patch.object(Path, 'read_bytes', counted), \
-             patch.object(agent_tasks, 'confirmed_units', wraps=agent_tasks.confirmed_units) as units:
+             patch.object(workflow_primitives, 'confirmed_units', wraps=workflow_primitives.confirmed_units) as units:
             first = observed()
             self.assertEqual(reads[str(self.source.resolve())], 1)
             self.assertEqual(units.call_count, 1)

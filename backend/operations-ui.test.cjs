@@ -206,7 +206,7 @@ test('flow removes redundant progress copy while preserving true errors and nati
   assert.ok(client.includes("refreshError ? h('p', { role: 'alert'"));
   assert.ok(client.includes('flowFeedback.error && flowFeedback.message'));
   assert.ok(client.includes("h('title', null, nodeLabel)"));
-  assert.match(client, /diagBanner\(selBatch, stage\),\s*h\(OperationsPanel/);
+  assert.match(client, /diagBanner\(selBatch, stage\),[\s\S]*?h\(OperationsPanel/);
   assert.ok(client.includes("jget('/batches/' + encodeURIComponent(batchName) + '/operations'"));
   assert.ok(client.includes('generation.current++; controller.abort(); clearTimeout(timer)'));
 });

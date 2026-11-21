@@ -22,10 +22,11 @@ from workflow.metadata_policy import MISSING
 from workflow.question_content import material_blank_numbers
 from workflow.wire_format import normalize_blank_text
 
+from workflow.workflow_constants import AI_MARK
+
 SOURCE_ALIASES = {"精品资料": "精品题源", "模拟卷": "中考模拟", "历年考题": "中考真题", "课本原创": "课本原创"}
 TYPE_ALIASES = {"单项选择": "单项填空", "短对话理解": "听力短对话理解", "长对话理解": "听力长对话理解",
                 "短文理解": "听力短文理解", "信息转换": "听力信息转换"}
-AI_MARK = "（AI生成，待校对）"
 DIFFICULTIES = {"容易": "易", "适中": "中", "困难": "难", "易": "易", "中": "中", "难": "难"}
 SOURCE_FIELDS = ("source_type", "source", "location", "version", "authorization", "year", "institution", "school", "regional_version")
 FILTER_FIELDS = {"subtypes", "categories", "region", "city", "district", "semesters", "difficultyValue"}
@@ -805,14 +806,13 @@ class _Builder:
             data["source_type"] = SOURCE_ALIASES.get(data["source_type"], data["source_type"])
         # Original numbers are projected explicitly at the top level before
         # allowlisting. location remains source prose and never supplies a number.
-        # 用户规则：AI 生成的解析/大意一律不采用，按缺失处理；仅匹配 AI 标记，避免误伤含「AI生成」字样的正常正文。
+        # 用户规则：放行带「（AI生成，待校对）」提示的解析与文章大意并保留该后缀；仅清空无正文的裸标记占位。
         for key in ("explanation", "articleSummary"):
             val = data.get(key)
-            if isinstance(val, str) and (
-                    AI_MARK in val
-                    or re.search(r"[（(]\s*AI\s*生成[^）)]*[）)]", val)
-                    or re.match(r"^\s*AI\s*生成(?:\s*$|待校对|[:：，,])", val)):
-                data[key] = ""
+            if isinstance(val, str):
+                stripped = val.strip()
+                if stripped == AI_MARK or re.fullmatch(r"(?:[（(]\s*)?AI\s*生成(?:\s*[，,：:]\s*待校对)?(?:\s*[）)])?", stripped):
+                    data[key] = ""
         # 用户规则：缺答案/缺解析不阻断，显式填「无答案」「无解析」占位。
         if not _nonempty(data.get("answer")) and not (
                 not child and data.get("unit_kind") == "group" and data.get("subquestions")):
@@ -849,7 +849,7 @@ class _Builder:
                 text = unescape(re.sub(r"</?(?:b|strong|i|em|u|sup|sub|span|p|div|br|font|small|mark)\b[^>]*>", "", text, flags=re.I))
                 if re.match(r"\s*[*_`~]*\s*" + prefix + r"\s*[*_`~]*\s*[:：]", text, re.I):
                     self.error("CONTENT_PREFIX_INVALID", f"{key} 只保留正文，不重复字段标题前缀", uid)
-        # 用户规则：缺文章大意填「无」，不生成；AI 生成文本在上方已丢弃。
+        # 用户规则：缺文章大意留空，带「（AI生成，待校对）」的有效解析/大意保留上传。
         if not _nonempty(data.get("explanation")):
             if data.get("explanation") is not None and not isinstance(data.get("explanation"), str):
                 self.error("EXPLANATION_INVALID", "explanation 必须是字符串", uid)

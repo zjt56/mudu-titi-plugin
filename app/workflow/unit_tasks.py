@@ -29,6 +29,20 @@ _ASSEMBLE_DROP = (
     "docs/knowledge-tagging.md",
 )
 
+# 题型判型分片只需题型分类目录与本片题目，不重背装配约束/经验教训/总览与闸门报告。
+_TYPES_DROP = (
+    "skills-reference/README.md",
+    "skills-reference/constraints.md",
+    "skills-reference/lessons-learned.md",
+    "07_review/structure-gate.json",
+)
+
+# 知识点分片不需要通用总览与结构闸门报告（结构已确认）。
+_KNOWLEDGE_DROP = (
+    "skills-reference/README.md",
+    "07_review/structure-gate.json",
+)
+
 
 def _compact_extraction(value):
     """把原卷提取结果压到分片需要的最小集合，避免每片重背整份版式。"""
@@ -75,6 +89,78 @@ def _weighted_groups(units, max_units, drafts):
         else:
             low = mid + 1
     return groups(low)
+
+
+def _balanced_groups(units, max_units, drafts):
+    """Distribute heavy units across shards (LPT bin-packing) to eliminate stragglers.
+
+    Contiguous slicing packs consecutive reading/cloze passages into one tail
+    shard. Spreading heavy groups across bins keeps every shard's character
+    weight balanced while preserving original paper order within each shard.
+    """
+    if len(units) <= max_units:
+        return [list(units)]
+    count = math.ceil(len(units) / max_units)
+    weighted = []
+    for idx, unit in enumerate(units):
+        draft = drafts.get(unit["unit_id"], {})
+        chars = len(json.dumps(draft or unit, ensure_ascii=False))
+        weight = 2 + len(unit.get("numbers", [])) + math.ceil(chars / 800)
+        weighted.append((weight, idx, unit))
+    weighted.sort(key=lambda row: (-row[0], row[1]))
+    bins = [[] for _ in range(count)]
+    loads = [0] * count
+    for weight, idx, unit in weighted:
+        target = min((i for i in range(count) if len(bins[i]) < max_units),
+                     key=lambda i: (loads[i], len(bins[i]), i))
+        bins[target].append((idx, unit))
+        loads[target] += weight
+    result = []
+    for bucket in bins:
+        if bucket:
+            bucket.sort(key=lambda row: row[0])
+            result.append([unit for _, unit in bucket])
+    result.sort(key=lambda grp: min(idx for idx, u in enumerate(units) if u["unit_id"] == grp[0]["unit_id"]))
+    return result
+
+
+def _prune_knowledge_catalog(subset):
+    """Keep only catalog paths and type-knowledge rules allowed for this shard's types."""
+    types_doc = subset.get(agent_tasks.ARTIFACTS["types"])
+    if not isinstance(types_doc, dict) or not isinstance(types_doc.get("items"), list):
+        return
+    part_types = {str(r.get("type") or "").strip() for r in types_doc["items"]
+                  if isinstance(r, dict) and str(r.get("type") or "").strip()}
+    if not part_types:
+        return
+    from workbench import taxonomy
+    known_types = set(taxonomy.types())
+    if not part_types <= known_types:
+        return
+    catalog = subset.get("references/knowledge-catalog.json")
+    if isinstance(catalog, dict):
+        if isinstance(catalog.get("paths"), list):
+            catalog["paths"] = [
+                path for path in catalog["paths"]
+                if isinstance(path, str) and any(taxonomy.knowledge_path_allowed(path, t) for t in part_types)
+            ]
+        elif isinstance(catalog.get("points"), list):
+            catalog["points"] = [
+                pt for pt in catalog["points"]
+                if isinstance(pt, dict) and isinstance(pt.get("path"), str)
+                and any(taxonomy.knowledge_path_allowed(pt["path"], t) for t in part_types)
+            ]
+    tkm = subset.get("references/type-knowledge-map.json")
+    if isinstance(tkm, dict):
+        pruned = {}
+        for key, value in tkm.items():
+            if key in ("_comment", "display_rules"):
+                pruned[key] = value
+            elif key == "by_type" and isinstance(value, dict):
+                pruned[key] = {t: rule for t, rule in value.items() if t in part_types}
+            elif key in part_types:
+                pruned[key] = value
+        subset["references/type-knowledge-map.json"] = pruned
 
 
 def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=None, balance_work=False):
@@ -168,6 +254,13 @@ def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=Non
                      "映射键使用所选单元的 question_ids[str(原小题号)]（旧批次无映射才用数字原号），原小题号不能改；只返回所选单元内的身份键，缺失须给来源证据，题组内全部子题必须覆盖。"
                      "先整体阅读本批次正文与答案材料，再一次性完成所选单元的匹配；不要按单题猜测或跨大题借用重复题号。"
                      "每条 evidence 必须包含可机器解析的来源坐标：相对文件路径:行号（如 01_source/附录.txt:3）或唯一别名+行号（如 附录 L3/附录 第3行）；自然语言描述只能补充，不能替代坐标。\n")
+        if stage == "types":
+            for key in _TYPES_DROP:
+                subset.pop(key, None)
+        if stage == "knowledge":
+            for key in _KNOWLEDGE_DROP:
+                subset.pop(key, None)
+            _prune_knowledge_catalog(subset)
         if stage == "assemble":
             for key in _ASSEMBLE_DROP:
                 subset.pop(key, None)
@@ -175,6 +268,11 @@ def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=Non
                      "本分片不附知识点目录与打标规则，不要自行新增、改写或推断标签。\n")
         if stage in ("answers", "explanations"):
             subset = agent_tasks.compact_label_context(subset)
+        elif stage in ("types", "knowledge"):
+            saved_structure = subset.get("01_source/structure.confirmed.json")
+            subset = agent_tasks.compact_label_context(subset)
+            if saved_structure is not None:
+                subset["01_source/structure.confirmed.json"] = saved_structure
         instruction = ("\nThis is one partition of a whole batch. Return ONLY these exact unit IDs: "
                        + json.dumps([u["unit_id"] for u in selected], ensure_ascii=False)
                        + ". Other source and structure data is context only. Cover every selected unit exactly once.\n"
@@ -190,7 +288,7 @@ def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=Non
     parts = []
     draft_rows = (context.get("06_batch/question-draft.json") or {}).get("items", [])
     drafts = {row.get("unit_id"): row for row in draft_rows if isinstance(row, dict)}
-    groups = _weighted_groups(units, max_units, drafts) if balance_work and units else [units]
+    groups = _balanced_groups(units, max_units, drafts) if balance_work and units else [units]
     for group in groups:
         selected = []
         for unit in group:

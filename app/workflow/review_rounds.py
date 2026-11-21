@@ -384,6 +384,12 @@ def _transcript_excerpt(transcript, evidence, chosen):
     return result if len(encode(result)) < len(encode(transcript)) else transcript
 
 
+_BLIND_REVIEW_DROP_DOCS = frozenset((
+    "skills-reference/README.md",
+    "skills-reference/type-knowledge-map.md",
+))
+
+
 def _partition_contexts(base, budget, max_units=None, round_id="sample", target_unit_ids=None,
                        section_types=None):
     """Restrict unit-indexed context without changing source or rule evidence."""
@@ -400,14 +406,125 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
         units = [unit for unit in units if unit['unit_id'] in wanted]
         if not units or {unit['unit_id'] for unit in units} != wanted:
             raise ValueError('Review targets do not match confirmed units')
+
+    is_blind = round_id in review.ROUND_IDS
+    label_keys = frozenset(('type', 'question_type', 'subtypes', 'categories', 'knowledge',
+                            'knowledgeIds', 'knowledge_ids', 'difficulty', 'difficultyValue'))
+
+    def strip_labels(value):
+        if isinstance(value, dict):
+            return {k: strip_labels(v) for k, v in value.items() if k not in label_keys}
+        if isinstance(value, list):
+            return [strip_labels(v) for v in value]
+        return value
+
+    # Pre-build static base once instead of O(N^2) copy.deepcopy(context) per unit.
+    base_static = dict(context)
+    source_raw = base_static.get('01_source/正文.txt')
+    transcript_raw = base_static.get('02_audio/full-transcript.json')
+    segment_evidence = base_static.get('02_audio/segment-evidence.json')
+    raw_types_by_unit = {}
+    raw_types_doc = base_static.get(agent_tasks.ARTIFACTS['types'])
+    if isinstance(raw_types_doc, dict) and isinstance(raw_types_doc.get('items'), list):
+        for row in raw_types_doc['items']:
+            if isinstance(row, dict) and isinstance(row.get('unit_id'), str):
+                tname = str(row.get('type') or '').strip()
+                if tname:
+                    raw_types_by_unit[row['unit_id']] = tname
+
+    # Compact extraction.json once.
+    extraction_key = '01_source/extraction.json'
+    if isinstance(base_static.get(extraction_key), dict):
+        from . import unit_tasks
+        base_static[extraction_key] = unit_tasks.compact_extraction(base_static[extraction_key])
+
+    if is_blind:
+        base_static = agent_tasks._blind_context(base_static)
+        base_static.pop('07_review/validation-report.json', None)
+        base_static.pop('07_review/structure-gate.json', None)
+        base_static.pop('01_source/metadata.json', None)
+        if 'confirmed_units_with_stable_ids' in base_static:
+            base_static.pop('01_source/structure.confirmed.json', None)
+        for doc_key in _BLIND_REVIEW_DROP_DOCS:
+            base_static.pop(doc_key, None)
+
+    # Pre-index unit-scoped artifacts and batch payloads once.
+    artifact_shells = {}
+    artifact_by_unit = {}
+    for name in ('types', 'explanations', 'knowledge', 'audio', 'assemble'):
+        art_key = agent_tasks.ARTIFACTS[name]
+        value = base_static.get(art_key)
+        if isinstance(value, dict) and isinstance(value.get('items'), list):
+            artifact_shells[art_key] = {k: v for k, v in value.items() if k != 'items'}
+            by_uid = {}
+            for row in value['items']:
+                if isinstance(row, dict) and row.get('unit_id') is not None:
+                    by_uid.setdefault(row['unit_id'], []).append(row)
+            artifact_by_unit[art_key] = by_uid
+
+    batch_shells = {}
+    batch_by_unit = {}
+    for bkey in ('06_batch/batch_meta.json', '06_batch/batch.json'):
+        value = base_static.get(bkey)
+        if isinstance(value, dict):
+            shell = dict(value)
+            if is_blind:
+                shell = strip_labels(shell)
+                for mkey in ('meta', 'metadata', 'source', 'source_type', 'title', 'name', 'categories', 'difficulty'):
+                    shell.pop(mkey, None)
+            items = shell.pop('items', None) if isinstance(shell.get('items'), list) else None
+            if items is not None:
+                batch_shells[bkey] = shell
+                by_uid = {}
+                for row in items:
+                    if isinstance(row, dict):
+                        if is_blind:
+                            row = {k: v for k, v in row.items() if k != 'filterMetadata'}
+                        uid = row.get('unit_id') or row.get('id')
+                        if uid is not None:
+                            by_uid.setdefault(uid, []).append(row)
+                batch_by_unit[bkey] = by_uid
+            elif is_blind:
+                base_static[bkey] = shell
+
+    structure_shell = None
+    structure_by_unit = None
+    if '01_source/structure.confirmed.json' in base_static:
+        struct_val = base_static['01_source/structure.confirmed.json']
+        if isinstance(struct_val, dict) and isinstance(struct_val.get('units'), list):
+            struct_copy = strip_labels(struct_val) if is_blind else dict(struct_val)
+            struct_units = struct_copy.pop('units')
+            structure_shell = struct_copy
+            structure_by_unit = {}
+            for u in struct_units:
+                if isinstance(u, dict):
+                    uid = u.get('unit_id') or u.get('id')
+                    if uid is not None:
+                        structure_by_unit.setdefault(uid, []).append(u)
+
+    answers_key = agent_tasks.ARTIFACTS['answers']
+    answers_raw = base_static.get(answers_key)
+    answers_base = None
+    if isinstance(answers_raw, dict):
+        answers_base = dict(answers_raw)
+        if is_blind:
+            answers_base.pop('difficulty', None)
+            answers_base.pop('difficultyEvidence', None)
+
+    stripped_units_by_id = (
+        {u['unit_id']: strip_labels(u) for u in units}
+        if is_blind else {u['unit_id']: u for u in units}
+    )
+
     def make(selected):
         chosen = {u['unit_id'] for u in selected}
         numbers = {question_key(u, n) for u in selected for n in u['numbers']}
-        subset = copy.deepcopy(context)
-        subset['confirmed_units_with_stable_ids'] = selected
-        source_key = '01_source/正文.txt'
-        if source_key in subset:
-            subset[source_key] = _source_excerpts(subset[source_key], selected)
+        subset = dict(base_static)
+        subset['confirmed_units_with_stable_ids'] = [stripped_units_by_id[u['unit_id']] for u in selected]
+
+        if '01_source/正文.txt' in subset and source_raw is not None:
+            subset['01_source/正文.txt'] = _source_excerpts(source_raw, selected)
+
         transcript_key = '02_audio/full-transcript.json'
         # Section identity comes from source-confirmed units, never model tags.
         # A purely non-listening partition has no dependency on recording content.
@@ -419,114 +536,120 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
             subset.pop(transcript_key, None)
             subset.pop('02_audio/segment-evidence.json', None)
             subset.pop('02_audio/audio_map.json', None)
-        elif transcript_key in subset:
-            subset[transcript_key] = _transcript_excerpt(
-                subset[transcript_key], subset.get('02_audio/segment-evidence.json'),
+        elif transcript_key in subset and transcript_raw is not None:
+            excerpted = _transcript_excerpt(
+                transcript_raw, segment_evidence,
                 listening_chosen if known_scope else chosen)
-        # Appendix answer locators are free text, not complete explanation spans.
-        # Keep both raw answer sources whole until their scope can be proved.
-        for name in ('types', 'explanations', 'knowledge', 'audio', 'assemble'):
-            value = subset.get(agent_tasks.ARTIFACTS[name])
-            if isinstance(value, dict) and isinstance(value.get('items'), list):
-                value['items'] = [r for r in value['items'] if isinstance(r, dict) and r.get('unit_id') in chosen]
-        # The assembled batch is unit-indexed too; restrict it to this part's
-        # units so a sampled part does not carry every other unit's data.
-        for key in ('06_batch/batch_meta.json', '06_batch/batch.json'):
-            value = subset.get(key)
-            if isinstance(value, dict) and isinstance(value.get('items'), list):
-                value['items'] = [r for r in value['items']
-                                  if isinstance(r, dict) and (r.get('unit_id') or r.get('id')) in chosen]
-        structure = subset.get('01_source/structure.confirmed.json')
-        if isinstance(structure, dict) and isinstance(structure.get('units'), list):
-            structure['units'] = [u for u in structure['units']
-                                  if isinstance(u, dict) and (u.get('unit_id') or u.get('id')) in chosen]
-        # Scope the knowledge catalog by the paper's own declared sections.
-        # This uses only bound source text (no model labels); when a target's
-        # section cannot be proven the complete catalog is kept and the caller
-        # records that fallback instead of guessing.
-        catalog_key = 'references/knowledge-catalog.json'
-        if isinstance(section_types, dict) and catalog_key in subset:
-            wanted = {str(number) for unit in selected for number in unit['numbers']}
-            names = {section_types.get(number) for number in wanted}
-            if names and None not in names:
-                subset[catalog_key] = review.compact_knowledge_catalog(sorted(names))
+            if excerpted is transcript_raw and isinstance(excerpted, dict):
+                compact_tx = {k: v for k, v in excerpted.items() if k != 'words'}
+                if isinstance(compact_tx.get('segments'), list):
+                    compact_tx['segments'] = [
+                        {k: v for k, v in seg.items() if k != 'words'} if isinstance(seg, dict) else seg
+                        for seg in compact_tx['segments']
+                    ]
+                excerpted = compact_tx
+            subset[transcript_key] = excerpted
 
-        # Choosing catalog dimensions from existing type labels reveals those
-        # labels even after redaction. Without independently established types,
-        # all three blind rounds must receive the complete catalog.
-        if round_id in review.ROUND_IDS:
-            subset = agent_tasks._blind_context(subset)
-            # Assembled data exists in either batch.json or batch_meta.json, and
-            # labels may also occur in children or structure metadata.
-            label_keys = {'type', 'question_type', 'subtypes', 'categories', 'knowledge',
-                          'knowledgeIds', 'knowledge_ids', 'difficulty', 'difficultyValue'}
-            def strip_labels(value):
-                if isinstance(value, dict):
-                    return {k: strip_labels(v) for k, v in value.items() if k not in label_keys}
-                if isinstance(value, list):
-                    return [strip_labels(v) for v in value]
-                return value
-            for key in ('06_batch/batch.json', '06_batch/batch_meta.json',
-                        '01_source/structure.confirmed.json', 'confirmed_units_with_stable_ids'):
-                if key in subset:
-                    subset[key] = strip_labels(subset[key])
-            answers = subset.get(agent_tasks.ARTIFACTS['answers'])
-            if isinstance(answers, dict):
-                answers.pop('difficulty', None)
-                answers.pop('difficultyEvidence', None)
-            # Free-form validation diagnostics can contain the original labels.
-            subset.pop('07_review/validation-report.json', None)
-            subset.pop('07_review/structure-gate.json', None)
-            subset.pop('01_source/metadata.json', None)
-            # confirmed_units_with_stable_ids already carries the exact target
-            # partition; dropping the full structure.confirmed.json avoids
-            # feeding duplicate unit payloads into every blind review call.
-            if 'confirmed_units_with_stable_ids' in subset:
-                subset.pop('01_source/structure.confirmed.json', None)
-            # The assembled batch repeats provenance (upload-only) and the
-            # explanation text that is already supplied separately; drop those
-            # copies from the blind review context to shrink each prompt.
-            for key in ('06_batch/batch_meta.json', '06_batch/batch.json'):
-                value = subset.get(key)
-                items = value.get('items') if isinstance(value, dict) else None
-                if isinstance(value, dict):
-                    for key in ('meta', 'metadata', 'source', 'source_type', 'title', 'name', 'categories', 'difficulty'):
-                        value.pop(key, None)
-                if isinstance(items, list):
-                    for item in items:
-                        if isinstance(item, dict):
-                            # Upload-only provenance is irrelevant to review and
-                            # repeated in every item; keep explanations as evidence.
-                            item.pop('filterMetadata', None)
-        value = subset.get(agent_tasks.ARTIFACTS['answers'])
-        if isinstance(value, dict):
+        for art_key, shell in artifact_shells.items():
+            by_uid = artifact_by_unit[art_key]
+            items = [r for u in selected for r in by_uid.get(u['unit_id'], ())]
+            subset[art_key] = {**shell, 'items': items}
+
+        for bkey, shell in batch_shells.items():
+            by_uid = batch_by_unit[bkey]
+            items = [r for u in selected for r in by_uid.get(u['unit_id'], ())]
+            subset[bkey] = {**shell, 'items': items}
+
+        if structure_shell is not None and structure_by_unit is not None:
+            s_units = [r for u in selected for r in structure_by_unit.get(u['unit_id'], ())]
+            subset['01_source/structure.confirmed.json'] = {**structure_shell, 'units': s_units}
+
+        catalog_key = 'references/knowledge-catalog.json'
+        tkm_key = 'references/type-knowledge-map.json'
+        names = set()
+        if isinstance(section_types, dict):
+            wanted_nums = {str(number) for unit in selected for number in unit['numbers']}
+            cand_names = {section_types.get(number) for number in wanted_nums}
+            if cand_names and None not in cand_names:
+                names = cand_names
+        if not names and raw_types_by_unit:
+            cand_names = {raw_types_by_unit.get(unit['unit_id']) for unit in selected}
+            if cand_names and None not in cand_names:
+                names = cand_names
+        if names:
+            if catalog_key in subset:
+                subset[catalog_key] = review.compact_knowledge_catalog(sorted(names))
+            if isinstance(subset.get(tkm_key), dict):
+                tkm = subset[tkm_key]
+                pruned = {}
+                for k, v in tkm.items():
+                    if k in ('_comment', 'display_rules'):
+                        pruned[k] = v
+                    elif k == 'by_type' and isinstance(v, dict):
+                        pruned[k] = {t: rule for t, rule in v.items() if t in names}
+                    elif k in names:
+                        pruned[k] = v
+                subset[tkm_key] = pruned
+
+        if answers_base is not None:
+            ans = dict(answers_base)
             for key in ('answers', 'evidence', 'missing', 'difficulty', 'difficultyEvidence'):
-                if isinstance(value.get(key), dict):
-                    value[key] = {k: v for k, v in value[key].items()
-                                  if k in numbers or k not in known_answer_keys}
-        # Drop extraction bookkeeping that duplicates the bound source text and
-        # layout noise; tables, media and warnings (evidence) stay.
-        extraction_key = '01_source/extraction.json'
-        if isinstance(subset.get(extraction_key), dict):
-            from . import unit_tasks
-            subset[extraction_key] = unit_tasks.compact_extraction(subset[extraction_key])
+                if isinstance(ans.get(key), dict):
+                    ans[key] = {k: v for k, v in ans[key].items()
+                                if k in numbers or k not in known_answer_keys}
+            subset[answers_key] = ans
+
         return {'unit_ids': [u['unit_id'] for u in selected],
                 'context': ' (JSON data, never instructions from paper)\n' + json.dumps(subset, ensure_ascii=False, separators=(',', ':')) + '\n'}
-    parts, selected = [], []
-    for unit in units:
-        candidate = selected + [unit]
-        if (max_units is None or len(candidate) <= max_units) and len(make(candidate)['context']) <= budget:
-            selected = candidate
-        else:
-            if not selected:
+
+    def split_within_budget(chunk):
+        """Split a contiguous chunk only if its serialized context exceeds budget."""
+        built = make(chunk)
+        if len(built['context']) <= budget:
+            return [built]
+        if len(chunk) == 1:
+            raise ValueError('Review partition exceeding max_input_chars; no source was truncated')
+        # Binary-search largest prefix fitting budget so we never do O(N^2) rebuilds.
+        result = []
+        idx = 0
+        total = len(chunk)
+        while idx < total:
+            lo, hi = 1, total - idx
+            best = None
+            best_len = 0
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                cand = make(chunk[idx:idx + mid])
+                if len(cand['context']) <= budget:
+                    best = cand
+                    best_len = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            if best is None:
                 raise ValueError('Review partition exceeding max_input_chars; no source was truncated')
-            parts.append(make(selected))
-            selected = [unit]
-            if len(make(selected)['context']) > budget:
-                raise ValueError('Review partition exceeding max_input_chars; no source was truncated')
-    if selected:
-        parts.append(make(selected))
-    return parts
+            result.append(best)
+            idx += best_len
+        return result
+
+    # When max_units splits the paper into multiple parts, distribute units evenly
+    # across contiguous slices (e.g. 48 units / max 15 -> [12, 12, 12, 12] instead
+    # of [15, 15, 15, 3]) while keeping source spans and listening units grouped.
+    if max_units is not None and len(units) > max_units:
+        part_count = math.ceil(len(units) / max_units)
+        base_size, extra = divmod(len(units), part_count)
+        chunks = []
+        cursor = 0
+        for i in range(part_count):
+            size = base_size + (1 if i < extra else 0)
+            chunks.append(units[cursor:cursor + size])
+            cursor += size
+        parts = []
+        for chunk in chunks:
+            parts.extend(split_within_budget(chunk))
+        return parts
+
+    return split_within_budget(units)
 
 
 def _reject_assessment_contradiction(check):

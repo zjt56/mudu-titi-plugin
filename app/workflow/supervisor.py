@@ -665,7 +665,17 @@ class WorkflowSupervisor:
         # must not clear a provider limit or replenish the no-progress budget.
         provider_retry = _cooldown(folder)
         retry_at = max(reservation, provider_retry, healing_retry)
-        local_opportunity = (max(provider_retry, healing_retry) > now
+        portable_signature = None
+        if retry_at > now or state.get("status") == "exhausted" or int(
+                _number(state.get("no_progress_attempts"), 0, 0)) >= self.config.max_no_progress:
+            from .agent_protocol import _digest, _encoded, pending_results
+
+            candidates = sorted({(stage, task_id, _digest(_encoded(envelope)))
+                                 for stage, task_id, _, envelope in pending_results(folder, manifest)})
+            if candidates:
+                portable_signature = hashlib.sha256(json.dumps(candidates).encode()).hexdigest()
+        new_candidate = bool(portable_signature and portable_signature != state.get("portable_recheck"))
+        local_opportunity = new_candidate or (max(provider_retry, healing_retry) > now
                              and _new_local_work(folder, manifest,
                                                  healing if healing_retry > now else {}, state))
         if retry_at > now and not local_opportunity:
@@ -724,6 +734,15 @@ class WorkflowSupervisor:
                              retry_reservation_at=max(reservation, now + self.config.interval))
                 _write_existing(folder, LEDGER, state)
                 return "active"
+            if new_candidate:
+                pending_wait = isinstance(dispatched, dict) and (
+                    dispatched.get("action") in {"import_pending", "busy"}
+                    or dispatched.get("status") == "import_pending"
+                    or any(isinstance(item, dict) and item.get("action") in {"import_pending", "busy"}
+                           for item in (dispatched.get("pending_stages") or [])))
+                if not pending_wait:
+                    state["portable_recheck"] = portable_signature
+                    _write_existing(folder, LEDGER, state)
         except Exception as exc:  # a single broken batch must not kill supervision
             state["last_result"] = {"error": str(exc)[:800]}
             _write_existing(folder, LEDGER, state)

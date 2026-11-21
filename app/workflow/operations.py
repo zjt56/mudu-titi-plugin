@@ -6,6 +6,7 @@ operation; an interrupted request remains unknown and must never be replayed.
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager, nullcontext
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -21,20 +22,53 @@ from . import contracts, manifest as mf, self_heal, supervisor
 LEDGER = "operations.json"
 LEASE_SECONDS = 180
 SERVICE_TTL = 20
+STALE_RUNNING_SECONDS = int(os.environ.get("WF_OPERATIONS_STALE_RUNNING_SECONDS") or 120)
+ORPHAN_RUNNING_GRACE_SECONDS = int(os.environ.get("WF_OPERATIONS_ORPHAN_RUNNING_GRACE_SECONDS") or 15)
+TRANSIENT_ESCALATION_THRESHOLD = int(os.environ.get("WF_OPERATIONS_TRANSIENT_THRESHOLD") or 3)
+TRANSIENT_STREAK_MIN_GAP_SECONDS = int(os.environ.get("WF_OPERATIONS_TRANSIENT_GAP_SECONDS") or 30)
+MAX_STORED_RECEIPTS = 120
 _service_until = 0.0
+_HEARTBEAT_FILE = Path(tempfile.gettempdir()) / "mdu-operations-service-heartbeat.json"
 
 
 def service_heartbeat(available):
-    """Volatile host readiness; restart/disabled/stale host restores legacy healing."""
+    """Host readiness with cross-process heartbeat file fallback."""
     if not isinstance(available, bool):
         raise ValueError('available must be boolean')
     global _service_until
     _service_until = time.monotonic() + SERVICE_TTL if available else 0.0
+    try:
+        payload = {
+            "pid": os.getpid(),
+            "available": available,
+            "until_epoch": (time.time() + SERVICE_TTL) if available else 0.0,
+        }
+        tmp = _HEARTBEAT_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, _HEARTBEAT_FILE)
+    except OSError:
+        pass
     return {'available': service_available(), 'ttl_seconds': SERVICE_TTL}
 
 
 def service_available():
-    return _service_until > time.monotonic()
+    if _service_until > 0.0:
+        return _service_until > time.monotonic()
+    try:
+        data = json.loads(_HEARTBEAT_FILE.read_text(encoding="utf-8"))
+        if (isinstance(data, dict) and data.get("available") is True
+                and isinstance(data.get("pid"), int) and data.get("pid") != os.getpid()
+                and float(data.get("until_epoch") or 0) > time.time()):
+            try:
+                os.kill(data["pid"], 0)
+                return True
+            except PermissionError:
+                return True
+            except OSError:
+                return False
+    except (OSError, ValueError, TypeError):
+        pass
+    return False
 
 ACTIONS = frozenset(("diagnose", "read_evidence", "preview_repair", "apply_repair",
                      "verify", "resume", "regenerate_units", "record_finding", "finish", "heartbeat",
@@ -69,6 +103,89 @@ def _only_transient_detail(detail):
         if not transient.fullmatch(message):
             return False
     return bool(parts)
+
+
+def _execution_busy(folder):
+    """Return True if a batch execution lock (.auto lock or .run.lock) is currently held."""
+    folder = Path(folder)
+    checker = getattr(supervisor, "execution_busy", None)
+    if callable(checker):
+        try:
+            return bool(checker(folder))
+        except (OSError, ValueError, RuntimeError):
+            pass
+    try:
+        with supervisor._try_file_lock(supervisor._auto_lock_path(folder)) as auto_free:
+            if not auto_free:
+                return True
+        with supervisor._try_file_lock(folder / "workflow/.run.lock") as run_free:
+            if not run_free:
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _stage_age_seconds(record):
+    """Seconds elapsed since the stage record was last updated or started."""
+    for key in ("updated_at", "started_at"):
+        value = record.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            return max(0.0, time.time() - dt.timestamp())
+        except ValueError:
+            continue
+    return None
+
+
+def _recent_stage_activity(folder, stage_id, window=STALE_RUNNING_SECONDS):
+    """Return True if a stage's run/attempt directory shows recent file activity."""
+    wf = Path(folder) / "workflow"
+    now = time.time()
+    dirs = []
+    if stage_id == "review":
+        dirs.append(wf / "review-attempts")
+    else:
+        dirs.append(wf / "agent-runs")
+    dirs.append(wf / "logs")
+    for base in dirs:
+        if not base.is_dir():
+            continue
+        try:
+            for entry in base.rglob("*"):
+                if not entry.is_file():
+                    continue
+                if stage_id != "review" and base.name == "agent-runs" and stage_id not in str(entry.relative_to(base)):
+                    continue
+                if now - entry.stat().st_mtime < window:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _stale_running_candidate(folder, manifest, *, force=False):
+    """Detect a RUNNING stage that is orphaned (no execution lock held) or stale."""
+    stages = manifest.get("stages") or {}
+    for spec in contracts.STAGES:
+        if spec.id in self_heal.BOUNDARIES:
+            continue
+        record = stages.get(spec.id) or {}
+        if record.get("status") != mf.RUNNING:
+            continue
+        age = _stage_age_seconds(record)
+        busy = _execution_busy(folder)
+        if not busy and (force or (age is not None and age >= ORPHAN_RUNNING_GRACE_SECONDS)):
+            detail = f"阶段 {spec.id} 处于运行中但无活跃执行锁（已滞留 {int(age) if age is not None else 0}s），疑似僵死"
+            return spec.id, detail
+        if age is not None and age >= STALE_RUNNING_SECONDS:
+            if busy and not force and _recent_stage_activity(folder, spec.id, STALE_RUNNING_SECONDS):
+                continue
+            detail = f"阶段 {spec.id} 处于运行中已超过 {int(age)}s（阈值 {STALE_RUNNING_SECONDS}s），疑似卡死"
+            return spec.id, detail
+    return None, ""
 
 
 def _hash(value):
@@ -147,9 +264,32 @@ def _load(folder):
     return value
 
 
+def _compact_receipts(state):
+    """Bound operations.json size without ever dropping unknown receipts or recent replay evidence."""
+    receipts = state.get("receipts")
+    if not isinstance(receipts, list) or len(receipts) <= 20:
+        return
+    unknown = [r for r in receipts if isinstance(r, dict) and r.get("status") == "unknown"]
+    settled = [r for r in receipts if isinstance(r, dict) and r.get("status") != "unknown"]
+    if len(settled) > MAX_STORED_RECEIPTS:
+        settled = settled[-MAX_STORED_RECEIPTS:]
+    for row in settled[:-20]:
+        ev = row.get("evidence")
+        if isinstance(ev, dict) and isinstance(ev.get("text"), str) and len(ev["text"]) > 1000:
+            text_val = ev["text"]
+            row["evidence"] = {
+                **{k: v for k, v in ev.items() if k != "text"},
+                "text_chars": len(text_val),
+                "text_sha256": hashlib.sha256(text_val.encode("utf-8", errors="replace")).hexdigest()[:16],
+                "compacted": True,
+            }
+    state["receipts"] = unknown + settled
+
+
 def _save(folder, state):
     if state.get("identity") != _identity(folder):
         raise ValueError("identity_changed: 拒绝迟到写入")
+    _compact_receipts(state)
     if not supervisor._write_existing(folder, LEDGER, state):
         raise ValueError("state_write_failed")
 
@@ -340,6 +480,52 @@ def _candidate_evidence(folder, stage):
     return rows[:104]
 
 
+_STAGE_SOURCE_HINTS = {
+    "parse": ["app/workflow/parser.py", "app/workflow/structure.py"],
+    "structure_gate": ["app/workflow/structure.py", "app/workflow/validation.py"],
+    "preassemble": ["app/workflow/preassemble.py", "app/workflow/assembler.py"],
+    "answers": ["app/workflow/content_stages.py", "app/workflow/local_agent.py"],
+    "explanations": ["app/workflow/content_stages.py", "app/workflow/local_agent.py"],
+    "types": ["app/workflow/content_stages.py", "app/workflow/local_agent.py"],
+    "knowledge": ["app/workflow/content_stages.py", "app/workflow/taxonomy.py"],
+    "audio": ["app/workflow/content_stages.py", "app/workflow/audio.py"],
+    "assemble": ["app/workflow/assembler.py", "app/workflow/self_heal_actions.py"],
+    "validate": ["app/workflow/validation.py", "app/workflow/assembler.py"],
+    "format_gate": ["app/workflow/legacy_format.py", "app/workflow/validation.py"],
+    "review": ["app/workflow/review.py", "app/workflow/local_agent.py"],
+    "review_gate": ["app/workflow/review.py", "app/workflow/structure.py"],
+}
+
+
+def _suspected_sources(stage, detail, issues):
+    codes = " ".join([str(detail or "")] + [str(i.get("code") or "") + " " + str(i.get("message") or "") for i in issues]).lower()
+    hints = list(_STAGE_SOURCE_HINTS.get(stage, []))
+    if "source_binding" in codes or "review_sample_source_unverified" in codes or "source_unverified" in codes:
+        hints = ["app/workflow/structure.py", "app/workflow/review.py", "app/workflow/preassemble.py"] + hints
+    elif "format" in codes or "legacy" in codes:
+        hints = ["app/workflow/legacy_format.py"] + hints
+    elif "option" in codes or "table" in codes:
+        hints = ["app/workflow/self_heal_actions.py", "app/workflow/assembler.py"] + hints
+    elif "json" in codes or "schema" in codes:
+        hints = ["app/workflow/local_agent.py", "app/workflow/review.py"] + hints
+    return list(dict.fromkeys(hints))[:6]
+
+
+def _recommended_action(stage, detail, issues, incident):
+    codes = " ".join([str(detail or "")] + [str(i.get("code") or "") for i in issues]).lower()
+    if incident.get("escalation"):
+        return "request_code_repair"
+    if stage in ("review", "review_gate"):
+        if "review_sample_source_unverified" in codes or "source_binding" in codes or "source_unverified" in codes:
+            return "resume(upstream_rederive) 或 request_code_repair"
+        return "resume(retry_stage_with_fresh_context)"
+    if stage in REGENERABLE:
+        return "regenerate_units（先核对候选与受影响题号）"
+    if stage in ("assemble", "validate", "format_gate"):
+        return "preview_repair/apply_repair 或 request_code_repair"
+    return "read_evidence 后选择最小修复动作或 request_code_repair"
+
+
 def _packet(folder, incident):
     """Self-contained failure packet: what failed, where, what changed, what is
     still independent. Bounded so a receipt never becomes a data dump."""
@@ -366,6 +552,8 @@ def _packet(folder, incident):
                            "check": issue.get("check"), "unit_id": issue.get("unit_id"),
                            "number": issue.get("number"), "message": str(issue.get("message") or "")[:600]}
                           for issue in issues[:12]],
+        "suspected_sources": _suspected_sources(stage, detail, issues),
+        "recommended_action": _recommended_action(stage, detail, issues, incident),
         "candidate_evidence": _candidate_evidence(folder, stage),
         "candidate_evidence_note": "候选存在不代表已验收；正式产物缺失不证明模型未产出。先读候选、repair-progress 验收错误和来源坐标，再决定局部修复或隔离代码修复。",
         "affected_unit_ids": list(unit_ids)[:40],
@@ -439,7 +627,7 @@ def _block_repeat(incident, kind, name, evidence):
 # blocker could otherwise be retried forever by fresh 40-action attempts. These
 # caps count what the incident has already spent, not what this attempt spent.
 BUDGET_ATTEMPTS = 24
-BUDGET_INSTALLS = 2
+BUDGET_INSTALLS = 3
 BUDGET_REGENERATIONS = 6
 
 
@@ -473,7 +661,7 @@ def _check_budget(incident, kind):
                          "超过跨轮次上限；记录证据并进入自治恢复队列，等待真实输入或代码变化")
     if kind == "install" and budgets["installs"] >= budgets["installs_limit"]:
         raise ValueError(f"install_budget_exhausted: 本次故障已安装 {budgets['installs']} 次，"
-                         "同一故障最多安装两次；记录证据并等待新的受验证修复方案")
+                         f"同一故障最多安装 {budgets['installs_limit']} 次；记录证据并等待新的受验证修复方案")
     if kind == "regenerate" and budgets["regenerations"] >= budgets["regenerations_limit"]:
         raise ValueError(f"regenerate_budget_exhausted: 本次故障已局部重生成 {budgets['regenerations']} 次，"
                          "超过上限；请检查范围是否过窄或证据是否有误")
@@ -574,7 +762,7 @@ def _queue_recovery(folder, incident, disposition, summary):
     incident.update(status="waiting_evidence" if waiting else "queued", eligible=not waiting,
                     attempt_id=None, lease_expires_at=0,
                     queue_generation=incident.get("queue_generation", 0) + 1,
-                    not_before=0 if waiting else time.time() + 60,
+                    not_before=0 if waiting else time.time() + 3,
                     prior_disposition=disposition)
     incident["recovery"] = {**plan, "summary": _redact(summary)[:2000],
                             "state": "waiting_evidence" if waiting else "scheduled",
@@ -625,7 +813,7 @@ def _reconcile_stage_refusal(state):
         _event(incident, "reconcile", "queued", "写前拒绝已结算，允许新代次认领；不重放旧动作")
 
 
-def _discover(folder):
+def _discover(folder, *, force=False):
     state = _load(folder) or {"identity": _identity(folder), "incident": None, "receipts": [], "failures": {}}
     state.setdefault("identity", _identity(folder))
     state.setdefault("incident", None)
@@ -639,14 +827,17 @@ def _discover(folder):
         # filter existed. Retire only parked/queued incidents, never a live
         # lease or an in-flight execution. Unknown receipts and outboxes remain
         # untouched and continue to quarantine any later operation.
+        preserve_transient = incident.get("trigger") in {"repeated_transient", "manual_takeover"}
         current_stage, current_detail, current_record = None, "", {}
-        if (incident.get("status") in {"queued", "waiting_evidence", "waiting_external"}
+        if (not preserve_transient
+                and incident.get("status") in {"queued", "waiting_evidence", "waiting_external"}
                 and _only_transient_detail(incident.get("detail"))):
             manifest = mf.load(folder)
             current_stage, current_detail = self_heal._candidate(folder, manifest)
             current_detail = str(current_detail or "")
             current_record = manifest.get("stages", {}).get(current_stage) or {}
-        if (incident.get("status") in {"queued", "waiting_evidence", "waiting_external"}
+        if (not preserve_transient
+                and incident.get("status") in {"queued", "waiting_evidence", "waiting_external"}
                 and not state.get("resume_outbox")
                 and not any(row.get("status") == "unknown" for row in state["receipts"])
                 and current_stage == incident.get("stage")
@@ -658,7 +849,8 @@ def _discover(folder):
                             lease_expires_at=0, not_before=0, prior_disposition=prior)
             _event(incident, "reconcile", "transient_deferred",
                    "历史纯瞬时故障退出运维队列；未判定故障已修复")
-        elif (incident.get("status") in {"queued", "waiting_evidence", "waiting_external"}
+        elif (not preserve_transient
+              and incident.get("status") in {"queued", "waiting_evidence", "waiting_external"}
               and _only_transient_detail(incident.get("detail"))
               and not state.get("resume_outbox")
               and not any(row.get("status") == "unknown" for row in state["receipts"])
@@ -729,11 +921,30 @@ def _discover(folder):
             return state
     manifest = mf.load(folder)
     stage, detail = self_heal._candidate(folder, manifest)
-    if not stage or stage in self_heal.BOUNDARIES or stage == "review_gate":
-        return state
+    stale_running = False
+    if not stage or stage in self_heal.BOUNDARIES:
+        stage, detail = _stale_running_candidate(folder, manifest, force=force)
+        if not stage:
+            return state
+        stale_running = True
     record = manifest.get("stages", {}).get(stage) or {}
-    if record.get("status") == mf.RUNNING:
-        return state
+    if stage == "review_gate":
+        detail_low = str(detail or "").strip().lower()
+        if (record.get("status") not in {mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW}
+                or _review_differences(folder, {"stage": "review_gate"})
+                or "quality difference" in detail_low
+                or detail_low == "difference"
+                or (record.get("status") == mf.NEEDS_REVIEW
+                    and record.get("execution_completed") is True
+                    and record.get("continue_unqualified") is True)):
+            return state
+    if record.get("status") == mf.RUNNING and not stale_running:
+        stale_stage, stale_detail = _stale_running_candidate(folder, manifest, force=force)
+        if stale_stage == stage:
+            detail = stale_detail
+            stale_running = True
+        else:
+            return state
     if stage == "review":
         if record.get("status") in {mf.COMPLETED, mf.APPROVED}:
             return state
@@ -756,8 +967,34 @@ def _discover(folder):
     # 预算耗尽）。运维只接管这些，不接管仍在推进的 retry_scheduled/upstream_escalated；
     # 旧实现只认 repair_failed/retry_failed，导致 retry_budget_exhausted 这类真正的卡点
     # 永远建不出运维单（面板只显示“待命”）。
+    repeated_transient = False
     if _only_transient_detail(detail):
-        return state
+        if force:
+            repeated_transient = True
+        else:
+            streaks = state.setdefault("transient_streaks", {})
+            streak_key = f"{stage}|{_redact(detail)}"
+            entry = streaks.get(streak_key)
+            if isinstance(entry, int):
+                entry = {"count": entry, "last_at": 0.0, "stage_updated_at": ""}
+            elif not isinstance(entry, dict):
+                entry = {"count": 0, "last_at": 0.0, "stage_updated_at": ""}
+            now_ts = time.time()
+            stage_updated = str(record.get("updated_at") or record.get("finished_at") or "")
+            stage_changed = bool(stage_updated and stage_updated != entry.get("stage_updated_at"))
+            gap_elapsed = (now_ts - float(entry.get("last_at") or 0.0)) >= TRANSIENT_STREAK_MIN_GAP_SECONDS
+            if int(entry.get("count") or 0) == 0 or stage_changed or gap_elapsed:
+                entry["count"] = int(entry.get("count") or 0) + 1
+                entry["last_at"] = now_ts
+                entry["stage_updated_at"] = stage_updated
+                streaks[streak_key] = entry
+            if int(entry.get("count") or 0) < TRANSIENT_ESCALATION_THRESHOLD:
+                return state
+            repeated_transient = True
+    elif isinstance(state.get("transient_streaks"), dict):
+        prefix = f"{stage}|"
+        for key in [k for k in state["transient_streaks"] if k.startswith(prefix)]:
+            state["transient_streaks"].pop(key, None)
     blocker_outcomes = set(self_heal.BLOCKER_OUTCOMES) | {"retry_failed"}
     failed = []
     for event in self_heal._load(folder).get("events", []):
@@ -780,10 +1017,11 @@ def _discover(folder):
     unusable_structure = (stage == 'structure_gate'
                           and (record.get('status') in mf.TERMINAL_OK or record.get('rebuild_required'))
                           and bool(self_heal._structure_unusable(folder)))
-    early = (service_available()
-             and (record.get('status') in {mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW} or unusable_structure)
-             and not _only_transient_detail(detail))
-    if early or (incident and incident.get('trigger') == 'first_blocker'
+    early = ((service_available() or force)
+             and (record.get('status') in {mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW}
+                  or unusable_structure or stale_running or repeated_transient)
+             and (not _only_transient_detail(detail) or repeated_transient or force))
+    if early or (incident and incident.get('trigger') in {'first_blocker', 'stale_running', 'repeated_transient', 'manual_takeover'}
                  and incident.get('stage') == stage and incident.get('detail') == _redact(detail)):
         evidence = json.dumps(self_heal._retry_evidence(folder, manifest, stage), sort_keys=True)
         signature = hashlib.sha256((stage + '\n' + detail + '\n' + evidence).encode('utf-8')).hexdigest()[:16]
@@ -791,11 +1029,15 @@ def _discover(folder):
                                   and incident.get("signature") == signature):
         if incident and incident.get("status") in {"transient_deferred", "superseded"}:
             state.setdefault("incident_history", []).append(incident)
+        trigger_name = ("manual_takeover" if force
+                        else "stale_running" if stale_running
+                        else "repeated_transient" if repeated_transient
+                        else "first_blocker" if early else "failed_self_heal")
         state["incident"] = {"incident_id": uuid.uuid4().hex, "batch_name": folder.name,
             "batch_dir": str(folder), "status": "queued", "eligible": True, "stage": stage,
             "signature": signature, "detail": _redact(detail), "self_heal_failures": count,
             "created_at": mf.now_iso(), "events": [], "fence": 0, "queue_generation": 1,
-            "trigger": "first_blocker" if early else "failed_self_heal"}
+            "trigger": trigger_name}
         _event(state["incident"], "discover", "queued", detail)
     return state
 
@@ -1219,7 +1461,7 @@ def _code_repair(folder, incident, data):
     start_line = data.get("start_line", 1)
     if operation == "read_lines" and "start_line" not in data and cursor is not None:
         start_line = cursor["start_line"]
-    if operation in {"read", "read_lines", "write", "patch", "restore_base"} and not isinstance(path, str):
+    if operation in {"read", "read_lines", "write", "patch", "patch_lines", "multi_patch", "restore_base"} and not isinstance(path, str):
         raise ValueError("source_path_required")
     if operation == "status":
         return _code_status(record, job)
@@ -1242,13 +1484,19 @@ def _code_repair(folder, incident, data):
     elif operation == 'patch':
         result = dev.patch_source(job, path, data.get('old_text'), data.get('new_text'),
                                   expected_sha=data.get('expected_sha'))
+    elif operation == 'patch_lines':
+        result = dev.patch_lines(job, path, data.get('start_line'), data.get('end_line'),
+                                 data.get('new_text'), expected_sha=data.get('expected_sha'))
+    elif operation == 'multi_patch':
+        result = dev.multi_patch(job, path, data.get('edits'), expected_sha=data.get('expected_sha'))
     elif operation == 'restore_base':
         result = dev.restore_base(job, path, expected_sha=data.get('expected_sha'))
     elif operation == "test":
-        evidence = _hash({"code": dev.fingerprint(job), "tests": data.get("tests")})
+        fast = bool(data.get("fast"))
+        evidence = _hash({"code": dev.fingerprint(job), "tests": data.get("tests"), "fast": fast})
         _block_repeat(incident, "code_test", "isolated_tests", evidence)
         _check_budget(incident, "repair")
-        result = dev.run_tests(job, data.get("tests"))
+        result = dev.run_tests(job, data.get("tests"), fast=fast)
         result["output"] = result["output"][-8000:]
         _attempt(incident, "code_test", "isolated_tests", evidence,
                  "succeeded" if result["passed"] else "failed", result["output"])
@@ -1264,9 +1512,10 @@ def _code_repair(folder, incident, data):
         record["status"] = "rolled_back"
     else:
         raise ValueError("unsupported_code_operation")
-    if operation in {"write", "patch", "restore_base", "test", "prepare"}:
-        record["status"] = {"write": "workspace_ready", "patch": "workspace_ready", 'restore_base': 'workspace_ready', "test": record.get("status"),
-                            "prepare": "prepared"}[operation]
+    if operation in {"write", "patch", "patch_lines", "multi_patch", "restore_base", "test", "prepare"}:
+        record["status"] = {"write": "workspace_ready", "patch": "workspace_ready", "patch_lines": "workspace_ready",
+                            "multi_patch": "workspace_ready", 'restore_base': 'workspace_ready',
+                            "test": record.get("status"), "prepare": "prepared"}[operation]
     record["workspace_fingerprint"] = dev.fingerprint(job)
     _save_code_record(folder, record)
     dev.save(job, record["path"])
@@ -1403,13 +1652,14 @@ def action(root, folder, payload, *, enqueue=None):
     resume = False
     writes_artifacts = name in {"apply_repair", "install_code_repair", "regenerate_units", "recover"} or (
         name == "resume" and bool(data.get("strategy")))
-    # Read-only tools may run alongside the batch. Any repair admission obtains
-    # execution locks first, then the short ledger lock (never the reverse).
+    global_lock = name in {"apply_repair", "install_code_repair"}
+    # Read-only tools may run alongside the batch. Only global mutations hold
+    # the cross-batch agent lock; batch-local repairs/resumes use batch locks.
     metadata_only = (name in INVESTIGATION_ACTIONS
                      and ((_load(folder).get("incident") or {}).get("mode") == "investigation"))
     guard = (_metadata_locked(root, folder) if metadata_only else
-             _locked(root, folder, execution=writes_artifacts,
-                     runner=name in {"preview_repair", "verify", "finish", "promote", "recover"}))
+             _locked(root, folder, execution=global_lock,
+                     runner=writes_artifacts or name in {"preview_repair", "verify", "finish", "promote", "recover"}))
     with guard:
         state = _load(folder)
         incident = state.get("incident") or {}
@@ -1488,13 +1738,29 @@ def action(root, folder, payload, *, enqueue=None):
                     result = {"resolved": False, "verified": False, "phase": "repair_required",
                               "next_action": "检查当前候选并直接执行可验证修复；代码缺陷使用隔离修复",
                               "packet": _packet(folder, incident), "verification": checked}
-                    if incident['stage'] in ('assemble', 'validate', 'format_gate'):
-                        from . import self_heal_actions
+                    stage_rec = (mf.load(folder).get("stages") or {}).get(incident["stage"]) or {}
+                    if (incident.get("trigger") in {"stale_running", "manual_takeover"}
+                            and stage_rec.get("status") == mf.RUNNING):
+                        mutating = True
+                        cur_manifest = mf.load(folder)
+                        mf.touch_stage(cur_manifest, incident["stage"], mf.PENDING,
+                                       notes="AI运维已确认无活跃执行进程，安全复位僵死运行态等待续跑")
+                        mf.save(folder, cur_manifest)
+                        _attempt(incident, "repair", "reset_stale_running", _evidence(folder, incident), "applied")
+                        result.update(phase="repair_applied", repair="reset_stale_running",
+                                      resume_required=True, resume_input={})
+                    elif incident['stage'] in ('assemble', 'validate', 'format_gate', 'preassemble'):
+                        from . import legacy_format, local_agent, self_heal_actions
                         evidence = _evidence(folder, incident)
                         snapshot = self_heal._snapshot(folder, mf.load(folder), incident['stage'])
                         expected = {k: v for k, v in snapshot['files'].items() if not k.startswith('input:')}
-                        for repair, prepare in (("repair_source_options", self_heal_actions._prepare_options),
-                                                ("repair_source_tables", self_heal_actions._prepare_tables)):
+                        applied_fast = False
+                        candidates = (
+                            ("repair_source_options", self_heal_actions._prepare_options),
+                            ("repair_source_tables", self_heal_actions._prepare_tables),
+                            ("repair_upload_format", legacy_format.prepare),
+                        ) if incident['stage'] in ('assemble', 'validate', 'format_gate') else ()
+                        for repair, prepare in candidates:
                             try:
                                 proposal = prepare(folder)
                             except (OSError, ValueError, TypeError, KeyError):
@@ -1503,14 +1769,34 @@ def action(root, folder, payload, *, enqueue=None):
                                 continue
                             _block_repeat(incident, 'repair', repair, evidence)
                             _check_budget(incident, 'repair')
-                            mutating = True
-                            outcome = getattr(self_heal_actions, REPAIRS[repair])(folder, expected_inputs=expected)
+                            try:
+                                with local_agent._agent_lock(0):
+                                    mutating = True
+                                    outcome = getattr(self_heal_actions, REPAIRS[repair])(folder, expected_inputs=expected)
+                            except local_agent.AgentError as exc:
+                                if exc.code == 'lock_timeout':
+                                    raise OperationsBusy('worker_busy: live model/import worker') from exc
+                                raise
                             _attempt(incident, 'repair', repair, evidence,
                                      'applied' if outcome.get('installed') else 'refused')
                             if outcome.get('installed'):
+                                applied_fast = True
                                 result.update(phase='repair_applied', repair=repair,
                                               resume_required=True, resume_input={})
                             break
+                        if not applied_fast:
+                            skeleton_fn = getattr(self_heal, '_skeleton_refresh_units', None)
+                            refresh_units = skeleton_fn(folder) if callable(skeleton_fn) else []
+                            if refresh_units:
+                                _block_repeat(incident, 'repair', 'refresh_preassemble', evidence)
+                                _check_budget(incident, 'repair')
+                                mutating = True
+                                from . import preassemble
+                                preassemble.run(folder, mf.load(folder))
+                                _attempt(incident, 'repair', 'refresh_preassemble', evidence, 'applied')
+                                result.update(phase='repair_applied', repair='refresh_preassemble',
+                                              refreshed_units=list(refresh_units)[:20],
+                                              resume_required=True, resume_input={})
             elif name == "diagnose":
                 result = {"stage": incident["stage"], "detail": incident["detail"],
                           "repairs": list(REPAIRS), "evidence_paths": sorted(set(self_heal.SOURCE_FILES) | set(self_heal.REPORTS)),
@@ -1605,11 +1891,16 @@ def action(root, folder, payload, *, enqueue=None):
                         raise ValueError("Knowledge rejudgment is not applicable to this stage")
                     if strategy == "upstream_rederive" and incident["stage"] in (
                             "review", "review_gate"):
-                        # 审核失败（含模型 JSON 协议错误）应重跑审核本身；重派生上游
-                        # 会改写 knowledge/batch，反过来让审核绑定失效，形成死循环。
-                        raise ValueError(
-                            "review_failure_requires_stage_retry: 审核失败应重跑审核阶段，"
-                            "不得重派生上游内容；请用 retry_stage_with_fresh_context")
+                        review_issues = self_heal._issues(folder)
+                        evidence_blob = (str(incident.get("detail") or "") + " " + json.dumps(review_issues, ensure_ascii=False)).lower()
+                        source_binding_proven = any(tok in evidence_blob for tok in (
+                            "review_sample_source_unverified", "source_binding", "source_unverified"))
+                        if not source_binding_proven:
+                            # 审核失败（含模型 JSON 协议错误）应重跑审核本身；重派生上游
+                            # 会改写 knowledge/batch，反过来让审核绑定失效，形成死循环。
+                            raise ValueError(
+                                "review_failure_requires_stage_retry: 审核失败应重跑审核阶段，"
+                                "不得重派生上游内容；请用 retry_stage_with_fresh_context")
                     # Pure refusal must precede the uncertain-write boundary:
                     # no scope/source conflict may enqueue work or create unknown receipts.
                     self_heal._retry_admission(folder, incident['stage'], incident['detail'], strategy)
@@ -1638,17 +1929,28 @@ def action(root, folder, payload, *, enqueue=None):
                         incident["session_id"] = None
                         result["session_recovery"] = dict(incident["session_recovery"])
                     incident["queue_generation"] = incident.get("queue_generation", 0) + 1
-                    incident["release_count"] = incident.get("release_count", 0) + 1
-                    incident["not_before"] = time.time() + min(900, 60 * 3 ** min(incident["release_count"] - 1, 3))
-                    if data.get("state") == "no_substantive_progress":
-                        # A bounded host attempt exhausted read-only navigation.
-                        # Preserve findings/workspace and wait for new evidence,
-                        # rather than re-buying the same investigation each minute.
-                        plan = _recovery_plan(folder, incident)
-                        incident.update(status="waiting_evidence", eligible=False, not_before=0)
-                        incident["recovery"] = {**plan, "state": "waiting_evidence",
-                            "reason": "相同证据下未产生新的修改或复验，保留隔离工作区等待真实证据变化",
-                            "at": mf.now_iso()}
+                    busy_retry = (data.get("busy_retry") is True
+                                  or data.get("reason_code") == "worker_busy"
+                                  or data.get("state") == "worker_busy"
+                                  or str(data.get("reason") or "").startswith("worker_busy"))
+                    repair_rec = _incident_code_record(folder, incident) or {}
+                    restart_wait = (repair_rec.get("status") == "installed_pending_restart"
+                                    or data.get("state") == "awaiting_restart"
+                                    or "awaits host restart" in str(data.get("reason") or ""))
+                    if busy_retry or restart_wait:
+                        incident["not_before"] = time.time() + (1 if restart_wait else 2)
+                    else:
+                        incident["release_count"] = incident.get("release_count", 0) + 1
+                        incident["not_before"] = time.time() + min(900, 60 * 3 ** min(incident["release_count"] - 1, 3))
+                        if data.get("state") == "no_substantive_progress":
+                            # A bounded host attempt exhausted read-only navigation.
+                            # Preserve findings/workspace and wait for new evidence,
+                            # rather than re-buying the same investigation each minute.
+                            plan = _recovery_plan(folder, incident)
+                            incident.update(status="waiting_evidence", eligible=False, not_before=0)
+                            incident["recovery"] = {**plan, "state": "waiting_evidence",
+                                "reason": "相同证据下未产生新的修改或复验，保留隔离工作区等待真实证据变化",
+                                "at": mf.now_iso()}
                 result = {**result, "released": True, "reclaim_required": True}
                 if isinstance(data.get("reason"), str):
                     result["detail"] = _redact(data["reason"])[:2000]
@@ -1663,7 +1965,9 @@ def action(root, folder, payload, *, enqueue=None):
                 # production install marks the receipt unknown (see below).
                 result = _code_repair(folder, incident, data)
                 phase = {'read': 'evidence_read', 'read_lines': 'evidence_read', 'search': 'evidence_read',
-                         'write': 'code_write', 'test': 'code_test', 'prepare': 'code_prepare'}.get(data.get('operation'))
+                         'write': 'code_write', 'patch': 'code_write', 'patch_lines': 'code_write',
+                         'multi_patch': 'code_write', 'restore_base': 'code_write',
+                         'test': 'code_test', 'prepare': 'code_prepare'}.get(data.get('operation'))
                 if phase:
                     incident['repair_progress'] = {'phase': phase, 'at': mf.now_iso(),
                         'operation': data.get('operation'), 'passed': result.get('passed')}
@@ -1806,7 +2110,7 @@ def _observe_execution_locked(folder):
             _settle_code_repair(folder, incident, "needs_deep_repair")
         incident.update(status="queued", eligible=True,
                         queue_generation=incident.get("queue_generation", 0) + 1,
-                        not_before=0 if changed else time.time() + 60)
+                        not_before=0 if changed else time.time() + 5)
         incident["recovery"] = {**_recovery_plan(folder, incident), "state": "original_check_failed"}
     outbox = state.pop("resume_outbox", None)
     if outbox:
@@ -1815,6 +2119,170 @@ def _observe_execution_locked(folder):
                 receipt.update(status="completed", evidence={**(receipt.get("evidence") or {}), "executed": True})
     _event(incident, "resume", "executed", "原流水线本地执行已结束；须重新认领并核验")
     _save(folder, state)
+
+
+def unfreeze(root, folder):
+    """Manually unfreeze a waiting_evidence/waiting_external incident and reset budget baselines."""
+    folder = Path(folder)
+    with _metadata_locked(root, folder):
+        state = _load(folder)
+        incident = state.get("incident")
+        if not incident:
+            return {"ok": True, "unfrozen": False, "status": None}
+        if any(r.get("status") == "unknown" for r in state.get("receipts", [])):
+            raise ValueError("unknown_receipt_quarantine")
+        if incident.get("status") not in {"waiting_evidence", "waiting_external"}:
+            return {"ok": True, "unfrozen": False, "status": incident.get("status")}
+        budgets = _budgets(incident)
+        incident.update(
+            status="queued",
+            eligible=True,
+            not_before=0,
+            release_count=0,
+            budget_baseline=budgets["attempts_total"],
+            install_baseline=budgets["installs_total"],
+            regeneration_baseline=budgets["regenerations_total"],
+            queue_generation=incident.get("queue_generation", 0) + 1,
+        )
+        if isinstance(incident.get("recovery"), dict):
+            incident["recovery"] = {**incident["recovery"], "state": "unfrozen", "at": mf.now_iso()}
+        _event(incident, "unfreeze", "queued", "人工解除冻结并重置当前预算基线，重新进入运维队列")
+        _save(folder, state)
+        return {"ok": True, "unfrozen": True, "incident": dict(incident)}
+
+
+def takeover(root, folder):
+    """Manually trigger immediate AI operations takeover, clearing cooldowns/freezes."""
+    folder = Path(folder)
+    with _metadata_locked(root, folder):
+        state = _load(folder) or {"identity": _identity(folder), "incident": None, "receipts": [], "failures": {}}
+        state.setdefault("identity", _identity(folder))
+        state.setdefault("incident", None)
+        state.setdefault("receipts", [])
+        state.setdefault("failures", {})
+        if any(r.get("status") == "unknown" for r in state.get("receipts", [])):
+            raise ValueError("unknown_receipt_quarantine")
+        incident = state.get("incident")
+        if incident:
+            _expire(incident)
+            if incident.get("status") == "claimed":
+                _save(folder, state)
+                return {"ok": True, "triggered": False, "already_claimed": True, "incident": dict(incident)}
+            if incident.get("status") in {"queued", "waiting_evidence", "waiting_external",
+                                          "transient_deferred", "needs_human", "needs_deep_repair",
+                                          "awaiting_execution"}:
+                prior = incident.get("status")
+                if prior in {"waiting_evidence", "waiting_external"}:
+                    budgets = _budgets(incident)
+                    incident.update(
+                        budget_baseline=budgets["attempts_total"],
+                        install_baseline=budgets["installs_total"],
+                        regeneration_baseline=budgets["regenerations_total"],
+                    )
+                incident.update(
+                    status="queued",
+                    eligible=True,
+                    not_before=0,
+                    release_count=0,
+                    trigger="manual_takeover",
+                    queue_generation=incident.get("queue_generation", 0) + 1,
+                )
+                if isinstance(incident.get("recovery"), dict):
+                    incident["recovery"] = {**incident["recovery"], "state": "manual_takeover", "at": mf.now_iso()}
+                _event(incident, "takeover", "queued", "人工触发立即接手，清空冷却并重新入队")
+                _save(folder, state)
+                return {"ok": True, "triggered": True, "incident": dict(incident)}
+        state = _discover(folder, force=True)
+        incident = state.get("incident")
+        if incident and incident.get("status") == "queued":
+            incident.update(
+                eligible=True,
+                not_before=0,
+                release_count=0,
+                trigger="manual_takeover",
+            )
+            _event(incident, "takeover", "queued", "人工触发立即接手")
+            _save(folder, state)
+            return {"ok": True, "triggered": True, "incident": dict(incident)}
+        _save(folder, state)
+        return {"ok": True, "triggered": False, "reason": "当前批次没有待接手的异常或卡点阶段"}
+
+
+def reconcile_unknown(root, folder, *, note=""):
+    """Manually reconcile quarantined unknown receipts without replaying old actions."""
+    folder = Path(folder)
+    with _metadata_locked(root, folder):
+        state = _load(folder)
+        if not state:
+            return {"ok": True, "reconciled": 0, "incident": None}
+        receipts = state.get("receipts") or []
+        unknown_rows = [r for r in receipts if isinstance(r, dict) and r.get("status") == "unknown"]
+        incident = state.get("incident")
+        if not unknown_rows:
+            return {"ok": True, "reconciled": 0, "incident": dict(incident) if incident else None}
+        for row in unknown_rows:
+            row["status"] = "failed"
+            row["reconciliation"] = {
+                "original_status": "unknown",
+                "reason": "reconciled_by_human",
+                "note": _redact(str(note or ""))[:500],
+                "at": mf.now_iso(),
+                "replayed": False,
+            }
+        state.pop("resume_outbox", None)
+        if incident and incident.get("status") not in {"resolved", "cancelled", "claimed"}:
+            incident.update(
+                status="queued",
+                eligible=True,
+                not_before=0,
+                release_count=0,
+                queue_generation=incident.get("queue_generation", 0) + 1,
+            )
+            _event(incident, "reconcile_unknown", "queued",
+                   f"人工核对并解除 {len(unknown_rows)} 条未确认回执隔离（不重放旧动作）")
+        _save(folder, state)
+        return {"ok": True, "reconciled": len(unknown_rows), "incident": dict(incident) if incident else None}
+
+
+def code_repair_diff(root, folder):
+    """Return exportable diff bundle for the active incident's isolated code repair workspace."""
+    folder = Path(folder)
+    _active(root, folder)
+    state = _load(folder)
+    incident = state.get("incident") or {}
+    record = _incident_code_record(folder, incident)
+    if not record or not record.get("path"):
+        return {"available": False, "files": [], "patch": "", "non_hot_reloadable": False}
+    from . import operations_development as dev
+    try:
+        job = dev.load(record["path"])
+        return dev.export_patch_bundle(job)
+    except (OSError, ValueError, KeyError):
+        return {"available": False, "files": [], "patch": "", "non_hot_reloadable": False}
+
+
+def performance_summary(root, folder):
+    """Return structured operational metrics and recent events for the current incident."""
+    folder = Path(folder)
+    _active(root, folder)
+    state = _load(folder)
+    incident = state.get("incident")
+    if not incident:
+        return {"has_incident": False, "status": None, "budgets": None, "events": []}
+    unknown_receipts = sum(1 for r in state.get("receipts", []) if r.get("status") == "unknown")
+    return {
+        "has_incident": True,
+        "incident_id": incident.get("incident_id"),
+        "stage": incident.get("stage"),
+        "status": incident.get("status"),
+        "budgets": _budgets(incident),
+        "attempts_count": len(incident.get("attempts") or []),
+        "findings_count": len(incident.get("findings") or []),
+        "repair_progress": incident.get("repair_progress"),
+        "recovery": incident.get("recovery"),
+        "unknown_receipts": unknown_receipts,
+        "events": list(incident.get("events") or [])[-10:],
+    }
 
 
 def recover_resumes(root, enqueue):

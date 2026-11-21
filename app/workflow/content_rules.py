@@ -8,9 +8,10 @@ from __future__ import annotations
 import json
 import re
 
-AI_MARK = '（AI生成，待校对）'
+from .workflow_constants import AI_MARK
+
 SUMMARY_TYPES = frozenset(('阅读理解', '任务型阅读', '读写综合', '完形填空', '语法选择'))
-LISTENING_FILLED = '答案由AI生成（AI生成，待校对）'
+LISTENING_FILLED = f'答案由AI生成{AI_MARK}'
 # 用户规则：试卷没有解析/文章大意时不再使用 AI 生成，直接跳过，对应字段一律填「无」。
 # 历史批次里的其它占位写法仍按缺失识别，避免旧产物被误判为编造。
 EMPTY_PLACEHOLDER = '无'

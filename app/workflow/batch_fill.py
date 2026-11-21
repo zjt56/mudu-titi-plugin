@@ -744,7 +744,7 @@ def _apply(root, data, stage, artifact):
             target["attachments"] = attachments
         touched.add(uid)
     if stage == "answers":
-        from .agent_tasks import confirmed_units
+        from .workflow_primitives import confirmed_units
         from .question_identity import question_key
         units = {u["unit_id"]: u for u in confirmed_units(root)}
         owners = {}
