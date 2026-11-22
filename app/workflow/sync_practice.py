@@ -135,9 +135,10 @@ def refine(hit: dict | None, body: str) -> dict | None:
     """
     if not hit or hit.get("subtype"):
         return hit
-    text = plain_text(body)
-    # ☆拓展设问 是附在最后一小题后的开放性追问，不是第 N 空/第 N 小题
-    text = re.split(r"[☆★]?\s*拓展设问", text)[0]
+    full_text = plain_text(body)
+    # 完形填空按空数定子类（10空等），☆拓展设问的追问不是第 N 空；
+    # 阅读理解的 ☆拓展设问与 1、2、3 同属本题组小题，计入总小题数（选择N题）。
+    text = re.split(r"[☆★]?\s*拓展设问", full_text)[0]
     hit = dict(hit)
     name = hit.get("type")
     numbers = {match.group(1) for match in _OPTION_NUMBER.finditer(text)}
@@ -147,7 +148,11 @@ def refine(hit: dict | None, body: str) -> dict | None:
         if count:
             hit["subtype"] = {5: "5空", 10: "10空", 15: "15空"}.get(count, "其他空数")
     elif name == "阅读理解":
-        count = len(numbers)
+        all_numbers = {match.group(1) for match in _OPTION_NUMBER.finditer(full_text)}
+        count = len(all_numbers)
+        if not count:
+            # 同步课时阅读小题常写为行首 `1.What...`（无前导括号），含 ☆拓展设问 小题一并计入。
+            count = len({m.group(1) for m in re.finditer(r"(?m)^\s*(\d{1,2})\s*[.．、](?!\d)", full_text)})
         if count in (3, 4, 5):
             hit["subtype"] = f"选择{count}题"
     elif name == "任务型阅读":

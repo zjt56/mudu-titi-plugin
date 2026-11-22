@@ -1040,14 +1040,16 @@ class _Builder:
             count = re.fullmatch(r"选择(\d+)题|(\d+)空", subtype)
             if not child and kind == "group" and count:
                 expected = int(count.group(1) or count.group(2))
-                # ☆拓展设问 is an open-ended follow-up rendered inside the group;
-                # it is not an option-choice item, so 选择N题 counts only the
-                # choice children while the group still keeps the extension.
-                counted = len([c for c in children if not _extension_child(data, c)]) if count.group(1) else len(children)
-                if counted != expected:
+                # ☆拓展设问 属于本题组的正式小题（形式可为简答/选择，与 1、2、3… 同属该题型）：
+                # 选择N题按本组全部结构化子题数计数（如 3 选择 + 1 拓展设问 = 选择4题），
+                # 同时兼容历史上已按不含拓展设问标出的 选择3题。
+                non_ext = len([c for c in children if not _extension_child(data, c)]) if count.group(1) else len(children)
+                allowed_counts = {len(children), non_ext} if count.group(1) else {len(children)}
+                if expected not in allowed_counts:
                     self.error("SUBQUESTION_COUNT_MISMATCH",
-                               f"子类{subtype}与 {counted} 个结构化子题不符"
-                               + (f"（另含拓展设问 {len(children) - counted} 题）" if len(children) != counted else ""), uid)
+                               f"子类{subtype}与 {len(children)} 个结构化子题不符"
+                               + (f"（其中选择题 {non_ext} 题、拓展设问 {len(children) - non_ext} 题）"
+                                  if len(children) != non_ext else ""), uid)
         if children:
             numbers = [c.get("number") for c in children if isinstance(c, dict) and _positive(c.get("number"))]
             if len(numbers) != len(set(numbers)):

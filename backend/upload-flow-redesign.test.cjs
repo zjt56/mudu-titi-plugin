@@ -19,14 +19,12 @@ test('排队区只列处理中的试卷；内容审核与上传格式检查结�
   assert.match(client, /pendingBatches\.map\(\(b, i\)/);
 });
 
-test('上传后不再自动跳到审核页，改由醒目入口按需切换', () => {
+test('上传后不再自动跳到审核页，且排队区下方不再显示待人工确认卡片', () => {
   // onUploaded 只刷新计数，不再 setTab('review')。
   assert.match(client, /onUploaded: \(\) => \{ setUploadedTick\(\(x\) => x \+ 1\); \}/);
-  assert.match(client, /onGoReview: \(\) => \{ setUploadedTick\(\(x\) => x \+ 1\); setTab\('review'\); \}/);
-  // 醒目入口：已完成 N 份 + 前往人工确认按钮。
-  assert.match(client, /已完成 ' \+ finishedBatches\.length/);
-  assert.match(client, /前往人工确认 →/);
-  assert.match(client, /const goReview = \(\) => \{ if \(props\.onGoReview\) props\.onGoReview\(\); \}/);
+  // 已移除排队区下方的「已完成 N 份 · 待人工确认 / 前往人工确认 →」卡片。
+  assert.doesNotMatch(client, /wf-handoff/);
+  assert.doesNotMatch(client, /前往人工确认 →/);
 });
 
 test('当前试卷内容审核与上传格式检查结束后自动切到下一份未结束的，流程图开始新流程', () => {

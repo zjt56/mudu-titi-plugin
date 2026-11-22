@@ -204,9 +204,9 @@ test('record failures preserve exact batch and error without showing stale recov
 test('flow removes redundant progress copy while preserving true errors and native hover graph', () => {
   assert.doesNotMatch(client, /进度更新：|正在读取进度…|pctAll|setLastRefresh/);
   assert.ok(client.includes("refreshError ? h('p', { role: 'alert'"));
-  assert.ok(client.includes('flowFeedback.error && flowFeedback.message'));
+  assert.ok(client.includes('wf-diag-fab'));
   assert.ok(client.includes("h('title', null, nodeLabel)"));
-  assert.match(client, /diagBanner\(selBatch, stage\),[\s\S]*?h\(OperationsPanel/);
+  assert.match(client, /diagBanner\(selBatch, stage, refresh, flowFeedback\),[\s\S]*?h\(OperationsPanel/);
   assert.ok(client.includes("jget('/batches/' + encodeURIComponent(batchName) + '/operations'"));
   assert.ok(client.includes('generation.current++; controller.abort(); clearTimeout(timer)'));
 });

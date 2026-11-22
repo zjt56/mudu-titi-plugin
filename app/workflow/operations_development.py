@@ -40,6 +40,9 @@ COPY_LIMIT = 8_000_000
 LOCKED = frozenset((
     "app/workflow/operations.py", "app/workflow/operations_development.py",
     "app/workflow/contracts.py", "app/workflow/manifest.py",
+    "app/workbench/server.py", "app/workflow/upload_client.py",
+    "app/workflow/upload.py", "app/workbench/ssh_tunnel.py",
+    "lib/index.js", "backend/wf-router.mjs",
 ))
 # These repairable owners used to be locked even when they caused the incident.
 # Their existing regression modules are a mandatory, immutable acceptance floor;

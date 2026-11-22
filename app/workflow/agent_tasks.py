@@ -1346,6 +1346,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
         # 图片/音频能力受限与原卷空白作答网格不是内容缺失：只有这类单元
         # 允许 contentComplete=false，其余仍如实阻断并等待真实修复。
         from .question_content import capability_limited_source
+        from .upload_payload import _extension_child
         appendix = ""
         try:
             appendix_path = _safe_path(batch, "01_source/附录.txt")
@@ -1353,8 +1354,46 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                 appendix = appendix_path.read_text(encoding="utf-8-sig")
         except (OSError, ValueError):
             appendix = ""
+        draft_by_id = {}
+        try:
+            draft_path = _safe_path(batch, "06_batch/question_draft.json")
+            if draft_path.is_file():
+                draft_obj = json.loads(draft_path.read_text(encoding="utf-8-sig"))
+                draft_by_id = {str(it.get("unit_id") or it.get("id")): it
+                               for it in (draft_obj.get("items") or []) if isinstance(it, dict)}
+        except (OSError, ValueError):
+            draft_by_id = {}
         unit_by_id = {u["unit_id"]: u for u in units}
         for row in rows.values():
+            uid = row.get("unit_id")
+            unit = unit_by_id.get(uid) or {}
+            draft_row = draft_by_id.get(str(uid))
+            if unit.get("unit_kind") == "group" and isinstance(draft_row, dict):
+                children = [c for c in (draft_row.get("subquestions") or []) if isinstance(c, dict)]
+                if children and len(children) == len(unit.get("numbers") or []):
+                    has_choice_options = any(
+                        bool([o for o in (c.get("options") or []) if isinstance(o, str) and o.strip()])
+                        for c in children
+                    )
+                    for subtype in row.get("subtypes") or []:
+                        if not isinstance(subtype, str):
+                            continue
+                        m = re.fullmatch(r"选择(\d+)题|(\d+)空", subtype)
+                        if not m:
+                            continue
+                        if m.group(1) and not has_choice_options:
+                            continue
+                        expected = int(m.group(1) or m.group(2))
+                        non_ext = (len([c for c in children if not _extension_child(draft_row, c)])
+                                   if m.group(1) else len(children))
+                        allowed_counts = {len(children), non_ext} if m.group(1) else {len(children)}
+                        if expected not in allowed_counts:
+                            ext_note = (f"（其中选择题 {non_ext} 题、拓展设问 {len(children) - non_ext} 题，"
+                                        f"请改选 选择{len(children)}题）"
+                                        if len(children) != non_ext else f"（请改选 {len(children)}{'题' if m.group(1) else '空'}）")
+                            raise ValueError(
+                                f"Invalid type labels for {uid}: 子类{subtype}与 {len(children)} 个结构化子题不符{ext_note}"
+                            )
             # 子智能体3必须给出词数与内容完整性；旧批次的上游产物回放时不强制。
             for key in ("words", "contentComplete"):
                 if key not in row:

@@ -768,13 +768,59 @@ class UploadPayloadTest(unittest.TestCase):
                                   "options": [], "answer": "Anything reasonable.",
                                   "explanation": "开放性设问。", "knowledge": ["设题角度/阅读/细节理解"]})
         self.assertTrue(self.build(batch(q))["passed"])
-        # Two option-less children are not an extension tail: the count must fail.
+        # 3 choice + 1 ☆拓展设问 labeled 选择4题 (counting all 4 subquestions in the group) must also pass.
+        q4 = reading_group()
+        q4["numbers"] = [56, 57, 58, 59]
+        q4["filterMetadata"]["subtypes"] = ["选择4题"]
+        q4["subquestions"].append({"number": 59, "stem": "What did they think of the trip? (不超过15个词)",
+                                   "options": [], "answer": "They liked it.",
+                                   "explanation": "开放性设问。", "knowledge": ["设题角度/阅读/细节理解"]})
+        self.assertTrue(self.build(batch(q4))["passed"])
+        # Two option-less children are not an extension tail: the count must fail for 选择3题.
         q = reading_group()
         q["numbers"] = [56, 57, 58, 59]
         q["subquestions"].append({"number": 59, "stem": "Why?", "options": [], "answer": "Because.",
                                   "explanation": "无解析", "knowledge": ["设题角度/阅读/细节理解"]})
         q["subquestions"][0]["options"] = []
         self.assertIn("SUBQUESTION_COUNT_MISMATCH", self.codes(self.build(batch(q))))
+
+    def test_types_validation_accepts_extension_tail_in_total_count_and_rejects_mismatch(self):
+        import json, tempfile
+        from pathlib import Path
+        from workflow import agent_tasks, self_heal
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "01_source").mkdir(parents=True)
+            (root / "06_batch").mkdir(parents=True)
+            (root / "07_review").mkdir(parents=True)
+            unit = {"unit_id": "u106", "unit_kind": "group", "type": "阅读理解", "numbers": [1, 2, 3, 4]}
+            (root / "01_source/structure.confirmed.json").write_text(
+                json.dumps({"units": [unit]}, ensure_ascii=False), encoding="utf-8")
+            draft_item = {
+                "unit_id": "u106", "unit_kind": "group", "numbers": [1, 2, 3, 4],
+                "subquestions": [
+                    {"number": 1, "stem": "Q1?", "options": ["A. a", "B. b", "C. c", "D. d"]},
+                    {"number": 2, "stem": "Q2?", "options": ["A. a", "B. b", "C. c", "D. d"]},
+                    {"number": 3, "stem": "Q3?", "options": ["A. a", "B. b", "C. c", "D. d"]},
+                    {"number": 4, "stem": "Q4?(不超过15个词)", "options": []},
+                ],
+            }
+            (root / "06_batch/question_draft.json").write_text(
+                json.dumps({"items": [draft_item]}, ensure_ascii=False), encoding="utf-8")
+            # 3 choice + 1 ☆拓展设问: 选择4题 (total) and legacy 选择3题 both pass; 选择5题 fails.
+            for ok_sub in ("选择4题", "选择3题"):
+                good = {"items": [{"unit_id": "u106", "type": "阅读理解", "subtypes": [ok_sub],
+                                   "words": 150, "contentComplete": True, "evidence": ["正文 L101"]}]}
+                agent_tasks._validate(root, "types", good, {}, [unit])
+            bad = {"items": [{"unit_id": "u106", "type": "阅读理解", "subtypes": ["选择5题"],
+                              "words": 150, "contentComplete": True, "evidence": ["正文 L101"]}]}
+            with self.assertRaisesRegex(ValueError, "选择4题"):
+                agent_tasks._validate(root, "types", bad, {}, [unit])
+            (root / "07_review/upload-format.json").write_text(
+                json.dumps({"errors": [{"code": "SUBQUESTION_COUNT_MISMATCH", "unit_id": "u106", "message": "x"}]}),
+                encoding="utf-8")
+            self.assertEqual(self_heal._subtype_count_repair_units(root), ["u106"])
 
     def test_unprinted_writing_number_is_not_exported_or_fabricated(self):
         q = question()

@@ -54,6 +54,8 @@ TOOL_ACTIONS = frozenset(("read_unit", "read_source", "read_catalog", "search_ca
 TOOL_BUDGET_CODE = "native_tool_budget"
 _TOOL_BUDGET_ERRORS = frozenset(("Content tool-call budget exceeded",
                                  "Content tool-call budget exhausted"))
+TASK_RETENTION_SECONDS = 2 * 86400  # 2 days, matching CHANGELOG retention
+TASK_MAX_KEEP = 40
 
 
 def _json(value):
@@ -239,7 +241,7 @@ def _tasks():
         yield _read(path)
 
 
-def prune_terminal_tasks(*, max_age_seconds=7 * 86400, max_keep=100):
+def prune_terminal_tasks(*, max_age_seconds=TASK_RETENTION_SECONDS, max_keep=TASK_MAX_KEEP):
     """Safely remove old terminal task directories while preserving active and retryable receipts."""
     now = time.time()
     removed = 0
@@ -1054,6 +1056,8 @@ def dispatch(method, path, payload=None):
             raise ValueError("Request payload must be an object")
         method = method.upper()
         path = path.split("?", 1)[0].rstrip("/")
+        if path == "/api/content-agent/tasks" and method == "GET":
+            _maybe_prune_terminal_tasks()
         with _lock():
             if path == "/api/content-agent/purges" and method == "GET":
                 return {"purges": [_read(p) for p in (QUEUE_ROOT.parent / "purges").glob("*.json")

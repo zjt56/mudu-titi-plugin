@@ -273,6 +273,22 @@ class ImageOptionEvidenceTest(unittest.TestCase):
         # 全是装饰图标且图数<期望：不豁免。
         self.assertIsNone(qc.image_option_evidence(unit, local, sem))
 
+    def test_extension_heading_stops_preceding_option_window(self):
+        from workflow import question_content as qc
+        lines = [
+            "**3.**What do Wu's words mean?",
+            "A.鱼和熊掌不可兼得。",
+            "B.授人以鱼,不如授人以渔。",
+            "C.三天打鱼,两天晒网。",
+            "D.临渊羡鱼,不如退而结网。",
+            "**☆****拓展设问**",
+            "**4.**What does Wu find?(不超过15个词)",
+        ]
+        parts = qc.question_parts(lines, 3)
+        self.assertEqual([o["label"] for o in parts["options"]], ["A", "B", "C", "D"])
+        self.assertEqual(parts["options"][3]["text"], "临渊羡鱼,不如退而结网。")
+        self.assertNotIn("拓展设问", parts["options"][3]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

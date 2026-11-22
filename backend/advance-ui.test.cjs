@@ -64,7 +64,7 @@ test('request and worker errors appear in batch feedback beside flow', async () 
   assert.match(ctx.advanceProgressFeedback({ result: { error: '执行锁失败' } }).message, /执行锁失败/);
   assert.equal(ctx.advanceProgressFeedback({ result: { status: 'blocked', stopped_at: 'answers', reason: '来源不符' } }).error, true);
   assert.match(ctx.advanceProgressFeedback({ result: { reason: '审核差异', status: 'needs_review' } }).message, /审核差异/);
-  assert.match(client, /role: flowFeedback.error \? 'alert' : 'status'/);
+  assert.match(client, /diagBanner\(selBatch, stage, refresh, flowFeedback\)/);
 });
 test('live queue state wins over stale previous worker error', () => {
   const ctx = helpers();

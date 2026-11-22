@@ -1,10 +1,9 @@
 {
-  "python": "",
-  "script": "",
-  "timeout_seconds": 1800,
-  "lock_timeout_seconds": 1800,
+  "python": "/path/to/PaddleOCR-VL-1.6/.venv/bin/python",
+  "script": "/path/to/PaddleOCR-VL-1.6/ocr_local.py",
+  "timeout_seconds": 1500,
+  "lock_timeout_seconds": 180,
   "dpi": 200,
   "preview_dpi": 120,
-  "max_new_tokens": 4096,
-  "max_pixels": 1003520
+  "max_new_tokens": 4096
 }

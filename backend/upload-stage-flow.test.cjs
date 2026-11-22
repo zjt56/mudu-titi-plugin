@@ -15,13 +15,13 @@ function renderFlow(items, current = items[0], options = {}) {
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter((x) => x != null && x !== false) }),
     useState(initial) { const index = stateIndex++; return [index === 6 ? (options.batches || [batch]) : index === 11 ? (options.refreshError || initial) : initial, value => updates.push({ index, value })]; },
-    useRef: (current) => ({ current }), useEffect() {},
+    useRef: (current) => ({ current }), useEffect() {}, useMemo: (fn) => fn(),
     useCallback: (callback) => { callbacks.push(callback); return callback; },
   };
   const context = vm.createContext({
     require: (name) => { assert.equal(name, 'react'); return React; },
     formField: (label, control) => React.createElement('label', null, label, control),
-    EmptyState() {}, uploadIcon() {}, docIcon() {}, diagBanner: () => null,
+    EmptyState() {}, uploadIcon() {}, docIcon() {}, diagBanner: () => null, BackendRestartControl: () => null,
     jget: options.jget || (() => { throw new Error('No network in flow tests'); }),
     jpost: () => { throw new Error('No network in flow tests'); },
   });
@@ -301,12 +301,12 @@ test('idle upload view retains all twelve neutral nodes and the same dependency 
   assert.doesNotMatch(text(tree), /0 \/ 12|正在读取进度|继续处理|暂无进行中的流程|本轮流程已结束/);
 });
 
-test('finished batches leave a neutral demonstration chart and retain the review handoff', () => {
+test('finished batches leave a neutral demonstration chart without a handoff card', () => {
   const items = stages().map(item => ({ ...item, status: 'completed', active: true }));
   const { tree } = renderFlow(items, items[0], { finished: true, advance: { running: true } });
   assert.deepEqual(nodesOf(tree).map(node => tipOf(node).split('\n')[0]), classNames);
-  assert.match(text(tree), /已完成 1 份 · 待人工确认/);
-  assert.match(text(tree), /前往人工确认 →/);
+  assert.doesNotMatch(text(tree), /已完成 1 份 · 待人工确认/);
+  assert.doesNotMatch(text(tree), /前往人工确认 →/);
   assert.doesNotMatch(text(tree), /12 \/ 12|继续处理|进度更新/);
   assert.equal(walk(tree, node => node.props.className === 'wf-node-pulse').length, 0);
 });

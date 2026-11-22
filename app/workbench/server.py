@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -2191,11 +2192,26 @@ def purge_batch(name: str, confirm_name: str) -> dict:
         return {"ok": True, "name": name, "purged": True, "removed": removed}
 
 
+MAX_JSON_BYTES = 2 * 1024 * 1024        # 2 MiB
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024    # 200 MiB
+
+
+class PayloadTooLargeError(ValueError):
+    """Raised when an incoming HTTP request exceeds allowed size limits."""
+
+
 def parse_multipart(handler) -> tuple[dict, list[dict]]:
-    length = int(handler.headers.get("Content-Length", "0"))
+    try:
+        length = int(handler.headers.get("Content-Length", "0") or "0")
+    except ValueError as exc:
+        raise ValueError("无效的 Content-Length") from exc
+    if length < 0:
+        raise ValueError("无效的 Content-Length")
+    if length > MAX_UPLOAD_BYTES:
+        raise PayloadTooLargeError(f"上传体积超过上限（{MAX_UPLOAD_BYTES // (1024 * 1024)} MB）")
     body = handler.rfile.read(length) if length else b""
     content_type = handler.headers.get("Content-Type", "")
-    if "multipart/form-data" not in content_type:
+    if "multipart/form-data" not in content_type.lower():
         raise ValueError("上传需要 multipart/form-data")
     message = BytesParser(policy=email_policy).parsebytes(
         b"Content-Type: " + content_type.encode("utf-8", "replace") + b"\r\nMIME-Version: 1.0\r\n\r\n" + body)
@@ -4615,14 +4631,68 @@ def apply_manual_content(folder: Path, unit_id, unit, expected, files, current,
             wf_manifest.invalidate_downstream(folder, current, "assemble", "工作台人工修改解析/大意，旧检查与审核结果失效")
     return result
 
+_ALLOWED_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _extract_host_only(raw_host: str) -> str:
+    host = (raw_host or "").strip().lower()
+    if not host:
+        return ""
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end > 0 else host
+    return host.split(":", 1)[0]
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
+
+    def _check_request_security(self, *, is_post: bool, decoded_path: str) -> bool:
+        host_header = self.headers.get("Host", "")
+        if host_header:
+            host_only = _extract_host_only(host_header)
+            if host_only not in _ALLOWED_LOOPBACK_HOSTS:
+                self.send_json({"error": "拒绝非本机 Host 请求"}, 403)
+                return False
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:
+            parsed_origin = urlparse(origin)
+            origin_host = (parsed_origin.hostname or "").lower()
+            if parsed_origin.scheme not in ("http", "https") or origin_host not in _ALLOWED_LOOPBACK_HOSTS:
+                self.send_json({"error": "拒绝跨站 Origin 请求"}, 403)
+                return False
+        expected_token = os.environ.get("WF_WORKBENCH_TOKEN", "").strip()
+        if expected_token and decoded_path != "/api/health":
+            provided = self.headers.get("X-Workbench-Token", "")
+            if not provided or not hmac.compare_digest(provided, expected_token):
+                self.send_json({"error": "缺少或无效的访问令牌"}, 401)
+                return False
+        if is_post:
+            ct = (self.headers.get("Content-Type") or "").strip().lower()
+            if decoded_path == "/api/uploads":
+                if "multipart/form-data" not in ct:
+                    self.send_json({"error": "上传接口要求 multipart/form-data"}, 415)
+                    return False
+            else:
+                try:
+                    content_len = int(self.headers.get("Content-Length", "0") or "0")
+                except ValueError:
+                    self.send_json({"error": "无效的 Content-Length"}, 400)
+                    return False
+                if content_len > MAX_JSON_BYTES:
+                    self.send_json({"error": f"请求体超过上限（{MAX_JSON_BYTES // (1024 * 1024)} MB）"}, 413)
+                    return False
+                if (content_len > 0 or ct) and "application/json" not in ct:
+                    self.send_json({"error": "POST 接口要求 Content-Type: application/json"}, 415)
+                    return False
+        return True
 
     def send_json(self, value, status=200):
         body = json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -4630,6 +4700,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         decoded_path = unquote(parsed.path)
+        if not self._check_request_security(is_post=False, decoded_path=decoded_path):
+            return
         try:
             if decoded_path == "/api/health":
                 return self.send_json({"ok": True, "instance_id": os.environ.get("WF_BACKEND_INSTANCE_ID", ""),
@@ -4702,6 +4774,9 @@ class Handler(BaseHTTPRequestHandler):
                                            base64.b64encode(data).decode("ascii")})
                 self.send_response(200)
                 self.send_header("Content-Type", content_type)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                if content_type == "image/svg+xml":
+                    self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 return self.wfile.write(data)
@@ -4715,6 +4790,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = target.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", content_type)
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Accept-Ranges", "bytes")
                 self.end_headers()
@@ -4743,14 +4819,22 @@ class Handler(BaseHTTPRequestHandler):
     @serialized
     def do_POST(self):
         parsed = urlparse(self.path)
-        parts = unquote(parsed.path).strip("/").split("/")
+        decoded_path = unquote(parsed.path)
+        parts = decoded_path.strip("/").split("/")
+        if not self._check_request_security(is_post=True, decoded_path=decoded_path):
+            return
         try:
             if parts == ["api", "uploads"]:
-                fields, files = parse_multipart(self)
+                try:
+                    fields, files = parse_multipart(self)
+                except PayloadTooLargeError as exc:
+                    return self.send_json({"error": str(exc)}, 413)
                 return self.send_json({"ok": True, **handle_upload(fields, files)})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "advance":
                 return self.send_json({"ok": True, **start_advance(parts[2], reset_budget=True)})
-            length = int(self.headers.get("Content-Length", "0"))
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length > MAX_JSON_BYTES:
+                return self.send_json({"error": f"请求体超过上限（{MAX_JSON_BYTES // (1024 * 1024)} MB）"}, 413)
             payload = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("请求内容必须是对象")

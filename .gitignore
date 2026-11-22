@@ -49,3 +49,7 @@ app/audio/vendor/ffmpeg/
 # DSH office 预览/渲染临时目录（每次运行随机后缀，属本机产物）
 /.dsh-office-*/
 app/workflow/local-agent.json.bak-*
+
+# 本机个人配置（含本机绝对路径，不随仓库提交；参考 *.example.json）
+app/workflow/local-agent.json
+app/workflow/ocr-config.json

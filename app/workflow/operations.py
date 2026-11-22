@@ -1794,14 +1794,35 @@ def action(root, folder, payload, *, enqueue=None):
                                               resume_required=True, resume_input={})
                             break
                         if not applied_fast:
+                            subtype_fn = getattr(self_heal, '_subtype_count_repair_units', None)
+                            subtype_units = subtype_fn(folder) if callable(subtype_fn) else []
                             skeleton_fn = getattr(self_heal, '_skeleton_refresh_units', None)
                             refresh_units = skeleton_fn(folder) if callable(skeleton_fn) else []
-                            if refresh_units:
+                            if subtype_units:
+                                _block_repeat(incident, 'repair', 'preassembly_type_repair', evidence)
+                                _check_budget(incident, 'repair')
+                                mutating = True
+                                self_heal._feedback(
+                                    folder, 'types',
+                                    '上传格式子类题数/选项数不符（如选择N题误计入☆拓展设问），局部重判题型子类',
+                                    incident['detail'], 1, unit_ids=subtype_units,
+                                )
+                                self_heal._requeue(
+                                    folder, mf.load(folder), 'preassemble',
+                                    'AI运维自动修复：上传格式子类计数不符，返回前置组装局部修正：' + '、'.join(subtype_units),
+                                )
+                                _attempt(incident, 'repair', 'preassembly_type_repair', evidence, 'applied')
+                                result.update(phase='repair_applied', repair='preassembly_type_repair',
+                                              refreshed_units=list(subtype_units)[:20],
+                                              resume_required=True, resume_input={})
+                            elif refresh_units:
                                 _block_repeat(incident, 'repair', 'refresh_preassemble', evidence)
                                 _check_budget(incident, 'repair')
                                 mutating = True
-                                from . import preassemble
-                                preassemble.run(folder, mf.load(folder))
+                                self_heal._requeue(
+                                    folder, mf.load(folder), 'preassemble',
+                                    'AI运维自动修复：按未变Word原文局部刷新题目格式：' + '、'.join(refresh_units),
+                                )
                                 _attempt(incident, 'repair', 'refresh_preassemble', evidence, 'applied')
                                 result.update(phase='repair_applied', repair='refresh_preassemble',
                                               refreshed_units=list(refresh_units)[:20],

@@ -128,10 +128,19 @@ def ensure_upload_connection(timeout=10):
                 "-o", "ConnectTimeout=8", "-p", str(ssh_port),
                 "-L", f"{bind_arg}:{port}:127.0.0.1:{remote_port}"]
         identity = setting('ssh_identity', 'MUDU_UPLOAD_SSH_IDENTITY')
+        known_hosts = setting('ssh_known_hosts', 'MUDU_UPLOAD_SSH_KNOWN_HOSTS').strip()
+        accept_new = os.environ.get('MUDU_UPLOAD_SSH_ACCEPT_NEW', '').strip().lower() in ('1', 'true', 'yes')
+        host_key_mode = 'accept-new' if accept_new else 'yes'
+        if known_hosts:
+            if not os.path.isfile(known_hosts):
+                raise TunnelError("SSH known_hosts 文件不存在；请确认主机指纹文件路径")
+            args.extend(["-o", f"UserKnownHostsFile={known_hosts}", "-o", "StrictHostKeyChecking=yes"])
+        else:
+            args.extend(["-o", f"StrictHostKeyChecking={host_key_mode}"])
         if identity:
             if not os.path.isfile(identity):
                 raise TunnelError("SSH 密钥文件不存在；请在题库设置的「SSH 隧道」中确认路径")
-            args.extend(["-i", identity, "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new"])
+            args.extend(["-i", identity, "-o", "IdentitiesOnly=yes"])
         args.append(destination)
         try:
             process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

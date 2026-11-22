@@ -136,6 +136,16 @@ class TestRefineWithBody(unittest.TestCase):
         self.assertEqual(sp.classify_with_body("Ⅳ.阅读理解", body)["subtype"], "选择4题")
         body3 = "(　)1.A.x\n(　)2.A.x\n(　)3.A.x"
         self.assertEqual(sp.classify_with_body("Ⅳ.阅读理解", body3)["subtype"], "选择3题")
+        # 行首裸题号（无前导括号）且末尾附 ☆拓展设问：1、2、3、4 同属本题组小题，应输出「选择4题」。
+        bare_with_ext = (
+            "Wu Zeyin comes from China.\n"
+            "**1.**What does high mean?\nA.实惠的 B.稳定的 C.高的 D.低的\n"
+            "**2.**What can farmers know?\nA.① B.② C.③ D.④\n"
+            "**3.**What do Wu's words mean?\nA.甲 B.乙 C.丙 D.丁\n"
+            "**☆****拓展设问**\n"
+            "**4.**What does Wu find?(不超过15个词)\n______\n"
+        )
+        self.assertEqual(sp.classify_with_body("Ⅱ. 阅读理解 · 时文阅读", bare_with_ext)["subtype"], "选择4题")
 
     def test_cloze_subtype_counts_blanks_not_extended_prompts(self):
         body = ("Good morning,class.That’s the \u30001\u3000.Let’s have our \u30002\u3000 now.\n" +
