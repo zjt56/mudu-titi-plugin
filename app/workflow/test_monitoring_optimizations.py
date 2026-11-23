@@ -505,6 +505,47 @@ class MonitoringOptimizationsTest(unittest.TestCase):
 
         self.assertFalse(agent._review_inputs_ready(self.batch, allow_pending_audio=False))
 
+    def test_scope_knowledge_rules_and_prefix_ordering(self):
+        from workflow import review
+        rules_path = Path(review.__file__).resolve().parents[1] / "skills-reference/knowledge-matching-rules.md"
+        raw = rules_path.read_text(encoding="utf-8")
+        # 单词拼写 + 完成句子: keeps 词汇/语法/语音 + 四步流程 + 边界 + 踩坑清单, drops 主题/语篇体裁/设题角度/语用/校验脚本.
+        scoped = review.scope_knowledge_rules(raw, ["单词拼写", "完成句子"])
+        self.assertIn("## 一、四步流程", scoped)
+        self.assertIn("## 四、词汇", scoped)
+        self.assertIn("## 五、语法", scoped)
+        self.assertIn("## 十一、真踩过的错", scoped)
+        self.assertNotIn("## 二、主题", scoped)
+        self.assertNotIn("## 六、语篇体裁", scoped)
+        self.assertNotIn("## 七、设题角度", scoped)
+        self.assertNotIn("## 十二、校验脚本", scoped)
+        self.assertLess(len(scoped), len(raw) * 0.6)
+
+        # 阅读理解: keeps 语篇体裁/主题/设题角度(仅阅读), drops 听力角度与语音/语法/词汇.
+        reading = review.scope_knowledge_rules(raw, ["阅读理解"])
+        self.assertIn("## 二、主题", reading)
+        self.assertIn("## 六、语篇体裁", reading)
+        self.assertIn("## 七、设题角度", reading)
+        self.assertNotIn("**听力**（`设题角度/听力/*`）", reading)
+        self.assertNotIn("## 五、语法", reading)
+
+        # Fallback on unknown type keeps all business sections I-XI but still drops CLI scripts.
+        fb = review.scope_knowledge_rules(raw, ["未知题型"])
+        self.assertIn("## 二、主题", fb)
+        self.assertIn("## 五、语法", fb)
+        self.assertNotIn("## 十二、校验脚本", fb)
+
+        # Prefix ordering puts static rules/catalogs before per-shard dynamic question data.
+        ordered = review.order_prompt_context({
+            "01_source/正文.txt": "body",
+            "06_batch/batch_meta.json": {"items": []},
+            "references/knowledge-catalog.json": {"paths": []},
+            "skills-reference/knowledge-matching-rules.md": scoped,
+        })
+        keys = list(ordered.keys())
+        self.assertLess(keys.index("skills-reference/knowledge-matching-rules.md"), keys.index("01_source/正文.txt"))
+        self.assertLess(keys.index("references/knowledge-catalog.json"), keys.index("06_batch/batch_meta.json"))
+
 
 if __name__ == "__main__":
     unittest.main()

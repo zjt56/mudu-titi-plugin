@@ -231,3 +231,38 @@ test('难度即使被审核改动，也只按第一次打标签结果显示', ()
   assert.doesNotMatch(rendered, /容易|困难/);
   assert.equal(auditNotes(d).length, 0);
 });
+
+test('题型/子类始终展示到最末级叶子，仅把存在差异的末级子类标红', () => {
+  const collectRed = (node, out = []) => {
+    if (node == null || typeof node !== 'object') return out;
+    if (Array.isArray(node)) { node.forEach((n) => collectRed(n, out)); return out; }
+    if (node.props && node.props.style && node.props.style.color === 'var(--dsw-alias-state-error-primary)') {
+      out.push(text(node).trim());
+    }
+    collectRed(node.children, out);
+    return out;
+  };
+  const d = {
+    unit_kind: 'standalone',
+    labels: { type: '单词拼写', subtypes: ['句意'], knowledge: ['词汇/拼写与词形', '语法/数词/基数词'] },
+    comparison: {
+      original: { labels: { type: '单词拼写', subtypes: ['句意'], knowledge: ['词汇/拼写与词形', '语法/数词/基数词'] } },
+      rounds: [{
+        round_id: 'labels', status: '已提供',
+        checks: [{ assessment: { type: '单词拼写', subtypes: ['汉语提示'], knowledge: ['语法/数词/基数词', '词汇/拼写与词形'] } }],
+      }],
+    },
+  };
+  const panels = labelAuditPanels(d);
+  const rendered = text(panels);
+  assert.match(rendered, /题型 \/ 子类/);
+  assert.match(rendered, /原标签\s+单词拼写\s*\/\s*句意/);
+  assert.match(rendered, /一审标签\s+单词拼写\s*\/\s*汉语提示/);
+  assert.deepEqual(collectRed(panels), ['句意', '汉语提示']);
+
+  // 无差异时仍展示到最末级叶子，但不标红。
+  d.comparison.rounds[0].checks[0].assessment.subtypes = ['句意'];
+  const samePanels = labelAuditPanels(d);
+  assert.match(text(samePanels), /原标签\s+单词拼写\s*\/\s*句意/);
+  assert.deepEqual(collectRed(samePanels), []);
+});

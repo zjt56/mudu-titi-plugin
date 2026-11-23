@@ -76,6 +76,8 @@ class UnderlineLayoutTest(unittest.TestCase):
     def test_bold_question_numbers_preserve_full_stem_and_underline(self):
         cases = (
             ('**1.**I’m <u>fine</u>.(对画线部分提问)', 'I’m fine.(对画线部分提问)', 'fine'),
+            ('**1****.**[传统文化]The loong was a symbol in <u>a</u>________(古代的) China.',
+             '[传统文化]The loong was a symbol in a______(古代的) China.', 'a______'),
             ('**2.**My name is <u>Susan</u>.(对画线部分提问)',
              'My name is Susan.(对画线部分提问)', 'Susan'),
             ('**(　)3.**读音与hell<u>o</u>相同的是______。',
@@ -83,7 +85,8 @@ class UnderlineLayoutTest(unittest.TestCase):
         )
         for source, stem, word in cases:
             with self.subTest(source=source):
-                expected = '**' + (stem.replace(word, f'<u>{word}</u>', 1)) + '\n作答线 ______'
+                replacement = '<u>a</u>______' if word == 'a______' else f'<u>{word}</u>'
+                expected = '**' + (stem.replace(word, replacement, 1)) + '\n作答线 ______'
                 batch = {'items': [{'stem': '**' + stem + '\n作答线 ______'}]}
                 candidate, report = underline.restore(batch, source)
                 self.assertTrue(report['passed'], report)

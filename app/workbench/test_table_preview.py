@@ -75,6 +75,51 @@ class TablePreviewTest(unittest.TestCase):
             self.assertEqual(cell["images"][0]["name"], "pic.png")
             self.assertTrue(cell["images"][0]["url"].endswith("/media/pic.png"))
 
+    def test_paper_preview_restores_pure_image_table_cells(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            wf_root = Path(tmp)
+            batch = wf_root / "b1"
+            (batch / "01_source").mkdir(parents=True)
+            (batch / "06_batch").mkdir(parents=True)
+            (batch / "01_source" / "正文.txt").write_text(
+                "Ⅲ. 阅读理解\n"
+                "[TABLE 1]\n"
+                "[IMG image2.jpeg] | Jack is 12.\n"
+                "[IMG image3.jpeg] | Sue is 13.\n"
+                "[/TABLE]\n",
+                encoding="utf-8",
+            )
+            batch_data = {
+                "name": "b1",
+                "items": [{
+                    "id": "u1",
+                    "number": 1,
+                    "material": "[TABLE 1]\n | Jack is 12.\n | Sue is 13.\n[/TABLE]",
+                    "materialBlocks": [{
+                        "type": "table",
+                        "rows": [
+                            {"cells": [{"text": "", "rowspan": 1, "colspan": 1}, {"text": "Jack is 12.", "rowspan": 1, "colspan": 1}]},
+                            {"cells": [{"text": "", "rowspan": 1, "colspan": 1}, {"text": "Sue is 13.", "rowspan": 1, "colspan": 1}]},
+                        ],
+                    }],
+                    "attachments": [
+                        {"kind": "image", "name": "image2.jpeg", "url": "01_source/media/image2.jpeg", "placement": "question"},
+                        {"kind": "image", "name": "image3.jpeg", "url": "01_source/media/image3.jpeg", "placement": "question"},
+                    ],
+                }],
+            }
+            (batch / "06_batch" / "batch.json").write_text(json.dumps(batch_data, ensure_ascii=False), encoding="utf-8")
+            old_wf = server.WORKFLOWS
+            try:
+                server.WORKFLOWS = wf_root
+                preview = server.paper_preview("b1")
+            finally:
+                server.WORKFLOWS = old_wf
+            rows = preview["items"][0]["materialBlocks"][0]["rows"]
+            self.assertEqual(rows[0]["cells"][0]["text"], "[IMG image2.jpeg]")
+            self.assertEqual(rows[1]["cells"][0]["text"], "[IMG image3.jpeg]")
+
 
 if __name__ == "__main__":
     unittest.main()

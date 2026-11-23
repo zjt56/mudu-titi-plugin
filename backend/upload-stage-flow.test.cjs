@@ -292,7 +292,7 @@ test('idle upload view retains all twelve neutral nodes and the same dependency 
   assert.ok(nodesOf(tree).every(node => tipOf(node).split('\n').length >= 2));
   const svg = walk(tree, node => node.type === 'svg' && node.props.role === 'group')[0];
   assert.equal(svg.props['aria-label'], '试卷处理流程总览：12 个环节');
-  assert.equal(walk(tree, node => node.props['data-flow-from']).length, 11);
+  assert.equal(walk(tree, node => node.props && node.props['data-flow-from']).length, 11);
   for (const node of nodesOf(tree)) {
     assert.equal(walk(node, entry => /wf-node-(pulse|dot)/.test(entry.props.className || '')).length, 0);
     assert.doesNotMatch(text(node), /✓|!|已完成|待处理|处理中|失败|受阻/);
@@ -321,20 +321,28 @@ test('overview tooltip lists each class substeps, not only the class name', () =
   assert.match(tip('upload'), /审核上传\n· .+\n· .+\n· /);
 });
 
-test('chart is width-adaptive: no fixed pixel size, svg stretches with its container', () => {
+test('chart fits both width and height of its card without vertical scroll', () => {
   const { tree } = renderFlow(stages());
+  const stage = walk(tree, node => node.props && node.props.className === 'wf-flow-stage')[0];
+  const canvas = walk(tree, node => node.props && node.props.className === 'wf-flow-canvas')[0];
   const svg = walk(tree, node => node.type === 'svg')[0];
-  // 不允许出现固定像素宽高：宽度100%、高度按 viewBox 比例自动。
+  assert.ok(stage);
+  assert.equal(stage.props.style.overflow, 'hidden');
+  assert.equal(stage.props.style.position, 'relative');
+  assert.equal(stage.props.style.minHeight, 0);
+  assert.ok(canvas);
+  assert.equal(canvas.props.style.position, 'absolute');
+  // 不允许出现固定像素宽高：宽高 100% 填满可视容器并按 viewBox 等比完整容纳，变宽变窄都不出现上下滚动。
   assert.equal(svg.props.width, undefined);
   assert.equal(svg.props.height, undefined);
   assert.equal(svg.props.preserveAspectRatio, 'xMidYMid meet');
   assert.equal(svg.props.style.width, '100%');
-  assert.equal(svg.props.style.height, 'auto');
-  assert.match(svg.props.style.aspectRatio, /^\d+ \/ \d+$/);
-  assert.equal(svg.props.style.maxWidth, undefined);
+  assert.equal(svg.props.style.height, '100%');
+  assert.equal(svg.props.style.maxWidth, '100%');
+  assert.equal(svg.props.style.maxHeight, '100%');
   // 节点与连线都留在同一 viewBox 坐标系内，缩放时整体等比，不会错位。
   assert.match(svg.props.viewBox, /^0 0 \d+ \d+$/);
-  assert.equal(walk(tree, node => node.props['data-flow-from']).length, 11);
+  assert.equal(walk(tree, node => node.props && node.props['data-flow-from']).length, 11);
 });
 
 test('each node carries the three-state style tokens for completion, idle and running', () => {

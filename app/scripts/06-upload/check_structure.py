@@ -102,12 +102,18 @@ def _check_unit(u, verified=None, table_verified=None):
 
     # D3/D8：共享材料已带题号时，子题 stem 写非空空位即可；保留题号前缀的
     # 旧版格式也兼容，但若存在前缀必须与子题号一致。
+    # 例外：完形后的「☆拓展设问」等非正文空位小题（题号不在材料空位集合内）应保留自身完整题干。
     if qt == CLOZE:
+        from workflow.upload_payload import material_blank_numbers
+        from workflow.wire_format import normalize_blank_text
+        blank_numbers = material_blank_numbers(normalize_blank_text(u.get("material") or ""))
         for c in subs:
             n = c.get("number")
             stem = c.get("stem")
             if stem is None or not str(stem).strip():
                 problems.append(f"[D3] {uid} 完形子题 {n}: stem 为空串，应为 '______' 或 '31.'")
+                continue
+            if blank_numbers and isinstance(n, int) and n not in blank_numbers:
                 continue
             s = plain(str(stem)).strip()
             m = NUMBER_PREFIX.match(s)

@@ -310,6 +310,35 @@ class SourceMarksTest(unittest.TestCase):
             (root / '01_source/附录.txt').write_text(appendix.replace('句型训练', '其他练习'), encoding='utf-8')
             self.assertIsNone(upload_content.resolve_scoped_answer(root, units[1], 2))
 
+    def test_word_box_sentence_list_keeps_source_mark_on_child_stem(self):
+        raw = (
+            "第三课时　Grammar Focus\n"
+            "Ⅱ. 用方框中所给单词的适当形式填空\n"
+            "guide　towards　scarf　bore　I\n"
+            "1.Charles never feels ________ when reading his favourite books.\n"
+            "2.[2025·甘肃兰州改编]I am 15 years old and I’m able to look after ________ well.\n"
+        )
+        rows = self.scoped(raw, {
+            "unit_kind": "group",
+            "question_type": "选词填空",
+            "numbers": [1, 2],
+            "stem": "",
+            "material": "guide　towards　scarf　bore　I",
+            "source_span": {"start_line": 3, "end_line": 5, "basis": "cleaned_source"},
+            "subquestions": [
+                {"number": 1, "stem": "Charles never feels ______ when reading his favourite books."},
+                {"number": 2, "stem": "[2025·甘肃兰州改编]I am 15 years old and I’m able to look after ______ well."},
+            ],
+        })
+        self.assertEqual(sp.audit_source_marks(rows, raw), [])
+
+        dropped = json.loads(json.dumps(rows))
+        dropped[0]["subquestions"][1]["stem"] = "I am 15 years old and I’m able to look after ______ well."
+        findings = sp.audit_source_marks(dropped, raw)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("[2025·甘肃兰州改编]", findings[0]["marks"])
+        self.assertTrue(any("所属子题2题干" in p for p in findings[0]["problems"]))
+
 
 if __name__ == '__main__':
     unittest.main()

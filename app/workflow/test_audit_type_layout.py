@@ -170,6 +170,19 @@ class TestReadingShortAnswerExtension(unittest.TestCase):
             ]}]}
         self.assertEqual(_run(batch), 0)
 
+    def test_reading_hybrid_summary_blank_exempt_from_e20(self):
+        # 混合阅读理解（任务一选择 + 任务二完成概要填空）的填空子题无选项，不应被 E20 判错。
+        batch = {"items": [{
+            "unit_id": "U9", "question_type": "阅读理解", "unit_kind": "group",
+            "stem": "读短文", "material": "Passage text.\n任务二:完成概要,每空一词。",
+            "options": [],
+            "subquestions": [
+                {"number": 1, "stem": "Where is Mike from?", "options": ["A. x", "B. y", "C. z", "D. w"], "answer": "D"},
+                {"number": 4, "stem": "任务二（完成概要，每空一词）：The girl ________ ________ is me.", "options": [], "answer": "in orange"},
+                {"number": 5, "stem": "These are my ________, Ann and Dave.", "options": [], "answer": "parents"},
+            ]}]}
+        self.assertEqual(_run(batch), 0)
+
     def test_reading_mc_sub_missing_options_still_flagged(self):
         # 没有简答/词数提示的阅读理解子题缺选项仍应报 E20，不当简答豁免。
         batch = {"items": [{

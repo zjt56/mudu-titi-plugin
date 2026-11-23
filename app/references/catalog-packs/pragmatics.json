@@ -1,0 +1,13 @@
+{
+  "schema_version": "catalog-packs/v1",
+  "pack": "pragmatics",
+  "base": true,
+  "description": "语用维度全部叶子（情景交际/谚语习语）",
+  "source_sha256": "7f5f45a90f3f9b22f1486f94933bf6d0976ffb5baceb5650d9efdec8064a21eb",
+  "count": 2,
+  "sha256": "1140eedfef5b53c97c3e4ebe2f4f2b847e7f7c83d110370ad2c92d91a1ce0a49",
+  "paths": [
+    "语用/情景交际",
+    "语用/谚语/习语"
+  ]
+}

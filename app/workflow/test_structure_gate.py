@@ -346,6 +346,14 @@ class StructureGateTest(unittest.TestCase):
         self.assertEqual(sorted(numbers), [1, 2, 9, 10], numbers)
         self.assertEqual(len(numbers), len(set(numbers)), numbers)
 
+    def test_cloze_underscore_wrapped_underline_blanks_recognized_by_weak_numbers(self):
+        from workflow import preview, source_anchors
+        line = "tired but __<u>2</u>__.After a short rest,our __<u>8</u>__ and __<u>10</u>__."
+        self.assertEqual(preview._weak_numbers(line), [2, 8, 10])
+        self.assertEqual(preview._weak_numbers("I have ______ 3 apples."), [])
+        self.assertEqual(source_anchors.printed_tokens("**1****.**[传统文化]The loong"), [(2, 1)])
+        self.assertEqual(source_anchors.printed_tokens("**3.14** is pi."), [])
+
     def test_table_numbered_blanks_with_initials_cover_every_slot(self):
         from workflow import extract, structure_gate as sg
         lines = ["Unit 2 第四课时", "[IMG header.jpeg]教材语篇回顾[IMG end.jpeg]", "[TABLE 1]",

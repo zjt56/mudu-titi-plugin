@@ -289,8 +289,17 @@ class UnitTasksTest(unittest.TestCase):
             with patch.object(agent_tasks, "build_task", return_value=self.base):
                 _, parts = unit_tasks.build_parts("unused", stage, 1000000, max_units=1)
             prompt = parts[0]["prompt"]
-            for required in ("COMPLETE-TAXONOMY", "SOURCE-OWNERSHIP-RULES", "COMPLETE-FRAMEWORK"):
+            for required in ("COMPLETE-TAXONOMY", "COMPLETE-FRAMEWORK"):
                 self.assertIn(required, prompt)
+            if stage != "knowledge":
+                self.assertIn("SOURCE-OWNERSHIP-RULES", prompt)
+            else:
+                # Knowledge shards drop duplicate human docs (content-labeling/type-knowledge-map.md)
+                # while retaining the compact catalog and scoped JSON/matching rules.
+                self.assertNotIn("SOURCE-OWNERSHIP-RULES", prompt)
+                self.assertNotIn("KNOWLEDGE-MAPPING", prompt)
+                self.assertIn("ALL-KNOWLEDGE-LEAVES", prompt)
+                continue
             for marker in ("ALL-KNOWLEDGE-LEAVES", "KNOWLEDGE-MAPPING"):
                 if stage == "explanations":
                     self.assertNotIn(marker, prompt)

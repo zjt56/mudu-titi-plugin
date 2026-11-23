@@ -761,6 +761,7 @@ def build(batch_dir, *, units=None):
                 offset_lines = len(rubric) if own_rubric else 0
                 body_lines = lines[offset_lines:] if offset_lines else lines
                 body_first = max(0, first - offset_lines)
+                trailing_material_lines = []
                 if option_start is not None:
                     line, offset = option_start
                     line -= offset_lines
@@ -778,6 +779,33 @@ def build(batch_dir, *, units=None):
                         row["options"].append({"key": option["label"], "text": value})
                 else:
                     row["material"] = "\n".join(body_lines[:body_first]).strip()
+                    # 混合题组（如阅读理解“任务一选择 + 任务二完成概要行内填空”）：
+                    # 最后一个独立小题窗口之后若存在含未解析子题行内空位的分任务段落，
+                    # 须将其并入共享 material，避免既丢材料又让后续子题题干留空。
+                    scoped_lines = lines
+                    if unit.get('identity_version') == 'scoped-v1':
+                        from .question_identity import numbered_projection
+                        scoped_lines = numbered_projection(lines)
+                    window_ends = [
+                        w[1] for n in unit["numbers"]
+                        if (w := question_content._question_window(scoped_lines, int(n))) is not None
+                    ]
+                    if window_ends:
+                        tail_start = max(window_ends)
+                        if tail_start < len(lines):
+                            unresolved_nums = {
+                                int(n) for n in unit["numbers"]
+                                if question_content._question_window(scoped_lines, int(n)) is None
+                            }
+                            if unresolved_nums and any(
+                                unresolved_nums.intersection(_weak_numbers(ln))
+                                for ln in lines[tail_start:] if ln.strip()
+                            ):
+                                trailing_material_lines = lines[tail_start:]
+                                tail_text = "\n".join(trailing_material_lines).strip()
+                                if tail_text:
+                                    row["material"] = (row["material"] + "\n" + tail_text).strip() if row["material"] else tail_text
+                material_weak_lines = lines[:first] + trailing_material_lines
                 for number in unit["numbers"]:
                     part = _parts(lines, number, scoped=unit.get('identity_version') == 'scoped-v1')
                     unnumbered = (unit.get('source_span') or {}).get('number_binding') in {
@@ -794,7 +822,7 @@ def build(batch_dir, *, units=None):
                         # 图片本身就是这一空的提示（答案册仍按号给答案）：按同表其余空位的
                         # 写法投影为填空位；图片仍原样留在材料与单元附件里，不算生成内容。
                         child["stem"] = "______"
-                    if not child["stem"] and any(int(number) in _weak_numbers(line) for line in lines[:first]):
+                    if not child["stem"] and any(int(number) in _weak_numbers(line) for line in material_weak_lines):
                         child["stem"] = "______"  # Explicit blank exists in shared source, not generated prose.
                     elif not unnumbered and not child["stem"] and not child["options"]:
                         issues.append({"unit_id": uid, "number": number, "code": "CHILD_CONTENT_UNRESOLVED",

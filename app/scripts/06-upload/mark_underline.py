@@ -95,10 +95,11 @@ def fields(value, path=()):
 def contexts(text, *, include_role=False):
     """Retain full paragraph context, splitting only explicit labeled options."""
     for paragraph in text.splitlines():
-        # Word can wrap the printed number (and its choice slot) in bold.
-        # The remaining inline markup is handled by visible().
-        paragraph = re.sub(r"^\s*(?:\*\*)?(?:[（(]\s*[）)]\s*)?\d{1,3}\s*(?:[.．](?!\d)|[、)])",
-                           "", paragraph)
+        # Word can wrap the printed number (and its choice slot / dot) in separate bold runs,
+        # e.g. "**1****.**..." or "**(** **)** **3.**...".
+        paragraph = re.sub(
+            r"^\s*(?:\*\*)*\s*(?:[（(](?:\s|\*\*)*[）)]\s*(?:\*\*)*\s*)?\d{1,3}(?:\s*\*\*)*\s*(?:[.．](?!\s*(?:\*\*\s*)?\d)|[、)])(?:\s*\*\*)*",
+            "", paragraph)
         # Label dots can be separated from text by inline formatting.
         labels = list(re.finditer(r"(?<![A-Za-z])(?:[A-H])[.．、]", paragraph))
         if not labels:

@@ -124,8 +124,43 @@ def _validated_round1_checks(folder: Path, data: dict) -> list[dict]:
     ]
 
 
+_ROUND1_ASSESSMENTS_CACHE: dict[tuple, dict[str, dict]] = {}
+_ROUND1_FINGERPRINT_FILES = (
+    "07_review/review-rounds.json",
+    "07_review/review-comparison.json",
+    "07_review/comparison-snapshot.json",
+    "01_source/structure.confirmed.json",
+    "01_source/正文.txt",
+    "06_batch/batch.json",
+    "06_batch/batch_meta.json",
+    "workflow/media-observations.json",
+)
+
+
+def _round1_cache_key(folder: Path) -> tuple:
+    import hashlib
+    parts = []
+    for rel in _ROUND1_FINGERPRINT_FILES:
+        path = folder / rel
+        try:
+            raw = path.read_bytes()
+            parts.append((rel, hashlib.sha256(raw).hexdigest()))
+        except OSError:
+            parts.append((rel, "missing"))
+    from . import review
+    fn_ids = (
+        id(review.prepare_round_plan),
+        id(review.resolve_round_plan),
+        id(review.rebase_rounds),
+        id(review._round_checks),
+        id(review._verify_round_sources),
+    )
+    return (str(folder.resolve()), tuple(parts), fn_ids)
+
+
 def load_round1_assessments(batch_dir: Path) -> dict[str, dict]:
     """Return validated ``{unit_id: assessment_dict}`` from Round 1 (``labels``) if present."""
+    import copy
     folder = Path(batch_dir)
     selected_data = None
     for rel in ("07_review/review-rounds.json", "07_review/review-comparison.json", "07_review/comparison-snapshot.json"):
@@ -135,6 +170,10 @@ def load_round1_assessments(batch_dir: Path) -> dict[str, dict]:
             break
     if not isinstance(selected_data, dict):
         return {}
+    cache_key = _round1_cache_key(folder)
+    cached = _ROUND1_ASSESSMENTS_CACHE.get(cache_key)
+    if cached is not None:
+        return copy.deepcopy(cached)
     checks = _validated_round1_checks(folder, selected_data)
     result: dict[str, dict] = {}
     for check in checks:
@@ -142,6 +181,9 @@ def load_round1_assessments(batch_dir: Path) -> dict[str, dict]:
         assessment = check.get("assessment")
         if uid and isinstance(assessment, dict):
             result[uid] = assessment
+    if len(_ROUND1_ASSESSMENTS_CACHE) > 64:
+        _ROUND1_ASSESSMENTS_CACHE.clear()
+    _ROUND1_ASSESSMENTS_CACHE[cache_key] = copy.deepcopy(result)
     return result
 
 

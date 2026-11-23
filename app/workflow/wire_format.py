@@ -462,31 +462,80 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None, 
 _TABLE_RE = re.compile(r"\[TABLE(?:\s+\d+)?\]([\s\S]*?)\[/TABLE\]", re.I)
 
 
-def restore_table_cell_images(blocks, source_text):
-    """Restore stripped `[IMG ...]` tags into table cells by exact cell-text match against source text."""
+def restore_table_cell_images(blocks, source_text, allowed_images=None):
+    """Restore stripped `[IMG ...]` tags into table cells for local preview.
+
+    Matches each `materialBlocks` table against `[TABLE ...]` blocks in `source_text`
+    using both non-empty cell text overlap and (when provided) `allowed_images`
+    overlap, then restores images via:
+    1. Grid `(row, col)` alignment (accounting for `rowspan`/`colspan`), which
+       restores pure-image cells whose text became `""` after `[IMG]` stripping
+       as well as mixed text+image cells.
+    2. Fallback exact non-empty cell-text match for tables whose row count differs.
+    """
     if not isinstance(blocks, list) or not blocks or not isinstance(source_text, str) or "[IMG" not in source_text:
         return blocks
+
+    allowed = None
+    if allowed_images is not None:
+        allowed = {str(n).strip().rsplit("/", 1)[-1] for n in allowed_images if str(n).strip()}
+        if not allowed:
+            return blocks
+
     def _norm(s):
         plain = IMAGE.sub("", str(s or ""))
         plain = re.sub(r"<br\s*/?>", "", plain, flags=re.I)
         return re.sub(r"[\s\u3000*]+", "", plain)
 
-    table_maps = []
+    def _cell_imgs(raw_cell):
+        tags = []
+        for m in IMAGE.finditer(raw_cell):
+            fname = m.group(1).strip().rsplit("/", 1)[-1]
+            if allowed is not None and fname not in allowed:
+                continue
+            tags.append(m.group(0))
+        return tags
+
+    def _apply_imgs(cell, raw_cell):
+        imgs = _cell_imgs(raw_cell)
+        if not imgs:
+            return False
+        cur = str(cell.get("text") or "")
+        stripped_raw = raw_cell.strip()
+        if stripped_raw.startswith("[IMG"):
+            cell["text"] = "\n".join(imgs) + ("\n" + cur.lstrip("\n") if cur.strip() else "")
+        else:
+            cell["text"] = (cur.rstrip("\n") + "\n" if cur.strip() else "") + "\n".join(imgs)
+        return True
+
+    src_tables = []
     for match in _TABLE_RE.finditer(source_text):
-        if "[IMG" not in match.group(1):
+        inner = match.group(1)
+        if "[IMG" not in inner:
             continue
-        cells = []
-        for line in match.group(1).strip().splitlines():
-            cells.extend(line.split("|") if "|" in line else ([line] if line.strip() else []))
-        cmap = {}
-        for raw_cell in cells:
-            if "[IMG" in raw_cell:
+        lines = [ln for ln in inner.strip().splitlines() if ln.strip()]
+        src_rows = [ln.split("|") if "|" in ln else [ln] for ln in lines]
+        all_norms = set()
+        img_cmap = {}
+        img_names = set()
+        for row in src_rows:
+            for raw_cell in row:
                 key = _norm(raw_cell)
                 if key:
-                    cmap[key] = raw_cell
-        if cmap:
-            table_maps.append(cmap)
-    if not table_maps:
+                    all_norms.add(key)
+                if "[IMG" in raw_cell:
+                    for m in IMAGE.finditer(raw_cell):
+                        img_names.add(m.group(1).strip().rsplit("/", 1)[-1])
+                    if key:
+                        img_cmap[key] = raw_cell
+        if img_names:
+            src_tables.append({
+                "rows": src_rows,
+                "all_norms": all_norms,
+                "img_cmap": img_cmap,
+                "img_names": img_names,
+            })
+    if not src_tables:
         return blocks
 
     for blk in blocks:
@@ -494,31 +543,61 @@ def restore_table_cell_images(blocks, source_text):
             continue
         if any("[IMG" in str(c.get("text") or "") for r in blk["rows"] for c in (r.get("cells") or []) if isinstance(c, dict)):
             continue
-        best_map = None
-        best_hits = 0
-        for cmap in table_maps:
-            hits = sum(
-                1 for r in blk["rows"] for c in (r.get("cells") or [])
-                if isinstance(c, dict) and _norm(c.get("text")) in cmap
-            )
-            if hits > best_hits:
-                best_hits, best_map = hits, cmap
-        if not best_map or best_hits == 0:
+        blk_norms = {
+            _norm(c.get("text"))
+            for r in blk["rows"]
+            for c in (r.get("cells") or [])
+            if isinstance(c, dict) and _norm(c.get("text"))
+        }
+        best_tbl = None
+        best_score = (0, 0, 0)
+        for st in src_tables:
+            img_overlap = len(st["img_names"] & allowed) if allowed is not None else 0
+            if allowed is not None and img_overlap == 0:
+                continue
+            text_hits = sum(1 for n in blk_norms if n in st["all_norms"])
+            shape_match = 1 if len(blk["rows"]) == len(st["rows"]) else 0
+            # Match either by shared cell text, or for 100% pure-image tables by exact row count + item attachments
+            if text_hits == 0 and not (not blk_norms and shape_match and allowed is not None and img_overlap > 0):
+                continue
+            score = (text_hits, img_overlap, shape_match)
+            if score > best_score:
+                best_score, best_tbl = score, st
+        if not best_tbl:
             continue
-        for r in blk["rows"]:
-            for c in r.get("cells") or []:
-                if not isinstance(c, dict):
-                    continue
-                raw_cell = best_map.get(_norm(c.get("text")))
-                if not raw_cell:
-                    continue
-                imgs = [m.group(0) for m in IMAGE.finditer(raw_cell)]
-                if not imgs:
-                    continue
-                cur = str(c.get("text") or "")
-                stripped_raw = raw_cell.strip()
-                if stripped_raw.startswith("[IMG"):
-                    c["text"] = "\n".join(imgs) + ("\n" + cur.lstrip("\n") if cur.strip() else "")
-                else:
-                    c["text"] = (cur.rstrip("\n") + "\n" if cur.strip() else "") + "\n".join(imgs)
+
+        # Pass 1: exact (row, col) grid alignment (handles pure-image cells and merged cells)
+        if len(blk["rows"]) == len(best_tbl["rows"]):
+            occupied = set()
+            for ri, r in enumerate(blk["rows"]):
+                col = 0
+                src_row = best_tbl["rows"][ri]
+                for c in r.get("cells") or []:
+                    if not isinstance(c, dict):
+                        continue
+                    while (ri, col) in occupied:
+                        col += 1
+                    rs = c.get("rowspan") if isinstance(c.get("rowspan"), int) and c.get("rowspan") > 0 else 1
+                    cs = c.get("colspan") if isinstance(c.get("colspan"), int) and c.get("colspan") > 0 else 1
+                    for dr in range(rs):
+                        for dc in range(cs):
+                            occupied.add((ri + dr, col + dc))
+                    if col < len(src_row):
+                        raw_cell = src_row[col]
+                        if "[IMG" in raw_cell and _norm(raw_cell) == _norm(c.get("text")):
+                            _apply_imgs(c, raw_cell)
+                    col += cs
+
+        # Pass 2: fallback exact non-empty text match for any remaining text+image cells
+        if best_tbl["img_cmap"]:
+            for r in blk["rows"]:
+                for c in r.get("cells") or []:
+                    if not isinstance(c, dict) or "[IMG" in str(c.get("text") or ""):
+                        continue
+                    key = _norm(c.get("text"))
+                    if not key:
+                        continue
+                    raw_cell = best_tbl["img_cmap"].get(key)
+                    if raw_cell:
+                        _apply_imgs(c, raw_cell)
     return blocks

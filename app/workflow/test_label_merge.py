@@ -332,6 +332,30 @@ class LabelMergeTests(unittest.TestCase):
             )
             self.assertEqual(label_merge.load_round1_assessments(batch_dir), {})
 
+    def test_load_round1_assessments_caches_and_invalidates_on_file_change(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            batch_dir = Path(tmp)
+            rounds_path = batch_dir / "07_review/review-rounds.json"
+            _write_json(rounds_path, {
+                "rounds": [{"round_id": "labels", "checks": [{"unit_id": "q-1", "assessment": {"knowledge": [KP_A]}}]}],
+            })
+            with mock.patch.object(label_merge, "_validated_round1_checks", wraps=label_merge._validated_round1_checks) as spy:
+                first = label_merge.load_round1_assessments(batch_dir)
+                second = label_merge.load_round1_assessments(batch_dir)
+                self.assertEqual(first["q-1"]["knowledge"], [KP_A])
+                self.assertEqual(second["q-1"]["knowledge"], [KP_A])
+                self.assertEqual(spy.call_count, 1)
+
+                # Mutating the bound file invalidates the cache immediately.
+                _write_json(rounds_path, {
+                    "rounds": [{"round_id": "labels", "checks": [{"unit_id": "q-1", "assessment": {"knowledge": [KP_B]}}]}],
+                })
+                third = label_merge.load_round1_assessments(batch_dir)
+                self.assertEqual(third["q-1"]["knowledge"], [KP_B])
+                self.assertEqual(spy.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

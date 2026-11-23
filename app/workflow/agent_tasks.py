@@ -770,35 +770,28 @@ def build_task(batch_dir, stage, max_input_chars=180000, blind=False, *, _specul
         hashes[str(path.resolve())] = hashlib.sha256(raw).hexdigest()
         if relative.endswith(".json"):
             value = json.loads(raw.decode("utf-8-sig"))
-            # 知识点标注只需要“可选叶子路径清单”；id 由导入器按路径自动反查回填
-            # （见 _project_knowledge_ids）。完整目录 73KB 全量下发会让每片提示词
-            # 膨胀、拖慢模型，这里只给路径。
-            if relative == "references/knowledge-catalog.json" and stage == "knowledge":
+            # 知识点标注与盲审只需要“可选最终叶子路径清单”；id 由导入器按路径自动反查回填
+            # （见 _project_knowledge_ids）。完整目录 68KB 全量下发会让每片提示词
+            # 膨胀、拖慢模型，这里只给叶子路径（及 exact_paths_by_type）。
+            if relative == "references/knowledge-catalog.json" and stage in ("knowledge", "review") \
+                    and isinstance(value, dict) and isinstance(value.get("points"), list):
                 _, leaves = taxonomy.knowledge_index()
                 exact = taxonomy.exact_knowledge_paths()
-                value = {"paths": [point["path"] for point in value["points"]
-                                   if point["path"] in leaves or point["path"] in exact]}
-            elif relative == "references/knowledge-catalog.json" and isinstance(value, dict) \
-                    and isinstance(value.get("points"), list):
-                # Blind review/label prompts must see where each path is a leaf so
-                # the model stops at real leaves (应用文/新媒体语篇/电子邮件 are
-                # sibling leaves) instead of inventing deeper levels.
-                points = value["points"]
-                marked = []
-                for point in points:
-                    if isinstance(point, dict) and isinstance(point.get("path"), str):
-                        path = point["path"]
-                        is_leaf = not any(
-                            isinstance(o, dict) and isinstance(o.get("path"), str)
-                            and o["path"].startswith(path + "/") for o in points)
-                        marked.append({**point, "leaf": is_leaf,
-                                       "leafTerminal": "叶子：到此为止，不得再拼接子级"
-                                                       if is_leaf else "非叶子：需继续选到叶子"})
-                    else:
-                        marked.append(point)
-                value = {**value, "points": marked, "exact_paths_by_type": {
-                    ty: sorted(taxonomy.exact_knowledge_paths(ty))
-                    for ty in taxonomy.type_knowledge_rules() if taxonomy.exact_knowledge_paths(ty)}}
+                paths = [point["path"] for point in value["points"]
+                         if isinstance(point, dict) and isinstance(point.get("path"), str)
+                         and (point["path"] in leaves or point["path"] in exact)]
+                if stage == "knowledge":
+                    value = {"paths": paths}
+                else:
+                    value = {
+                        **{k: v for k, v in value.items() if k != "points"},
+                        "paths": paths,
+                        "exact_paths_by_type": {
+                            ty: sorted(taxonomy.exact_knowledge_paths(ty))
+                            for ty in taxonomy.type_knowledge_rules() if taxonomy.exact_knowledge_paths(ty)
+                        },
+                        "note": "仅含可选最终叶子路径（及 exact_paths_by_type 精确路径）；每条路径必须原样照抄，不得再拼接子级。",
+                    }
             context[relative] = _sanitized(value)
         else:
             context[relative] = _sanitized(raw.decode("utf-8-sig"))

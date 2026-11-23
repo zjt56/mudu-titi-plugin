@@ -36,6 +36,19 @@ def picture_sentence_group(unit):
             and hit.get("rule") == "sentence-picture")
 
 
+def heading_word_bank_group(unit):
+    """Identify a word-bank group whose candidate words are printed in the section heading.
+
+    Example: ``**Ⅱ. 用can、can’t、could或couldn’t的适当形式填空**`` (`spell-modal`).
+    There is no separate word box between the heading and item 1: the section
+    heading itself carries the complete shared prompt and candidate words.
+    """
+    from .sync_practice import heading_hit
+    hit = heading_hit((unit.get("source_section") or {}).get("title") or "") or {}
+    return (unit.get("unit_kind") == "group" and unit.get("type") == "选词填空"
+            and hit.get("rule") == "spell-modal")
+
+
 def native_section_rubric(lines, unit, *, band_evidence=None):
     """Bind the printed heading of an intact, scoped source group."""
     from .question_content import legitimate_source_shape
@@ -49,8 +62,9 @@ def native_section_rubric(lines, unit, *, band_evidence=None):
                             and legitimate_source_shape(unit) == 'image_only')
                     ))
     picture = picture_sentence_group(unit)
+    word_bank_heading = heading_word_bank_group(unit)
     if (unit.get("identity_version") != "scoped-v1"
-            or unit.get('type') != '语音题' and not native_alias and not picture):
+            or unit.get('type') != '语音题' and not native_alias and not picture and not word_bank_heading):
         return []
     section, span = unit.get("source_section") or {}, unit.get("source_span") or {}
     heading, first, last = section.get("start_line"), span.get("start_line"), span.get("end_line")
@@ -86,6 +100,9 @@ def native_section_rubric(lines, unit, *, band_evidence=None):
     if picture:
         if not anchors or not any(re.fullmatch(r"\s*\[IMG\s+[^\]]+\]\s*", line)
                                   for line in body[:anchors[0][0]]):
+            return []
+    if word_bank_heading:
+        if not anchors or any(line.strip() for line in body[:anchors[0][0]]):
             return []
     if printed and sorted(printed) != sorted(int(n) for n in unit.get("numbers") or []):
         return []

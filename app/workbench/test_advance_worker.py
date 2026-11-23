@@ -209,6 +209,61 @@ class AdvanceWorkerTests(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(server._advance_state["later"]["waiting_for"], "earlier")
 
+    def test_manual_advance_clears_stale_activity_and_returns_stage_context(self):
+        import os, time
+        folder = self.batch("b-ctx")
+        wf = folder / "workflow"
+        (wf / "manifest.json").write_text(json.dumps({
+            "stages": {
+                "extract": {"status": "completed"},
+                "structure_gate": {"status": "pending"},
+            }
+        }), encoding="utf-8")
+        # Dead PID left a stale activity.json and supervisor has a future cooldown.
+        (wf / "activity.json").write_text(json.dumps({
+            "stage": "structure_gate", "detail": "old", "pid": 999999, "token": "dead",
+            "started_at": "2026-11-22T00:00:00+00:00",
+        }), encoding="utf-8")
+        (wf / "supervisor.json").write_text(json.dumps({
+            "version": 1, "status": "scheduled", "next_retry_at": time.time() + 120,
+            "no_progress_attempts": 2,
+        }), encoding="utf-8")
+        with patch.object(server, "_ensure_advance_worker", return_value=True), \
+             patch.object(server, "_wake_supervisor", return_value=None):
+            receipt = server._launch_advance("b-ctx", folder, reset_budget=True)
+        self.assertTrue(receipt["started"])
+        self.assertTrue(receipt["cleared_cooldown"])
+        self.assertTrue(receipt["cleared_stale_activity"])
+        self.assertFalse((wf / "activity.json").exists())
+        self.assertEqual(receipt["next_stage"], "structure_gate")
+        self.assertEqual(receipt["next_stage_label"], "结构确认")
+        self.assertEqual(receipt["queue_position"], 1)
+
+        # While running with live activity, advance_state exposes live stage + elapsed seconds.
+        (wf / "activity.json").write_text(json.dumps({
+            "stage": "structure_gate", "detail": "正在确认题目结构", "pid": os.getpid(),
+            "token": "live", "started_at": "2026-11-22T00:00:00+00:00",
+        }), encoding="utf-8")
+        state = server.advance_state("b-ctx")
+        self.assertEqual(state["active_stage"], "structure_gate")
+        self.assertEqual(state["active_stage_label"], "结构确认")
+        self.assertIsInstance(state.get("elapsed_seconds"), int)
+
+    def test_launch_advance_fresh_pending_batch_without_supervisor_json(self):
+        """Fresh batch with no supervisor.json must not fail evaluating next_retry_at > time()."""
+        folder = self.batch("b-fresh")
+        wf = folder / "workflow"
+        (wf / "manifest.json").write_text(json.dumps({
+            "stages": {"extract": {"status": "pending"}}
+        }), encoding="utf-8")
+        with patch.object(server, "_ensure_advance_worker", return_value=True), \
+             patch.object(server, "_wake_supervisor", return_value=None):
+            receipt = server._launch_advance("b-fresh", folder, reset_budget=True)
+        self.assertTrue(receipt["started"])
+        self.assertFalse(receipt["cleared_cooldown"])
+        self.assertFalse(receipt["cleared_stale_activity"])
+        self.assertEqual(receipt["next_stage"], "extract")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -166,6 +166,73 @@ class PhoneticStructureTest(unittest.TestCase):
         self.assertFalse(self.verified())
         self.assertTrue(any('[A8]' in problem for problem in check(row, self.verified())))
 
+    def test_heading_word_bank_group_keeps_heading_rubric_and_passes_all_layers(self):
+        from workflow import denoise, extract, handoff, structure_gate
+
+        text = ('Unit 2 Home Sweet Home\n第三课时 Grammar Focus\n'
+                '**Ⅱ. 用can、can’t、could或couldn’t的适当形式填空**\n\n'
+                '**1.**—________ I ask you a question?\n'
+                '—Yes, of course.\n'
+                '**2.**My brother ________ play the piano when he was five.')
+        structure, text, _ = extract.infer_structure(text)
+        units = structure_gate._build_units(structure['sections'], structure['groups'],
+                                            denoise.clean_body(text)[0].splitlines())
+        self.assertEqual(len(units), 1)
+        unit = units[0]
+        self.assertEqual(unit['unit_kind'], 'group')
+        self.assertEqual(unit['type'], '选词填空')
+        for path, content in (('正文.txt', text), ('structure.json', structure),
+                              ('structure.confirmed.json', {'units': units})):
+            self.write('01_source/' + path, content)
+        row = question_draft.build(self.root)['items'][0]
+        row['question_type'] = '选词填空'
+        row['filterMetadata'] = {'subtypes': ['多句']}
+        row['knowledge'] = ['语篇体裁/应用文/其他', '主题/人与自我/生活与学习/日常起居']
+        for child, ans in zip(row['subquestions'], ('Could', 'could')):
+            child['answer'] = ans
+        self.assertEqual(row['stem'], unit['source_section']['title'])
+        self.assertEqual(row['material'], '')
+        self.assertEqual(phonetic_structure.shape(row, self.verified()), (True, False))
+        check = self.check_script('check_structure')._check_unit
+        self.assertEqual(check(row, self.verified()), [])
+        self.assertTrue(any('[A8]' in p for p in check({**row, 'stem': ''}, self.verified())))
+        self.assertTrue(any('[A8]' in p for p in check({**row, 'stem': '编造指令'}, self.verified())))
+        self.assertEqual(question_content.audit_batch_source(self.root, {'items': [row]})['issues'], [])
+        filled = {'items': [row]}
+        early = copy.deepcopy(filled)
+        early['items'][0]['stem'] = ''
+        for filename in ('content.snapshot.json', 'batch_meta.base.json', 'batch_meta.json'):
+            self.write('06_batch/' + filename, early)
+        final = assemble_local.project_final_view(self.root, filled)
+        self.assertEqual(final['items'][0]['stem'], row['stem'])
+        headings = phonetic_structure.verified_picture_headings(self.root, units)
+        handoff._assert_underline_projection(early, final, source_headings=headings)
+        chunk = preview.source_slice(self.root, row['numbers'], unit_id=row['unit_id'])
+        self.assertEqual(chunk[0], row['stem'])
+        result = upload_payload.build_payload(final, batch_dir=self.root)
+        error_codes = {e['code'] for e in result['errors']}
+        self.assertNotIn('GROUP_INCOMPLETE', error_codes)
+        self.assertNotIn('MISSING_STEM', error_codes)
+        self.assertEqual(result['payload']['items'][0]['stem'], row['stem'].replace('**', ''))
+
+        # 反向保障：真正需要方框词库的 word-bank 组若 material 为空，绝不豁免 A8
+        wb_text = ('Unit 2 Home Sweet Home\n第三课时 Grammar Focus\n'
+                   '**Ⅱ. 用方框中所给单词的适当形式填空**\n'
+                   '**1.**He is ______.\n**2.**She is ______.')
+        wb_struct, wb_text, _ = extract.infer_structure(wb_text)
+        wb_units = structure_gate._build_units(wb_struct['sections'], wb_struct['groups'],
+                                               denoise.clean_body(wb_text)[0].splitlines())
+        for path, content in (('正文.txt', wb_text), ('structure.json', wb_struct),
+                              ('structure.confirmed.json', {'units': wb_units})):
+            self.write('01_source/' + path, content)
+        wb_row = question_draft.build(self.root)['items'][0]
+        wb_row['question_type'] = '选词填空'
+        for child in wb_row['subquestions']:
+            child['answer'] = 'kind'
+        self.assertEqual(wb_row['stem'], '')
+        self.assertEqual(wb_row['material'], '')
+        self.assertTrue(any('[A8]' in p for p in check(wb_row, self.verified())))
+
     def test_no_source_context_is_strict_even_for_plausible_native_attachment(self):
         self.assertEqual(phonetic_structure.shape(self.rows[0]), (False, False))
         codes = [p['code'] for p in upload_payload.build_payload({'items': self.rows})['errors']]

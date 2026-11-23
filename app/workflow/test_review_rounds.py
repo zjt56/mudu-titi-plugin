@@ -108,12 +108,11 @@ class ReviewRoundsTest(unittest.TestCase):
             supplied_catalog = data['references/knowledge-catalog.json']
             original_catalog = json.loads((Path(review.__file__).resolve().parents[1]
                                            / 'references/knowledge-catalog.json').read_text())
-            # Supplied points carry leaf/leafTerminal markers; compare content only.
-            def strip(cat):
-                return [{k: v for k, v in p.items() if k not in ('leaf', 'leafTerminal')}
-                        for p in cat['points']]
-            self.assertEqual(strip(supplied_catalog), strip(original_catalog))
-            self.assertTrue(all('leafTerminal' in p for p in supplied_catalog['points']))
+            # Supplied catalog uses compact leaf-only paths (+ exact paths) to keep prompts small.
+            expected_catalog = review.compact_knowledge_catalog([], original_catalog)
+            self.assertEqual(supplied_catalog['paths'], expected_catalog['paths'])
+            self.assertIn('note', supplied_catalog)
+            self.assertNotIn('points', supplied_catalog)
 
     @patch.object(review, '_verify_round_sources', new=lambda *args: None)
     def test_difficulty_blind_assessment_and_comparison(self):
@@ -262,22 +261,14 @@ class ReviewRoundsTest(unittest.TestCase):
         scoped = review.compact_knowledge_catalog(['阅读理解'], catalog)
         self.assertEqual(scoped['version'], catalog['version'])
         self.assertEqual(scoped['versionId'], catalog['versionId'])
-        self.assertLess(len(scoped['points']), len(catalog['points']))
-        # Every supplied point gains a leaf/leafTerminal marker; content unchanged.
-        for point in scoped['points']:
-            self.assertIn('leaf', point)
-            self.assertIn('leafTerminal', point)
-        base = {p['path']: {k: v for k, v in p.items() if k not in ('leaf', 'leafTerminal')}
-                for p in catalog['points']}
-
-        def strip(cat):
-            return {p['path']: {k: v for k, v in p.items() if k not in ('leaf', 'leafTerminal')}
-                    for p in cat['points']}
+        self.assertLess(len(scoped['paths']), len(catalog['points']))
+        self.assertNotIn('points', scoped)
+        self.assertIn('note', scoped)
+        full_compact = review.compact_knowledge_catalog([], catalog)
         for types in ([], ['未知题型'], ['阅读理解', '未知题型'], ['阅读理解', None]):
             scoped_fallback = review.compact_knowledge_catalog(types, catalog)
-            self.assertEqual(strip(scoped_fallback), base)
-            for point in scoped_fallback['points']:
-                self.assertIn('leafTerminal', point)
+            self.assertEqual(scoped_fallback['paths'], full_compact['paths'])
+            self.assertNotIn('points', scoped_fallback)
 
     def test_knowledge_schema_allows_empty_whole_group_child_labels(self):
         exported = review_rounds.export_task(self.batch)
@@ -891,8 +882,10 @@ class ReviewRoundsTest(unittest.TestCase):
             body = part['prompt'].split('BEGIN SUPPLIED CONTENT', 1)[1] \
                 .rsplit('END SUPPLIED CONTENT', 1)[0].split('\n', 1)[1]
             catalogs.append(json.loads(body)['references/knowledge-catalog.json'])
-        single = [point['path'] for point in catalogs[0]['points']]
-        reading = [point['path'] for point in catalogs[2]['points']]
+        single = list(catalogs[0]['paths'])
+        reading = list(catalogs[2]['paths'])
+        self.assertEqual(catalogs[0]['packs'], ['vocab-full', 'grammar', 'phonetics', 'pragmatics'])
+        self.assertEqual(catalogs[2]['packs'], ['theme', 'genre', 'angle-reading'])
         self.assertTrue(single and all(path.startswith(('\u8bcd\u6c47', '\u8bed\u6cd5', '\u8bed\u97f3', '\u8bed\u7528'))
                                        for path in single))
         self.assertFalse(any(path.startswith('\u8bbe\u9898\u89d2\u5ea6/\u9605\u8bfb') for path in single))
@@ -1759,20 +1752,20 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(failure['targets'], ['group-1-6'])
 
     def test_leaf_markers_present_in_review_catalog(self):
-        # The blind review catalog must label every node as a leaf (terminal) or
-        # not, so the model stops at real leaves instead of drilling deeper.
+        # The blind review catalog supplies only terminal leaf paths (plus exact
+        # paths) with an explicit terminal note, cutting prompt bloat while
+        # preventing the model from drilling past real leaves.
         from workflow import agent_tasks
         self._parallel_batch()
         base = agent_tasks.build_task(self.batch, "review", max_input_chars=1000000)
         part = review_rounds._partition_contexts(base, 1000000, round_id="labels")[0]
         context = part["context"]
-        self.assertIn("leafTerminal", context)
         data = json.loads(context.split("\n", 1)[1])
-        points = data["references/knowledge-catalog.json"]["points"]
-        self.assertTrue(points)
-        for point in points:
-            self.assertIn("leaf", point)
-            self.assertIn("leafTerminal", point)
+        cat = data["references/knowledge-catalog.json"]
+        self.assertNotIn("points", cat)
+        self.assertTrue(cat["paths"])
+        self.assertIn("不得再拼接子级", cat.get("note", ""))
+        self.assertTrue(all(isinstance(p, str) and p for p in cat["paths"]))
 
 
 if __name__ == "__main__":

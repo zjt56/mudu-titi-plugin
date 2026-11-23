@@ -1,0 +1,16 @@
+{
+  "schema_version": "catalog-packs/v1",
+  "pack": "angle-listening",
+  "base": true,
+  "description": "设题角度/听力分支全部叶子",
+  "source_sha256": "7f5f45a90f3f9b22f1486f94933bf6d0976ffb5baceb5650d9efdec8064a21eb",
+  "count": 5,
+  "sha256": "53f8e88d70219eb2474c8ef837ba1b4d3ffcd1bdbee13b17834fe5a2852aede5",
+  "paths": [
+    "设题角度/听力/细节理解",
+    "设题角度/听力/推理判断",
+    "设题角度/听力/人物关系",
+    "设题角度/听力/地点推断",
+    "设题角度/听力/主旨大意"
+  ]
+}

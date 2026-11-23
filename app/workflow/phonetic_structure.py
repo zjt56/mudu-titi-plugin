@@ -29,10 +29,10 @@ def verified_groups(batch_path):
     from .agent_tasks import confirmed_units
     from collections import Counter
     from .question_content import legitimate_source_shape
-    from .shared_rubric import picture_sentence_group
+    from .shared_rubric import heading_word_bank_group, picture_sentence_group
     try:
         eligible = {u['unit_id']: u.get('type') for u in confirmed_units(root)
-                    if u.get('type') == '语音题' or picture_sentence_group(u) or (
+                    if u.get('type') == '语音题' or picture_sentence_group(u) or heading_word_bank_group(u) or (
                         u.get('unit_kind') == 'group' and (
                             (u.get('numbers') == [1]
                              and (u.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
@@ -72,9 +72,10 @@ def verified_groups(batch_path):
 
 
 def verified_picture_headings(root, units):
-    from .shared_rubric import picture_sentence_group
+    from .shared_rubric import heading_word_bank_group, picture_sentence_group
 
-    ids = {unit['unit_id'] for unit in units if picture_sentence_group(unit)}
+    ids = {unit['unit_id'] for unit in units
+           if picture_sentence_group(unit) or heading_word_bank_group(unit)}
     if not ids:
         return {}
     return {uid: item['stem'] for uid, item in verified_groups(Path(root) / '06_batch/batch.json').items()
@@ -141,6 +142,9 @@ def shape(unit, verified=None):
         actual = [a for a in unit.get("attachments") or []
                   if isinstance(a, dict) and a.get("kind") == "image" and a.get("placement") == "question"]
         return bool(images and images == present and len(actual) == len(images)), False
+    if expected.get("_source_question_type") == "选词填空":
+        complete = all(str(c.get("stem") or "").strip() for c in subs)
+        return (not str(expected.get("material") or "").strip() and complete), False
     binding = expected.get('source_span', {}).get('number_binding')
     alias = ((
         (len(subs) == 1 and binding == 'unnumbered_section')

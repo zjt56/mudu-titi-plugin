@@ -89,33 +89,123 @@ def _prune_stale_round_unchecked(rows: list, rounds: dict) -> list:
 
 
 def compact_knowledge_catalog(types, catalog=None):
-    """Filter only when every type has a usable mapping; otherwise keep everything.
+    """Filter to valid leaf paths (+ exact paths) for the given question types.
 
-    Every returned point carries an explicit ``leaf``/``leafTerminal`` marker so
-    the blind review model can see where the catalog stops and does not invent
-    deeper paths (e.g. 应用文/新媒体语篇/电子邮件 are sibling leaves).
+    Delegates to ``catalog_packs`` so each type set loads only its required
+    dimension packs (e.g. ``vocab-spelling`` excludes ``词汇/词汇辨析/*``;
+    ``phonetics-keyword`` keeps only ``语音/基本读音`` and never leaks non-leaf
+    exact paths into ``单项填空``/``语音题``/``单词拼写``).
     """
-    from workbench import taxonomy
-    if catalog is None:
-        catalog = _load(taxonomy.KNOWLEDGE_PATH)
-    if not isinstance(catalog, dict) or not isinstance(catalog.get("points"), list):
+    if catalog is not None and (not isinstance(catalog, dict) or not isinstance(catalog.get("points"), list)):
         return catalog
-    result = dict(catalog)
-    rules = taxonomy.type_knowledge_rules()
-    points = catalog["points"]
-    if not types or any(not isinstance(ty, str) or ty not in rules
-                        or not (taxonomy._allowed_prefixes(ty) or taxonomy.exact_knowledge_paths(ty))
-                        for ty in types):
-        kept = points
-    else:
-        kept = [point for point in points
-                if not isinstance(point, dict) or not isinstance(point.get("path"), str)
-                or any(taxonomy.knowledge_path_allowed(point["path"], ty) for ty in types)]
-    result["points"] = [_mark_leaf(point, points) for point in kept]
-    result["exact_paths_by_type"] = {ty: sorted(taxonomy.exact_knowledge_paths(ty))
-                                     for ty in (types or rules) if isinstance(ty, str)
-                                     and taxonomy.exact_knowledge_paths(ty)}
+    from . import catalog_packs
+    pack_info = catalog_packs.packs_for_types(types, catalog=catalog)
+    result = dict(pack_info["catalog_meta"])
+    result["packs"] = pack_info["packs"]
+    result["paths"] = pack_info["paths"]
+    result["exact_paths_by_type"] = pack_info["exact_paths_by_type"]
+    result["note"] = "仅含可选最终叶子路径（及 exact_paths_by_type 精确路径）；每条路径必须原样照抄，不得再拼接子级。"
     return result
+
+
+_RULE_DIM_SECTIONS = (
+    ("二、主题", "主题"),
+    ("三、语音", "语音"),
+    ("四、词汇", "词汇"),
+    ("五、语法", "语法"),
+    ("六、语篇体裁", "语篇体裁"),
+    ("七、设题角度", "设题角度"),
+    ("八、语用", "语用"),
+)
+
+_STATIC_PREFIX_ORDER = (
+    "skills-reference/knowledge-matching-rules.md",
+    "skills-reference/type-taxonomy.md",
+    "docs/source-fragments.md",
+    "references/filter-framework.json",
+    "references/type-knowledge-map.json",
+    "references/knowledge-catalog.json",
+    "textbook_index",
+    "batch_metadata",
+    "01_source/material-roles.json",
+)
+
+
+def scope_knowledge_rules(text, types=None):
+    """Trim ``knowledge-matching-rules.md`` to a concise, shard-scoped rule card.
+
+    Always removes developer-only preamble links and Section 12 (CLI scripts),
+    while preserving Step-by-Step workflow, boundary rules, and real pitfall
+    cases. When all ``types`` map cleanly in ``taxonomy``, keeps only the
+    dimension sections allowed for those question types.
+    """
+    if not isinstance(text, str) or "## " not in text:
+        return text
+    from workbench import taxonomy
+    rules = taxonomy.type_knowledge_rules()
+    type_list = [ty for ty in (types or []) if isinstance(ty, str) and ty.strip()]
+    use_scope = bool(type_list) and all(
+        ty in rules and (taxonomy._allowed_prefixes(ty) or taxonomy.exact_knowledge_paths(ty))
+        for ty in type_list
+    )
+    allowed_roots = set()
+    allowed_scopes = set()
+    if use_scope:
+        for ty in type_list:
+            for prefix in (*taxonomy._allowed_prefixes(ty), *taxonomy.exact_knowledge_paths(ty)):
+                allowed_scopes.add(prefix)
+                allowed_roots.add(prefix.split("/", 1)[0])
+
+    # Split into ("## heading", body) blocks, skipping developer preamble before first "## ".
+    raw_sections = re.split(r"(?m)^(?=## )", text)
+    kept_blocks = []
+    for block in raw_sections:
+        if not block.startswith("## "):
+            continue
+        first_line = block.splitlines()[0].strip()
+        if "十二、校验脚本" in first_line:
+            continue
+        dim_match = next((dim for marker, dim in _RULE_DIM_SECTIONS if marker in first_line), None)
+        if dim_match is not None and use_scope:
+            if dim_match not in allowed_roots:
+                continue
+            if dim_match == "设题角度":
+                allow_reading = any(s.startswith("设题角度/阅读") or s == "设题角度" for s in allowed_scopes)
+                allow_listening = any(s.startswith("设题角度/听力") or s == "设题角度" for s in allowed_scopes)
+                if allow_reading and not allow_listening and "**听力**" in block:
+                    head_part, _, rest = block.partition("**听力**")
+                    tail_idx = rest.find("\n**以组题为准")
+                    block = head_part.rstrip() + (rest[tail_idx:] if tail_idx >= 0 else "")
+                elif allow_listening and not allow_reading and "**阅读**" in block and "**听力**" in block:
+                    head_part, _, after_reading = block.partition("**阅读**")
+                    _, _, from_listening = after_reading.partition("**听力**")
+                    block = head_part.rstrip() + "\n\n**听力**" + from_listening
+        elif "九、多标签模板" in first_line and use_scope:
+            out_lines = []
+            for ln in block.splitlines():
+                if ln.startswith("|") and not ln.startswith("| 题型") and not ln.startswith("| ---"):
+                    col0 = ln.split("|", 2)[1].strip()
+                    # Keep row if any shard type name (or prefix like 听力) appears in col0
+                    if not any(ty in col0 or (ty.startswith("听力") and "听力" in col0) for ty in type_list):
+                        continue
+                out_lines.append(ln)
+            block = "\n".join(out_lines)
+        kept_blocks.append(block.strip())
+    return "\n\n".join(kept_blocks) if kept_blocks else text
+
+
+def order_prompt_context(subset):
+    """Put static rules/catalogs before per-shard dynamic data for prefix caching."""
+    if not isinstance(subset, dict):
+        return subset
+    ordered = {}
+    for key in _STATIC_PREFIX_ORDER:
+        if key in subset:
+            ordered[key] = subset[key]
+    for key, value in subset.items():
+        if key not in ordered:
+            ordered[key] = value
+    return ordered
 
 
 def _mark_leaf(point, all_points):

@@ -61,9 +61,10 @@ test('流程图精修：紧凑两行节点名、方向箭头、已完成段用�
   assert.match(client, /const lineFor = \(a, b, reached\)/);
   // 整图是带 viewBox 的自适应 SVG：随容器等比缩放，节点名在 SVG 内两行居中。
   assert.match(client, /viewBox: '0 0 ' \+ svgW/);
-  // 自适应：不设固定宽高，随列宽拉伸，高度按比例自动。
+  // 双向自适应：宽高 100% 占满可视区，由 preserveAspectRatio 等比缩放且容器不出现纵向滚动条。
   assert.match(client, /preserveAspectRatio: 'xMidYMid meet'/);
-  assert.match(client, /style: \{ display: 'block', width: '100%', height: 'auto', aspectRatio: svgW \+ ' \/ ' \+ svgH \}/);
+  assert.match(client, /style: \{ display: 'block', width: '100%', height: '100%', maxWidth: '100%', maxHeight: '100%' \}/);
+  assert.match(client, /className: 'wf-flow-stage', style: \{ flex: 1, minWidth: 0, minHeight: 0, position: 'relative', overflow: 'hidden'/);
   assert.doesNotMatch(client, /maxWidth: svgW/);
   assert.match(client, /function flowLabelLines\(name\)/);
   assert.match(client, /flowLabelLines\(shortStageName\(it\)\)/);

@@ -209,5 +209,58 @@ class WireFormatTest(unittest.TestCase):
             atts = [(a["name"], a["placement"], a.get("optionKey")) for a in out.get("attachments") or []]
             self.assertEqual(atts, [("image10.png", "option", "A")])
 
+    def test_restore_table_cell_images_pure_image_cells_and_merges(self):
+        from workflow.wire_format import restore_table_cell_images
+
+        source = (
+            "[TABLE 1]\n"
+            "[IMG image2.jpeg] | Jack is my classmate.\n"
+            "[IMG image3.jpeg] | This girl is Sue.\n"
+            "[IMG image4.jpeg] | Anna is 25.\n"
+            "[/TABLE]\n"
+        )
+        blocks = [{
+            "type": "table",
+            "rows": [
+                {"cells": [{"text": "", "rowspan": 1, "colspan": 1}, {"text": "Jack is my classmate.", "rowspan": 1, "colspan": 1}]},
+                {"cells": [{"text": "", "rowspan": 1, "colspan": 1}, {"text": "This girl is Sue.", "rowspan": 1, "colspan": 1}]},
+                {"cells": [{"text": "", "rowspan": 1, "colspan": 1}, {"text": "Anna is 25.", "rowspan": 1, "colspan": 1}]},
+            ],
+        }]
+        restore_table_cell_images(blocks, source, allowed_images={"image2.jpeg", "image3.jpeg", "image4.jpeg"})
+        self.assertEqual(blocks[0]["rows"][0]["cells"][0]["text"], "[IMG image2.jpeg]")
+        self.assertEqual(blocks[0]["rows"][1]["cells"][0]["text"], "[IMG image3.jpeg]")
+        self.assertEqual(blocks[0]["rows"][2]["cells"][0]["text"], "[IMG image4.jpeg]")
+
+        # Merged cells (rowspan in col 0 shifts row 1 cells to col 1)
+        merged_source = (
+            "[TABLE 2]\n"
+            "Group | [IMG a.png] | Alpha\n"
+            " | [IMG b.png] | Beta\n"
+            "[/TABLE]\n"
+        )
+        merged_blocks = [{
+            "type": "table",
+            "rows": [
+                {"cells": [{"text": "Group", "rowspan": 2, "colspan": 1}, {"text": ""}, {"text": "Alpha"}]},
+                {"cells": [{"text": ""}, {"text": "Beta"}]},
+            ],
+        }]
+        restore_table_cell_images(merged_blocks, merged_source, allowed_images={"a.png", "b.png"})
+        self.assertEqual(merged_blocks[0]["rows"][0]["cells"][1]["text"], "[IMG a.png]")
+        self.assertEqual(merged_blocks[0]["rows"][1]["cells"][0]["text"], "[IMG b.png]")
+
+        # Pure-image table (no text cells at all) matched via allowed_images + row shape
+        pic_source = "[TABLE 3]\n[IMG p1.png] | [IMG p2.png]\n[/TABLE]\n"
+        pic_blocks = [{"type": "table", "rows": [{"cells": [{"text": ""}, {"text": ""}]}]}]
+        restore_table_cell_images(pic_blocks, pic_source, allowed_images={"p1.png", "p2.png"})
+        self.assertEqual(pic_blocks[0]["rows"][0]["cells"][0]["text"], "[IMG p1.png]")
+        self.assertEqual(pic_blocks[0]["rows"][0]["cells"][1]["text"], "[IMG p2.png]")
+
+        # Decorative/unlisted images must not be resurrected when allowed_images is provided
+        decor_blocks = [{"type": "table", "rows": [{"cells": [{"text": ""}, {"text": "Jack is my classmate."}]}]}]
+        restore_table_cell_images(decor_blocks, source, allowed_images={"other.jpeg"})
+        self.assertEqual(decor_blocks[0]["rows"][0]["cells"][0]["text"], "")
+
 if __name__ == "__main__":
     unittest.main()

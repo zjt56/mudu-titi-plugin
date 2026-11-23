@@ -1271,6 +1271,85 @@ def work_in_flight() -> bool:
     return _operations_leased()
 
 
+_ADVANCE_STAGE_LABELS = {
+    "extract": "内容提取",
+    "structure_gate": "结构确认",
+    "preassemble": "前置组装与判型",
+    "types": "题型交接",
+    "audio": "听力处理",
+    "answers": "答案填充",
+    "explanations": "解析填充",
+    "knowledge": "知识标注",
+    "content_snapshot": "内容快照",
+    "meta": "元信息整理",
+    "underlines": "画线检查",
+    "assemble": "汇总整理",
+    "validate": "本地体检",
+    "review": "内容审核",
+    "review_gate": "审核汇总",
+    "format_gate": "格式检查",
+    "upload_gate": "审核上传",
+}
+
+
+def _advance_context_info(folder: Path) -> dict:
+    """Summarize live activity and next/blocked stage for clear 继续处理 feedback."""
+    info = {}
+    try:
+        from workflow import activity as wf_activity
+        act = wf_activity.read(folder)
+        if act:
+            stage = str(act.get("stage") or "")
+            info["active_stage"] = stage
+            info["active_stage_label"] = _ADVANCE_STAGE_LABELS.get(stage, stage)
+            if act.get("detail"):
+                info["active_detail"] = str(act["detail"])
+            started_at = act.get("started_at")
+            if isinstance(started_at, str) and started_at:
+                try:
+                    dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                    elapsed = int(max(0, (datetime.now(dt.tzinfo) - dt).total_seconds()))
+                    info["elapsed_seconds"] = elapsed
+                except (ValueError, TypeError):
+                    pass
+    except (ImportError, OSError, ValueError, TypeError):
+        pass
+    try:
+        manifest = load(folder / "workflow/manifest.json", {}) or {}
+        stages = manifest.get("stages") if isinstance(manifest.get("stages"), dict) else {}
+        for st_name, st_val in stages.items():
+            if st_name in ("upload_gate", "upload", "publish_gate"):
+                continue
+            status = str((st_val or {}).get("status") or "pending")
+            if status in ("failed", "blocked") and "blocked_stage" not in info:
+                info["blocked_stage"] = st_name
+                info["blocked_stage_label"] = _ADVANCE_STAGE_LABELS.get(st_name, st_name)
+                reason = str((st_val or {}).get("error") or (st_val or {}).get("notes") or "").strip()
+                if reason:
+                    info["blocked_reason"] = reason[:200]
+            if status not in ("completed", "approved", "skipped") and "next_stage" not in info:
+                info["next_stage"] = st_name
+                info["next_stage_label"] = _ADVANCE_STAGE_LABELS.get(st_name, st_name)
+    except (OSError, ValueError, TypeError):
+        pass
+    return info
+
+
+def _cleanup_stale_activity(folder: Path) -> bool:
+    """Remove workflow/activity.json left behind by a dead PID (display-only cleanup)."""
+    path = folder / "workflow/activity.json"
+    try:
+        if not path.is_file() or path.is_symlink() or path.parent.is_symlink():
+            return False
+        from workflow import activity as wf_activity
+        if not wf_activity.read(folder):
+            path.unlink(missing_ok=True)
+            return True
+    except (ImportError, OSError, ValueError, TypeError):
+        pass
+    return False
+
+
 @serialized
 def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expectation=None,
                     reset_budget=False, **details) -> dict:
@@ -1288,6 +1367,7 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
     if not reset_budget and (folder / QUEUE_REMOVED).is_file():
         return {"started": False, "removed": True,
                 "reason": "批次已由用户移出排队区；点继续处理才会恢复"}
+    ctx_info = _advance_context_info(folder)
     # Strict queue serialization: only the earliest unfinished batch may start.
     # A later batch waits until every earlier one is complete and out of 排队区.
     predecessor = _waiting_for_predecessor(name)
@@ -1295,31 +1375,44 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
         with _lock:
             _advance_state[name] = {"running": False, "waiting": True,
                                     "waiting_for": predecessor, "updated_at": now()}
-        return {"started": False, "waiting": True, "waiting_for": predecessor,
+        return {"started": False, "waiting": True, "waiting_for": predecessor, **ctx_info,
                 "reason": f"需等待前一份试卷「{predecessor}」全部完成并移出排队区后再开始"}
     if (_advance_state.get(name) or {}).get("running"):
-        return {"started": False, "running": True}
+        return {"started": False, "running": True, **ctx_info}
     with _advance_queue_lock:
-        queued = any((entry.get("name") if isinstance(entry, dict) else entry) == name
-                     for entry in _advance_queue)
+        q_names = [(entry.get("name") if isinstance(entry, dict) else entry) for entry in _advance_queue]
+        queued = name in q_names
+        q_pos = (q_names.index(name) + 1) if queued else None
     if queued:
         _ensure_advance_worker()
         _wake_supervisor()
-        return {"started": False, "running": True, "queued": True}
+        return {"started": False, "running": True, "queued": True, "queue_position": q_pos, **ctx_info}
+    cleared_cooldown = False
+    cleared_stale_activity = False
     # Preparation writes must participate in the same lock/lease as execution.
     with wf_supervisor.advance_claim(folder) as acquired:
         if not acquired:
-            return {"started": False, "running": True, "external": True}
+            return {"started": False, "running": True, "external": True, **ctx_info}
         if operations_expectation is not None:
             from workflow import operations
             if (operations_expectation.get("identity") != operations._identity(folder)
                     or operations_expectation.get("incident_id") != (operations._load(folder).get("incident") or {}).get("incident_id")):
                 return {"started": False, "error": "stale_operations_identity"}
         if reset_budget:
+            cleared_stale_activity = _cleanup_stale_activity(folder)
             try:
+                sup_before = load(folder / "workflow/supervisor.json", {}) or {}
+                if sup_before.get("status") in {"exhausted", "waiting_external", "scheduled", "cooldown"} or float(sup_before.get("next_retry_at") or 0) > time():
+                    cleared_cooldown = True
                 wf_supervisor.clear_exhausted(folder)
             except (OSError, ValueError, TypeError):
                 pass
+            if ctx_info.get("blocked_stage"):
+                try:
+                    from workflow import operations
+                    operations.observe_execution(folder)
+                except (ImportError, OSError, ValueError, RuntimeError):
+                    pass
         if prepare is not None:
             details.update(prepare())
     with _lock:
@@ -1327,9 +1420,18 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
     with _advance_queue_lock:
         _advance_queue.append({"name": name, "operations_expectation": operations_expectation}
                               if operations_expectation is not None else name)
+        q_pos = len(_advance_queue)
+    if reset_budget:
+        _OVERVIEW_CACHE.clear()
     _ensure_advance_worker()
     _wake_supervisor()
-    return {"started": True, "queued": True, "running": False}
+    return {
+        "started": True, "queued": True, "running": False,
+        "queue_position": q_pos,
+        "cleared_cooldown": cleared_cooldown,
+        "cleared_stale_activity": cleared_stale_activity,
+        **ctx_info,
+    }
 
 
 @serialized
@@ -1385,6 +1487,11 @@ def advance_state(name: str) -> dict:
             if stage_status not in ("completed", "approved", "skipped"):
                 state["self_heal"] = {key: healing[key] for key in
                     ("status", "stage", "next_retry_at", "attempt", "verified", "action", "reason", "error_code", "has_feedback") if key in healing}
+        ctx_info = _advance_context_info(folder)
+        if ctx_info.get("active_stage"):
+            for k in ("active_stage", "active_stage_label", "active_detail", "elapsed_seconds"):
+                if k in ctx_info:
+                    state[k] = ctx_info[k]
     except ValueError:
         pass
     return state
@@ -1863,9 +1970,15 @@ def handle_upload(fields: dict, files: list[dict]) -> dict:
         inbox_rel = str(folder)
     source_notice = (wf_source_policy.upload_notice(source, [f for f in docs if f is not source])
                      if wf_source_policy is not None else "")
+    adv_state = advance_state(batch_folder.name)
     return {"name": batch_folder.name, "inbox": inbox_rel,
             "paper": paper_info(batch_folder, {}, manifest),
-            "stage": stage_cards(manifest),
+            "stage": stage_cards(manifest, False, bool(adv_state.get("running")), None, batch_folder=batch_folder),
+            "advance": adv_state,
+            "flow_done": False, "uploaded": False, "queue_removed": False,
+            "created_at": manifest.get("created_at"),
+            "updated_at": manifest.get("updated_at"),
+            "queue_order_ts": _batch_upload_order_ns(batch_folder, manifest),
             "source_notice": source_notice,
             "source_kind": wf_source_policy.kind(source) if wf_source_policy is not None else None,
             "files": [path.name for path in (saved_source, saved_answer, saved_audio) if path]
@@ -2544,7 +2657,7 @@ def _live_overview(value, name, folder):
     value = dict(value)
     advance = advance_state(name)
     value["advance"] = advance
-    upload = upload_state(name)
+    upload = upload_state(name, include_unreviewed=False)
     value["upload_status"] = upload
     manifest = load(folder / "workflow/manifest.json", {}) or {}
     work = activity.read(folder)
@@ -2555,17 +2668,25 @@ def _live_overview(value, name, folder):
                 audio = audio_status(name)  # A leftover heartbeat alone is not live work.
         except (OSError, ValueError, TypeError, ImportError):
             audio = {}
-    # Always re-read the small outcome reports here. These substeps must not
-    # inherit the cached document projection's older report contents.
-    stage = (stage_cards(manifest, bool(value.get("rows")), bool(advance.get("running")), value.get("diagnostics"),
-                         batch_folder=folder, runtime_activity=work, audio_state=audio)
-             if manifest.get("stages") else dict(value.get("stage") or {}))
-    stage["items"] = [dict(card) for card in stage.get("items") or []]
-    if not manifest.get("stages"):
-        from workflow.substeps import project as project_substeps
-        projected = project_substeps(manifest, folder, work, audio)
-        for card in stage["items"]:
-            card["substeps"] = projected.get(card.get("id"), [])
+    # Fast path for idle cached batches: _overview_key() already fingerprints
+    # manifest.json and every stage report, so when no live worker/activity/audio
+    # is running we can reuse the cached stage cards instead of re-reading 15+
+    # report JSONs per batch on every 2.5s list_batches() poll.
+    cached_stage = value.get("stage")
+    if (not work and not advance.get("running") and not audio.get("running")
+            and isinstance(cached_stage, dict) and cached_stage.get("items")):
+        stage = dict(cached_stage)
+        stage["items"] = [dict(card) for card in stage.get("items") or []]
+    else:
+        stage = (stage_cards(manifest, bool(value.get("rows")), bool(advance.get("running")), value.get("diagnostics"),
+                             batch_folder=folder, runtime_activity=work, audio_state=audio)
+                 if manifest.get("stages") else dict(cached_stage or {}))
+        stage["items"] = [dict(card) for card in stage.get("items") or []]
+        if not manifest.get("stages"):
+            from workflow.substeps import project as project_substeps
+            projected = project_substeps(manifest, folder, work, audio)
+            for card in stage["items"]:
+                card["substeps"] = projected.get(card.get("id"), [])
     if audio.get("running") and not audio.get("stale"):
         for card in stage["items"]:
             if card.get("id") == "audio" and card.get("status") not in TERMINAL_OK:
@@ -2691,7 +2812,7 @@ def _overview_uncached(name, folder):
         diagnostics = None
     # 内容审核之后仍须完成最终格式检查。不能在二审结束时提前移出上传队列。
     flow_done = final_format_complete(folder, manifest)
-    upload = upload_state(name)
+    upload = upload_state(name, include_unreviewed=False)
     upload_stage_done = str(((manifest.get("stages") or {}).get("upload") or {}).get("status") or "") == "completed"
     flow_done = flow_done or upload_stage_done  # 已提交远端的历史批次不因新增本地步骤重新排队。
     receipt = upload.get("receipt") or load(folder / "receipt.json", {})
@@ -3316,7 +3437,7 @@ def start_batch_upload(name, actor="本机操作员", *, allow_unreviewed=False,
     return {"started": True}
 
 
-def upload_state(name):
+def upload_state(name, *, include_unreviewed=True):
     """Project in-memory progress and durable upload evidence after a restart."""
     folder = batch_dir(name)
     with _lock:
@@ -3324,14 +3445,15 @@ def upload_state(name):
     result = {"running": False, "ok": None, "step": "", "output": "", "error": "",
               "state": "idle", "receipt": None}
     result.update(job)
-    try:
-        from workflow.runner import unreviewed_summary
-        result['unreviewed'] = unreviewed_summary(folder, wf_manifest.load(folder))
-        if result['unreviewed'].get('revision'):
-            result['requires_unreviewed_confirmation'] = not result['unreviewed']['passed']
-    except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
-        result['unreviewed'] = {'passed': False, 'revision': '', 'counts': {},
-                                'errors': [{'message': str(exc)}]}
+    if include_unreviewed:
+        try:
+            from workflow.runner import unreviewed_summary
+            result['unreviewed'] = unreviewed_summary(folder, wf_manifest.load(folder))
+            if result['unreviewed'].get('revision'):
+                result['requires_unreviewed_confirmation'] = not result['unreviewed']['passed']
+        except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
+            result['unreviewed'] = {'passed': False, 'revision': '', 'counts': {},
+                                    'errors': [{'message': str(exc)}]}
     receipt = load(folder / "07_upload" / "receipt.json")
     receipt = receipt if isinstance(receipt, dict) and receipt.get("id") else None
     attempts = []
@@ -3632,7 +3754,7 @@ def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None, ap_ct
         return []
 
 
-def label_payload(row, batch_item, subs, folder, unit_id=None, *, ap_ctx=None):
+def label_payload(row, batch_item, subs, folder, unit_id=None, *, ap_ctx=None, r1_assessments=None):
     """当前标签值 + 目录校验结果，供人工核对/修改。
 
     优先级：单元标签草稿（人工改过的）> 批次单元 > 行汇总 > 子题。
@@ -3667,8 +3789,9 @@ def label_payload(row, batch_item, subs, folder, unit_id=None, *, ap_ctx=None):
                  or row.get("question_type") or row.get("type") or "")
     from workflow import label_merge
     uid_key = str(unit_id or row.get("unit_id") or "")
+    r1_kwargs = {"round1_assessment": r1_assessments.get(uid_key)} if isinstance(r1_assessments, dict) else {}
     merged_info = label_merge.merged_unit_knowledge(
-        folder, uid_key, knowledge, main_type=main_type, manual_labels=unit_labels
+        folder, uid_key, knowledge, main_type=main_type, manual_labels=unit_labels, **r1_kwargs
     ) if uid_key else {"knowledge": knowledge, "auto_merged": knowledge, "added_from_round1": [], "has_round1": False, "manually_edited": explicit_knowledge}
     if not explicit_knowledge and merged_info.get("has_round1"):
         knowledge = list(merged_info["knowledge"])
@@ -4186,7 +4309,14 @@ def paper_preview(name: str) -> dict:
             continue
         it = dict(raw_it)
         if source_txt and "[IMG" in source_txt and isinstance(it.get("materialBlocks"), list):
-            wire_format.restore_table_cell_images(it["materialBlocks"], source_txt)
+            att_imgs = None
+            if isinstance(it.get("attachments"), list):
+                att_imgs = {
+                    str(a.get("name") or str(a.get("url") or "").rsplit("/", 1)[-1]).strip()
+                    for a in it["attachments"]
+                    if isinstance(a, dict) and a.get("kind") == "image"
+                }
+            wire_format.restore_table_cell_images(it["materialBlocks"], source_txt, allowed_images=att_imgs)
         existing_sec = it.get("source_section")
         if isinstance(existing_sec, dict) and str(existing_sec.get("title") or "").strip():
             sec_copy = dict(existing_sec)
@@ -4303,6 +4433,11 @@ def _prepare_batch_detail_context(folder: Path, name: str):
             scoped_cands_by_uid.setdefault(uid_key, {})[number] = (item, path)
     ap_ctx = _prepare_answer_point_ctx(folder)
     rc_ctx = _prepare_review_comparison_ctx(folder)
+    try:
+        from workflow import label_merge
+        r1_assessments = label_merge.load_round1_assessments(folder)
+    except (ImportError, OSError, ValueError, TypeError, KeyError):
+        r1_assessments = {}
     adv_running = bool(advance_state(name).get("running"))
     shared = {
         "batch": name,
@@ -4327,7 +4462,7 @@ def _prepare_batch_detail_context(folder: Path, name: str):
         "all_numbers": all_numbers, "media": media,
         "snapshot_pair": snapshot_pair, "batch_map": batch_map,
         "all_cands_by_num": all_cands_by_num, "scoped_cands_by_uid": scoped_cands_by_uid,
-        "ap_ctx": ap_ctx, "rc_ctx": rc_ctx,
+        "ap_ctx": ap_ctx, "rc_ctx": rc_ctx, "r1_assessments": r1_assessments,
         "adv_running": adv_running, "shared": shared,
     }
 
@@ -4484,7 +4619,10 @@ def _build_unit_detail(folder: Path, name: str, unit_id, ctx: dict, *, row_overr
     whole_unit = taxonomy.whole_unit_type(row.get("type") or batch_item.get("type") or "")
     label_open = group_duplicate_findings(label_findings, whole_unit=whole_unit)
     format_open = [f for f in format_findings if is_open(f)] + [f for f in other_findings if is_open(f)]
-    labels = label_payload(row, batch_item, subs, folder, row.get("unit_id") or unit_id, ap_ctx=ap_ctx)
+    labels = label_payload(
+        row, batch_item, subs, folder, row.get("unit_id") or unit_id,
+        ap_ctx=ap_ctx, r1_assessments=ctx.get("r1_assessments"),
+    )
     comparison = review_comparison(folder, row.get("unit_id") or unit_id, numbers, rc_ctx=rc_ctx, ap_ctx=ap_ctx)
     # 每条意见带上“这是哪道题、当前值是什么”，人不用再翻原卷猜问题指的是什么。
     for finding in label_open:
@@ -4724,7 +4862,11 @@ class Handler(BaseHTTPRequestHandler):
             if decoded_path == "/api/operations/work-state":
                 return self.send_json(operations_work_state())
             if decoded_path == "/api/batches":
-                return self.send_json({"batches": cached_list_batches()})
+                batches = cached_list_batches()
+                if (parse_qs(parsed.query).get("lite") or [""])[0] == "1":
+                    batches = [{k: v for k, v in item.items() if k not in ("rows", "extraction")}
+                               if isinstance(item, dict) else item for item in batches]
+                return self.send_json({"batches": batches})
             if decoded_path == "/api/taxonomy":
                 return self.send_json(taxonomy.taxonomy())
             if decoded_path == "/api/knowledge/tree":
@@ -4742,6 +4884,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"version": taxonomy.knowledge_version(),
                                        "items": taxonomy.knowledge_search(query, limit, main_type=main_type)})
             parts = decoded_path.strip("/").split("/")
+            if len(parts) == 3 and parts[:2] == ["api", "batches"]:
+                return self.send_json(overview(parts[2]))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "operations":
                 from workflow import operations
                 return self.send_json(operations.view(WORKFLOWS, batch_dir(parts[2])))

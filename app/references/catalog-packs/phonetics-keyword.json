@@ -1,0 +1,12 @@
+{
+  "schema_version": "catalog-packs/v1",
+  "pack": "phonetics-keyword",
+  "base": false,
+  "description": "听力关键词语选择专用包：仅含精确节点「语音/基本读音」，禁止下钻",
+  "source_sha256": "7f5f45a90f3f9b22f1486f94933bf6d0976ffb5baceb5650d9efdec8064a21eb",
+  "count": 1,
+  "sha256": "d657507967187cd38b025c25a18adbbf80c746f5b24780dab898c021b7204363",
+  "paths": [
+    "语音/基本读音"
+  ]
+}

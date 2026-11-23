@@ -363,6 +363,29 @@ class DecoratedHeadingUnnumberedImageGroupTest(unittest.TestCase):
         audit = question_content.audit_batch_source(root, {"items": draft2["items"]})
         self.assertTrue(audit["passed"], audit)
 
+    def test_cloze_extension_question_keeps_full_stem_without_d3_error(self):
+        import importlib.util
+        path = Path(__file__).parents[1] / "scripts/06-upload/check_structure.py"
+        spec = importlib.util.spec_from_file_location("cloze_ext_check_structure", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        checker = mod._check_unit
+        unit = {
+            "unit_id": "u-cloze-ext",
+            "unit_kind": "group",
+            "question_type": "完形填空",
+            "material": "Tim lived in a small __1__ with nice mountains.",
+            "knowledge": ["语篇体裁/记叙文/故事", "主题/人与自然/自然生态/自然景观"],
+            "subquestions": [
+                {"number": 1, "stem": "______", "answer": "B", "options": ["A. city", "B. village", "C. town", "D. country"]},
+                {"number": 2, "stem": "Why did Tim go on a trip?", "answer": "C", "options": ["A. a", "B. b", "C. c", "D. d"]},
+            ],
+        }
+        self.assertEqual(checker(unit, None), [])
+        bad = json.loads(json.dumps(unit))
+        bad["subquestions"][0]["stem"] = "Unexpected text on inline blank"
+        self.assertTrue(any("[D3]" in p for p in checker(bad, None)))
+
 
 if __name__ == "__main__":
     unittest.main()

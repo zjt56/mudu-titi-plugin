@@ -19,8 +19,8 @@ def strip_visual_markup(line: str) -> str:
 
 
 # A later item needs a real column boundary, never an ordinary prose space.
-_COLUMN = re.compile(r"(?:[\t\u3000]+|[ \xa0]{2,})(?:\*{1,3})?(?:[（(][ \u3000]*[）)][ \u3000]*)?([1-9]\d{0,2})\s*[.．、](?!\d)")
-_LEADING = re.compile(r"^\s*(?:\*{1,3})?(?:[（(][ \u3000]*[）)]\s*)?([1-9]\d{0,2})\s*[.．、](?!\d)")
+_COLUMN = re.compile(r"(?:[\t\u3000]+|[ \xa0]{2,})(?:\*{1,3})*(?:[（(](?:[ \u3000]|\*{1,3})*[）)](?:[ \u3000]|\*{1,3})*)?([1-9]\d{0,2})(?:\s|\*{1,3})*[.．、](?!\s*(?:\*\*\s*)?\d)")
+_LEADING = re.compile(r"^\s*(?:\*{1,3})*(?:[（(](?:[ \u3000]|\*{1,3})*[）)](?:\s|\*{1,3})*)?([1-9]\d{0,2})(?:\s|\*{1,3})*[.．、](?!\s*(?:\*\*\s*)?\d)")
 
 
 def printed_tokens(line: str) -> list[tuple[int, int]]:

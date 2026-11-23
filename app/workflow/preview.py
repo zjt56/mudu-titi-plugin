@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+from functools import lru_cache
 import json
 import re
 from pathlib import Path
@@ -49,13 +50,20 @@ def _short_knowledge_list(values) -> list[str]:
     return [_short_knowledge(p) for p in (values or []) if str(p).strip()]
 
 
+@lru_cache(maxsize=8192)
 def _strong_number(line: str) -> int | None:
     """真正的题号行：(　)31. 或 31. 开头。"""
+    plain = _plain(line)
     for pattern in START_PATTERNS[:2]:
-        match = pattern.search(_plain(line))
+        match = pattern.search(plain)
         if match:
             return int(match.group(1))
     return None
+
+
+@lru_cache(maxsize=8192)
+def _is_title_like(line: str) -> bool:
+    return bool(TITLE_LIKE.fullmatch(_plain(line).strip()))
 
 
 # 空位号（子题号本体）的两种合法写法，集中在一处，供预览/闸门/身份/审计共用：
@@ -102,14 +110,16 @@ def picture_cell_numbers(line: str) -> list[int]:
     单独一格的 `6.[IMG …]` 依旧不算小题号。
     """
     from .source_anchors import strip_visual_markup
-    plain = _plain(strip_visual_markup(line))
+    from .wire_format import normalize_blank_text
+    plain = _plain(strip_visual_markup(normalize_blank_text(line)))
     return _picture_cells(plain, _printed_blank_numbers(plain))
 
 
-def _weak_numbers(line: str) -> list[int]:
-    """材料一行里所有空位号（子题号），不把普通句号数字误当题号。"""
+@lru_cache(maxsize=8192)
+def _weak_numbers_tuple(line: str) -> tuple[int, ...]:
     from .source_anchors import strip_visual_markup
-    plain = _plain(strip_visual_markup(line))
+    from .wire_format import normalize_blank_text
+    plain = _plain(strip_visual_markup(normalize_blank_text(line)))
     found = _printed_blank_numbers(plain)
     # 图片作提示的编号格只在同行编号序列里成立（见 _PICTURE_CELL）。
     found += _picture_cells(plain, found)
@@ -118,7 +128,12 @@ def _weak_numbers(line: str) -> list[int]:
         # speaker and an adjacent printed number; an arbitrary image proves none.
         found += [int(m.group(1)) for m in re.finditer(
             r'(?<!\d)(\d{1,3})\s*[.．]\s*(?=\[IMG\s+[^\]]+\])', plain)]
-    return sorted(set(found))
+    return tuple(sorted(set(found)))
+
+
+def _weak_numbers(line: str) -> list[int]:
+    """材料一行里所有空位号（子题号），不把普通句号数字误当题号。"""
+    return list(_weak_numbers_tuple(line))
 
 
 def _weak_number(line: str) -> int | None:
@@ -144,12 +159,12 @@ def _sentence_with(text: str, number: int) -> str:
 
 def _find(lines: list[str], number: int, strong: bool = True) -> int | None:
     for index, line in enumerate(lines):
-        if TITLE_LIKE.fullmatch(_plain(line).strip()):
+        if _is_title_like(line):
             continue
         if strong:
             if _strong_number(line) == number:
                 return index
-        elif number in _weak_numbers(line):
+        elif number in _weak_numbers_tuple(line):
             return index
     return None
 

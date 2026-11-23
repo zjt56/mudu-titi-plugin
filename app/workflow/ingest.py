@@ -395,7 +395,10 @@ def build_review_files(batch_dir: Path, result: dict, *, reconcile_rounds=False)
     if reconcile_rounds:
         evaluated = review.evaluate_rounds(batch_dir, rounds_payload)
         if not evaluated.get("execution_completed"):
-            raise ValueError("Cannot reconcile incomplete review rounds")
+            reasons = [str(e.get("reason") or e.get("message") or e.get("code") or "").strip()
+                       for e in (evaluated.get("errors") or []) if isinstance(e, dict)]
+            detail = "; ".join(r for r in reasons if r)[:240]
+            raise ValueError("Cannot reconcile incomplete review rounds" + (f": {detail}" if detail else ""))
         def signature(item):
             return (str(item.get("unit_id", "")), str(item.get("field", "")),
                     str(item.get("reason") or item.get("question") or ""),

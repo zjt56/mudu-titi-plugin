@@ -37,10 +37,14 @@ _TYPES_DROP = (
     "07_review/structure-gate.json",
 )
 
-# 知识点分片不需要通用总览与结构闸门报告（结构已确认）。
+# 知识点分片不需要通用总览、结构闸门报告、工程说明与重复的 Markdown 维度对照表
+# （维度表已由按片裁剪的 references/type-knowledge-map.json 提供，细则由按片裁剪的 knowledge-matching-rules.md 提供）。
 _KNOWLEDGE_DROP = (
     "skills-reference/README.md",
     "07_review/structure-gate.json",
+    "skills-reference/type-knowledge-map.md",
+    "docs/content-labeling.md",
+    "docs/knowledge-tagging.md",
 )
 
 
@@ -125,7 +129,7 @@ def _balanced_groups(units, max_units, drafts):
 
 
 def _prune_knowledge_catalog(subset):
-    """Keep only catalog paths and type-knowledge rules allowed for this shard's types."""
+    """Keep only catalog packs and type-knowledge rules allowed for this shard's types."""
     types_doc = subset.get(agent_tasks.ARTIFACTS["types"])
     if not isinstance(types_doc, dict) or not isinstance(types_doc.get("items"), list):
         return
@@ -133,22 +137,27 @@ def _prune_knowledge_catalog(subset):
                   if isinstance(r, dict) and str(r.get("type") or "").strip()}
     if not part_types:
         return
-    from workbench import taxonomy
-    known_types = set(taxonomy.types())
-    if not part_types <= known_types:
+    from . import catalog_packs
+    pack_info = catalog_packs.packs_for_types(sorted(part_types))
+    if pack_info["fallback"]:
         return
+    allowed_paths = set(pack_info["paths"])
     catalog = subset.get("references/knowledge-catalog.json")
     if isinstance(catalog, dict):
         if isinstance(catalog.get("paths"), list):
+            catalog["packs"] = pack_info["packs"]
             catalog["paths"] = [
                 path for path in catalog["paths"]
-                if isinstance(path, str) and any(taxonomy.knowledge_path_allowed(path, t) for t in part_types)
+                if isinstance(path, str) and path in allowed_paths
             ]
+            if pack_info["exact_paths_by_type"]:
+                catalog["exact_paths_by_type"] = pack_info["exact_paths_by_type"]
         elif isinstance(catalog.get("points"), list):
+            catalog["packs"] = pack_info["packs"]
             catalog["points"] = [
                 pt for pt in catalog["points"]
                 if isinstance(pt, dict) and isinstance(pt.get("path"), str)
-                and any(taxonomy.knowledge_path_allowed(pt["path"], t) for t in part_types)
+                and pt["path"] in allowed_paths
             ]
     tkm = subset.get("references/type-knowledge-map.json")
     if isinstance(tkm, dict):
@@ -161,6 +170,10 @@ def _prune_knowledge_catalog(subset):
             elif key in part_types:
                 pruned[key] = value
         subset["references/type-knowledge-map.json"] = pruned
+    rules_key = "skills-reference/knowledge-matching-rules.md"
+    if isinstance(subset.get(rules_key), str):
+        from . import review
+        subset[rules_key] = review.scope_knowledge_rules(subset[rules_key], sorted(part_types))
 
 
 def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=None, balance_work=False):
@@ -268,17 +281,37 @@ def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=Non
                      "本分片不附知识点目录与打标规则，不要自行新增、改写或推断标签。\n")
         if stage in ("answers", "explanations"):
             subset = agent_tasks.compact_label_context(subset)
-        elif stage in ("types", "knowledge"):
+        elif stage == "knowledge":
+            subset = agent_tasks.compact_label_context(subset)
+            # question-draft.json already carries full stems/materials/options for this shard;
+            # drop duplicate structure.confirmed.json and stem copies in confirmed_units_with_stable_ids.
+            if isinstance(subset.get("06_batch/question-draft.json"), dict):
+                subset.pop("01_source/structure.confirmed.json", None)
+                subset["confirmed_units_with_stable_ids"] = [
+                    {k: v for k, v in u.items()
+                     if k in ("unit_id", "numbers", "unit_kind", "type", "label",
+                              "identity_version", "question_ids", "section_id", "source_section", "source_span")}
+                    for u in selected if isinstance(u, dict)
+                ]
+        elif stage == "types":
             saved_structure = subset.get("01_source/structure.confirmed.json")
             subset = agent_tasks.compact_label_context(subset)
-            if saved_structure is not None:
-                subset["01_source/structure.confirmed.json"] = saved_structure
+            # confirmed_units_with_stable_ids already holds the exact selected units;
+            # keep only non-unit metadata from structure.confirmed.json to avoid 2x duplication.
+            if isinstance(saved_structure, dict):
+                meta_only = {k: v for k, v in saved_structure.items() if k != "units"}
+                if meta_only:
+                    subset["01_source/structure.confirmed.json"] = meta_only
+                else:
+                    subset.pop("01_source/structure.confirmed.json", None)
         instruction = ("\nThis is one partition of a whole batch. Return ONLY these exact unit IDs: "
                        + json.dumps([u["unit_id"] for u in selected], ensure_ascii=False)
                        + ". Other source and structure data is context only. Cover every selected unit exactly once.\n"
                        "原卷版式块（extraction.blocks）与重复正文未放入本分片；涉及版式的判断只能依据正文、结构数据"
                        "与媒体证据，缺证据时记入 unchecked，不要凭印象补齐。\n" + extra)
-        return before + instruction + _BEGIN + json.dumps(subset, ensure_ascii=False, indent=1) + _END
+        from . import review as _review
+        ordered_subset = _review.order_prompt_context(subset)
+        return before + instruction + _BEGIN + json.dumps(ordered_subset, ensure_ascii=False, separators=(",", ":")) + _END
 
     if selected_ids is not None:
         chosen_ids = set(selected_ids)
@@ -288,7 +321,28 @@ def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=Non
     parts = []
     draft_rows = (context.get("06_batch/question-draft.json") or {}).get("items", [])
     drafts = {row.get("unit_id"): row for row in draft_rows if isinstance(row, dict)}
-    groups = _balanced_groups(units, max_units, drafts) if balance_work and units else [units]
+    if stage == "knowledge" and units:
+        types_rows = (context.get(agent_tasks.ARTIFACTS["types"]) or {}).get("items", [])
+        types_by_uid = {
+            row["unit_id"]: str(row.get("type") or "").strip()
+            for row in types_rows
+            if isinstance(row, dict) and isinstance(row.get("unit_id"), str)
+        }
+        if any(types_by_uid.get(u["unit_id"]) for u in units):
+            from . import catalog_packs
+            bucket_runs = catalog_packs.contiguous_bucket_runs(
+                units, lambda u: types_by_uid.get(u["unit_id"])
+            )
+            groups = []
+            for _bucket, run_units in bucket_runs:
+                if balance_work and len(run_units) > max_units:
+                    groups.extend(_balanced_groups(run_units, max_units, drafts))
+                else:
+                    groups.append(run_units)
+        else:
+            groups = _balanced_groups(units, max_units, drafts) if balance_work else [units]
+    else:
+        groups = _balanced_groups(units, max_units, drafts) if balance_work and units else [units]
     for group in groups:
         selected = []
         for unit in group:

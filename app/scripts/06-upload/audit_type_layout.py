@@ -136,19 +136,24 @@ def _check_shell_subquestions(problems, uid, qt, kind, mat_numbers, subs):
 
 
 def _is_short_answer_sub(c):
-    """A sub-question that is a written/short answer, not multiple choice.
+    """A sub-question that is a written/short answer or blank-fill, not multiple choice.
 
-    Reading groups can attach a `☆拓展设问` (e.g. 「…（不超过15个词）」) that is
-    answerable in words, not an A–D option. Such a sub legitimately has 0 options
-    and must not be judged by the multiple-choice option-count baseline (E20).
-    Identify it only when it has no options AND its stem carries a word-limit /
-    short-answer cue — a genuinely-missing-options MC sub (stem without such a
-    cue, or answered by a letter) is still flagged.
+    Reading groups can attach a `☆拓展设问` (e.g. 「…（不超过15个词）」) or a hybrid
+    `任务二：完成概要，每空一词` fill-in-the-blank task that is answerable in words,
+    not an A–D option. Such a sub legitimately has 0 options and must not be judged
+    by the multiple-choice option-count baseline (E20).
+    Identify it only when it has no options, its answer is not a single choice letter,
+    AND its stem carries a word-limit / short-answer / blank-fill cue.
     """
     if c.get("options"):
         return False
+    answer = plain(c.get("answer") or "").strip()
+    if re.fullmatch(r"[A-Ha-h]", answer):
+        return False
     stem = plain(c.get("stem") or "")
-    return bool(re.search(r"(?:不超过|不多于|不超过|低于|少于|以内|词以内|个词|用一句|一句话|概括|简答|写出|回答|陈述)", stem))
+    if re.search(r"(?:不超过|不多于|低于|少于|以内|词以内|个词|用一句|一句话|概括|简答|写出|回答|陈述|每空一词|每空仅填一词|完成概要|完成句子|补全概要|填空)", stem):
+        return True
+    return bool(re.search(r"_{3,}|＿{2,}", stem))
 
 
 def _check_option_count(problems, uid, qt, kind, u, subs, want, where):

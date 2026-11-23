@@ -64,7 +64,7 @@ class ReviewEvidenceScopeTest(unittest.TestCase):
                     check['assessment']['knowledge'] = [rejected]
                     review._round_checks(record, rid, self.plan, self.batch)
         catalog = review.compact_knowledge_catalog(['听力关键词语选择'])
-        self.assertEqual([point['path'] for point in catalog['points']], [path])
+        self.assertEqual(catalog['paths'], [path])
         self.assertEqual(catalog['exact_paths_by_type'], {'听力关键词语选择': [path]})
 
     def test_supplied_ocr_and_authority_context_are_bound(self):

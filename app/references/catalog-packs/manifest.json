@@ -1,0 +1,91 @@
+{
+  "schema_version": "catalog-packs/v1",
+  "source_file": "references/knowledge-catalog.json",
+  "source_sha256": "7f5f45a90f3f9b22f1486f94933bf6d0976ffb5baceb5650d9efdec8064a21eb",
+  "catalog_version": "英语知识点目录1.1",
+  "catalog_version_id": "KCV-ENGLISH-KNOWLEDGE-1-1",
+  "total_nodes": 522,
+  "total_leaves": 408,
+  "base_packs": [
+    "theme",
+    "genre",
+    "angle-reading",
+    "angle-listening",
+    "vocab-full",
+    "grammar",
+    "phonetics",
+    "pragmatics"
+  ],
+  "packs": {
+    "theme": {
+      "file": "theme.json",
+      "base": true,
+      "count": 52,
+      "sha256": "8d3c9565ae5881fa00a12b24d80a236feaa41dbc743805f2d1ba82d98b5f9028",
+      "description": "主题维度全部叶子（人与自我/人与社会/人与自然）"
+    },
+    "genre": {
+      "file": "genre.json",
+      "base": true,
+      "count": 34,
+      "sha256": "e1d105eedcaca0e870fc7991addb6043ba13b3063a194e5084fd3fb0e82cfbf4",
+      "description": "语篇体裁维度全部叶子"
+    },
+    "angle-reading": {
+      "file": "angle-reading.json",
+      "base": true,
+      "count": 22,
+      "sha256": "137452c835f8507029e6e843ee1c38f0b10b5993a6b841487fe0862317813caf",
+      "description": "设题角度/阅读分支全部叶子"
+    },
+    "angle-listening": {
+      "file": "angle-listening.json",
+      "base": true,
+      "count": 5,
+      "sha256": "53f8e88d70219eb2474c8ef837ba1b4d3ffcd1bdbee13b17834fe5a2852aede5",
+      "description": "设题角度/听力分支全部叶子"
+    },
+    "vocab-full": {
+      "file": "vocab-full.json",
+      "base": true,
+      "count": 17,
+      "sha256": "f800102dc6561bab4dbdfd5ea098a33f3f6e573a90050708d7fc7fa944a0350d",
+      "description": "词汇维度全部叶子（含拼写与词形/构词法/短语/词汇辨析）"
+    },
+    "vocab-spelling": {
+      "file": "vocab-spelling.json",
+      "base": false,
+      "count": 10,
+      "sha256": "d287d3a4a5b84d3b8206c652c8ae232f39f1b4c9f454c423a171c64e03af97b1",
+      "description": "单词拼写专用词汇包：物理排除「词汇/词汇辨析」分支"
+    },
+    "grammar": {
+      "file": "grammar.json",
+      "base": true,
+      "count": 264,
+      "sha256": "12b959e52b6a082f461fd263e23973cefeadf7631214c59194190a9d97a68aeb",
+      "description": "语法维度全部叶子"
+    },
+    "phonetics": {
+      "file": "phonetics.json",
+      "base": true,
+      "count": 12,
+      "sha256": "b6c3fdca1fdce14a0623dcb4ae032f023d95a9e4ad2f4bcac939bd7aa7e44601",
+      "description": "语音维度全部叶子（供语音题/单项填空/单词拼写等）"
+    },
+    "phonetics-keyword": {
+      "file": "phonetics-keyword.json",
+      "base": false,
+      "count": 1,
+      "sha256": "d657507967187cd38b025c25a18adbbf80c746f5b24780dab898c021b7204363",
+      "description": "听力关键词语选择专用包：仅含精确节点「语音/基本读音」，禁止下钻"
+    },
+    "pragmatics": {
+      "file": "pragmatics.json",
+      "base": true,
+      "count": 2,
+      "sha256": "1140eedfef5b53c97c3e4ebe2f4f2b847e7f7c83d110370ad2c92d91a1ce0a49",
+      "description": "语用维度全部叶子（情景交际/谚语习语）"
+    }
+  }
+}

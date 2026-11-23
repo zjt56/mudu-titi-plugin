@@ -484,9 +484,10 @@ def _question_window(lines: list[str], number: int) -> tuple[int, int] | None:
     end = len(lines)
     for i in range(start + 1, len(lines)):
         plain = _plain(lines[i]).strip()
-        # 【文章大意】/【解析】等字段标题与 ☆拓展设问 小标题是小题末边界：不能并进上一小题的选项/题干。
+        # 【文章大意】/【解析】等字段标题、☆拓展设问 与 任务二/任务三 等分任务小标题是小题末边界：不能并进上一小题的选项/题干。
         if (re.match(r"^[\[【]?\s*(?:文章大意|解析|答案|分析)\s*[\]】]?\s*[：:]?", plain)
-                or re.fullmatch(r"[☆★]?\s*拓展设问", plain)):
+                or re.fullmatch(r"[☆★]?\s*拓展设问", plain)
+                or re.match(r"^(?:[☆★]\s*)?任务[一二三四五六七八九十\d]+\s*[：:.．、]", plain)):
             end = i
             break
         if (_strong_number(plain) is not None or SECTION.match(plain)

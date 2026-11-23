@@ -741,7 +741,11 @@ def _mark_requirements(unit, lines, window):
                                        for item in projected[pos:stop]):
                     option_anchors.append(pos)
             unique = len(option_anchors) == 1
-        if unique and len(matches) == 1 and (not material_type or option_block):
+        child_has_stem = (
+            len(matches) == 1
+            and bool(re.search(r"[A-Za-z\u4e00-\u9fff]", str(matches[0].get("stem") or "")))
+        )
+        if unique and len(matches) == 1 and (not material_type or option_block or child_has_stem):
             target, label = _own_text(matches[0]), f"所属子题{number}题干"
         elif material_type:
             target, label = _own_text(unit), "原材料/作答指令"
