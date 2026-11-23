@@ -15,6 +15,22 @@ class LeadingImageOptionTest(unittest.TestCase):
     导致 SOURCE_OPTIONS_INCOMPLETE / SOURCE_IMAGE_MISSING 误报。
     """
 
+    def test_cloze_extension_short_answer_needs_no_options(self):
+        # 完形组末尾「☆拓展设问」原卷只有作答线，源头审计/结构体检不能判它缺 A–D 选项；
+        # 真正漏选项的正文空位小题（空壳题干、答案不是字母）仍必须判缺。
+        from workflow.question_content import short_answer_cue
+        extension = {"stem": "What do people think of Anqing as?(不超过5个词)",
+                     "options": [], "answer": "Hometown of Huangmei Opera."}
+        blank_shell = {"stem": "______", "options": [], "answer": "know"}
+        letter_answer = {"stem": "What do people think of it?(不超过5个词)",
+                         "options": [], "answer": "B"}
+        with_options = {"stem": "______", "options": [{"label": "A", "text": "know"}],
+                        "answer": "A"}
+        self.assertTrue(short_answer_cue(extension))
+        self.assertFalse(short_answer_cue(blank_shell))
+        self.assertFalse(short_answer_cue(letter_answer))
+        self.assertFalse(short_answer_cue(with_options))
+
     def test_leading_image_options_attach_to_their_own_label(self):
         lines = [
             "☆拓展设问",

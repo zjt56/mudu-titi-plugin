@@ -202,6 +202,38 @@ class UnitsBundleTests(unittest.TestCase):
         self.assertEqual(status_single, 200)
         self.assertEqual({**bundle["shared"], **bundle["units"]["U1"]}, single)
 
+    def test_units_bundle_disk_cache_survives_ram_clear_invalidates_on_edit_and_cleans_on_purge(self):
+        import os
+        from unittest.mock import patch
+
+        folder = _make_regular_batch(server.WORKFLOWS, "paper-cache")
+        cache_dir = Path(self._tmp.name) / "cache"
+        with patch.dict(os.environ, {"WF_CACHE_DIR": str(cache_dir)}):
+            server._UNITS_BUNDLE_CACHE.clear()
+            server._REVIEW_SNAPSHOT_CACHE.clear()
+            first = server.units_bundle("paper-cache")
+            disk_file = server._units_bundle_disk_path(folder)
+            self.assertTrue(disk_file.is_file())
+
+            # Full RAM clear (simulated backend restart): detail() hits disk cache without rebuilding.
+            server._UNITS_BUNDLE_CACHE.clear()
+            server._REVIEW_SNAPSHOT_CACHE.clear()
+            with patch.object(server, "_prepare_batch_detail_context", side_effect=AssertionError("should hit disk cache")):
+                d_disk = server.detail("paper-cache", "U1")
+            self.assertEqual(d_disk["labels"], first["units"]["U1"]["labels"])
+
+            # Editing a unit's manual labels immediately invalidates both RAM and disk cache.
+            _write_json(folder / "candidates" / "units" / "U1.json", {
+                "unit_id": "U1", "type": "单项填空", "knowledge": ["语法/时态/一般现在时"],
+                "knowledge_manually_saved": True,
+            })
+            d_updated = server.detail("paper-cache", "U1")
+            self.assertEqual(d_updated["labels"]["knowledge"], ["语法/时态/一般现在时"])
+
+            # Purging the batch clears RAM and deletes the disk cache file (zero leftover trace).
+            server._clear_purged_batch_state("paper-cache")
+            self.assertFalse(disk_file.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

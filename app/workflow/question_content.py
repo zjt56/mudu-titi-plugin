@@ -745,6 +745,11 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
         lacks_own_options = mixed_group and not labels
         if lacks_own_options:
             continue
+        # 完形/语法选择组里的「☆拓展设问」等开放作答小题原卷本就没有 A–D 选项
+        # （材料里也没有对应空位，只有作答线），不能按选择题选项基准判缺；
+        # 其余无选项小题（空壳题干）仍是真实缺项。
+        if choice_group and not labels and short_answer_cue({"stem": part["stem"]}):
+            continue
         if (choice_group and not labels) or (max_options and (labels != expected or any(not _canonical(o["text"]) for o in part["options"]))):
             issues.append({"code": "SOURCE_OPTIONS_INCOMPLETE", "number": n,
                            "message": f"第 {n} 题源头选项 {labels}，本组应完整包含 {expected} 且内容非空"})
@@ -760,6 +765,27 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
                 if isinstance(opt, dict) and isinstance(opt.get("text"), str):
                     opt["text"] = re.sub(r"\*{1,3}", "", opt["text"]).strip()
     return {"passed": not issues, "issues": issues, "questions": parts, "shared_options": shared_options}
+
+
+_SHORT_ANSWER_CUE = re.compile(
+    r"(?:不超过|不多于|低于|少于|以内|词以内|个词|用一句|一句话|概括|简答|写出|回答|陈述|"
+    r"每空一词|每空仅填一词|完成概要|完成句子|补全概要|填空)")
+
+
+def short_answer_cue(child) -> bool:
+    """开放作答小题（简答/填空）的题干线索。
+
+    完形/语法选择/阅读组末尾的「☆拓展设问」以及「任务二：完成概要，每空一词」一类
+    小题在原卷只有作答线，没有 A–D 选项。只有该小题本身没有选项、答案不是单个选项
+    字母、且题干带字数限制/简答/填空线索时才认定，避免把真正漏选项的选择题放过。
+    """
+    if not isinstance(child, dict) or child.get("options"):
+        return False
+    answer = str(child.get("answer") or "").strip()
+    if re.fullmatch(r"[A-Ha-h]", answer):
+        return False
+    stem = re.sub(r"\*{1,3}", "", str(child.get("stem") or ""))
+    return bool(_SHORT_ANSWER_CUE.search(stem))
 
 
 def _candidate_options(options) -> list[dict]:

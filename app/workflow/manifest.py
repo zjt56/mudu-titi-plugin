@@ -726,7 +726,9 @@ def touch_stage(manifest: dict, stage_id: str, status: str, **fields) -> None:
     if status == RUNNING:
         record["started_at"] = now_iso()
     if status in (COMPLETED, APPROVED, FAILED, BLOCKED, SKIPPED, INVALIDATED):
-        record["finished_at"] = now_iso()
+        # 已完成阶段在后置复核/刷新时保持首次完成时间戳，避免批次任务结束后耗时继续增长。
+        if not (status in (COMPLETED, APPROVED, SKIPPED) and previous == status and record.get("finished_at")):
+            record["finished_at"] = now_iso()
     for key, value in fields.items():
         record[key] = value
     if previous != status:

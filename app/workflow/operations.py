@@ -1135,6 +1135,51 @@ def view(root, folder, *, discover=True):
             "receipts": state.get("receipts", []) if state else []}
 
 
+def _folder_needs_incident_scan(folder: Path) -> bool:
+    """Cheap read-only guard so `incidents()` skips provably-idle batches.
+
+    Without this filter, every poll scans all historical completed batches
+    through `diagnose()` and `review.evaluate_rounds()`, burning 10-20s of CPU
+    per poll and tripping the host poller's 20s stale-scan alarm.
+    Only returns False when `_discover()` provably cannot create, update, or
+    reconcile an incident on this folder.
+    """
+    state = _load(folder)
+    if state:
+        if pending_incident(folder):
+            return True
+        if state.get("resume_outbox"):
+            return True
+        if any(isinstance(row, dict) and row.get("status") == "unknown"
+               for row in (state.get("receipts") or [])):
+            return True
+    try:
+        manifest = mf.load(folder)
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+    stages = manifest.get("stages") or {}
+    sg = stages.get("structure_gate") or {}
+    if sg.get("rebuild_required") or (
+            sg.get("status") in mf.TERMINAL_OK and bool(self_heal._structure_unusable(folder))):
+        return True
+    ext = stages.get("extract") or {}
+    if ext.get("status") == mf.PENDING and (
+            ext.get("exit_code") == 6 or (folder / "workflow/ocr-reconciliation.json").is_file()):
+        return True
+    for spec in contracts.STAGES:
+        if spec.id in self_heal.BOUNDARIES or spec.kind == contracts.HUMAN:
+            continue
+        rec = stages.get(spec.id) or {}
+        st = rec.get("status") or mf.PENDING
+        if (spec.id == "review_gate" and st == mf.NEEDS_REVIEW
+                and rec.get("execution_completed") is True
+                and rec.get("continue_unqualified") is True):
+            continue
+        if st in {mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW, mf.RUNNING}:
+            return True
+    return False
+
+
 def incidents(root):
     root = Path(root)
     found = []
@@ -1142,6 +1187,8 @@ def incidents(root):
         return {"incidents": []}
     for folder in sorted(root.iterdir()):
         if not supervisor._active_folder(root, folder):
+            continue
+        if not _folder_needs_incident_scan(folder):
             continue
         try:
             incident = view(root, folder)["incident"]
@@ -2341,6 +2388,9 @@ def recover_resumes(root, enqueue):
     for folder in root.iterdir():
         if supervisor._active_folder(root, folder):
             try:
+                state = _load(folder)
+                if not (isinstance(state, dict) and state.get("resume_outbox")):
+                    continue
                 _active(root, folder)
                 _dispatch_resume(root, folder, lambda expected: enqueue(folder.name, folder, operations_expectation=expected))
             except (ValueError, OSError, RuntimeError):

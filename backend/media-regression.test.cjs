@@ -86,3 +86,56 @@ test('ready proxy skips full batch probes and handles an already-ended GET', asy
   } finally { clearTimeout(timeout); }
   assert.deepEqual([...result], [255, 216, 255]);
 });
+
+test('proxyToBackend retries idempotent GET after transient fetch failed and formats cause on failure', async () => {
+  const code = host.slice(host.indexOf('async function proxyToBackend('), host.indexOf('// 写入 router 时'));
+  let calls = 0;
+  let ensured = 0;
+  const proxy = vm.runInNewContext(code + '\nproxyToBackend', {
+    Buffer, AbortController, setTimeout, clearTimeout,
+    backend: { port: 8791, ready: true },
+    backendAuthHeaders: () => ({}),
+    ensureBackend: async () => { ensured += 1; return { ok: true }; },
+    fetch: async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+      return new Response(JSON.stringify({ batches: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  });
+  const req = Readable.from([]);
+  req.method = 'GET'; req.url = '/wf-plugin/api/batches?lite=1'; req.headers = {};
+  req.resume();
+  await new Promise((resolve) => req.once('end', resolve));
+  let statusCode = 0; let bodyText = '';
+  const res = {
+    once() {}, removeListener() {},
+    writeHead(s) { statusCode = s; },
+    end(buf) { bodyText = buf.toString('utf8'); },
+  };
+  await proxy(req, res, '/api/batches');
+  assert.equal(calls, 2);
+  assert.equal(ensured, 1);
+  assert.equal(statusCode, 200);
+  assert.equal(bodyText, '{"batches":[]}');
+
+  // Persistent failure still returns 502 and exposes cause code instead of bare "fetch failed".
+  const failProxy = vm.runInNewContext(code + '\nproxyToBackend', {
+    Buffer, AbortController, setTimeout, clearTimeout,
+    backend: { port: 8791, ready: true },
+    backendAuthHeaders: () => ({}),
+    ensureBackend: async () => ({ ok: true }),
+    fetch: async () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }); },
+  });
+  let failStatus = 0; let failBody = '';
+  const failReq = Readable.from([]);
+  failReq.method = 'GET'; failReq.url = '/wf-plugin/api/batches?lite=1'; failReq.headers = {};
+  failReq.resume();
+  await new Promise((resolve) => failReq.once('end', resolve));
+  await failProxy(failReq, {
+    once() {}, removeListener() {},
+    writeHead(s) { failStatus = s; },
+    end(buf) { failBody = buf.toString('utf8'); },
+  }, '/api/batches');
+  assert.equal(failStatus, 502);
+  assert.match(failBody, /ECONNREFUSED/);
+});

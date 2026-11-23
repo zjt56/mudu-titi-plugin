@@ -286,6 +286,63 @@ class UnderlineLayoutTest(unittest.TestCase):
             self.assertFalse(report['applied'])
             self.assertEqual(batch.read_bytes(), before)
 
+    def test_promoted_img_marker_in_table_cell_restores_across_material_and_blocks(self):
+        source = (
+            '[IMG image41.jpg]<br>Dear Dave,<br>Most boys catch up around __<u>▲</u>__.<br>'
+            'Why don’t you tell your sister you don’t like her <u>nickname</u> for you?<br>Yours, Aunt Ann'
+        )
+        cell_text = (
+            '\nDear Dave,\nMost boys catch up around __<u>▲</u>__.\n'
+            'Why don’t you tell your sister you don’t like her nickname for you?\nYours, Aunt Ann'
+        )
+        batch = {
+            'items': [{
+                'unit_id': 'u48',
+                'material': '[TABLE 1]\nDear Aunt Ann,\nHello.\n' + cell_text + '\n[/TABLE]',
+                'materialBlocks': [{
+                    'type': 'table',
+                    'rows': [
+                        {'cells': [{'text': 'Dear Aunt Ann,\nHello.'}]},
+                        {'cells': [{'text': cell_text}]},
+                    ],
+                }],
+                'attachments': [{'kind': 'image', 'name': 'image41.jpg',
+                                 'url': '01_source/media/image41.jpg', 'placement': 'question'}],
+            }]
+        }
+        candidate, report = underline.restore(batch, source)
+        self.assertTrue(report['passed'], report)
+        self.assertEqual(
+            {change['field'] for change in report['changes']},
+            {'items/0/material', 'items/0/materialBlocks/0/rows/1/cells/0/text'},
+        )
+        self.assertIn('her <u>nickname</u> for you?', candidate['items'][0]['material'])
+        self.assertIn('her <u>nickname</u> for you?',
+                      candidate['items'][0]['materialBlocks'][0]['rows'][1]['cells'][0]['text'])
+        again, report2 = underline.restore(candidate, source)
+        self.assertTrue(report2['passed'], report2)
+        self.assertEqual(report2['changes'], [])
+        self.assertEqual(again, candidate)
+
+        # 反向防线：正文文字或非 IMG 方括号标记改动仍必须报 UNDERLINE_MAPPING_MISSING
+        edited = {'items': [{'material': cell_text.replace('Dear Dave', 'Dear Mike')}]}
+        _, bad = underline.restore(edited, source)
+        self.assertFalse(bad['passed'])
+        self.assertEqual([i['code'] for i in bad['issues']], ['UNDERLINE_MAPPING_MISSING'])
+
+        marked_source = '[新考法·词义猜测]Why don’t you like her <u>nickname</u>?'
+        missing_mark = {'items': [{'stem': 'Why don’t you like her nickname?'}]}
+        _, bad_mark = underline.restore(missing_mark, marked_source)
+        self.assertFalse(bad_mark['passed'])
+        self.assertEqual([i['code'] for i in bad_mark['issues']], ['UNDERLINE_MAPPING_MISSING'])
+
+    def test_underline_wrapping_only_img_marker_is_ignored(self):
+        batch = {'items': [{'stem': 'Read the passage and answer.'}]}
+        candidate, report = underline.restore(batch, '<u>[IMG icon.png]</u>Read the passage and answer.')
+        self.assertTrue(report['passed'], report)
+        self.assertEqual(report['changes'], [])
+        self.assertEqual(candidate, batch)
+
 
 if __name__ == '__main__':
     unittest.main()

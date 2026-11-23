@@ -206,11 +206,14 @@ def _agent_lock_busy(path):
         handle.close()
 
 
-def execution_busy(folder, *, include_auto=True):
+def execution_busy(folder, *, include_auto=True, include_global_agent=True):
     """Probe the same locks used by auto, runner and live model/import workers.
 
     A stale running manifest alone is deliberately not a live-worker signal.
     An orphaned child surviving a backend restart still holds the agent lock.
+    Callers that only need to guard a single batch (e.g. purge/archive of an
+    already-finished batch) pass ``include_global_agent=False`` so another
+    batch's active model call does not falsely block unrelated batches.
     """
     from . import local_agent
     key = hashlib.sha256(str(Path(local_agent.__file__).resolve().parent).encode()).hexdigest()
@@ -223,6 +226,8 @@ def execution_busy(folder, *, include_auto=True):
         with _try_file_lock(path) as acquired:
             if not acquired:
                 return True
+    if not include_global_agent:
+        return False
     return _agent_lock_busy(Path(tempfile.gettempdir()) / ("mudu-local-agent-" + key + ".lock"))
 
 
@@ -243,7 +248,7 @@ def clear_exhausted(folder):
 
 
 @contextlib.contextmanager
-def advance_claim(folder):
+def advance_claim(folder, *, include_global_agent=True):
     """Hold auto's existing per-batch lock before a workbench worker is started.
 
     The owner must call auto._advance_locked, not reacquire auto.advance's lock.
@@ -254,7 +259,8 @@ def advance_claim(folder):
     from . import operations
     with _try_file_lock(_auto_lock_path(folder)) as acquired:
         yield bool(acquired and not operations.lease_active(folder)
-                   and not execution_busy(folder, include_auto=False))
+                   and not execution_busy(folder, include_auto=False,
+                                          include_global_agent=include_global_agent))
 
 
 def _redirected(path):

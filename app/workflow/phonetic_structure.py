@@ -30,7 +30,7 @@ def verified_groups(batch_path):
     from collections import Counter
     from .question_content import legitimate_source_shape
     from .shared_rubric import (heading_word_bank_group, phonetic_write_group,
-                                picture_sentence_group)
+                                picture_sentence_group, picture_spelling_group)
     try:
         confirmed = confirmed_units(root)
         phonetic_scope = False
@@ -41,8 +41,7 @@ def verified_groups(batch_path):
             phonetic_scope = (metadata.get("source_type") == "同步练习"
                               and looks_like_sync_practice(source_text))
         eligible = {u['unit_id']: u.get('type') for u in confirmed
-                    if (u.get('type') == '语音题' or picture_sentence_group(u)
-                        or heading_word_bank_group(u) or (phonetic_scope and phonetic_write_group(u))) or (
+                    if u.get('type') == '语音题' or picture_sentence_group(u) or picture_spelling_group(u) or heading_word_bank_group(u) or (phonetic_write_group(u) and phonetic_scope) or (
                         u.get('unit_kind') == 'group' and (
                             (u.get('numbers') == [1]
                              and (u.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
@@ -83,10 +82,10 @@ def verified_groups(batch_path):
 
 def verified_picture_headings(root, units):
     from .shared_rubric import (heading_word_bank_group, phonetic_write_group,
-                                picture_sentence_group)
+                                picture_sentence_group, picture_spelling_group)
 
     ids = {unit['unit_id'] for unit in units
-           if picture_sentence_group(unit)
+           if picture_sentence_group(unit) or picture_spelling_group(unit)
            or heading_word_bank_group(unit) or phonetic_write_group(unit)}
     if not ids:
         return {}
@@ -99,7 +98,8 @@ def shape(unit, verified=None):
     if unit.get('unit_kind') != 'group':
         return False, False
     expected = (verified or {}).get(unit.get('unit_id'))
-    if not expected or unit.get('question_type') != expected.get('_source_question_type'):
+    actual_type = unit.get('question_type') or unit.get('type')
+    if not expected or actual_type != expected.get('_source_question_type'):
         return False, False
     if unit.get('material') != expected.get('material'):
         return False, False
@@ -157,7 +157,11 @@ def shape(unit, verified=None):
     if expected.get("_source_question_type") == "选词填空":
         complete = all(str(c.get("stem") or "").strip() for c in subs)
         return (not str(expected.get("material") or "").strip() and complete), False
-    from .shared_rubric import phonetic_write_group
+    from .shared_rubric import phonetic_write_group, picture_spelling_group
+    if picture_spelling_group(expected):
+        actual = [a for a in unit.get("attachments") or []
+                  if isinstance(a, dict) and a.get("kind") == "image" and a.get("placement") == "question"]
+        return bool(images and images == present and len(actual) == len(images)), False
     if phonetic_write_group(expected):
         # The printed heading is the source-backed instruction; each child
         # carries its own phonetic prompt, so no shared material is expected.

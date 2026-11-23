@@ -20,11 +20,15 @@ from workflow.docx_extract import extract_docx, blocking_warnings, layout_hint_w
 from workflow.extract import infer_structure
 
 MARK = re.compile(r"<u>(.*?)</u>", re.S)
-TAG = re.compile(r"<[^>]*>|\*\*")
+# Inline [IMG ...] tokens from DOCX extraction are promoted to native attachments
+# (or stripped when decorative) during draft/wire normalization, so they are
+# non-text layout markup just like <br>/<u>/**. Ordinary bracketed source marks
+# (e.g. [传统文化], [新考法·…]) never match [IMG ...] and remain part of context.
+TAG = re.compile(r"<[^>]*>|\*\*|\[IMG\s+[^\]]+\]")
 # Explicit answer rules have equivalent layouts in DOCX and assembled JSON.
 # Keep a token for the blank (never delete it), so an absent/moved blank still
 # fails the complete-context comparison. No words or punctuation are folded.
-LAYOUT = re.compile(r"<u>[^\S\r\n]+</u>|_{2,}|<[^>]*>|\*\*")
+LAYOUT = re.compile(r"<u>[^\S\r\n]+</u>|_{2,}|<[^>]*>|\*\*|\[IMG\s+[^\]]+\]")
 
 
 def extraction_gate(warnings, auto_ocr: bool) -> dict:

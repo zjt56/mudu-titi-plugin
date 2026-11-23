@@ -1295,28 +1295,40 @@ _ADVANCE_STAGE_LABELS = {
 def _advance_context_info(folder: Path) -> dict:
     """Summarize live activity and next/blocked stage for clear 继续处理 feedback."""
     info = {}
+    manifest = {}
+    stages = {}
+    try:
+        manifest = load(folder / "workflow/manifest.json", {}) or {}
+        stages = manifest.get("stages") if isinstance(manifest.get("stages"), dict) else {}
+    except (OSError, ValueError, TypeError):
+        manifest, stages = {}, {}
+    upload_done = str((stages.get("upload") or {}).get("status") or "") == "completed"
+    flow_finished = bool(stages and (final_format_complete(folder, manifest) or upload_done))
     try:
         from workflow import activity as wf_activity
         act = wf_activity.read(folder)
         if act:
             stage = str(act.get("stage") or "")
-            info["active_stage"] = stage
-            info["active_stage_label"] = _ADVANCE_STAGE_LABELS.get(stage, stage)
-            if act.get("detail"):
-                info["active_detail"] = str(act["detail"])
-            started_at = act.get("started_at")
-            if isinstance(started_at, str) and started_at:
-                try:
-                    dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-                    elapsed = int(max(0, (datetime.now(dt.tzinfo) - dt).total_seconds()))
-                    info["elapsed_seconds"] = elapsed
-                except (ValueError, TypeError):
-                    pass
+            stage_status = str((stages.get(stage) or {}).get("status") or "")
+            # 批次已结束或该阶段已进入完成态时，不再继续累加活动计时，防止残留 activity.json 持续计时。
+            stage_already_done = stage_status in ("completed", "approved", "skipped")
+            batch_ended_for_stage = flow_finished and stage not in ("upload", "upload_gate", "publish_gate")
+            if stage and not stage_already_done and not batch_ended_for_stage:
+                info["active_stage"] = stage
+                info["active_stage_label"] = _ADVANCE_STAGE_LABELS.get(stage, stage)
+                if act.get("detail"):
+                    info["active_detail"] = str(act["detail"])
+                started_at = act.get("started_at")
+                if isinstance(started_at, str) and started_at:
+                    try:
+                        dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                        elapsed = int(max(0, (datetime.now(dt.tzinfo) - dt).total_seconds()))
+                        info["elapsed_seconds"] = elapsed
+                    except (ValueError, TypeError):
+                        pass
     except (ImportError, OSError, ValueError, TypeError):
         pass
     try:
-        manifest = load(folder / "workflow/manifest.json", {}) or {}
-        stages = manifest.get("stages") if isinstance(manifest.get("stages"), dict) else {}
         for st_name, st_val in stages.items():
             if st_name in ("upload_gate", "upload", "publish_gate"):
                 continue
@@ -1999,7 +2011,7 @@ def archive_batch(name: str, confirm_name: str) -> dict:
     from workflow import supervisor as wf_supervisor
     folder = batch_dir(name)
     with wf_supervisor._try_file_lock(wf_supervisor._auto_lock_path(folder)) as acquired:
-        if not acquired or wf_supervisor.execution_busy(folder, include_auto=False):
+        if not acquired or wf_supervisor.execution_busy(folder, include_auto=False, include_global_agent=False):
             raise ValueError("批次正在运行或执行运维动作，请稍后归档")
         return _archive_batch_locked(name, confirm_name)
 
@@ -2151,6 +2163,15 @@ def _clear_purged_batch_state(name):
     # These small caches include question content, not just derived counters.
     # Clear opaque hash-keyed caches too, since they cannot be filtered by path.
     _OVERVIEW_CACHE.clear()
+    _REVIEW_SNAPSHOT_CACHE.clear()
+    _UNITS_BUNDLE_CACHE.clear()
+    try:
+        folder = WORKFLOWS / name
+        disk_cache = _units_bundle_disk_path(folder)
+        if disk_cache.is_file():
+            disk_cache.unlink()
+    except OSError:
+        pass
     for module_name, attributes in {
         "workflow.manifest": ("_FILE_DIGEST_CACHE",),
         "workflow.review": ("_LOAD_CACHE", "_DIGEST_CACHE", "_PLAN_CACHE",
@@ -2253,7 +2274,7 @@ def purge_batch(name: str, confirm_name: str) -> dict:
     if name in _RECYCLE_DIRS:
         raise ValueError("拒绝删除共享回收目录")
     from workflow import ai_supplement, supervisor as wf_supervisor
-    with wf_supervisor.advance_claim(folder) as acquired:
+    with wf_supervisor.advance_claim(folder, include_global_agent=False) as acquired:
         if not acquired:
             raise ValueError("批次正在运行或执行运维动作，请稍后删除")
         if ((_advance_state.get(name) or {}).get("running")
@@ -2344,6 +2365,19 @@ def parse_multipart(handler) -> tuple[dict, list[dict]]:
 
 
 _REVIEW_SNAPSHOT_CACHE = {}
+_REVIEW_SNAPSHOT_LOCKS_GUARD = threading.Lock()
+_REVIEW_SNAPSHOT_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _folder_lock(table: dict[str, threading.Lock], key: str) -> threading.Lock:
+    with _REVIEW_SNAPSHOT_LOCKS_GUARD:
+        lock = table.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            if len(table) > 256:
+                table.clear()
+            table[key] = lock
+        return lock
 
 
 def _review_inputs_key(folder):
@@ -2399,17 +2433,23 @@ def _review_inputs_key(folder):
 
 def review_snapshot(folder):
     """只读投影真实分轮记录；不以旧 report.json 或流程状态冒充审核证据。"""
-    key = (str(folder), _review_inputs_key(folder))
+    import copy
+    folder_key = str(folder)
+    key = (folder_key, _review_inputs_key(folder))
     hit = _REVIEW_SNAPSHOT_CACHE.get(key)
     if hit is not None:
-        import copy
         return copy.deepcopy(hit)
-    value = _review_snapshot_uncached(folder)
-    if len(_REVIEW_SNAPSHOT_CACHE) > 64:
-        _REVIEW_SNAPSHOT_CACHE.clear()
-    _REVIEW_SNAPSHOT_CACHE[key] = value
-    import copy
-    return copy.deepcopy(value)
+    # Single-flight per batch so concurrent detail() + units_bundle() requests
+    # never run duplicate 500ms review.evaluate_rounds() computations under the GIL.
+    with _folder_lock(_REVIEW_SNAPSHOT_LOCKS, folder_key):
+        hit = _REVIEW_SNAPSHOT_CACHE.get(key)
+        if hit is not None:
+            return copy.deepcopy(hit)
+        value = _review_snapshot_uncached(folder)
+        if len(_REVIEW_SNAPSHOT_CACHE) > 64:
+            _REVIEW_SNAPSHOT_CACHE.clear()
+        _REVIEW_SNAPSHOT_CACHE[key] = value
+        return copy.deepcopy(value)
 
 
 def _review_snapshot_uncached(folder):
@@ -2740,27 +2780,44 @@ def _parse_iso(value):
     return parsed if parsed.tzinfo else parsed.astimezone()
 
 
+_POST_FLOW_TIMING_STAGES = frozenset({"upload_gate", "upload", "publish_gate"})
+
+
 def _flow_timing(manifest):
     """Flow start/finish and elapsed minutes from real stage timestamps.
 
-    The completion time is the moment the automated flow finished (the final
-    format check, or the latest finished stage), not the manifest's re-export
-    mtime. Elapsed is rounded to whole minutes from the earliest start.
+    The completion time is the moment the automated flow finished (the completed
+    format_gate, or the latest finished automated-flow stage), not later manual
+    upload/publish stages or manifest re-exports. Elapsed is rounded to whole
+    minutes from the earliest automated-flow start.
     """
     stages = (manifest or {}).get("stages") or {}
-    started, finished = [], []
-    for record in stages.values():
+    flow_started, flow_finished = [], []
+    all_started, all_finished = [], []
+    for stage_id, record in stages.items():
         if not isinstance(record, dict):
             continue
         s = _parse_iso(record.get("started_at"))
         f = _parse_iso(record.get("finished_at"))
         if s:
-            started.append(s)
+            all_started.append(s)
+            if stage_id not in _POST_FLOW_TIMING_STAGES:
+                flow_started.append(s)
         if f:
-            finished.append(f)
-    if not finished:
+            all_finished.append(f)
+            if stage_id not in _POST_FLOW_TIMING_STAGES:
+                flow_finished.append(f)
+    if not all_finished:
         return None, None, None
-    finish = _parse_iso((stages.get("format_gate") or {}).get("finished_at")) or max(finished)
+    fg = stages.get("format_gate") or {}
+    fg_finished = _parse_iso(fg.get("finished_at")) if fg.get("status") == "completed" else None
+    if fg_finished is not None:
+        finish = fg_finished
+    elif flow_finished:
+        finish = max(flow_finished)
+    else:
+        finish = max(all_finished)
+    started = flow_started or all_started
     start = min(started) if started else _parse_iso((manifest or {}).get("created_at"))
     minutes = None
     if start is not None and finish is not None and finish >= start:
@@ -2871,16 +2928,32 @@ def list_batches():
 
 
 def warm_batch_list():
-    """Warm the first page load in the background.
+    """Warm the first page load and top unuploaded review bundles in the background.
 
     A cold projection of every batch costs several seconds (source text + review
     rounds + digests per batch). Building it once at startup keeps the review
     page's first list request well inside the client's 15s request budget, and
-    later polls hit the per-batch cache. Read-only; any failure just leaves the
-    cache cold.
+    pre-warming the top 3 unuploaded batches makes clicking into review instant.
+    Read-only; any failure just leaves the cache cold.
     """
     try:
-        cached_list_batches()
+        batches = cached_list_batches()
+    except (OSError, ValueError, TypeError, KeyError, ImportError):
+        return
+    try:
+        pending_review = [
+            b for b in (batches or [])
+            if isinstance(b, dict) and b.get("name") and not b.get("uploaded") and b.get("rows")
+        ]
+        pending_review.sort(
+            key=lambda b: str(b.get("completed_at") or b.get("updated_at") or b.get("created_at") or ""),
+            reverse=True,
+        )
+        for b in pending_review[:15]:
+            try:
+                units_bundle(b["name"], _readonly=True)
+            except (OSError, ValueError, TypeError, KeyError, ImportError):
+                continue
     except (OSError, ValueError, TypeError, KeyError, ImportError):
         pass
 
@@ -3437,6 +3510,24 @@ def start_batch_upload(name, actor="本机操作员", *, allow_unreviewed=False,
     return {"started": True}
 
 
+_UNREVIEWED_SUMMARY_CACHE: dict[tuple, dict] = {}
+
+
+def _cached_unreviewed_summary(folder: Path) -> dict:
+    """Cache unreviewed_summary by review input fingerprint so 3s polls stay sub-millisecond."""
+    cache_key = (str(folder), _review_inputs_key(folder))
+    hit = _UNREVIEWED_SUMMARY_CACHE.get(cache_key)
+    if hit is not None:
+        return dict(hit)
+    from workflow.runner import unreviewed_summary
+    summary = unreviewed_summary(folder, wf_manifest.load(folder))
+    if isinstance(summary, dict):
+        if len(_UNREVIEWED_SUMMARY_CACHE) >= 32:
+            _UNREVIEWED_SUMMARY_CACHE.clear()
+        _UNREVIEWED_SUMMARY_CACHE[cache_key] = dict(summary)
+    return summary
+
+
 def upload_state(name, *, include_unreviewed=True):
     """Project in-memory progress and durable upload evidence after a restart."""
     folder = batch_dir(name)
@@ -3447,8 +3538,7 @@ def upload_state(name, *, include_unreviewed=True):
     result.update(job)
     if include_unreviewed:
         try:
-            from workflow.runner import unreviewed_summary
-            result['unreviewed'] = unreviewed_summary(folder, wf_manifest.load(folder))
+            result['unreviewed'] = _cached_unreviewed_summary(folder)
             if result['unreviewed'].get('revision'):
                 result['requires_unreviewed_confirmation'] = not result['unreviewed']['passed']
         except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
@@ -4412,10 +4502,9 @@ def _prepare_batch_detail_context(folder: Path, name: str):
         extraction = {}
     audio_mapping = audio_map(folder)
     all_numbers = [int(n) for r in rows for n in (r.get("numbers") or []) if str(n).isdigit()]
-    try:
-        media = media_audit.audit(folder, all_numbers)
-    except (OSError, ValueError, KeyError):
-        media = None
+    # 延迟计算整卷媒体归属：仅在当前单元确实包含图片引用时才执行 media_audit.audit，
+    # 避免纯文本首题在打开时先做全卷图片核查。
+    media = None
     try:
         snapshot_pair = review_snapshot(folder)
     except (ImportError, OSError, ValueError, TypeError, KeyError):
@@ -4433,11 +4522,27 @@ def _prepare_batch_detail_context(folder: Path, name: str):
             scoped_cands_by_uid.setdefault(uid_key, {})[number] = (item, path)
     ap_ctx = _prepare_answer_point_ctx(folder)
     rc_ctx = _prepare_review_comparison_ctx(folder)
-    try:
-        from workflow import label_merge
-        r1_assessments = label_merge.load_round1_assessments(folder)
-    except (ImportError, OSError, ValueError, TypeError, KeyError):
+    r1_record = (snapshot_pair[1] or {}).get("labels") if isinstance(snapshot_pair, tuple) and len(snapshot_pair) == 2 else None
+    r1_round_meta = next(
+        (r for r in ((snapshot_pair[0] or {}).get("rounds") or [])
+         if isinstance(r, dict) and r.get("round_id") == "labels"),
+        None,
+    ) if isinstance(snapshot_pair, tuple) and len(snapshot_pair) == 2 else None
+    if isinstance(r1_record, dict) and isinstance(r1_record.get("checks"), list):
+        r1_assessments = {
+            str(c.get("unit_id") or "").strip(): c["assessment"]
+            for c in r1_record["checks"]
+            if isinstance(c, dict) and str(c.get("unit_id") or "").strip()
+            and isinstance(c.get("assessment"), dict)
+        }
+    elif isinstance(r1_round_meta, dict) and r1_round_meta.get("state") == "not_started":
         r1_assessments = {}
+    else:
+        try:
+            from workflow import label_merge
+            r1_assessments = label_merge.load_round1_assessments(folder)
+        except (ImportError, OSError, ValueError, TypeError, KeyError):
+            r1_assessments = {}
     adv_running = bool(advance_state(name).get("running"))
     shared = {
         "batch": name,
@@ -4459,7 +4564,7 @@ def _prepare_batch_detail_context(folder: Path, name: str):
         "scoped_units": scoped_units, "scoped_by_uid": scoped_by_uid, "has_scoped": has_scoped,
         "lines": lines, "source_text": source_text, "is_sync_practice": is_sync_practice,
         "extraction": extraction, "audio_mapping": audio_mapping,
-        "all_numbers": all_numbers, "media": media,
+        "all_numbers": all_numbers, "media": media, "media_loaded": False,
         "snapshot_pair": snapshot_pair, "batch_map": batch_map,
         "all_cands_by_num": all_cands_by_num, "scoped_cands_by_uid": scoped_cands_by_uid,
         "ap_ctx": ap_ctx, "rc_ctx": rc_ctx, "r1_assessments": r1_assessments,
@@ -4633,9 +4738,16 @@ def _build_unit_detail(folder: Path, name: str, unit_id, ctx: dict, *, row_overr
             finding["merged_count"] = len(finding["member_ids"])
         finding["current"] = finding_current(finding, labels, subs, numbers)
         finding["comparison"] = finding_comparison(finding, comparison, numbers, number_map)
-    if media is not None:
-        shown = {Path(m.group(1).strip()).name for line in chunk for m in media_audit.IMG_REF.finditer(line)}
-        media_items = [m for m in media["items"] if m["name"] in shown]
+    shown = {Path(m.group(1).strip()).name for line in chunk for m in media_audit.IMG_REF.finditer(line)}
+    if shown:
+        if not ctx.get("media_loaded"):
+            try:
+                ctx["media"] = media_audit.audit(folder, ctx["all_numbers"])
+            except (OSError, ValueError, KeyError):
+                ctx["media"] = None
+            ctx["media_loaded"] = True
+        media = ctx.get("media")
+        media_items = [m for m in media["items"] if m["name"] in shown] if media is not None else []
     else:
         media_items = []
     # 卷头、栏目图、已排除的图不是题目内容，预览里不显示，避免被当成题目图片保存。
@@ -4677,30 +4789,166 @@ def _build_unit_detail(folder: Path, name: str, unit_id, ctx: dict, *, row_overr
     return result
 
 
-def detail(name, unit_id):
-    folder = batch_dir(name)
+_UNITS_BUNDLE_CACHE: dict[tuple, dict] = {}
+_DETAIL_CTX_CACHE: dict[tuple, dict] = {}
+_UNITS_BUNDLE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _units_bundle_disk_path(folder: Path) -> Path:
+    digest = hashlib.sha256(str(folder.resolve()).encode("utf-8")).hexdigest()[:24]
+    return _overview_snapshot_path().parent / "units-bundles" / f"{digest}.json"
+
+
+def _units_bundle_key_str(folder: Path, name: str) -> str:
+    """Content/stat fingerprint for RAM + disk cached units_bundle() & detail()."""
+    parts = [
+        _review_inputs_key(folder),
+        bool(advance_state(name).get("running")),
+        (folder / "02_audio/SKIP_LISTENING").is_file(),
+    ]
+    try:
+        code = Path(__file__).stat()
+        parts.append(("server-code", code.st_mtime_ns, code.st_size))
+    except OSError:
+        parts.append(("server-code", "unknown"))
+    for rel in ("01_source/extraction.json", "02_audio/audio_map.json",
+                "01_source/正文.txt", "01_source/structure.confirmed.json",
+                "06_batch/batch_meta.json", "06_batch/batch.json"):
+        p = folder / rel
+        try:
+            st = p.stat()
+            parts.append((rel, st.st_mtime_ns, st.st_size))
+        except OSError:
+            parts.append((rel, "missing"))
+    cand_dir = folder / "candidates"
+    if cand_dir.is_dir():
+        for p in sorted(cand_dir.rglob("*.json")):
+            try:
+                parts.append(("cand:" + str(p.relative_to(folder)), hashlib.sha256(p.read_bytes()).hexdigest()))
+            except OSError:
+                continue
+    return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()
+
+
+def _load_units_bundle_disk(folder: Path, key_str: str) -> dict | None:
+    try:
+        raw = json.loads(_units_bundle_disk_path(folder).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (isinstance(raw, dict) and raw.get("version") == 1
+            and raw.get("folder") == str(folder)
+            and raw.get("key") == key_str
+            and isinstance(raw.get("bundle"), dict)):
+        return raw["bundle"]
+    return None
+
+
+def _save_units_bundle_disk(folder: Path, key_str: str, bundle: dict) -> None:
+    try:
+        target = _units_bundle_disk_path(folder)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        tmp.write_text(
+            json.dumps({"version": 1, "folder": str(folder), "key": key_str, "bundle": bundle},
+                       ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        tmp.replace(target)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _get_cached_bundle(folder: Path, name: str) -> tuple[tuple, dict | None]:
+    key_str = _units_bundle_key_str(folder, name)
+    cache_key = (str(folder), key_str)
+    hit = _UNITS_BUNDLE_CACHE.get(cache_key)
+    if hit is not None:
+        return cache_key, hit
+    disk_hit = _load_units_bundle_disk(folder, key_str)
+    if disk_hit is not None:
+        if len(_UNITS_BUNDLE_CACHE) >= 24:
+            _UNITS_BUNDLE_CACHE.clear()
+        _UNITS_BUNDLE_CACHE[cache_key] = disk_hit
+        return cache_key, disk_hit
+    return cache_key, None
+
+
+def _get_or_prepare_detail_ctx(folder: Path, name: str, cache_key: tuple) -> dict:
+    ctx = _DETAIL_CTX_CACHE.get(cache_key)
+    if ctx is not None:
+        return ctx
     ctx = _prepare_batch_detail_context(folder, name)
-    return _build_unit_detail(folder, name, unit_id, ctx, for_bundle=False)
+    if len(_DETAIL_CTX_CACHE) >= 16:
+        _DETAIL_CTX_CACHE.clear()
+    _DETAIL_CTX_CACHE[cache_key] = ctx
+    return ctx
 
 
-def units_bundle(name):
+def detail(name, unit_id, *, _readonly: bool = False):
+    folder = batch_dir(name)
+    cache_key, cached_bundle = _get_cached_bundle(folder, name)
+    if cached_bundle is not None:
+        unit_payload = cached_bundle["units"].get(str(unit_id))
+        if unit_payload is not None:
+            if _readonly:
+                result = dict(cached_bundle["shared"])
+                result.update(unit_payload)
+                return result
+            import copy
+            result = copy.deepcopy(cached_bundle["shared"])
+            result.update(copy.deepcopy(unit_payload))
+            return result
+    # 与 units_bundle 共享按批次锁与整卷上下文缓存：若预取正在计算则直接复用其产物，
+    # 若首题先到则只算首题并把上下文留给随后的 units_bundle 复用，彻底消除双份重算。
+    with _folder_lock(_UNITS_BUNDLE_LOCKS, str(folder)):
+        cache_key, cached_bundle = _get_cached_bundle(folder, name)
+        if cached_bundle is not None:
+            unit_payload = cached_bundle["units"].get(str(unit_id))
+            if unit_payload is not None:
+                if _readonly:
+                    result = dict(cached_bundle["shared"])
+                    result.update(unit_payload)
+                    return result
+                import copy
+                result = copy.deepcopy(cached_bundle["shared"])
+                result.update(copy.deepcopy(unit_payload))
+                return result
+        ctx = _get_or_prepare_detail_ctx(folder, name, cache_key)
+        return _build_unit_detail(folder, name, unit_id, ctx, for_bundle=False)
+
+
+def units_bundle(name, *, _readonly: bool = False):
     """一次性返回整份试卷全部单元详情（共享字段只传一次），供前端切题零延迟命中缓存。"""
+    import copy
     folder = batch_dir(name)
-    ctx = _prepare_batch_detail_context(folder, name)
-    units = {}
-    order = []
-    for row in ctx["rows"]:
-        uid = str(row.get("unit_id") or row.get("number") or "")
-        if not uid or uid in units:
-            continue
-        units[uid] = _build_unit_detail(folder, name, uid, ctx, row_override=row, for_bundle=True)
-        order.append(uid)
-    return {
-        "batch": name,
-        "shared": ctx["shared"],
-        "units": units,
-        "order": order,
-    }
+    cache_key, cached_bundle = _get_cached_bundle(folder, name)
+    if cached_bundle is not None:
+        return cached_bundle if _readonly else copy.deepcopy(cached_bundle)
+    with _folder_lock(_UNITS_BUNDLE_LOCKS, str(folder)):
+        cache_key, cached_bundle = _get_cached_bundle(folder, name)
+        if cached_bundle is not None:
+            return cached_bundle if _readonly else copy.deepcopy(cached_bundle)
+        ctx = _get_or_prepare_detail_ctx(folder, name, cache_key)
+        units = {}
+        order = []
+        for row in ctx["rows"]:
+            uid = str(row.get("unit_id") or row.get("number") or "")
+            if not uid or uid in units:
+                continue
+            units[uid] = _build_unit_detail(folder, name, uid, ctx, row_override=row, for_bundle=True)
+            order.append(uid)
+        bundle = {
+            "batch": name,
+            "shared": ctx["shared"],
+            "units": units,
+            "order": order,
+        }
+        if len(_UNITS_BUNDLE_CACHE) >= 24:
+            _UNITS_BUNDLE_CACHE.clear()
+        _UNITS_BUNDLE_CACHE[cache_key] = bundle
+        _DETAIL_CTX_CACHE.pop(cache_key, None)
+        _save_units_bundle_disk(folder, cache_key[1], bundle)
+        return bundle if _readonly else copy.deepcopy(bundle)
 
 
 MANUAL_CONTENT_FIELDS = ("explanation", "articleSummary")
@@ -4862,10 +5110,30 @@ class Handler(BaseHTTPRequestHandler):
             if decoded_path == "/api/operations/work-state":
                 return self.send_json(operations_work_state())
             if decoded_path == "/api/batches":
+                qs = parse_qs(parsed.query)
                 batches = cached_list_batches()
-                if (parse_qs(parsed.query).get("lite") or [""])[0] == "1":
-                    batches = [{k: v for k, v in item.items() if k not in ("rows", "extraction")}
-                               if isinstance(item, dict) else item for item in batches]
+                if (qs.get("unuploaded") or [""])[0] == "1":
+                    batches = [item for item in batches if not (isinstance(item, dict) and item.get("uploaded"))]
+                is_lite = (qs.get("lite") or [""])[0] == "1"
+                is_review_list = (qs.get("review_list") or [""])[0] == "1"
+                if is_lite or is_review_list:
+                    drop_keys = ("rows", "extraction", "structure_gate", "diagnostics") if is_review_list else ("rows", "extraction")
+                    slim_batches = []
+                    for item in batches:
+                        if not isinstance(item, dict):
+                            slim_batches.append(item)
+                            continue
+                        rows = item.get("rows")
+                        first_uid = ""
+                        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                            first_uid = str(rows[0].get("unit_id") or rows[0].get("number") or "")
+                        slim = {k: v for k, v in item.items() if k not in drop_keys}
+                        if is_review_list and isinstance(slim.get("stage"), dict):
+                            slim["stage"] = {"hint": slim["stage"].get("hint", "")}
+                        if first_uid:
+                            slim["first_unit_id"] = first_uid
+                        slim_batches.append(slim)
+                    batches = slim_batches
                 return self.send_json({"batches": batches})
             if decoded_path == "/api/taxonomy":
                 return self.send_json(taxonomy.taxonomy())
@@ -4940,13 +5208,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return self.wfile.write(data)
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "units":
-                return self.send_json(units_bundle(parts[2]))
+                return self.send_json(units_bundle(parts[2], _readonly=True))
             if len(parts) == 5 and parts[:2] == ["api", "batches"] and parts[3] == "units":
-                return self.send_json(detail(parts[2], parts[4]))
+                return self.send_json(detail(parts[2], parts[4], _readonly=True))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "pipeline":
                 return self.send_json({"name": parts[2], **advance_state(parts[2])})
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "upload-status":
-                return self.send_json(upload_state(parts[2]))
+                lite = parse_qs(parsed.query).get("lite") == ["1"]
+                return self.send_json(upload_state(parts[2], include_unreviewed=not lite))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "ai-supplement":
                 from workflow import ai_supplement
                 return self.send_json({"ok": True, **ai_supplement.read_progress(batch_dir(parts[2]))})
@@ -5401,7 +5670,10 @@ def main():
     # 页面第一次拉 /api/batches 时不要再现算 13 批投影（冷启约 9s，接近客户端 15s
     # 上限）；启动后在后台预热一次，首屏直接命中缓存。
     threading.Thread(target=warm_batch_list, daemon=True, name="warm-batches").start()
-    serve(ThreadingHTTPServer((args.host, args.port), Handler))
+    class WorkbenchHTTPServer(ThreadingHTTPServer):
+        request_queue_size = 64
+        allow_reuse_address = True
+    serve(WorkbenchHTTPServer((args.host, args.port), Handler))
 
 
 if __name__ == "__main__":

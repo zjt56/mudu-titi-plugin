@@ -84,10 +84,11 @@ test('流程图精修：紧凑两行节点名、方向箭头、已完成段用�
   assert.match(client, /it\.status === 'needs_review' \|\| it\.status === 'invalidated'/);
 });
 
-test('试卷审核列表：按最新时间在最上面，待人工确认仍标出', () => {
+test('试卷审核列表：按最新时间在最上面，不再展示待人工确认徽标', () => {
   assert.match(client, /function batchLatestTime\(b\)/);
   assert.match(client, /sort\(\(a, b\) => batchLatestTime\(b\) - batchLatestTime\(a\)\)/);
-  assert.match(client, /待人工确认/);
+  const cardChunk = client.slice(client.indexOf('const uploadedCard = isBatchUploaded(b);'), client.indexOf('const uploadedCard = isBatchUploaded(b);') + 1200);
+  assert.doesNotMatch(cardChunk, /待人工确认/);
   assert.match(server, /"created_at": manifest\.get\("created_at"\)/);
   assert.match(server, /"updated_at": manifest\.get\("updated_at"\)/);
 });

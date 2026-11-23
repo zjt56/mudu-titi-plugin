@@ -83,15 +83,26 @@ def _check_unit(u, verified=None, table_verified=None):
     if kind == "standalone" and subs:
         problems.append(f"[A11] {uid} ({qt}): standalone 单元不应有 subquestions（现有 {len(subs)} 个）")
 
-    # C11：完形填空单元 options 应为空，每个子题恰好 4 个选项
+    # C11：完形填空单元 options 应为空，每个正文空位子题恰好 4 个选项
     if qt == CLOZE:
         if opts:
             problems.append(f"[C11] {uid}: 完形填空单元 options 应为空（选项在子题），现有 {len(opts)} 个")
+        from workflow.upload_payload import material_blank_numbers
+        from workflow.wire_format import normalize_blank_text
+        blank_numbers = material_blank_numbers(normalize_blank_text(u.get("material") or ""))
         for c in subs:
             n = c.get("number")
             cn = len(c.get("options") or [])
-            if cn != 4:
-                problems.append(f"[C11] {uid} 完形子题 {n}: 选项应为恰好 4 个，现有 {cn} 个")
+            if cn == 4:
+                continue
+            # 只在原卷正文空位上要求恰好 4 个选项。完形后的「☆拓展设问」等非材料空位
+            # 小题（以及带字数限制/简答线索的开放作答小题）原卷只有作答线，没有 A–D
+            # 选项；与 D3（非空位小题保留题干）、E20（简答子题不按选择题选项基准）
+            # 同一口径，不得要求或伪造选项。真正漏选项的空位小题仍会被 C11 拦下。
+            if cn == 0 and ((blank_numbers and isinstance(n, int) and n not in blank_numbers)
+                            or question_content.short_answer_cue(c)):
+                continue
+            problems.append(f"[C11] {uid} 完形子题 {n}: 选项应为恰好 4 个，现有 {cn} 个")
 
     # C12：选词/短文/教材语篇填空 子题不应有 options
     if qt in NO_SUB_OPTIONS:

@@ -509,6 +509,98 @@ class PhoneticStructureTest(unittest.TestCase):
         self.assertEqual(pb_row['material'], '')
         self.assertTrue(any('[A8]' in problem for problem in check(pb_row, self.verified())))
 
+    def test_picture_spelling_group_keeps_rubric_and_shared_image(self):
+        from workbench.server import source_blocks
+        from workflow import denoise, extract, handoff, shared_rubric, structure_gate
+
+        media = self.root / '01_source/media/family_tree.jpeg'
+        media.write_bytes(b'\xff\xd8\xff\xe0picture-spelling-shared-image')
+        text = ('Unit 2 We’re Family!\n第一课时 Section A (1a-1d)\n'
+                '**Ⅱ. 根据家谱完成单词**\n\n'
+                '[IMG family_tree.jpeg]\n\n'
+                '**1.**Tom is Mary’s ______.\n'
+                '**2.**Lucy is Tom’s ______.')
+        structure, text, _ = extract.infer_structure(text)
+        units = structure_gate._build_units(
+            structure['sections'], structure['groups'], denoise.clean_body(text)[0].splitlines())
+        self.assertEqual(len(units), 1)
+        unit = units[0]
+        self.assertEqual(unit['unit_kind'], 'group')
+        self.assertEqual(unit['type'], '单词拼写')
+        for path, value in (('正文.txt', text), ('structure.json', structure),
+                            ('structure.confirmed.json', {'units': units})):
+            self.write('01_source/' + path, value)
+
+        row = question_draft.build(self.root)['items'][0]
+        row['question_type'] = '单词拼写'
+        row['filterMetadata'] = {'subtypes': ['看图填词']}
+        for child, ans in zip(row['subquestions'], ('brother', 'sister')):
+            child['answer'] = ans
+        self.assertEqual(row['stem'], unit['source_section']['title'])
+        self.assertEqual(row['material'], '')
+        self.assertEqual([a['name'] for a in row.get('attachments') or []], ['family_tree.jpeg'])
+        verified = self.verified()
+        self.assertIn(row['unit_id'], verified)
+        self.assertTrue(shared_rubric.picture_spelling_group(verified[row['unit_id']]))
+        self.assertEqual(phonetic_structure.shape(row, verified), (True, False))
+
+        check = self.check_script('check_structure')._check_unit
+        self.assertEqual(check(row, verified), [])
+        self.assertEqual(question_content.audit_batch_source(self.root, {'items': [row]})['issues'], [])
+
+        filled = {'items': [row]}
+        early = copy.deepcopy(filled)
+        early['items'][0]['stem'] = ''
+        for filename in ('content.snapshot.json', 'batch_meta.base.json', 'batch_meta.json'):
+            self.write('06_batch/' + filename, early)
+        final = assemble_local.project_final_view(self.root, filled)
+        self.assertEqual(final['items'][0]['stem'], row['stem'])
+        headings = phonetic_structure.verified_picture_headings(self.root, units)
+        self.assertEqual(headings, {row['unit_id']: row['stem']})
+        handoff._assert_underline_projection(early, final, source_headings=headings)
+        chunk = preview.source_slice(self.root, row['numbers'], unit_id=row['unit_id'])
+        self.assertEqual(chunk[:2], [row['stem'], '[IMG family_tree.jpeg]'])
+        self.assertIn('family_tree.jpeg', json.dumps(source_blocks(chunk)))
+
+        result = upload_payload.build_payload(final, batch_dir=self.root)
+        error_codes = {e['code'] for e in result['errors']}
+        self.assertNotIn('GROUP_INCOMPLETE', error_codes)
+        self.assertNotIn('MISSING_STEM', error_codes)
+        wire = result['payload']['items'][0]
+        self.assertEqual(wire['stem'], row['stem'].replace('**', ''))
+        self.assertEqual(wire['attachments'], [
+            {'kind': 'image', 'name': 'family_tree.jpeg', 'placement': 'question'}])
+
+        # 反向防线：缺图、错归属、冒名图、多出附件、源文件丢失均撤销豁免并报 A8
+        for invalid in ([], [dict(row['attachments'][0], placement='answer')],
+                        [dict(row['attachments'][0], name='other.jpeg')],
+                        [*row['attachments'], dict(row['attachments'][0], name='extra.jpeg')]):
+            self.assertEqual(phonetic_structure.shape({**row, 'attachments': invalid}, verified), (False, False))
+            self.assertTrue(any('[A8]' in p for p in check({**row, 'attachments': invalid}, verified)))
+        media.unlink()
+        self.assertFalse(self.verified())
+        self.assertTrue(any('[A8]' in p for p in check(row, self.verified())))
+
+        # 反向防线：无顶置共享图的 spell-picture 仍报 A8（不因标题关键词放行）
+        no_img_text = ('Unit 2 We’re Family!\n第一课时 Section A (1a-1d)\n'
+                       '**Ⅱ. 根据家谱完成单词**\n'
+                       '**1.**Tom is Mary’s ______.\n'
+                       '**2.**Lucy is Tom’s ______.')
+        ni_struct, ni_text, _ = extract.infer_structure(no_img_text)
+        ni_units = structure_gate._build_units(
+            ni_struct['sections'], ni_struct['groups'], denoise.clean_body(ni_text)[0].splitlines())
+        for path, value in (('正文.txt', ni_text), ('structure.json', ni_struct),
+                            ('structure.confirmed.json', {'units': ni_units})):
+            self.write('01_source/' + path, value)
+        ni_row = question_draft.build(self.root)['items'][0]
+        ni_row['question_type'] = '单词拼写'
+        for child in ni_row['subquestions']:
+            child['answer'] = 'brother'
+        self.assertEqual(ni_row['stem'], '')
+        self.assertEqual(ni_row['material'], '')
+        self.assertTrue(any('[A8]' in p for p in check(ni_row, self.verified())))
+
+
     def test_source_audit_requires_instruction_and_shared_image(self):
         for field in ('stem', 'attachments'):
             rows = copy.deepcopy(self.rows)

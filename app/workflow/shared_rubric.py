@@ -36,6 +36,26 @@ def picture_sentence_group(unit):
             and hit.get("rule") == "sentence-picture")
 
 
+def picture_spelling_group(unit):
+    """Identify the confirmed synchronous-practice picture word-spelling group rule.
+
+    Example: ``**Ⅱ. 根据家谱/地图/图片信息完成单词**`` (`spell-picture`).
+    When a shared image sits between the heading and item 1 and is promoted to a
+    native ``placement=question`` attachment, the group's text ``material`` is
+    legitimately empty while the heading carries the rubric and the attachment
+    carries the shared picture. Unnumbered pure-image sections remain owned by
+    the ``native_alias`` path so child alias semantics stay intact.
+    """
+    from .sync_practice import heading_hit
+    if (unit.get("source_span") or {}).get("number_binding") in {
+            "unnumbered_section", "answer_inferred_image_group"}:
+        return False
+    hit = heading_hit((unit.get("source_section") or {}).get("title") or "") or {}
+    qtype = unit.get("type") or unit.get("_source_question_type")
+    return (unit.get("unit_kind") == "group" and qtype == "单词拼写"
+            and hit.get("rule") == "spell-picture" and hit.get("kind") == "group")
+
+
 def heading_word_bank_group(unit):
     """Identify a word-bank group whose candidate words are printed in the section heading.
 
@@ -70,15 +90,14 @@ def native_section_rubric(lines, unit, *, band_evidence=None):
                             and bool(unit.get('numbers'))
                             and legitimate_source_shape(unit) == 'image_only')
                     ))
-    picture = picture_sentence_group(unit)
+    picture = picture_sentence_group(unit) or picture_spelling_group(unit)
     word_bank_heading = heading_word_bank_group(unit)
     phonetic_write = phonetic_write_group(unit)
     if phonetic_write:
         from .sync_practice import looks_like_sync_practice
         phonetic_write = looks_like_sync_practice("\n".join(lines))
     if (unit.get("identity_version") != "scoped-v1"
-            or (unit.get('type') != '语音题'
-                and not (native_alias or picture or word_bank_heading or phonetic_write))):
+            or unit.get('type') != '语音题' and not native_alias and not picture and not word_bank_heading and not phonetic_write):
         return []
     section, span = unit.get("source_section") or {}, unit.get("source_span") or {}
     heading, first, last = section.get("start_line"), span.get("start_line"), span.get("end_line")

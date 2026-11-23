@@ -392,6 +392,7 @@ _BLIND_REVIEW_DROP_DOCS = frozenset((
     "skills-reference/README.md",
     "skills-reference/type-knowledge-map.md",
     "docs/knowledge-tagging.md",
+    "docs/content-labeling.md",
 ))
 
 
@@ -456,8 +457,13 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
         base_static.pop('07_review/validation-report.json', None)
         base_static.pop('07_review/structure-gate.json', None)
         base_static.pop('01_source/metadata.json', None)
+        base_static.pop('batch_metadata', None)
+        base_static.pop('01_source/material-roles.json', None)
         if 'confirmed_units_with_stable_ids' in base_static:
             base_static.pop('01_source/structure.confirmed.json', None)
+        ff = base_static.get('references/filter-framework.json')
+        if isinstance(ff, dict) and 'question_types' in ff:
+            base_static['references/filter-framework.json'] = {'question_types': ff['question_types']}
         for doc_key in _BLIND_REVIEW_DROP_DOCS:
             base_static.pop(doc_key, None)
 

@@ -941,6 +941,13 @@ def _refresh_post_edit_gates(batch: Path, *, lock_held: bool = False) -> tuple[i
                         output_hashes=mf.output_hashes(batch, spec),
                         exit_code=0, kind=spec.kind, notes="",
                     )
+                    # 批次已完成后的人工编辑/AI补充只刷新校验哈希，不推迟原流程完成时间与耗时。
+                    if isinstance(prev_format, dict):
+                        fg_rec = fresh.setdefault("stages", {}).setdefault("format_gate", {})
+                        if prev_format.get("finished_at"):
+                            fg_rec["finished_at"] = prev_format["finished_at"]
+                        if prev_format.get("started_at"):
+                            fg_rec["started_at"] = prev_format["started_at"]
                     mf.record_semantics(batch, fresh, spec)
                 else:
                     # Keep already-completed batch in review workbench instead of kicking it back to queue.

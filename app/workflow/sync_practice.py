@@ -354,10 +354,11 @@ def answer_key_start(raw_text: str) -> int | None:
     return None
 
 
-def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[dict]:
-    """原文坐标上的大题 occurrence 候选；不生成/改写正式题号或确认单元。"""
+@lru_cache(maxsize=64)
+def _heading_candidates_cached(raw_text: str, path_str: str, rules_sig: tuple[int, int] | None) -> tuple[dict, ...]:
     from .lesson_bands import is_column_banner
-    lines = str(raw_text or "").splitlines()
+    path = Path(path_str) if path_str else None
+    lines = raw_text.splitlines()
     rows, context, table_depth = [], "", 0
     appendix = answer_key_start(raw_text)
     for index, raw in enumerate(lines, 1):
@@ -409,7 +410,20 @@ def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[di
         if appendix and row["start_line"] < appendix <= end:
             end = appendix - 1
         row["end_line"] = max(row["start_line"], end)
-    return rows
+    return tuple(rows)
+
+
+def heading_candidates(raw_text: str, path: str | Path | None = None) -> list[dict]:
+    """原文坐标上的大题 occurrence 候选；不生成/改写正式题号或确认单元。"""
+    text = str(raw_text or "")
+    rules_file = Path(path) if path is not None else RULES_PATH
+    try:
+        st = rules_file.stat()
+        sig: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = None
+    path_str = str(rules_file) if path is not None else ""
+    return [dict(row) for row in _heading_candidates_cached(text, path_str, sig)]
 
 
 def heading_candidates_of(lines: list[str], path: str | Path | None = None) -> list[dict]:
@@ -509,7 +523,7 @@ def prompt_block(path: str | Path | None = None, limit: int = 0) -> str:
                  "题目内容与空档不属于指令；②空档统一 `______`（6 个下划线），首字母题首字母紧贴空档（`c______`）、"
                  "非首字母空档两侧留空格；③组题里材料已带齐题号（`__51__`/`51.`/`　51　`）时，子题 stem 只写空壳"
                  "`______`，不要重复题号或整句，否则底部整串重复；④完形子题 stem 写题号 `1.`、恰好 4 个选项"
-                 "（A–D 连续），☆拓展设问的设问留在 stem 里；⑤选词/短文/教材语篇填空的子题没有选项；"
+                 "（A–D 连续）；完形后的 ☆拓展设问 只保留设问与作答线，不配 A–D 选项；⑤选词/短文/教材语篇填空的子题没有选项；"
                  "⑥补全对话正文每个空位必须带题号、选项恰好 A–G；⑦完成句子一词一空（答案几个词就几组下划线）；"
                  "⑧阅读/任务型/读写综合保留 A/B/C/D 篇章标号，材料段落用换行分隔。")
     lines.append("- 没见过的题型照原卷版式录（分行、编号、留空、表格、小标题都不动），题型挑 27 主类里最接近的一类，"

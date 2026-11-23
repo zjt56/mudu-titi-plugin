@@ -546,6 +546,60 @@ class MonitoringOptimizationsTest(unittest.TestCase):
         self.assertLess(keys.index("skills-reference/knowledge-matching-rules.md"), keys.index("01_source/正文.txt"))
         self.assertLess(keys.index("references/knowledge-catalog.json"), keys.index("06_batch/batch_meta.json"))
 
+    def test_operations_incidents_skips_completed_idle_batches_and_scans_active(self):
+        from workflow import contracts, manifest as mf, operations, sync_practice
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            idle = root / "batch-idle-done"
+            (idle / "workflow").mkdir(parents=True)
+            (idle / "01_source").mkdir(parents=True)
+            (idle / "06_batch").mkdir(parents=True)
+            (idle / "06_batch/batch.base.json").write_text("{}", encoding="utf-8")
+            (idle / "01_source/structure.confirmed.json").write_text(
+                json.dumps({"units": [{"unit_id": "u1", "numbers": [1], "unit_kind": "standalone", "stem": "1. Hi"}]}),
+                encoding="utf-8",
+            )
+            m_idle = {"stages": {}}
+            for spec in contracts.STAGES:
+                if spec.id in ("upload_gate", "upload", "publish_gate"):
+                    m_idle["stages"][spec.id] = {"status": mf.PENDING}
+                elif spec.id == "review_gate":
+                    m_idle["stages"][spec.id] = {
+                        "status": mf.NEEDS_REVIEW, "execution_completed": True, "continue_unqualified": True
+                    }
+                else:
+                    m_idle["stages"][spec.id] = {"status": mf.COMPLETED}
+            mf.save(idle, m_idle)
+
+            active = root / "batch-active-failed"
+            (active / "workflow").mkdir(parents=True)
+            m_active = {"stages": {spec.id: {"status": mf.PENDING} for spec in contracts.STAGES}}
+            m_active["stages"]["assemble"] = {"status": mf.FAILED}
+            mf.save(active, m_active)
+
+            self.assertFalse(operations._folder_needs_incident_scan(idle))
+            self.assertTrue(operations._folder_needs_incident_scan(active))
+
+            # Even if idle batch gets a pending incident or missing structure.confirmed.json, it MUST be scanned.
+            (idle / "workflow/operations.json").write_text(
+                json.dumps({"identity": operations._identity(idle),
+                            "incident": {"incident_id": "i1", "status": "queued"}}), encoding="utf-8"
+            )
+            self.assertTrue(operations._folder_needs_incident_scan(idle))
+            (idle / "workflow/operations.json").unlink()
+            self.assertFalse(operations._folder_needs_incident_scan(idle))
+
+            (idle / "01_source/structure.confirmed.json").unlink()
+            self.assertTrue(operations._folder_needs_incident_scan(idle))
+
+            # heading_candidates cache returns isolated dicts so caller mutation cannot corrupt cache.
+            sample_text = "Unit 1\n**Ⅰ. 根据首字母及汉语提示补全单词**\n1. apple\n"
+            first = sync_practice.heading_candidates(sample_text)
+            self.assertTrue(first)
+            first[0]["title"] = "MUTATED"
+            second = sync_practice.heading_candidates(sample_text)
+            self.assertNotEqual(second[0]["title"], "MUTATED")
+
 
 if __name__ == "__main__":
     unittest.main()

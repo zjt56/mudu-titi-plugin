@@ -657,7 +657,8 @@ def diagnose(batch_dir) -> dict:
         # 而在“质量备注/卡点”两种展示间摇摆。
         # 只把「真正卡住当前推进」的阶段列为卡点：已失败/待复核/阻断，或第一个未完成的。
         note = str(record.get("notes") or "")
-        unmet = [d for d in stage.depends_on if not dependency_satisfied(d)]
+        review_differences = stage.id == "review_gate" and _review_differences(record)
+        unmet = [] if review_differences else [d for d in stage.depends_on if not dependency_satisfied(d)]
         missing_inputs = [k for k in stage.requires
                           if not (inputs.get(k) or {}).get("exists")]
 
@@ -666,7 +667,6 @@ def diagnose(batch_dir) -> dict:
             # 可跳过阶段不是卡点：给出正常说明，不当作“缺少必需输入”或失败。
             reason = "可跳过（" + input_skip_reason + "）"
             detail = input_skip_reason
-        review_differences = stage.id == "review_gate" and _review_differences(record)
         if review_differences:
             # 差异是审核产出（AGENTS.md 硬规则 6）：保留在人工队列与 review-gate.json，
             # 供人工判断模型/知识头的偏差；不是要修掉的故障，也不阻断手动上传。
