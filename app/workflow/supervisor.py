@@ -216,7 +216,6 @@ def execution_busy(folder, *, include_auto=True, include_global_agent=True):
     batch's active model call does not falsely block unrelated batches.
     """
     from . import local_agent
-    key = hashlib.sha256(str(Path(local_agent.__file__).resolve().parent).encode()).hexdigest()
     paths = [Path(folder) / "workflow/.run.lock"]
     if include_auto:
         paths.insert(0, _auto_lock_path(folder))
@@ -226,9 +225,11 @@ def execution_busy(folder, *, include_auto=True, include_global_agent=True):
         with _try_file_lock(path) as acquired:
             if not acquired:
                 return True
+    if _agent_lock_busy(local_agent._batch_lock_path(folder)):
+        return True
     if not include_global_agent:
         return False
-    return _agent_lock_busy(Path(tempfile.gettempdir()) / ("mudu-local-agent-" + key + ".lock"))
+    return _agent_lock_busy(local_agent._global_lock_path())
 
 
 def clear_exhausted(folder):

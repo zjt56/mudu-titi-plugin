@@ -319,8 +319,8 @@ def _cooldown_preflight(batch_dir, stage):
         return None
     code = assemble_local.try_assemble(batch_dir)
     if code == 0:
-        from .local_agent import _agent_lock
-        with _agent_lock(1500):
+        from .local_agent import _batch_lock
+        with _batch_lock(batch_dir, 1500):
             current = mf.load(batch_dir)
             if not rn._record_success(batch_dir, current, stage):
                 code = 3
@@ -405,7 +405,7 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
         stage_id, (exported, task, run_dir) = item
         # Persist actual worker activity so the UI need not pretend every ready
         # stage is already running (idle/queued/cooldown must remain distinct).
-        with bookkeeping_lock, agent_protocol._agent_lock(5):
+        with bookkeeping_lock, agent_protocol._batch_lock(batch_dir, 5):
             current = mf.load(batch_dir)
             mf.touch_stage(current, stage_id, mf.RUNNING, notes="")
             mf.save(batch_dir, current)
@@ -443,7 +443,7 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
                 for retry in range(1 if stage.id in {"answers", "explanations"} or bounded_knowledge else int(config.get("retries", 0)) + 1):
                     envelope = json.loads(response_path.read_text(encoding="utf-8"))
                     try:
-                        with bookkeeping_lock, agent_protocol._agent_lock(5):
+                        with bookkeeping_lock, agent_protocol._batch_lock(batch_dir, 5):
                             agent_tasks.accept_result(batch_dir, stage.id, envelope["result"], validate_only=True)
                         break
                     except ValueError as exc:
@@ -481,7 +481,7 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
             admission_cooldown = code == 4
             if code == 5:
                 code = 1
-            with bookkeeping_lock, agent_protocol._agent_lock(5):
+            with bookkeeping_lock, agent_protocol._batch_lock(batch_dir, 5):
                 manifest = mf.load(batch_dir)
                 if manifest["stages"].get(stage.id, {}).get("status") not in mf.TERMINAL_OK:
                     if limited:
@@ -915,13 +915,13 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
     def advance_local_projection():
         # Keep the scheduler as the sole writer for these steps. Model workers
         # are already dispatched and their imports still run on this thread.
-        from .agent_protocol import _agent_lock
+        from .agent_protocol import _batch_lock
         for sid in ('content_snapshot', 'meta', 'underlines'):
             spec = contracts.STAGE_BY_ID[sid]
             if (sid in projected or sid in recovery_wait or cancel_requested(batch_dir)
                     or stop_at and contracts.STAGE_ORDER.index(sid) >= contracts.STAGE_ORDER.index(stop_at)):
                 continue
-            with _agent_lock(1500):
+            with _batch_lock(batch_dir, 1500):
                 current = mf.load(batch_dir)
                 if current['stages'][sid].get('status') in mf.TERMINAL_OK:
                     continue  # Normal pass owns staleness/skip reconciliation.
@@ -1353,8 +1353,8 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                     _set_cooldown(batch_dir, delay)
                     cooldown = delay
                     if upstream:
-                        from .agent_protocol import _agent_lock
-                        with _agent_lock(5):
+                        from .agent_protocol import _batch_lock
+                        with _batch_lock(batch_dir, 5):
                             current = mf.load(batch_dir)
                             if current['stages'].get(stage.id, {}).get('status') not in mf.TERMINAL_OK:
                                 mf.touch_stage(current, stage.id, mf.PENDING,
@@ -1392,8 +1392,8 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                             retry_after=rn.ocr_retry_after(waiting["next_retry_at"] - time.time()),
                             next_retry_at=waiting["next_retry_at"])
                     continue
-            from .agent_protocol import _agent_lock
-            with _agent_lock(1500):
+            from .agent_protocol import _batch_lock
+            with _batch_lock(batch_dir, 1500):
                 manifest = mf.load(batch_dir)
                 record = manifest["stages"].get(stage.id, {})
                 if record.get("status") in mf.TERMINAL_OK:
@@ -1487,9 +1487,9 @@ def _result(batch_dir: Path, manifest: dict, stage_id, reason: str,
     # Imports also use this lock; reload to avoid replacing a just-imported stage.
     # Contention means another executor owns the batch right now: report the round
     # without fighting for the lock or turning a transient wait into a failure.
-    from .agent_protocol import _agent_lock
+    from .agent_protocol import _batch_lock
     try:
-        with _agent_lock(5):
+        with _batch_lock(batch_dir, 5):
             manifest = mf.load(batch_dir)
             manifest["status"] = mf.derive_status(manifest)
             mf.save(batch_dir, manifest)

@@ -256,7 +256,7 @@ def _metadata_locked(root, folder):
 
 
 @contextmanager
-def _locked(root, folder, *, execution=False, runner=False):
+def _locked(root, folder, *, execution=False, runner=False, batch_execution=False):
     root, folder = Path(root), Path(folder)
     _active(root, folder)
     identity = _identity(folder)
@@ -268,14 +268,19 @@ def _locked(root, folder, *, execution=False, runner=False):
             raise ValueError("identity_changed: 批次身份已变化")
         # Metadata/heartbeats never contend with an unrelated batch's model.
         # Actual artifact writers HOLD execution/import locks, not just a probe.
+        # Per-batch repairs use _batch_lock(folder, 0) so unrelated batches run
+        # concurrently; global codebase installs additionally hold _agent_lock(0).
         from . import local_agent
-        run_guard = supervisor._try_file_lock(folder / "workflow/.run.lock") if execution or runner else nullcontext(True)
+        run_guard = supervisor._try_file_lock(folder / "workflow/.run.lock") if execution or batch_execution or runner else nullcontext(True)
         with run_guard as run_acquired:
             if not run_acquired:
                 raise OperationsBusy("worker_busy: runner owns batch")
             with ExitStack() as stack:
                 try:
-                    stack.enter_context(local_agent._agent_lock(0) if execution else nullcontext())
+                    if execution or batch_execution:
+                        stack.enter_context(local_agent._batch_lock(folder, 0))
+                    if execution:
+                        stack.enter_context(local_agent._agent_lock(0))
                 except local_agent.AgentError as exc:
                     if exc.code == "lock_timeout":
                         raise OperationsBusy("worker_busy: live model/import worker") from exc
@@ -1797,13 +1802,14 @@ def action(root, folder, payload, *, enqueue=None):
     resume = False
     writes_artifacts = name in {"apply_repair", "install_code_repair", "regenerate_units", "recover"} or (
         name == "resume" and bool(data.get("strategy")))
-    global_lock = name in {"apply_repair", "install_code_repair"}
-    # Read-only tools may run alongside the batch. Only global mutations hold
-    # the cross-batch agent lock; batch-local repairs/resumes use batch locks.
+    global_lock = name == "install_code_repair"
+    batch_lock = name == "apply_repair"
+    # Read-only tools may run alongside the batch. Only global codebase installs
+    # hold the cross-batch agent lock; batch-local repairs/resumes use batch locks.
     metadata_only = (name in INVESTIGATION_ACTIONS
                      and ((_load(folder).get("incident") or {}).get("mode") == "investigation"))
     guard = (_metadata_locked(root, folder) if metadata_only else
-             _locked(root, folder, execution=global_lock,
+             _locked(root, folder, execution=global_lock, batch_execution=batch_lock,
                      runner=writes_artifacts or name in {"preview_repair", "verify", "finish", "promote", "recover"}))
     with guard:
         state = _load(folder)
@@ -1915,7 +1921,7 @@ def action(root, folder, payload, *, enqueue=None):
                             _block_repeat(incident, 'repair', repair, evidence)
                             _check_budget(incident, 'repair')
                             try:
-                                with local_agent._agent_lock(0):
+                                with local_agent._batch_lock(folder, 0):
                                     mutating = True
                                     outcome = getattr(self_heal_actions, REPAIRS[repair])(folder, expected_inputs=expected)
                             except local_agent.AgentError as exc:

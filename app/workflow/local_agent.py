@@ -316,21 +316,27 @@ def _file_lock(lock_path: Path, timeout, *, shared=False, label="workflow agent 
             # would also unlock a still-running child sharing this description.
 
 
+def _global_lock_path() -> Path:
+    key = hashlib.sha256(str(Path(__file__).resolve().parent).encode()).hexdigest()
+    return Path(tempfile.gettempdir()) / f"mudu-local-agent-{key}.lock"
+
+
+def _batch_lock_path(batch_dir) -> Path:
+    key = hashlib.sha256(str(Path(batch_dir).expanduser().resolve()).encode()).hexdigest()
+    return Path(tempfile.gettempdir()) / f"mudu-batch-agent-{key}.lock"
+
+
 @contextmanager
 def _agent_lock(timeout, *, shared=False):
     """Global agent lock across workflows sharing this codebase."""
-    key = hashlib.sha256(str(Path(__file__).resolve().parent).encode()).hexdigest()
-    lock_path = Path(tempfile.gettempdir()) / f"mudu-local-agent-{key}.lock"
-    with _file_lock(lock_path, timeout, shared=shared, label="workflow agent lock") as handle:
+    with _file_lock(_global_lock_path(), timeout, shared=shared, label="workflow agent lock") as handle:
         yield handle
 
 
 @contextmanager
 def _batch_lock(batch_dir, timeout, *, shared=False):
-    """Per-batch lock so concurrent batches never starve each other's imports."""
-    key = hashlib.sha256(str(Path(batch_dir).resolve()).encode()).hexdigest()
-    lock_path = Path(tempfile.gettempdir()) / f"mudu-batch-agent-{key}.lock"
-    with _file_lock(lock_path, timeout, shared=shared, label="batch review lock") as handle:
+    """Per-batch lock so concurrent batches never starve each other."""
+    with _file_lock(_batch_lock_path(batch_dir), timeout, shared=shared, label="batch agent lock") as handle:
         yield handle
 
 
@@ -516,7 +522,8 @@ def _json_write(path, payload):
         handle.write("\n")
 
 
-def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False, coordinated_imports=False) -> dict:
+def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False,
+           coordinated_imports=False, lock_handle=None) -> dict:
     """Run one fresh CLI process; preserve all attempt evidence, even on failure.
 
     run_dir is the caller's isolated attempt directory. Its reserved output files
@@ -596,19 +603,25 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False, co
             # orchestrator that bounds concurrency and serializes imports opts in.
             if coordinated_imports and not permit_parallel:
                 raise AgentError("Coordinated imports require a parallel read-only orchestrator", "integration")
+            if lock_handle is not None and not coordinated_imports:
+                raise AgentError("External lock handle requires coordinated imports", "integration")
+            from .model_admission import resolve_batch, require_model_call
+            resolved_batch = resolve_batch(batch_dir=settings.get("_content_batch_dir"), run_dir=root)
             # Auto owns the per-batch scheduler lock, fences every input and
             # serializes protocol imports. Its private model outputs need not
-            # retain a global read lock that would block those imports.
-            lock = (nullcontext(None) if coordinated_imports else
-                    _agent_lock(settings["timeout_seconds"], shared=True) if permit_parallel
-                    else _agent_lock(settings["timeout_seconds"]))
-            with lock as lock_handle:
+            # retain a read lock that would block those imports.
+            # Callers holding a per-batch lock pass lock_handle so POSIX
+            # children inherit the lock descriptor via pass_fds.
+            lock = (nullcontext(lock_handle) if coordinated_imports else
+                    _batch_lock(resolved_batch, settings["timeout_seconds"], shared=permit_parallel)
+                    if resolved_batch is not None else
+                    (_agent_lock(settings["timeout_seconds"], shared=True) if permit_parallel
+                     else _agent_lock(settings["timeout_seconds"])))
+            with lock as active_lock_handle:
                 # None remains valid for Windows and mock/no-op lock contexts.
-                inherited_lock = ({"pass_fds": (lock_handle.fileno(),)}
-                                  if os.name != "nt" and lock_handle is not None else {})
-                from .model_admission import resolve_batch, require_model_call
-                require_model_call(resolve_batch(batch_dir=settings.get("_content_batch_dir"), run_dir=root),
-                                   error_type=AgentError)
+                inherited_lock = ({"pass_fds": (active_lock_handle.fileno(),)}
+                                  if os.name != "nt" and active_lock_handle is not None else {})
+                require_model_call(resolved_batch, error_type=AgentError)
                 call_started = time.monotonic()
                 metadata["wall_start"] = datetime.now(timezone.utc).isoformat()
                 process = None
@@ -1084,7 +1097,7 @@ def main(argv=None):
             # Reuse the existing type model/partition/repair implementation inside
             # preassembly. The outer agent/runner records preassemble, not types.
             from . import preassembly
-            with _agent_lock(config.get("timeout_seconds", 900)):
+            with _batch_lock(batch_dir, config.get("timeout_seconds", 900)):
                 if args.dry_run:
                     preassembly.require_current_source(batch_dir)
                 else:
@@ -1109,7 +1122,7 @@ def main(argv=None):
             attempts.mkdir(parents=True, exist_ok=True)
             run_dir = Path(tempfile.mkdtemp(prefix=args.stage + "-", dir=attempts))
             result = label_execution.run(batch_dir, args.stage, config, run_dir, invoke=invoke)
-            with _agent_lock(config.get("timeout_seconds", 900)):
+            with _batch_lock(batch_dir, config.get("timeout_seconds", 900)):
                 _check_input_hashes(batch_dir, result["input_hashes"])
                 label_execution.check_inputs(batch_dir, args.stage, result["collected_hashes"])
                 report = agent_tasks.accept_result(batch_dir, accept_stage, result["response"])
@@ -1167,7 +1180,7 @@ def main(argv=None):
                 attempts.mkdir(parents=True, exist_ok=True)
                 run_dir = Path(tempfile.mkdtemp(prefix=("preassemble" if assembling else args.stage) + "-", dir=attempts))
                 _json_write(run_dir / "response.json", direct_response)
-                with _agent_lock(config.get("timeout_seconds", 900)):
+                with _batch_lock(batch_dir, config.get("timeout_seconds", 900)):
                     _check_input_hashes(batch_dir, task.get("input_hashes", {}))
                     report = agent_tasks.accept_result(batch_dir, accept_stage, direct_response)
                 _json_write(run_dir / "import-report.json", report)
@@ -1186,7 +1199,7 @@ def main(argv=None):
                 attempts.mkdir(parents=True, exist_ok=True)
                 run_dir = Path(tempfile.mkdtemp(prefix="knowledge-", dir=attempts))
                 _json_write(run_dir / "response.json", direct_response)
-                with _agent_lock(config.get("timeout_seconds", 900)):
+                with _batch_lock(batch_dir, config.get("timeout_seconds", 900)):
                     _check_input_hashes(batch_dir, task.get("input_hashes", {}))
                     report = agent_tasks.accept_result(batch_dir, accept_stage, direct_response)
                 _json_write(run_dir / "import-report.json", report)
@@ -1272,7 +1285,7 @@ def main(argv=None):
             except (OSError, ValueError):
                 cached = None
             if cached is not None:
-                with _agent_lock(config.get("timeout_seconds", 900)):
+                with _batch_lock(batch_dir, config.get("timeout_seconds", 900)):
                     _check_input_hashes(batch_dir, strict_hashes)
                     report = agent_tasks.accept_result(batch_dir, accept_stage, cached)
                 _json_write(run_dir / "import-report.json", report)
@@ -1401,7 +1414,7 @@ def main(argv=None):
                     if isinstance(items, list):
                         items.sort(key=lambda row: rank.get(row.get("unit_id"), len(rank)))
             _json_write(run_dir / "response.json", response)
-            with _agent_lock(config.get("timeout_seconds", 900)):
+            with _batch_lock(batch_dir, config.get("timeout_seconds", 900)):
                 _check_input_hashes(batch_dir, strict_hashes)
                 for part in parts:
                     unit_tasks.check_part_inputs(batch_dir, part)
@@ -1455,7 +1468,7 @@ def main(argv=None):
                 raise
             response = result["response"]
             try:
-                with _agent_lock(config.get("timeout_seconds", 900)):
+                with _batch_lock(batch_dir, config.get("timeout_seconds", 900)):
                     _check_input_hashes(batch_dir, hashes)
                     report = agent_tasks.accept_result(batch_dir, accept_stage, response)
             except AgentError as exc:

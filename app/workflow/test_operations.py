@@ -605,12 +605,12 @@ class OperationsTests(unittest.TestCase):
 
     def test_unrelated_global_model_lock_allows_metadata_but_blocks_apply(self):
         from workflow import local_agent
-        import hashlib, subprocess, sys
+        import subprocess, sys
         claim = self.claim()
-        key = hashlib.sha256(str(Path(local_agent.__file__).resolve().parent).encode()).hexdigest()
-        path = Path(tempfile.gettempdir()) / ('mudu-local-agent-' + key + '.lock')
+        # Same-batch live model/import worker allows metadata/heartbeats but blocks apply_repair.
+        same_path = local_agent._batch_lock_path(self.folder)
         code = 'from pathlib import Path; import sys; from workflow.supervisor import _try_file_lock\nwith _try_file_lock(Path(sys.argv[1])) as acquired:\n assert acquired\n print("ready",flush=True)\n sys.stdin.read()'
-        process = subprocess.Popen([sys.executable, '-c', code, str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        process = subprocess.Popen([sys.executable, '-c', code, str(same_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(process.stdout.readline().strip(), 'ready')
             self.assertEqual(self.request(claim, 'heartbeat')["status"], 'completed')
@@ -625,6 +625,29 @@ class OperationsTests(unittest.TestCase):
         finally:
             process.communicate(timeout=5)
         self.assertEqual(process.returncode, 0)
+
+        # An unrelated batch's lock must NOT block per-batch apply_repair on self.folder,
+        # while the global codebase lock still blocks global install_code_repair.
+        other_path = local_agent._batch_lock_path(self.root / 'other-batch')
+        other_proc = subprocess.Popen([sys.executable, '-c', code, str(other_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(other_proc.stdout.readline().strip(), 'ready')
+            # Not raising OperationsBusy proves the unrelated batch lock did not block admission.
+            res = self.request(claim, 'apply_repair', {"repair": "repair_source_tables"}, request='apply-isolated')
+            self.assertIn("preview", str(res.get("error") or "").lower())
+        finally:
+            other_proc.communicate(timeout=5)
+        self.assertEqual(other_proc.returncode, 0)
+
+        global_path = local_agent._global_lock_path()
+        global_proc = subprocess.Popen([sys.executable, '-c', code, str(global_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(global_proc.stdout.readline().strip(), 'ready')
+            with self.assertRaisesRegex(op.OperationsBusy, 'worker_busy'):
+                self.request(claim, 'install_code_repair', {"confirm": True}, request='install-blocked')
+        finally:
+            global_proc.communicate(timeout=5)
+        self.assertEqual(global_proc.returncode, 0)
 
     def test_cross_process_runner_lock_blocks_claim(self):
         import subprocess, sys

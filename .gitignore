@@ -8,6 +8,8 @@ backend/.local-agent.effective.json.tmp-*
 
 # 项目变更记录目录：不进上传仓库（本地保留，只用于自动清理与追溯）
 /CHANGELOG/
+# 本地资料区（项目报告、总结、分析及非代码杂物，不随仓库上传）
+/资料区/
 /.workbench-trash/
 # 原生内容子智能体队列/取证快照（含试卷原文，不入库）
 /.content-agent/

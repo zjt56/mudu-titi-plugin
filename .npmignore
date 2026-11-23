@@ -3,6 +3,8 @@ workflows/
 inbox/
 # 项目变更记录：不进上传仓库/发布包
 CHANGELOG/
+# 本地资料区：项目报告、总结、分析及非代码杂物，绝不进包
+资料区/
 .port-backup/
 .git/
 node_modules/

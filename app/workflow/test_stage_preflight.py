@@ -22,7 +22,7 @@ def isolated_protocol_lock(test):
     def lock(*args, **kwargs):
         with mutex:
             yield
-    guard = patch.object(agent_protocol, '_agent_lock', side_effect=lock)
+    guard = patch.object(agent_protocol, '_batch_lock', side_effect=lock)
     guard.start()
     test.addCleanup(guard.stop)
 
@@ -170,7 +170,7 @@ class StagePreflightTest(unittest.TestCase):
         def saved(batch, state):
             self.assertTrue(inside)
             return save(batch, state)
-        with patch.object(agent_protocol, '_agent_lock', side_effect=lock), \
+        with patch.object(agent_protocol, '_batch_lock', side_effect=lock), \
              patch.object(stage_preflight, 'audio_evidence_ready', side_effect=checked), \
              patch.object(mf, 'save', side_effect=saved):
             self.assertEqual(stage_preflight.run(self.batch, 'audio')[0], 0)

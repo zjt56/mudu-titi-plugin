@@ -1310,8 +1310,8 @@ def run(batch_dir: Path) -> dict:
         if selected['inputs'] != manifest['inputs']:
             # Persist through manifest's atomic writer only while extraction owns
             # the input binding; do not manufacture any completed stage status.
-            from workflow.local_agent import _agent_lock
-            with _agent_lock(1500):
+            from workflow.local_agent import _batch_lock
+            with _batch_lock(batch_dir, 1500):
                 current = mf.load(batch_dir)
                 if current.get('inputs') != manifest.get('inputs'):
                     raise ValueError('附件角色识别期间输入发生变化，请重试')

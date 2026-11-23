@@ -17,7 +17,7 @@ import time
 import uuid
 
 from . import agent_tasks, contracts, manifest as mf
-from .local_agent import MAX_FINAL_BYTES, _agent_lock
+from .local_agent import MAX_FINAL_BYTES, _agent_lock, _batch_lock
 
 PROTOCOL = "upload-workflow.agent/v1"
 PUBLIC_FILES = ("task.json", "response.schema.json", "response.example.json", "README.md")
@@ -294,7 +294,7 @@ def export_task(batch_dir, stage, output_dir=None, max_input_chars=180000) -> di
                 _atomic(destination / name, (Path(result["package_dir"]) / name).read_bytes())
             result["package_dir"] = str(destination)
         return result
-    with _agent_lock(5):
+    with _batch_lock(batch, 5):
         manifest = mf.load(batch)
         blockers = _preconditions(manifest, spec)
         if blockers:
@@ -391,7 +391,7 @@ def import_result(batch_dir, task_id, result_path) -> dict:
         raise ValueError("Response requires exactly protocol, task_id, result")
     if response["protocol"] != PROTOCOL or response["task_id"] != task_id:
         raise ValueError("Response protocol/task_id does not match the exported task")
-    with _agent_lock(5):
+    with _batch_lock(batch, 5):
         binding_path = _path(batch, f"workflow/agent-bindings/{task_id}.json")
         binding = _load(binding_path.read_bytes())
         if binding.get("protocol") != PROTOCOL or binding.get("task_id") != task_id:

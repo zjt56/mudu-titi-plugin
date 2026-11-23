@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import re
 
-_HEADING = re.compile(r'^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+|[IVX]{1,4})\s*[.、]\s*(\S[^\n(（]*)')
+_HEADING = re.compile(
+    r'^\s*(?:\*{1,2}\s*)?(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+|[IVX]{1,4}|[一二三四五六七八九十]+)\s*[.、]\s*(\S[^\n(（]*)'
+)
 _NUMBER_LINE = re.compile(r'^\s*(?:\(\s*\)\s*)?(\d+)\s*[.、]')
 _BLANK = re.compile(r'<\s*u\s*>[^<]{0,20}?(?<!\d)(\d+)(?!\d)[^<]{0,20}?<\s*/\s*u\s*>'
                     r'|__\s*(\d+)\s*__')
@@ -57,27 +59,33 @@ def question_sections(source):
     lines = source.splitlines()
     for index, line in enumerate(lines):
         match = _HEADING.match(line)
-        main_type = heading_type(match.group(1)) if match else None
-        if main_type:
-            headings.append((index, main_type))
+        if match:
+            # Record unrecognized headings as None too so an earlier section's
+            # type cannot bleed across a section boundary.
+            headings.append((index, heading_type(match.group(1))))
             continue
         start = _NUMBER_LINE.match(line)
         if start:
-            positions.setdefault(start.group(1), index)
+            positions.setdefault(start.group(1), []).append(index)
         for blank in _BLANK.finditer(line):
             number = blank.group(1) or blank.group(2)
-            positions.setdefault(number, index)
+            positions.setdefault(number, []).append(index)
     section_of, types, unassigned = {}, set(), []
-    for number, index in positions.items():
-        chosen = None
-        for heading_index, main_type in headings:
-            if heading_index > index:
-                break
-            chosen = main_type
-        if chosen is None:
-            unassigned.append(number)
-            continue
-        section_of[number] = chosen
-        types.add(chosen)
+    for number, indices in positions.items():
+        choices = set()
+        for index in indices:
+            chosen = None
+            for heading_index, main_type in headings:
+                if heading_index > index:
+                    break
+                chosen = main_type
+            choices.add(chosen)
+        if len(choices) == 1:
+            only = next(iter(choices))
+            if only is not None:
+                section_of[number] = only
+                types.add(only)
+                continue
+        unassigned.append(number)
     return {'types': section_of, 'declared_types': sorted(types),
             'unassigned': sorted(unassigned, key=lambda n: int(n) if n.isdigit() else 0)}

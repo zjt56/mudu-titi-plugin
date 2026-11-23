@@ -249,10 +249,10 @@ def _candidate(batch: Path, manifest: dict) -> tuple[str | None, str]:
 
 
 def _busy(batch: Path) -> bool:
-    """Do not diagnose/repair a worker still holding the actual execution lock."""
-    from .local_agent import AgentError, _agent_lock
+    """Do not diagnose/repair a worker still holding this batch's execution lock."""
+    from .local_agent import AgentError, _batch_lock
     try:
-        with _agent_lock(0):
+        with _batch_lock(batch, 0):
             pass
     except AgentError as exc:
         if exc.code == "lock_timeout":

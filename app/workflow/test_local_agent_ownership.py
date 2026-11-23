@@ -291,6 +291,43 @@ class LocalAgentOwnershipTest(unittest.TestCase):
                         os.killpg(pid, signal.SIGKILL)
                     self.wait_for(lambda: not self.running(pid), "fake child leaked")
 
+    def test_batch_lock_isolates_two_batches_for_invoke_self_heal_and_supervisor(self):
+        from workflow import self_heal, supervisor
+        batch_a = self.root / "batch-a"
+        batch_b = self.root / "batch-b"
+        (batch_a / "workflow").mkdir(parents=True)
+        (batch_b / "workflow").mkdir(parents=True)
+        code = (
+            "from pathlib import Path; import sys; from workflow.local_agent import _batch_lock\n"
+            "with _batch_lock(Path(sys.argv[1]), 0, shared=True):\n"
+            "    print('ready', flush=True)\n"
+            "    sys.stdin.read()\n"
+        )
+        holder = subprocess.Popen(
+            [sys.executable, "-c", code, str(batch_a)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "ready")
+            # Batch A is busy under its own per-batch lock.
+            self.assertTrue(self_heal._busy(batch_a))
+            self.assertTrue(supervisor.execution_busy(batch_a, include_global_agent=False))
+            with self.assertRaises(agent.AgentError) as caught:
+                with agent._batch_lock(batch_a, 0):
+                    pass
+            self.assertEqual(caught.exception.code, "lock_timeout")
+            # Batch B is completely unblocked for lock acquisition, self_heal, supervisor, and invoke.
+            self.assertFalse(self_heal._busy(batch_b))
+            self.assertFalse(supervisor.execution_busy(batch_b, include_global_agent=False))
+            with agent._batch_lock(batch_b, 0):
+                pass
+            cfg = dict(self.config(batch_b / "workflow", "success"), _content_batch_dir=str(batch_b))
+            result = agent.invoke("fake", batch_b / "workflow/agent-runs/a1", cfg)
+            self.assertEqual(result["response"], RESPONSE)
+        finally:
+            holder.communicate(timeout=5)
+        self.assertEqual(holder.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

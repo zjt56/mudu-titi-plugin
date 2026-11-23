@@ -621,11 +621,11 @@ def try_assemble(batch_dir, config=None):
             return 3
         print(f"  确定性产物未通过整批校验，交回模型组装：{exc}", flush=True)
         return None
-    from .local_agent import _agent_lock
+    from .local_agent import _batch_lock
     timeout = 900
     if isinstance(config, dict):
         timeout = config.get("timeout_seconds", 900)
-    with _agent_lock(timeout):
+    with _batch_lock(batch_dir, timeout):
         report = agent_tasks.accept_result(batch_dir, "assemble", candidate)
     if report.get("completed"):
         record_guard(batch_dir)

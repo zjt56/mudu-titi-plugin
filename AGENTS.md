@@ -21,6 +21,7 @@
 | `config/` | `model-router.json`（模型/子 Agent 路由）、策略配置 |
 | `CHANGELOG/` | **项目变更记录**（见第三节，强制维护） |
 | `ISSUES/` | **卡点台账**：`open/` 未修复待办清单，`fixed/` 已修复留档（见硬规则 24） |
+| `资料区/` | **本地资料与杂物区**（项目报告、总结、分析等非代码文件；已忽略，不上传仓库） |
 | `workflows/` | 实际试卷批次产物（**用户数据，非代码**） |
 
 改代码前先读对应 `app/docs/*.md`；`app/workflow/contracts.py` 是阶段与产物的唯一真相，改动前先对齐它。
@@ -115,6 +116,7 @@
 44. **提取层“容器与题内分离、语境与作答分离”通用规则**：① **容器横幅与题内标记同源单一真相**：整行栏目/板块/步骤横幅（`lesson_bands.is_column_banner`，含 `【一、基础巩固】`、`【三、熟词生义】`、`【第N步 ...】`、`【Step N ...】` 等）统一作为结构容器边界；上游 `extract` 遇横幅立即截断上一大题窗口，下游 `sync_practice.source_marks`（及 `audit_source_marks`）跳过整行容器横幅、只校验真正属于题干/材料/大题标题内的行内提示标记（如 `[熟词生义]`、`[情境题]`、`[2025·…]`），杜绝「上游截断边界、下游误报 D27/B9 丢标记」的矛盾。② **语境引用空位 ≠ 本题印刷题号或作答空位**：同步练习的独立题大题（`standalone`，如翻译/熟词生义/句型改写）引用前文完形或语篇原句时，句中携带的完形编号空位（`__<u>N</u>__`、`__N__`）仅作原文语境保留，绝不当作本题的印刷小题号或作答空位——`extract` 不对同步独立题执行 `blank_numbers` 扫描，`structure_gate` 对未声明题号且无行首强题号的独立节不回落弱空位号，`question_content.unnumbered_text_responses` 计数作答空位前先剔除引用编号空位，确保无号文字作答题完整进入 `unnumbered_section`，避免漏题与连锁 `UNDERLINE_MAPPING_MISSING`。③ **阶段交付自动清理历史局部修复反馈**：`agent_protocol.import_result` 在阶段通过校验并正式交付（`completed=true`）后，自动将 `workflow/repair-feedback/{stage}.json` 归档至 `resolved/`，防止旧单题反馈在后续结构更新时锁死确定性直抄通道。④ **纯图反推题组全链路同源豁免**：`structure_gate` 位置核验对 `number_binding="answer_inferred_image_group"` 且满足 `printed_numbers==[]`、`inferred_numbers==numbers`、`inferred_evidence` 非空的单元与 `single_writing_section`/`unnumbered_section` 一视同仁，避免 `format_gate` 误报 `QUESTION_NOT_FOUND`。落地：`app/workflow/extract.py`、`lesson_bands.py`、`question_content.py`、`structure_gate.py`、`sync_practice.py`、`agent_protocol.py`；回归 `app/workflow/test_golden_layouts.py`。
 45. **四合一附件组通用角色识别（正文 / 答案解析 / 独立听力材料 / 音频）**：多附件材料分类（`material_classify.py`）支持 `listening_script` 角色，明确区分 `paper`（含待作答试题题干/选项/空位）、`answers`/`explanations`（答案速查、解析、`【文章大意】`、`【评分标准】`、`【参考范文】`，无试题与选项不得判 `mix`/`paper`）、`listening_script`（纯听力朗读原文、`W:`/`M:` 对话与听力提示语，无选项/空位/试题图/笔试大题/答案标记不得判 `paper`）和 `mix`。模型误把纯听力稿或纯答案解析卷判为 `paper`/`mix` 时由内容特征守卫纠偏，使同批只有真正的多份不同试卷正文才报 `MATERIAL_MULTIPLE_PAPERS`；独立 `listening_script` 保持 `content_authority=true`，由 `listening_script.extract`（支持无额外总标题行、粗体大题号及 `6、7` 题号对）写入听力解析，同时在 `upload_content` 答案/解析锚点扫描与 `explanations_direct._pdf_sources` 中隔离，避免对话编号误充答案或解析锚点。落地：`app/workflow/material_classify.py`、`listening_script.py`、`upload_content.py`、`explanations_direct.py`。
 46. **题干上的原卷提示标记必须保留且按子题真实句干归属（单句列表型选词填空不误判 D27/B9）**：原卷印刷在小题题干开头的提示标记（如 `[2025·甘肃兰州改编]`、`[2025·宿州泗县期末]`、`[新考法·…]` 等）必须保留在所属小题题干中。`audit_source_marks`（`sync_practice._mark_requirements`）判定归属时，不得仅因主类属于 `选词填空` 等 `material_type` 且无 `A/B/C/D` 选项块就强制要求标记出现在题组 `material`（词库）中；当唯一匹配的子题自身携带独立句干文字（`child_has_stem`）时，该子题行上的提示标记归属 `所属子题N题干`（保留即通过，丢失仍阻断），只有无独立子题句干的连贯语篇/对话才归属 `原材料/作答指令`。落地：`app/workflow/sync_practice.py::_mark_requirements`、`app/docs/sync-practice.md`；回归 `app/workflow/test_sync_source_marks.py::test_word_box_sentence_list_keeps_source_mark_on_child_stem`。
+47. **非代码资料与报告统一放入 `资料区/`，绝不进 Git**：所有与项目代码运行无关的产物（项目报告、阶段总结、批次数据分析、调研杂物等）统一存放于根目录 `资料区/`；该目录已列入 `.gitignore` 与 `.npmignore`，禁止散落在仓库根目录或提交推送到 GitHub。
 
 ## 三、变更记录制度（强制）
 

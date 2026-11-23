@@ -183,9 +183,9 @@ def _mark_crashed(batch_dir: Path, manifest: dict, stage: contracts.Stage,
     Only `running` is touched: a stage that already reached a terminal state
     must keep its verdict, and a stage that never started must stay pending.
     """
-    from .local_agent import _agent_lock
+    from .local_agent import _batch_lock
     try:
-        with _agent_lock(30):
+        with _batch_lock(batch_dir, 30):
             current = mf.load(batch_dir)
             status = current.get("stages", {}).get(stage.id, {}).get("status")
             if status != mf.RUNNING:
@@ -456,10 +456,10 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
     argv = _stage_argv(rendered)
     log = _log_path(batch_dir, stage.id)
     print(f"  执行：{' '.join(argv[1:])}")
-    from .local_agent import _agent_lock, authentication_binding, classify_failure, MODEL_AUTHENTICATION_NOTE
+    from .local_agent import _batch_lock, authentication_binding, classify_failure, MODEL_AUTHENTICATION_NOTE
     model_stage = contracts.STAGE_BY_ID.get(stage.id, stage).kind == contracts.AGENT
     auth_binding = authentication_binding() if model_stage else None
-    with _agent_lock(timeout):
+    with _batch_lock(batch_dir, timeout):
         current = mf.load(batch_dir)
         env = _stage_env()
         if stage.id == "extract" and current.get("stages", {}).get("extract", {}).get("ocr_reconciliation"):
@@ -507,7 +507,7 @@ def _execute_command_stage(batch_dir: Path, manifest: dict, stage: contracts.Sta
                 metadata_ai.auto_identify(batch_dir)
         except (OSError, ValueError, RuntimeError, TypeError) as exc:
             print(f"  · 元信息识别跳过：{str(exc)[:160]}")
-    with _agent_lock(timeout):
+    with _batch_lock(batch_dir, timeout):
         current = mf.load(batch_dir)
         # Another actor may have completed this stage while the command ran.
         # Never replace its terminal result with a late failure or success.
@@ -707,8 +707,8 @@ def do_validate(batch_dir: Path, manifest: dict, *, lock_held: bool = False,
     for item in report.get("skipped", []):
         print(f"    · {item['check']} 跳过（{item['reason']}）")
     # 提交前在锁内重读台账并复核实际证据；并发的无关更新必须保留。
-    from .local_agent import _agent_lock
-    with (contextlib.nullcontext() if lock_held else _agent_lock(1500)):
+    from .local_agent import _batch_lock
+    with (contextlib.nullcontext() if lock_held else _batch_lock(batch_dir, 1500)):
         try:
             current = mf.load(batch_dir)
         except FileNotFoundError:
@@ -981,8 +981,8 @@ def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
     # Auto/supervisor call this directly, not the CLI stage-dispatch branch.
     # Gather complete page/column evidence before freezing gate inputs.
     _ensure_visual_evidence(batch_dir)
-    from .local_agent import _agent_lock
-    with _agent_lock(1500):
+    from .local_agent import _batch_lock
+    with _batch_lock(batch_dir, 1500):
         current = mf.load(batch_dir)
         binding = _structure_inputs(batch_dir, current)
         stage_before = json.dumps(current["stages"]["structure_gate"], sort_keys=True)
@@ -1018,7 +1018,7 @@ def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
         if not report.get("passed") and report.get("layout_required"):
             # Avoid dispatching OCR for evidence already known to be stale. OCR
             # can acquire other locks, so it must run outside the agent lock.
-            with _agent_lock(1500):
+            with _batch_lock(batch_dir, 1500):
                 current = mf.load(batch_dir)
                 if not fresh(current):
                     return reject_stale(current)
@@ -1029,7 +1029,7 @@ def do_structure_gate(batch_dir: Path, manifest: dict) -> int:
                 fallback = {"status": "needs_review", "dispatch_state": "unavailable", "reason": str(exc)}
             report["layout_fallback"] = fallback
             print(f"  · 版面复核：{fallback.get('dispatch_state', 'needs_review')}；证据未完成前不放行")
-        with _agent_lock(1500):
+        with _batch_lock(batch_dir, 1500):
             current = mf.load(batch_dir)
             if not fresh(current):
                 return reject_stale(current)
@@ -1189,8 +1189,8 @@ def do_review_gate(batch_dir: Path, manifest: dict, *, lock_held=False) -> int:
     if len(result["errors"]) > 10:
         print(f"    …另有 {len(result['errors']) - 10} 条")
     # 提交前锁内重读台账并复核审核证据；并发的无关更新必须保留，过期判断不放行。
-    from .local_agent import _agent_lock
-    with (contextlib.nullcontext() if lock_held else _agent_lock(1500)):
+    from .local_agent import _batch_lock
+    with (contextlib.nullcontext() if lock_held else _batch_lock(batch_dir, 1500)):
         try:
             current = mf.load(batch_dir)
         except FileNotFoundError:
@@ -1399,8 +1399,8 @@ def cmd_diagnose(args) -> int:
 
 def _run_batch_locked(batch_dir: Path, fn) -> int:
     """Serialize a complete public batch operation with protocol imports."""
-    from .local_agent import _agent_lock
-    with _agent_lock(1500):
+    from .local_agent import _batch_lock
+    with _batch_lock(batch_dir, 1500):
         return fn()
 
 
@@ -1534,8 +1534,8 @@ def _skip_agent_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
     if dry_run:
         print(f"  · {stage.id} 将跳过（{reason}）")
         return True
-    from .local_agent import _agent_lock
-    with _agent_lock(1500):
+    from .local_agent import _batch_lock
+    with _batch_lock(batch_dir, 1500):
         current = mf.load(batch_dir)
         reason = mf.skip_reason(current, stage)
         if not reason:
@@ -1838,8 +1838,8 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
 
     if not args.dry_run:
         # 重读台账：期间可能已有其它协作写入（例如协议导入）完成阶段。
-        from .local_agent import _agent_lock
-        with _agent_lock(1500):
+        from .local_agent import _batch_lock
+        with _batch_lock(batch_dir, 1500):
             fresh = mf.load(batch_dir)
             fresh["status"] = mf.derive_status(fresh)
             mf.save(batch_dir, fresh)

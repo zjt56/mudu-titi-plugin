@@ -12,7 +12,7 @@ import os
 
 from . import manifest as mf
 from . import upload_client, upload_payload
-from .local_agent import _agent_lock
+from .local_agent import _agent_lock, _batch_lock
 
 ROOT = Path(__file__).resolve().parents[1]
 FOLDER = '07_upload'
@@ -356,7 +356,7 @@ def prepare(batch_dir, *, catalog=None, config=None, check_media=True, ensure_ca
     """读取实时目录后冻结确定性映射。离线目录预检不等同已验证远端媒体。"""
     batch = Path(batch_dir).resolve()
     settings = _config(config)
-    with _agent_lock(10):
+    with _batch_lock(batch, 10):
         source_path, source_raw, source = _source(batch)
         client = upload_client.ApiClient(settings)
         needs_tb = any(isinstance(item, dict) and isinstance(item.get("textbook"), dict) and item.get("textbook")
@@ -560,7 +560,7 @@ def submit_approved(batch_dir, manifest, *, config=None, lock_held=False):
     """提交冻结字节；仅可凭同一 Key 绑定恢复新版幂等请求。"""
     batch = Path(batch_dir).resolve()
     settings = _config(config)
-    with (contextlib.nullcontext() if lock_held else _agent_lock(10)):
+    with (contextlib.nullcontext() if lock_held else _batch_lock(batch, 10)):
         frozen = verify(batch, config=settings)
         plan = frozen['plan']; gate = manifest['stages']['upload_gate']
         if (gate.get('status') != mf.APPROVED or gate.get('approved_batch_sha256') != plan['source_sha256']

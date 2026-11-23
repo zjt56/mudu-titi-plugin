@@ -154,7 +154,7 @@ def _audio_locked(batch):
     # Keep validation and delivery in one exclusive section. In particular, do
     # not call agent._mark_stage_completed after releasing this lock: a cutter or
     # an upstream import could replace the inputs between the check and mark.
-    with agent_protocol._agent_lock(1500):
+    with agent_protocol._batch_lock(batch, 1500):
         if scoped_regeneration.requested(batch, 'audio'):
             return None  # Scoped repairs must validate/merge the selected rows.
         path = batch / '02_audio/segment-evidence.json'

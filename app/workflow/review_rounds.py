@@ -771,14 +771,28 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
             s_units = [r for u in selected for r in structure_by_unit.get(u['unit_id'], ())]
             subset['01_source/structure.confirmed.json'] = {**structure_shell, 'units': s_units}
 
+        from .review_paper_scope import heading_type as _heading_type
+
+        def _declared_section_type(unit):
+            sec = unit.get('source_section')
+            if isinstance(sec, dict):
+                from_sec = _heading_type(sec.get('title'))
+                if from_sec:
+                    return from_sec
+            if isinstance(section_types, dict) and unit.get('numbers'):
+                u_types = {section_types.get(str(n)) for n in unit['numbers']}
+                if len(u_types) == 1:
+                    only = next(iter(u_types))
+                    if isinstance(only, str) and only.strip():
+                        return only.strip()
+            return None
+
         catalog_key = 'references/knowledge-catalog.json'
         tkm_key = 'references/type-knowledge-map.json'
         names = set()
-        if isinstance(section_types, dict):
-            wanted_nums = {str(number) for unit in selected for number in unit['numbers']}
-            cand_names = {section_types.get(number) for number in wanted_nums}
-            if cand_names and None not in cand_names:
-                names = cand_names
+        cand_names = {_declared_section_type(unit) for unit in selected}
+        if cand_names and None not in cand_names:
+            names = cand_names
         if not names and raw_types_by_unit:
             cand_names = {raw_types_by_unit.get(unit['unit_id']) for unit in selected}
             if cand_names and None not in cand_names:
@@ -857,6 +871,12 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
         return str(raw_types_by_unit.get(uid) or '').startswith('听力')
 
     def _unit_type_for_bucket(unit):
+        from .review_paper_scope import heading_type as _heading_type
+        sec = unit.get('source_section')
+        if isinstance(sec, dict):
+            from_sec = _heading_type(sec.get('title'))
+            if from_sec:
+                return from_sec
         if isinstance(section_types, dict):
             u_types = {section_types.get(str(n)) for n in unit.get('numbers') or ()}
             if len(u_types) == 1:
@@ -896,9 +916,9 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
 
     def split_run(run_units):
         effective_max = max_units
-        if (effective_max is not None and standalone_max_units is not None
+        if (standalone_max_units is not None
                 and all(u.get('unit_kind') == 'standalone' for u in run_units)):
-            effective_max = max(effective_max, standalone_max_units)
+            effective_max = max(1, int(standalone_max_units))
         if effective_max is not None and len(run_units) > effective_max:
             part_count = math.ceil(len(run_units) / effective_max)
             base_size, extra = divmod(len(run_units), part_count)
@@ -1202,8 +1222,9 @@ def _invoke_review(batch_dir, prompt, run_dir, config, *, permit_parallel=False)
                 timeout = max(1, int(config.get("timeout_seconds") or 600))
             except (TypeError, ValueError):
                 timeout = 600
-        with _batch_lock(batch_dir, timeout, shared=True):
-            return invoke(prompt, run_dir, config, permit_parallel=True, coordinated_imports=True)
+        with _batch_lock(batch_dir, timeout, shared=True) as batch_lock_handle:
+            return invoke(prompt, run_dir, config, permit_parallel=True,
+                          coordinated_imports=True, lock_handle=batch_lock_handle)
     if permit_parallel:
         return invoke(prompt, run_dir, config, permit_parallel=True)
     return invoke(prompt, run_dir, config)
@@ -1451,12 +1472,28 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
     # New exports follow actual prompt/role bytes even when a version tag was
     # not bumped. Existing in-flight packages and their bindings stay immutable.
     prompt_digest = review._digest(_round_prompt(round_id, [], ""))
-    state_key = [plan, round_id, input_hashes, CONTEXT_VERSION, PROMPT_VERSION, reuse, prompt_digest]
     generation = _review_generation(batch, plan)
-    if generation is not None:
-        state_key.append(generation['nonce'])
-    state_path = "workflow/review-partitions/" + review._digest(state_key) + ".json"
+
+    def _state_path_for(hashes):
+        key = [plan, round_id, hashes, CONTEXT_VERSION, PROMPT_VERSION, reuse, prompt_digest]
+        if generation is not None:
+            key.append(generation['nonce'])
+        return "workflow/review-partitions/" + review._digest(key) + ".json"
+
+    state_path = _state_path_for(input_hashes)
     path = _path(batch, state_path)
+    # Backward compatibility: pre-upgrade in-flight partitions included
+    # workflow/repair-feedback/review.json in input_hashes. Reuse that exact
+    # partition state if it exists on disk and was not retired, instead of
+    # re-exporting and re-invoking every already-cached shard.
+    if not path.is_file() and "workflow/repair-feedback/review.json" in base["input_hashes"]:
+        legacy_input_hashes = dict(input_hashes)
+        legacy_input_hashes["workflow/repair-feedback/review.json"] = base["input_hashes"]["workflow/repair-feedback/review.json"]
+        legacy_state_path = _state_path_for(legacy_input_hashes)
+        if generation is None or legacy_state_path not in generation['retired_state_paths']:
+            legacy_path = _path(batch, legacy_state_path)
+            if legacy_path.is_file():
+                state_path, input_hashes, path = legacy_state_path, legacy_input_hashes, legacy_path
     if path.is_file():
         state = _load(path.read_bytes())
         if (state.get("plan") != plan or state.get("round_id") != round_id
@@ -2583,15 +2620,22 @@ def _run(batch_dir, config=None, portable_max_input_chars=None, *, blocked_round
             all_parts = [part for wave in zip_longest(*queues) for part in wave if part is not None]
             for part in all_parts:
                 if not part.get("has_listening") and _load_pending(batch_dir, part["task_id"]) is None:
-                    nl_rel = _nonlistening_cache_path(part["round_id"], part, part.get("input_hashes"))
-                    nl_path = _path(batch_dir, nl_rel)
-                    if nl_path.is_file():
-                        try:
-                            cached_resp = _load(nl_path.read_bytes())
-                            if isinstance(cached_resp, dict):
-                                _save_pending(batch_dir, part["task_id"], cached_resp)
-                        except (OSError, ValueError):
-                            pass
+                    part_hashes = part.get("input_hashes") or {}
+                    nl_candidates = [_nonlistening_cache_path(part["round_id"], part, part_hashes)]
+                    if "workflow/repair-feedback/review.json" not in part_hashes:
+                        legacy_hashes = dict(part_hashes)
+                        legacy_hashes["workflow/repair-feedback/review.json"] = agent_tasks.MISSING_INPUT
+                        nl_candidates.append(_nonlistening_cache_path(part["round_id"], part, legacy_hashes))
+                    for nl_rel in nl_candidates:
+                        nl_path = _path(batch_dir, nl_rel)
+                        if nl_path.is_file():
+                            try:
+                                cached_resp = _load(nl_path.read_bytes())
+                                if isinstance(cached_resp, dict):
+                                    _save_pending(batch_dir, part["task_id"], cached_resp)
+                                    break
+                            except (OSError, ValueError):
+                                pass
             runnable_parts = [p for p in all_parts if not (audio_pending and p.get("has_listening"))]
             deferred_listening = [p for p in all_parts if audio_pending and p.get("has_listening")]
             if runnable_parts:
@@ -2656,11 +2700,17 @@ def _run(batch_dir, config=None, portable_max_input_chars=None, *, blocked_round
                         if isinstance(exc, ValueError) and last_error_code != 'review_consumer':
                             _clear_pending(batch_dir, part['task_id'])
                             if not part.get("has_listening"):
-                                try:
-                                    _path(batch_dir, _nonlistening_cache_path(
-                                        part["round_id"], part, part.get("input_hashes"))).unlink()
-                                except FileNotFoundError:
-                                    pass
+                                part_hashes = part.get("input_hashes") or {}
+                                clear_candidates = [_nonlistening_cache_path(part["round_id"], part, part_hashes)]
+                                if "workflow/repair-feedback/review.json" not in part_hashes:
+                                    legacy_hashes = dict(part_hashes)
+                                    legacy_hashes["workflow/repair-feedback/review.json"] = agent_tasks.MISSING_INPUT
+                                    clear_candidates.append(_nonlistening_cache_path(part["round_id"], part, legacy_hashes))
+                                for nl_rel in clear_candidates:
+                                    try:
+                                        _path(batch_dir, nl_rel).unlink()
+                                    except FileNotFoundError:
+                                        pass
                         _save_review_failure(batch_dir, part['task_id'], round_id,
                                              last_error, last_error_code)
                         break

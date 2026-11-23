@@ -272,7 +272,7 @@ def _run_review_rounds(batch_dir, config_path=None):
     """Run the three review rounds without creating a separate AI precheck."""
     try:
         from . import contracts, manifest as mf, review, review_rounds
-        from .local_agent import _agent_lock, load_config
+        from .local_agent import load_config
         if not _review_inputs_ready(batch_dir, allow_pending_audio=review_rounds._audio_pending(batch_dir)):
             print(json.dumps({"action": "blocked", "completed": False,
                               "reason": "审核输入或上游阶段未就绪"}, ensure_ascii=False))
@@ -323,8 +323,8 @@ def _mark_stage_completed(batch_dir, stage_id):
     stage = contracts.STAGE_BY_ID.get(stage_id)
     if stage is None:
         return False
-    from .local_agent import _agent_lock
-    with _agent_lock(1500):
+    from .local_agent import _batch_lock
+    with _batch_lock(batch, 1500):
         manifest = mf.load(batch)
         if manifest.get("stages", {}).get(stage_id, {}).get("status") in mf.TERMINAL_OK:
             return True
