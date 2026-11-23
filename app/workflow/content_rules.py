@@ -26,26 +26,44 @@ def is_placeholder(text) -> bool:
     return value == '' or value in PLACEHOLDER_TEXTS
 
 
-def boundary_guidelines_block(stage: str = "") -> str:
-    """读取生产侧与审核侧共用的高频易分歧边界口径（唯一来源：references/boundary-guidelines.json）。"""
+_WRITING_GUIDELINE_TYPES = frozenset(("书面表达", "读写综合", "看图写话", "其他"))
+_PHRASE_GUIDELINE_TYPES = frozenset((
+    "完成句子", "单词拼写", "单项填空", "短文填空", "选词填空",
+    "教材语篇填空", "句型转换", "翻译", "改错", "听力信息转换", "其他",
+))
+_SPELLING_GUIDELINE_TYPES = frozenset((
+    "单词拼写", "完成句子", "短文填空", "选词填空", "教材语篇填空", "单项填空", "其他",
+))
+
+
+def boundary_guidelines_block(stage: str = "", types=None) -> str:
+    """读取生产侧与审核侧共用的高频易分歧边界口径（唯一来源：references/boundary-guidelines.json）。
+
+    传入 ``types``（当前分片题型集合）时仅注入与该分片相关的边界段落，
+    避免把书面表达/单词拼写长规则塞进无关的阅读或听力分片；``types`` 为空时返回全量。
+    """
     from pathlib import Path
     path = Path(__file__).resolve().parents[1] / "references" / "boundary-guidelines.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return ""
+    type_set = {str(t).strip() for t in (types or ()) if isinstance(t, str) and str(t).strip()} or None
     lines = []
     if stage in ("", "preassemble", "types", "review"):
-        writing = data.get("writing_subtypes") or []
-        if writing:
-            lines.append("【同源边界口径·书面表达子类】" + " ".join(str(x) for x in writing))
+        if type_set is None or bool(type_set & _WRITING_GUIDELINE_TYPES):
+            writing = data.get("writing_subtypes") or []
+            if writing:
+                lines.append("【同源边界口径·书面表达子类】" + " ".join(str(x) for x in writing))
     if stage in ("", "knowledge", "review"):
-        phrase = data.get("phrase_knowledge_granularity") or []
-        if phrase:
-            lines.append("【同源边界口径·固定短语知识点粒度】" + " ".join(str(x) for x in phrase))
-        spelling = data.get("word_spelling_granularity") or []
-        if spelling:
-            lines.append("【同源边界口径·适当形式填词知识点粒度】" + " ".join(str(x) for x in spelling))
+        if type_set is None or bool(type_set & _PHRASE_GUIDELINE_TYPES):
+            phrase = data.get("phrase_knowledge_granularity") or []
+            if phrase:
+                lines.append("【同源边界口径·固定短语知识点粒度】" + " ".join(str(x) for x in phrase))
+        if type_set is None or bool(type_set & _SPELLING_GUIDELINE_TYPES):
+            spelling = data.get("word_spelling_granularity") or []
+            if spelling:
+                lines.append("【同源边界口径·适当形式填词知识点粒度】" + " ".join(str(x) for x in spelling))
     return "\n".join(lines)
 
 

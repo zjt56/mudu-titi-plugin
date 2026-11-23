@@ -34,15 +34,51 @@ test('isBatchUploaded 识别已上传与远端暂存待确认批次，未上传�
   assert.equal(isBatchUploaded(null), false);
 });
 
-test('试卷审核工具栏在重启后端同行展示全部分类按钮（全部/试卷类/课时类），卡片仅对已上传标绿提示且不再展示待人工确认', () => {
-  const toolbarIdx = client.indexOf('{ style: T.toolbarTitle }, TEXT.review');
-  assert.ok(toolbarIdx >= 0);
-  const toolbarChunk = client.slice(toolbarIdx, toolbarIdx + 360);
-  assert.match(toolbarChunk, /categoryBar/);
-  assert.match(toolbarChunk, /BackendRestartControl/);
-  assert.match(client, /\['all', '全部', baseList\.length\]/);
-  assert.match(client, /\['exam', '试卷类', examCount\]/);
-  assert.match(client, /\['lesson', '课时类', lessonCount\]/);
+test('matchReviewFilter 按全部、试卷类（全部/未上传/已上传）、课时类（全部/未上传/已上传）准确筛选', () => {
+  const batchCategory = extractFn('batchCategory');
+  const isBatchUploaded = extractFn('isBatchUploaded');
+  const re = /function matchReviewFilter\([^)]*\) \{[\s\S]*?\n      \}/;
+  const match = client.match(re);
+  assert.ok(match, '找不到函数 matchReviewFilter');
+  const matchReviewFilter = vm.runInNewContext(match[0] + '\nmatchReviewFilter', { batchCategory, isBatchUploaded });
+
+  const examUn = { name: '2025中考', paper: { source_type: '中考真题' }, uploaded: false };
+  const examUp = { name: '2024中考', paper: { source_type: '中考真题' }, uploaded: true };
+  const lessonUn = { name: '课时1', paper: { source_type: '同步练习' }, uploaded: false };
+  const lessonUp = { name: '课时2', paper: { source_type: '同步练习' }, uploaded: false, upload_pending_confirmation: true };
+
+  assert.equal(matchReviewFilter(examUn, 'all'), true);
+  assert.equal(matchReviewFilter(lessonUp, 'all'), true);
+  assert.equal(matchReviewFilter(examUn, 'exam:all'), true);
+  assert.equal(matchReviewFilter(examUp, 'exam:all'), true);
+  assert.equal(matchReviewFilter(lessonUn, 'exam:all'), false);
+  assert.equal(matchReviewFilter(examUn, 'exam:unuploaded'), true);
+  assert.equal(matchReviewFilter(examUp, 'exam:unuploaded'), false);
+  assert.equal(matchReviewFilter(examUp, 'exam:uploaded'), true);
+  assert.equal(matchReviewFilter(examUn, 'exam:uploaded'), false);
+  assert.equal(matchReviewFilter(lessonUn, 'lesson:all'), true);
+  assert.equal(matchReviewFilter(lessonUp, 'lesson:all'), true);
+  assert.equal(matchReviewFilter(examUn, 'lesson:all'), false);
+  assert.equal(matchReviewFilter(lessonUn, 'lesson:unuploaded'), true);
+  assert.equal(matchReviewFilter(lessonUp, 'lesson:unuploaded'), false);
+  assert.equal(matchReviewFilter(lessonUp, 'lesson:uploaded'), true);
+  assert.equal(matchReviewFilter(lessonUn, 'lesson:uploaded'), false);
+});
+
+test('试卷审核采用分组筛选栏（全部 + 试卷类/课时类各含全部/未上传/已上传），移除顶部统计条与重启后端，卡片标绿已上传', () => {
+  const filterIdx = client.indexOf('const reviewFilterBar = h(');
+  assert.ok(filterIdx >= 0);
+  const toolbarChunk = client.slice(filterIdx, filterIdx + 1200);
+  assert.match(toolbarChunk, /TEXT\.reload/);
+  assert.doesNotMatch(toolbarChunk, /BackendRestartControl/);
+  assert.doesNotMatch(client, /'共 ' \+ baseList\.length \+ ' 份 · 未上传 '/);
+  assert.match(client, /jget\('\/batches\?review_list=1'\)/);
+  assert.match(client, /renderFilterChip\('all', '全部', baseList\.length\)/);
+  assert.match(client, /renderFilterGroup\('exam', '试卷类'/);
+  assert.match(client, /renderFilterGroup\('lesson', '课时类'/);
+  assert.match(client, /renderFilterChip\(groupKey \+ ':all', '全部'/);
+  assert.match(client, /renderFilterChip\(groupKey \+ ':unuploaded', '未上传'/);
+  assert.match(client, /renderFilterChip\(groupKey \+ ':uploaded', '已上传'/);
   assert.match(client, /const uploadedCard = isBatchUploaded\(b\);/);
   assert.match(client, /uploadedCard \? \{ background: 'rgba\(34, 197, 94, 0\.06\)', borderColor: 'rgba\(34, 197, 94, 0\.24\)' \}/);
   assert.match(client, /uploadedCard[\s\S]*?background: '#16a34a'[\s\S]*?'已上传'[\s\S]*?: null,/);

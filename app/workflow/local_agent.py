@@ -268,7 +268,7 @@ def load_config(path=None) -> dict:
 
 
 @contextmanager
-def _agent_lock(timeout, *, shared=False):
+def _file_lock(lock_path: Path, timeout, *, shared=False, label="workflow agent lock"):
     """Exclusive by default; explicit parallel callers share the lock.
 
     POSIX callers may pass the yielded handle to their child via pass_fds.
@@ -279,8 +279,6 @@ def _agent_lock(timeout, *, shared=False):
     from 1..1023. Windows yields None (no descriptor inheritance). Never unlink
     the lock inode.
     """
-    key = hashlib.sha256(str(Path(__file__).resolve().parent).encode()).hexdigest()
-    lock_path = Path(tempfile.gettempdir()) / f"mudu-local-agent-{key}.lock"
     with lock_path.open("a+b") as handle:
         handle.seek(0, os.SEEK_END)
         size = handle.tell()
@@ -305,9 +303,9 @@ def _agent_lock(timeout, *, shared=False):
                 break
             except OSError as exc:
                 if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                    raise AgentError(f"Cannot acquire agent lock: {exc}", "lock") from exc
+                    raise AgentError(f"Cannot acquire {label}: {exc}", "lock") from exc
                 if time.monotonic() >= deadline:
-                    raise AgentError("Timed out waiting for workflow agent lock", "lock_timeout") from exc
+                    raise AgentError(f"Timed out waiting for {label}", "lock_timeout") from exc
                 time.sleep(min(0.1, max(0, deadline - time.monotonic())))
         try:
             yield handle if os.name != "nt" else None
@@ -316,6 +314,24 @@ def _agent_lock(timeout, *, shared=False):
                 _windows_unlock(handle, *locked_range)
             # POSIX: the outer with closes only our reference. Explicit LOCK_UN
             # would also unlock a still-running child sharing this description.
+
+
+@contextmanager
+def _agent_lock(timeout, *, shared=False):
+    """Global agent lock across workflows sharing this codebase."""
+    key = hashlib.sha256(str(Path(__file__).resolve().parent).encode()).hexdigest()
+    lock_path = Path(tempfile.gettempdir()) / f"mudu-local-agent-{key}.lock"
+    with _file_lock(lock_path, timeout, shared=shared, label="workflow agent lock") as handle:
+        yield handle
+
+
+@contextmanager
+def _batch_lock(batch_dir, timeout, *, shared=False):
+    """Per-batch lock so concurrent batches never starve each other's imports."""
+    key = hashlib.sha256(str(Path(batch_dir).resolve()).encode()).hexdigest()
+    lock_path = Path(tempfile.gettempdir()) / f"mudu-batch-agent-{key}.lock"
+    with _file_lock(lock_path, timeout, shared=shared, label="batch review lock") as handle:
+        yield handle
 
 
 def _windows_lock(handle, shared):
@@ -1117,7 +1133,7 @@ def main(argv=None):
                     confirmed = agent_tasks.confirmed_units(batch_dir)
                     direct_order = [u["unit_id"] for u in confirmed]
                     direct_types = types_direct.classify_units(batch_dir, confirmed)
-                except (OSError, ValueError, TypeError, KeyError):
+                except (OSError, ValueError, TypeError, KeyError, AttributeError):
                     direct_types = {}
         elif args.stage == "knowledge" and not args.dry_run and config.get("knowledge_direct", True):
             has_feedback = (batch_dir / "workflow" / "repair-feedback" / "knowledge.json").is_file()
@@ -1127,7 +1143,7 @@ def main(argv=None):
                     confirmed = agent_tasks.confirmed_units(batch_dir)
                     direct_order = [u["unit_id"] for u in confirmed]
                     direct_knowledge = knowledge_direct.tag_units(batch_dir, confirmed)
-                except (OSError, ValueError, TypeError, KeyError):
+                except (OSError, ValueError, TypeError, KeyError, AttributeError):
                     direct_knowledge = {}
         selected_ids = None
         if (direct_types or direct_knowledge) and direct_order:
@@ -1301,6 +1317,9 @@ def main(argv=None):
                     print(f"  分片 {index + 1}/{len(parts)}：复用已校验快照，不再调用模型", flush=True)
                     return index, reused, True
                 feedback = ""
+                max_timeout_retries = max(0, int(config.get("timeout_retries", 1)
+                                                 if config.get("timeout_retries") is not None else 1))
+                timeout_attempts = 0
                 for attempt in range(retries + 1):
                     part_dir = run_dir / ("part-%04d-attempt-%02d" % (index + 1, attempt + 1))
                     room = max(0, config["max_input_chars"] - len(part["prompt"]))
@@ -1326,6 +1345,12 @@ def main(argv=None):
                         with measure(part_dir / 'acceptance-timing.json', 'acceptance', **dimensions):
                             unit_tasks.validate_part(batch_dir, args.stage, part, candidate)
                     except (AgentError, ValueError) as exc:
+                        if isinstance(exc, AgentError) and exc.code == "timeout":
+                            if timeout_attempts < max_timeout_retries and attempt < retries:
+                                timeout_attempts += 1
+                                print(f"  分片 {index + 1}/{len(parts)}：调用超时，执行第 {timeout_attempts} 次重试", flush=True)
+                                continue
+                            raise
                         recoverable = isinstance(exc, ValueError) or exc.code in ("response", "integration")
                         if not recoverable or attempt >= retries:
                             raise
@@ -1403,6 +1428,9 @@ def main(argv=None):
         report = None
         response = None
         retries = int(config.get("retries", 0) or 0)
+        max_timeout_retries = max(0, int(config.get("timeout_retries", 1)
+                                         if config.get("timeout_retries") is not None else 1))
+        timeout_attempts = 0
         feedback_limit = int(config.get("retry_feedback_chars", 1200) or 1200)
         for attempt in range(retries + 1):
             delivered = prompt + feedback
@@ -1416,7 +1444,10 @@ def main(argv=None):
                 _check_input_hashes(batch_dir, hashes)
                 result = invoke(delivered, run_dir, config)
             except AgentError as exc:
-                # 额度/限流/超时/启动失败重试没有意义；协议类错误带反馈重试一次。
+                # 软超时允许有界重试（默认最多 1 次）；协议类错误带反馈重试；额度/限流/启动失败不重试。
+                if exc.code == "timeout" and timeout_attempts < max_timeout_retries and attempt < retries:
+                    timeout_attempts += 1
+                    continue
                 if exc.code in ("response", "integration") and attempt < retries:
                     feedback = ("\n\n上一次返回无法解析或不符合协议，错误：" + str(exc)[:feedback_limit]
                                 + "\n请只返回一个完整、合法的 JSON 对象，并严格按 schema 填写。")

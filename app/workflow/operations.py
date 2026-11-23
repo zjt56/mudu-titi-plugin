@@ -773,6 +773,49 @@ def _recovery_plan(folder, incident):
             "mode": "isolated_code_repair", "requires_human": False}
 
 
+def _agent_lock_free():
+    """Non-blocking probe of the cross-batch model/import execution lock."""
+    from . import local_agent
+    try:
+        with local_agent._agent_lock(0):
+            return True
+    except local_agent.AgentError as exc:
+        if exc.code == "lock_timeout":
+            return False
+        raise
+
+
+def _prepared_install_unattempted(folder, incident):
+    if _install_authorization(confirm=True).get("allowed") is not True:
+        return False, ""
+    record = _incident_code_record(folder, incident) or {}
+    if record.get("status") != "prepared":
+        return False, ""
+    plan_id = record.get("plan_id") or ""
+    if any(row.get("kind") == "install" and (not plan_id or row.get("name") == plan_id)
+           for row in incident.get("attempts", [])):
+        return False, ""
+    return True, plan_id
+
+
+def _prepared_install_waiting_lock(folder, incident, plan):
+    if plan.get("next_actions") != ["install_code_repair"]:
+        return False, ""
+    unattempted, plan_id = _prepared_install_unattempted(folder, incident)
+    if not unattempted:
+        return False, ""
+    recovery = incident.get("recovery") or {}
+    if recovery.get("waiting_lock") is True:
+        return True, plan_id
+    token = plan_id or "__prepared__"
+    if token in (incident.get("lock_woken_plans") or []):
+        return False, ""
+    recent_releases = [ev for ev in incident.get("events", [])[-12:] if ev.get("action") == "release"]
+    if any("worker_busy" in str(ev.get("detail") or "") for ev in recent_releases):
+        return True, plan_id
+    return False, ""
+
+
 def _queue_recovery(folder, incident, disposition, summary):
     plan = _recovery_plan(folder, incident)
     prior = incident.get("recovery") or {}
@@ -786,15 +829,27 @@ def _queue_recovery(folder, incident, disposition, summary):
         raise ValueError("autonomous_action_required: 尚未执行可用自治修复步骤；"
                          + ", ".join(plan["next_actions"]))
     waiting = not plan["next_actions"] or same_progress
+    unattempted_install, plan_id = _prepared_install_unattempted(folder, incident)
+    token = plan_id or "__prepared__"
+    waiting_lock = (
+        waiting
+        and plan["next_actions"] == ["install_code_repair"]
+        and unattempted_install
+        and (not _agent_lock_free() or incident.get("busy_wait_plan_id") == token)
+    )
+    incident.pop("busy_wait_plan_id", None)
     incident.update(status="waiting_evidence" if waiting else "queued", eligible=not waiting,
                     attempt_id=None, lease_expires_at=0,
                     queue_generation=incident.get("queue_generation", 0) + 1,
                     not_before=0 if waiting else time.time() + 3,
                     prior_disposition=disposition)
+    reason = ("已准备的代码修复等待全局执行锁释放后自动安装" if waiting_lock
+              else "等待输入、代码或实际修复证据变化，拒绝相同调查空转" if waiting
+              else "未修复事件自动升级隔离修复，复验后续跑")
     incident["recovery"] = {**plan, "summary": _redact(summary)[:2000],
                             "state": "waiting_evidence" if waiting else "scheduled",
-                            "reason": "等待输入、代码或实际修复证据变化，拒绝相同调查空转" if waiting
-                                      else "未修复事件自动升级隔离修复，复验后续跑",
+                            "waiting_lock": bool(waiting_lock),
+                            "reason": reason,
                             "at": mf.now_iso()}
     incident["escalation"] = {"kind": "code_repair", "at": mf.now_iso(),
                               "reason": incident["recovery"]["reason"]}
@@ -924,16 +979,29 @@ def _discover(folder, *, force=False):
             _queue_recovery(folder, incident, "needs_human", "迁移历史人工终态，自动升级隔离修复")
         if incident.get("status") == "waiting_evidence":
             plan = _recovery_plan(folder, incident)
-            if plan["evidence"] != (incident.get("recovery") or {}).get("evidence"):
-                budgets = _budgets(incident)
-                incident.update(budget_baseline=budgets["attempts_total"],
-                                install_baseline=budgets["installs_total"],
-                                regeneration_baseline=budgets["regenerations_total"])
-                plan = _recovery_plan(folder, incident)
+            evidence_changed = plan["evidence"] != (incident.get("recovery") or {}).get("evidence")
+            lock_ready, wake_plan_id = _prepared_install_waiting_lock(folder, incident, plan)
+            lock_unblocked = (not evidence_changed) and lock_ready and _agent_lock_free()
+            if evidence_changed or lock_unblocked:
+                if evidence_changed:
+                    budgets = _budgets(incident)
+                    incident.update(budget_baseline=budgets["attempts_total"],
+                                    install_baseline=budgets["installs_total"],
+                                    regeneration_baseline=budgets["regenerations_total"])
+                    plan = _recovery_plan(folder, incident)
+                else:
+                    woken = list(incident.get("lock_woken_plans") or [])
+                    token = wake_plan_id or "__prepared__"
+                    if token not in woken:
+                        woken.append(token)
+                    incident["lock_woken_plans"] = woken[-10:]
+                incident.pop("busy_wait_plan_id", None)
                 incident.update(status="queued", eligible=True, not_before=0,
                                 queue_generation=incident.get("queue_generation", 0) + 1)
-                incident["recovery"] = {**plan, "state": "scheduled", "at": mf.now_iso()}
-                _event(incident, "recovery", "queued", "真实输入或代码已变化，恢复自动调查；原检查仍须通过")
+                incident["recovery"] = {**plan, "state": "scheduled", "waiting_lock": False, "at": mf.now_iso()}
+                _event(incident, "recovery", "queued",
+                       "真实输入或代码已变化，恢复自动调查；原检查仍须通过" if evidence_changed
+                       else "全局执行锁已释放，恢复已准备的代码修复安装；原检查仍须通过")
             return state
         if incident.get("status") == "needs_deep_repair":
             _queue_recovery(folder, incident, "needs_deep_repair", "尚未通过真实复验，自动升级隔离修复")
@@ -1195,6 +1263,9 @@ def incidents(root):
             if (incident and incident.get("status") == "queued"
                     and incident.get("not_before", 0) <= time.time()
                     and not any(row.get("status") == "unknown" for row in _load(folder).get("receipts", []))):
+                unattempted_install, _ = _prepared_install_unattempted(folder, incident)
+                if unattempted_install and not _agent_lock_free():
+                    continue
                 found.append(incident)
         except (ValueError, OSError):
             continue
@@ -2033,6 +2104,10 @@ def action(root, folder, payload, *, enqueue=None):
                                     or data.get("state") == "awaiting_restart"
                                     or "awaits host restart" in str(data.get("reason") or ""))
                     if busy_retry or restart_wait:
+                        if busy_retry:
+                            rec = _incident_code_record(folder, incident) or {}
+                            if rec.get("status") == "prepared":
+                                incident["busy_wait_plan_id"] = rec.get("plan_id") or "__prepared__"
                         incident["not_before"] = time.time() + (1 if restart_wait else 2)
                     else:
                         incident["release_count"] = incident.get("release_count", 0) + 1

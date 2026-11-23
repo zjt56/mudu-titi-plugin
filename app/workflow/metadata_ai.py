@@ -50,6 +50,42 @@ def _number(text: str) -> str:
     return str(digits[text]) if text in digits else ""
 
 
+_UNIT_PATTERN = r"(?<![A-Za-z])(?:(Starter)\s+)?(?:Unit|uint)\s*(\d+)\b"
+_SUBTOPIC_EXACT = re.compile(
+    r"^(?:单元话题写作|综合阅读提升|综合训练|综合练习|综合检测|综合测试|读写综合|拓展阅读|"
+    r"单元综合(?:测试|检测|练习|训练|评估|复习|卷)?|"
+    r"单元(?:复习|过关|写作|阅读|语法|巩固|小测|检测|测验)|专题(?:训练|复习|提升)|话题写作|阅读提升|语法专练)$"
+)
+_SUBTOPIC_SEARCH = re.compile(
+    r"(?:单元话题写作|综合阅读提升|综合训练|综合练习|综合检测|综合测试|读写综合|拓展阅读|"
+    r"单元综合(?:测试|检测|练习|训练|评估|复习|卷)?|"
+    r"单元(?:复习|过关|写作|阅读|语法|巩固|小测|检测|测验)|专题(?:训练|复习|提升)|话题写作|阅读提升|语法专练)"
+)
+_QUESTION_OR_SECTION_START = re.compile(r"^(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[\.、]|[一二三四五六七八九十]+[、\.]|\d+[\.、\)])")
+
+
+def extract_unit_subtopic(text: str, filename: str = "") -> tuple[str | None, str | None]:
+    """提取与「第X课时」同层级的单元专题名称（如单元话题写作、综合阅读提升、单元综合）。"""
+    saw_unit = False
+    for raw_line in (text or "").splitlines()[:15]:
+        plain = _plain(raw_line).strip()
+        if not plain:
+            continue
+        if re.match(_UNIT_PATTERN, plain, re.I):
+            saw_unit = True
+            continue
+        if _QUESTION_OR_SECTION_START.match(plain):
+            break
+        if saw_unit and _SUBTOPIC_EXACT.match(plain):
+            return plain, raw_line
+    base = _plain(_basename(filename))
+    if base:
+        match = _SUBTOPIC_SEARCH.search(base)
+        if match:
+            return match.group(0), str(filename)
+    return None, None
+
+
 def identify_source(text: str, filename: str = "", *, source_path: str = "") -> dict:
     """只用明确原名与独立章节标题识别同步材料，不据题内年份/考试标注推断。"""
     from .metadata_policy import extract_filename_year
@@ -106,6 +142,10 @@ def identify_source(text: str, filename: str = "", *, source_path: str = "") -> 
         if not values:
             for match in re.finditer(pattern, _plain(_basename(filename)), re.I):
                 values[render(match)] = str(filename)
+    if not lessons and len(units) == 1:
+        subtopic, sub_quote = extract_unit_subtopic(text, filename)
+        if subtopic and sub_quote:
+            lessons[subtopic] = sub_quote
     sync = bool(found.get("series") or (lessons and (units or found.get("book"))))
     if not sync:
         return {}

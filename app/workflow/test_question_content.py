@@ -305,6 +305,85 @@ class ImageOptionEvidenceTest(unittest.TestCase):
         self.assertEqual(parts["options"][3]["text"], "临渊羡鱼,不如退而结网。")
         self.assertNotIn("拓展设问", parts["options"][3]["text"])
 
+    def test_audit_batch_source_ignores_decorative_images_but_requires_content_images(self):
+        import json, tempfile
+        from pathlib import Path
+        from workflow import question_content as qc
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            (batch / "01_source").mkdir()
+            body = (
+                "Ⅱ. 阅读理解\n"
+                "阅读下面短文，回答问题。\n"
+                "[IMG image34.jpg]\n"
+                "[IMG image36.jpg]\n"
+                "Tom likes reading books every day.\n"
+                "1. What does Tom like?\n"
+                "A. Reading.\tB. Running.\tC. Swimming.\tD. Singing.\n"
+            )
+            (batch / "01_source/正文.txt").write_text(body, encoding="utf-8")
+            (batch / "01_source/extraction.json").write_text(json.dumps({
+                "media": [
+                    {"name": "image34.jpg", "decorative": False, "width": 600, "height": 400},
+                    {"name": "image36.jpg", "decorative": True, "width": 99, "height": 100},
+                ]
+            }), encoding="utf-8")
+            unit = {
+                "unit_id": "u1",
+                "unit_kind": "group",
+                "type": "阅读理解",
+                "numbers": [1],
+                "identity_version": "scoped-v1",
+                "scope_key": "sec-1",
+                "stem": body,
+                "source_span": {"basis": "ai_classified", "start_line": 1, "end_line": 7},
+            }
+            (batch / "01_source/structure.json").write_text(json.dumps({
+                "sections": [{"type": "阅读理解", "questions": [1]}],
+                "groups": [{"type": "阅读理解", "questions": [1]}],
+            }), encoding="utf-8")
+            (batch / "01_source/structure.confirmed.json").write_text(json.dumps({
+                "units": [unit],
+            }), encoding="utf-8")
+
+            def make_batch(include_content_img: bool):
+                atts = [{"path": "01_source/media/image34.jpg", "placement": "material"}] if include_content_img else []
+                return {
+                    "items": [{
+                        "unit_id": "u1",
+                        "unit_kind": "group",
+                        "type": "阅读理解",
+                        "numbers": [1],
+                        "scope_key": "sec-1",
+                        "material": "阅读下面短文，回答问题。\nTom likes reading books every day.",
+                        "attachments": atts,
+                        "subquestions": [{
+                            "number": 1,
+                            "stem": "What does Tom like?",
+                            "options": [
+                                {"key": "A", "text": "Reading."},
+                                {"key": "B", "text": "Running."},
+                                {"key": "C", "text": "Swimming."},
+                                {"key": "D", "text": "Singing."},
+                            ],
+                        }],
+                    }]
+                }
+
+            ok_batch = make_batch(include_content_img=True)
+            self.assertEqual(qc.restore_source_fidelity(batch, ok_batch), 0)
+            self.assertNotIn("image36.jpg", ok_batch["items"][0]["material"])
+            res_ok = qc.audit_batch_source(batch, ok_batch)
+            img_issues_ok = [i for i in res_ok["issues"] if i["code"] == "SOURCE_IMAGE_MISSING"]
+            self.assertEqual(img_issues_ok, [], img_issues_ok)
+
+            missing_batch = make_batch(include_content_img=False)
+            res_bad = qc.audit_batch_source(batch, missing_batch)
+            img_issues_bad = [i for i in res_bad["issues"] if i["code"] == "SOURCE_IMAGE_MISSING"]
+            self.assertEqual(len(img_issues_bad), 1, img_issues_bad)
+            self.assertIn("image34.jpg", img_issues_bad[0]["message"])
+            self.assertNotIn("image36.jpg", img_issues_bad[0]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

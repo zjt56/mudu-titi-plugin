@@ -853,6 +853,8 @@ def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
     except (OSError, ValueError, TypeError):
         pass
     by_numbers, _ambiguous = _unique_source_index(fresh)
+    from . import wire_format
+    decorative = wire_format.decorative_names(root)
     changed = 0
     for row in batch.get("items") or []:
         key = source_key(row)
@@ -879,6 +881,7 @@ def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
             source_images = set(_image_names(str(part.get("stem") or "").splitlines()))
             for option in part.get("options") or []:
                 source_images.update(_image_names(str(option.get("text") or "").splitlines()))
+            source_images -= decorative
             child_images.update(source_images)
             if not source_images:
                 continue
@@ -890,7 +893,7 @@ def restore_source_fidelity(batch_dir: str | Path, batch: dict) -> int:
                 extra = "\n".join(f"[IMG {name}]" for name in missing_child)
                 target["stem"] = (_field_text(target.get("stem")).rstrip() + "\n" + extra).strip()
                 changed += 1
-        shared_images = set(_image_names(unit_lines)) - child_images
+        shared_images = set(_image_names(unit_lines)) - child_images - decorative
         missing_shared = sorted(shared_images - _image_refs(row))
         if missing_shared:
             extra = '\n'.join(f'[IMG {name}]' for name in missing_shared)
@@ -1268,10 +1271,11 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
     every labeled option are checked at the corresponding actual number.
     This is deterministic text evidence, never a claim of visual review.
     """
-    from . import denoise, structure_gate, lesson_bands
+    from . import denoise, structure_gate, lesson_bands, wire_format
     from .extract import _plain, material_label
     from .preview import _strong_number, BARE_OPTION, SECTION
     root = Path(batch_dir)
+    decorative = wire_format.decorative_names(root)
     source = (root / "01_source/正文.txt").read_text(encoding="utf-8-sig")
     structure = json.loads((root / "01_source/structure.json").read_text(encoding="utf-8-sig"))
     confirmed = json.loads((root / "01_source/structure.confirmed.json").read_text(encoding="utf-8-sig"))
@@ -1370,7 +1374,9 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
         )
 
         def check_images(required, present, number=None, label=""):
-            for name in sorted(set(_image_names(str(required).splitlines())) - present):
+            # 装饰性小图标（wire_format.decorative_names 识别并在标准化时剥离）
+            # 不属于题目内容图，不得误报 SOURCE_IMAGE_MISSING；真实内容图仍逐张校验。
+            for name in sorted(set(_image_names(str(required).splitlines())) - decorative - present):
                 scope = f"第 {number} 题" if number is not None else "本单元共享材料"
                 if label:
                     scope += f" {label} 选项"

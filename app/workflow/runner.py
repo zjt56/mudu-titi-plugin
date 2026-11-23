@@ -1682,21 +1682,24 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
             print(f"⏸ {stage_id} 等待上游：{'、'.join(unmet)}")
             return 0 if args.dry_run else 1
 
-        # 解析与知识点两路打标共享同一已校验上游、互不依赖，并行调用压缩墙钟时间。
+        # 答案/解析/知识点三路打标共享同一已校验上游、互不依赖，并行调用压缩墙钟时间。
         # 导出/导入仍在批次锁内串行，导入前重新核对输入哈希与上游状态。
-        if (stage.id in ("explanations", "knowledge") and not args.dry_run
+        if (stage.id in ("answers", "explanations", "knowledge") and not args.dry_run
                 and not args.stage):
-            pair_ids = ("explanations", "knowledge")
+            parallel_ids = ("answers", "explanations", "knowledge")
             ready = []
-            for pid in pair_ids:
+            for pid in parallel_ids:
                 pstage = contracts.STAGE_BY_ID[pid]
                 prec = manifest["stages"].get(pid, {})
                 if prec.get("status") in TERMINAL and not args.force:
                     continue
                 if all(manifest["stages"].get(d, {}).get("status") in TERMINAL
                        for d in pstage.depends_on):
+                    if pid == "explanations" and _skip_agent_stage(batch_dir, manifest, pstage, dry_run=False):
+                        manifest = mf.load(batch_dir)
+                        continue
                     ready.append(pstage)
-            if len(ready) == 2:
+            if len(ready) >= 2:
                 from workflow import auto as auto_flow
                 from workflow import local_agent
                 try:
@@ -1704,7 +1707,7 @@ def _cmd_run_locked(batch_dir: Path, args) -> int:
                 except (OSError, ValueError):
                     config = None
                 if config:
-                    _print_header("explanations / knowledge · 打标签并行")
+                    _print_header(f"{' / '.join(s.id for s in ready)} · 阶段并行")
                     outcomes = auto_flow._parallel_ready_agents(batch_dir, ready, config)
                     manifest = mf.load(batch_dir)
                     if any(code not in (0, 3) for code in outcomes.values()):

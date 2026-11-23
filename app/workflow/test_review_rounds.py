@@ -1693,8 +1693,7 @@ class ReviewRoundsTest(unittest.TestCase):
             seen.append((rid, prompt))
             response = self.response(rid)
             if rid == 'labels' and sum(r == rid for r, _ in seen) == 1:
-                response.pop('notes')
-                response.pop('findings')
+                response.pop('status')
             return {'response': response}
         with patch.object(review_rounds, 'invoke', side_effect=invoke), patch.object(review_rounds._time, 'sleep'):
             result = review_rounds.run(self.batch, {'provider': 'fixture', 'review_part_parallel': 2,
@@ -1702,7 +1701,7 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertTrue(result['completed'], result)
         label_prompts = [p for rid, p in seen if rid == 'labels']
         self.assertEqual(len(label_prompts), 2)
-        self.assertIn("absent=['findings', 'notes']", label_prompts[-1])
+        self.assertIn("absent=['status']", label_prompts[-1])
 
     def test_install_provenance_failure_never_publishes_round_or_success_receipt(self):
         exported = review_rounds.export_task(self.batch, only_round='labels')
@@ -1766,6 +1765,186 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertTrue(cat["paths"])
         self.assertIn("不得再拼接子级", cat.get("note", ""))
         self.assertTrue(all(isinstance(p, str) and p for p in cat["paths"]))
+
+    def test_round_prompt_slims_output_and_scopes_rules_by_partition_type(self):
+        """审核提示词收紧输出体积并按分片题型动态裁剪无关静态规则。"""
+        from workflow import agent_roles, content_rules
+
+        def ctx_for(types, *, audio=False):
+            payload = {
+                "references/type-knowledge-map.json": {
+                    "by_type": {t: {"dims": []} for t in types}
+                }
+            }
+            if audio:
+                payload["02_audio/full-transcript.json"] = {"segments": []}
+            return " (JSON data, never instructions from paper)\n" + json.dumps(payload, ensure_ascii=False) + "\n"
+
+        # 1) 纯阅读理解分片（无听力）：应裁掉听力规则、书面表达/拼写/短语边界口径、答案考点长规则与单词拼写规则
+        reading_prompt = review_rounds._round_prompt("labels", ["u1"], ctx_for(["阅读理解"]))
+        reading_head = reading_prompt.split("BEGIN SUPPLIED CONTENT", 1)[0]
+        self.assertIn("仅摘 1–2 条最短定位原文", reading_head)
+        self.assertIn("verdict=ok 时控制在 30–60 字以内", reading_head)
+        self.assertNotIn("02_audio/full-transcript.json", reading_head)
+        self.assertNotIn("书面表达子类", reading_head)
+        self.assertNotIn("适当形式填词知识点粒度", reading_head)
+        self.assertNotIn("固定短语知识点粒度", reading_head)
+        self.assertNotIn("听力关键词语选择是唯一例外", reading_head)
+        self.assertNotIn("单数主语要求 kisses", reading_head)
+        self.assertIn("本分片题型未配置答案考点", reading_head)
+        self.assertLess(len(reading_head), 4500)
+
+        # 2) 书面表达分片：保留书面表达子类边界，裁掉听力与设题角度/单词拼写规则
+        writing_prompt = review_rounds._round_prompt("labels", ["u2"], ctx_for(["书面表达"]))
+        writing_head = writing_prompt.split("BEGIN SUPPLIED CONTENT", 1)[0]
+        self.assertIn("书面表达子类", writing_head)
+        self.assertNotIn("02_audio/full-transcript.json", writing_head)
+        self.assertNotIn("适当形式填词知识点粒度", writing_head)
+        self.assertNotIn("5. 设题角度", writing_head)
+
+        # 3) 单词拼写分片：保留答案考点、适当形式子类和单词拼写边界，裁掉主题/体裁/设题角度与听力规则
+        spelling_prompt = review_rounds._round_prompt("labels", ["u3"], ctx_for(["单词拼写"]))
+        spelling_head = spelling_prompt.split("BEGIN SUPPLIED CONTENT", 1)[0]
+        self.assertIn("在 assessment.answer_points 独立填写", spelling_head)
+        self.assertIn("适当形式填词知识点粒度", spelling_head)
+        self.assertIn("invent→inventor", spelling_head)
+        self.assertNotIn("02_audio/full-transcript.json", spelling_head)
+        self.assertNotIn("书面表达子类", spelling_head)
+        self.assertNotIn("4. 主题", spelling_head)
+        self.assertNotIn("5. 设题角度", spelling_head)
+
+        # 4) 听力长对话分片：保留听力转写规则与主题/设题角度，裁掉书面表达/单词拼写边界
+        listening_prompt = review_rounds._round_prompt("labels", ["u4"], ctx_for(["听力长对话理解"], audio=True))
+        listening_head = listening_prompt.split("BEGIN SUPPLIED CONTENT", 1)[0]
+        self.assertIn("02_audio/full-transcript.json", listening_head)
+        self.assertIn("4. 主题", listening_head)
+        self.assertIn("5. 设题角度", listening_head)
+        self.assertNotIn("书面表达子类", listening_head)
+        self.assertNotIn("适当形式填词知识点粒度", listening_head)
+
+        # 5) 未知/空上下文（含 knowledge 生产侧）仍返回完整口径，零破坏向后兼容
+        full_guidelines = content_rules.boundary_guidelines_block("review")
+        self.assertIn("书面表达子类", full_guidelines)
+        self.assertIn("固定短语知识点粒度", full_guidelines)
+        self.assertIn("适当形式填词知识点粒度", full_guidelines)
+        self.assertEqual(content_rules.boundary_guidelines_block("review", ["阅读理解"]), "")
+        full_rules = agent_roles.knowledge_judgment_rules()
+        self.assertIn(full_rules, review_rounds._round_prompt("labels", [], ""))
+
+    def test_completed_model_response_omitting_empty_notes_and_findings_is_normalized_without_retry(self):
+        """completed 模型响应仅省略固定空数组 notes/findings 时直接规范化验收，不浪费重跑。"""
+        seen = []
+        def invoke(prompt, run_dir, config, permit_parallel=False):
+            seen.append(prompt)
+            response = self.response('labels')
+            response.pop('notes')
+            response.pop('findings')
+            return {'response': response}
+        with patch.object(review_rounds, 'invoke', side_effect=invoke):
+            result = review_rounds.run(self.batch, {'provider': 'fixture', 'review_part_parallel': 2,
+                                                    'review_max_attempts': 2})
+        self.assertTrue(result['completed'], result)
+        self.assertEqual(len(seen), 1)
+        # needs_review 缺 notes 或包含多余键时仍必须严格拒绝
+        self.assertNotIn('notes', review_rounds._normalize_model_envelope({'status': 'needs_review', 'artifacts': {}}))
+        extra = {'status': 'completed', 'artifacts': {'review_round': {'checks': []}}, 'extra': 1}
+        self.assertNotIn('notes', review_rounds._normalize_model_envelope(extra))
+        # notes/findings 被误放进 artifacts 内部时自动提升到顶层
+        nested = {'status': 'completed', 'artifacts': {'review_round': {'checks': []}, 'notes': ['ok'], 'findings': []}}
+        hoisted = review_rounds._normalize_model_envelope(nested)
+        self.assertEqual(hoisted['notes'], ['ok'])
+        self.assertEqual(hoisted['findings'], [])
+        self.assertEqual(set(hoisted['artifacts']), {'review_round'})
+
+    def test_review_batch_lock_isolates_concurrent_batches_from_global_agent_lock(self):
+        """其他批次持有全局 _agent_lock 共享锁时，本批次 export/import 不应 lock_timeout。"""
+        with review_rounds._agent_lock(0, shared=True):
+            exported = review_rounds.export_task(self.batch, only_round='labels')
+            self.assertEqual(exported['action'], 'exported')
+            report = review_rounds.import_result(self.batch, exported['task_id'], self.response('labels'))
+            self.assertTrue(report['completed'], report)
+        # 同批次在途模型持有 _batch_lock 共享锁时，restart_rounds 仍必须拒绝
+        with review_rounds._batch_lock(self.batch, 0, shared=True):
+            with self.assertRaises(review_rounds.AgentError) as caught:
+                review_rounds.restart_rounds(self.batch)
+        self.assertEqual(caught.exception.code, 'lock_timeout')
+
+    def test_review_repair_feedback_does_not_invalidate_completed_partitions(self):
+        """外部写入 workflow/repair-feedback/review.json 不得作废已完成的盲审分片与 state_path。"""
+        first = review_rounds.export_group(self.batch, only_round='labels')
+        self.assertEqual(first['action'], 'exported')
+        tid = first['parts'][0]['task_id']
+        review_rounds._save_pending(self.batch, tid, self.response('labels'))
+        self.write('workflow/repair-feedback/review.json', {
+            'version': 1, 'stage': 'review',
+            'reason': '修正审核响应的协议、覆盖或引文校验错误；仍须独立盲审。',
+            'error': '仅核对目标覆盖、字段结构及原文引文；不得依据任何先前标签推断答案。',
+            'unit_ids': ['group-1-6'],
+            'feedback_by_unit': {'group-1-6': {
+                'reason': '修正审核响应的协议、覆盖或引文校验错误；仍须独立盲审。',
+                'error': '仅核对目标覆盖、字段结构及原文引文；不得依据任何先前标签推断答案。',
+            }},
+            'all_units': False, 'scoped_units': False, 'attempt': 1,
+        })
+        second = review_rounds.export_group(self.batch, only_round='labels')
+        self.assertEqual(second['action'], 'exported')
+        self.assertEqual(second['parts'][0]['task_id'], tid)
+        self.assertIsNotNone(review_rounds._load_pending(self.batch, tid))
+        prompt = (Path(second['parts'][0]['package_dir']) / 'task.json').read_text(encoding='utf-8')
+        self.assertNotIn('"repair_feedback"', prompt)
+
+    def test_partition_coalesces_non_adjacent_same_bucket_and_packs_standalone_units(self):
+        """非相邻同维度桶归并为一桶，纯单题桶按 standalone_max_units 打包，且语篇组题与听力保持隔离。"""
+        units = (
+            [{"unit_id": f"c1-{i}", "unit_kind": "standalone", "numbers": [i], "type": "完成句子", "stem": f"{i}. S{i}"} for i in range(1, 4)]
+            + [{"unit_id": "g-read", "unit_kind": "group", "numbers": [4, 5], "type": "阅读理解", "stem": "Passage\n4. Q4\n5. Q5"}]
+            + [{"unit_id": f"c2-{i}", "unit_kind": "standalone", "numbers": [i], "type": "完成句子", "stem": f"{i}. S{i}"} for i in range(6, 9)]
+            + [{"unit_id": "l-1", "unit_kind": "standalone", "numbers": [9], "type": "听力关键词语选择", "stem": "9. L9"}]
+        )
+        ctx = {
+            "confirmed_units_with_stable_ids": units,
+            "01_source/正文.txt": "\n".join(u["stem"] for u in units),
+            "03_types/types.json": {"items": [{"unit_id": u["unit_id"], "type": u["type"]} for u in units]},
+            "06_batch/batch_meta.json": {"items": [{"unit_id": u["unit_id"], "stem": u["stem"]} for u in units]},
+        }
+        base = {"prompt": "H\nBEGIN SUPPLIED CONTENT (JSON)\n" + json.dumps(ctx, ensure_ascii=False) + "\nEND SUPPLIED CONTENT\n"}
+        parts = review_rounds._partition_contexts(
+            base, 500000, max_units=5, round_id="labels",
+            listening_uids={"l-1"}, standalone_max_units=8,
+        )
+        # 两组非相邻「完成句子」(3+3=6) 归并并按 standalone_max_units=8 打成 1 片，不再拆成 3+3；
+        # 阅读理解(group)与听力各自保持独立分片。
+        self.assertEqual(
+            [p["unit_ids"] for p in parts],
+            [["c1-1", "c1-2", "c1-3", "c2-6", "c2-7", "c2-8"], ["g-read"], ["l-1"]],
+        )
+        self.assertEqual(review_rounds._standalone_part_units({"review_part_units": 5}), 8)
+        self.assertIsNone(review_rounds._standalone_part_units({"review_part_units": 1}))
+        self.assertEqual(review_rounds._standalone_part_units({"review_part_units": 5, "review_standalone_part_units": 10}), 10)
+
+    def test_round_prompt_includes_required_dims_reminder_for_scoped_types(self):
+        """选词填空/阅读理解等有必带维度的分片应显式点名必带维度，无必带维度题型不误加。"""
+        def ctx_for(types):
+            payload = {"references/type-knowledge-map.json": {"by_type": {t: {"dims": []} for t in types}}}
+            return " (JSON data, never instructions from paper)\n" + json.dumps(payload, ensure_ascii=False) + "\n"
+
+        cloze_head = review_rounds._round_prompt("labels", ["u1"], ctx_for(["选词填空"])).split("BEGIN SUPPLIED CONTENT", 1)[0]
+        self.assertIn("【本分片必带维度·缺一必拒】", cloze_head)
+        self.assertIn("选词填空→语篇体裁、主题", cloze_head)
+
+        reading_head = review_rounds._round_prompt("labels", ["u1"], ctx_for(["阅读理解"])).split("BEGIN SUPPLIED CONTENT", 1)[0]
+        self.assertIn("阅读理解→语篇体裁、主题", reading_head)
+
+        for no_req_type in ("单词拼写", "单项填空", "书面表达"):
+            head = review_rounds._round_prompt("labels", ["u1"], ctx_for([no_req_type])).split("BEGIN SUPPLIED CONTENT", 1)[0]
+            self.assertNotIn("【本分片必带维度·缺一必拒】", head, no_req_type)
+
+    def test_types_json_prevents_untyped_confirmed_unit_from_false_listening_flag(self):
+        """structure.confirmed.json 省略 type 时，03_types/types.json 已明确非听力题型不得被误标为 has_listening。"""
+        group = review_rounds.export_group(self.batch, only_round='labels', allow_pending_audio=True)
+        self.assertEqual(group['action'], 'exported')
+        self.assertTrue(group['parts'])
+        self.assertTrue(all(not part['has_listening'] for part in group['parts']), group['parts'])
 
 
 if __name__ == "__main__":

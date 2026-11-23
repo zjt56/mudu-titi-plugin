@@ -76,6 +76,31 @@ class OverviewSnapshotTest(unittest.TestCase):
             server._OVERVIEW_SNAPSHOT = None
             self.assertEqual(server._load_overview_snapshot(), {})
 
+    def test_over_64_batches_do_not_thrash_cache_or_truncate_snapshot(self):
+        workflows, env = self._patches()
+        with workflows, env:
+            for idx in range(75):
+                b = self.workflows / f"paper-{idx:03d}"
+                (b / "workflow").mkdir(parents=True, exist_ok=True)
+                (b / "workflow/manifest.json").write_text("{}", encoding="utf-8")
+            server._OVERVIEW_CACHE.clear()
+            server._OVERVIEW_SNAPSHOT = None
+            server._OVERVIEW_SNAPSHOT_DIRTY = False
+            with mock.patch.object(server, "_overview_uncached", side_effect=lambda n, f: {"name": n, "rows": []}) as u_mock, \
+                    mock.patch.object(server, "_live_overview", side_effect=lambda v, n, f: v):
+                first = server.list_batches()
+                self.assertEqual(len(first), 76)
+                self.assertEqual(u_mock.call_count, 76)
+                self.assertEqual(len(server._OVERVIEW_CACHE), 76)
+                self.assertEqual(len(server._OVERVIEW_SNAPSHOT), 76)
+                second = server.list_batches()
+                self.assertEqual(len(second), 76)
+                self.assertEqual(u_mock.call_count, 76)
+                server._invalidate_overview_batch((self.workflows / "paper-000").resolve(), "paper-000")
+                server.list_batches()
+                self.assertEqual(u_mock.call_count, 77)
+                self.assertEqual(len(server._OVERVIEW_SNAPSHOT), 76)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

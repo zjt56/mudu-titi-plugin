@@ -729,7 +729,8 @@ class AgentTasksTest(unittest.TestCase):
         stored = json.loads((self.batch / "07_review/content-review.json").read_text())["findings"]
         self.assertEqual(stored, [old])
         unchecked = json.loads((self.batch / "07_review/unchecked.json").read_text())
-        self.assertEqual({r["round_id"] for r in unchecked}, {"labels", "sample"})
+        from workflow import review as review_mod
+        self.assertEqual({r["round_id"] for r in unchecked}, set(review_mod.ROUND_IDS))
         self.assertTrue(all(r["required"] and r["status"] == "unchecked" for r in unchecked))
 
     def test_incomplete_review_never_creates_empty_unchecked(self):

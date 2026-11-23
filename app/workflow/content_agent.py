@@ -48,7 +48,7 @@ SUPPORTED_STAGES = frozenset(("knowledge", "answers", "explanations", "types", "
 PART_STAGES = SUPPORTED_STAGES - {"structure_gate"}
 MAX_PART_UNITS = 4
 INLINE_CATALOG_CHARS = 16000
-INLINE_UNIT_CHARS = 20000
+INLINE_UNIT_CHARS = 32000
 TOOL_ACTIONS = frozenset(("read_unit", "read_source", "read_catalog", "search_catalog",
                           "list_media", "inspect_media", "stage_candidate", "submit_candidate"))
 TOOL_BUDGET_CODE = "native_tool_budget"
@@ -555,7 +555,9 @@ def _child_prompt(prompt, context, stage, media):
                     "\nFor knowledge tagging, use exact catalog paths from catalog.items when supplied. "
                     "It is the complete bound catalog; do not search it again to confirm an exact path. "
                     "supplied_unit_evidence is the same evidence as read_unit for those unit IDs. "
-                    "Call read_unit only for other selected IDs or use read_source for evidence not supplied inline. "
+                    "When every selected unit_id is already in supplied_unit_evidence and catalog.items is supplied, "
+                    "tag directly from that inline evidence and call content_stage_candidate once—do not call read_unit or "
+                    "read_source unless a unit or needed passage is missing. "
                     "Keep enough tool calls to stage the completed units and submit the candidate.\n"
                 )
                 if (context.get("textbook_matching") or {}).get("enabled"):

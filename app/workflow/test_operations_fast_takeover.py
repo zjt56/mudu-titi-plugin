@@ -394,6 +394,102 @@ class FastTakeoverTests(unittest.TestCase):
         # Most recent 20 settled receipts retain full text
         self.assertEqual(settled[-1]["evidence"]["text"], big_text)
 
+    # ---------------- Prepared install lock deferral & waiting_evidence wake
+
+    def test_prepared_install_defers_while_global_lock_busy_and_wakes_from_waiting_evidence(self):
+        op.service_heartbeat(True)
+        code_record = {"job_id": "cr-1", "status": "prepared", "plan_id": "plan-1"}
+        with mock.patch.object(self_heal, "_candidate", return_value=("validate", "broken")), \
+             mock.patch.object(self_heal, "_snapshot", return_value={"stage_inputs": {}, "files": {}}), \
+             mock.patch.object(op, "_evidence", return_value="ev-1"), \
+             mock.patch.object(op, "_incident_code_record", return_value=code_record), \
+             mock.patch.object(op, "_install_authorization", return_value={"allowed": True, "mode": "autonomy"}):
+            # 1) While global lock is held, a queued incident waiting on prepared install
+            # is NOT dispatched (prevents 2-second busy-spin LLM turns).
+            with mock.patch.object(op, "_agent_lock_free", return_value=False):
+                self.assertEqual(op.incidents(self.root)["incidents"], [])
+            # Once global lock is free, it dispatches cleanly.
+            with mock.patch.object(op, "_agent_lock_free", return_value=True):
+                found = op.incidents(self.root)["incidents"]
+                self.assertEqual(len(found), 1)
+                inc = found[0]
+
+            # 2) Simulate busy_retry release followed by finish(recovery_queued) -> waiting_evidence(waiting_lock=True)
+            claimed = op.claim(self.root, self.folder, {
+                "incident_id": inc["incident_id"],
+                "session_id": "sess-lock-1",
+                "mode": "repair",
+                "execution_first": True,
+            })
+            state = op._load(self.folder)
+            state["incident"]["attempts"] = [{"kind": "code_test", "name": "isolated_tests", "outcome": "failed"}]
+            op._save(self.folder, state)
+            op.action(self.root, self.folder, {
+                "incident_id": claimed["incident_id"],
+                "attempt_id": claimed["attempt_id"],
+                "session_id": claimed["session_id"],
+                "request_id": "req-rel-busy",
+                "action": "release",
+                "input": {
+                    "reason": "worker_busy: live model/import worker",
+                    "reason_code": "worker_busy",
+                    "busy_retry": True,
+                    "state": "worker_busy",
+                },
+            })
+            state = op._load(self.folder)
+            state["incident"]["not_before"] = 0
+            plan = op._recovery_plan(self.folder, state["incident"])
+            state["incident"]["recovery"] = {**plan, "state": "scheduled"}
+            op._save(self.folder, state)
+
+            claimed2 = op.claim(self.root, self.folder, {
+                "incident_id": inc["incident_id"],
+                "session_id": "sess-lock-2",
+                "mode": "repair",
+                "execution_first": True,
+            })
+            with mock.patch.object(op, "_agent_lock_free", return_value=False):
+                op.action(self.root, self.folder, {
+                    "incident_id": claimed2["incident_id"],
+                    "attempt_id": claimed2["attempt_id"],
+                    "session_id": claimed2["session_id"],
+                    "request_id": "req-fin-busy",
+                    "action": "finish",
+                    "input": {"outcome": "recovery_queued", "summary": "waiting for worker_busy lock"},
+                })
+                parked = op._load(self.folder)["incident"]
+                self.assertEqual(parked["status"], "waiting_evidence")
+                self.assertTrue(parked["recovery"].get("waiting_lock"))
+                # Still busy -> stays waiting_evidence, not dispatched.
+                self.assertEqual(op.incidents(self.root)["incidents"], [])
+
+            # 3) Lock clears -> wakes automatically from waiting_evidence to queued!
+            with mock.patch.object(op, "_agent_lock_free", return_value=True):
+                woken = op.incidents(self.root)["incidents"]
+                self.assertEqual(len(woken), 1)
+                self.assertEqual(woken[0]["status"], "queued")
+                self.assertFalse(woken[0]["recovery"].get("waiting_lock"))
+
+                # 4) If model still calls finish(recovery_queued) while lock IS free (no busy_retry),
+                # it parks in waiting_evidence WITHOUT looping forever.
+                claimed3 = op.claim(self.root, self.folder, {
+                    "incident_id": inc["incident_id"],
+                    "session_id": "sess-lock-3",
+                    "mode": "repair",
+                    "execution_first": True,
+                })
+                op.action(self.root, self.folder, {
+                    "incident_id": claimed3["incident_id"],
+                    "attempt_id": claimed3["attempt_id"],
+                    "session_id": claimed3["session_id"],
+                    "request_id": "req-fin-idle",
+                    "action": "finish",
+                    "input": {"outcome": "recovery_queued", "summary": "still did not install"},
+                })
+                self.assertEqual(op._load(self.folder)["incident"]["status"], "waiting_evidence")
+                self.assertEqual(op.incidents(self.root)["incidents"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

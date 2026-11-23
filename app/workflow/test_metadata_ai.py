@@ -100,6 +100,15 @@ class SourceRulesTest(unittest.TestCase):
     def test_exam_citation_alone_is_not_sync_source(self):
         self.assertEqual(metadata_ai.identify_source("1.[2025期中/月考]题目", "source.docx"), {})
 
+    def test_unit_subtopic_headings_append_to_title_like_lessons(self):
+        for subtopic in ("单元话题写作", "综合阅读提升", "单元综合"):
+            body = f"九上 · 人教版 · 课时A计划\n**Unit 2\u3000Inspiring People**\n**{subtopic}**\n"
+            found = metadata_ai.identify_source(body, f"15 26秋 九上 人教版 课时A计划 Unit 2 Inspiring People {subtopic}.docx")
+            self.assertEqual(found["unit"], "Unit 2")
+            self.assertEqual(found["lesson"], subtopic)
+            self.assertEqual(found["source_scope"], "lesson")
+            self.assertEqual(found["paper_title"], f"九上人教版课时A计划 Unit 2 {subtopic}")
+
     def test_prompt_supports_workbooks_and_source_rules(self):
         prompt = metadata_ai.build_prompt(self.BODY, self.NAME, SOURCE_TYPES)
         self.assertNotIn("ONE English exam", prompt)

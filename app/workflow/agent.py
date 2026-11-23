@@ -245,8 +245,7 @@ def _review_after(callback, batch_dir, config_path=None, max_attempts=3, allow_f
         from . import contracts, manifest as mf
         batch = Path(batch_dir)
         if (batch / "workflow/manifest.json").is_file():
-            from .local_agent import _agent_lock
-            with _agent_lock(1500):
+            with review_rounds._batch_lock(batch, 1500):
                 manifest = mf.load(batch)
                 spec = contracts.STAGE_BY_ID["review"]
                 mf.touch_stage(manifest, "review", mf.COMPLETED if completed else mf.NEEDS_REVIEW,
@@ -284,7 +283,7 @@ def _run_review_rounds(batch_dir, config_path=None):
         gate = review.evaluate(batch_dir)
         batch = Path(batch_dir)
         if (batch / "workflow/manifest.json").is_file():
-            with _agent_lock(1500):
+            with review_rounds._batch_lock(batch, 1500):
                 manifest = mf.load(batch)
                 spec = contracts.STAGE_BY_ID["review"]
                 next_status = mf.PENDING if waiting_audio else (mf.COMPLETED if execution_completed else mf.NEEDS_REVIEW)

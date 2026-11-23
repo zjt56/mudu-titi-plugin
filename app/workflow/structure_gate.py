@@ -1518,11 +1518,16 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
         "SOURCE_METADATA_MISSING", "ANSWER_APPENDIX_DETECTED",
         "INLINE_ANSWER_BLOCK", "QUESTION_NUMBER_INFERRED",
     }
+    if scoped:
+        clean_allowed.update({
+            "NUMBERING_RESTART", "DUPLICATE_QUESTION_NUMBER",
+            "GROUP_BOUNDARY_REVIEW", "QUESTION_BOUNDARY_MISSING",
+        })
     if extraction_warnings_nonblocking:
         clean_allowed.add("EXTRACTION_WARNING")
     non_clean_unresolved = unresolved_codes - clean_allowed
     chosen = None
-    if not force_ai and not scoped and not has_ai_marker and ai_enabled and not non_clean_unresolved:
+    if not force_ai and not has_ai_marker and ai_enabled and not non_clean_unresolved:
         det = _run_structural_pass(ai_classified=None)
         det_blockers, _, _, det_warnings, _, det_units, _, _, _ = det
         blocking_layout_warnings = [

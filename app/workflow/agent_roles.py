@@ -72,38 +72,98 @@ def load(stage: str, artifact: str | None = None) -> dict:
     return role
 
 
-def knowledge_judgment_rules() -> str:
-    """Shared semantic selection policy for production labels and blind assessments."""
-    return (
-        "\n【共用知识点判定口径】\n"
+_NO_AP_FILL_RULE_TYPES = frozenset(("完成句子", "短文填空", "选词填空", "教材语篇填空", "其他"))
+_LEXICAL_GRAMMAR_RULE_TYPES = frozenset((
+    "单词拼写", "单项填空", "完成句子", "短文填空", "选词填空", "教材语篇填空", "其他",
+))
+
+
+def knowledge_judgment_rules(types=None) -> str:
+    """Shared semantic selection policy for production labels and blind assessments.
+
+    When ``types`` is omitted/empty (or contains an unknown type), returns the
+    full canonical 6-point policy. When scoped to known partition types, keeps
+    only the clauses applicable to those types' allowed dimensions.
+    """
+    type_set = None
+    allowed_roots = None
+    has_listening = True
+    if types:
+        cleaned = {str(t).strip() for t in types if isinstance(t, str) and str(t).strip()}
+        if cleaned:
+            from workbench import taxonomy
+            known = set(taxonomy.types())
+            if cleaned <= known:
+                type_set = frozenset(cleaned)
+                roots = set()
+                for ty in type_set:
+                    for prefix in (*taxonomy._allowed_prefixes(ty), *taxonomy.exact_knowledge_paths(ty)):
+                        roots.add(prefix.split("/", 1)[0])
+                allowed_roots = frozenset(roots)
+                has_listening = any(ty.startswith("听力") for ty in type_set)
+
+    parts = [
+        "\n【共用知识点判定口径】\n",
         "1. 先确定题型和层级，再选完整目录叶子。题型表 dims 是允许范围；组级仅把允许的主题、语篇体裁作为必带维度（其他题型除外），"
-        "其余维度按实际考点逐项判断。历史参考中的宽泛举例与本段冲突时以本段为准。\n"
-        "完成句子、短文填空、选词填空和教材语篇填空均不把答案词或短语作为答案考点标签。完成句子按实际考点打词汇和语法标签；"
-        "短文填空、选词填空和教材语篇填空按材料打体裁、主题，再按组内实际考点打词汇、语法标签。\n"
-        "听力关键词语选择是唯一例外：knowledge 只填原目录节点『语音/基本读音』，该节点虽有子级也直接选，"
-        "不选任何子类或其他语音、词汇、语法标签。答案考点走原有独立字段或派生链路，不填入 knowledge。按确认的单元层级提交。\n"
+        "其余维度按实际考点逐项判断。历史参考中的宽泛举例与本段冲突时以本段为准。\n",
+    ]
+    if type_set is None or bool(type_set & _NO_AP_FILL_RULE_TYPES):
+        parts.append(
+            "完成句子、短文填空、选词填空和教材语篇填空均不把答案词或短语作为答案考点标签。完成句子按实际考点打词汇和语法标签；"
+            "短文填空、选词填空和教材语篇填空按材料打体裁、主题，再按组内实际考点打词汇、语法标签。\n"
+        )
+    if type_set is None or bool(type_set & {"听力关键词语选择", "其他"}):
+        parts.append(
+            "听力关键词语选择是唯一例外：knowledge 只填原目录节点『语音/基本读音』，该节点虽有子级也直接选，"
+            "不选任何子类或其他语音、词汇、语法标签。答案考点走原有独立字段或派生链路，不填入 knowledge。按确认的单元层级提交。\n"
+        )
+    parts.append(
         "2. 每个叶子先定位题干、答案对照、材料主旨或设问证据。能用一个更具体的叶子解释作答原因时，不再加描述同一原因的泛项；"
         "有不同证据支持的独立考点分别保留。不要因某词出现在干扰项、背景里或解析顺带提到就打标。\n"
         "选点前先独立说明正确答案靠哪条规则或哪句原文得出。对拟加的第二个知识点逐个核对：它是否解释了另一个实际作答步骤？"
         "例如选出 There be 句型时，错误选项中含 This 或 That 不构成指示代词考点。\n"
-        "3. 单词拼写凭词义提示写出一个词、未要求辨别备选词时，优先用目录的『词汇/拼写与词形』。"
-        "题干明确要求变形、构词或辨音，或空前后语法线索限定了词形，才追加对应的具体叶子；"
-        "例如一般现在时的第三人称单数主语要求 kisses，可加第三人称单数形式变化。词性本身不证明词义辨析，"
-        "答案词恰好带词缀也不证明考派生。单项填空若由明确语法规则决定（如钟点前用 at），优先用具体语法叶子；"
-        "只有正确与错误选项需要依靠词义区别才能判断时才标相应词义辨析。\n"
-        "4. 主题取完整材料或相关听力对话的主话题，地点、职业和单个名词可为背景线索。只有独立且有实质内容的第二主题才并列。"
-        "先用一句话概括材料主要在讲什么，再选叶子。多个主题都说得通时，优先选能直接解释材料核心事件、主要目的或中心观点的那一个。"
-        "例如全文围绕一个纪念日的由来和纪念含义，可取文化习俗；只有材料主要讲社会状况如何变化时，才取社会发展。"
-        "听力只给出递尺子等单一动作、无法证明上课或校园情境时，不能仅凭物品推断学校生活。"
-        "同一篇按主要写作功能判断体裁：介绍事物特征用介绍类短文，阐释原因、原理或道理用事理阐释；出现某人物不等于人物传记。\n"
-        "5. 设题角度按得到答案的方法判断。原文或转写可直接定位答案是细节理解，需结合线索推出未明说的信息才是推理；"
-        "例如直接说出地点按细节理解，凭环境线索才能判断发生地才是地点推断。整组题按各子题独立核对角度，有证据的角度在组级去重汇总。"
-        "优先选能够准确描述解题任务的具体角度。例如推断文章来源有专用的文章出处标签且题型允许时，用文章出处；"
-        "不要再为同一道小题追加泛化的推理判断。组内其他题确实考一般推理时，组级仍保留推理判断。"
-        "听力可用材料不足时不得用选项场景或转写占位冒充完整对话。\n"
+    )
+    if type_set is None or bool(type_set & _LEXICAL_GRAMMAR_RULE_TYPES):
+        parts.append(
+            "3. 单词拼写凭词义提示写出一个词、未要求辨别备选词时，优先用目录的『词汇/拼写与词形』。"
+            "题干明确要求变形、构词或辨音，或空前后语法线索限定了词形，才追加对应的具体叶子；"
+            "例如一般现在时的第三人称单数主语要求 kisses，可加第三人称单数形式变化。词性本身不证明词义辨析，"
+            "答案词恰好带词缀也不证明考派生。单项填空若由明确语法规则决定（如钟点前用 at），优先用具体语法叶子；"
+            "只有正确与错误选项需要依靠词义区别才能判断时才标相应词义辨析。\n"
+        )
+    if allowed_roots is None or bool(allowed_roots & {"主题", "语篇体裁"}):
+        item4 = []
+        if allowed_roots is None or "主题" in allowed_roots:
+            item4.append(
+                "主题取完整材料或相关听力对话的主话题，地点、职业和单个名词可为背景线索。只有独立且有实质内容的第二主题才并列。"
+                "先用一句话概括材料主要在讲什么，再选叶子。多个主题都说得通时，优先选能直接解释材料核心事件、主要目的或中心观点的那一个。"
+                "例如全文围绕一个纪念日的由来和纪念含义，可取文化习俗；只有材料主要讲社会状况如何变化时，才取社会发展。"
+            )
+            if has_listening:
+                item4.append(
+                    "听力只给出递尺子等单一动作、无法证明上课或校园情境时，不能仅凭物品推断学校生活。"
+                )
+        if allowed_roots is None or "语篇体裁" in allowed_roots:
+            item4.append(
+                "同一篇按主要写作功能判断体裁：介绍事物特征用介绍类短文，阐释原因、原理或道理用事理阐释；出现某人物不等于人物传记。"
+            )
+        if item4:
+            parts.append("4. " + "".join(item4) + "\n")
+    if allowed_roots is None or "设题角度" in allowed_roots:
+        item5 = (
+            "5. 设题角度按得到答案的方法判断。原文或转写可直接定位答案是细节理解，需结合线索推出未明说的信息才是推理；"
+            "例如直接说出地点按细节理解，凭环境线索才能判断发生地才是地点推断。整组题按各子题独立核对角度，有证据的角度在组级去重汇总。"
+            "优先选能够准确描述解题任务的具体角度。例如推断文章来源有专用的文章出处标签且题型允许时，用文章出处；"
+            "不要再为同一道小题追加泛化的推理判断。组内其他题确实考一般推理时，组级仍保留推理判断。"
+        )
+        if has_listening:
+            item5 += "听力可用材料不足时不得用选项场景或转写占位冒充完整对话。"
+        parts.append(item5 + "\n")
+    parts.append(
         "6. 事实依据使用当前题目的正文、共享材料、选项和能唯一关联的原答案、原解析或听力文字。"
         "证据缺失时明确指出判断局限，避免用题型提示强凑可选标签或自造目录项。\n"
     )
+    return "".join(parts)
 
 
 def section(stage: str, artifact: str | None = None, round_id: str | None = None) -> str:
@@ -117,17 +177,9 @@ def section(stage: str, artifact: str | None = None, round_id: str | None = None
                 "sample": "本轮为二审：只核对计划 TARGET；整组题型按整组核对，独立单题按小题，不扩写到未抽中目标。"}
         return ("\n\n[子 Agent] " + role["title"]
                 + "\n本轮职责：" + duty.get(round_id, "本轮职责以 ROUND 行为准。")
-                + "\n权限边界：仅返回本轮 review_round.checks 判断；不改产物、不放行、不伪造审批。"
-                + "\n脑子检查：每个目标均有真实证据和独立 assessment；根对象包含 status、artifacts、notes、findings 四个同级键，findings=[]。"
-                + "不得输出 `checked_units` 或 `unchecked`。"
-                + "\n审核差异是产出，不是执行故障：独立填写 assessment，由程序比较原标签并保留队列及 rounds.errors；"
-                + "不得要求上游知识点重判，不得改正式标签、自动 resolve/dismiss、迎合旧判断或反复重审直到差异消失。"
-                + "盲审隐藏标签不等于正式标签缺失，不能猜原标签。"
-                + "知识点与基本差异（题型/子类/答案/解析/原文）照实记录；难度/来源/分类/选题/词数不进审核差异。"
-                + "图片/音频能力限制只作 informational，但不能据此过滤已经比较出的真实标签差异。"
-                + "\n出问题怎么办：只对 JSON/键集/覆盖/引证/绑定失败修复本次响应或补齐未执行目标，"
-                + "不改语义判断来减少差异，不重跑已合格目标；当前审核未完成不得靠旧完成标记背书。"
-                + "差异不阻止本地格式检查或用户手动上传，也不授权自动上传/发布；质量仍未放行。\n")
+                + "\n权限边界：仅返回本轮 review_round.checks，不得输出 `checked_units` 或 `unchecked`；不改产物、不放行、不自动上传/发布。"
+                + "\n审核差异是产出，不是执行故障：独立填写 assessment，不得要求上游知识点重判、不得改正式标签或迎合旧判断。"
+                + "补修 JSON/键集/覆盖/引证/绑定失败时不得改动语义判断来减少差异。\n")
     return ("\n\n[子 Agent] " + role["title"] + "\n允许写入的产物：" + role["artifact"] + "\n" + role["body"]
             + ("\n\n" + GROUP_MATERIAL_RULE if stage in {"preassemble", "types", "assemble"} else "")
             + (knowledge_judgment_rules() if stage == "knowledge" else ""))

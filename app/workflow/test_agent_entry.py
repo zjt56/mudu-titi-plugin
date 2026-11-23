@@ -194,7 +194,7 @@ class AgentEntryTests(unittest.TestCase):
         def partial():
             print(json.dumps(first))
             return 3
-        def invoke(prompt, run_dir, config):
+        def invoke(prompt, run_dir, config, permit_parallel=False):
             round_id = review.ROUND_IDS[len(seen)]
             self.assertIn("ROUND: " + round_id, prompt)
             seen.append(run_dir)
@@ -212,7 +212,7 @@ class AgentEntryTests(unittest.TestCase):
         with contextlib.redirect_stdout(output), patch.object(local_agent, "load_config", return_value={"provider": "fixture", "max_input_chars": 600000}), \
              patch.object(review_rounds, "invoke", side_effect=invoke):
             self.assertEqual(agent._review_after(partial, batch, Path("fixture-config")), 3)
-        self.assertEqual(len(set(seen)), 2)
+        self.assertEqual(len(set(seen)), len(review.ROUND_IDS))
         report = json.loads(output.getvalue())
         self.assertTrue(report["execution_completed"])
         self.assertFalse(report["ai_review_completed"])
@@ -294,7 +294,7 @@ class AgentEntryTests(unittest.TestCase):
             calls.append(True)
             print(json.dumps({"error": "Invalid fields: extra", "code": "integration"}), file=agent.sys.stderr)
             return 2
-        def invoke(prompt, run_dir, config):
+        def invoke(prompt, run_dir, config, permit_parallel=False):
             round_id = review.ROUND_IDS[len(seen)]
             self.assertIn("ROUND: " + round_id, prompt)
             seen.append(run_dir)
@@ -314,7 +314,7 @@ class AgentEntryTests(unittest.TestCase):
             self.assertEqual(agent._review_after(callback, batch, Path("fixture-config")), 3)
         report = json.loads(output.getvalue())
         self.assertEqual(len(calls), 3)
-        self.assertEqual(len(set(seen)), 2)
+        self.assertEqual(len(set(seen)), len(review.ROUND_IDS))
         self.assertTrue(report["execution_completed"])
         self.assertFalse(report["completed"])
         self.assertFalse(report["ai_review_completed"])

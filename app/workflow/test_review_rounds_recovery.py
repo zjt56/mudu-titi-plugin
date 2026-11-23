@@ -218,7 +218,7 @@ class ReviewRecoveryTest(unittest.TestCase):
                     with patch.object(review_rounds, 'invoke', side_effect=fixture):
                         result = review_rounds.run(self.batch, config={key: 1, 'review_part_parallel': parallel})
                     self.assertTrue(result['completed'], result)
-                    self.assertEqual(len(targets_seen), 4)
+                    self.assertEqual(len(targets_seen), 3)
                     self.assertTrue(all(len(targets) == 1 for targets in targets_seen))
                     self.batch = batch
 
@@ -460,7 +460,7 @@ class ReviewRecoveryTest(unittest.TestCase):
             result = review_rounds.run(self.batch, config={'review_max_attempts': 2})
         self.assertTrue(result['completed'], result)
         self.assertNotIn('quota', result)
-        self.assertEqual(len(calls), 3)  # failed labels attempt, good labels, good sample
+        self.assertEqual(len(calls), 2)  # failed labels attempt, good labels
         self.assertIn(message, calls[1])
         failure = json.loads(next((self.batch / 'workflow/review-failures').glob('*.json')).read_text())
         self.assertEqual(failure['error'], message)
@@ -539,8 +539,8 @@ class ReviewRecoveryTest(unittest.TestCase):
             result = review_rounds.run(self.batch, config={'review_part_parallel': 2, 'review_max_attempts': 3})
         self.assertFalse(result['completed'])
         self.assertNotIn('quota', result)
-        self.assertEqual(model.call_count, 2)
-        self.assertEqual(review.evaluate_rounds(self.batch)['checked_rounds'], ['sample'])
+        self.assertEqual(model.call_count, 1)
+        self.assertEqual(review.evaluate_rounds(self.batch)['checked_rounds'], [])
         failure = result['summary']['execution_failures']['labels']
         self.assertEqual(failure['reason'], message)
         self.assertIsNone(failure['error_code'])
@@ -580,13 +580,38 @@ class ReviewRecoveryTest(unittest.TestCase):
         exported, task, partial = self.repair_fixture()
         original = task['prompt']
         evidence = self.snapshot(['workflow/review-bindings', 'workflow/review-tasks', 'workflow/review-partitions'])
+        def _supplied_json(text):
+            body = text.split('\nBEGIN SUPPLIED CONTENT', 1)[1].rpartition('END SUPPLIED CONTENT')[0]
+            return json.loads(body.split('\n', 1)[1])
+
+        def _assert_pruned_blind_context(repaired_prompt, original_prompt, failed_ids):
+            orig_ctx = _supplied_json(original_prompt)
+            rep_ctx = _supplied_json(repaired_prompt)
+            self.assertEqual(set(rep_ctx), set(orig_ctx))
+            pruned_keys = {'06_batch/batch_meta.json', 'confirmed_units_with_stable_ids',
+                           '01_source/structure.confirmed.json', '04_knowledge/explanations.json'}
+            for k in orig_ctx:
+                if k not in pruned_keys:
+                    self.assertEqual(rep_ctx[k], orig_ctx[k], k)
+            if 'confirmed_units_with_stable_ids' in orig_ctx:
+                self.assertEqual(rep_ctx['confirmed_units_with_stable_ids'],
+                                 [u for u in orig_ctx['confirmed_units_with_stable_ids'] if u.get('unit_id') in failed_ids])
+            if '01_source/structure.confirmed.json' in orig_ctx:
+                self.assertEqual(rep_ctx['01_source/structure.confirmed.json']['units'],
+                                 [u for u in orig_ctx['01_source/structure.confirmed.json']['units'] if u.get('unit_id') in failed_ids])
+            if '06_batch/batch_meta.json' in orig_ctx:
+                self.assertEqual(rep_ctx['06_batch/batch_meta.json']['items'],
+                                 [it for it in orig_ctx['06_batch/batch_meta.json']['items'] if (it.get('unit_id') or it.get('id')) in failed_ids])
+            if '04_knowledge/explanations.json' in orig_ctx:
+                self.assertEqual(rep_ctx['04_knowledge/explanations.json']['items'],
+                                 [it for it in orig_ctx['04_knowledge/explanations.json']['items'] if (it.get('unit_id') or it.get('id')) in failed_ids])
+
         seen = []
         def fixture(prompt, *args, **kwargs):
             seen.append(prompt)
             self.assertIn('references/knowledge-catalog.json', prompt)
             self.assertNotIn('SECRET_ORIGINAL_', prompt)
-            self.assertEqual(prompt.split('\nBEGIN SUPPLIED CONTENT', 1)[1].encode(),
-                             original.split('\nBEGIN SUPPLIED CONTENT', 1)[1].encode())
+            _assert_pruned_blind_context(prompt, original, {'u2'})
             self.assertEqual(json.loads(re.search(r'TARGETS: (\[.*?\])\n', prompt).group(1)), ['u2'])
             self.assertIn(partial['failed'][0]['reason'], prompt)
             self.assertIn('Complete appendix evidence must remain available.', prompt)
@@ -628,8 +653,11 @@ class ReviewRecoveryTest(unittest.TestCase):
         (Path(exported['package_dir']) / 'task.json').unlink()
         prompt, targets = review_rounds._repair_context(self.batch, partial, review.prepare_round_plan(self.batch))
         self.assertEqual(targets, ['u2'])
-        self.assertEqual(prompt.split('\nBEGIN SUPPLIED CONTENT', 1)[1],
-                         task['prompt'].split('\nBEGIN SUPPLIED CONTENT', 1)[1])
+        rep_ctx = json.loads(prompt.split('\nBEGIN SUPPLIED CONTENT', 1)[1].rpartition('END SUPPLIED CONTENT')[0].split('\n', 1)[1])
+        orig_ctx = json.loads(task['prompt'].split('\nBEGIN SUPPLIED CONTENT', 1)[1].rpartition('END SUPPLIED CONTENT')[0].split('\n', 1)[1])
+        self.assertEqual(rep_ctx['01_source/正文.txt'], orig_ctx['01_source/正文.txt'])
+        self.assertEqual(rep_ctx['references/knowledge-catalog.json'], orig_ctx['references/knowledge-catalog.json'])
+        self.assertEqual([u['unit_id'] for u in rep_ctx['confirmed_units_with_stable_ids']], ['u2'])
         with patch.object(review_rounds, 'invoke', return_value={'response': self.response(task['prompt'])}):
             with self.assertRaisesRegex(ValueError, 'only the failed targets'):
                 review_rounds._repair_round(self.batch, exported['task_id'], {})
@@ -640,17 +668,18 @@ class ReviewRecoveryTest(unittest.TestCase):
             {'unit_id': 'g1', 'unit_kind': 'group', 'numbers': [1, 2, 3], 'stem': self.source}]})
         self.write('03_types/types.json', {'items': [{'unit_id': 'g1', 'type': '阅读理解'}]})
         self.write('04_knowledge/knowledge.json', {'items': [{'unit_id': 'g1', 'knowledge': []}]})
-        exported = review_rounds.export_task(self.batch, only_round='sample')
-        task = self.task(exported)
-        plan = review.prepare_round_plan(self.batch)
-        partial = {'task_id': exported['task_id'], 'round_id': 'sample', 'input_binding': plan['input_binding'],
-                   'part_index': 0, 'valid_checks': [],
-                   'failed': [{'unit_id': 'g1', 'number': None, 'reason': 'quote absent'}]}
-        prompt, targets = review_rounds._repair_context(self.batch, partial, plan)
-        self.assertEqual(targets, [{'unit_id': 'g1', 'number': None}])
-        self.assertIn('references/knowledge-catalog.json', prompt)
-        self.assertEqual(prompt.split('\nBEGIN SUPPLIED CONTENT', 1)[1],
-                         task['prompt'].split('\nBEGIN SUPPLIED CONTENT', 1)[1])
+        with patch.object(review, 'ROUND_IDS', ('labels', 'sample')):
+            exported = review_rounds.export_task(self.batch, only_round='sample')
+            task = self.task(exported)
+            plan = review.prepare_round_plan(self.batch)
+            partial = {'task_id': exported['task_id'], 'round_id': 'sample', 'input_binding': plan['input_binding'],
+                       'part_index': 0, 'valid_checks': [],
+                       'failed': [{'unit_id': 'g1', 'number': None, 'reason': 'quote absent'}]}
+            prompt, targets = review_rounds._repair_context(self.batch, partial, plan)
+            self.assertEqual(targets, [{'unit_id': 'g1', 'number': None}])
+            self.assertIn('references/knowledge-catalog.json', prompt)
+            self.assertEqual(prompt.split('\nBEGIN SUPPLIED CONTENT', 1)[1],
+                             task['prompt'].split('\nBEGIN SUPPLIED CONTENT', 1)[1])
 
     def complete_fixture_rounds(self):
         with patch.object(review_rounds, 'invoke', side_effect=lambda prompt, *a, **k: {'response': self.response(prompt)}):

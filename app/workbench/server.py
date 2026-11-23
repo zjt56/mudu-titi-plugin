@@ -651,7 +651,21 @@ def paper_info(folder: Path, report, manifest) -> dict:
         "source_type": known(batch.get("source_type"), meta.get("source_type"), detected.get("source_type")),
         "year": batch.get("year") or meta.get("year") or detected.get("year"),
     }, folder)
-    return {"title": str(resolved.get("paper_title") or MISSING),
+    title = str(resolved.get("paper_title") or MISSING)
+    if title != MISSING and re.search(r"\bUnit\s+\d+$", title):
+        text_path = folder / "01_source" / "正文.txt"
+        head_text = ""
+        if text_path.is_file():
+            try:
+                with text_path.open("r", encoding="utf-8-sig") as fh:
+                    head_text = "".join(fh.readline() for _ in range(15))
+            except OSError:
+                head_text = ""
+        from workflow.metadata_ai import extract_unit_subtopic
+        subtopic, _ = extract_unit_subtopic(head_text, str(batch.get("batch") or folder.name))
+        if subtopic and subtopic not in title:
+            title = f"{title} {subtopic}"
+    return {"title": title,
             "batch": str(batch.get("batch") or folder.name),
             "source": str(resolved.get("source") or MISSING),
             "source_type": str(resolved.get("source_type") or MISSING),
@@ -777,13 +791,38 @@ def stage_cards(manifest, has_output: bool = False, advance_running: bool = Fals
 _advance_state: dict[str, dict] = {}
 
 # 用户要求：多份试卷上传后必须“依次排队”跑，同一时刻只允许一个批次在推进，
-# 第一份跑完才轮到第二份，绝不并行。这里用一个进程级 FIFO 队列 + 单一调度线程
-# 实现全局串行；_advance_state[name] 记录 running/queued 状态供前端展示。
+# 进程级 FIFO 队列 + 可配置并发度调度线程（默认 1 保持严格串行，插件端通过
+# WF_MAX_CONCURRENT_BATCHES=2 启用双批并发）；_advance_state[name] 记录状态。
 _advance_queue: list[str] = []
 _advance_queue_lock = threading.Lock()
 _advance_worker_running = False
 _advance_worker_thread = None
+_advance_worker_threads: list[threading.Thread] = []
 _advance_worker_start_error = None
+
+
+def _max_concurrent_batches() -> int:
+    """Max concurrent advancing batches (1 = strict serial; capped at 4 for memory safety)."""
+    raw = os.environ.get("WF_MAX_CONCURRENT_BATCHES", "1")
+    try:
+        value = int(str(raw).strip())
+    except (ValueError, TypeError):
+        value = 1
+    return max(1, min(value, 4))
+
+
+def _alive_advance_workers() -> list:
+    """Prune dead worker threads and keep _advance_worker_thread synced (hold _advance_queue_lock)."""
+    global _advance_worker_thread
+    if _advance_worker_thread is None:
+        _advance_worker_threads.clear()
+        return []
+    if _advance_worker_thread not in _advance_worker_threads:
+        _advance_worker_threads[:] = [_advance_worker_thread]
+    alive = [t for t in _advance_worker_threads if t is not None and t.is_alive()]
+    _advance_worker_threads[:] = alive
+    _advance_worker_thread = alive[0] if alive else None
+    return alive
 
 
 QUEUE_REMOVED = "workflow/.queue-removed"
@@ -810,9 +849,7 @@ def remove_from_queue(name: str, reason: str = "") -> dict:
         temporary.write_text(json.dumps({"removed_at": now(), "reason": str(reason)[:300]},
                                         ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(marker)
-    global _OVERVIEW_SNAPSHOT
-    _OVERVIEW_CACHE.clear()
-    _OVERVIEW_SNAPSHOT = None
+    _invalidate_overview_batch(folder, name)
     return {"removed": True, "batch": name, "batch_dir": str(folder)}
 
 
@@ -824,9 +861,7 @@ def restore_queue(name: str) -> dict:
         marker.unlink()
     with _lock:
         _advance_state.pop(name, None)
-    global _OVERVIEW_SNAPSHOT
-    _OVERVIEW_CACHE.clear()
-    _OVERVIEW_SNAPSHOT = None
+    _invalidate_overview_batch(folder, name)
     return {"restored": True, "batch": name, "batch_dir": str(folder)}
 
 
@@ -909,9 +944,14 @@ def _queue_head():
 
 
 def _waiting_for_predecessor(name):
-    """Return the blocking head name when `name` must wait, else None."""
-    head = _queue_head()
-    return head if (head is not None and head != name) else None
+    """Return the blocking head name when `name` must wait beyond the concurrency window, else None."""
+    order = _queue_batch_order()
+    if not order:
+        return None
+    limit = _max_concurrent_batches()
+    if name in order[:limit]:
+        return None
+    return order[0]
 
 
 def finding_current(finding: dict, labels: dict, subs: list[dict], numbers: list) -> str:
@@ -1067,10 +1107,12 @@ def _resolve_structure_issue(folder: Path, finding: dict) -> None:
 
 
 def _run_advance_now(name: str, folder: Path, *, operations_expectation=None) -> dict:
-    """Execute one batch's advance pass synchronously (called only by the serial worker)."""
+    """Execute one batch's advance pass synchronously (called by advance workers)."""
     from workflow import supervisor as wf_supervisor
     result = {"error": "后台执行器意外退出，等待监督器重试"}
-    claim = wf_supervisor.advance_claim(folder)
+    claim = (wf_supervisor.advance_claim(folder)
+             if _max_concurrent_batches() <= 1
+             else wf_supervisor.advance_claim(folder, include_global_agent=False))
     if not claim.__enter__():
         claim.__exit__(None, None, None)
         with _lock:
@@ -1112,11 +1154,11 @@ def _run_advance_now(name: str, folder: Path, *, operations_expectation=None) ->
 
 
 def _advance_worker_loop():
-    """Single global worker: run queued batches strictly one at a time (FIFO).
+    """FIFO worker loop supporting 1..N concurrent batches (N = _max_concurrent_batches()).
 
-    One batch must finish before the next starts; never run two batches in
-    parallel. When the queue empties the worker exits; the next enqueue restarts
-    it. The queue itself survives between passes.
+    When the queue empties the worker exits cleanly and relinquishes its slot;
+    finishing a batch wakes the supervisor immediately so waiting batches start
+    without a 30s tick gap.
     """
     global _advance_worker_running, _advance_worker_thread
     while True:
@@ -1125,10 +1167,21 @@ def _advance_worker_loop():
         with _lock:
             with _advance_queue_lock:
                 if not _advance_queue:
-                    _advance_worker_running = False
-                    # Relinquish ownership under the same lock as enqueue/start;
-                    # a thread still unwinding its return cannot strand new work.
-                    _advance_worker_thread = None
+                    current = threading.current_thread()
+                    if _advance_worker_thread is None or _advance_worker_thread not in _advance_worker_threads:
+                        _advance_worker_threads.clear()
+                    _advance_worker_threads[:] = [
+                        t for t in _advance_worker_threads
+                        if t is not None and t is not current and t.is_alive()
+                    ]
+                    if _advance_worker_threads:
+                        _advance_worker_thread = _advance_worker_threads[0]
+                        _advance_worker_running = True
+                    else:
+                        # Relinquish ownership under the same lock as enqueue/start;
+                        # a thread still unwinding its return cannot strand new work.
+                        _advance_worker_thread = None
+                        _advance_worker_running = False
                     return
                 entry = _advance_queue.pop(0)
                 name = entry["name"] if isinstance(entry, dict) else entry
@@ -1143,7 +1196,7 @@ def _advance_worker_loop():
             if queue_removed(folder) or (folder / "workflow/.delete-requested").exists():
                 _advance_state.pop(name, None)
                 continue
-            # Even a later queued batch cannot pass an unfinished predecessor.
+            # Even a later queued batch cannot pass outside the active concurrency window.
             predecessor = _waiting_for_predecessor(name)
             if predecessor is not None:
                 _advance_state[name] = {"running": False, "waiting": True,
@@ -1158,39 +1211,55 @@ def _advance_worker_loop():
         except Exception as exc:  # noqa: BLE001 - never kill the worker loop
             with _lock:
                 _advance_state[name] = {"running": False, "result": {"error": str(exc)}, "finished_at": now()}
+        finally:
+            # Wake supervisor right after a batch finishes so the next waiting batch
+            # in 排队区 starts immediately instead of waiting for the next 30s tick.
+            _wake_supervisor()
 
 
 @serialized
 def _ensure_advance_worker():
-    """Reconcile queued work with a real thread, never restart an executing task."""
+    """Reconcile queued work with up to _max_concurrent_batches() live worker threads."""
     global _advance_worker_running, _advance_worker_thread, _advance_worker_start_error
     # Start while holding the queue lock: another caller cannot mistake a
-    # constructed-but-not-started thread for a dead worker and create a second.
+    # constructed-but-not-started thread for a dead worker and over-spawn.
     # The serialized wrapper preserves the worker's _lock -> queue-lock order.
     with _advance_queue_lock:
-        if _advance_worker_thread is not None and _advance_worker_thread.is_alive():
-            _advance_worker_running = True
-            return True
-        _advance_worker_running = False
+        alive = _alive_advance_workers()
         if not _advance_queue:
-            return False
-        if any(state.get("running") for state in _advance_state.values()):
+            _advance_worker_running = bool(alive)
+            return bool(alive)
+        running_count = sum(1 for state in _advance_state.values() if state.get("running"))
+        if running_count > 0 and not alive:
             # A dead thread with a recorded owner is ambiguous: expose it for
             # diagnosis, never replay it or let another batch overtake it.
-            return False
-        try:
-            worker = threading.Thread(target=_advance_worker_loop, daemon=True,
-                                      name="workbench-advance-worker")
-            _advance_worker_thread = worker
-            _advance_worker_running = True
-            worker.start()
-        except Exception as exc:  # noqa: BLE001 - retain queue for the next reconciliation
             _advance_worker_running = False
-            _advance_worker_thread = None
-            _advance_worker_start_error = str(exc)
             return False
+        limit = _max_concurrent_batches()
+        desired = min(limit, running_count + len(_advance_queue))
+        while len(alive) < desired:
+            idx = len(alive) + 1
+            worker_name = "workbench-advance-worker" if idx == 1 else f"workbench-advance-worker-{idx}"
+            worker = None
+            try:
+                worker = threading.Thread(target=_advance_worker_loop, daemon=True,
+                                          name=worker_name)
+                _advance_worker_threads.append(worker)
+                if _advance_worker_thread is None:
+                    _advance_worker_thread = worker
+                _advance_worker_running = True
+                worker.start()
+                alive.append(worker)
+            except Exception as exc:  # noqa: BLE001 - retain queue for the next reconciliation
+                if worker is not None and worker in _advance_worker_threads:
+                    _advance_worker_threads.remove(worker)
+                _advance_worker_thread = alive[0] if alive else None
+                _advance_worker_running = bool(alive)
+                _advance_worker_start_error = str(exc)
+                return bool(alive)
+        _advance_worker_running = bool(alive)
         _advance_worker_start_error = None
-        return True
+        return bool(alive)
 
 
 def advance_worker_health() -> dict:
@@ -1208,9 +1277,12 @@ def advance_worker_health() -> dict:
                     ages.append(max(0.0, (current - queued.astimezone()).total_seconds()))
                 except (ValueError, TypeError, OverflowError):
                     continue
-            alive = bool(_advance_worker_thread is not None and _advance_worker_thread.is_alive())
+            alive_workers = _alive_advance_workers()
+            alive = bool(alive_workers)
             running = [name for name, state in _advance_state.items() if state.get("running")]
             return {"worker_alive": alive,
+                    "active_workers": len(alive_workers),
+                    "max_concurrent_batches": _max_concurrent_batches(),
                     "running_batches": running,
                     "running_without_worker": bool(running and not alive),
                     "queue_length": len(names),
@@ -1402,7 +1474,10 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
     cleared_cooldown = False
     cleared_stale_activity = False
     # Preparation writes must participate in the same lock/lease as execution.
-    with wf_supervisor.advance_claim(folder) as acquired:
+    claim_cm = (wf_supervisor.advance_claim(folder)
+                if _max_concurrent_batches() <= 1
+                else wf_supervisor.advance_claim(folder, include_global_agent=False))
+    with claim_cm as acquired:
         if not acquired:
             return {"started": False, "running": True, "external": True, **ctx_info}
         if operations_expectation is not None:
@@ -1434,7 +1509,7 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
                               if operations_expectation is not None else name)
         q_pos = len(_advance_queue)
     if reset_budget:
-        _OVERVIEW_CACHE.clear()
+        _invalidate_overview_batch(folder, name)
     _ensure_advance_worker()
     _wake_supervisor()
     return {
@@ -2436,19 +2511,17 @@ def review_snapshot(folder):
     import copy
     folder_key = str(folder)
     key = (folder_key, _review_inputs_key(folder))
-    hit = _REVIEW_SNAPSHOT_CACHE.get(key)
+    hit = _cache_get_lru(_REVIEW_SNAPSHOT_CACHE, key)
     if hit is not None:
         return copy.deepcopy(hit)
     # Single-flight per batch so concurrent detail() + units_bundle() requests
     # never run duplicate 500ms review.evaluate_rounds() computations under the GIL.
     with _folder_lock(_REVIEW_SNAPSHOT_LOCKS, folder_key):
-        hit = _REVIEW_SNAPSHOT_CACHE.get(key)
+        hit = _cache_get_lru(_REVIEW_SNAPSHOT_CACHE, key)
         if hit is not None:
             return copy.deepcopy(hit)
         value = _review_snapshot_uncached(folder)
-        if len(_REVIEW_SNAPSHOT_CACHE) > 64:
-            _REVIEW_SNAPSHOT_CACHE.clear()
-        _REVIEW_SNAPSHOT_CACHE[key] = value
+        _cache_put_lru(_REVIEW_SNAPSHOT_CACHE, key, value, _REVIEW_SNAPSHOT_CACHE_MAX)
         return copy.deepcopy(value)
 
 
@@ -2584,6 +2657,45 @@ _OVERVIEW_CACHE = {}
 # 8-9s，逼近前端 15s 的请求上限；而列表内容只在批次文件变化时才变。把按内容
 # 指纹校验的投影快照存到进程外，重启后首屏直接复用，指纹不符的批次照常重算。
 _OVERVIEW_SNAPSHOT = None
+_OVERVIEW_SNAPSHOT_DIRTY = False
+_CACHE_GUARD = threading.Lock()
+_OVERVIEW_CACHE_MAX = 512
+_REVIEW_SNAPSHOT_CACHE_MAX = 512
+_UNITS_BUNDLE_CACHE_MAX = 64
+_DETAIL_CTX_CACHE_MAX = 32
+
+
+def _cache_get_lru(cache: dict, key):
+    with _CACHE_GUARD:
+        value = cache.get(key)
+        if value is not None:
+            cache.pop(key, None)
+            cache[key] = value
+        return value
+
+
+def _cache_put_lru(cache: dict, key, value, max_size: int) -> None:
+    with _CACHE_GUARD:
+        cache.pop(key, None)
+        cache[key] = value
+        while len(cache) > max_size:
+            oldest = next(iter(cache), None)
+            if oldest is None:
+                break
+            cache.pop(oldest, None)
+
+
+def _invalidate_overview_batch(folder: Path, name: str) -> None:
+    """Evict a single batch's overview cache entry without thrashing unrelated batches."""
+    global _OVERVIEW_SNAPSHOT_DIRTY
+    folder_str = str(folder)
+    with _CACHE_GUARD:
+        stale_keys = [k for k in _OVERVIEW_CACHE if isinstance(k, tuple) and k and k[0] == folder_str]
+        for k in stale_keys:
+            _OVERVIEW_CACHE.pop(k, None)
+        if isinstance(_OVERVIEW_SNAPSHOT, dict):
+            _OVERVIEW_SNAPSHOT.pop(name, None)
+        _OVERVIEW_SNAPSHOT_DIRTY = True
 
 
 def _overview_snapshot_path():
@@ -2611,20 +2723,37 @@ def _load_overview_snapshot():
     return _OVERVIEW_SNAPSHOT
 
 
-def _save_overview_snapshot():
-    """Persist only this workflows dir's projections; best effort, never fatal."""
+def _save_overview_snapshot(*, only_if_dirty: bool = False):
+    """Persist this workflows dir's projections; merge with existing snapshot so entries aren't lost."""
+    global _OVERVIEW_SNAPSHOT, _OVERVIEW_SNAPSHOT_DIRTY
+    path = _overview_snapshot_path()
+    if only_if_dirty and not _OVERVIEW_SNAPSHOT_DIRTY and path.is_file():
+        return
     items = {}
-    for (folder, key), value in list(_OVERVIEW_CACHE.items()):
+    workflows_root = WORKFLOWS.resolve()
+    existing = _OVERVIEW_SNAPSHOT if isinstance(_OVERVIEW_SNAPSHOT, dict) else {}
+    for bname, entry in list(existing.items()):
+        if not isinstance(entry, dict):
+            continue
         try:
-            path = Path(folder)
-            if path.parent != WORKFLOWS:
+            ep = Path(entry.get("folder") or "")
+            if ep.parent.resolve() != workflows_root or not ep.is_dir():
                 continue
         except (OSError, TypeError):
             continue
-        items[path.name] = {"folder": str(path), "key": key, "value": value}
+        items[bname] = entry
+    with _CACHE_GUARD:
+        cache_entries = list(_OVERVIEW_CACHE.items())
+    for (folder, key), value in cache_entries:
+        try:
+            ep = Path(folder)
+            if ep.parent.resolve() != workflows_root:
+                continue
+        except (OSError, TypeError):
+            continue
+        items[ep.name] = {"folder": str(ep), "key": key, "value": value}
     if not items:
         return
-    path = _overview_snapshot_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps({"version": 1, "batches": items}, ensure_ascii=False)
@@ -2633,8 +2762,8 @@ def _save_overview_snapshot():
         os.replace(tmp, path)
     except OSError:
         return
-    global _OVERVIEW_SNAPSHOT
     _OVERVIEW_SNAPSHOT = items
+    _OVERVIEW_SNAPSHOT_DIRTY = False
 
 
 
@@ -2673,21 +2802,23 @@ def _overview_key(folder):
 
 
 def overview(name):
+    global _OVERVIEW_SNAPSHOT_DIRTY
     folder = batch_dir(name)
     key = (str(folder), _overview_key(folder))
-    hit = _OVERVIEW_CACHE.get(key)
+    hit = _cache_get_lru(_OVERVIEW_CACHE, key)
     if hit is not None:
         return _live_overview(hit, name, folder)
     saved = _load_overview_snapshot().get(name)
-    if (isinstance(saved, dict) and saved.get("folder") == str(folder)
+    saved_folder = saved.get("folder") if isinstance(saved, dict) else None
+    same_folder = bool(saved_folder and (saved_folder == str(folder) or Path(saved_folder).resolve() == folder.resolve()))
+    if (isinstance(saved, dict) and same_folder
             and saved.get("key") == key[1] and isinstance(saved.get("value"), dict)):
         # Same content fingerprint as when the snapshot was written: reuse it.
-        _OVERVIEW_CACHE[key] = saved["value"]
+        _cache_put_lru(_OVERVIEW_CACHE, key, saved["value"], _OVERVIEW_CACHE_MAX)
         return _live_overview(saved["value"], name, folder)
     value = _overview_uncached(name, folder)
-    if len(_OVERVIEW_CACHE) > 64:
-        _OVERVIEW_CACHE.clear()
-    _OVERVIEW_CACHE[key] = value
+    _cache_put_lru(_OVERVIEW_CACHE, key, value, _OVERVIEW_CACHE_MAX)
+    _OVERVIEW_SNAPSHOT_DIRTY = True
     return _live_overview(value, name, folder)
 
 
@@ -2923,7 +3054,7 @@ def list_batches():
                     result.append(overview(folder.name))
                 except ValueError:
                     pass
-    _save_overview_snapshot()
+    _save_overview_snapshot(only_if_dirty=True)
     return result
 
 
@@ -4824,7 +4955,8 @@ def _units_bundle_key_str(folder: Path, name: str) -> str:
     if cand_dir.is_dir():
         for p in sorted(cand_dir.rglob("*.json")):
             try:
-                parts.append(("cand:" + str(p.relative_to(folder)), hashlib.sha256(p.read_bytes()).hexdigest()))
+                st = p.stat()
+                parts.append(("cand:" + str(p.relative_to(folder)), st.st_mtime_ns, st.st_size))
             except OSError:
                 continue
     return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()
@@ -4861,26 +4993,22 @@ def _save_units_bundle_disk(folder: Path, key_str: str, bundle: dict) -> None:
 def _get_cached_bundle(folder: Path, name: str) -> tuple[tuple, dict | None]:
     key_str = _units_bundle_key_str(folder, name)
     cache_key = (str(folder), key_str)
-    hit = _UNITS_BUNDLE_CACHE.get(cache_key)
+    hit = _cache_get_lru(_UNITS_BUNDLE_CACHE, cache_key)
     if hit is not None:
         return cache_key, hit
     disk_hit = _load_units_bundle_disk(folder, key_str)
     if disk_hit is not None:
-        if len(_UNITS_BUNDLE_CACHE) >= 24:
-            _UNITS_BUNDLE_CACHE.clear()
-        _UNITS_BUNDLE_CACHE[cache_key] = disk_hit
+        _cache_put_lru(_UNITS_BUNDLE_CACHE, cache_key, disk_hit, _UNITS_BUNDLE_CACHE_MAX)
         return cache_key, disk_hit
     return cache_key, None
 
 
 def _get_or_prepare_detail_ctx(folder: Path, name: str, cache_key: tuple) -> dict:
-    ctx = _DETAIL_CTX_CACHE.get(cache_key)
+    ctx = _cache_get_lru(_DETAIL_CTX_CACHE, cache_key)
     if ctx is not None:
         return ctx
     ctx = _prepare_batch_detail_context(folder, name)
-    if len(_DETAIL_CTX_CACHE) >= 16:
-        _DETAIL_CTX_CACHE.clear()
-    _DETAIL_CTX_CACHE[cache_key] = ctx
+    _cache_put_lru(_DETAIL_CTX_CACHE, cache_key, ctx, _DETAIL_CTX_CACHE_MAX)
     return ctx
 
 
@@ -4943,12 +5071,11 @@ def units_bundle(name, *, _readonly: bool = False):
             "units": units,
             "order": order,
         }
-        if len(_UNITS_BUNDLE_CACHE) >= 24:
-            _UNITS_BUNDLE_CACHE.clear()
-        _UNITS_BUNDLE_CACHE[cache_key] = bundle
+        _cache_put_lru(_UNITS_BUNDLE_CACHE, cache_key, bundle, _UNITS_BUNDLE_CACHE_MAX)
         _DETAIL_CTX_CACHE.pop(cache_key, None)
-        _save_units_bundle_disk(folder, cache_key[1], bundle)
-        return bundle if _readonly else copy.deepcopy(bundle)
+    # 落盘放在批次锁外，避免阻塞并发的单题 detail() 命中内存缓存。
+    _save_units_bundle_disk(folder, cache_key[1], bundle)
+    return bundle if _readonly else copy.deepcopy(bundle)
 
 
 MANUAL_CONTENT_FIELDS = ("explanation", "articleSummary")
@@ -5632,10 +5759,18 @@ def _wake_supervisor():
 def serve(http_server):
     """Start background recovery only with an actual server lifecycle."""
     global _workflow_supervisor
-    from workflow.supervisor import WorkflowSupervisor
+    from dataclasses import replace as _dc_replace
+    from workflow import supervisor as wf_supervisor
+    from workflow.supervisor import SupervisorConfig, WorkflowSupervisor
+    max_concurrent = _max_concurrent_batches()
+    sup_cfg = SupervisorConfig.from_env()
+    if max_concurrent > sup_cfg.max_dispatch_per_tick:
+        sup_cfg = _dc_replace(sup_cfg, max_dispatch_per_tick=max_concurrent)
     supervisor = WorkflowSupervisor(WORKFLOWS, _dispatch_supervised,
         is_active=lambda name: bool((_advance_state.get(name) or {}).get("running")
-                                   or (_upload_jobs.get(name) or {}).get("running")))
+                                   or (_upload_jobs.get(name) or {}).get("running")),
+        config=sup_cfg,
+        busy=lambda f: wf_supervisor.execution_busy(f, include_global_agent=(max_concurrent <= 1)))
     _workflow_supervisor = supervisor
     # CHANGELOG 保留：随服务器生命周期启停周期清理线程（超过两天自动删除）。
     _changelog_prune_halt.clear()
