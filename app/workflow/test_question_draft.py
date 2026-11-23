@@ -92,6 +92,25 @@ class QuestionDraftTest(unittest.TestCase):
         self.assertEqual(row['stem'], '1.')
         self.assertEqual(row['options'], ['A. tie', 'B. scarf', 'C. card'])
 
+    def test_numbered_standalone_keeps_its_own_marked_section_instruction(self):
+        from workflow import sync_practice
+
+        heading = '**Ⅰ. [跨学科]在下列四线三格中写出加点字对应的英文单词**'
+        lines = [heading, '1. 第一句', '2. 第二句', 'Ⅱ. 单词拼写', '1. 另一道题']
+        headings = sync_practice.heading_candidates('\n'.join(lines))
+        for number, line in ((1, 2), (2, 3)):
+            with self.subTest(number=number):
+                unit = {'identity_version': 'scoped-v1', 'section_id': 'sec',
+                        'unit_id': f'sec-u{line}', 'numbers': [number], 'unit_kind': 'standalone',
+                        'question_ids': {str(number): f'sec-l{line}-q{number}'},
+                        'source_section': {'title': heading, 'start_line': 1},
+                        'source_span': {'basis': 'ai_classified', 'start_line': line, 'end_line': line}}
+                proof = {'start_line': line, 'end_line': line}
+                resolve = question_draft._numbered_marked_heading
+                self.assertEqual(resolve(unit, proof, lines, headings, [unit]), heading)
+                self.assertEqual(resolve(unit, proof, lines, headings, [dict(unit, section_id='other')]), '')
+                self.assertEqual(resolve(unit, {'start_line': 5, 'end_line': 5}, lines, headings, [unit]), '')
+
     def test_wire_shape_word_markup_and_empty_labels(self):
         self.standalone()
         result = question_draft.ensure(self.root)

@@ -611,6 +611,34 @@ def _section_rubric(lines, unit):
                           unit.get("type") or "")
 
 
+def _numbered_marked_heading(unit, proof, lines, headings, fresh):
+    """Bind a marked instruction to an independently located printed question."""
+    from .sync_practice import _scoped_mark_window, source_marks
+
+    span = unit.get("source_span") or {}
+    numbers = unit.get("numbers") or []
+    if len(numbers) != 1 or span.get("number_binding") in {"unnumbered_section", "single_writing_section"}:
+        return ""
+    window = _scoped_mark_window(unit, lines, headings)
+    if not window:
+        return ""
+    start, end, owner = window
+    heading = lines[owner["start_line"] - 1].strip()
+    if heading != str((unit.get("source_section") or {}).get("title") or "").strip() or not source_marks(heading):
+        return ""
+    first, last = proof.get("start_line"), proof.get("end_line")
+    if not (type(first) is int and type(last) is int and owner["start_line"] < start <= first <= last <= end):
+        return ""
+    number = str(numbers[0])
+    qid = (unit.get("question_ids") or {}).get(number)
+    if not qid:
+        return ""
+    peers = [peer for peer in fresh if peer.get("section_id") == unit.get("section_id")
+             and (peer.get("question_ids") or {}).get(number) == qid
+             and (peer.get("source_section") or {}).get("start_line") == owner["start_line"]]
+    return heading if len(peers) == 1 else ""
+
+
 def _standalone_marked_heading(unit, proof, source, cleaned_lines, fresh):
     """Recover a marked heading only for a fully rebuilt unnumbered section."""
     from .question_identity import VERSION as IDENTITY_VERSION
@@ -687,6 +715,10 @@ def build(batch_dir, *, units=None):
     evidence = lesson_bands.for_text(root, cleaned)
     sections = lesson_bands.annotate_sections(structure.get("sections") or [], evidence)
     fresh = _build_units(sections, structure.get("groups") or [], cleaned.splitlines(), batch_dir=root)
+    from .sync_practice import heading_candidates, source_marks
+    raw_lines = source.splitlines()
+    raw_headings = heading_candidates(source) if source_marks(source) else []
+    cleaned_headings = heading_candidates(cleaned) if source != cleaned and raw_headings else raw_headings
     decorative = wire_format.decorative_names(root, extraction=extraction)
     items, bindings, issues, media = [], {}, [], set()
     layout_diagnostics = []
@@ -722,6 +754,11 @@ def build(batch_dir, *, units=None):
                     if not part["stem"] and not part["options"]:
                         row["stem"] = text
                 heading = _standalone_marked_heading(unit, proof, source, cleaned_lines, fresh)
+                if not heading:
+                    raw_basis = proof.get("line_basis") == "01_source/正文.txt"
+                    heading = _numbered_marked_heading(unit, proof,
+                                                       raw_lines if raw_basis else cleaned_lines,
+                                                       raw_headings if raw_basis else cleaned_headings, fresh)
                 if heading and heading not in row["stem"].splitlines():
                     row["stem"] = heading + "\n" + row["stem"]
                     proof["section_heading_rubric"] = heading
