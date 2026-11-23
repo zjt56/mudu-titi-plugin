@@ -410,6 +410,105 @@ class PhoneticStructureTest(unittest.TestCase):
         expected[row['unit_id']]['stem'] = 'Ⅲ.找出每组单词中画线部分的读音不同的一项'
         self.assertEqual(phonetic_structure.shape(row, expected), (False, False))
 
+    def test_phonetic_write_group_has_source_backed_no_material_proof(self):
+        from workflow import denoise, extract, handoff, shared_rubric, structure_gate
+
+        text = ('Unit 3 Same or Different?\n第一课时 Section A (1a-1e)\n'
+                '【三、Pronunciation】\n'
+                '**Ⅱ. 根据所给音标写出单词**\n\n'
+                '**1.**/ˈhæmbɜːɡə(r)/:______\n'
+                '**2.**/sɜːv/:______\n'
+                '**3.**/ˈtɜːsti/:______\n'
+                '**4.**/ˈnʌmbə(r)/:______\n'
+                '**5.**/ˈməʊmənt/:______\n'
+                '**6.**/kəmˈpjuːtə(r)/:______')
+        structure, text, _ = extract.infer_structure(text)
+        units = structure_gate._build_units(
+            structure['sections'], structure['groups'], denoise.clean_body(text)[0].splitlines())
+        self.assertEqual(len(units), 1)
+        unit = units[0]
+        self.assertEqual(unit['unit_kind'], 'group')
+        self.assertEqual(unit['type'], '单词拼写')
+        for path, value in (('正文.txt', text), ('structure.json', structure),
+                            ('structure.confirmed.json', {'units': units}),
+                            ('metadata.json', {'source_type': '同步练习'})):
+            self.write('01_source/' + path, value)
+
+        row = question_draft.build(self.root)['items'][0]
+        row['question_type'] = '单词拼写'
+        row['filterMetadata'] = {'subtypes': ['句意及音标']}
+        for child, ans in zip(row['subquestions'],
+                              ('hamburger', 'serve', 'thirsty', 'number', 'moment', 'computer')):
+            child['answer'] = ans
+        self.assertEqual(row['material'], '')
+        self.assertEqual(row['stem'], unit['source_section']['title'])
+        verified = self.verified()
+        self.assertIn(row['unit_id'], verified)
+        self.assertTrue(shared_rubric.phonetic_write_group(verified[row['unit_id']]))
+        self.assertEqual(phonetic_structure.shape(row, verified), (True, False))
+        check = self.check_script('check_structure')._check_unit
+        self.assertEqual(check(row, verified), [])
+        source_audit = question_content.audit_batch_source(self.root, {'items': [row]})
+        self.assertEqual(source_audit['issues'], [])
+
+        self.write('01_source/metadata.json', {'source_type': '期中考试'})
+        self.assertNotIn(row['unit_id'], self.verified())
+        self.write('01_source/metadata.json', {'source_type': '同步练习'})
+
+        exam_lines = text.splitlines()
+        exam_lines[0] = '2026 期中英语试卷'
+        exam_lines[1] = 'Instructions'
+        self.assertEqual(shared_rubric.native_section_rubric(exam_lines, unit), [])
+
+        # 全链路：早阶段 stem 为空时 project_final_view / underline 投影 / 预览 / 上传映射均保留大题标题
+        filled = {'items': [row]}
+        early = copy.deepcopy(filled)
+        early['items'][0]['stem'] = ''
+        for filename in ('content.snapshot.json', 'batch_meta.base.json', 'batch_meta.json'):
+            self.write('06_batch/' + filename, early)
+        final = assemble_local.project_final_view(self.root, filled)
+        self.assertEqual(final['items'][0]['stem'], row['stem'])
+        headings = phonetic_structure.verified_picture_headings(self.root, units)
+        self.assertEqual(headings, {row['unit_id']: row['stem']})
+        handoff._assert_underline_projection(early, final, source_headings=headings)
+        chunk = preview.source_slice(self.root, row['numbers'], unit_id=row['unit_id'])
+        self.assertEqual(chunk[0], row['stem'])
+        result = upload_payload.build_payload(final, batch_dir=self.root)
+        error_codes = {e['code'] for e in result['errors']}
+        self.assertNotIn('GROUP_INCOMPLETE', error_codes)
+        self.assertNotIn('MISSING_STEM', error_codes)
+        self.assertEqual(result['payload']['items'][0]['stem'], row['stem'].replace('**', ''))
+
+        # 反向防线：清空/篡改标题、缺子题均撤销豁免
+        for bad_stem in ('', '编造指令'):
+            bad = copy.deepcopy(row)
+            bad['stem'] = bad_stem
+            self.assertEqual(phonetic_structure.shape(bad, verified), (False, False))
+            self.assertTrue(any('[A8]' in problem for problem in check(bad, verified)))
+        bad = copy.deepcopy(row)
+        bad['subquestions'].pop()
+        self.assertEqual(phonetic_structure.shape(bad, verified), (False, False))
+        self.assertTrue(any('[A8]' in problem for problem in check(bad, verified)))
+
+        # 反向防线：需要方框词库的 phonetic-bank 若缺 material 仍报 A8
+        pb_text = ('Unit 3 Same or Different?\n第一课时 Section A (1a-1e)\n'
+                   '【三、Pronunciation】\n'
+                   '**Ⅱ. 根据音标从方框中选择单词填空**\n'
+                   '**1.**/sɜːv/:______\n**2.**/ˈməʊmənt/:______')
+        pb_struct, pb_text, _ = extract.infer_structure(pb_text)
+        pb_units = structure_gate._build_units(
+            pb_struct['sections'], pb_struct['groups'], denoise.clean_body(pb_text)[0].splitlines())
+        for path, value in (('正文.txt', pb_text), ('structure.json', pb_struct),
+                            ('structure.confirmed.json', {'units': pb_units})):
+            self.write('01_source/' + path, value)
+        pb_row = question_draft.build(self.root)['items'][0]
+        pb_row['question_type'] = '单词拼写'
+        for child in pb_row['subquestions']:
+            child['answer'] = 'serve'
+        self.assertEqual(pb_row['stem'], '')
+        self.assertEqual(pb_row['material'], '')
+        self.assertTrue(any('[A8]' in problem for problem in check(pb_row, self.verified())))
+
     def test_source_audit_requires_instruction_and_shared_image(self):
         for field in ('stem', 'attachments'):
             rows = copy.deepcopy(self.rows)

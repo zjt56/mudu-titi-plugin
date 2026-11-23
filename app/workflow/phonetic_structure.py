@@ -29,10 +29,20 @@ def verified_groups(batch_path):
     from .agent_tasks import confirmed_units
     from collections import Counter
     from .question_content import legitimate_source_shape
-    from .shared_rubric import heading_word_bank_group, picture_sentence_group
+    from .shared_rubric import (heading_word_bank_group, phonetic_write_group,
+                                picture_sentence_group)
     try:
-        eligible = {u['unit_id']: u.get('type') for u in confirmed_units(root)
-                    if u.get('type') == '语音题' or picture_sentence_group(u) or heading_word_bank_group(u) or (
+        confirmed = confirmed_units(root)
+        phonetic_scope = False
+        if any(phonetic_write_group(unit) for unit in confirmed):
+            from .sync_practice import looks_like_sync_practice
+            metadata = question_draft._json(root, "01_source/metadata.json", {})
+            source_text = (root / "01_source/正文.txt").read_text(encoding="utf-8-sig")
+            phonetic_scope = (metadata.get("source_type") == "同步练习"
+                              and looks_like_sync_practice(source_text))
+        eligible = {u['unit_id']: u.get('type') for u in confirmed
+                    if (u.get('type') == '语音题' or picture_sentence_group(u)
+                        or heading_word_bank_group(u) or (phonetic_scope and phonetic_write_group(u))) or (
                         u.get('unit_kind') == 'group' and (
                             (u.get('numbers') == [1]
                              and (u.get('source_span') or {}).get('number_binding') == 'unnumbered_section'
@@ -72,10 +82,12 @@ def verified_groups(batch_path):
 
 
 def verified_picture_headings(root, units):
-    from .shared_rubric import heading_word_bank_group, picture_sentence_group
+    from .shared_rubric import (heading_word_bank_group, phonetic_write_group,
+                                picture_sentence_group)
 
     ids = {unit['unit_id'] for unit in units
-           if picture_sentence_group(unit) or heading_word_bank_group(unit)}
+           if picture_sentence_group(unit)
+           or heading_word_bank_group(unit) or phonetic_write_group(unit)}
     if not ids:
         return {}
     return {uid: item['stem'] for uid, item in verified_groups(Path(root) / '06_batch/batch.json').items()
@@ -143,6 +155,12 @@ def shape(unit, verified=None):
                   if isinstance(a, dict) and a.get("kind") == "image" and a.get("placement") == "question"]
         return bool(images and images == present and len(actual) == len(images)), False
     if expected.get("_source_question_type") == "选词填空":
+        complete = all(str(c.get("stem") or "").strip() for c in subs)
+        return (not str(expected.get("material") or "").strip() and complete), False
+    from .shared_rubric import phonetic_write_group
+    if phonetic_write_group(expected):
+        # The printed heading is the source-backed instruction; each child
+        # carries its own phonetic prompt, so no shared material is expected.
         complete = all(str(c.get("stem") or "").strip() for c in subs)
         return (not str(expected.get("material") or "").strip() and complete), False
     binding = expected.get('source_span', {}).get('number_binding')
