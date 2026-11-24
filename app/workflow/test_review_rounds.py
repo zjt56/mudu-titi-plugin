@@ -1946,6 +1946,197 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertTrue(group['parts'])
         self.assertTrue(all(not part['has_listening'] for part in group['parts']), group['parts'])
 
+    def test_standalone_max_units_can_shrink_below_max_units(self):
+        """显式调小 review_standalone_part_units（小于 review_part_units）必须按更小上限切分单题分片。"""
+        units = [
+            {"unit_id": f"s-{i}", "unit_kind": "standalone", "numbers": [i], "type": "完成句子", "stem": f"{i}. S{i}"}
+            for i in range(1, 7)
+        ]
+        ctx = {
+            "confirmed_units_with_stable_ids": units,
+            "01_source/正文.txt": "\n".join(u["stem"] for u in units),
+            "03_types/types.json": {"items": [{"unit_id": u["unit_id"], "type": u["type"]} for u in units]},
+            "06_batch/batch_meta.json": {"items": [{"unit_id": u["unit_id"], "stem": u["stem"]} for u in units]},
+        }
+        base = {"prompt": "H\nBEGIN SUPPLIED CONTENT (JSON)\n" + json.dumps(ctx, ensure_ascii=False) + "\nEND SUPPLIED CONTENT\n"}
+        self.assertEqual(review_rounds._standalone_part_units({"review_part_units": 5, "review_standalone_part_units": 2}), 2)
+        parts = review_rounds._partition_contexts(
+            base, 500000, max_units=5, round_id="labels",
+            listening_uids=set(), standalone_max_units=2,
+        )
+        self.assertEqual([len(p["unit_ids"]) for p in parts], [2, 2, 2])
+
+    def test_repeated_question_numbers_do_not_inject_wrong_required_dims_or_catalog(self):
+        """大题重号时（阅读理解#1 与 单词拼写#1）不得把单词拼写误裁剪成阅读目录或注入阅读必带维度。"""
+        from workflow.review_paper_scope import question_sections
+        source = (
+            "Ⅰ.阅读理解(共1小题)\n"
+            "Passage text.\n1. What is the main idea?\nA. a B. b C. c D. d\n"
+            "Ⅱ.单词拼写(共1小题)\n"
+            "1. My father is a d____(医生).\n"
+        )
+        section_types = question_sections(source)["types"]
+        self.assertEqual(section_types, {})
+
+        # 情况 A：无 source_section 且无 types.json 时保持全目录，不误注阅读必带维度
+        from workbench import taxonomy as _taxonomy
+        units_plain = [
+            {"unit_id": "u-read", "unit_kind": "group", "numbers": [1], "stem": "Passage text.\n1. What is the main idea?"},
+            {"unit_id": "u-spell", "unit_kind": "standalone", "numbers": [1], "stem": "1. My father is a d____(医生)."},
+        ]
+        tkm = {"by_type": {t: {"dims": []} for t in _taxonomy.types()}}
+        ctx_plain = {
+            "confirmed_units_with_stable_ids": units_plain,
+            "01_source/正文.txt": source,
+            "references/type-knowledge-map.json": tkm,
+            "references/knowledge-catalog.json": {"paths": ["p1"]},
+        }
+        base_plain = {"prompt": "H\nBEGIN SUPPLIED CONTENT (JSON)\n" + json.dumps(ctx_plain, ensure_ascii=False) + "\nEND SUPPLIED CONTENT\n"}
+        parts_plain = review_rounds._partition_contexts(
+            base_plain, 500000, max_units=1, round_id="labels",
+            section_types=section_types, listening_uids=set(),
+        )
+        spell_part_plain = next(p for p in parts_plain if p["unit_ids"] == ["u-spell"])
+        spell_ctx_plain = json.loads(spell_part_plain["context"].split("\n", 1)[1])
+        self.assertEqual(set(spell_ctx_plain["references/type-knowledge-map.json"]["by_type"]), set(_taxonomy.types()))
+        spell_prompt_plain = review_rounds._round_prompt("labels", ["u-spell"], spell_part_plain["context"]).split("BEGIN SUPPLIED CONTENT", 1)[0]
+        self.assertNotIn("阅读理解→语篇体裁、主题", spell_prompt_plain)
+
+        # 情况 B：带 source_section 时按各自大题标题精确裁剪，互不串扰
+        units_scoped = [
+            {**units_plain[0], "source_section": {"title": "Ⅰ.阅读理解"}},
+            {**units_plain[1], "source_section": {"title": "Ⅱ.单词拼写"}},
+        ]
+        ctx_scoped = {**ctx_plain, "confirmed_units_with_stable_ids": units_scoped}
+        base_scoped = {"prompt": "H\nBEGIN SUPPLIED CONTENT (JSON)\n" + json.dumps(ctx_scoped, ensure_ascii=False) + "\nEND SUPPLIED CONTENT\n"}
+        parts_scoped = review_rounds._partition_contexts(
+            base_scoped, 500000, max_units=1, round_id="labels",
+            section_types=section_types, listening_uids=set(),
+        )
+        read_part = next(p for p in parts_scoped if p["unit_ids"] == ["u-read"])
+        spell_part = next(p for p in parts_scoped if p["unit_ids"] == ["u-spell"])
+        read_head = review_rounds._round_prompt("labels", ["u-read"], read_part["context"]).split("BEGIN SUPPLIED CONTENT", 1)[0]
+        spell_head = review_rounds._round_prompt("labels", ["u-spell"], spell_part["context"]).split("BEGIN SUPPLIED CONTENT", 1)[0]
+        self.assertIn("阅读理解→语篇体裁、主题", read_head)
+        self.assertNotIn("阅读理解→语篇体裁、主题", spell_head)
+        spell_ctx = json.loads(spell_part["context"].split("\n", 1)[1])
+        self.assertEqual(set(spell_ctx["references/type-knowledge-map.json"]["by_type"]), {"单词拼写"})
+
+    def test_upgrade_reuses_legacy_partition_state_with_repair_feedback_hash(self):
+        """升级前已落盘（input_hashes 含 repair-feedback/review.json）的分片状态与缓存续跑时零重调直接安装。"""
+        first = review_rounds.export_group(self.batch, only_round='labels')
+        self.assertEqual(first['action'], 'exported')
+        tid = first['parts'][0]['task_id']
+        binding_path = self.batch / 'workflow/review-bindings' / f'{tid}.json'
+        binding = json.loads(binding_path.read_text(encoding='utf-8'))
+        old_state_rel = binding['state_path']
+        old_state_path = self.batch / old_state_rel
+        state = json.loads(old_state_path.read_text(encoding='utf-8'))
+
+        # Restore the old task shape, including the pre-routing-header digest.
+        legacy_hashes = dict(state['input_hashes'])
+        legacy_hashes['workflow/repair-feedback/review.json'] = agent_tasks.MISSING_INPUT
+        state['input_hashes'] = legacy_hashes
+        binding['input_hashes'] = legacy_hashes
+        header = 'Stage: review\nAgent: review\n'
+        state['prompt_digest'] = review._digest(review_rounds._round_prompt('labels', [], '').removeprefix(header))
+        state['parts'][0]['prompt'] = state['parts'][0]['prompt'].removeprefix(header)
+        binding['task']['prompt'] = state['parts'][0]['prompt']
+        legacy_key = [
+            state['plan'], state['round_id'], legacy_hashes,
+            review_rounds.CONTEXT_VERSION, review_rounds.PROMPT_VERSION,
+            state['reuse'], state['prompt_digest'],
+        ]
+        legacy_state_rel = 'workflow/review-partitions/' + review._digest(legacy_key) + '.json'
+        self.assertNotEqual(legacy_state_rel, old_state_rel)
+        binding['state_path'] = legacy_state_rel
+        binding['state_digest'] = review.frozen_partition_digest(state)
+        replacement_tid = 'round-' + 'a' * 32
+        replacement = json.loads(old_state_path.read_bytes())
+        replacement['parts'][0]['task_id'] = replacement_tid
+        review_rounds._write_part_package(self.batch, replacement, old_state_rel, replacement['plan'],
+                                          replacement['input_hashes'], 0, review.frozen_partition_digest(replacement))
+        review_rounds._save(self.batch, old_state_rel, replacement)
+        review_rounds._save(self.batch, legacy_state_rel, state)
+        review_rounds._save(self.batch, f'workflow/review-bindings/{tid}.json', binding)
+        review_rounds._save_pending(self.batch, tid, self.response('labels'))
+        self.write('workflow/repair-feedback/review.json', {
+            'version': 1, 'stage': 'review', 'reason': '重试审核协议', 'error': '覆盖不全',
+            'unit_ids': [], 'feedback_by_unit': {}, 'all_units': True, 'attempt': 2,
+        })
+
+        # 常规 run 必须复用旧分片与 review-pending 缓存，不得触发任何模型调用
+        def must_not_invoke(*args, **kwargs):
+            raise AssertionError("legacy cached partition should be reused without model invocation")
+
+        with patch.object(review_rounds, 'invoke', side_effect=must_not_invoke):
+            result = review_rounds.run(self.batch, {'provider': 'fixture', 'review_part_parallel': 2})
+        self.assertTrue(result['completed'], result)
+        self.assertEqual(result['action'], 'complete')
+        self.assertTrue(binding_path.with_suffix('.receipt.json').is_file())
+        self.assertFalse((self.batch / 'workflow/review-bindings' / f'{replacement_tid}.receipt.json').exists())
+
+    def test_review_manifest_save_and_audio_manifest_save_share_batch_lock(self):
+        """审核更新 manifest 与同批音频导入共用 _batch_lock，并发更新不会把已完成音频写回 pending。"""
+        import threading
+        from workflow import agent as wf_agent, agent_protocol, manifest as mf
+
+        self.assertIs(agent_protocol._batch_lock, review_rounds._batch_lock)
+        manifest = mf.new_manifest('WF-RACE', self.batch, {}, {})
+        manifest['stages']['validate']['status'] = mf.COMPLETED
+        manifest['stages']['audio']['status'] = mf.PENDING
+        mf.save(self.batch, manifest)
+
+        audio_entered = threading.Event()
+        release_audio = threading.Event()
+        review_started = threading.Event()
+        errors = []
+
+        def audio_writer():
+            try:
+                with review_rounds._batch_lock(self.batch, 10):
+                    m = mf.load(self.batch)
+                    audio_entered.set()
+                    self.assertTrue(release_audio.wait(timeout=5))
+                    mf.touch_stage(m, 'audio', mf.COMPLETED, notes='audio done')
+                    mf.save(self.batch, m)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def review_writer():
+            try:
+                review_started.set()
+                with patch.object(wf_agent, '_review_inputs_ready', return_value=True), \
+                        patch.object(review_rounds, '_audio_pending', return_value=False), \
+                        patch.object(review_rounds, 'run', return_value={'action': 'complete', 'completed': True, 'summary': {}}), \
+                        patch.object(review, 'evaluate', return_value={'passed': True}):
+                    code = wf_agent._run_review_rounds(self.batch)
+                    self.assertEqual(code, 0)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t_audio = threading.Thread(target=audio_writer)
+        t_audio.start()
+        self.assertTrue(audio_entered.wait(timeout=5))
+        t_review = threading.Thread(target=review_writer)
+        t_review.start()
+        self.assertTrue(review_started.wait(timeout=5))
+        # 给 review 线程机会撞上 _batch_lock，再放行 audio 写入并释放锁
+        threading.Event().wait(0.1)
+        release_audio.set()
+        t_audio.join(timeout=5)
+        t_review.join(timeout=5)
+        self.assertEqual(errors, [])
+
+        final_manifest = mf.load(self.batch)
+        self.assertEqual(final_manifest['stages']['audio']['status'], mf.COMPLETED)
+        self.assertEqual(final_manifest['stages']['review']['status'], mf.COMPLETED)
+
+    def test_round_prompt_carries_stage_agent_and_round_headers(self):
+        """审核分片提示词必须携带 Stage/Agent/ROUND 头部，供 wf-router 命中一审与审核模型设置。"""
+        prompt = review_rounds._round_prompt('labels', ['u1'], '{}')
+        self.assertTrue(prompt.startswith('Stage: review\nAgent: review\nROUND: labels\n'))
+
 
 if __name__ == "__main__":
     unittest.main()

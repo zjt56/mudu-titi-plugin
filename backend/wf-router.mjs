@@ -114,8 +114,9 @@ function choose(data, stage, round, agent) {
   const roles = section(data, 'roles');
   const review = section(data, 'review');
   const rounds = section(review, 'rounds');
+  const effectiveStage = stage || (round ? 'review' : '');
   let entry;
-  if (stage === 'review') {
+  if (effectiveStage === 'review') {
     entry = round ? override(rounds, round, 'review.rounds') : null;
     if (!entry) entry = agent ? override(roles, agent, 'roles') : null;
     if (!entry) entry = override(roles, 'review', 'roles');
@@ -123,7 +124,10 @@ function choose(data, stage, round, agent) {
     if (!entry) entry = override(review, 'default', 'review');
   } else {
     entry = agent ? override(roles, agent, 'roles') : null;
-    if (!entry) entry = override(stages, stage, 'stages');
+    if (!entry) entry = effectiveStage ? override(stages, effectiveStage, 'stages') : null;
+    if (!entry && (effectiveStage === 'preassemble' || agent === 'preassemble')) {
+      entry = override(roles, 'types', 'roles') || override(stages, 'types', 'stages');
+    }
   }
   return valid(entry) ? entry : def;
 }
@@ -274,16 +278,21 @@ const profile = makeProfile(selected.profile || 'wf-deepseek-fast', selected.pro
 const bin = findDsh();
 if (!bin) fail('dsh executable not found; set DSH_BIN to dsh or dsh.cmd');
 console.error(`wf-router: stage=${stage || '?'} agent=${agent || '?'} round=${round || '?'} -> provider=${selected.provider} model=${selected.model} (base=${profile})`);
+const routePatch = join(dshHome, 'profiles', profile, 'cordis.patch.yml');
+const patchText = readFileSync(routePatch, 'utf8');
+const envKeys = new Set(['DEEPSEEK_API_KEY', 'MAGPIE_GATEWAY_KEY', 'OPENCODE_GO_API_KEY']);
+for (const match of patchText.matchAll(/^\s+apiKeyEnv:\s*['"]?([A-Za-z0-9_]+)['"]?\s*(?:#.*)?$/gm)) {
+  envKeys.add(match[1]);
+}
 const env = { ...process.env };
-for (const key of ['DEEPSEEK_API_KEY', 'MAGPIE_GATEWAY_KEY', 'OPENCODE_GO_API_KEY']) {
+for (const key of envKeys) {
   const value = credential(key);
   if (value) env[key] = value;
 }
-const routePatch = join(dshHome, 'profiles', profile, 'cordis.patch.yml');
 // 选中的 provider 必须真的出现在路由 profile 里：桌面端启用的中转 provider
 // （如 WorkBuddy 的 magpie）不会被复制进 headless overlay，继续调用只会得到
 // NO_ADAPTER。这里提前失败并给出可选列表，避免模型错误被当成普通阶段失败。
-const available = overlayProviders(readFileSync(routePatch, 'utf8'));
+const available = overlayProviders(patchText);
 if (available.size && !available.has(selected.provider)) {
   fail(`provider "${selected.provider}" 不在路由 profile 的可用 provider 中（可用: ${[...available].sort().join(', ')}）。请在插件设置里重新选择模型`);
 }

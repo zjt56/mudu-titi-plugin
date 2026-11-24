@@ -1591,6 +1591,8 @@ def _skip_agent_stage(batch_dir: Path, manifest: dict, stage: contracts.Stage,
 
 
 def cmd_run(args) -> int:
+    from .local_agent import _runtime_lock
+
     batch_dir = Path(args.batch_dir).expanduser().resolve()
     try:
         # Keep the explicit runner's execution lock until the stage driver has
@@ -1598,7 +1600,7 @@ def cmd_run(args) -> int:
         # lock is released so Harness can safely claim the batch.  This mirrors
         # auto._result's safe handoff and leaves the optional operations service
         # unable to interfere with ordinary runner execution.
-        with _single_run_lock(batch_dir):
+        with _single_run_lock(batch_dir), _runtime_lock(5):
             code = _cmd_run_locked(batch_dir, args)
     except RuntimeError as exc:
         print(f"✗ {exc}")

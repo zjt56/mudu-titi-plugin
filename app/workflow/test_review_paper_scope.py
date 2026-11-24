@@ -57,6 +57,32 @@ class PaperScopeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             question_sections(None)
 
+    def test_repeated_numbers_across_different_sections_stay_unassigned(self):
+        source = (
+            'Ⅰ.阅读理解(共2小题)\n'
+            '1. What is the main idea?\nA. a B. b C. c D. d\n'
+            '2. What does it mean?\nA. a B. b C. c D. d\n'
+            'Ⅱ.单词拼写(共2小题)\n'
+            '1. My father is a d____(医生).\n'
+            '2. She likes r____(阅读).\n'
+        )
+        result = question_sections(source)
+        self.assertEqual(result['types'], {})
+        self.assertEqual(result['unassigned'], ['1', '2'])
+
+    def test_chinese_numeral_and_unknown_headings_stop_section_bleed(self):
+        source = (
+            '一、阅读理解(共1小题)\n'
+            '1. What happens?\nA. a B. b\n'
+            '二、单词拼写(共1小题)\n'
+            '1. Spell it.\n'
+            '三、词汇运用(共1小题)\n'
+            '3. Fill in the blank.\n'
+        )
+        result = question_sections(source)
+        self.assertEqual(result['types'], {})
+        self.assertEqual(result['unassigned'], ['1', '3'])
+
 
 if __name__ == '__main__':
     unittest.main()

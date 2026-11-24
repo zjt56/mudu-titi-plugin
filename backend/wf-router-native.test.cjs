@@ -241,3 +241,36 @@ test('native router follows the device Harness model when no plugin default is p
   assert.match(patch, /provider: "opencode-go"/);
   assert.match(patch, /model: "deepseek-v4.1-flash"/);
 });
+
+test('native router routes ROUND-only review prompts to review.rounds and roles.review', t => {
+  const f = fixture(t, 'ROUND: labels\n请独立盲审。\n');
+  const cfg = JSON.parse(fs.readFileSync(path.join(f.plugin, 'config', 'model-router.json'), 'utf8'));
+  cfg.roles = { review: { provider: 'deepseek-official', model: 'review-role-model', profile: 'fake' } };
+  cfg.review = { rounds: { labels: { provider: 'deepseek-official', model: 'labels-round-model', profile: 'fake' } } };
+  fs.writeFileSync(path.join(f.plugin, 'config', 'model-router.json'), JSON.stringify(cfg));
+  const result = spawnSync(process.execPath, [router, f.prompt, f.response], {
+    encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /model=labels-round-model/);
+
+  delete cfg.review.rounds.labels;
+  fs.writeFileSync(path.join(f.plugin, 'config', 'model-router.json'), JSON.stringify(cfg));
+  const roleOnly = spawnSync(process.execPath, [router, f.prompt, f.response], {
+    encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
+  });
+  assert.equal(roleOnly.status, 0, roleOnly.stderr);
+  assert.match(roleOnly.stderr, /model=review-role-model/);
+});
+
+test('native router routes preassemble via roles.types when preassemble is not separately set', t => {
+  const f = fixture(t, 'Stage: preassemble\nAgent: preassemble\n');
+  const cfg = JSON.parse(fs.readFileSync(path.join(f.plugin, 'config', 'model-router.json'), 'utf8'));
+  cfg.roles = { types: { provider: 'deepseek-official', model: 'types-role-model', profile: 'fake' } };
+  fs.writeFileSync(path.join(f.plugin, 'config', 'model-router.json'), JSON.stringify(cfg));
+  const result = spawnSync(process.execPath, [router, f.prompt, f.response], {
+    encoding: 'utf8', env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: f.dsh },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /model=types-role-model/);
+});

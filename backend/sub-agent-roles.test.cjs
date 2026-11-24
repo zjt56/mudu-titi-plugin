@@ -58,6 +58,25 @@ test('router prefers the sub-agent role over the stage and keeps the default fal
     const invalid = resolve({ ...staged, roles: { knowledge: {} } });
     assert.notEqual(invalid.status, 0);
     assert.match(invalid.stderr, /roles\.knowledge is incomplete/);
+
+    // ROUND-only review prompts (without explicit Stage header) still select review.rounds.labels.
+    fs.writeFileSync(routerPath, JSON.stringify({
+      ...defaults,
+      roles: { types: route('types-role-model'), review: route('review-role-model') },
+      review: { rounds: { labels: route('labels-round-model') } },
+    }));
+    const roundRes = spawnSync(process.env.PYTHON || 'python3',
+      [path.join(root, 'backend/route_pick.py'), routerPath, '', 'labels', ''],
+      { encoding: 'utf8' });
+    assert.equal(roundRes.status, 0, roundRes.stderr);
+    assert.equal(roundRes.stdout.split('\t')[1], 'labels-round-model');
+
+    // preassemble falls back to roles.types when preassemble has no separate override.
+    const preRes = spawnSync(process.env.PYTHON || 'python3',
+      [path.join(root, 'backend/route_pick.py'), routerPath, 'preassemble', '', 'preassemble'],
+      { encoding: 'utf8' });
+    assert.equal(preRes.status, 0, preRes.stderr);
+    assert.equal(preRes.stdout.split('\t')[1], 'types-role-model');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -138,3 +138,15 @@ test('插件图标同步改为中性灰', () => {
   assert.doesNotMatch(icon, /#4f46e5/);
   assert.match(icon, /#8a94a6/);
 });
+
+test('整卷预览按钮使用独立样式类与显式 hover/active 状态，点击不再发白看不见', () => {
+  const idx = client.indexOf("'整卷预览'");
+  assert.ok(idx >= 0, '找不到整卷预览按钮');
+  const btnChunk = client.slice(Math.max(0, idx - 260), idx + 40);
+  assert.match(btnChunk, /className: 'wf-paper-preview-btn'/);
+  assert.doesNotMatch(btnChunk, /wf-btn-primary/);
+  assert.doesNotMatch(btnChunk, /color: '#ffffff'/);
+  assert.match(client, /\.wf-paper-preview-btn\{[^}]*display:inline-flex/);
+  assert.match(client, /\.wf-paper-preview-btn:not\(:disabled\):hover\{[^}]*background:color-mix/);
+  assert.match(client, /\.wf-paper-preview-btn:not\(:disabled\):active\{[^}]*background:color-mix/);
+});

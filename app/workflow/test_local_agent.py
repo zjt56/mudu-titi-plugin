@@ -736,5 +736,27 @@ class WindowsByteRangeLockTest(unittest.TestCase):
             self.assertFalse(self.fake.exclusive)
 
 
+class RouterSelectedRouteTests(unittest.TestCase):
+    def test_preassemble_falls_back_to_types_and_incomplete_override_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            router_path = Path(tmp) / "model-router.json"
+            router_path.write_text(json.dumps({
+                "default": {"provider": "p-def", "model": "m-def"},
+                "roles": {"types": {"provider": "p-types", "model": "m-types"}},
+            }), encoding="utf-8")
+            with patch.dict(os.environ, {"WF_ROUTER_FILE": str(router_path)}):
+                self.assertEqual(
+                    agent._router_selected_route("preassemble"),
+                    {"provider": "p-types", "model": "m-types"},
+                )
+            router_path.write_text(json.dumps({
+                "default": {"provider": "p-def", "model": "m-def"},
+                "roles": {"knowledge": {"provider": "broken-only"}},
+            }), encoding="utf-8")
+            with patch.dict(os.environ, {"WF_ROUTER_FILE": str(router_path)}):
+                with self.assertRaises(agent.AgentError):
+                    agent._router_selected_route("knowledge")
+
+
 if __name__ == "__main__":
     unittest.main()

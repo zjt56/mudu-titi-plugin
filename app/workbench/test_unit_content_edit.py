@@ -139,6 +139,17 @@ class UnitContentEditTest(unittest.TestCase):
                                       {"articleSummary": "过期修改"}, {"articleSummary": "旧大意"})
         self.assertEqual(self.batch_row()["articleSummary"], "新大意")
 
+    def test_edit_routes_respect_the_same_batch_model_lock(self):
+        from workflow.local_agent import _batch_lock
+
+        with _batch_lock(self.folder, 0, shared=True):
+            with self.assertRaisesRegex(ValueError, "正在运行"):
+                self.save({"articleSummary": "未保存"})
+            with self.assertRaisesRegex(ValueError, "正在运行"):
+                server.Handler.save_content_edit(self.folder, "q-1", {})
+        self.assertEqual(self.batch_row()["articleSummary"], "旧大意")
+        self.assertTrue(self.save({"articleSummary": "新大意"})["applied"]["applied"])
+
     def test_replace_failure_rolls_back_producer_and_formal_batch(self):
         from unittest.mock import patch
         from workflow import agent_tasks

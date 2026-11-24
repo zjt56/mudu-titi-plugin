@@ -166,7 +166,8 @@ if not (isinstance(default, dict) and default.get("provider") and default.get("m
     sys.exit(1)
 
 chosen = None
-if stage == "review":
+effective_stage = stage or ("review" if rnd else "")
+if effective_stage == "review":
     entry = (_override(rounds, rnd, "review.rounds") if rnd else None)
     if entry is None:
         entry = _override(roles, agent, "roles") if agent else None
@@ -180,8 +181,10 @@ if stage == "review":
 else:
     # 子 Agent 角色优先于阶段，便于同一阶段的多个角色独立选模型。
     entry = _override(roles, agent, "roles") if agent else None
-    if entry is None:
-        entry = _override(stages, stage, "stages")
+    if entry is None and effective_stage:
+        entry = _override(stages, effective_stage, "stages")
+    if entry is None and (effective_stage == "preassemble" or agent == "preassemble"):
+        entry = _override(roles, "types", "roles") or _override(stages, "types", "stages")
     chosen = entry or default
 
 provider = chosen.get("provider")

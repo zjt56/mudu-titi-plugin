@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import dataclasses
 from datetime import datetime
 import hashlib
@@ -786,8 +786,19 @@ def _refresh_completed_review(batch_dir, manifest):
 def _advance_locked(batch_dir: Path, bridge: dict, stop_at: str | None = None) -> dict:
     # Web calls this lock-owned entry directly. Every entry therefore owns the
     # same bounded worker lifetime; no caller can accidentally use sync cuts.
+    from .local_agent import AgentError, _runtime_lock
+
     pending_audio = []
-    with ThreadPoolExecutor(max_workers=1) as audio_worker:
+    with ExitStack() as workers:
+        try:
+            workers.enter_context(_runtime_lock(0))
+        except AgentError as exc:
+            if exc.code != 'lock_timeout':
+                raise
+            return {"status": "busy", "action": "busy", "stopped_at": None,
+                    "reason": "正在安装流程代码，稍后自动继续", "retryable": True,
+                    "error_kind": "lock_timeout", "failed_stages": [], "pending_stages": []}
+        audio_worker = workers.enter_context(ThreadPoolExecutor(max_workers=1))
         try:
             return _advance_impl(batch_dir, bridge, stop_at, audio_worker=audio_worker,
                                  pending_audio=pending_audio)

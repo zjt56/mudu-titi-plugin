@@ -3453,14 +3453,14 @@ def _stage_upload_media(folder):
     """Stage only media referenced by a stable final batch, after the upload click."""
     import hashlib
     from workflow import media_inventory, media_transfer, upload
-    from workflow.local_agent import _agent_lock
+    from workflow.local_agent import _batch_lock
 
     source = folder / '06_batch' / 'batch_meta.json'
     if not source.exists():
         return None
     # Serialize with workflow imports. Workbench and independent external edits
     # are detected by the stable reads and digest comparisons below.
-    with _agent_lock(1500):
+    with _batch_lock(folder, 1500):
         root_fd = media_transfer._open_root(folder)
         try:
             raw = media_transfer._read_file(root_fd, '06_batch/batch_meta.json')
@@ -3508,7 +3508,7 @@ def _stage_upload_media(folder):
     mapping = media_transfer.stage_media(folder, refs,
         static_root='/home/ubuntu/mudu-quiz/static/source-media', batch_id=batch_id,
         settings=destination)
-    with _agent_lock(1500):
+    with _batch_lock(folder, 1500):
         if media_inventory.referenced_media(folder, metadata) != refs:
             raise ValueError('批次媒体在暂存期间发生变化，请重新上传')
         root_fd = media_transfer._open_root(folder)
@@ -5526,7 +5526,7 @@ class Handler(BaseHTTPRequestHandler):
         from contextlib import ExitStack
         from workflow import ai_supplement, supervisor
         from workflow.agent_tasks import _safe_path
-        from workflow.local_agent import _agent_lock, AgentError
+        from workflow.local_agent import _batch_lock, AgentError
 
         if not folder.is_dir() or folder.is_symlink():
             raise ValueError("批次不存在或已归档，请刷新列表")
@@ -5539,7 +5539,7 @@ class Handler(BaseHTTPRequestHandler):
             if not locks.enter_context(supervisor._try_file_lock(run_lock)):
                 raise ValueError(busy)
             try:
-                locks.enter_context(_agent_lock(0))
+                locks.enter_context(_batch_lock(folder, 0))
             except AgentError as exc:
                 raise ValueError(busy) from exc
             locks.enter_context(ai_supplement.content_write_lock(folder, timeout=5.0))
@@ -5552,7 +5552,7 @@ class Handler(BaseHTTPRequestHandler):
         from contextlib import ExitStack
         from workflow import supervisor
         from workflow.agent_tasks import _safe_path
-        from workflow.local_agent import _agent_lock, AgentError
+        from workflow.local_agent import _batch_lock, AgentError
 
         if not folder.is_dir() or folder.is_symlink():
             raise ValueError("批次不存在或已归档，请刷新列表")
@@ -5565,7 +5565,7 @@ class Handler(BaseHTTPRequestHandler):
             if not locks.enter_context(supervisor._try_file_lock(run_lock)):
                 raise ValueError(busy)
             try:
-                locks.enter_context(_agent_lock(0))
+                locks.enter_context(_batch_lock(folder, 0))
             except AgentError as exc:
                 raise ValueError(busy) from exc
             return Handler._save_units_locked(folder, unit_id, items, labels, unit, expected)

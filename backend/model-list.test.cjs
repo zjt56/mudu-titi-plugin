@@ -66,6 +66,7 @@ test('harness default resolves to a servable model without entering any API key'
 test('AI operations route prefers explicit role, then Harness model, then plugin default', () => {
   const harness = { provider: 'h', model: 'hm' };
   assert.deepEqual(plugin.operationsRouteFor({ roles: { operations: { provider: 'q', model: 'ops' } } }, harness), { provider: 'q', model: 'ops' });
+  assert.deepEqual(plugin.operationsRouteFor({ stages: { operations: { provider: 'q', model: 'ops-stage' } } }, harness), { provider: 'q', model: 'ops-stage' });
   // 用户设置的默认模型优先；没有默认才跟随 Harness。
   assert.deepEqual(plugin.operationsRouteFor({ default: { provider: 'p', model: 'd' } }, harness), { provider: 'p', model: 'd' });
   assert.deepEqual(plugin.operationsRouteFor({ default: {} }, harness), { provider: 'h', model: 'hm' });

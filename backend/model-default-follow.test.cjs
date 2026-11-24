@@ -113,3 +113,38 @@ test('articleSummary & explanation model card supports follow-default and per-it
   assert.equal(saved.roles.ai_summary, undefined, 'ai_summary following old default should follow new default');
   assert.equal(saved.roles.ai_explanation.model, 'custom-exp', 'custom ai_explanation should stay pinned');
 });
+
+test('setDefault(null) resets default to follow Harness and clearStage clears legacy stages too', () => {
+  const client = fs.readFileSync(path.join(root, 'lib/client.js'), 'utf8');
+  const start = client.indexOf('      const inferProfile = () =>');
+  const end = client.indexOf('      function ModelSelect(', start);
+  let saved = null;
+  const context = vm.createContext({
+    router: {
+      default: { provider: 'opencode-go', model: 'deepseek-v4.1-flash' },
+      roles: {
+        answers: { provider: 'opencode-go', model: 'deepseek-v4.1-flash' },
+        types: { provider: 'other', model: 't-model' },
+        preassemble: { provider: 'other', model: 'p-model' },
+      },
+      stages: {
+        types: { provider: 'other', model: 'legacy-types' },
+        preassemble: { provider: 'other', model: 'legacy-pre' },
+      },
+      review: { rounds: { labels: { provider: 'other', model: 'l-model' } } },
+    },
+    persist: (next) => { saved = next; },
+  });
+  vm.runInContext(client.slice(start, end) + '\nthis.setDefault = setDefault; this.clearStage = clearStage;', context);
+  context.setDefault(null);
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.default)), {});
+  assert.equal(saved.roles.answers, undefined);
+  assert.equal(saved.roles.types.model, 't-model');
+
+  context.router = saved;
+  context.clearStage('types');
+  assert.equal(saved.roles.types, undefined);
+  assert.equal(saved.roles.preassemble, undefined);
+  assert.equal(saved.stages.types, undefined);
+  assert.equal(saved.stages.preassemble, undefined);
+});

@@ -634,7 +634,7 @@ class OperationsTests(unittest.TestCase):
             self.assertEqual(other_proc.stdout.readline().strip(), 'ready')
             # Not raising OperationsBusy proves the unrelated batch lock did not block admission.
             res = self.request(claim, 'apply_repair', {"repair": "repair_source_tables"}, request='apply-isolated')
-            self.assertIn("preview", str(res.get("error") or "").lower())
+            self.assertEqual((res.get("evidence") or {}).get("error"), "current_successful_preview_required")
         finally:
             other_proc.communicate(timeout=5)
         self.assertEqual(other_proc.returncode, 0)
@@ -648,6 +648,34 @@ class OperationsTests(unittest.TestCase):
         finally:
             global_proc.communicate(timeout=5)
         self.assertEqual(global_proc.returncode, 0)
+
+    def test_install_waits_for_other_batch_and_excludes_new_workers(self):
+        from workflow import auto, local_agent
+
+        claim = self.claim()
+        other = self.root / 'parallel-batch'
+        other.mkdir()
+
+        def install(*args):
+            with self.assertRaisesRegex(local_agent.AgentError, 'source installation lock'):
+                with local_agent._batch_lock(other, 0):
+                    self.fail('Batch writer entered during source installation')
+            deferred = auto._advance_locked(other, {})
+            self.assertEqual(deferred['action'], 'busy')
+            self.assertTrue(deferred['retryable'])
+            return {'status': 'isolated-install'}
+
+        with patch.object(op, '_install_code_repair', side_effect=install) as installer:
+            with local_agent._batch_lock(other, 0, shared=True):
+                self.assertFalse(op._agent_lock_free())
+                with local_agent._batch_lock(self.folder, 0):
+                    pass
+                with self.assertRaisesRegex(op.OperationsBusy, 'worker_busy'):
+                    self.request(claim, 'install_code_repair', {'confirm': True}, request='install')
+                installer.assert_not_called()
+            self.assertTrue(op._agent_lock_free())
+            self.request(claim, 'install_code_repair', {'confirm': True}, request='install')
+            installer.assert_called_once()
 
     def test_cross_process_runner_lock_blocks_claim(self):
         import subprocess, sys

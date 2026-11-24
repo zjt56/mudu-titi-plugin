@@ -228,10 +228,10 @@ class LocalAgentOwnershipTest(unittest.TestCase):
         real_popen = subprocess.Popen
         inherited = []
         def spawn(*args, **kwargs):
-            self.assertEqual(len(kwargs["pass_fds"]), 1)
-            fd = kwargs["pass_fds"][0]
-            self.assertFalse(os.get_inheritable(fd))
-            inherited.append(fd)
+            self.assertEqual(len(kwargs["pass_fds"]), 2)
+            for fd in kwargs["pass_fds"]:
+                self.assertFalse(os.get_inheritable(fd))
+            inherited[:] = kwargs["pass_fds"]
             return real_popen(*args, **kwargs)
         for mode in ("success", "wait", "spawn-error"):
             with self.subTest(mode=mode):
@@ -266,9 +266,10 @@ class LocalAgentOwnershipTest(unittest.TestCase):
                                 except ProcessLookupError:
                                     pass
                             self.wait_for(lambda: not self.running(pid), "fake child leaked")
-                with self.assertRaises(OSError) as caught:
-                    os.fstat(inherited[-1])
-                self.assertEqual(caught.exception.errno, errno.EBADF)
+                for fd in inherited:
+                    with self.assertRaises(OSError) as caught:
+                        os.fstat(fd)
+                    self.assertEqual(caught.exception.errno, errno.EBADF)
                 self.assertEqual(self.probe(), "acquired")
 
     def test_mock_context_yielding_none_omits_pass_fds(self):
@@ -279,6 +280,7 @@ class LocalAgentOwnershipTest(unittest.TestCase):
         root = self.root / "no-lock-context"
         root.mkdir()
         with patch.object(agent, "_agent_lock", return_value=contextlib.nullcontext()), \
+             patch.object(agent, "_runtime_lock", return_value=contextlib.nullcontext()), \
              patch.object(agent.subprocess, "Popen", side_effect=spawn):
             try:
                 result = agent.invoke("fake", root / "attempt", self.config(root, "success"))
@@ -327,6 +329,68 @@ class LocalAgentOwnershipTest(unittest.TestCase):
         finally:
             holder.communicate(timeout=5)
         self.assertEqual(holder.returncode, 0)
+
+    def test_review_invoke_sigkill_owner_keeps_batch_lock_until_child_exits(self):
+        """审核父进程被 SIGKILL 后，仍在运行的模型子进程必须继续持有同批次 _batch_lock 共享锁。"""
+        batch_a = self.root / "review-batch-a"
+        batch_b = self.root / "review-batch-b"
+        (batch_a / "workflow").mkdir(parents=True)
+        (batch_b / "workflow").mkdir(parents=True)
+        owner_code = (
+            "import json, pathlib, sys\n"
+            "from workflow import local_agent, review_rounds\n"
+            "batch = pathlib.Path(sys.argv[1])\n"
+            "root = pathlib.Path(sys.argv[2])\n"
+            "cfg = json.loads(sys.argv[3])\n"
+            "local_agent.__file__ = sys.argv[4]\n"
+            "review_rounds._invoke_review(batch, 'fake review', root / 'attempt', cfg, permit_parallel=True)\n"
+        )
+        probe_code = (
+            "import pathlib, sys\n"
+            "from workflow import local_agent as agent\n"
+            "try:\n"
+            "    with agent._batch_lock(pathlib.Path(sys.argv[1]), 0.12, shared=sys.argv[2] == 'shared'):\n"
+            "        print('acquired')\n"
+            "except agent.AgentError as exc:\n"
+            "    print(exc.code)\n"
+        )
+        def probe_batch(batch_dir, shared=False):
+            res = subprocess.run(
+                [sys.executable, "-B", "-c", probe_code, str(batch_dir), "shared" if shared else "exclusive"],
+                env=self.env, capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            return res.stdout.strip()
+
+        root = self.root / "review-killed-owner"
+        root.mkdir()
+        owner = subprocess.Popen(
+            [sys.executable, "-B", "-c", owner_code, str(batch_a), str(root),
+             json.dumps(self.config(root, "wait", timeout=15)), self.identity],
+            env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            child = self.ready(root)
+            self.assertEqual(probe_batch(batch_a), "lock_timeout")
+            self.assertEqual(probe_batch(batch_b), "acquired")
+            owner.kill()
+            self.assertEqual(owner.wait(timeout=5), -signal.SIGKILL)
+            self.assertTrue(self.running(child))
+            with self.assertRaisesRegex(agent.AgentError, 'source installation lock'):
+                with agent._runtime_lock(0, shared=False):
+                    self.fail('Installer entered while the review child held the runtime lock')
+            # 父进程异常退出后，同批次独占锁仍被活着的模型子进程持有；他批次不受影响
+            self.assertEqual(probe_batch(batch_a), "lock_timeout")
+            self.assertEqual(probe_batch(batch_a, shared=True), "acquired")
+            self.assertEqual(probe_batch(batch_b), "acquired")
+            (root / "release").touch()
+            self.wait_for(lambda: not self.running(child), "orphan review child did not exit")
+            self.assertEqual(probe_batch(batch_a), "acquired")
+            with agent._runtime_lock(0, shared=False):
+                pass
+        finally:
+            self.cleanup_owner(owner, root)
 
 
 if __name__ == "__main__":

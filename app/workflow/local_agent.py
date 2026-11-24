@@ -334,9 +334,19 @@ def _agent_lock(timeout, *, shared=False):
 
 
 @contextmanager
+def _runtime_lock(timeout, *, shared=True):
+    """Serialize source installation with workers using this codebase."""
+    path = _global_lock_path().with_suffix(".runtime.lock")
+    with _file_lock(path, timeout, shared=shared, label="workflow source installation lock") as handle:
+        yield handle
+
+
+@contextmanager
 def _batch_lock(batch_dir, timeout, *, shared=False):
     """Per-batch lock so concurrent batches never starve each other."""
-    with _file_lock(_batch_lock_path(batch_dir), timeout, shared=shared, label="batch agent lock") as handle:
+    with _runtime_lock(timeout), _file_lock(
+        _batch_lock_path(batch_dir), timeout, shared=shared, label="batch agent lock"
+    ) as handle:
         yield handle
 
 
@@ -565,7 +575,8 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False,
                     Path(batch), stage, max_input_chars=sys.maxsize)["input_hashes"]
             if not native_settings.get("_content_route_identity"):
                 native_settings["_content_route_identity"] = _selected_content_route(stage)
-            return content_agent.invoke(prompt, root, native_settings, permit_parallel=permit_parallel)
+            with _runtime_lock(settings["timeout_seconds"]):
+                return content_agent.invoke(prompt, root, native_settings, permit_parallel=permit_parallel)
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -617,10 +628,13 @@ def invoke(prompt: str, run_dir: Path, config=None, *, permit_parallel=False,
                     if resolved_batch is not None else
                     (_agent_lock(settings["timeout_seconds"], shared=True) if permit_parallel
                      else _agent_lock(settings["timeout_seconds"])))
-            with lock as active_lock_handle:
-                # None remains valid for Windows and mock/no-op lock contexts.
-                inherited_lock = ({"pass_fds": (active_lock_handle.fileno(),)}
-                                  if os.name != "nt" and active_lock_handle is not None else {})
+            with _runtime_lock(settings["timeout_seconds"]) as runtime_handle, lock as active_lock_handle:
+                inherited_fds = ()
+                if os.name != "nt":
+                    inherited_fds = tuple(
+                        handle.fileno() for handle in (runtime_handle, active_lock_handle) if handle is not None
+                    )
+                inherited_lock = {"pass_fds": inherited_fds} if inherited_fds else {}
                 require_model_call(resolved_batch, error_type=AgentError)
                 call_started = time.monotonic()
                 metadata["wall_start"] = datetime.now(timezone.utc).isoformat()
@@ -841,23 +855,42 @@ def _router_selected_route(stage=None, *, plugin=None):
     router = _router_file(plugin or Path(__file__).resolve().parents[2])
     try:
         data = json.loads(router.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError) as exc:
+        raise AgentError(f"model-router.json is unreadable: {exc}", "config") from exc
     if not isinstance(data, dict):
-        return None
+        raise AgentError("model-router.json root must be an object", "config")
     candidates = []
     roles = data.get("roles")
-    if stage and isinstance(roles, dict):
-        candidates.append(roles.get(stage))
+    if roles is not None and not isinstance(roles, dict):
+        raise AgentError("model-router.json roles must be an object", "config")
     stages = data.get("stages")
+    if stages is not None and not isinstance(stages, dict):
+        raise AgentError("model-router.json stages must be an object", "config")
+    if stage and isinstance(roles, dict):
+        candidates.append((f"roles.{stage}", roles.get(stage)))
     if stage and isinstance(stages, dict):
-        candidates.append(stages.get(stage))
-    candidates.append(data.get("default"))
-    for entry in candidates:
+        candidates.append((f"stages.{stage}", stages.get(stage)))
+    if stage == "preassemble":
+        if isinstance(roles, dict):
+            candidates.append(("roles.types", roles.get("types")))
+        if isinstance(stages, dict):
+            candidates.append(("stages.types", stages.get("types")))
+    raw_default = data.get("default")
+    if raw_default is not None and raw_default != {}:
+        candidates.append(("default", raw_default))
+    for label, entry in candidates:
+        if entry is None:
+            continue
         if (isinstance(entry, dict)
                 and isinstance(entry.get("provider"), str) and entry["provider"].strip()
                 and isinstance(entry.get("model"), str) and entry["model"].strip()):
             return {"provider": entry["provider"].strip(), "model": entry["model"].strip()}
+        raise AgentError(
+            f"model-router.json {label} is incomplete; provider/model are required",
+            "config",
+        )
     return None
 
 

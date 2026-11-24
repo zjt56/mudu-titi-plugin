@@ -268,8 +268,8 @@ def _locked(root, folder, *, execution=False, runner=False, batch_execution=Fals
             raise ValueError("identity_changed: 批次身份已变化")
         # Metadata/heartbeats never contend with an unrelated batch's model.
         # Actual artifact writers HOLD execution/import locks, not just a probe.
-        # Per-batch repairs use _batch_lock(folder, 0) so unrelated batches run
-        # concurrently; global codebase installs additionally hold _agent_lock(0).
+        # Source installation excludes workers across all batches. Batch-local
+        # repairs only exclude other writers for their own batch.
         from . import local_agent
         run_guard = supervisor._try_file_lock(folder / "workflow/.run.lock") if execution or batch_execution or runner else nullcontext(True)
         with run_guard as run_acquired:
@@ -277,10 +277,13 @@ def _locked(root, folder, *, execution=False, runner=False, batch_execution=Fals
                 raise OperationsBusy("worker_busy: runner owns batch")
             with ExitStack() as stack:
                 try:
-                    if execution or batch_execution:
-                        stack.enter_context(local_agent._batch_lock(folder, 0))
                     if execution:
                         stack.enter_context(local_agent._agent_lock(0))
+                        stack.enter_context(local_agent._runtime_lock(0, shared=False))
+                    elif batch_execution:
+                        stack.enter_context(local_agent._batch_lock(folder, 0))
+                    elif runner:
+                        stack.enter_context(local_agent._runtime_lock(0))
                 except local_agent.AgentError as exc:
                     if exc.code == "lock_timeout":
                         raise OperationsBusy("worker_busy: live model/import worker") from exc
@@ -779,10 +782,10 @@ def _recovery_plan(folder, incident):
 
 
 def _agent_lock_free():
-    """Non-blocking probe of the cross-batch model/import execution lock."""
+    """Probe the same source installation locks used by the installer."""
     from . import local_agent
     try:
-        with local_agent._agent_lock(0):
+        with local_agent._agent_lock(0), local_agent._runtime_lock(0, shared=False):
             return True
     except local_agent.AgentError as exc:
         if exc.code == "lock_timeout":

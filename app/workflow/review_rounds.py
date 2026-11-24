@@ -28,6 +28,8 @@ PROMPT_VERSION = "review-prompt-v18"
 
 ARTIFACT = "review_round"
 ROUND_ROOT_FIELDS = ('status', 'artifacts', 'notes', 'findings')
+_REVIEW_FEEDBACK = 'workflow/repair-feedback/review.json'
+_REVIEW_ROUTING_HEADER = 'Stage: review\nAgent: review\n'
 
 
 def _round_envelope(status='completed', notes=None):
@@ -297,7 +299,8 @@ def _round_prompt(round_id, targets, context):
         lines.append(guidelines)
 
     return (
-        "ROUND: " + round_id + "\n"
+        _REVIEW_ROUTING_HEADER
+        + "ROUND: " + round_id + "\n"
         + "\n".join(lines)
         + _agent_roles().section("review", "07_review/agent-review.json", round_id)
         + _agent_roles().knowledge_judgment_rules(scoped_types)
@@ -1280,7 +1283,12 @@ def _check_bound_inputs(batch, task_id, plan=None):
     if generation is not None and binding.get('state_path') in generation['retired_state_paths']:
         raise ReviewInputsChanged('Review generation changed; export a new blind task')
     try:
-        _check_input_hashes(batch, binding['input_hashes'])
+        hashes = binding['input_hashes']
+        if binding.get('context_version') == 'blind-context-v12' and binding.get('frozen_state') is True:
+            # Legacy keys included retry bookkeeping. Keep the original binding
+            # and prompt for provenance, and fence every actual review input.
+            hashes = {path: digest for path, digest in hashes.items() if path != _REVIEW_FEEDBACK}
+        _check_input_hashes(batch, hashes)
     except RuntimeError as exc:
         if getattr(exc, 'code', None) == 'context_changed':
             raise ReviewInputsChanged(str(exc)) from exc
@@ -1425,6 +1433,52 @@ def _write_part_package(batch, state, state_path, plan, input_hashes, index, fro
         + execution_id + " --result <result.json>. Do not modify workflow/review-bindings.\n").encode())
 
 
+def _partition_progress(batch, state_path, state):
+    """Count covered targets backed by the original frozen task and a response."""
+    try:
+        parts, completed = state['parts'], state['completed']
+        if not isinstance(parts, list) or not isinstance(completed, list) or len(completed) >= len(parts):
+            return -1
+        digest = review.frozen_partition_digest(state)
+        progress = 0
+        for index, part in enumerate(parts):
+            tid = part['task_id']
+            if not re.fullmatch(r'round-[0-9a-f]{32}', tid):
+                return -1
+            binding = review._load(_path(batch, f'workflow/review-bindings/{tid}.json')) or {}
+            if (binding.get('state_path') != state_path or binding.get('state_digest') != digest
+                    or binding.get('context_version') != CONTEXT_VERSION or binding.get('frozen_state') is not True
+                    or binding.get('plan') != state['plan'] or binding.get('input_hashes') != state['input_hashes']
+                    or binding.get('prior_rounds') != state['prior_rounds'] or binding.get('part_index') != index):
+                return -1
+            task = binding.get('task') or {}
+            if (task.get('task_id') != tid or task.get('protocol') != review.ROUND_PROTOCOL
+                    or task.get('round_id') != state['round_id'] or task.get('prompt') != part['prompt']
+                    or task.get('input_binding') != state['plan']['input_binding']
+                    or task.get('part_index') != index + 1 or task.get('part_count') != len(parts)):
+                return -1
+            if index < len(completed):
+                review._completed_part_source(batch, tid, binding)
+                progress += len(part['targets'])
+            else:
+                candidate = review._load(_path(batch, _pending_path(tid)))
+                if isinstance(candidate, dict) and candidate.get('status') == 'completed':
+                    try:
+                        _check_response_envelope(candidate)
+                    except ValueError:
+                        continue
+                    checks = candidate['artifacts'][ARTIFACT]['checks']
+                    rid = state['round_id']
+                    actual = [review._check_key(check, rid) for check in checks if isinstance(check, dict)]
+                    targets = [review._check_key(target, rid) if rid == 'sample' else (target, None)
+                               for target in part['targets']]
+                    if len(actual) == len(checks) == len(targets) and all(target in actual for target in targets):
+                        progress += len(targets)
+        return progress
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return -1
+
+
 def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_per_part=None,
                  only_round=None, allow_pending_audio=False, standalone_max_units=None):
     batch = Path(batch_dir)
@@ -1457,9 +1511,9 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
     # Blind review manages its own per-partition/per-target failure & repair
     # feedback; excluding generic outer repair-feedback/review.json prevents a
     # single-part retry from invalidating every already-completed sibling shard.
-    input_hashes = {p: digest for p, digest in base["input_hashes"].items()
-                    if p not in ("workflow/manifest.json", "manifest.json",
-                                 "workflow/repair-feedback/review.json")}
+    current_hashes = {p: digest for p, digest in base["input_hashes"].items()
+                      if p not in ("workflow/manifest.json", "manifest.json", _REVIEW_FEEDBACK)}
+    input_hashes = current_hashes
     try:
         from .review_paper_scope import question_sections
         section_types = question_sections(
@@ -1471,38 +1525,56 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
     reused_checks, reuse = review.reusable_checks(batch, previous, plan, round_id)
     # New exports follow actual prompt/role bytes even when a version tag was
     # not bumped. Existing in-flight packages and their bindings stay immutable.
-    prompt_digest = review._digest(_round_prompt(round_id, [], ""))
+    round_prompt = _round_prompt(round_id, [], "")
+    prompt_digest = review._digest(round_prompt)
+    compatible_prompt_digests = {prompt_digest, review._digest(round_prompt.removeprefix(_REVIEW_ROUTING_HEADER))}
     generation = _review_generation(batch, plan)
 
-    def _state_path_for(hashes):
-        key = [plan, round_id, hashes, CONTEXT_VERSION, PROMPT_VERSION, reuse, prompt_digest]
+    def _state_path_for(hashes, digest):
+        key = [plan, round_id, hashes, CONTEXT_VERSION, PROMPT_VERSION, reuse, digest]
         if generation is not None:
             key.append(generation['nonce'])
         return "workflow/review-partitions/" + review._digest(key) + ".json"
 
-    state_path = _state_path_for(input_hashes)
+    state_path = _state_path_for(input_hashes, prompt_digest)
     path = _path(batch, state_path)
-    # Backward compatibility: pre-upgrade in-flight partitions included
-    # workflow/repair-feedback/review.json in input_hashes. Reuse that exact
-    # partition state if it exists on disk and was not retired, instead of
-    # re-exporting and re-invoking every already-cached shard.
-    if not path.is_file() and "workflow/repair-feedback/review.json" in base["input_hashes"]:
-        legacy_input_hashes = dict(input_hashes)
-        legacy_input_hashes["workflow/repair-feedback/review.json"] = base["input_hashes"]["workflow/repair-feedback/review.json"]
-        legacy_state_path = _state_path_for(legacy_input_hashes)
-        if generation is None or legacy_state_path not in generation['retired_state_paths']:
-            legacy_path = _path(batch, legacy_state_path)
-            if legacy_path.is_file():
-                state_path, input_hashes, path = legacy_state_path, legacy_input_hashes, legacy_path
-    if path.is_file():
-        state = _load(path.read_bytes())
+    # A previous upgrade may already have exported a new state without results.
+    # Prefer the matching frozen state with the most recoverable targets.
+    state = _load(path.read_bytes()) if path.is_file() else None
+    best_progress = max(0, _partition_progress(batch, state_path, state)) if state is not None else 0
+    retired = set(generation['retired_state_paths']) if generation else set()
+    for entry in sorted(path.parent.glob('*.json')):
+        candidate_path = f'workflow/review-partitions/{entry.name}'
+        if candidate_path == state_path or candidate_path in retired or not re.fullmatch(r'[0-9a-f]{64}\.json', entry.name):
+            continue
+        try:
+            candidate = review._load(_path(batch, candidate_path))
+        except (OSError, ValueError):
+            continue
+        hashes = candidate.get('input_hashes') if isinstance(candidate, dict) else None
+        if not isinstance(hashes, dict) or {p: d for p, d in hashes.items() if p != _REVIEW_FEEDBACK} != current_hashes:
+            continue
+        digest = candidate.get('prompt_digest')
+        if (not isinstance(digest, str) or digest not in compatible_prompt_digests
+                or candidate.get('plan') != plan or candidate.get('round_id') != round_id
+                or candidate.get('reuse') != reuse or candidate_path != _state_path_for(hashes, digest)):
+            continue
+        progress = _partition_progress(batch, candidate_path, candidate)
+        if progress > best_progress:
+            best_progress = progress
+            state_path, state = candidate_path, copy.deepcopy(candidate)
+    if state is not None:
+        if not isinstance(state, dict):
+            raise ValueError("Invalid review partition binding")
+        input_hashes = state.get('input_hashes')
         if (state.get("plan") != plan or state.get("round_id") != round_id
                 or not isinstance(state.get("prior_rounds"), dict)
                 or not isinstance(state.get("parts"), list)
                 or not state["parts"]
                 or any(not isinstance(part, dict) or not isinstance(part.get("task_id"), str)
                        for part in state["parts"])
-                or state.get("input_hashes") != input_hashes):
+                or not isinstance(input_hashes, dict)
+                or {p: d for p, d in input_hashes.items() if p != _REVIEW_FEEDBACK} != current_hashes):
             raise ValueError("Invalid review partition binding")
     else:
         budget = max_input_chars
