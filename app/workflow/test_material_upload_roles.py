@@ -260,3 +260,34 @@ class MaterialUploadRoleTests(unittest.TestCase):
         self.assertEqual(by_key['answers']['source'], 'deterministic')
         self.assertEqual(by_key['attachment_001']['role'], 'listening_script')
         self.assertEqual(by_key['attachment_001']['source'], 'deterministic')
+
+    def test_two_docx_extract_parses_each_document_once_and_preserves_media_and_answers(self):
+        paper_path = self.file('paper.docx', 'fake-paper-docx')
+        ans_path = self.file('answers.docx', 'fake-answers-docx')
+        state = {'inputs': {'source': paper_path, 'answers': ans_path}}
+        calls = []
+
+        def fake_docx(source, out):
+            calls.append(Path(source).name)
+            if Path(source).name == 'paper.docx':
+                media_dir = Path(out) / 'media'
+                media_dir.mkdir(parents=True, exist_ok=True)
+                (media_dir / 'img-1.png').write_bytes(b'\x89PNG\r\n\x1a\nFAKE')
+                return {'text': PAPER + '\n[IMG img-1.png]', 'media': [{'name': 'img-1.png'}], 'warnings': []}
+            return {'text': ANSWER, 'media': [], 'warnings': []}
+
+        with patch('workflow.local_agent._agent_lock', side_effect=lambda *a: nullcontext()), \
+             patch.object(mf, 'load', side_effect=lambda *a: state), \
+             patch.object(mf, 'save', side_effect=lambda batch, new: (state.clear(), state.update(new)) if new is not state else None), \
+             patch('workflow.agent.configured', return_value=False), \
+             patch('workflow.docx_extract.extract_docx', side_effect=fake_docx):
+            result = extract.run(self.root)
+
+        self.assertTrue(result['passed'], result.get('error'))
+        # Each DOCX (paper + answers) is parsed exactly once across classify, extract, and answer preparation.
+        self.assertEqual(sorted(calls), ['answers.docx', 'paper.docx'])
+        self.assertTrue((self.root / '01_source/media/img-1.png').is_file())
+        self.assertEqual((self.root / '01_source/media/img-1.png').read_bytes(), b'\x89PNG\r\n\x1a\nFAKE')
+        self.assertIn('Who is he?', (self.root / '01_source/原始正文.txt').read_text(encoding='utf-8'))
+        self.assertIn('参考答案', (self.root / '01_source_ans/正文.txt').read_text(encoding='utf-8'))
+        self.assertTrue((self.root / '01_source_ans/preparation.json').is_file())

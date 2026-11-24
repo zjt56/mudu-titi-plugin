@@ -46,8 +46,11 @@ test('普通下划线文字不被当成空档', () => {
   assert.equal(ctx.markLine('<u>farmers</u>'), '<u>farmers</u>');
   // 库侧空档格式只有 __数字__；__文字__ 不是后端产物，不得被当标记（保持原样）。
   assert.equal(ctx.markLine('to be __careful__ here'), 'to be __careful__ here');
-  // 多段纯空下划线夹文字：不得把中间文字误包成下划线。
-  assert.equal(ctx.markLine('______ are ______?'), '______ are ______?');
+  // 多段纯空下划线夹文字：不得把中间文字误包成下划线，且横线统一走同一 CSS 类。
+  assert.equal(
+    ctx.markLine('______ are ______?'),
+    '<span class="wf-fill-blank wf-rule-sm"></span> are <span class="wf-fill-blank wf-rule-sm"></span>?',
+  );
 });
 
 test('正文保留上下标，外部字体标签及属性按文本处理', () => {
@@ -58,9 +61,9 @@ test('正文保留上下标，外部字体标签及属性按文本处理', () =>
   assert.match(markLine('<font face="Arial">Text</font>'), /^&lt;font /);
 });
 
-test('无题号的空白下划线保留为普通填空线', () => {
+test('无题号的空白下划线统一渲染为全局一致的填空横线', () => {
   const ctx = harness();
-  assert.match(ctx.markLine('a <u> </u> b'), /<u> <\/u>/);
+  assert.equal(ctx.markLine('a <u> </u> b'), 'a <span class="wf-fill-blank wf-rule-sm"></span> b');
 });
 
 test('通篇加粗只在该试卷的渲染中压平，保留局部粗体、画线和上下标', () => {
@@ -126,4 +129,59 @@ test('单词后接纯空下划线不产生嵌套 <u> 双线（用户反馈很短
   }
   // 真正的库侧题号空 __17__ 仍还原为填空线
   assert.match(ctx.markLine('to be __17__ and'), /<span class="wf-blank">17<\/span>/);
+});
+
+test('整行超长下划线与长空白 <u> 答题线归一为单行自适应横线，不折成两行', () => {
+  const ctx = harness();
+  // 83 个下划线的整行答题线
+  const rawUnderscores = '_'.repeat(83);
+  assert.equal(ctx.markLine(rawUnderscores), '<span class="wf-answer-line"></span>');
+  // Word 用 <u>\xa0</u><u>   ...   </u> 拼出的整行答题线（中考任务型阅读 / 书面表达常见）
+  const rawSpaced = '<u>\u00a0</u><u>' + ' '.repeat(78) + '</u>';
+  assert.equal(ctx.markLine(rawSpaced), '<span class="wf-answer-line"></span>');
+  // 表格/作文框内由 <br> 分隔的多条答题横线
+  const inCell = 'Dear David,<br>' + rawSpaced + '<br>' + rawSpaced + '<br>Yours,';
+  assert.equal(
+    ctx.markLine(inCell),
+    'Dear David,<br><span class="wf-answer-line"></span><br><span class="wf-answer-line"></span><br>Yours,',
+  );
+  // 样式表必须将 .wf-answer-line 限制在单行 100% 宽度内
+  assert.match(client, /\.wf-fill-blank,\.wf-answer-line,\.wf-fill-line\{[^}]*display:inline-block[^}]*max-width:100%/);
+  assert.match(client, /\.wf-answer-line,\.wf-fill-line\{width:100%\}/);
+});
+
+test('全局填空横线统一使用同一套 1px 自适应细线，同一题内短/中/长横线粗细完全一致', () => {
+  const ctx = harness();
+  // 同一道题内同时含 8 个和 16 个下划线：全部走 .wf-fill-blank，杜绝字体 '_' 与 CSS 混用导致粗细不一
+  assert.equal(
+    ctx.markLine('Jack________ ________________ his parents ________ friendly to me.'),
+    'Jack<span class="wf-fill-blank wf-rule-sm"></span> <span class="wf-fill-blank wf-rule-md"></span> his parents <span class="wf-fill-blank wf-rule-sm"></span> friendly to me.',
+  );
+  // 中等行内空（12~19 字符）
+  assert.equal(
+    ctx.markLine('/ʊ/:' + '_'.repeat(12) + ' '),
+    '/ʊ/:<span class="wf-fill-blank wf-rule-md"></span> ',
+  );
+  // 长行内空（20~35 字符）
+  assert.equal(
+    ctx.markLine('the hillside ' + '_'.repeat(24) + ' colourful wildflowers.'),
+    'the hillside <span class="wf-fill-blank wf-rule-lg"></span> colourful wildflowers.',
+  );
+  // 超长行内空（36+ 字符）
+  assert.equal(
+    ctx.markLine('73. ' + '_'.repeat(48)),
+    '73. <span class="wf-fill-blank wf-rule-xl"></span>',
+  );
+  // 行内超长空白 <u>
+  assert.equal(
+    ctx.markLine('Answer: <u>' + ' '.repeat(24) + '</u>.'),
+    'Answer: <span class="wf-fill-blank wf-rule-lg"></span>.',
+  );
+  // 样式表所有横线共享同一 1px 规则且按百分比 clamp 自适应宽度
+  assert.match(client, /\.wf-fill-blank,\.wf-answer-line,\.wf-fill-line\{[^}]*border-bottom:1px solid currentColor/);
+  assert.match(client, /\.wf-fill-blank\.wf-rule-sm\{width:clamp\([^}]*%\s*,[^}]*\)\}/);
+  assert.match(client, /\.wf-fill-blank\.wf-rule-md\{width:clamp\([^}]*%\s*,[^}]*\)\}/);
+  assert.match(client, /\.wf-fill-blank\.wf-rule-lg\{width:clamp\([^}]*%\s*,[^}]*\)\}/);
+  assert.match(client, /\.wf-fill-blank\.wf-rule-xl\{width:clamp\([^}]*%\s*,[^}]*\)\}/);
+  assert.match(client, /\.wf-paper u,\.wf-table u\{[^}]*border-bottom:1px solid currentColor/);
 });

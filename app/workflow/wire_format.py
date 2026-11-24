@@ -148,8 +148,51 @@ def _split_inline_underline(match):
     return "".join(out)
 
 
+# 独立整行答题横线（翻译/仿写/任务型阅读简答等）默认占一整行，避免被截短成 6 个 `_` 传到远端题库后过短。
+FULL_LINE_BLANK = "_" * 60
+_FULL_LINE_SENTINEL = "\x00WF_FULL_LINE_BLANK\x00"
+_STANDALONE_LONG_RULE = re.compile(
+    r"(?im)(^|\n)[ \t\u3000\xa0]*"
+    r"((?:<u>[\s\u3000\xa0_\uff3f]+</u>|[_\uff3f]{3,})"
+    r"(?:[ \t\u3000\xa0]*(?:<u>[\s\u3000\xa0_\uff3f]+</u>|[_\uff3f]{3,}))*)"
+    r"[ \t\u3000\xa0]*(?=\n|$)"
+)
+_STANDALONE_SHORT_RULE = re.compile(r"(?m)^[ \t]*[_\uff3f]{3,}[ \t]*$")
+
+
+def _rule_visual_units(raw: str) -> int:
+    plain = re.sub(r"</?u>", "", raw or "", flags=re.I)
+    return sum(2 if ch in ("\u3000", "\uff3f") else 1 for ch in plain)
+
+
+def _protect_full_line_blank(match):
+    if _rule_visual_units(match.group(2)) >= 12:
+        return match.group(1) + _FULL_LINE_SENTINEL
+    return match.group(0)
+
+
+def expand_standalone_answer_lines(text):
+    """Expand standalone answer-line blanks (after prompt text) to a full-line rule for remote upload.
+
+    Preserves shell-only subquestion stems (bare ``______`` with no prompt text) and inline blanks.
+    """
+    if not isinstance(text, str) or "\n" not in text:
+        return text
+    lines = text.splitlines()
+    has_prompt = False
+    out = []
+    for line in lines:
+        if has_prompt and _STANDALONE_SHORT_RULE.fullmatch(line):
+            out.append(FULL_LINE_BLANK)
+        else:
+            out.append(line)
+            if line.strip() and not _STANDALONE_SHORT_RULE.fullmatch(line):
+                has_prompt = True
+    return "\n".join(out)
+
+
 def normalize_blank_text(text):
-    """库侧空档写法：<u>　26　</u> → __26__，纯空档 → ______。
+    """库侧空档写法：<u>　26　</u> → __26__，行内纯空档 → ______，独立整行答题横线保留为整行。
 
     连续多段下划线属于同一处空档（题号 + 两侧留白），必须先整体识别再归一。
     <u>词______</u> 这种标签内夹连续下划线的歧义形态会拆成 <u>词</u>______，
@@ -157,6 +200,7 @@ def normalize_blank_text(text):
     """
     if not isinstance(text, str):
         return text
+    text = _STANDALONE_LONG_RULE.sub(_protect_full_line_blank, text)
     text = BLANK_RUN.sub(_blank_run, text)
     text = re.sub(r"<u>\s*[\u3000\s]*(\d{1,3})[\u3000\s]*\s*</u>", r"__\1__", text)
     text = re.sub(r"\u3000\s*(\d{1,3})\s*\u3000", r"__\1__", text)
@@ -174,9 +218,11 @@ def normalize_blank_text(text):
     )
     # 最后一步：拆掉标签内夹连续下划线的歧义形态（<u>i______</u> → <u>i</u>______）。
     # 只合并「拆分产生的 6+ 连续下划线」（如 <u>w</u>____________），不触碰形如
-    # ____1____ 的编号空档或词间带空格的 ______。
+    # ____1____ 的编号空档、词间带空格的 ______ 或已保护的独立整行答题横线。
     text = _U_INLINE_RUN.sub(_split_inline_underline, text)
     text = re.sub(r"_{6,}", "______", text)
+    if _FULL_LINE_SENTINEL in text:
+        text = text.replace(_FULL_LINE_SENTINEL, FULL_LINE_BLANK)
     return text
 
 

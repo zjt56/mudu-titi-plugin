@@ -702,11 +702,18 @@ def run_tests(job, tests, *, timeout=300, fast=False):
     """Run only named unittest modules inside the copy. Fixed argv, no shell."""
     workspace = _workspace(job)
     if not isinstance(tests, list) or not tests or len(tests) > 12:
-        raise ValueError("tests_invalid")
+        raise ValueError(
+            "tests_invalid: tests 必须为 1–12 个 unittest 模块名列表，"
+            "例如 ['workflow.test_review_rounds']（不可为空或超过 12 项）"
+        )
     names = []
     for entry in tests:
         if not isinstance(entry, str) or not UNIT_TEST.fullmatch(entry):
-            raise ValueError("tests_invalid")
+            raise ValueError(
+                f"tests_invalid: 非法测试名 {entry!r}；仅接受 Python unittest 名称"
+                "（如 'workflow.test_xxx' 或 'workflow.test_xxx.TestCase.test_fn'），"
+                "不可传文件路径或命令行参数"
+            )
         names.append(entry)
     required = [] if fast else required_core_regressions(job)
     if required:
@@ -765,7 +772,7 @@ def prepare_install(job, *, require_tests=True, require_regression=True):
     required = required_core_regressions(job, changes)
     _check_core_regression_sources(job, required)
     if (require_tests or required) and not (last.get("passed") and last.get("fingerprint") == fingerprint(job)):
-        raise ValueError("passing_tests_required")
+        raise ValueError("passing_tests_required: 须先在当前代码指纹下运行 code_repair(operation='test') 且全部通过后再 prepare")
     if required and not set(required) <= set(last.get("tests") or []):
         raise ValueError("core_regression_tests_required:" + ",".join(required))
     if required and not all(type((last.get("core_regression_results") or {}).get(module)) is int
@@ -828,6 +835,13 @@ def _release_marker(root, state, **extra):
     body = {"state": state, "at": _now(), **extra}
     _replace_bytes(path, json.dumps(body, ensure_ascii=False, indent=1).encode("utf-8"), suffix=".release")
     return path
+
+
+def release_awaiting_restart(root):
+    marker = _regular(_safe(root, RELEASE_MARKER))
+    if marker is None:
+        return False
+    return json.loads(marker.read_text(encoding="utf-8")).get("state") == "installed"
 
 
 def install(job, *, backup_dir, allow=False):

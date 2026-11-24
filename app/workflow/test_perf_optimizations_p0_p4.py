@@ -159,7 +159,8 @@ class P1ScopedStructureFastPathTests(unittest.TestCase):
     def test_clean_scoped_sync_practice_skips_structure_ai(self):
         with tempfile.TemporaryDirectory() as tmp:
             batch = self._make_scoped_batch(Path(tmp))
-            with patch("workflow.structure_ai.auto_classify") as ai_mock:
+            with patch.dict(os.environ, {"WF_STRUCTURE_AI": "1"}, clear=False), \
+                    patch("workflow.structure_ai.auto_classify") as ai_mock:
                 report = structure_gate.run_gate(batch)
             ai_mock.assert_not_called()
             self.assertTrue(report["passed"])
@@ -175,14 +176,15 @@ class P1ScopedStructureFastPathTests(unittest.TestCase):
                 Path(tmp),
                 unresolved=[{"code": "IMAGE_SECTION_UNNUMBERED", "message": "图片题未标号"}],
             )
-            with patch("workflow.structure_ai.auto_classify", return_value={"units": []}) as ai_mock:
+            with patch.dict(os.environ, {"WF_STRUCTURE_AI": "1"}, clear=False), \
+                    patch("workflow.structure_ai.auto_classify", return_value={"units": []}) as ai_mock:
                 structure_gate.run_gate(batch)
             ai_mock.assert_called_once()
 
     def test_force_structure_ai_env_overrides_scoped_fast_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             batch = self._make_scoped_batch(Path(tmp))
-            with patch.dict(os.environ, {"WF_FORCE_STRUCTURE_AI": "1"}, clear=False), \
+            with patch.dict(os.environ, {"WF_STRUCTURE_AI": "1", "WF_FORCE_STRUCTURE_AI": "1"}, clear=False), \
                     patch("workflow.structure_ai.auto_classify", return_value={"units": []}) as ai_mock:
                 structure_gate.run_gate(batch)
             ai_mock.assert_called_once()
@@ -190,12 +192,12 @@ class P1ScopedStructureFastPathTests(unittest.TestCase):
 
 class P2ConfigGuardrailTests(unittest.TestCase):
     def test_all_agent_configs_aligned_and_memory_safe(self):
-        configs = [
-            REPO_ROOT / "app" / "workflow" / "local-agent.json",
-            REPO_ROOT / "backend" / "local-agent.plugin.json",
-            REPO_ROOT / "backend" / ".local-agent.effective.json",
-        ]
-        for path in configs:
+        plugin_template = REPO_ROOT / "backend" / "local-agent.plugin.json"
+        plugin_configs = [plugin_template]
+        effective = REPO_ROOT / "backend" / ".local-agent.effective.json"
+        if effective.is_file():
+            plugin_configs.append(effective)
+        for path in plugin_configs:
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(data["timeout_seconds"], 480, path.name)
             self.assertEqual(data["part_concurrency"], 4, path.name)
@@ -205,6 +207,20 @@ class P2ConfigGuardrailTests(unittest.TestCase):
             self.assertEqual(data["review_max_attempts"], 2, path.name)
             # 2 concurrent batches * review_part_parallel <= 8 (well below 16GB OOM threshold of 16)
             self.assertLessEqual(2 * data["review_part_parallel"], 8, path.name)
+
+        # Standalone local workflow config (excluded from npm package; intentionally higher
+        # single-batch concurrency 8/6 per 2026-11-23-knowledge-inline-budget-and-concurrency.md).
+        local_cfg = REPO_ROOT / "app" / "workflow" / "local-agent.json"
+        if local_cfg.is_file():
+            data = json.loads(local_cfg.read_text(encoding="utf-8"))
+            self.assertEqual(data["timeout_seconds"], 480, local_cfg.name)
+            self.assertEqual(data["review_part_units"], 5, local_cfg.name)
+            self.assertEqual(data["retries"], 2, local_cfg.name)
+            self.assertEqual(data["review_max_attempts"], 2, local_cfg.name)
+            self.assertGreaterEqual(data["part_concurrency"], 1, local_cfg.name)
+            self.assertLessEqual(data["part_concurrency"], 8, local_cfg.name)
+            self.assertGreaterEqual(data["review_part_parallel"], 1, local_cfg.name)
+            self.assertLessEqual(data["review_part_parallel"], 6, local_cfg.name)
 
 
 class P3TimeoutRetryAndTranscriptTests(unittest.TestCase):

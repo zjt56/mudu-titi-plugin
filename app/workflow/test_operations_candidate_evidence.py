@@ -103,6 +103,54 @@ class CandidateEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'evidence_not_allowlisted'):
                 op._read_evidence(self.folder, {'path': relative})
 
+    def test_review_stage_exposes_failures_partials_partitions_and_scripts_read(self):
+        fail_rel = self.put('workflow/review-failures/round-1.json', {'error': 'missing knowledge'})
+        part_rel = self.put('workflow/review-partial/round-1.json', {'failed': []})
+        state_rel = self.put('workflow/review-partitions/abc.json', {'parts': []})
+        rows = op._candidate_evidence(self.folder, 'review')
+        paths = {r['path'] for r in rows}
+        self.assertTrue({fail_rel, part_rel, state_rel} <= paths)
+        # _read_evidence allows reading review failure when incident stage is review
+        state = op._load(self.folder)
+        state['incident'] = {'stage': 'review'}
+        op._save(self.folder, state)
+        read_fail = op._read_evidence(self.folder, {'path': fail_rel})
+        self.assertIn('missing knowledge', read_fail['text'])
+        # scope="plugin" allows read-only access to app/scripts/**/*.py
+        read_script = op._read_evidence(self.folder, {'scope': 'plugin', 'path': 'app/scripts/06-upload/mark_underline.py', 'limit': 200})
+        self.assertEqual(read_script['path'], 'app/scripts/06-upload/mark_underline.py')
+        # Actionable hint on forbidden path
+        with self.assertRaisesRegex(ValueError, r'evidence_not_allowlisted.*review-failures'):
+            op._read_evidence(self.folder, {'path': 'workflow/nonexistent-secret.json'})
+
+    def test_run_tests_invalid_name_returns_actionable_format_hint(self):
+        from workflow import operations_development as dev
+        with self.assertRaisesRegex(ValueError, r'tests_invalid.*Python unittest'):
+            dev.run_tests({'workspace': str(self.folder)}, ['app/workflow/test_review_rounds.py'])
+
+    def test_review_failure_keeps_its_older_partition_readable_and_paginates_utf8(self):
+        import os
+        state = op._load(self.folder)
+        state['incident'] = {'stage': 'review'}
+        op._save(self.folder, state)
+        paths = [self.put(f'workflow/review-partitions/{n:064x}.json', {}) for n in range(7)]
+        old = self.folder / paths[0]
+        old.write_text('审核分片\r\n知识目录', encoding='utf-8')
+        for n, relative in enumerate(paths):
+            os.utime(self.folder / relative, (100 + n, 100 + n))
+        self.put('workflow/review-failures/round-current.json', {'state_path': paths[0]})
+        rows = op._candidate_evidence(self.folder, 'review')
+        self.assertIn(paths[0], {row['path'] for row in rows})
+        self.assertEqual(sum(row['path'] == paths[0] for row in rows), 1)
+        self.assertNotIn(paths[1], {row['path'] for row in rows})
+        page = op._read_evidence(self.folder, {'path': paths[0], 'limit': 2})
+        self.assertEqual(page['text'], '审核')
+        self.assertEqual(page['next_offset'], 6)
+        self.assertFalse(page['eof'])
+        rest = op._read_evidence(self.folder, {'path': paths[0], 'offset': page['next_offset']})
+        self.assertEqual(rest['text'], '分片\r\n知识目录')
+        self.assertTrue(rest['eof'])
+
 
 if __name__ == '__main__':
     unittest.main()

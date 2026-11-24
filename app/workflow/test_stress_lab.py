@@ -50,6 +50,19 @@ class StressOracleTest(unittest.TestCase):
         wrong["items"][0]["unit_id"] = "foreign"
         self.assertFalse(stress_lab._data_preserved(self.payload(), wrong, injected=self.payload()))
 
+    def test_build_fixture_supports_exact_listening_knowledge_and_bound_structure_evidence(self):
+        import tempfile
+        from pathlib import Path
+        from workflow import format_gate
+        self.assertEqual(stress_lab.valid_knowledge("听力关键词语选择", [], "standalone"), ["语音/基本读音"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "synth"
+            fixture = stress_lab.build_fixture(root, 912, standalone_count=2)
+            self.assertTrue(fixture.units)
+            (root / "07_review/upload-format.json").unlink(missing_ok=True)
+            report = format_gate.run(root)
+            self.assertTrue(report["passed"], report.get("errors"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,7 +20,7 @@ from workbench import taxonomy, textbook
 from workflow import label_audit
 from workflow.metadata_policy import MISSING
 from workflow.question_content import material_blank_numbers
-from workflow.wire_format import normalize_blank_text
+from workflow.wire_format import expand_standalone_answer_lines, normalize_blank_text
 
 from workflow.workflow_constants import AI_MARK
 
@@ -1083,11 +1083,15 @@ class _Builder:
                 )
                 if semester:
                     output.setdefault("filterMetadata", {})["semesters"] = [semester]
-        # 空档统一成库侧写法：<u>　26　</u> → __26__，纯空档 → ______；同时剥离题干/材料/选项里残留的粗体星号 **。
-        # 装配阶段已归一化；这里兜底历史批次，避免把 <u> 或 ** 原样写进题库。
+        # 空档统一成库侧写法：<u>　26　</u> → __26__，行内纯空档 → ______，独立整行答题横线展开为整行；
+        # 同时剥离题干/材料/选项里残留的粗体星号 **。
+        # 装配阶段已归一化；这里兜底历史批次，避免把 <u>、** 或被旧版截短的整行翻译答题线原样写进题库。
         for key in ("stem", "material"):
             if isinstance(output.get(key), str):
-                output[key] = normalize_blank_text(re.sub(r"\*{2,}", "", output[key]).strip())
+                normalized = normalize_blank_text(re.sub(r"\*{2,}", "", output[key]).strip())
+                if key == "stem" and main_type != "书面表达":
+                    normalized = expand_standalone_answer_lines(normalized)
+                output[key] = normalized
         if isinstance(output.get("options"), list):
             output["options"] = [re.sub(r"\*{2,}", "", opt) if isinstance(opt, str) else opt for opt in output["options"]]
         blocks = output.get("materialBlocks")

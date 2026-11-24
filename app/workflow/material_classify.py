@@ -336,12 +336,15 @@ _DOC_TEXT_CACHE: dict[tuple, str] = {}
 def _document_text(batch: Path, source: str, ocr_report=None) -> str | None:
     """把一份文档的文字层提取出来（答案卷在 answers/explanations 时用原始正文）。"""
     try:
-        from . import extract
+        from . import docx_extract, extract
         import tempfile
         src = Path(source).expanduser().resolve(strict=True)
         st = src.stat()
         ocr_key = id(ocr_report) if ocr_report is not None else 0
-        cache_key = (str(src), st.st_mtime_ns, st.st_size, ocr_key)
+        cache_key = (
+            str(src), st.st_ino, st.st_mtime_ns, st.st_size, ocr_key,
+            id(extract.extract_source), id(docx_extract.extract_docx),
+        )
         cached = _DOC_TEXT_CACHE.get(cache_key)
         if cached is not None:
             return cached

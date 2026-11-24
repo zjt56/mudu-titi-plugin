@@ -235,6 +235,50 @@ class UnderlineLayoutTest(unittest.TestCase):
         self.assertEqual(report['issues'][0]['code'], 'UNDERLINE_MAPPING_AMBIGUOUS')
         self.assertEqual(candidate, batch)
 
+    def test_cross_unit_quote_is_owned_by_the_exact_paragraph_field(self):
+        # A 熟词生义 item repeats a cloze sentence verbatim. Only the unit whose
+        # own field is exactly the marked source paragraph owns the underline;
+        # the copy inside the longer passage stays unmarked.
+        quoted = 'Then they __3__ the students 40 seconds to memorize them.'
+        source = ('Do you find it hard to memorize words?\n'
+                  'Some Canadian scientists did the study.Then they __<u>3</u>__ the students '
+                  '40 seconds to memorize them.\n'
+                  'Then they __<u>3</u>__ the students 40 <u>seconds</u> to memorize them.')
+        batch = {'items': [{'material': 'Do you find it hard to memorize words?\n'
+                                        'Some Canadian scientists did the study.Then they __3__ '
+                                        'the students 40 seconds to memorize them.'},
+                           {'stem': quoted}]}
+        candidate, report = underline.restore(batch, source)
+        self.assertTrue(report['passed'], report)
+        self.assertEqual([change['field'] for change in report['changes']], ['items/1/stem'])
+        self.assertEqual(candidate['items'][1]['stem'],
+                         'Then they __3__ the students 40 <u>seconds</u> to memorize them.')
+        self.assertNotIn('<u>', candidate['items'][0]['material'])
+        again, report = underline.restore(candidate, source)
+        self.assertTrue(report['passed'], report)
+        self.assertEqual(report['changes'], [])
+        self.assertEqual(again, candidate)
+
+    def test_cross_unit_quote_already_marked_is_idempotent(self):
+        source = ('Do you find it hard to memorize words?\n'
+                  'Then they __<u>3</u>__ the students 40 <u>seconds</u> to memorize them.')
+        batch = {'items': [{'material': 'Do you find it hard to memorize words?\n'
+                                        'Then they __3__ the students 40 seconds to memorize them.'},
+                           {'stem': 'Then they __3__ the students 40 <u>seconds</u> to memorize them.'}]}
+        candidate, report = underline.restore(batch, source)
+        self.assertTrue(report['passed'], report)
+        self.assertEqual(report['changes'], [])
+        self.assertEqual(candidate, batch)
+
+    def test_two_exact_paragraph_fields_stay_ambiguous(self):
+        source = 'Then they __<u>3</u>__ the students 40 <u>seconds</u> to memorize them.'
+        stem = 'Then they __3__ the students 40 seconds to memorize them.'
+        batch = {'items': [{'stem': stem}, {'stem': stem}]}
+        candidate, report = underline.restore(batch, source)
+        self.assertFalse(report['passed'], report)
+        self.assertEqual(report['issues'][0]['code'], 'UNDERLINE_MAPPING_AMBIGUOUS')
+        self.assertEqual(candidate, batch)
+
     def test_partial_existing_word_mark_is_a_conflict(self):
         batch = {'items': [{'stem': STEM.replace('remove', '<u>rem</u>ove')}]}
         candidate, report = underline.restore(batch, SOURCE)

@@ -56,16 +56,19 @@ _LABEL_CACHE: dict[tuple, list[str]] = {}
 
 
 def valid_knowledge(main_type: str, subtypes=None, unit_kind: str = "standalone") -> list[str]:
-    """Pick catalog leaves that the real validator accepts for this unit shape."""
+    """Pick catalog leaves (or exact-match nodes) that the real validator accepts."""
     key = (main_type, tuple(subtypes or ()), unit_kind)
     if key in _LABEL_CACHE:
         return _LABEL_CACHE[key]
+    exact = sorted(taxonomy.exact_knowledge_paths(main_type))
     genre = [leaf for leaf in _LEAVES if leaf.startswith("语篇体裁/")]
     others = [leaf for leaf in _LEAVES if not leaf.startswith("语篇体裁/")]
-    candidates = []
+    candidates = [[p] for p in exact]
     for leaf in (genre if unit_kind == "group" else []) + others:
         candidates.append([leaf])
     if unit_kind == "group":
+        if exact:
+            candidates += [[g, p] for g in genre[:12] for p in exact]
         candidates += [[g, o] for g in genre[:12] for o in others[:60:6]]
     for paths in candidates:
         probe = {"question_type": main_type, "unit_kind": unit_kind,
@@ -265,9 +268,27 @@ def build_fixture(root: Path, seed: int, *, standalone_count=None, only_standalo
     audit = question_content.audit_batch_source(root, final_view)
     if not audit.get("passed"):
         raise AssertionError({"audit": audit.get("issues", [])[:4]})
+    from . import final_audit
+    original = root / "00_original/source.txt"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(root / "01_source/正文.txt", original)
+    initial_manifest = mf.new_manifest(
+        f"stress-{seed}", root, mf.register_input(root, "source", original), {}, meta
+    )
+    mf.save(root, initial_manifest)
+    structure_hashes = {
+        rel: mf.sha256_file(root / rel)
+        for rel in final_audit.SOURCE_FILES
+        if (root / rel).is_file()
+    }
     _write(root, "07_review/validation-report.json",
            {"passed": True, "source_audit": audit, "checks": [], "warnings": [], "skipped": []})
-    _write(root, "07_review/structure-gate.json", {"passed": True})
+    _write(root, "07_review/structure-gate.json", {
+        "passed": True,
+        "input_hashes": structure_hashes,
+        "original_sha256": mf.sha256_file(original),
+        "structure_warnings": [],
+    })
     _write(root, "07_review/extraction-report.json", {"passed": True})
     fixture = Fixture(root=root, seed=seed, units=units, rows=rows, meta=meta)
     _create_review_evidence(fixture)

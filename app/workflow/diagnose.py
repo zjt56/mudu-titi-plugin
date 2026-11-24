@@ -60,14 +60,14 @@ def _last_error_line(text: str) -> str:
     return clean[-1] if clean else ""
 
 
-def _review_failure_detail(batch: Path, record: dict | None = None) -> str:
+def _review_failure_evidence(batch: Path, record: dict | None = None) -> dict:
     """Read failures for current unfinished tasks; historical evidence stays history."""
     from datetime import datetime
     from . import review, review_rounds
 
     folder = batch / "workflow" / "review-failures"
     if not folder.is_dir():
-        return ""
+        return {}
     record = record or {}
     try:
         evaluated = review.evaluate_rounds(batch)
@@ -82,7 +82,7 @@ def _review_failure_detail(batch: Path, record: dict | None = None) -> str:
         try:
             started = datetime.fromisoformat(record["started_at"]).timestamp()
         except (ValueError, TypeError):
-            return ""
+            return {}
     files = sorted((p for p in folder.glob("*.json") if p.is_file()),
                    key=lambda p: p.stat().st_mtime_ns, reverse=True)
     for path in files:
@@ -102,7 +102,7 @@ def _review_failure_detail(batch: Path, record: dict | None = None) -> str:
             if (current_task or any(k in report for k in ("input_binding", "state_path", "part_index", "targets"))
                     or started is not None and path.stat().st_mtime < started):
                 continue
-            return str(error)[:1200]
+            return {"error": str(error)}
         if (not isinstance(task_id, str) or not re.fullmatch(r"round-[0-9a-f]{32}", task_id)
                 or current_task and task_id != current_task or not isinstance(plan, dict)):
             continue
@@ -117,6 +117,8 @@ def _review_failure_detail(batch: Path, record: dict | None = None) -> str:
                     or not isinstance(index, int) or isinstance(index, bool) or index < 0
                     or index >= len(state.get("parts") or [])):
                 continue
+            if binding.get("frozen_state") and binding.get("state_digest") != review.frozen_partition_digest(state):
+                continue
             part = state["parts"][index]
             if (task.get("task_id") != task_id or task.get("round_id") != report.get("round_id")
                     or part.get("task_id") != task_id
@@ -128,8 +130,12 @@ def _review_failure_detail(batch: Path, record: dict | None = None) -> str:
                 continue
         except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
             continue
-        return str(error)[:1200]
-    return ""
+        return {**report, **identity, "task_id": task_id, "error": str(error)}
+    return {}
+
+
+def _review_failure_detail(batch: Path, record: dict | None = None) -> str:
+    return _review_failure_evidence(batch, record).get("error", "")[:1200]
 
 
 def _failed_units(report) -> dict:

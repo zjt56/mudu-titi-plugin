@@ -32,8 +32,11 @@ test('actual producer marker reaches host at repository root and restores throug
   let options;
   let boots = 0;
   let stops = 0;
+  let repairActive = true;
   const context = vm.createContext({ WORKFLOW_DIR: workflowDir, join, resolve, restoreRelease,
     console: { log() {} }, clearTimeout,
+    operationsManager: { busyForRestart: () => repairActive },
+    backend: { ready: false },
     ensureBackend: async () => ({ ok: ++boots > 1, error: 'simulated_unhealthy_boot' }),
     createReleaseCoordinator: (supplied) => {
       options = supplied;
@@ -63,11 +66,18 @@ test('actual producer marker reaches host at repository root and restores throug
     changes: [{ path: 'app/workflow/example.py', base_sha256: hash('previous-code'), new_sha256: hash('installed-code') }],
     backups: { 'app/workflow/example.py': backup } }));
   emit('installed', { plan_id: 'fixture-plan', journal, files: ['app/workflow/example.py'] });
+  assert.equal(coordinator.blocksAdmission(), true);
+  await coordinator.check();
+  assert.equal(boots, 0);
+  assert.equal(coordinator.status.paused, true);
+  assert.equal(JSON.parse(readFileSync(markerPath, 'utf8')).state, 'installed');
+  repairActive = false;
   await coordinator.check();
   assert.equal(boots, 2);
   assert.equal(coordinator.status.state, 'rolled_back');
   assert.equal(readFileSync(target, 'utf8'), 'previous-code');
   assert.equal(existsSync(markerPath), false);
+  assert.equal(coordinator.blocksAdmission(), false);
   context.stop();
   assert.equal(stops, 1);
   // Unload leaves no polling or subsequent restart work alive.

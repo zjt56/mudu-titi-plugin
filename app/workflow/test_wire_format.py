@@ -262,5 +262,27 @@ class WireFormatTest(unittest.TestCase):
         restore_table_cell_images(decor_blocks, source, allowed_images={"other.jpeg"})
         self.assertEqual(decor_blocks[0]["rows"][0]["cells"][0]["text"], "")
 
+    def test_standalone_answer_line_is_preserved_as_full_line_while_inline_and_shell_stay_short(self):
+        from workflow.wire_format import FULL_LINE_BLANK, expand_standalone_answer_lines
+        # 翻译/仿写题下方独立整行 83 个下划线不被截成 6 个 _
+        raw = "你的玩偶是什么颜色的?(doll)\n" + "_" * 83
+        self.assertEqual(normalize_blank_text(raw), "你的玩偶是什么颜色的?(doll)\n" + FULL_LINE_BLANK)
+        # Word 导出的长空格 <u> 独立答题线同样保留为整行横线
+        spaced = "88.Why was the mouse very sad?\n<u>\xa0</u><u>" + " " * 78 + "</u>"
+        self.assertEqual(normalize_blank_text(spaced), "88.Why was the mouse very sad?\n" + FULL_LINE_BLANK)
+        # 存量已被旧版截短成 6 个 _ 的翻译题在上传投影阶段也能展开回整行横线
+        legacy = "例句:We met friendly people.\n仿写:我们在北京参观了很多地方。\n______"
+        self.assertEqual(
+            expand_standalone_answer_lines(legacy),
+            "例句:We met friendly people.\n仿写:我们在北京参观了很多地方。\n" + FULL_LINE_BLANK,
+        )
+        # 完形/补全对话等纯空壳子题与行内空档保持 6 个 _ 不变
+        self.assertEqual(normalize_blank_text("______"), "______")
+        self.assertEqual(expand_standalone_answer_lines("______"), "______")
+        self.assertEqual(
+            normalize_blank_text("Boys and girls,________ ________________________."),
+            "Boys and girls,______ ______.",
+        )
+
 if __name__ == "__main__":
     unittest.main()

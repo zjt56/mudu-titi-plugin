@@ -476,35 +476,60 @@ def _report_files(stage):
 
 def _candidate_evidence(folder, stage):
     """Expose bounded local candidates, never treat their presence as acceptance."""
-    if stage not in {"answers", "explanations", "knowledge", "types", "audio"}:
+    if stage not in {"answers", "explanations", "knowledge", "types", "audio", "review"}:
         return []
     def directory(path):
         # Symlinks and junctions can redirect a listing into another batch.
         return path.is_dir() and not supervisor._redirected(path)
 
-    base = Path(folder) / "workflow" / "agent-runs"
-    if not directory(base):
-        return []
+    def newest_json(path, limit):
+        if not directory(path):
+            return []
+        return sorted((p for p in path.glob("*.json") if p.is_file() and not supervisor._redirected(p)),
+                      key=lambda p: p.stat().st_mtime_ns, reverse=True)[:limit]
+
     rows = []
     try:
-        runs = sorted((p for p in base.glob(stage + "-*")
-                       if directory(p) and p.name != stage + "-parts"),
-                      key=lambda p: p.stat().st_mtime, reverse=True)[:2]
         paths = []
-        for run in runs:
-            paths.append(run / "response.json")
-            progress = sorted((p for p in run.glob("repair-progress*.json")
-                               if p.is_file() and not supervisor._redirected(p)),
-                              key=lambda p: p.stat().st_mtime, reverse=True)[:1]
-            paths.extend(progress)
-            parts = sorted((p for p in run.glob("round-*-part-*") if directory(p)),
-                           reverse=True)[:40]
-            paths.extend(part / "response.json" for part in parts)
-        failures = base / (stage + "-parts")
-        if directory(failures):
-            paths.extend(sorted(failures.glob("*.failure.json"),
-                                key=lambda p: p.stat().st_mtime, reverse=True)[:20])
-        for path in paths:
+        if stage == "review":
+            wf = Path(folder) / "workflow"
+            failures = newest_json(wf / "review-failures", 10)
+            paths.extend(failures)
+            for failure in failures:
+                checked = supervisor._regular_file(Path(folder), failure.relative_to(folder).as_posix())
+                if checked is None or checked.stat().st_size > 128_000:
+                    continue
+                report = supervisor._read(checked)
+                state_path = report.get("state_path")
+                if state_path is None and re.fullmatch(r"round-[0-9a-f]{32}", failure.stem):
+                    binding = supervisor._regular_file(Path(folder), f"workflow/review-bindings/{failure.name}")
+                    if binding is not None:
+                        state_path = supervisor._read(binding).get("state_path")
+                if isinstance(state_path, str) and re.fullmatch(r"workflow/review-partitions/[0-9a-f]{64}\.json", state_path):
+                    paths.append(Path(folder) / state_path)
+            paths.extend(newest_json(wf / "review-partial", 10))
+            paths.extend(newest_json(wf / "review-partitions", 4))
+        else:
+            base = Path(folder) / "workflow" / "agent-runs"
+            if not directory(base):
+                return []
+            runs = sorted((p for p in base.glob(stage + "-*")
+                           if directory(p) and p.name != stage + "-parts"),
+                          key=lambda p: p.stat().st_mtime, reverse=True)[:2]
+            for run in runs:
+                paths.append(run / "response.json")
+                progress = sorted((p for p in run.glob("repair-progress*.json")
+                                   if p.is_file() and not supervisor._redirected(p)),
+                                  key=lambda p: p.stat().st_mtime, reverse=True)[:1]
+                paths.extend(progress)
+                parts = sorted((p for p in run.glob("round-*-part-*") if directory(p)),
+                               reverse=True)[:40]
+                paths.extend(part / "response.json" for part in parts)
+            failures = base / (stage + "-parts")
+            if directory(failures):
+                paths.extend(sorted(failures.glob("*.failure.json"),
+                                    key=lambda p: p.stat().st_mtime, reverse=True)[:20])
+        for path in dict.fromkeys(paths):
             relative = path.relative_to(folder).as_posix()
             checked = supervisor._regular_file(Path(folder), relative)
             if checked is not None:
@@ -524,10 +549,11 @@ _STAGE_SOURCE_HINTS = {
     "types": ["app/workflow/content_stages.py", "app/workflow/local_agent.py"],
     "knowledge": ["app/workflow/content_stages.py", "app/workflow/taxonomy.py"],
     "audio": ["app/workflow/content_stages.py", "app/workflow/audio.py"],
+    "underlines": ["app/scripts/06-upload/mark_underline.py", "app/workflow/underline_layout.py"],
     "assemble": ["app/workflow/assembler.py", "app/workflow/self_heal_actions.py"],
     "validate": ["app/workflow/validation.py", "app/workflow/assembler.py"],
     "format_gate": ["app/workflow/legacy_format.py", "app/workflow/validation.py"],
-    "review": ["app/workflow/review.py", "app/workflow/local_agent.py"],
+    "review": ["app/workflow/review_rounds.py", "app/workflow/review.py", "app/workflow/local_agent.py"],
     "review_gate": ["app/workflow/review.py", "app/workflow/structure.py"],
 }
 
@@ -1180,18 +1206,47 @@ def _handoff_locked(folder):
             'reason': '异常已交 AI 运维分析，等待接手或查看已记录的修复建议'}
 
 
+_PENDING_INCIDENT_STATUSES = frozenset({
+    'queued', 'claimed', 'awaiting_execution', 'investigating',
+    'repairing', 'verifying', 'waiting_external', 'waiting_evidence',
+    'needs_human', 'needs_deep_repair',
+})
+
+_INCIDENT_SCAN_STAT_FILES = (
+    "workflow/" + LEDGER,
+    "workflow/manifest.json",
+    "workflow/ocr-reconciliation.json",
+    "06_batch/batch.base.json",
+    "01_source/structure.confirmed.json",
+)
+_INCIDENT_SCAN_IDLE_CACHE: dict[str, tuple[tuple, bool]] = {}
+_INCIDENT_SCAN_IDLE_CACHE_MAX = 512
+
+
+def _is_pending_incident(state) -> bool:
+    incident = (state or {}).get('incident') or {}
+    return incident.get('status') in _PENDING_INCIDENT_STATUSES
+
+
 def pending_incident(folder):
     """Read-only admission hint; terminal history never keeps scanning alive.
 
     Discovery/expiry/reconciliation remain owned by the ordinary incidents path.
     In particular this hint never saves a ledger just to check if work exists.
     """
-    incident = (_load(Path(folder)) or {}).get('incident') or {}
-    return incident.get('status') in {
-        'queued', 'claimed', 'awaiting_execution', 'investigating',
-        'repairing', 'verifying', 'waiting_external', 'waiting_evidence',
-        'needs_human', 'needs_deep_repair',
-    }
+    return _is_pending_incident(_load(Path(folder)))
+
+
+def _incident_scan_stat_key(folder: Path) -> tuple:
+    parts = []
+    for rel in _INCIDENT_SCAN_STAT_FILES:
+        path = folder / rel
+        try:
+            st = path.stat()
+            parts.append((st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size))
+        except OSError:
+            parts.append(None)
+    return tuple(parts)
 
 
 def view(root, folder, *, discover=True):
@@ -1220,27 +1275,39 @@ def _folder_needs_incident_scan(folder: Path) -> bool:
     Only returns False when `_discover()` provably cannot create, update, or
     reconcile an incident on this folder.
     """
+    folder = Path(folder)
+    cache_key = str(folder)
+    stat_key = _incident_scan_stat_key(folder)
+    cached = _INCIDENT_SCAN_IDLE_CACHE.get(cache_key)
+    if cached is not None and cached[0] == stat_key:
+        return False
     state = _load(folder)
     if state:
-        if pending_incident(folder):
+        if _is_pending_incident(state):
+            _INCIDENT_SCAN_IDLE_CACHE.pop(cache_key, None)
             return True
         if state.get("resume_outbox"):
+            _INCIDENT_SCAN_IDLE_CACHE.pop(cache_key, None)
             return True
         if any(isinstance(row, dict) and row.get("status") == "unknown"
                for row in (state.get("receipts") or [])):
+            _INCIDENT_SCAN_IDLE_CACHE.pop(cache_key, None)
             return True
     try:
         manifest = mf.load(folder)
     except (OSError, ValueError, KeyError, TypeError):
+        _INCIDENT_SCAN_IDLE_CACHE.pop(cache_key, None)
         return True
     stages = manifest.get("stages") or {}
     sg = stages.get("structure_gate") or {}
     if sg.get("rebuild_required") or (
             sg.get("status") in mf.TERMINAL_OK and bool(self_heal._structure_unusable(folder))):
+        _INCIDENT_SCAN_IDLE_CACHE.pop(cache_key, None)
         return True
     ext = stages.get("extract") or {}
     if ext.get("status") == mf.PENDING and (
             ext.get("exit_code") == 6 or (folder / "workflow/ocr-reconciliation.json").is_file()):
+        _INCIDENT_SCAN_IDLE_CACHE.pop(cache_key, None)
         return True
     for spec in contracts.STAGES:
         if spec.id in self_heal.BOUNDARIES or spec.kind == contracts.HUMAN:
@@ -1252,7 +1319,11 @@ def _folder_needs_incident_scan(folder: Path) -> bool:
                 and rec.get("continue_unqualified") is True):
             continue
         if st in {mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW, mf.RUNNING}:
+            _INCIDENT_SCAN_IDLE_CACHE.pop(cache_key, None)
             return True
+    if len(_INCIDENT_SCAN_IDLE_CACHE) >= _INCIDENT_SCAN_IDLE_CACHE_MAX:
+        _INCIDENT_SCAN_IDLE_CACHE.clear()
+    _INCIDENT_SCAN_IDLE_CACHE[cache_key] = (stat_key, False)
     return False
 
 
@@ -1364,24 +1435,34 @@ def _read_evidence(folder, data):
     # Do not expose arbitrary inputs, prompts, another stage or another batch.
     allowed = set(self_heal.SOURCE_FILES) | set(self_heal.REPORTS)
     if data.get("scope") == "plugin":
-        if not re.fullmatch(r"app/workflow/[a-z_]+\.py", relative):
-            raise ValueError("source_not_allowlisted")
+        if not (re.fullmatch(r"app/workflow/[a-z0-9_]+\.py", relative)
+                or re.fullmatch(r"app/scripts/(?:[a-z0-9_][a-z0-9_-]*/)*[a-z_][a-z0-9_]*\.py", relative)
+                or re.fullmatch(r"app/workbench/[a-z0-9_]+\.py", relative)):
+            raise ValueError(
+                f"source_not_allowlisted: {relative!r} 不在只读源码白名单内"
+                "（允许 app/workflow/*.py、app/scripts/**/*.py、app/workbench/*.py）"
+            )
         path = supervisor._regular_file(Path(__file__).resolve().parents[2], relative)
     else:
         current = _load(folder).get("incident") or {}
         candidate_paths = {row["path"] for row in _candidate_evidence(folder, current.get("stage"))}
         if (relative not in allowed and relative not in candidate_paths
                 and relative not in {"workflow/logs/" + s.id + ".log" for s in contracts.STAGES}):
-            raise ValueError("evidence_not_allowlisted")
+            sample = sorted(candidate_paths)[:6]
+            hint = f"；当前阶段可读候选={sample}" if sample else ""
+            raise ValueError(f"evidence_not_allowlisted: {relative!r} 不在白名单内{hint}")
         path = supervisor._regular_file(folder, relative)
     if path is None:
         raise ValueError("evidence_missing")
-    offset = max(0, min(int(data.get("offset", 0)), 10000000))
+    offset = max(0, min(int(data.get("offset", 0)), path.stat().st_size))
     limit = max(1, min(int(data.get("limit", 12000)), 24000))
-    with path.open("r", encoding="utf-8", errors="replace") as stream:
+    with path.open("r", encoding="utf-8", errors="replace", newline="\n") as stream:
         stream.seek(offset)
         text = stream.read(limit)
-    return {"path": relative, "offset": offset, "text": _redact(text), "limit": limit}
+        next_offset = stream.tell()
+        eof = not stream.read(1)
+    return {"path": relative, "offset": offset, "text": _redact(text), "limit": limit,
+            "next_offset": next_offset, "eof": eof}
 
 
 def _verify(folder, incident):
@@ -1841,6 +1922,10 @@ def action(root, folder, payload, *, enqueue=None):
             raise ValueError("repair_claim_required")
         if not investigation and name not in {"release", "cancel"} and incident.get("snapshot") != _snapshot(folder, incident["stage"]):
             raise ValueError("inputs_changed: release then claim a fresh snapshot")
+        if name == "install_code_repair":
+            from . import operations_development as dev
+            if dev.release_awaiting_restart(_source_root()):
+                raise OperationsBusy("worker_busy: 上一次代码发布仍在等待宿主重启")
         recovery = data.get("session_corruption")
         if "session_corruption" in data:
             # An authenticated Host reports the exact Harness restore defect; this

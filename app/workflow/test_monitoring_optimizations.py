@@ -592,6 +592,35 @@ class MonitoringOptimizationsTest(unittest.TestCase):
             (idle / "01_source/structure.confirmed.json").unlink()
             self.assertTrue(operations._folder_needs_incident_scan(idle))
 
+            # Restore structure and verify single ledger load on cold scan, zero loads on cached warm scan,
+            # and immediate invalidation when operations.json changes.
+            (idle / "01_source/structure.confirmed.json").write_text(
+                json.dumps({"units": [{"unit_id": "u1", "numbers": [1], "unit_kind": "standalone", "stem": "1. Hi"}]}),
+                encoding="utf-8",
+            )
+            (idle / "workflow/operations.json").write_text(
+                json.dumps({"identity": operations._identity(idle),
+                            "incident": {"incident_id": "i0", "status": "resolved"}}), encoding="utf-8"
+            )
+            operations._INCIDENT_SCAN_IDLE_CACHE.clear()
+            load_calls = 0
+            orig_load = operations._load
+            def counting_load(folder_arg):
+                nonlocal load_calls
+                load_calls += 1
+                return orig_load(folder_arg)
+            with patch.object(operations, "_load", side_effect=counting_load):
+                self.assertFalse(operations._folder_needs_incident_scan(idle))
+                self.assertEqual(load_calls, 1)
+                self.assertFalse(operations._folder_needs_incident_scan(idle))
+                self.assertEqual(load_calls, 1)
+                (idle / "workflow/operations.json").write_text(
+                    json.dumps({"identity": operations._identity(idle),
+                                "incident": {"incident_id": "i2", "status": "queued"}}), encoding="utf-8"
+                )
+                self.assertTrue(operations._folder_needs_incident_scan(idle))
+                self.assertEqual(load_calls, 2)
+
             # heading_candidates cache returns isolated dicts so caller mutation cannot corrupt cache.
             sample_text = "Unit 1\n**Ⅰ. 根据首字母及汉语提示补全单词**\n1. apple\n"
             first = sync_practice.heading_candidates(sample_text)

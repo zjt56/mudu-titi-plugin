@@ -172,6 +172,32 @@ def _same_unit_mirror(matches):
     return True
 
 
+def _exact_paragraph_unit(matches):
+    """The single unit whose own passage field is exactly this source paragraph.
+
+    A unit may quote another unit's passage sentence verbatim (a 熟词生义 item
+    repeating a cloze line), so the same full context exists in several units
+    while only the source paragraph that actually carries the underline owns it.
+    The owning field equals the source paragraph in full; quoted copies are only
+    substrings of a longer passage and must never be marked. Several exact
+    fields, none, or an exact non-passage field (subquestion/option) stay
+    ambiguous.
+    """
+    units = set()
+    for _owner, _key, path, _left, _right, _inside, _overlap, exact in matches:
+        if not exact:
+            continue
+        if not _is_mirror_field(path):
+            return None
+        unit = _unit_index(path)
+        if unit is None:
+            return None
+        units.add(unit)
+    if len(units) != 1:
+        return None
+    return units.pop()
+
+
 def restore(batch, source_text):
     candidate = copy.deepcopy(batch)
     changes, issues = [], []
@@ -232,7 +258,8 @@ def restore(batch, source_text):
                     # Full paragraph context is identical for every hit because
                     # each was located by matching the same plain_context; the mark's
                     # relative position within it is the shared (lo, hi) span.
-                    matches.append((owner, key, path, left, right, inside, overlap))
+                    matches.append((owner, key, path, left, right, inside, overlap,
+                                    value == plain_context))
             evidence = {"source_context": plain_context, "underlined": marked_plain}
             if not matches:
                 issues.append(dict(evidence, code="UNDERLINE_MAPPING_MISSING",
@@ -243,24 +270,44 @@ def restore(batch, source_text):
                 # its own text fields (e.g. stem repeats the opening paragraph of
                 # material, and both already carry the mark). Multiple hits are
                 # the same logical underline mirrored within one unit, so mark
-                # all of them rather than refuse. Hits that land in different
-                # units, or at genuinely different positions, stay ambiguous.
-                if not _same_unit_mirror(matches):
+                # all of them rather than refuse.
+                if _same_unit_mirror(matches):
+                    mirror_overlap = False
+                    for owner, key, path, left, right, inside, overlap, _exact in matches:
+                        if overlap:
+                            mirror_overlap = True
+                        elif not inside:
+                            text = owner[key]
+                            owner[key] = text[:left] + "<u>" + text[left:right] + "</u>" + text[right:]
+                            changes.append(dict(evidence, field="/".join(map(str, path))))
+                    if mirror_overlap:
+                        issues.append(dict(evidence, code="UNDERLINE_OVERLAP", message="已有画线与原卷画线范围冲突"))
+                    continue
+                # Several units may hold the same sentence because one of them
+                # quotes the other's passage line (e.g. 熟词生义 repeating a
+                # cloze sentence). Only the unit whose own field is exactly this
+                # source paragraph owns the mark; quoted copies belong to source
+                # lines that carry no underline. Genuinely competing positions
+                # (several exact fields, or none) stay ambiguous.
+                owned = _exact_paragraph_unit(matches)
+                if owned is None:
                     issues.append(dict(evidence, code="UNDERLINE_MAPPING_AMBIGUOUS",
                                        message=f"完整原文上下文对应 {len(matches)} 个位置，未自动改动"))
                     continue
-                mirror_overlap = False
-                for owner, key, path, left, right, inside, overlap in matches:
+                owned_overlap = False
+                for owner, key, path, left, right, inside, overlap, _exact in matches:
+                    if _unit_index(path) != owned:
+                        continue
                     if overlap:
-                        mirror_overlap = True
+                        owned_overlap = True
                     elif not inside:
                         text = owner[key]
                         owner[key] = text[:left] + "<u>" + text[left:right] + "</u>" + text[right:]
                         changes.append(dict(evidence, field="/".join(map(str, path))))
-                if mirror_overlap:
+                if owned_overlap:
                     issues.append(dict(evidence, code="UNDERLINE_OVERLAP", message="已有画线与原卷画线范围冲突"))
                 continue
-            owner, key, path, left, right, inside, overlap = matches[0]
+            owner, key, path, left, right, inside, overlap, _exact = matches[0]
             if overlap:
                 issues.append(dict(evidence, code="UNDERLINE_OVERLAP", message="已有画线与原卷画线范围冲突"))
             elif not inside:

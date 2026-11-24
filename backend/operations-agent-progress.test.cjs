@@ -51,6 +51,57 @@ async function fixture(options = {}) {
     get turns() { return turns; }, get disposals() { return disposals; }, get cancellations() { return cancellations; } };
 }
 
+test('failed validation receipts stop repeated dispatch and leave budget for corrected actions', async () => {
+  const results = [];
+  const f = await fixture({ managerOptions: { maxActions: 5 }, backend: (_path, init) => {
+    const { action, input, request_id } = init.body || {};
+    if (action === 'code_repair' && input.operation === 'test') {
+      return input.tests[0].startsWith('workflow.')
+        ? { request_id, status: 'completed', evidence: { passed: true } }
+        : { request_id, status: 'failed', evidence: { error: 'tests_invalid: bad path' } };
+    }
+  }, program: async ({ call }) => {
+    for (const tests of [['bad/path.py'], ['bad/path.py'], ['bad/path.py'], ['another/path.py']]) {
+      results.push(await call('code_repair', { operation: 'test', tests }));
+    }
+    results.push(await call('code_repair', { operation: 'test', tests: ['workflow.test_fixture'] }));
+    await call('verify');
+  } });
+  await f.run();
+  assert.deepEqual(results.map(result => result.status), ['failed', 'failed', 'failed', 'failed', undefined]);
+  assert.match(results[0].host_hint, /workflow\.test_review_rounds/);
+  assert.equal(results[1].stop_repeating, true);
+  assert.ok(results[2].cached_refusal && results[3].cached_refusal);
+  assert.equal(results[4].passed, true);
+  assert.equal(f.calls.filter(call => call.body?.action === 'code_repair').length, 3);
+  assert.ok(f.calls.some(call => call.body?.action === 'verify'));
+  assert.ok(!f.events.some(event => event.state === 'budget_exceeded'));
+  await f.manager.dispose();
+});
+
+test('release pause blocks new claims but waits for the existing attempt to settle', async () => {
+  let admit = true;
+  const started = deferred();
+  const finish = deferred();
+  const f = await fixture({ managerOptions: { canAdmit: () => admit },
+    program: async () => { started.resolve(); await finish.promise; } });
+  try {
+    f.manager.start();
+    await started.promise;
+    admit = false;
+    await f.manager.tick();
+    assert.equal(f.manager.busyForRestart(), true);
+    assert.equal(f.calls.filter(call => call.path.endsWith('/claim')).length, 1);
+    finish.resolve();
+    await f.manager.drain();
+    assert.equal(f.manager.busyForRestart(), false);
+    assert.ok(f.calls.some(call => call.body?.action === 'release'));
+  } finally {
+    finish.resolve();
+    await f.manager.dispose();
+  }
+});
+
 test('hard deadline settles whenIdle that ignores cancel, stops heartbeats, and releases the lease', async () => {
   const f = await fixture({ program: never, managerOptions: { maxAttemptMs: 25 } });
   await f.run();

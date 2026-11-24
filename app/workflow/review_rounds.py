@@ -30,6 +30,8 @@ ARTIFACT = "review_round"
 ROUND_ROOT_FIELDS = ('status', 'artifacts', 'notes', 'findings')
 _REVIEW_FEEDBACK = 'workflow/repair-feedback/review.json'
 _REVIEW_ROUTING_HEADER = 'Stage: review\nAgent: review\n'
+_PARTITION_CATALOG_VERSION = 'catalog-v1'
+_PARTITION_PATH = re.compile(r'workflow/review-partitions/[0-9a-f]{64}\.json')
 
 
 def _round_envelope(status='completed', notes=None):
@@ -774,15 +776,24 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
             s_units = [r for u in selected for r in structure_by_unit.get(u['unit_id'], ())]
             subset['01_source/structure.confirmed.json'] = {**structure_shell, 'units': s_units}
 
+        from . import sync_practice
         from .review_paper_scope import heading_type as _heading_type
 
         def _declared_section_type(unit):
             sec = unit.get('source_section')
             if isinstance(sec, dict):
-                from_sec = _heading_type(sec.get('title'))
+                title = sec.get('title')
+                from_sec = _heading_type(title)
                 if from_sec:
                     return from_sec
-            if isinstance(section_types, dict) and unit.get('numbers'):
+                if isinstance(title, str) and title.strip():
+                    hit = sync_practice.classify(title)
+                    if isinstance(hit, dict) and isinstance(hit.get('type'), str) and hit['type'].strip():
+                        return hit['type'].strip()
+            # Flat section_types is keyed by bare question number; never trust it when
+            # numbers restart across sections (scoped-v1 / lesson sheets).
+            if (not has_restarted_numbers and unit.get('identity_version') != 'scoped-v1'
+                    and isinstance(section_types, dict) and unit.get('numbers')):
                 u_types = {section_types.get(str(n)) for n in unit['numbers']}
                 if len(u_types) == 1:
                     only = next(iter(u_types))
@@ -800,6 +811,10 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
             cand_names = {raw_types_by_unit.get(unit['unit_id']) for unit in selected}
             if cand_names and None not in cand_names:
                 names = cand_names
+        # Keep the declared scope available for independent judgment, with the
+        # delivered type's allowed dimensions available even when they differ.
+        names.update(raw_types_by_unit[u['unit_id']] for u in selected
+                     if raw_types_by_unit.get(u['unit_id']))
         rules_key = 'skills-reference/knowledge-matching-rules.md'
         if names:
             if catalog_key in subset:
@@ -873,14 +888,24 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
             return True
         return str(raw_types_by_unit.get(uid) or '').startswith('听力')
 
+    all_nums = [n for u in units for n in (u.get('numbers') or ())]
+    has_restarted_numbers = len(all_nums) != len(set(all_nums))
+
     def _unit_type_for_bucket(unit):
+        from . import sync_practice
         from .review_paper_scope import heading_type as _heading_type
         sec = unit.get('source_section')
         if isinstance(sec, dict):
-            from_sec = _heading_type(sec.get('title'))
+            title = sec.get('title')
+            from_sec = _heading_type(title)
             if from_sec:
                 return from_sec
-        if isinstance(section_types, dict):
+            if isinstance(title, str) and title.strip():
+                hit = sync_practice.classify(title)
+                if isinstance(hit, dict) and isinstance(hit.get('type'), str) and hit['type'].strip():
+                    return hit['type'].strip()
+        if (not has_restarted_numbers and unit.get('identity_version') != 'scoped-v1'
+                and isinstance(section_types, dict)):
             u_types = {section_types.get(str(n)) for n in unit.get('numbers') or ()}
             if len(u_types) == 1:
                 only = next(iter(u_types))
@@ -1282,6 +1307,11 @@ def _check_bound_inputs(batch, task_id, plan=None):
     generation = _review_generation(batch, plan)
     if generation is not None and binding.get('state_path') in generation['retired_state_paths']:
         raise ReviewInputsChanged('Review generation changed; export a new blind task')
+    state_path = binding.get('state_path')
+    if (isinstance(state_path, str) and _PARTITION_PATH.fullmatch(state_path)
+            and _path(batch, _catalog_replacement_path(state_path)).is_file()
+            and not _path(batch, 'workflow/review-bindings/' + task_id + '.receipt.json').is_file()):
+        raise ReviewInputsChanged('Review catalog partition was replaced; export the current task')
     try:
         hashes = binding['input_hashes']
         if binding.get('context_version') == 'blind-context-v12' and binding.get('frozen_state') is True:
@@ -1479,6 +1509,79 @@ def _partition_progress(batch, state_path, state):
         return -1
 
 
+def _catalog_replacement_path(state_path):
+    return 'workflow/review-partition-replacements/' + Path(state_path).name
+
+
+def _review_types_by_uid(batch):
+    doc = review._load(_path(batch, agent_tasks.ARTIFACTS['types']))
+    rows = doc.get('items') if isinstance(doc, dict) else None
+    return {row['unit_id']: row['type'].strip() for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict) and isinstance(row.get('unit_id'), str)
+            and isinstance(row.get('type'), str) and row['type'].strip()}
+
+
+def _stale_catalog_parts(state, types_by_uid):
+    """Return the part indexes that lack catalog coverage for delivered types."""
+    if not isinstance(state, dict) or not types_by_uid:
+        return set()
+    parts = state.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return set()
+    from workbench import taxonomy
+    known_types = set(taxonomy.types())
+    stale = set()
+    for index, part in enumerate(parts):
+        if not isinstance(part, dict):
+            continue
+        unit_ids = part.get("unit_ids")
+        if not isinstance(unit_ids, list):
+            continue
+        expected = {types_by_uid.get(uid) for uid in unit_ids if isinstance(uid, str)} & known_types
+        if not expected:
+            continue
+        prompt = part.get("prompt")
+        supplied = prompt.partition("\nBEGIN SUPPLIED CONTENT")[2] if isinstance(prompt, str) else ""
+        data = supplied.rpartition("END SUPPLIED CONTENT")[0]
+        try:
+            context = json.loads(data.partition("\n")[2])
+            tkm = context.get("references/type-knowledge-map.json")
+            if isinstance(tkm, str):
+                tkm = json.loads(tkm)
+            by_type = tkm.get('by_type')
+        except (ValueError, AttributeError):
+            by_type = None
+        if not isinstance(by_type, dict) or not expected <= set(by_type):
+            stale.add(index)
+    return stale
+
+
+def _partition_catalog_stale(state, types_by_uid):
+    return bool(_stale_catalog_parts(state, types_by_uid))
+
+
+def _catalog_reusable_checks(batch, state, stale_parts, plan, round_id):
+    checks, refs = [], []
+    completed = state.get('completed')
+    if not isinstance(completed, list):
+        return checks, refs
+    for index, entry in enumerate(completed):
+        if index in stale_parts or not isinstance(entry, dict):
+            continue
+        saved = entry.get('checks')
+        if not isinstance(saved, list):
+            continue
+        for check in saved:
+            if not isinstance(check, dict):
+                continue
+            uid, number = review._check_key(check, round_id)
+            checks.append(check)
+            refs.append({'unit_id': uid, 'number': number, 'task_id': entry.get('task_id'), 'part': True})
+    synthetic = {'plan': state['plan'], 'rounds': [{'round_id': round_id,
+        'execution_id': 'accepted-parts', 'checks': checks, 'reuse': refs}]}
+    return review._payload_reusable_checks(batch, synthetic, plan, round_id)
+
+
 def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_per_part=None,
                  only_round=None, allow_pending_audio=False, standalone_max_units=None):
     batch = Path(batch_dir)
@@ -1530,22 +1633,41 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
     compatible_prompt_digests = {prompt_digest, review._digest(round_prompt.removeprefix(_REVIEW_ROUTING_HEADER))}
     generation = _review_generation(batch, plan)
 
-    def _state_path_for(hashes, digest):
+    def _state_path_for(hashes, digest, catalog_version=None):
         key = [plan, round_id, hashes, CONTEXT_VERSION, PROMPT_VERSION, reuse, digest]
         if generation is not None:
             key.append(generation['nonce'])
+        if catalog_version is not None:
+            key.append(catalog_version)
         return "workflow/review-partitions/" + review._digest(key) + ".json"
 
-    state_path = _state_path_for(input_hashes, prompt_digest)
-    path = _path(batch, state_path)
-    # A previous upgrade may already have exported a new state without results.
-    # Prefer the matching frozen state with the most recoverable targets.
-    state = _load(path.read_bytes()) if path.is_file() else None
-    best_progress = max(0, _partition_progress(batch, state_path, state)) if state is not None else 0
+    types_by_uid = _review_types_by_uid(batch)
+    listening_uids = {uid for uid, kind in types_by_uid.items() if kind.startswith("听力")}
+    try:
+        for unit in agent_tasks.confirmed_units(batch):
+            uid = unit.get("unit_id")
+            if not isinstance(uid, str):
+                continue
+            unit_type = unit.get("type")
+            unit_type = unit_type.strip() if isinstance(unit_type, str) and unit_type.strip() else ""
+            resolved_type = types_by_uid.get(uid) or unit_type
+            if not resolved_type or resolved_type.startswith("听力") or unit_type.startswith("听力"):
+                listening_uids.add(uid)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+
+    new_state_path = _state_path_for(input_hashes, prompt_digest, _PARTITION_CATALOG_VERSION)
+    state_path = new_state_path
+    path = _path(batch, new_state_path)
+    state = None
+    best_progress = -1
+    stale_states = []
+    repair_checks, repair_refs = [], []
     retired = set(generation['retired_state_paths']) if generation else set()
-    for entry in sorted(path.parent.glob('*.json')):
+    # Prefer the exact key on ties and still accept clean legacy frozen states.
+    for entry in [path, *sorted(p for p in path.parent.glob('*.json') if p != path)]:
         candidate_path = f'workflow/review-partitions/{entry.name}'
-        if candidate_path == state_path or candidate_path in retired or not re.fullmatch(r'[0-9a-f]{64}\.json', entry.name):
+        if candidate_path in retired or not _PARTITION_PATH.fullmatch(candidate_path):
             continue
         try:
             candidate = review._load(_path(batch, candidate_path))
@@ -1555,15 +1677,27 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
         if not isinstance(hashes, dict) or {p: d for p, d in hashes.items() if p != _REVIEW_FEEDBACK} != current_hashes:
             continue
         digest = candidate.get('prompt_digest')
-        if (not isinstance(digest, str) or digest not in compatible_prompt_digests
+        catalog_version = candidate.get('catalog_version')
+        if (catalog_version not in (None, _PARTITION_CATALOG_VERSION)
+                or not isinstance(digest, str) or digest not in compatible_prompt_digests
                 or candidate.get('plan') != plan or candidate.get('round_id') != round_id
-                or candidate.get('reuse') != reuse or candidate_path != _state_path_for(hashes, digest)):
+                or candidate.get('base_reuse', candidate.get('reuse')) != reuse
+                or candidate_path != _state_path_for(hashes, digest, catalog_version)):
+            continue
+        stale_parts = _stale_catalog_parts(candidate, types_by_uid)
+        if stale_parts:
+            stale_states.append(candidate_path)
+            checks, refs = _catalog_reusable_checks(batch, candidate, stale_parts, plan, round_id)
+            if len(refs) > len(repair_refs):
+                repair_checks, repair_refs = checks, refs
             continue
         progress = _partition_progress(batch, candidate_path, candidate)
+        if progress >= 0:
+            progress += len(candidate.get('reuse', [])) - len(reuse)
         if progress > best_progress:
             best_progress = progress
             state_path, state = candidate_path, copy.deepcopy(candidate)
-    if state is not None:
+    if state is not None and best_progress >= len(repair_refs):
         if not isinstance(state, dict):
             raise ValueError("Invalid review partition binding")
         input_hashes = state.get('input_hashes')
@@ -1577,36 +1711,20 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
                 or {p: d for p, d in input_hashes.items() if p != _REVIEW_FEEDBACK} != current_hashes):
             raise ValueError("Invalid review partition binding")
     else:
+        if path.is_file():
+            raise ValueError('Current review catalog state is invalid; preserve it for diagnosis')
+        state_path = new_state_path
+        combined_reuse = list(reuse)
+        combined_checks = list(reused_checks)
+        reused_keys = {review._check_key(ref, round_id) for ref in reuse}
+        for check, ref in zip(repair_checks, repair_refs):
+            key = review._check_key(ref, round_id)
+            if key not in reused_keys:
+                combined_checks.append(check)
+                combined_reuse.append(ref)
+                reused_keys.add(key)
         budget = max_input_chars
-        listening_uids = set()
-        types_by_uid = {}
-        types_file = _path(batch, agent_tasks.ARTIFACTS["types"])
-        if types_file.is_file():
-            try:
-                t_doc = _load(types_file.read_bytes())
-                for row in (t_doc.get("items") or []):
-                    if isinstance(row, dict) and isinstance(row.get("unit_id"), str):
-                        rtype = row.get("type")
-                        if isinstance(rtype, str) and rtype.strip():
-                            types_by_uid[row["unit_id"]] = rtype.strip()
-                            if rtype.strip().startswith("听力"):
-                                listening_uids.add(row["unit_id"])
-            except (OSError, ValueError):
-                pass
-        try:
-            for unit in agent_tasks.confirmed_units(batch):
-                uid = unit.get("unit_id")
-                if not isinstance(uid, str):
-                    continue
-                unit_type = unit.get("type")
-                unit_type = unit_type.strip() if isinstance(unit_type, str) and unit_type.strip() else ""
-                resolved_type = types_by_uid.get(uid) or unit_type
-                if not resolved_type or resolved_type.startswith("听力") or unit_type.startswith("听力"):
-                    listening_uids.add(uid)
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
         while True:
-            reused_keys = {review._check_key(ref, round_id) for ref in reuse}
             pending = ([q for q in (plan.get('sample') or []) if review._check_key(q, round_id) not in reused_keys]
                        if round_id == 'sample' else [uid for uid in plan['units'] if (uid, None) not in reused_keys])
             pending_units = {q['unit_id'] for q in pending} if round_id == 'sample' else set(pending)
@@ -1642,11 +1760,18 @@ def _export_task(batch_dir, max_input_chars=600000, skip_rounds=(), max_units_pe
                  "prompt_digest": prompt_digest,
                  "generation_nonce": generation["nonce"] if generation else None,
                  "execution_id": "round-group-" + uuid.uuid4().hex, "parts": parts, "completed": [],
-                 "reuse": reuse, "reused_checks": reused_checks}
+                 "catalog_version": _PARTITION_CATALOG_VERSION, "base_reuse": reuse,
+                 "reuse": combined_reuse, "reused_checks": combined_checks}
+        if _partition_catalog_stale(state, types_by_uid):
+            raise ValueError('Review partition builder omitted required catalog types')
         frozen_digest = review.frozen_partition_digest(state)
         for index in range(len(parts)):
             _write_part_package(batch, state, state_path, plan, input_hashes, index, frozen_digest)
         _save(batch, state_path, state)
+    for replaced in stale_states:
+        marker = _catalog_replacement_path(replaced)
+        if not _path(batch, marker).is_file():
+            _save(batch, marker, {'replaced_by': state_path})
     if len(state["completed"]) >= len(state["parts"]):
         raise ValueError("Invalid completed partition state")
     part_index = len(state["completed"])

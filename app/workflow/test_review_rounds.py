@@ -2034,6 +2034,8 @@ class ReviewRoundsTest(unittest.TestCase):
         state = json.loads(old_state_path.read_text(encoding='utf-8'))
 
         # Restore the old task shape, including the pre-routing-header digest.
+        state.pop('catalog_version', None)
+        state.pop('base_reuse', None)
         legacy_hashes = dict(state['input_hashes'])
         legacy_hashes['workflow/repair-feedback/review.json'] = agent_tasks.MISSING_INPUT
         state['input_hashes'] = legacy_hashes
@@ -2131,6 +2133,173 @@ class ReviewRoundsTest(unittest.TestCase):
         final_manifest = mf.load(self.batch)
         self.assertEqual(final_manifest['stages']['audio']['status'], mf.COMPLETED)
         self.assertEqual(final_manifest['stages']['review']['status'], mf.COMPLETED)
+
+    def test_restarted_lesson_numbers_do_not_corrupt_catalog_packs_with_later_cloze(self):
+        # 课时作业各节从 1 重新编号时，扁平 section_types['1'..'5'] 会被后续完形填空覆盖。
+        # 单词拼写/完成句子不得因此被误划入完形填空桶或只拿到 主题+语篇体裁 目录。
+        units = [
+            {
+                'unit_id': 'u-spell-1',
+                'unit_kind': 'standalone',
+                'numbers': [1],
+                'identity_version': 'scoped-v1',
+                'question_ids': {'1': 'q-spell-1'},
+                'source_section': {'title': '**Ⅰ. 根据句意用所给词的适当形式填空**'},
+            },
+            {
+                'unit_id': 'u-sent-1',
+                'unit_kind': 'standalone',
+                'numbers': [1],
+                'identity_version': 'scoped-v1',
+                'question_ids': {'1': 'q-sent-1'},
+                'source_section': {'title': '**Ⅱ. 根据汉语意思完成句子,每空一词**'},
+            },
+            {
+                'unit_id': 'u-cloze-1',
+                'unit_kind': 'group',
+                'numbers': [1, 2],
+                'identity_version': 'scoped-v1',
+                'question_ids': {'1': 'q-cloze-1', '2': 'q-cloze-2'},
+                'source_section': {'title': '**Ⅰ. 完形填空**'},
+            },
+        ]
+        ctx = {
+            'confirmed_units_with_stable_ids': units,
+            'references/knowledge-catalog.json': {'paths': []},
+            'references/type-knowledge-map.json': {'by_type': {'单词拼写': {}, '完成句子': {}, '完形填空': {}}},
+            '03_types/types.json': {
+                'items': [
+                    {'unit_id': 'u-spell-1', 'type': '单词拼写'},
+                    {'unit_id': 'u-sent-1', 'type': '完成句子'},
+                    {'unit_id': 'u-cloze-1', 'type': '完形填空'},
+                ]
+            },
+        }
+        base = {
+            'prompt': (
+                'HEADER\nBEGIN SUPPLIED CONTENT (JSON)\n'
+                + json.dumps(ctx, ensure_ascii=False)
+                + '\nEND SUPPLIED CONTENT\nReturn JSON only.'
+            )
+        }
+        overwritten_section_types = {'1': '完形填空', '2': '完形填空'}
+        parts = review_rounds._partition_contexts(
+            base,
+            500000,
+            max_units=5,
+            round_id='labels',
+            section_types=overwritten_section_types,
+        )
+        by_uid = {}
+        for part in parts:
+            payload = json.loads(part['context'].split('\n', 1)[1])
+            packs = payload['references/knowledge-catalog.json']['packs']
+            for uid in part['unit_ids']:
+                by_uid[uid] = packs
+        self.assertIn('vocab-spelling', by_uid['u-spell-1'])
+        self.assertIn('grammar', by_uid['u-spell-1'])
+        self.assertNotIn('theme', by_uid['u-spell-1'])
+        self.assertIn('vocab-full', by_uid['u-sent-1'])
+        self.assertIn('grammar', by_uid['u-sent-1'])
+        self.assertEqual(by_uid['u-cloze-1'], ['theme', 'genre'])
+
+    def test_partition_catalog_stale_detects_poisoned_frozen_partition(self):
+        """冻结分片的 type-knowledge-map 漏掉单元真实题型时，自动判定过期以触发重建；正常分片保持复用。"""
+        stale_prompt = review_rounds._round_prompt(
+            'labels',
+            ['u-spell-1'],
+            ' (JSON)\n' + json.dumps({
+                'references/type-knowledge-map.json': {'by_type': {'完形填空': {'dims': []}}},
+            }, ensure_ascii=False) + '\n',
+        )
+        fresh_prompt = review_rounds._round_prompt(
+            'labels',
+            ['u-spell-1'],
+            ' (JSON)\n' + json.dumps({
+                'references/type-knowledge-map.json': {'by_type': {'单词拼写': {'dims': []}}},
+            }, ensure_ascii=False) + '\n',
+        )
+        types_by_uid = {'u-spell-1': '单词拼写'}
+        self.assertTrue(review_rounds._partition_catalog_stale(
+            {'parts': [{'unit_ids': ['u-spell-1'], 'prompt': stale_prompt}]},
+            types_by_uid,
+        ))
+        self.assertFalse(review_rounds._partition_catalog_stale(
+            {'parts': [{'unit_ids': ['u-spell-1'], 'prompt': fresh_prompt}]},
+            types_by_uid,
+        ))
+        for bad_map in ({}, {'by_type': {}}):
+            prompt = review_rounds._round_prompt(
+                'labels', ['u-spell-1'], ' (JSON)\n' + json.dumps({
+                    'references/type-knowledge-map.json': bad_map,
+                }) + '\n')
+            self.assertTrue(review_rounds._partition_catalog_stale(
+                {'parts': [{'unit_ids': ['u-spell-1'], 'prompt': prompt}]}, types_by_uid))
+
+    def test_catalog_rebuild_reuses_accepted_sibling_and_fences_legacy_task(self):
+        from workflow import self_heal
+
+        self._parallel_batch()
+        structures = json.loads((self.batch / '01_source/structure.confirmed.json').read_text())
+        structures['units'][1]['source_section'] = {'title': '完形填空'}
+        self.write('01_source/structure.confirmed.json', structures)
+        partition = review_rounds._partition_contexts
+
+        def legacy_partition(*args, **kwargs):
+            parts = partition(*args, **kwargs)
+            bad = parts[1]
+            header, data = bad['context'].split('\n', 1)
+            payload = json.loads(data)
+            payload['references/type-knowledge-map.json']['by_type'].pop('阅读理解')
+            bad['context'] = header + '\n' + json.dumps(payload, ensure_ascii=False) + '\n'
+            return parts
+
+        with (patch.object(review_rounds, '_PARTITION_CATALOG_VERSION', None),
+              patch.object(review_rounds, '_partition_catalog_stale', return_value=False),
+              patch.object(review_rounds, '_partition_contexts', side_effect=legacy_partition)):
+            legacy = review_rounds.export_group(self.batch, only_round='labels', max_units_per_part=1)
+        first, failed = [part['task_id'] for part in legacy['parts'][:2]]
+        binding = review_rounds._check_bound_inputs(self.batch, first)
+        accepted = review_rounds.import_result(
+            self.batch, first, self._part_response(binding['task']['prompt'], 'labels'))
+        self.assertEqual(accepted['part_completed'], 1)
+        before = (self.batch / binding['state_path']).read_bytes()
+        error = '1 target(s) need repair: Every review needs knowledge and subquestions'
+        review_rounds._save_review_failure(self.batch, failed, 'labels', error)
+        self.write('workflow/manifest.json', {'stages': {'review': {'task_id': failed}}})
+        with patch.object(agent, 'invoke') as model:
+            plan = self_heal._plan(self.batch, 'review', error, {})
+        model.assert_not_called()
+        self.assertEqual(plan['action'], 'retry_stage')
+
+        rebuilt = review_rounds.export_group(self.batch, only_round='labels', max_units_per_part=1)
+        self.assertCountEqual([part['targets'] for part in rebuilt['parts']],
+                              [part['targets'] for part in legacy['parts'][1:]])
+        next_task = rebuilt['parts'][0]['task_id']
+        self.assertEqual(review_rounds.export_task(self.batch, only_round='labels')['task_id'], next_task)
+        self.assertEqual((self.batch / binding['state_path']).read_bytes(), before)
+        with self.assertRaises(review_rounds.ReviewInputsChanged):
+            review_rounds._check_bound_inputs(self.batch, failed)
+        replacement = review_rounds._check_bound_inputs(self.batch, next_task)
+        state = json.loads((self.batch / replacement['state_path']).read_text())
+        self.assertEqual(state['reuse'], [{'unit_id': legacy['parts'][0]['targets'][0], 'number': None,
+                                           'task_id': first, 'part': True}])
+        self.assertFalse(review_rounds._partition_catalog_stale(state, review_rounds._review_types_by_uid(self.batch)))
+
+        review_rounds._save_review_failure(self.batch, next_task, 'labels', error)
+        self.write('workflow/manifest.json', {'stages': {'review': {'task_id': next_task}}})
+        model_plan = {'response': {'status': 'completed', 'artifacts': {'self_heal': {
+            'action': 'retry_stage', 'stage': 'review', 'reason': '补齐单目标字段'}}}}
+        with patch.object(agent, 'invoke', return_value=model_plan) as model:
+            plan = self_heal._plan(self.batch, 'review', error, {})
+        model.assert_called_once()
+        self.assertEqual(plan['reason'], '补齐单目标字段')
+        for part in rebuilt['parts']:
+            task = review_rounds._check_bound_inputs(self.batch, part['task_id'])['task']
+            report = review_rounds.import_result(
+                self.batch, part['task_id'], self._part_response(task['prompt'], 'labels'))
+        self.assertTrue(report['completed'])
+        self.assertTrue(review.evaluate_rounds(self.batch)['execution_completed'])
 
     def test_round_prompt_carries_stage_agent_and_round_headers(self):
         """审核分片提示词必须携带 Stage/Agent/ROUND 头部，供 wf-router 命中一审与审核模型设置。"""

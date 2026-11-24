@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
+import copy
 import hashlib
 import json
 import re
@@ -923,6 +926,22 @@ def _doc_to_docx(source: Path, evidence: Path):
     )
 
 
+_DOCX_RUN_CACHE: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "extract_docx_run_cache", default=None
+)
+
+
+@contextlib.contextmanager
+def _docx_run_cache_scope():
+    """Within a single extract.run(), reuse exact DOCX extraction (text + media) across classify and extract."""
+    with tempfile.TemporaryDirectory(prefix="extract-docx-cache-") as tmp:
+        token = _DOCX_RUN_CACHE.set({"entries": {}, "root": Path(tmp), "seq": 0})
+        try:
+            yield
+        finally:
+            _DOCX_RUN_CACHE.reset(token)
+
+
 def extract_source(source: Path, destination: Path, config=None, ocr_result=None, ocr_warning=None, pdf_ocr_wait=None) -> dict:
     """原件只读，原生/OCR 结果留存；不伪造答案、题号覆盖或审核通过。"""
     source = Path(source).expanduser().resolve(strict=True)
@@ -939,7 +958,43 @@ def extract_source(source: Path, destination: Path, config=None, ocr_result=None
         source, doc_convert = _doc_to_docx(source, evidence)
     if source.suffix.lower() == ".docx":
         from workflow.docx_extract import extract_docx
-        result = extract_docx(source, evidence)
+        docx_hash = original_hash if doc_convert is None else mf.sha256_file(source)
+        run_cache = _DOCX_RUN_CACHE.get()
+        cache_key = (str(source.resolve()), docx_hash, id(extract_docx))
+        cached_entry = run_cache["entries"].get(cache_key) if run_cache is not None else None
+        if cached_entry is not None:
+            result = copy.deepcopy(cached_entry["result"])
+            cached_media = cached_entry.get("media_dir")
+            if cached_media and Path(cached_media).is_dir():
+                dst_media = evidence / "media"
+                dst_media.mkdir(parents=True, exist_ok=True)
+                for item in result.get("media", []):
+                    name = item["name"]
+                    if Path(name).name != name:
+                        raise ValueError("不合法媒体文件名")
+                    src_file = Path(cached_media) / name
+                    if src_file.is_file():
+                        shutil.copy2(src_file, dst_media / name)
+        else:
+            result = extract_docx(source, evidence)
+            if run_cache is not None and doc_convert is None:
+                run_cache["seq"] += 1
+                media_backup = None
+                src_media_dir = evidence / "media"
+                if result.get("media") and src_media_dir.is_dir():
+                    media_backup = run_cache["root"] / f"m{run_cache['seq']}"
+                    media_backup.mkdir(parents=True, exist_ok=True)
+                    for item in result.get("media", []):
+                        name = item["name"]
+                        if Path(name).name != name:
+                            raise ValueError("不合法媒体文件名")
+                        src_file = src_media_dir / name
+                        if src_file.is_file():
+                            shutil.copy2(src_file, media_backup / name)
+                run_cache["entries"][cache_key] = {
+                    "result": copy.deepcopy(result),
+                    "media_dir": str(media_backup) if media_backup else None,
+                }
         result.setdefault("pages", [])
         # 正常 Word 保留原生文字/格式。用户 2026-11-11 策略：纯 Word 直接文字提取、
         # 不跑本地 OCR；图片（含符号字体/浮动对象/图片型）语义交给 extract 之后的
@@ -1275,6 +1330,11 @@ def _material_classifier():
 
 
 def run(batch_dir: Path) -> dict:
+    with _docx_run_cache_scope():
+        return _run_impl(batch_dir)
+
+
+def _run_impl(batch_dir: Path) -> dict:
     batch_dir = Path(batch_dir)
     manifest = mf.load(batch_dir)
     source = manifest.get("inputs", {}).get("source", {}).get("path")
@@ -1388,20 +1448,23 @@ def run(batch_dir: Path) -> dict:
         ans_text = batch_dir / "01_source_ans" / "正文.txt"
         if ans_path:
             try:
-                if Path(ans_path).suffix.lower() == ".pdf":
-                    answer = next((row for row in roles.get("documents", [])
-                                   if row.get("input") == "answers" and row.get("text_path")), None)
-                    if answer:
-                        ans_text.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(batch_dir / answer["text_path"], ans_text)
-                        answer_source = Path(ans_path).expanduser()
-                        if not answer_source.is_absolute():
-                            answer_source = batch_dir / answer_source
-                        _write(ans_text.parent / "preparation.json", {
-                            "source": str(answer_source.resolve()),
-                            "source_sha256": mf.sha256_file(answer_source),
-                            "text_sha256": mf.sha256_file(ans_text),
-                            "extraction_report": {"source": "material_classify"}})
+                answer = next((row for row in roles.get("documents", [])
+                               if row.get("input") == "answers" and row.get("text_path")), None)
+                answer_source = Path(ans_path).expanduser()
+                if not answer_source.is_absolute():
+                    answer_source = batch_dir / answer_source
+                reused_text = (batch_dir / answer["text_path"]) if answer else None
+                if (answer and reused_text is not None and reused_text.is_file()
+                        and answer_source.is_file()
+                        and answer.get("source_sha256") == mf.sha256_file(answer_source)
+                        and answer.get("text_sha256") == mf.sha256_file(reused_text)):
+                    ans_text.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(reused_text, ans_text)
+                    _write(ans_text.parent / "preparation.json", {
+                        "source": str(answer_source.resolve()),
+                        "source_sha256": answer["source_sha256"],
+                        "text_sha256": mf.sha256_file(ans_text),
+                        "extraction_report": {"source": "material_classify"}})
                 else:
                     try:
                         from workflow import agent_prepare

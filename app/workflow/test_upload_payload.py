@@ -1188,3 +1188,20 @@ class AliasAlignmentTests(unittest.TestCase):
         self.assertEqual(wire["subquestions"][0]["explanation"], "本文提到AI生成内容在课堂上的应用。")
         self.assertEqual(wire["subquestions"][1]["explanation"], "根据第一段可知选A。（AI生成，待校对）")
 
+    def test_translation_standalone_answer_line_expands_to_full_line_on_upload(self):
+        from workflow.wire_format import FULL_LINE_BLANK
+        item = question()
+        item["question_type"] = "翻译"
+        item["filterMetadata"]["subtypes"] = ["汉翻英"]
+        item["options"] = []
+        item["stem"] = "你的玩偶是什么颜色的?(doll)\n______"
+        item["answer"] = "What colour is your doll?"
+        item["explanation"] = "无"
+        report = upload_payload.build_payload(batch(item), self.catalog)
+        self.assertTrue(report["passed"], report["errors"])
+        self.assertEqual(
+            report["payload"]["items"][0]["stem"],
+            "你的玩偶是什么颜色的?(doll)\n" + FULL_LINE_BLANK,
+        )
+        # 本地输入对象不被原地修改
+        self.assertEqual(item["stem"], "你的玩偶是什么颜色的?(doll)\n______")

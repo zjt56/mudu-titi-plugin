@@ -1192,6 +1192,12 @@ class FastRepairOperationsTests(unittest.TestCase):
         self.assertEqual(installed["status"], "completed", installed)
         first = op._code_record(self.folder)
         self.assertEqual(first["install_process"], op._process_identity())
+        marker = self.source / dev.RELEASE_MARKER
+        pending_release = marker.read_bytes()
+        with self.assertRaisesRegex(op.OperationsBusy, "等待宿主重启"):
+            self.request(claim, "install_code_repair", {"confirm": True}, request="extra-install")
+        self.assertEqual(marker.read_bytes(), pending_release)
+        self.assertFalse(any(row["request_id"] == "extra-install" for row in op._load(self.folder)["receipts"]))
         blocked = self.request(claim, "verify", request="verify-before-restart")
         self.assertIn("installed_pending_restart", blocked["evidence"]["error"])
         self.request(claim, "release", request="release")
@@ -1202,6 +1208,8 @@ class FastRepairOperationsTests(unittest.TestCase):
         self.assertEqual(op._code_record(self.folder)["status"], "installed_pending_restart")
         with patch.object(op, "_process_identity", return_value={"pid": 99999, "generation": "new-interpreter"}), \
              patch.object(op, "_pid_alive", return_value=False):
+            # A healthy boot consumes the marker before another release may install.
+            marker.unlink()
             # The old process lease cannot authorize actions in a new process; a
             # restarted interpreter is gone, so its lease is released at claim.
             with self.assertRaisesRegex(ValueError, "stale_lease"):
