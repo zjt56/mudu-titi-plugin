@@ -279,6 +279,32 @@ class DocxExtractTests(unittest.TestCase):
         self.assertFalse(by_name["option.png"].get("decorative"))
         self.assertFalse(by_name["passage.png"].get("decorative"))
 
+    def test_emphasis_dot_extracts_em_and_respects_style_override(self):
+        styles = (
+            '<w:style w:type="character" w:styleId="Dotted">'
+            '<w:rPr><w:em w:val="dot"/></w:rPr>'
+            '</w:style>'
+        )
+        body = (
+            '<w:p>'
+            '<w:r><w:rPr><w:b/></w:rPr><w:t>1.</w:t></w:r>'
+            '<w:r><w:t>两个</w:t></w:r>'
+            '<w:r><w:rPr><w:em w:val="dot"/></w:rPr><w:t>黄</w:t></w:r>'
+            '<w:r><w:t>鹂鸣翠柳,一行</w:t></w:r>'
+            '<w:r><w:rPr><w:em w:val="underDot"/></w:rPr><w:t>白</w:t></w:r>'
+            '<w:r><w:t>鹭上青天。</w:t></w:r>'
+            '<w:r><w:rPr><w:rStyle w:val="Dotted"/></w:rPr><w:t>赤</w:t></w:r>'
+            '<w:r><w:rPr><w:rStyle w:val="Dotted"/><w:em w:val="none"/></w:rPr><w:t>无点</w:t></w:r>'
+            '<w:r><w:rPr><w:em w:val="dot"/></w:rPr><w:t>   </w:t></w:r>'
+            '</w:p>'
+        )
+        self.make_docx(body, styles=styles)
+        result = self.run_extract()
+        self.assertEqual(
+            result["text"],
+            "**1.**两个<em>黄</em>鹂鸣翠柳,一行<em>白</em>鹭上青天。<em>赤</em>无点   ",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

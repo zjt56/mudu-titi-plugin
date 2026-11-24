@@ -156,7 +156,9 @@ class PhoneticStructureTest(unittest.TestCase):
         result = upload_payload.build_payload(final, batch_dir=self.root)
         self.assertNotIn('GROUP_INCOMPLETE', {e['code'] for e in result['errors']})
         wire = result['payload']['items'][0]
-        self.assertEqual(wire['stem'], row['stem'])
+        # 加粗是排版符号，不是题目内容：上传口径统一剥离 **（与本文件其他用例一致），
+        # 不能因此把同一句题干判成不一致。
+        self.assertEqual(wire['stem'], row['stem'].replace('**', ''))
         self.assertEqual(wire['attachments'], row['attachments'])
         for invalid in ([], [dict(row['attachments'][0], placement='answer')],
                         [dict(row['attachments'][0], name='other.jpeg')]):
@@ -607,6 +609,103 @@ class PhoneticStructureTest(unittest.TestCase):
             rows[0][field] = '' if field == 'stem' else []
             codes = [p['code'] for p in question_content.audit_batch_source(self.root, {'items': rows})['issues']]
             self.assertIn('SOURCE_SHARED_RUBRIC_MISSING' if field == 'stem' else 'SOURCE_IMAGE_MISSING', codes)
+
+    def test_reading_group_with_pure_image_material_passes_a8_preview_and_payload(self):
+        from workbench.server import source_blocks
+        from workflow import denoise, extract, structure_gate
+
+        text = ('Unit 6 Beyond Earth\n第六课时 Project & Reflecting\n'
+                '**【二、B 创新阅读专练】**\n'
+                '**阅读理解[情境题]**\n'
+                '[IMG poster.jpg]\n'
+                '**1.**What can tourists do during the trip?\n'
+                'A.Explore Mars.  B.Collect moon rocks.\n'
+                'C.Pick delicious fruit.  D.Visit a space station.\n'
+                '**2.**Where can you probably read the text?\n'
+                'A.On a travel website.  B.In a music magazine.\n'
+                'C.In a storybook.  D.In a health report.')
+        structure, text, _ = extract.infer_structure(text)
+        units = structure_gate._build_units(
+            structure['sections'], structure['groups'], denoise.clean_body(text)[0].splitlines())
+        self.assertEqual(len(units), 1)
+        for path, content in (('正文.txt', text), ('structure.json', structure),
+                              ('structure.confirmed.json', {'units': units})):
+            self.write('01_source/' + path, content)
+        media = self.root / '01_source/media/poster.jpg'
+        media.write_bytes(b'reading-poster-bytes')
+
+        row = question_draft.build(self.root)['items'][0]
+        row['question_type'] = '阅读理解'
+        row['filterMetadata'] = {'subtypes': ['选择2题'], 'source': '测试同步', 'source_type': '同步练习', 'year': 2026}
+        row['knowledge'] = ['语篇体裁/应用文/广告', '主题/人与自然/宇宙探索/地球与宇宙探秘']
+        for child, ans in zip(row['subquestions'], ('B', 'A')):
+            child['answer'] = ans
+        row['attachments'][0]['url'] = '/source-media/' + self.root.name + '/poster.jpg'
+
+        self.assertEqual(row['material'], '')
+        self.assertEqual(row['stem'], '**阅读理解[情境题]**')
+        verified = self.verified()
+        self.assertEqual(phonetic_structure.shape(row, verified), (True, False))
+
+        check = self.check_script('check_structure')._check_unit
+        self.assertEqual(check(row, verified), [])
+        self.assertEqual(question_content.audit_batch_source(self.root, {'items': [row]})['issues'], [])
+
+        filled = {'items': [row]}
+        for filename in ('content.snapshot.json', 'batch_meta.base.json', 'batch_meta.json'):
+            self.write('06_batch/' + filename, filled)
+        final = assemble_local.project_final_view(self.root, filled)
+        self.assertEqual(final['items'][0]['attachments'], row['attachments'])
+        self.assertEqual(assemble_local.project_final_view(self.root, filled), final)
+
+        chunk = preview.source_slice(self.root, row['numbers'], unit_id=row['unit_id'])
+        self.assertIn('[IMG poster.jpg]', chunk)
+        self.assertIn('poster.jpg', json.dumps(source_blocks(chunk)))
+
+        result = upload_payload.build_payload(final, batch_dir=self.root)
+        error_codes = {e['code'] for e in result['errors']}
+        self.assertNotIn('GROUP_INCOMPLETE', error_codes)
+        self.assertNotIn('MISSING_STEM', error_codes)
+        self.assertEqual(result['payload']['items'][0]['attachments'], row['attachments'])
+
+        # 反向防线：缺图、错 placement、冒名图、外链/异批 URL、篡改 stem、源文件丢失均拒放行并报 A8
+        for invalid in (
+            {**row, 'attachments': []},
+            {**row, 'attachments': [dict(row['attachments'][0], placement='answer')]},
+            {**row, 'attachments': [dict(row['attachments'][0], name='other.jpg')]},
+            {**row, 'attachments': [dict(row['attachments'][0], url='/source-media/other-batch/poster.jpg')]},
+            {**row, 'stem': ''},
+        ):
+            self.assertEqual(phonetic_structure.shape(invalid, verified), (False, False))
+            self.assertTrue(any('[A8]' in p for p in check(invalid, verified)))
+        media.unlink()
+        self.assertFalse(self.verified())
+        self.assertTrue(any('[A8]' in p for p in check(row, self.verified())))
+
+        # 反向防线：原文含文字+图的阅读材料若文字 material 被清空，绝不放行（仍报 A8 与 GROUP_INCOMPLETE）
+        mixed_text = ('Unit 6 Beyond Earth\n第六课时 Project & Reflecting\n'
+                      '**阅读理解[情境题]**\n'
+                      'Welcome to our Moon Travel Agency.\n'
+                      '[IMG poster.jpg]\n'
+                      '**1.**What can tourists do?\n'
+                      'A.Explore Mars.  B.Collect moon rocks.\n'
+                      'C.Pick fruit.  D.Visit a station.')
+        m_struct, m_text, _ = extract.infer_structure(mixed_text)
+        m_units = structure_gate._build_units(
+            m_struct['sections'], m_struct['groups'], denoise.clean_body(m_text)[0].splitlines())
+        for path, content in (('正文.txt', m_text), ('structure.json', m_struct),
+                              ('structure.confirmed.json', {'units': m_units})):
+            self.write('01_source/' + path, content)
+        media.write_bytes(b'reading-poster-bytes')
+        m_row = question_draft.build(self.root)['items'][0]
+        m_row['question_type'] = '阅读理解'
+        m_row['subquestions'][0]['answer'] = 'B'
+        m_row['attachments'][0]['url'] = '/source-media/' + self.root.name + '/poster.jpg'
+        self.assertIn('Moon Travel Agency', m_row['material'])
+        wiped = {**m_row, 'material': ''}
+        self.assertNotIn(m_row['unit_id'], self.verified())
+        self.assertTrue(any('[A8]' in p for p in check(wiped, self.verified())))
+        self.assertIn('GROUP_INCOMPLETE', {e['code'] for e in upload_payload.build_payload({'items': [wiped]}, batch_dir=self.root)['errors']})
 
 
 if __name__ == '__main__':

@@ -74,8 +74,8 @@ def report(problems, ok_msg="通过", *, soft_default=False):
 
 
 def plain(text):
-    """去掉 HTML 标签（<u></u>、<b> 等）后的纯文本。"""
-    return re.sub(r"</?(?:u|b|i|sup|sub)>", "", text or "")
+    """去掉 HTML 标签（<u></u>、<b>、<em> 等）后的纯文本。"""
+    return re.sub(r"</?(?:u|b|i|em|strong|sup|sub)>", "", text or "")
 
 
 def effective_options(q, unit, is_cloze):

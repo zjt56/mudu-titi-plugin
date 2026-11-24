@@ -19,7 +19,7 @@ from urllib.parse import unquote, urlsplit
 from workbench import taxonomy, textbook
 from workflow import label_audit
 from workflow.metadata_policy import MISSING
-from workflow.question_content import material_blank_numbers
+from workflow.question_content import group_material_from_media, material_blank_numbers
 from workflow.wire_format import expand_standalone_answer_lines, normalize_blank_text
 
 from workflow.workflow_constants import AI_MARK
@@ -840,7 +840,8 @@ class _Builder:
                  or isinstance(data.get("answer"), str) and not data["answer"].strip()))
         material_group = (not child and data.get('unit_kind') == 'group'
                           and bool(data.get('subquestions'))
-                          and (_nonempty(data.get('material')) or bool(data.get('materialBlocks'))))
+                          and (_nonempty(data.get('material')) or bool(data.get('materialBlocks'))
+                               or (phonetic_material and bool(self.verified_phonetic.get(uid, {}).get("_source_image_material")))))
         for key in ("stem", "answer"):
             if not _nonempty(data.get(key)) and not (
                     key == "answer" and deferred_group_answer
@@ -1002,7 +1003,12 @@ class _Builder:
                 # a written transcript to satisfy a reading-material rule.
                 listening_group = (isinstance(main_type, str) and main_type.startswith('听力')
                                    and _nonempty(data.get('stem')))
-                if not children or not (_nonempty(data.get("material")) or data.get("materialBlocks") or listening_group or phonetic_material):
+                # 共享材料可以是结构化 materialBlocks，也可以是组级导语里唯一的图片/表格
+                # 引用（原卷语篇以图片形式排入 Word）；判据与本地 A8 体检共用
+                # question_content.group_material_from_media，不因图片材料报缺材料。
+                media_material = group_material_from_media(data)
+                if not children or not (_nonempty(data.get("material")) or data.get("materialBlocks")
+                                        or listening_group or phonetic_material or media_material):
                     self.error("GROUP_INCOMPLETE", "题组必须有结构化子题及共享材料；听力题组可保留原卷听力说明", uid)
                 expected_numbers = raw.get("numbers")
                 child_numbers = [c.get("number") for c in children if isinstance(c, dict)]

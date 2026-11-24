@@ -61,9 +61,14 @@ def _check_unit(u, verified=None, table_verified=None):
     # 例外：听力组题的材料是音频，没有文字 material；跳过听力时允许为空，不伪造文本。
     #       语音组题（phonetic_material）与每小题目包含内容的合法形态(self_contained_group)
     #       同样允许空 material，但都必须有子题。
+    #       组题的材料由原卷图片/表格原件承载（materialBlocks/attachments 的图片块，或
+    #       组级导语里唯一的 [IMG]/[TABLE] 引用）时也允许空文字 material，判据统一在
+    #       workflow.question_content.group_material_from_media，与发布闸门/上传契约同口径；
+    #       导语还有文字却 material 为空，仍是真正缺材料，继续报 A8。
     if kind == "group":
         if (not material and not str(qt).startswith("听力")
-                and not phonetic_material and not self_contained_group):
+                and not phonetic_material and not self_contained_group
+                and not question_content.group_material_from_media(u)):
             problems.append(f"[A8] {uid} ({qt}): 题组 unit_kind=group 但 material 为空")
         if not subs:
             problems.append(f"[A8] {uid} ({qt}): 题组 unit_kind=group 但 subquestions 为空")

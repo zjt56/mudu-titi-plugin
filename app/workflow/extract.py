@@ -46,7 +46,7 @@ GROUP_TYPES = {"完形填空", "语法选择", "阅读理解", "任务型阅读"
 
 
 def _plain(line):
-    return re.sub(r"</?(?:u|sup|sub)>", "", line).replace("**", "")
+    return re.sub(r"</?(?:u|sup|sub|em)>", "", line).replace("**", "")
 
 
 # 图注空：`N.[IMG …](提示)` 或 `N.[IMG …]（提示）`。原卷短文填空/选词填空里，

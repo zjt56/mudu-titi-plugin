@@ -287,7 +287,7 @@ def project_structure(structure: dict, raw_text: str, cleaned_text: str | None =
     # accept only that one end-coordinate and project it to the last retained line.
     terminal_boundary = bool(raw_text) and raw_text.endswith(("\n", "\r"))
     direct = {n: i for i, n in enumerate(retained, 1)}
-    normalize = lambda text: re.sub(r"</?(?:u|sup|sub)>", "", str(text)).replace("**", "").strip()
+    normalize = lambda text: re.sub(r"</?(?:u|sup|sub|em)>", "", str(text)).replace("**", "").strip()
     for section in result.get("sections") or []:
         at, title = section.get("source_line"), section.get("title")
         if type(at) is int and title and (not 1 <= at <= len(raw_lines)

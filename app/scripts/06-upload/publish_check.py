@@ -93,9 +93,13 @@ def main(argv=None):
             # 听力组题的材料是音频，跳过听力时允许 material 为空（不伪造文本）。
             # 「每小题目包含内容、无共享材料」的合法形态（四线三格空白网格/看图题）不要求
             # material；判据与结构体检共用 question_content.self_contained_group 同一口径。
-            from workflow.question_content import self_contained_group
+            # 组题材料由原卷图片/表格原件承载（结构化 materialBlocks 或组级导语的图片引用）
+            # 时同样允许空文字 material，判据与结构体检/上传契约共用
+            # question_content.group_material_from_media。
+            from workflow.question_content import group_material_from_media, self_contained_group
             if (_is_blank(unit.get("material")) and not str(qt or "").startswith("听力")
-                    and not phonetic_material and not self_contained_group(unit)):
+                    and not phonetic_material and not self_contained_group(unit)
+                    and not group_material_from_media(unit)):
                 problems.append(f"{uid}: 题组缺少 material（A8）")
             if not has_subs:
                 problems.append(f"{uid}: 题组缺少 subquestions（A8）")

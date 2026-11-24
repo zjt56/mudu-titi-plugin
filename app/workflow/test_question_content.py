@@ -82,6 +82,63 @@ class LeadingImageOptionTest(unittest.TestCase):
         audit = audit_source_unit(unit)
         self.assertTrue(audit["passed"], audit["issues"])
 
+    def test_name_initial_is_not_an_option_label(self):
+        """“Alexis E.Block” 里的人名缩写不能被当成选项 E。"""
+        lines = [
+            "1.Why does the writer mention the movies?",
+            "A.To introduce great movies.",
+            "B.To show the robots’ development.",
+            "C.To catch readers’ interests.",
+            "D.To do a research.",
+            "2.What’s Alexis E.Block’s aim?",
+            "A.To make robots closer to people.",
+            "B.To make robots have self⁃awareness.",
+            "C.To make the friendship come true.",
+            "D.To make robots smarter than people.",
+        ]
+        part = question_parts(lines, 2)
+        self.assertEqual([option["label"] for option in part["options"]], list("ABCD"))
+        self.assertIn("E.Block", part["stem"])
+        candidate = [f"{option['label']}.{option['text']}" for option in part["options"]]
+        audit = audit_question(lines, 2, item={"number": 2, "options": candidate})
+        self.assertFalse(any(issue["code"] == "OPTIONS_MISMATCH" for issue in audit["issues"]),
+                         audit["issues"])
+
+    def test_group_with_name_initial_keeps_four_options(self):
+        """阅读组里出现人名缩写时，组内每道小题仍是 4 条选项，不判缺选项。"""
+        stem = "\n".join([
+            "1.Why does the writer mention the movies?",
+            "A.To introduce great movies.",
+            "B.To show the robots’ development.",
+            "C.To catch readers’ interests.",
+            "D.To do a research.",
+            "2.What’s Alexis E.Block’s aim?",
+            "A.To make robots closer to people.",
+            "B.To make robots have self⁃awareness.",
+            "C.To make the friendship come true.",
+            "D.To make robots smarter than people.",
+        ])
+        unit = {"unit_kind": "group", "type": "阅读理解", "numbers": [1, 2], "stem": stem,
+                "source_span": {"start_line": 1, "end_line": len(stem.splitlines())}}
+        audit = audit_source_unit(unit)
+        self.assertEqual([option["label"] for option in audit["questions"][2]["options"]], list("ABCD"))
+        self.assertFalse([issue for issue in audit["issues"]
+                          if issue["code"] == "SOURCE_OPTIONS_INCOMPLETE"], audit["issues"])
+        self.assertTrue(audit["passed"], audit["issues"])
+
+    def test_inline_options_after_title_case_words_stay_options(self):
+        options = ["A. New York", "B. Boston", "C. Chicago", "D. Dallas"]
+        for stem in ["Choose", "Where is Tom", "What did Alexis A. Block choose in B.C.?"]:
+            with self.subTest(stem=stem):
+                lines = ["1. " + stem + " " + " ".join(options)]
+                part = question_parts(lines, 1)
+                self.assertEqual(part["stem"], stem)
+                self.assertEqual([option["label"] for option in part["options"]], list("ABCD"))
+                self.assertEqual([option["text"] for option in part["options"]],
+                                 ["New York", "Boston", "Chicago", "Dallas"])
+                audit = audit_question(lines, 1, item={"number": 1, "options": options[1:]})
+                self.assertIn("OPTIONS_MISMATCH", {issue["code"] for issue in audit["issues"]})
+
 
 class LegitimateSourceShapeTest(unittest.TestCase):
     """原卷合法空/图形态与真实缺字必须区分，避免同类误判再次阻断。"""
@@ -123,6 +180,56 @@ class LegitimateSourceShapeTest(unittest.TestCase):
         self.assertIsNone(legitimate_source_shape(self.unit("阅读短文并作答", (1,))))
 
 
+class GroupMaterialFromMediaTest(unittest.TestCase):
+    """组题共享材料以原卷图片/表格原件交付时，空文字 material 不是丢内容。"""
+
+    def unit(self, **overrides):
+        unit = {
+            "unit_id": "u-img", "unit_kind": "group", "question_type": "阅读理解",
+            "numbers": [1, 2], "material": "",
+            "knowledge": ["语篇体裁/应用文", "主题/太空探索"],
+            "stem": ("[IMG image64.jpg]\n**1.**What can tourists do during the trip?\n"
+                     "A.Explore Mars.\tB.Visit a space station.\n**2.**Where can you read the text?\n"
+                     "A.On a travel website.\tB.In a storybook."),
+            "subquestions": [{"number": 1, "stem": "What can tourists do during the trip?", "answer": "B"},
+                             {"number": 2, "stem": "Where can you read the text?", "answer": "A"}],
+        }
+        unit.update(overrides)
+        return unit
+
+    def test_image_lead_is_shared_material(self):
+        from workflow.question_content import group_material_from_media
+        self.assertTrue(group_material_from_media(self.unit()))
+        self.assertTrue(group_material_from_media(self.unit(stem="[IMG image64.jpg]")))
+
+    def test_lead_text_or_missing_media_keeps_real_missing_material_blocked(self):
+        from workflow.question_content import group_material_from_media
+        # 组级导语除图片外还有文字：文字共享材料真的丢了，继续按缺材料处理。
+        self.assertFalse(group_material_from_media(self.unit(
+            stem="[IMG image64.jpg]\n阅读下列短文，从每小题所给的选项中选出最佳选项。\n**1.**What?")))
+        # 没有任何图片/表格证据。
+        self.assertFalse(group_material_from_media(self.unit(stem="**1.**What?")))
+        # 非题组不适用。
+        self.assertFalse(group_material_from_media(self.unit(unit_kind="standalone")))
+        # 解析/答案位置的图片不能顶替共享材料。
+        self.assertFalse(group_material_from_media(self.unit(
+            stem="**1.**What?",
+            attachments=[{"kind": "image", "name": "image6.jpg", "placement": "explanation"}])))
+
+    def test_local_structure_check_uses_same_image_material_rule(self):
+        import importlib.util
+        from pathlib import Path as _Path
+        path = _Path(__file__).resolve().parents[1] / "scripts/06-upload/check_structure.py"
+        spec = importlib.util.spec_from_file_location("a8_image_material", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertFalse([p for p in module._check_unit(self.unit()) if p.startswith("[A8]")])
+        # 组级导语只有一个图片引用时，空文字 material 不算缺材料。
+        self.assertFalse([p for p in module._check_unit(self.unit(stem="[IMG image64.jpg]"))
+                          if p.startswith("[A8]")])
+        # 导语还有文字却 material 为空，A8 仍须拦截。
+        self.assertTrue(any("[A8]" in p for p in module._check_unit(self.unit(
+            stem="[IMG image64.jpg]\n阅读下列短文，从每小题所给的选项中选出最佳选项。\n**1.**What?"))))
 
 
 SAMPLE = Path(__file__).resolve().parent.parent / "workflows" / "_real_2025"
@@ -249,6 +356,23 @@ class OptionBoundaryTest(unittest.TestCase):
             # 结构无法派生 single_writing_section 时不擅自改写；有可解析单元时才落回原文。
             changed = apply_required_writing_stem(batch, payload)
             self.assertIn(changed, (0, 1))
+
+    def test_spaced_name_initial_and_dotted_acronyms_in_stem_are_not_options(self):
+        from workflow.question_content import question_parts
+        cases = [
+            (["3.What's Alexis E. Block's aim?", "A.One", "B.Two", "C.Three", "D.Four"], 3, "E. Block"),
+            (["4.What happened at 8:00 A.M. yesterday?", "A.One", "B.Two", "C.Three", "D.Four"], 4, "A.M."),
+            (["5.Where is Washington, D.C. located?", "A.One", "B.Two", "C.Three", "D.Four"], 5, "D.C."),
+            (["6.What does Grade A. mean in the chart?", "A.Excellent", "B.Good", "C.Fair", "D.Poor"], 6, "Grade A."),
+        ]
+        for lines, num, expected_in_stem in cases:
+            with self.subTest(num=num):
+                part = question_parts(lines, num)
+                self.assertEqual([o["label"] for o in part["options"]], list("ABCD"))
+                self.assertIn(expected_in_stem, part["stem"])
+        # 行内直接接选项（无后续行首 A.）仍正常切分 4 项
+        inline = question_parts(["7.Choose one: A.Apple B.Banana C.Pear D.Peach"], 7)
+        self.assertEqual([o["label"] for o in inline["options"]], list("ABCD"))
 
 
 class ImageOptionEvidenceTest(unittest.TestCase):

@@ -47,6 +47,7 @@ except ImportError:  # 看台可以脱离流水线单独跑
     wf_source_policy = None
 
 ROOT = Path(__file__).resolve().parents[1]
+_SERVER_STARTED_AT = time()
 _WINDOWS = os.name == "nt"
 # 插件版：宿主编译生效配置后，让本进程拉起的 runner/auto 子进程也走插件模型路由。
 # 独立运行 app（没有 backend/.local-agent.effective.json）时保持原行为。
@@ -99,12 +100,13 @@ def serialized(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
         global _batches_snapshot, _batches_epoch
-        # Broker receipts own their process lock. In particular a native purge
-        # acknowledgement must reach the server while explicit batch deletion
-        # waits, and image observation must not hold the global write lock.
-        if (function.__name__ == "do_POST" and args
-                and urlparse(getattr(args[0], "path", "")).path.startswith("/api/content-agent/")):
-            return function(*args, **kwargs)
+        # Broker receipts and read-only operations heartbeats own their own
+        # locks/atomic files. Exempting /api/operations/service avoids holding
+        # the global write lock and busting _batches_snapshot every 5 seconds.
+        if function.__name__ == "do_POST" and args:
+            post_path = urlparse(getattr(args[0], "path", "")).path
+            if post_path.startswith("/api/content-agent/") or post_path == "/api/operations/service":
+                return function(*args, **kwargs)
         with _lock:
             try:
                 return function(*args, **kwargs)
@@ -1574,11 +1576,15 @@ def advance_state(name: str) -> dict:
             if stage_status not in ("completed", "approved", "skipped"):
                 state["self_heal"] = {key: healing[key] for key in
                     ("status", "stage", "next_retry_at", "attempt", "verified", "action", "reason", "error_code", "has_feedback") if key in healing}
-        ctx_info = _advance_context_info(folder)
-        if ctx_info.get("active_stage"):
-            for k in ("active_stage", "active_stage_label", "active_detail", "elapsed_seconds"):
-                if k in ctx_info:
-                    state[k] = ctx_info[k]
+        # active_stage/elapsed_seconds only exist while workflow/activity.json is present.
+        # Skipping _advance_context_info for idle batches avoids parsing manifest.json
+        # and upload-format.json across 100+ batches on every list poll.
+        if (folder / "workflow" / "activity.json").is_file():
+            ctx_info = _advance_context_info(folder)
+            if ctx_info.get("active_stage"):
+                for k in ("active_stage", "active_stage_label", "active_detail", "elapsed_seconds"):
+                    if k in ctx_info:
+                        state[k] = ctx_info[k]
     except ValueError:
         pass
     return state
@@ -2240,6 +2246,7 @@ def _clear_purged_batch_state(name):
     _OVERVIEW_CACHE.clear()
     _REVIEW_SNAPSHOT_CACHE.clear()
     _UNITS_BUNDLE_CACHE.clear()
+    _WORK_STATE_CACHE.clear()
     try:
         folder = WORKFLOWS / name
         disk_cache = _units_bundle_disk_path(folder)
@@ -2797,8 +2804,35 @@ def _overview_key(folder):
     audio = folder / "02_audio" / "SKIP_LISTENING"
     parts.append(("skip_listening", audio.is_file()))
     parts.append(("queue_removed", (folder / QUEUE_REMOVED).is_file()))
+    attempts_dir = folder / "07_upload" / "attempts"
+    if attempts_dir.is_dir():
+        attempt_parts = []
+        try:
+            for p in sorted(attempts_dir.iterdir()):
+                if p.suffix != ".json":
+                    continue
+                try:
+                    st = p.stat()
+                    attempt_parts.append((p.name, st.st_mtime_ns, st.st_size))
+                except OSError:
+                    attempt_parts.append((p.name, "missing"))
+        except OSError:
+            pass
+        parts.append(("upload_attempts", tuple(attempt_parts)))
     raw = repr(parts).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+_LIVE_OVERVIEW_CTX = threading.local()
+
+
+def _call_live_overview_matched(value, name, folder):
+    prev = getattr(_LIVE_OVERVIEW_CTX, "matched_folder", None)
+    _LIVE_OVERVIEW_CTX.matched_folder = str(folder)
+    try:
+        return _live_overview(value, name, folder)
+    finally:
+        _LIVE_OVERVIEW_CTX.matched_folder = prev
 
 
 def overview(name):
@@ -2807,7 +2841,7 @@ def overview(name):
     key = (str(folder), _overview_key(folder))
     hit = _cache_get_lru(_OVERVIEW_CACHE, key)
     if hit is not None:
-        return _live_overview(hit, name, folder)
+        return _call_live_overview_matched(hit, name, folder)
     saved = _load_overview_snapshot().get(name)
     saved_folder = saved.get("folder") if isinstance(saved, dict) else None
     same_folder = bool(saved_folder and (saved_folder == str(folder) or Path(saved_folder).resolve() == folder.resolve()))
@@ -2815,19 +2849,37 @@ def overview(name):
             and saved.get("key") == key[1] and isinstance(saved.get("value"), dict)):
         # Same content fingerprint as when the snapshot was written: reuse it.
         _cache_put_lru(_OVERVIEW_CACHE, key, saved["value"], _OVERVIEW_CACHE_MAX)
-        return _live_overview(saved["value"], name, folder)
+        return _call_live_overview_matched(saved["value"], name, folder)
     value = _overview_uncached(name, folder)
     _cache_put_lru(_OVERVIEW_CACHE, key, value, _OVERVIEW_CACHE_MAX)
     _OVERVIEW_SNAPSHOT_DIRTY = True
-    return _live_overview(value, name, folder)
+    return _call_live_overview_matched(value, name, folder)
 
 
 def _live_overview(value, name, folder):
     """Overlay runtime ownership on the cached document projection, without mutation."""
+    from datetime import timezone
     from workflow import activity
     value = dict(value)
     advance = advance_state(name)
     value["advance"] = advance
+    # Idle fast-path: when _overview_key() matched every disk file (manifest,
+    # upload-format, batch_meta, receipts, attempts, queue_removed) and there is
+    # no live advance/upload/audio/activity worker, reuse cached stage/upload/
+    # flow_done fields instead of re-reading & parsing 4+ JSONs per batch on
+    # every 2s list poll across 100+ idle batches.
+    if getattr(_LIVE_OVERVIEW_CTX, "matched_folder", None) == str(folder):
+        with _lock:
+            has_upload_job = name in _upload_jobs
+        if (not has_upload_job
+                and not (advance.get("running") or advance.get("queued") or advance.get("waiting"))
+                and not (folder / "workflow" / "activity.json").is_file()
+                and not _audio_has_live_worker(name)
+                and isinstance(value.get("stage"), dict) and value["stage"].get("items")
+                and isinstance(value.get("upload_status"), dict)
+                and "flow_done" in value):
+            value["observed_at"] = datetime.now(timezone.utc).isoformat()
+            return value
     upload = upload_state(name, include_unreviewed=False)
     value["upload_status"] = upload
     manifest = load(folder / "workflow/manifest.json", {}) or {}
@@ -2895,7 +2947,6 @@ def _live_overview(value, name, folder):
         if manifest.get("updated_at"):
             value["updated_at"] = manifest.get("updated_at")
     value["queue_removed"] = queue_removed(folder)
-    from datetime import timezone
     value["observed_at"] = datetime.now(timezone.utc).isoformat()
     return value
 
@@ -2949,6 +3000,12 @@ def _flow_timing(manifest):
     else:
         finish = max(all_finished)
     started = flow_started or all_started
+    extract_record = stages.get("extract") if isinstance(stages.get("extract"), dict) else {}
+    extract_start = _parse_iso(extract_record.get("started_at"))
+    if extract_start is not None and finish >= extract_start:
+        current_started = [s for s in started if s >= extract_start]
+        if current_started:
+            started = current_started
     start = min(started) if started else _parse_iso((manifest or {}).get("created_at"))
     minutes = None
     if start is not None and finish is not None and finish >= start:
@@ -3058,6 +3115,39 @@ def list_batches():
     return result
 
 
+def _is_batch_uploaded(batch: dict) -> bool:
+    """判断批次是否已上传到远端（含已写入云端上传暂存、待远端确认发布）。"""
+    if not isinstance(batch, dict):
+        return False
+    if batch.get("uploaded") or batch.get("upload_pending_confirmation"):
+        return True
+    stages = batch.get("stages")
+    if isinstance(stages, list) and any(
+        isinstance(s, dict) and s.get("id") == "upload" and s.get("status") == "completed"
+        for s in stages
+    ):
+        return True
+    upload_status = batch.get("upload_status")
+    rec = upload_status.get("receipt") if isinstance(upload_status, dict) else None
+    return bool(
+        isinstance(rec, dict)
+        and (rec.get("state") == "staged" or rec.get("submitted_at") or rec.get("remote_confirmation_required"))
+    )
+
+
+def _is_queued_unfinished(batch: dict) -> bool:
+    """判断批次是否仍在「上传试卷 → 排队区」且自动流程尚未完成。"""
+    if not isinstance(batch, dict):
+        return False
+    if batch.get("flow_done") is True:
+        return False
+    if _is_batch_uploaded(batch):
+        return False
+    if batch.get("queue_removed"):
+        return False
+    return batch.get("flow_done") is False
+
+
 def warm_batch_list():
     """Warm the first page load and top unuploaded review bundles in the background.
 
@@ -3074,7 +3164,8 @@ def warm_batch_list():
     try:
         pending_review = [
             b for b in (batches or [])
-            if isinstance(b, dict) and b.get("name") and not b.get("uploaded") and b.get("rows")
+            if isinstance(b, dict) and b.get("name") and not _is_batch_uploaded(b)
+            and not _is_queued_unfinished(b) and b.get("rows")
         ]
         pending_review.sort(
             key=lambda b: str(b.get("completed_at") or b.get("updated_at") or b.get("created_at") or ""),
@@ -3087,6 +3178,22 @@ def warm_batch_list():
                 continue
     except (OSError, ValueError, TypeError, KeyError, ImportError):
         pass
+
+
+_WORK_STATE_CACHE: dict[str, tuple[tuple, bool]] = {}
+_WORK_STATE_CACHE_MAX = 512
+
+
+def _work_state_stat_key(folder: Path, adv_running: bool, ledger: str) -> tuple:
+    stats = [adv_running]
+    for rel in ("workflow/manifest.json", "07_review/upload-format.json",
+                "06_batch/batch_meta.json", "workflow/" + ledger):
+        try:
+            st = (folder / rel).stat()
+            stats.append((st.st_ino, st.st_mtime_ns, st.st_size))
+        except OSError:
+            stats.append(None)
+    return tuple(stats)
 
 
 def operations_work_state():
@@ -3104,24 +3211,38 @@ def operations_work_state():
                 or not (folder / "workflow/manifest.json").is_file()):
             continue
         try:
+            adv_running = bool((_advance_state.get(folder.name) or {}).get("running"))
+            stat_key = _work_state_stat_key(folder, adv_running, operations.LEDGER)
+            folder_key = str(folder)
+            with _CACHE_GUARD:
+                cached = _WORK_STATE_CACHE.get(folder_key)
+            if cached is not None and cached[0] == stat_key:
+                if cached[1]:
+                    active.append(folder.name)
+                continue
             manifest = wf_manifest.load(folder) if wf_manifest else {}
             if manifest.get('status') in {'stopped', 'cancelled', 'archived', 'published', 'staged'}:
-                continue
-            stages = manifest.get('stages') or {}
-            local_pending = bool(wf_execution_state) and any(
-                not wf_execution_state.executed(stages.get(sid), allow_unqualified=True)
-                for sid in wf_execution_state.LOCAL_STAGES)
-            # Only hash the final artifact when the local records appear done.
-            if not local_pending and wf_execution_state:
-                local_pending = not wf_execution_state.local_complete(folder, manifest)
-            if not local_pending:
-                has_running_stage = any(
-                    isinstance(rec, dict) and rec.get('status') == 'running'
-                    for rec in stages.values())
-                adv = _advance_state.get(folder.name) or {}
-                if has_running_stage and not adv.get('running'):
-                    local_pending = True
-            if local_pending or operations.pending_incident(folder):
+                is_active = False
+            else:
+                stages = manifest.get('stages') or {}
+                local_pending = bool(wf_execution_state) and any(
+                    not wf_execution_state.executed(stages.get(sid), allow_unqualified=True)
+                    for sid in wf_execution_state.LOCAL_STAGES)
+                # Only hash the final artifact when the local records appear done.
+                if not local_pending and wf_execution_state:
+                    local_pending = not wf_execution_state.local_complete(folder, manifest)
+                if not local_pending:
+                    has_running_stage = any(
+                        isinstance(rec, dict) and rec.get('status') == 'running'
+                        for rec in stages.values())
+                    if has_running_stage and not adv_running:
+                        local_pending = True
+                is_active = bool(local_pending or operations.pending_incident(folder))
+            with _CACHE_GUARD:
+                if len(_WORK_STATE_CACHE) >= _WORK_STATE_CACHE_MAX:
+                    _WORK_STATE_CACHE.clear()
+                _WORK_STATE_CACHE[folder_key] = (stat_key, is_active)
+            if is_active:
                 active.append(folder.name)
         except (OSError, ValueError, TypeError):
             continue
@@ -3184,6 +3305,192 @@ def cached_list_batches():
             if epoch == _batches_epoch and key == _batches_live_fingerprint():
                 _batches_snapshot = (key, monotonic() + 2.0, result)
         return result
+
+
+TYPE_REVIEW_MAX_PAGE_SIZE = 20
+TYPE_REVIEW_DEFAULT_PAGE_SIZE = 20
+UNTYPED_TYPE_VALUE = "__untyped__"
+UNTYPED_TYPE_LABEL = "未判定"
+
+
+def _batch_sort_ts(batch: dict) -> tuple:
+    """与前端「试卷审核」一致的最新时间排序键（降序）。"""
+    for field in ("flow_finished_at", "updated_at", "created_at"):
+        val = str(batch.get(field) or "").strip()
+        if val:
+            return (val, str(batch.get("name") or ""))
+    return ("", str(batch.get("name") or ""))
+
+
+def _type_review_is_pending(row: dict) -> bool:
+    """统一待审口径：与前端红点及 status=open 筛选保持严格一致。"""
+    if bool(row.get("excluded")):
+        return False
+    return bool(row.get("needs_human")) or str(row.get("state") or "") in ("attention", "blocked")
+
+
+def _type_review_row(batch: dict, row: dict) -> dict:
+    b_name = str(batch.get("name") or "")
+    paper = batch.get("paper") if isinstance(batch.get("paper"), dict) else {}
+    paper_title = str(paper.get("title") or b_name)
+    uploaded = bool(batch.get("uploaded") or batch.get("upload_pending_confirmation"))
+    uid = str(row.get("unit_id") or row.get("number") or "")
+    main_type = str(row.get("type") or "").strip()
+    subtypes = [str(s).strip() for s in (row.get("subtypes") or []) if str(s).strip()]
+    needs_human = bool(row.get("needs_human"))
+    excluded = bool(row.get("excluded"))
+    section = row.get("source_section") if isinstance(row.get("source_section"), dict) else None
+    return {
+        "batch_name": b_name,
+        "paper_title": paper_title,
+        "uploaded": uploaded,
+        "unit_id": uid,
+        "number": row.get("number"),
+        "numbers": list(row.get("numbers") or []),
+        "printed_numbers": row.get("printed_numbers"),
+        "label": row.get("label") if row.get("label") not in (None, "") else (row.get("number") or ""),
+        "unit_kind": str(row.get("unit_kind") or ""),
+        "type": main_type,
+        "subtypes": subtypes,
+        "state": str(row.get("state") or ""),
+        "needs_human": needs_human,
+        "excluded": excluded,
+        "open_summary": str(row.get("open_summary") or ""),
+        "open_findings": row.get("open_findings"),
+        "difficulty": row.get("difficulty"),
+        "source_section": section,
+        "knowledge": [str(k).strip() for k in (row.get("knowledge") or []) if str(k).strip()],
+    }
+
+
+def _match_type_review_raw(batch: dict, row: dict, main_type: str, tokens: list[str]) -> bool:
+    if not tokens:
+        return True
+    b_name = str(batch.get("name") or "")
+    paper = batch.get("paper") if isinstance(batch.get("paper"), dict) else {}
+    paper_title = str(paper.get("title") or b_name)
+    section = row.get("source_section") if isinstance(row.get("source_section"), dict) else {}
+    label = row.get("label") if row.get("label") not in (None, "") else (row.get("number") or "")
+    parts = [
+        main_type or UNTYPED_TYPE_LABEL,
+        " ".join(str(s).strip() for s in (row.get("subtypes") or []) if str(s).strip()),
+        paper_title,
+        b_name,
+        str(label),
+        str(row.get("number") or ""),
+        str(section.get("title") or ""),
+        str(section.get("context") or ""),
+        " ".join(str(k).strip() for k in (row.get("knowledge") or []) if str(k).strip()),
+    ]
+    hay = " ".join(parts).lower()
+    return all(tok in hay for tok in tokens)
+
+
+def type_review_units(*, question_type: str = "", query: str = "", status: str = "all",
+                      uploaded: str = "all", page: int = 1,
+                      page_size: int = TYPE_REVIEW_DEFAULT_PAGE_SIZE) -> dict:
+    """按题型分页返回跨批次轻量题组列表，每页最多 20 题，仅对本页 20 题构造完整行对象。"""
+    ps = max(1, min(TYPE_REVIEW_MAX_PAGE_SIZE, int(page_size)))
+    status_norm = "open" if str(status or "").strip().lower() == "open" else "all"
+    raw_uploaded = str(uploaded or "").strip().lower()
+    uploaded_norm = raw_uploaded if raw_uploaded in ("unuploaded", "uploaded") else "all"
+    raw_selected = str(question_type or "").strip()
+    if raw_selected in ("", "all", "全部", "全部题型"):
+        selected = ""
+    elif raw_selected in (UNTYPED_TYPE_VALUE, UNTYPED_TYPE_LABEL):
+        selected = UNTYPED_TYPE_VALUE
+    else:
+        selected = raw_selected
+    q_text = str(query or "").strip()
+    q_tokens = [tok for tok in q_text.lower().split() if tok]
+
+    batches = [b for b in (cached_list_batches() or []) if isinstance(b, dict)]
+    batches.sort(key=_batch_sort_ts, reverse=True)
+
+    all_total = 0
+    all_pending = 0
+    counts_by_type: dict[str, int] = {}
+    pending_by_type: dict[str, int] = {}
+    extra_types: list[str] = []
+    extra_set: set[str] = set()
+    catalog_types = list(taxonomy.types())
+    catalog_set = set(catalog_types)
+    matched_pairs: list[tuple[dict, dict]] = []
+
+    for b in batches:
+        if _is_queued_unfinished(b):
+            continue
+        is_uploaded = _is_batch_uploaded(b)
+        if uploaded_norm == "unuploaded" and is_uploaded:
+            continue
+        if uploaded_norm == "uploaded" and not is_uploaded:
+            continue
+        rows = b.get("rows")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            all_total += 1
+            main_type = str(row.get("type") or "").strip()
+            t_key = main_type or UNTYPED_TYPE_VALUE
+            counts_by_type[t_key] = counts_by_type.get(t_key, 0) + 1
+            is_pending = _type_review_is_pending(row)
+            if is_pending:
+                all_pending += 1
+                pending_by_type[t_key] = pending_by_type.get(t_key, 0) + 1
+            if main_type and main_type not in catalog_set and main_type not in extra_set:
+                extra_set.add(main_type)
+                extra_types.append(main_type)
+            if status_norm == "open" and not is_pending:
+                continue
+            if selected == UNTYPED_TYPE_VALUE:
+                if main_type:
+                    continue
+            elif selected and main_type != selected:
+                continue
+            if q_tokens and not _match_type_review_raw(b, row, main_type, q_tokens):
+                continue
+            matched_pairs.append((b, row))
+
+    type_entries = [
+        {
+            "name": t_name,
+            "value": t_name,
+            "count": counts_by_type.get(t_name, 0),
+            "pending": pending_by_type.get(t_name, 0),
+        }
+        for t_name in (*catalog_types, *extra_types)
+    ]
+    if counts_by_type.get(UNTYPED_TYPE_VALUE, 0) > 0:
+        type_entries.append({
+            "name": UNTYPED_TYPE_LABEL,
+            "value": UNTYPED_TYPE_VALUE,
+            "count": counts_by_type[UNTYPED_TYPE_VALUE],
+            "pending": pending_by_type.get(UNTYPED_TYPE_VALUE, 0),
+        })
+
+    total = len(matched_pairs)
+    total_pages = max(1, (total + ps - 1) // ps)
+    current_page = max(1, min(total_pages, int(page)))
+    start = (current_page - 1) * ps
+    page_items = [_type_review_row(b, row) for b, row in matched_pairs[start : start + ps]]
+
+    return {
+        "items": page_items,
+        "total": total,
+        "page": current_page,
+        "page_size": ps,
+        "max_page_size": TYPE_REVIEW_MAX_PAGE_SIZE,
+        "total_pages": total_pages,
+        "selected_type": selected,
+        "query": q_text,
+        "status": status_norm,
+        "uploaded": uploaded_norm,
+        "all_total": all_total,
+        "all_pending": all_pending,
+        "types": type_entries,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -4388,7 +4695,7 @@ def paper_uses_bulk_bold(lines):
     """Detect document-wide bold runs for display, without touching source data."""
     body = []
     for line in lines:
-        text = re.sub(r'<(?:/?(?:u|sup|sub)|br\s*/?)>', '', line.strip(), flags=re.I)
+        text = re.sub(r'<(?:/?(?:u|sup|sub|em)|br\s*/?)>', '', line.strip(), flags=re.I)
         if not text or text.startswith(('[IMG ', '[TABLE ', '[/TABLE]')):
             continue
         body.append(text)
@@ -5158,6 +5465,9 @@ def _extract_host_only(raw_host: str) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Prevent stalled/half-open client sockets from wedging worker threads or _lock.
+    timeout = 60
+
     def log_message(self, fmt, *args):
         return
 
@@ -5203,12 +5513,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, value, status=200):
         body = json.dumps(value, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            # Client aborted/disconnected (e.g. rapid question switching or tab close).
+            return
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -5218,6 +5532,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if decoded_path == "/api/health":
                 return self.send_json({"ok": True, "instance_id": os.environ.get("WF_BACKEND_INSTANCE_ID", ""),
+                                       "started_at": _SERVER_STARTED_AT,
                                        "busy": work_in_flight(),
                                        "advance_worker": advance_worker_health(),
                                        "workflow_runtime_version": wf_execution_state.RUNTIME_VERSION if wf_execution_state else None,
@@ -5243,6 +5558,20 @@ class Handler(BaseHTTPRequestHandler):
                     batches = [item for item in batches if not (isinstance(item, dict) and item.get("uploaded"))]
                 is_lite = (qs.get("lite") or [""])[0] == "1"
                 is_review_list = (qs.get("review_list") or [""])[0] == "1"
+                has_active_work = False
+                if is_review_list:
+                    has_active_work = any(
+                        isinstance(item, dict) and (
+                            _is_queued_unfinished(item)
+                            or bool((item.get("advance") or {}).get("running"))
+                            or bool((item.get("advance") or {}).get("queued"))
+                            or bool((item.get("advance") or {}).get("waiting"))
+                            or bool((item.get("upload_status") or {}).get("running"))
+                        )
+                        for item in batches
+                    )
+                    # 上传试卷排队区中尚未完成的批次不进入「试卷审核」列表。
+                    batches = [item for item in batches if not _is_queued_unfinished(item)]
                 if is_lite or is_review_list:
                     drop_keys = ("rows", "extraction", "structure_gate", "diagnostics") if is_review_list else ("rows", "extraction")
                     slim_batches = []
@@ -5261,9 +5590,34 @@ class Handler(BaseHTTPRequestHandler):
                             slim["first_unit_id"] = first_uid
                         slim_batches.append(slim)
                     batches = slim_batches
-                return self.send_json({"batches": batches})
+                payload = {"batches": batches}
+                if is_review_list:
+                    payload["has_active_work"] = has_active_work
+                return self.send_json(payload)
             if decoded_path == "/api/taxonomy":
                 return self.send_json(taxonomy.taxonomy())
+            if decoded_path == "/api/type-review/units":
+                qs = parse_qs(parsed.query)
+                raw_type = (qs.get("type") or [""])[0]
+                raw_q = (qs.get("q") or [""])[0]
+                raw_status = (qs.get("status") or ["all"])[0]
+                raw_uploaded = (qs.get("uploaded") or ["all"])[0]
+                try:
+                    raw_page = int((qs.get("page") or ["1"])[0])
+                except ValueError:
+                    raw_page = 1
+                try:
+                    raw_size = int((qs.get("page_size") or [str(TYPE_REVIEW_DEFAULT_PAGE_SIZE)])[0])
+                except ValueError:
+                    raw_size = TYPE_REVIEW_DEFAULT_PAGE_SIZE
+                return self.send_json(type_review_units(
+                    question_type=raw_type,
+                    query=raw_q,
+                    status=raw_status,
+                    uploaded=raw_uploaded,
+                    page=raw_page,
+                    page_size=raw_size,
+                ))
             if decoded_path == "/api/knowledge/tree":
                 main_type = (parse_qs(parsed.query).get("type") or [""])[0].strip() or None
                 return self.send_json(taxonomy.knowledge_tree(main_type=main_type))
@@ -5351,6 +5705,8 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "material-roles":
                 return self.send_json(get_material_roles(parts[2]))
             self.send_json({"error": "not found"}, 404)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return
         except (ValueError, KeyError) as exc:
             self.send_json({"error": str(exc)}, 400)
         except Exception as exc:  # noqa: BLE001 - 本地服务，错误直接回显
@@ -5510,6 +5866,8 @@ class Handler(BaseHTTPRequestHandler):
                     }, 409)
                 return self.send_json({"ok": True, **result})
             self.send_json({"error": "not found"}, 404)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             self.send_json({"error": str(exc)}, 400)
         except Exception as exc:  # noqa: BLE001
@@ -5808,6 +6166,7 @@ def main():
     class WorkbenchHTTPServer(ThreadingHTTPServer):
         request_queue_size = 64
         allow_reuse_address = True
+        daemon_threads = True
     serve(WorkbenchHTTPServer((args.host, args.port), Handler))
 
 

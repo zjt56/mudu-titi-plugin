@@ -124,8 +124,90 @@ class OperationsImprovementsTest(unittest.TestCase):
         pkt = op._packet(folder, incident)
         self.assertIn("suspected_sources", pkt)
         self.assertIn("recommended_action", pkt)
-        self.assertIn("app/workflow/structure.py", pkt["suspected_sources"])
+        self.assertIn("app/workflow/structure_gate.py", pkt["suspected_sources"])
         self.assertIn("upstream_rederive", pkt["recommended_action"])
+        self.assertIn("unit_excerpts", pkt)
+        self.assertIn("log_tail", pkt)
+
+    def test_stage_source_hints_point_to_existing_files(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        for stage, paths in op._STAGE_SOURCE_HINTS.items():
+            for rel in paths:
+                with self.subTest(stage=stage, rel=rel):
+                    self.assertTrue((repo_root / rel).is_file(), f"missing hint {rel} for stage {stage}")
+
+    def test_code_repair_auto_initializes_workspace_and_normalizes_test_names(self):
+        src_root = self.root / "src_auto"
+        (src_root / "app" / "workflow").mkdir(parents=True)
+        (src_root / "app" / "workflow" / "sample_mod.py").write_text(
+            "\n".join(f"x_{i} = {i}" for i in range(1, 150)) + "\n", encoding="utf-8"
+        )
+        (src_root / "app" / "workflow" / "test_sample_mod.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self): self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        folder = _seed_batch(self.root, "auto-init-batch")
+        incident = {"incident_id": "inc-auto", "stage": "validate", "detail": "fail", "attempts": []}
+        with mock.patch.object(op, "_source_root", return_value=src_root), \
+             mock.patch.object(op, "_code_root", return_value=self.root / "dev-root"):
+            res = op._code_repair(folder, incident, {"operation": "read_lines", "path": "app/workflow/sample_mod.py", "start_line": 1})
+            self.assertTrue(res.get("workspace_auto_initialized"))
+            self.assertEqual(res["limit"], 200)
+            self.assertEqual(len(res["lines"]), 149)
+            tested = op._code_repair(folder, incident, {
+                "operation": "test",
+                "tests": ["app/workflow/test_sample_mod.py"],
+                "fast": True,
+            })
+            self.assertTrue(tested["passed"])
+            self.assertEqual(tested["tests"], ["workflow.test_sample_mod"])
+
+    def test_read_evidence_allows_safe_artifacts_and_prompts_while_blocking_secrets(self):
+        folder = _seed_batch(self.root, "ev-batch")
+        (folder / "01_source" / "materials").mkdir(parents=True, exist_ok=True)
+        (folder / "01_source" / "material-roles.json").write_text('{"roles": []}', encoding="utf-8")
+        (folder / "01_source" / "materials" / "notes.txt").write_text("answer key", encoding="utf-8")
+        (folder / "01_source" / "materials" / "secret_token.txt").write_text("nope", encoding="utf-8")
+        (folder / "workflow" / "repair-feedback").mkdir(parents=True, exist_ok=True)
+        (folder / "workflow" / "repair-feedback" / "answers.json").write_text('{"units": []}', encoding="utf-8")
+        self.assertIn("roles", op._read_evidence(folder, {"path": "01_source/material-roles.json"})["text"])
+        self.assertIn("answer key", op._read_evidence(folder, {"path": "01_source/materials/notes.txt"})["text"])
+        self.assertIn("units", op._read_evidence(folder, {"path": "workflow/repair-feedback/answers.json"})["text"])
+        prompt_res = op._read_evidence(folder, {"scope": "plugin", "path": "app/prompts/roles/answers.md", "limit": 120})
+        self.assertEqual(prompt_res["path"], "app/prompts/roles/answers.md")
+        with self.assertRaisesRegex(ValueError, "evidence_not_allowlisted"):
+            op._read_evidence(folder, {"path": "01_source/materials/secret_token.txt"})
+        with self.assertRaisesRegex(ValueError, "evidence_not_allowlisted"):
+            op._read_evidence(folder, {"path": "workflow/manifest.json"})
+
+    def test_recover_auto_resumes_restarted_pending_verify(self):
+        folder = _seed_batch(self.root, "reverify-batch")
+        op._save(folder, {
+            "identity": op._identity(folder),
+            "incident": {
+                "incident_id": "inc-rv", "stage": "assemble", "status": "claimed",
+                "mode": "repair", "eligible": False, "attempt_id": "att-1",
+                "session_id": "sess-1", "lease_expires_at": 9999999999.0,
+                "execution_process": op._process_identity(),
+                "snapshot": op._snapshot(folder, "assemble"),
+                "detail": "assemble failed", "attempts": [],
+            },
+            "receipts": [], "failures": {},
+        })
+        op._save_code_record(folder, {
+            "job_id": "cr-1", "path": str(self.root / "unused.json"),
+            "status": "restarted_pending_verify", "incident_id": "inc-rv",
+        })
+        with mock.patch.object(op, "_verify", return_value={"verified": False, "stage": "assemble", "reason": "not yet"}):
+            receipt = op.action(self.root, folder, {
+                "action": "recover", "request_id": "req-rv",
+                "incident_id": "inc-rv", "attempt_id": "att-1", "session_id": "sess-1", "input": {},
+            })
+        self.assertEqual(receipt["status"], "completed")
+        ev = receipt["evidence"]
+        self.assertEqual(ev["phase"], "restarted_auto_resume")
+        self.assertTrue(ev["resume_required"])
+        self.assertEqual(ev["resume_input"]["strategy"], "retry_stage_with_fresh_context")
 
     # --- P3: patch_source diagnostics, patch_lines, multi_patch, export_patch_bundle, fast tests ---
     def test_code_repair_patch_extensions_and_fast_test_gate(self):

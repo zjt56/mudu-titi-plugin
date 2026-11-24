@@ -40,6 +40,71 @@ FORBIDDEN = re.compile(r"(?:考试时间|满分\s*\d+分|本试卷共|扫码练�
 _IPA = r"[a-zɑɒæəɛɜɪʊʌɔθðʃʒŋɡːˈˌ]"
 OPTION = re.compile(r"(?:(?<![A-Za-z0-9&/.\-])|(?<=/" + _IPA + r"/)|(?<=/" + _IPA + r"{2}/)|(?<=/" + _IPA + r"{3}/))([A-H])[.．、]\s*")
 
+# 选项标签后面直接接正文（"A.To introduce…"）是正常排版，但题干行内出现的英文人名
+# 缩写（"Alexis E.Block" / "Alexis E. Block"）、多字母缩写（"A.M." / "B.C." / "D.C." /
+# "A.I." / "E.g."）或位于真正选项 A 之前的行内单字母（如 "Grade A." / "E.Block"）会
+# 被 OPTION 误当成选项，导致题干截断、选项变成 5 条并在组装阶段报 E20。
+_NAME_TOKEN = re.compile(r"(?<![A-Za-z0-9])[A-Z][a-z]+[\s\u3000]+$")
+_DOTTED_ACRONYM = re.compile(r"[A-H]\.[A-Za-z]\.")
+_NAME_AFTER_INITIAL = re.compile(r"[A-H]\.[ \t\u3000]*[A-Z][a-z]+")
+
+
+def _at_line_start(text: str, pos: int) -> bool:
+    line_start = text.rfind("\n", 0, pos) + 1
+    return not text[line_start:pos].strip()
+
+
+def _starts_ordered_options(text: str, matches: list) -> bool:
+    # Two initials may both belong to names; require a longer ordered run
+    # before overriding the name-initial heuristic.
+    if [match.group(1) for match in matches] != ["A", "B", "C"]:
+        return False
+    for match, following in zip(matches, matches[1:]):
+        option_text = text[match.end():following.start()]
+        if (not option_text.strip()
+                or ("\n" in option_text and not _at_line_start(text, following.start()))
+                or _DOTTED_ACRONYM.match(text, following.start())):
+            return False
+    return True
+
+
+def _is_non_option_inline(text: str, match, index: int, raw: list, accepted: list) -> bool:
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    if not text[line_start:match.start()].strip():
+        return False  # 行首标签是常规选项排版
+    if any(other.start() >= line_start for other in accepted):
+        return False  # 同一行前面已有选项标签：横排选项 A.… B.…
+    tail = text[match.start():]
+    # 1) 题干行内英文缩写（A.M. / B.C. / D.C. / A.D. / A.I. / E.g. / J.K. 等）
+    if _DOTTED_ACRONYM.match(tail):
+        return True
+    # A title-case option (e.g. A. London) can look like a surname.
+    if _starts_ordered_options(text, raw[index:index + 3]):
+        return False
+    # 2) 题干行内人名缩写（无空格 "Alexis E.Block" 与带空格 "Alexis E. Block"）
+    if _NAME_AFTER_INITIAL.match(tail) and _NAME_TOKEN.search(text[:match.start()]):
+        return True
+    # 3) 尚未出现任何选项时，题干行内夹杂的非 A 字母（如 B./C./D./E.）且后文存在真正 A.
+    letter = match.group(1)
+    if not accepted:
+        later = raw[index + 1:]
+        if letter != "A" and any(other.group(1) == "A" for other in later):
+            return True
+        # 4) 题干行内出现 A.（如 "Grade A."），但后文另起一行有正式行首 A.
+        if letter == "A" and any(other.group(1) == "A" and _at_line_start(text, other.start()) for other in later):
+            return True
+    return False
+
+
+def option_matches(text: str) -> list:
+    """按顺序返回选项标签匹配，跳过题干行内人名缩写、多字母缩写及真正 A 之前的误匹配。"""
+    raw = list(OPTION.finditer(text))
+    accepted: list = []
+    for index, match in enumerate(raw):
+        if not _is_non_option_inline(text, match, index, raw, accepted):
+            accepted.append(match)
+    return accepted
+
 CONTRACT = {
     "standalone": ["题号", "题干/作答指令", "本题选项或作答空位（如有）", "答案及来源", "题内图片/图标引用（如有）"],
     "group": ["共享材料或表格", "组内每个小题的题号和题干/空位", "各小题选项（如有）", "材料与小题的归属关系", "题内图片/图标及归属（如有）"],
@@ -256,6 +321,36 @@ def self_contained_group(unit: dict) -> bool:
 
 _IMG_REF = re.compile(r"\[IMG\s+[^\]]+?\]")
 _OPTION_LABEL_CHARS = "ABCDEFGH"
+_TABLE_REF = re.compile(r"\[TABLE[^\]]*\]", re.I)
+
+
+def _media_presence(value) -> bool:
+    return bool(_IMG_REF.search(str(value or "")) or _TABLE_REF.search(str(value or "")))
+
+
+def group_material_from_media(unit: dict) -> bool:
+    """题组共享材料由原卷图片/表格原件承载时，文字 material 为空不是丢内容。
+
+    与 check_fidelity 的图片材料例外、shared_rubric.GROUP_MATERIAL_RULE（同组已绑定
+    的原生图片或结构化表格可承载共享材料）同一口径。判据是保守的存在性证明，不是
+    语义审核：只认组级自身的导语区（首个子题题号之前），且导语去掉 [IMG]/[TABLE]
+    标记后不得还有任何文字——导语还有文字却 material 为空，仍是真正缺材料，继续报 A8。
+    题组已有的原生图片/表格证明（phonetic_structure 等按来源核实过的附件）由各自
+    校验器负责，这里不凭未核实的 attachments/materialBlocks 放行。
+    """
+    if (unit.get("unit_kind") or "").strip() != "group":
+        return False
+    stem = str(unit.get("stem") or "")
+    cut = len(stem)
+    for number in unit.get("numbers") or []:
+        match = re.search(r"(?<![\d])" + re.escape(str(number)) + r"\s*[.．、]", stem)
+        if match:
+            cut = min(cut, match.start())
+    lead = stem[:cut]
+    if not _media_presence(lead):
+        return False
+    rest = _TABLE_REF.sub("", _IMG_REF.sub("", lead))
+    return not re.sub(r"[\s\u3000*_`#>\-]+", "", rest)
 
 
 def image_option_evidence(unit: dict, local_lines: list[str], image_semantics: dict | None = None) -> dict | None:
@@ -322,8 +417,8 @@ def audit_question(source_lines: list[str], number: int, item: dict | None = Non
     if missing:
         issues.append({"code": "IMAGE_MISSING", "severity": "blocker", "message": "原文引用的图片文件缺失：" + ", ".join(missing)})
     options = item.get("options") or []
-    source_letters = sorted(set(OPTION.findall(text)))
-    candidate_letters = sorted(set(m.group(1) for option in options for m in OPTION.finditer(str(option)))) if isinstance(options, list) else []
+    source_letters = sorted(set(match.group(1) for match in option_matches(text)))
+    candidate_letters = sorted(set(match.group(1) for option in options for match in option_matches(str(option)))) if isinstance(options, list) else []
     if item and source_letters and source_letters != candidate_letters:
         issues.append({"code": "OPTIONS_MISMATCH", "severity": "major", "message": f"原卷选项 {source_letters} 与候选选项 {candidate_letters} 不一致"})
     if item:
@@ -511,7 +606,7 @@ def question_parts(lines: list[str], number: int, *, scoped=False) -> dict:
     start, end = window
     text = "\n".join(lines[start:end])
     text = re.sub(r"^\s*(?:[（(]\s*[）)]\s*)?\d{1,3}\s*[.．、)]", "", _plain(text))
-    matches = list(OPTION.finditer(text))
+    matches = option_matches(text)
     # Some papers print an option's image *before* its label: "[IMG a.png]A.…".
     # The segment between label i and label i+1 then holds the *next* image, so a
     # naive split shifts every image one label left (and empties the last option).
@@ -1364,6 +1459,11 @@ def audit_batch_source(batch_dir: str | Path, batch: dict) -> dict:
                 preserved = [_canonical(x) for x in re.findall(r"<u>(.*?)</u>", candidate_body, flags=re.S)]
                 if _canonical(marked) not in preserved:
                     issue("SOURCE_UNDERLINE_MISSING", "原卷实词下划线未保留：" + marked[:80], uid)
+        for marked in re.findall(r"<em>(.*?)</em>", unit["stem"], flags=re.S):
+            if _canonical(marked):
+                preserved = [_canonical(x) for x in re.findall(r"<em>(.*?)</em>", candidate_body, flags=re.S)]
+                if _canonical(marked) not in preserved:
+                    issue("SOURCE_EMPHASIS_MISSING", "原卷着重号未保留：" + marked[:80], uid)
         # Keep final batch material semantics based on the confirmed unit stem;
         # structure-gate performs the separate raw-span option audit.
         # Validate the exact confirmed line/offset span as well as the rebuilt

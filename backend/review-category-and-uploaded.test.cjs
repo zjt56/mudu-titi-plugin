@@ -80,3 +80,27 @@ test('试卷审核采用简洁平铺筛选栏（全部 / 试卷类 / 课时类 /
   const cardChunk = client.slice(client.indexOf('const uploadedCard = isBatchUploaded(b);'), client.indexOf('const uploadedCard = isBatchUploaded(b);') + 1200);
   assert.doesNotMatch(cardChunk, /待人工确认/);
 });
+
+test('isBatchPendingInQueue 准确识别上传排队区未完成批次，且试卷审核 baseList 将其排除', () => {
+  const isBatchUploaded = extractFn('isBatchUploaded');
+  const re = /function isBatchPendingInQueue\([^)]*\) \{[\s\S]*?\n      \}/;
+  const match = client.match(re);
+  assert.ok(match, '找不到函数 isBatchPendingInQueue');
+  const isBatchPendingInQueue = vm.runInNewContext(match[0] + '\nisBatchPendingInQueue', { isBatchUploaded });
+
+  // 上传排队区处理中/排队中/卡住且未完成：应判定为 pending（不出现在试卷审核）
+  assert.equal(isBatchPendingInQueue({ name: 'q1', flow_done: false, uploaded: false, queue_removed: false }), true);
+  assert.equal(isBatchPendingInQueue({ name: 'q2', flow_done: false }), true);
+  // 流程已完成：应出现在试卷审核
+  assert.equal(isBatchPendingInQueue({ name: 'd1', flow_done: true, uploaded: false, queue_removed: false }), false);
+  // 已上传或远端暂存待确认：应出现在试卷审核
+  assert.equal(isBatchPendingInQueue({ name: 'u1', flow_done: false, uploaded: true }), false);
+  assert.equal(isBatchPendingInQueue({ name: 'u2', flow_done: false, upload_pending_confirmation: true }), false);
+  assert.equal(isBatchPendingInQueue({ name: 'u3', flow_done: false, upload_status: { receipt: { state: 'staged' } } }), false);
+  // 显式移出排队区：不再处于排队区，不隐藏
+  assert.equal(isBatchPendingInQueue({ name: 'r1', flow_done: false, uploaded: false, queue_removed: true }), false);
+  assert.equal(isBatchPendingInQueue(null), false);
+
+  assert.match(client, /const baseList = \(batches \|\| \[\]\)\.filter\(\(b\) => !isBatchPendingInQueue\(b\)\)/);
+  assert.match(client, /setServerActiveWork\(Boolean\(d && d\.has_active_work\)\)/);
+});

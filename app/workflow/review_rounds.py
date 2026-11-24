@@ -1024,15 +1024,65 @@ def _project_review_answer_points(checks):
     return projected
 
 
-def _partition_check_issues(review, plan, round_id, checks, batch):
-    """Validate each check on its own so one bad target keeps the others."""
+def _partition_target_key(review, round_id, target):
+    """Stable identity for one partition target, mirroring review._check_key."""
+    if round_id == "sample":
+        return review._check_key(target, round_id) if isinstance(target, dict) else (None, None)
+    return (target, None)
+
+
+def _partition_check_key(review, round_id, check):
+    uid = check.get("unit_id") if isinstance(check, dict) else None
+    if not isinstance(uid, str) or not uid.strip():
+        return None
+    return review._check_key(check, round_id)
+
+
+def _partition_check_issues(review, plan, round_id, checks, batch, targets=None):
+    """Validate each check on its own so one bad target keeps the others.
+
+    Per-check validation cannot judge the partition as a whole: the same target
+    may be submitted twice, a check may name a unit owned by another partition,
+    or a target may be missing altogether. Those shapes used to reach the
+    part-level coverage assertion in _import_result, which aborted the whole
+    partition with a non-repairable "cover each target exactly once" error and
+    forced a full re-call that reproduced the same shape. Classify them per
+    target here so only the offending targets are re-asked.
+    """
+    if not isinstance(checks, list):
+        raise ValueError("Round checks must be a list")
+    expected = None
+    expected_set = None
+    counts = {}
+    if targets is not None:
+        expected = [_partition_target_key(review, round_id, target) for target in targets]
+        if not expected or any(not isinstance(key[0], str) or not key[0].strip() for key in expected):
+            raise ValueError("Review partition targets must be distinct nonempty targets")
+        expected_set = set(expected)
+        if len(expected_set) != len(expected):
+            raise ValueError("Review partition targets must be distinct nonempty targets")
+        for check in checks:
+            key = _partition_check_key(review, round_id, check)
+            if key in expected_set:
+                counts[key] = counts.get(key, 0) + 1
     valid, failed = [], []
+    duplicate_keys = set()
     for check in checks:
-        if not isinstance(check, dict):
-            failed.append({"unit_id": "", "number": None, "reason": "check must be an object"})
+        key = _partition_check_key(review, round_id, check)
+        if expected_set is not None and key not in expected_set:
             continue
-        uid = check.get("unit_id")
-        number = review._sample_number(check) if round_id == "sample" else None
+        if key is None:
+            failed.append({"unit_id": "", "number": None, "reason": "check must have a nonempty string unit_id"})
+            continue
+        uid, number = key
+        if counts.get(key, 0) > 1:
+            if key in duplicate_keys:
+                continue
+            duplicate_keys.add(key)
+            failed.append({"unit_id": uid, "number": number,
+                           "reason": "Duplicate review check for this target: "
+                                     "review checks must cover each target exactly once"})
+            continue
         single = dict(plan)
         single["sample" if round_id == "sample" else "units"] = (
             [{"unit_id": uid, "number": number}] if round_id == "sample" else [uid])
@@ -1046,6 +1096,12 @@ def _partition_check_issues(review, plan, round_id, checks, batch):
             failed.append({"unit_id": uid, "number": number, "reason": str(exc)})
         except ValueError as exc:
             failed.append({"unit_id": uid, "number": number, "reason": str(exc)})
+    if expected is not None:
+        for key in expected:
+            if not counts.get(key):
+                failed.append({"unit_id": key[0], "number": key[1],
+                               "reason": "Missing review check for this target: "
+                                         "review checks must cover each target exactly once"})
     return valid, failed
 
 
@@ -1371,9 +1427,7 @@ def _repair_round(batch, task_id, config):
     if not isinstance(checks, list) or not checks:
         raise ValueError("Repair response has no checks")
     def key(check):
-        uid = check.get("unit_id") if isinstance(check, dict) else None
-        number = review._sample_number(check) if partial["round_id"] == "sample" and isinstance(check, dict) else None
-        return (uid, number)
+        return _partition_check_key(review, partial["round_id"], check)
     expected = ({(target['unit_id'], review._sample_number(target)) for target in targets}
                 if partial['round_id'] == 'sample' else {(uid, None) for uid in targets})
     actual = [key(check) for check in checks]
@@ -2011,21 +2065,45 @@ def _import_result(batch_dir, task_id, result):
         raise ValueError("Invalid round task ID")
     # Check original inputs before honoring any receipt or interrupted transaction.
     binding = _check_bound_inputs(batch, task_id)
-    # Near-verbatim quotes are rewritten to the exact bound substring before
-    # hashing/validation, so a trivial typographic difference no longer fails
-    # the whole round while paraphrases still fail closed.
-    result = review._normalize_result_quotes(batch, result)
+    state_path = binding.get("state_path")
+    state_file = _path(batch, state_path) if state_path else None
+    state = _load(state_file.read_bytes()) if state_file and state_file.is_file() else None
+    parts = (state.get("parts") or []) if isinstance(state, dict) else []
+    part_index = binding.get("part_index", -1)
+    part = parts[part_index] if type(part_index) is int and 0 <= part_index < len(parts) else None
+    if not isinstance(part, dict) or part.get("task_id") != task_id:
+        part = None
+    round_id = binding["task"]["round_id"]
+    discarded = []
+    raw_path = None
     artifacts = result.get("artifacts")
     candidate = artifacts.get(ARTIFACT) if isinstance(artifacts, dict) else None
     if result.get("status") == "completed" and isinstance(candidate, dict):
         original_checks = candidate.get("checks")
-        projected = _project_review_answer_points(original_checks)
+        projected = original_checks
+        if part is not None and isinstance(original_checks, list):
+            targets = {_partition_target_key(review, round_id, target) for target in part["targets"]}
+            projected = []
+            for index, check in enumerate(original_checks):
+                key = _partition_check_key(review, round_id, check)
+                if key in targets:
+                    projected.append(check)
+                else:
+                    discarded.append({
+                        "index": index,
+                        "reason": "invalid_unit_id" if key is None else "outside_partition",
+                    })
+        projected = _project_review_answer_points(projected)
         if projected != original_checks:
-            # Keep the submitted candidate separately. Receipts and replay bind
-            # the exact installation view used to verify the round.
+            # Retain the submitted envelope. Coverage, receipts and later
+            # provenance checks bind the same projected response.
             raw_path = "workflow/review-raw-results/" + task_id + "/" + review._digest(result) + ".json"
             _save(batch, raw_path, result)
             result = {**result, "artifacts": {**artifacts, ARTIFACT: {**candidate, "checks": projected}}}
+    # Near-verbatim quotes are rewritten to the exact bound substring before
+    # hashing/validation, so a trivial typographic difference no longer fails
+    # the whole round while paraphrases still fail closed.
+    result = review._normalize_result_quotes(batch, result)
     digest = review._digest(result)
     receipt_path = "workflow/review-bindings/" + task_id + ".receipt.json"
     if _path(batch, receipt_path).is_file():
@@ -2050,9 +2128,7 @@ def _import_result(batch_dir, task_id, result):
         if transaction['result_digest'] != digest:
             raise ValueError('Round task already consumed by a different response')
         return _finish_install(batch, transaction)
-    state_path = binding.get('state_path')
-    if state_path and _path(batch, state_path).is_file():
-        state = _load(_path(batch, state_path).read_bytes())
+    if isinstance(state, dict):
         saved = next((x for x in state.get('completed', []) if x.get('task_id') == task_id), None)
         if saved:
             if saved.get('result_digest') != digest or not saved.get('report'):
@@ -2084,17 +2160,12 @@ def _import_result(batch_dir, task_id, result):
     candidate = result["artifacts"][ARTIFACT]
     agent_tasks._fields(candidate, ("checks",), ("checks",))
     checks = candidate["checks"]
-    round_id = binding["task"]["round_id"]
     if round_id not in review.ROUND_IDS or round_id in review.evaluate_rounds(batch)["checked_rounds"]:
         raise ValueError("This round is not currently executable")
-    state = _load(_path(batch, binding["state_path"]).read_bytes())
+    if part is None:
+        raise ValueError("Review partition task binding mismatch")
     expected_digest = (review.frozen_partition_digest(state) if binding.get("frozen_state")
                        else review._digest(state))
-    parts = state.get("parts") or []
-    if (binding["part_index"] >= len(parts)
-            or not isinstance(parts[binding["part_index"]], dict)
-            or parts[binding["part_index"]].get("task_id") != task_id):
-        raise ValueError("Review partition task binding mismatch")
     if expected_digest != binding["state_digest"] or len(state["completed"]) != binding["part_index"]:
         # Recover an interrupted receipt write without repeating an accepted part.
         saved = next((x for x in state.get("completed", []) if x.get("task_id") == task_id), None)
@@ -2102,23 +2173,26 @@ def _import_result(batch_dir, task_id, result):
             _save(batch, receipt_path, {"result_digest": digest, "report": saved["report"]})
             return saved["report"]
         raise ValueError("Review partition state changed; export the next task again")
-    part = state["parts"][binding["part_index"]]
     part_plan = dict(plan)
     part_plan["sample" if round_id == "sample" else "units"] = part["targets"]
     record = {"round_id": round_id, "input_binding": plan["input_binding"],
               "execution_id": task_id, "checks": checks}
-    valid_checks, failed = _partition_check_issues(review, plan, round_id, checks, batch)
+    valid_checks, failed = _partition_check_issues(review, plan, round_id, checks, batch,
+                                                   part["targets"])
     if failed:
         # Keep the checks that passed and let the caller repair only the
         # offending targets, instead of discarding the whole partition.
-        _save(batch, "workflow/review-partial/" + task_id + ".json",
-              {"round_id": round_id, "task_id": task_id, "part_index": binding["part_index"],
-               "input_binding": plan["input_binding"], "valid_checks": valid_checks,
-               "failed": failed})
+        partial = {"round_id": round_id, "task_id": task_id, "part_index": part_index,
+                   "input_binding": plan["input_binding"], "valid_checks": valid_checks,
+                   "failed": failed}
+        if discarded:
+            partial.update(raw_candidate=raw_path, discarded_checks=discarded)
+        _save(batch, "workflow/review-partial/" + task_id + ".json", partial)
         raise review.RoundCheckError(
             "%d target(s) need repair: %s" % (len(failed), failed[0]["reason"]), failed)
+    record["checks"] = valid_checks
     review._round_checks(record, round_id, part_plan, batch, lenient=True, require_coverage=True)
-    completed = {"task_id": task_id, "result_digest": digest, "checks": checks}
+    completed = {"task_id": task_id, "result_digest": digest, "checks": valid_checks}
     if binding["part_index"] + 1 < len(state["parts"]):
         report = {"completed": False, "action": "continue", "round_id": round_id,
                   "part_completed": binding["part_index"] + 1, "part_count": len(state["parts"])}

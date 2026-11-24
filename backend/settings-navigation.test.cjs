@@ -6,7 +6,7 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const client = fs.readFileSync(path.join(root, 'lib/client.js'), 'utf8');
 const host = fs.readFileSync(path.join(root, 'lib/index.js'), 'utf8');
-const settings = client.slice(client.indexOf('function SettingsTab()'));
+const settings = client.slice(client.indexOf('function SettingsTab(props'));
 
 test('设置页用左侧五项导航（含初始化引导），顺序固定', () => {
   assert.match(settings, /const sections = \[\['onboarding', '初始化引导'\], \['models', '模型设置'\], \['api', '上传设置'\], \['ocr', 'OCR 识别'\], \['audio', '听力切分'\]\]/);
@@ -67,4 +67,55 @@ test('宿主注册 OCR 配置与完整测试路由', () => {
 
 test('旧左右两栏设置样式已移除', () => {
   assert.equal(client.includes('wf-settings-columns'), false);
+});
+
+test('SettingsTab 带 props 或无参均可正常挂载，不报 props is not defined', () => {
+  const vm = require('node:vm');
+  let exported = null;
+  let slot = 0;
+  const states = ['onboarding', { onboarding: true }, [], null, 'idle', ''];
+  const fakeReact = {
+    Fragment: 'Fragment',
+    Component: class Component { constructor(p) { this.props = p; } },
+    createElement: (tag, props, ...children) => ({ tag, props, children }),
+    useState: (init) => [slot < states.length ? states[slot++] : (typeof init === 'function' ? init() : init), () => {}],
+    useRef: (v) => ({ current: v }),
+    useMemo: (fn) => fn(),
+    useCallback: (fn) => fn,
+    useEffect: () => {},
+  };
+  const ctx = {
+    console,
+    setTimeout: () => 1, clearTimeout: () => {},
+    setInterval: () => 1, clearInterval: () => {},
+    URLSearchParams, Map, Set, AbortController, DOMException, encodeURIComponent, decodeURIComponent,
+    window: {
+      __ModuleLoader__: { load(mod) { exported = mod.factory(() => fakeReact); } },
+      fetch: async () => ({ ok: true, json: async () => ({}) }),
+      addEventListener() {}, removeEventListener() {},
+    },
+    document: { getElementById: () => null, head: { appendChild() {} }, createElement: () => ({}), visibilityState: 'visible', addEventListener() {}, removeEventListener() {}, querySelector: () => null },
+  };
+  ctx.window.window = ctx.window;
+  vm.runInNewContext(client, ctx);
+  const { SettingsTab, TabBoundary } = exported.__panel;
+  assert.doesNotThrow(() => { slot = 0; SettingsTab({ isActive: true }); });
+  assert.doesNotThrow(() => { slot = 0; SettingsTab(); });
+  // 即使接口异常返回非数组 models / null router，SettingsTab 也不得抛异常导致白屏。
+  const badStates = ['models', { onboarding: true, models: true }, null, null, 'idle', ''];
+  assert.doesNotThrow(() => {
+    slot = 0;
+    const orig = states.slice();
+    states.splice(0, states.length, ...badStates);
+    try { SettingsTab({ isActive: true }); } finally { states.splice(0, states.length, ...orig); }
+  });
+  // TabBoundary 捕获渲染错误时展示错误提示与重试按钮，不整页白屏。
+  assert.equal(typeof TabBoundary.getDerivedStateFromError, 'function');
+  const errState = TabBoundary.getDerivedStateFromError(new Error('boom'));
+  assert.equal(errState.error, 'boom');
+  const boundary = new TabBoundary({ name: 'settings', label: '模型与设置', children: 'ok' });
+  boundary.state = { error: 'boom', retry: 0 };
+  const fallback = boundary.render();
+  assert.ok(fallback && fallback.props && String(fallback.props.title || '').includes('boom'));
+  assert.match(client, /wrapTab\('settings', TEXT\.settings,/);
 });

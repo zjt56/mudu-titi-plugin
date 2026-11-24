@@ -185,3 +185,18 @@ test('全局填空横线统一使用同一套 1px 自适应细线，同一题内
   assert.match(client, /\.wf-fill-blank\.wf-rule-xl\{width:clamp\([^}]*%\s*,[^}]*\)\}/);
   assert.match(client, /\.wf-paper u,\.wf-table u\{[^}]*border-bottom:1px solid currentColor/);
 });
+
+test('Word 底部着重号 <em> 原样放行并用底部实心圆点（非斜体）渲染', () => {
+  const ctx = harness();
+  assert.equal(
+    ctx.markLine('两个<em>黄</em>鹂鸣翠柳,一行<em>白</em>鹭上青天。'),
+    '两个<em>黄</em>鹂鸣翠柳,一行<em>白</em>鹭上青天。',
+  );
+  // 通篇加粗压平时保留 <em>
+  assert.equal(
+    ctx.markLine('**两个<em>黄</em>鹂**', true),
+    '两个<em>黄</em>鹂',
+  );
+  // 样式表用底部实心圆点渲染 <em>，不斜体
+  assert.match(client, /\.wf-paper em,\.wf-table em,\.wf-content-text em\{[^}]*font-style:normal[^}]*text-emphasis:filled dot[^}]*text-emphasis-position:under right/);
+});

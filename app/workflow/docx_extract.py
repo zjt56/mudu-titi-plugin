@@ -358,9 +358,9 @@ class _Extractor:
             return result
         for child in node:
             key = child.tag.rsplit("}", 1)[-1]
-            if key in ("b", "bCs", "u", "vertAlign"):
-                value = _val(child, "1")
-                result[key] = value not in ("0", "false", "off", "none") if key != "vertAlign" else value
+            if key in ("b", "bCs", "u", "vertAlign", "em"):
+                value = _val(child, "none" if key == "em" else "1")
+                result[key] = value not in ("0", "false", "off", "none") if key not in ("vertAlign", "em") else value
             elif key == "rFonts":
                 result["font"] = " ".join(child.attrib.values())
         return result
@@ -462,6 +462,8 @@ class _Extractor:
             if fmt.get("vertAlign") in ("superscript", "subscript"):
                 tag = "sup" if fmt["vertAlign"] == "superscript" else "sub"
                 text = f"<{tag}>{text}</{tag}>"
+            if fmt.get("em") in ("dot", "underDot", "circle", "comma") and text.strip():
+                text = "<em>" + text + "</em>"
             if fmt.get("u"):
                 text = "<u>" + text + "</u>"
             if fmt.get("b"):

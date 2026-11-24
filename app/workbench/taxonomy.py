@@ -118,8 +118,16 @@ def _knowledge_index(mtime: float):
         path = str(point.get("path") or "").strip()
         if path:
             by_path[path] = {"id": point.get("id", ""), "name": point.get("name", ""), "path": path}
-    leaves = {path for path in by_path
-              if not any(other != path and other.startswith(path + "/") for other in by_path)}
+    # O(N) ancestor-prefix sweep instead of O(N^2) pairwise startswith scan.
+    non_leaves = set()
+    for path in by_path:
+        pos = path.rfind("/")
+        while pos > 0:
+            prefix = path[:pos]
+            if prefix in by_path:
+                non_leaves.add(prefix)
+            pos = path.rfind("/", 0, pos)
+    leaves = {path for path in by_path if path not in non_leaves}
     return by_path, leaves
 
 
@@ -132,24 +140,30 @@ _DISALLOWED_VOCAB_TYPES = ("完成句子", "短文填空", "选词填空", "教�
 
 
 def _is_selectable_for_type(path: str, main_type: str | None, leaves: set[str],
-                            allowed_prefixes=None, exact_paths=None) -> bool:
+                            allowed_prefixes=None, exact_paths=None,
+                            excluded_prefixes=None, types_set=None) -> bool:
     """判定某目录路径在指定题型下是否可选为最终知识点。"""
-    if not main_type or main_type not in types():
+    valid_types = types_set if types_set is not None else _types_set()
+    if not main_type or main_type not in valid_types:
         return path in leaves
     if main_type in _DISALLOWED_VOCAB_TYPES and (
             _under(path, "词汇/考察词汇") or _under(path, "词汇/答案考点")):
         return False
     if exact_paths is None:
         exact_paths = exact_knowledge_paths(main_type)
+    if excluded_prefixes is None:
+        excluded_prefixes = _excluded_prefixes(main_type)
     if exact_paths:
         return path in exact_paths and not any(
-            _under(path, excluded) for excluded in _excluded_prefixes(main_type))
-    return path in leaves and knowledge_path_allowed(path, main_type, allowed_prefixes)
+            _under(path, excluded) for excluded in excluded_prefixes)
+    return path in leaves and knowledge_path_allowed(
+        path, main_type, allowed_prefixes,
+        excluded_prefixes=excluded_prefixes, exact_paths=exact_paths)
 
 
-def knowledge_tree(main_type: str | None = None):
-    """目录树；传 main_type 时只保留该题型允许的知识点分支，名称里的斜线不是新层级。"""
-    by_path, leaves = knowledge_index()
+@lru_cache(maxsize=64)
+def _knowledge_tree_cached(k_mtime: float, f_mtime: float, t_mtime: float, clean_type: str):
+    by_path, leaves = _knowledge_index(k_mtime)
     nodes = {path: {**point, "leaf": path in leaves, "selectable": path in leaves, "children": []}
              for path, point in by_path.items()}
     roots = []
@@ -158,15 +172,18 @@ def knowledge_tree(main_type: str | None = None):
         while parent and parent not in nodes:
             parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
         (nodes[parent]["children"] if parent else roots).append(node)
-    clean_type = main_type.strip() if isinstance(main_type, str) else ""
-    scoped = bool(clean_type and clean_type in types())
+    k_data = _knowledge_cached(k_mtime)
+    version = {"version": k_data.get("version", ""), "versionId": k_data.get("versionId", ""),
+               "count": len(k_data.get("points", []))}
+    valid_types = _types_set_cached(f_mtime)
+    scoped = bool(clean_type and clean_type in valid_types)
     if not scoped:
-        return {"version": knowledge_version(), "complete": True, "scoped": False,
+        return {"version": version, "complete": True, "scoped": False,
                 "type": "", "allowed_prefixes": [], "total": len(nodes),
                 "selectable_total": len(leaves), "leaf_total": len(leaves), "items": roots}
-    allowed = _allowed_prefixes(clean_type)
-    exact = exact_knowledge_paths(clean_type)
-    excluded = _excluded_prefixes(clean_type)
+    allowed = list(_allowed_prefixes_cached(t_mtime, clean_type))
+    exact = _exact_paths_cached(t_mtime, clean_type)
+    excluded = _excluded_prefixes_cached(t_mtime, clean_type)
 
     def prune(node):
         path = node["path"]
@@ -182,7 +199,9 @@ def knowledge_tree(main_type: str | None = None):
             kept = prune(child)
             if kept is not None:
                 children.append(kept)
-        is_sel = _is_selectable_for_type(path, clean_type, leaves, allowed, exact)
+        is_sel = _is_selectable_for_type(
+            path, clean_type, leaves, allowed, exact,
+            excluded_prefixes=excluded, types_set=valid_types)
         if not is_sel and not children:
             return None
         return {**node, "selectable": is_sel, "children": children}
@@ -201,10 +220,21 @@ def knowledge_tree(main_type: str | None = None):
 
     pruned_roots = [kept for root in roots if (kept := prune(root)) is not None]
     total_nodes, selectable_count = count_tree(pruned_roots)
-    return {"version": knowledge_version(), "complete": False, "scoped": True,
+    return {"version": version, "complete": False, "scoped": True,
             "type": clean_type, "allowed_prefixes": [*allowed, *sorted(exact)],
             "total": total_nodes, "selectable_total": selectable_count,
             "leaf_total": selectable_count, "items": pruned_roots}
+
+
+def knowledge_tree(main_type: str | None = None):
+    """目录树；传 main_type 时只保留该题型允许的知识点分支，名称里的斜线不是新层级。"""
+    clean_type = main_type.strip() if isinstance(main_type, str) else ""
+    return _knowledge_tree_cached(
+        KNOWLEDGE_PATH.stat().st_mtime,
+        FRAMEWORK_PATH.stat().st_mtime,
+        TYPE_KNOWLEDGE_PATH.stat().st_mtime,
+        clean_type,
+    )
 
 
 def knowledge_catalog_for_prompt():
@@ -250,9 +280,13 @@ def knowledge_search(query: str = "", limit: int = 40, main_type: str | None = N
     if scoped:
         allowed = _allowed_prefixes(clean_type)
         exact = exact_knowledge_paths(clean_type)
+        excluded = _excluded_prefixes(clean_type)
+        valid_types = _types_set()
         candidates = sorted(
             path for path in by_path
-            if _is_selectable_for_type(path, clean_type, leaves, allowed, exact))
+            if _is_selectable_for_type(
+                path, clean_type, leaves, allowed, exact,
+                excluded_prefixes=excluded, types_set=valid_types))
     else:
         candidates = sorted(leaves)
     keyword = (query or "").strip().lower()
@@ -315,8 +349,52 @@ def resolve_knowledge(paths, main_type=None):
 
 
 @lru_cache(maxsize=4)
+def _types_set_cached(mtime: float) -> frozenset[str]:
+    return frozenset(t.get("name", "") for t in _framework_cached(mtime).get("question_types", []) if t.get("name"))
+
+
+def _types_set() -> frozenset[str]:
+    return _types_set_cached(FRAMEWORK_PATH.stat().st_mtime)
+
+
+@lru_cache(maxsize=4)
 def _type_rules_cached(mtime: float):
     return _read(TYPE_KNOWLEDGE_PATH).get("by_type", {})
+
+
+@lru_cache(maxsize=128)
+def _exact_paths_cached(mtime: float, main_type: str | None) -> frozenset[str]:
+    rules = _type_rules_cached(mtime)
+    specs = rules.values() if main_type is None else (rules.get(main_type, {}),)
+    return frozenset(dim["branch"] + "/" + dim["scope"] for spec in specs
+                     for dim in spec.get("dims", []) if dim.get("show") == "exact")
+
+
+@lru_cache(maxsize=128)
+def _excluded_prefixes_cached(mtime: float, main_type: str | None) -> tuple[str, ...]:
+    excluded = []
+    for dim in _type_rules_cached(mtime).get(main_type, {}).get("dims", []):
+        for item in dim.get("exclude", []) or []:
+            if isinstance(item, str) and item.strip() and item.strip() not in excluded:
+                excluded.append(item.strip())
+    return tuple(excluded)
+
+
+@lru_cache(maxsize=128)
+def _allowed_prefixes_cached(mtime: float, main_type: str | None) -> tuple[str, ...]:
+    prefixes = []
+    for dim in _type_rules_cached(mtime).get(main_type, {}).get("dims", []):
+        if dim.get("show") == "exact" or dim.get("separate"):
+            continue
+        # branch 的复合值是多个维度根，不是知识点路径。
+        for branch in dim.get("branch", "").split("/"):
+            prefix = branch + ("/" + dim["scope"] if dim.get("scope") else "")
+            # 其他的旧规则仍写「阅读技能」；现有目录已迁至阅读设题角度。
+            if prefix == "阅读技能":
+                prefix = "设题角度/阅读"
+            if prefix and prefix not in prefixes:
+                prefixes.append(prefix)
+    return tuple(prefixes)
 
 
 def type_knowledge_rules():
@@ -328,21 +406,21 @@ def exact_knowledge_paths(main_type=None):
     """Catalog nodes selectable only as exact paths for the given question type."""
     if main_type is not None and not isinstance(main_type, str):
         return set()
-    rules = type_knowledge_rules()
-    specs = rules.values() if main_type is None else (rules.get(main_type, {}),)
-    return {dim["branch"] + "/" + dim["scope"] for spec in specs
-            for dim in spec.get("dims", []) if dim.get("show") == "exact"}
+    return set(_exact_paths_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime, main_type))
 
 
-def knowledge_path_allowed(path, main_type, prefixes=None):
+def knowledge_path_allowed(path, main_type, prefixes=None, *, excluded_prefixes=None, exact_paths=None):
     if prefixes is None:
         prefixes = _allowed_prefixes(main_type)
     # 某些题型在允许维度内部仍排除特定子分支（如单词拼写不用「词汇/词汇辨析」）。
-    if any(_under(path, excluded) for excluded in _excluded_prefixes(main_type)):
+    if excluded_prefixes is None:
+        excluded_prefixes = _excluded_prefixes(main_type)
+    if any(_under(path, excluded) for excluded in excluded_prefixes):
         return False
-    exact = exact_knowledge_paths(main_type)
-    if exact:
-        return path in exact
+    if exact_paths is None:
+        exact_paths = exact_knowledge_paths(main_type)
+    if exact_paths:
+        return path in exact_paths
     return any(_under(path, prefix) for prefix in prefixes)
 
 
@@ -352,28 +430,11 @@ def _excluded_prefixes(main_type):
     例如单词拼写虽允许「词汇」维度，但不用「词汇/词汇辨析」这一子类：
     拼写/词形落 词汇/拼写与词形 而不是 词汇辨析/<词性>辨析。
     """
-    excluded = []
-    for dim in type_knowledge_rules().get(main_type, {}).get("dims", []):
-        for item in dim.get("exclude", []) or []:
-            if isinstance(item, str) and item.strip() and item.strip() not in excluded:
-                excluded.append(item.strip())
-    return excluded
+    return list(_excluded_prefixes_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime, main_type))
 
 
 def _allowed_prefixes(main_type):
-    prefixes = []
-    for dim in type_knowledge_rules().get(main_type, {}).get("dims", []):
-        if dim.get("show") == "exact" or dim.get("separate"):
-            continue
-        # branch 的复合值是多个维度根，不是知识点路径。
-        for branch in dim.get("branch", "").split("/"):
-            prefix = branch + ("/" + dim["scope"] if dim.get("scope") else "")
-            # 其他的旧规则仍写「阅读技能」；现有目录已迁至阅读设题角度。
-            if prefix == "阅读技能":
-                prefix = "设题角度/阅读"
-            if prefix and prefix not in prefixes:
-                prefixes.append(prefix)
-    return prefixes
+    return list(_allowed_prefixes_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime, main_type))
 
 
 def _under(path, prefix):

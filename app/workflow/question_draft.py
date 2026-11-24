@@ -18,7 +18,7 @@ PATH = "06_batch/question-draft.json"
 VERSION = "upload-workflow.question-draft/v1"
 _INPUTS = ("01_source/正文.txt", "01_source/structure.confirmed.json",
            "01_source/structure.json", "01_source/extraction.json", "01_source/pdf-ocr.json")
-_MARKUP = re.compile(r"</?(?:u|sup|sub)>|\*\*")
+_MARKUP = re.compile(r"</?(?:u|sup|sub|em)>|\*\*")
 _TABLE = re.compile(r"\[TABLE(?:\s+(\d+))?\](.*?)\[/TABLE\]", re.S)
 _INSTRUCTION = re.compile(
     r"^(?:听下面|听一段|听两遍|你将听到|阅读下列|阅读下面|根据对话内容|根据短文内容"

@@ -40,9 +40,9 @@ test('标签合并将原标签与一审知识点去重合并，且不再展示�
  d.comparison.rounds[0].checks[0].rationale = '依据第一段补充社区生活知识点';
  d.comparison.rounds[0].checks[0].assessment.knowledge = ['主题/原标签', '主题/新标签'];
  const rendered = text(labelAuditPanels(d));
- assert.match(rendered, /原标签 原标签/);
- assert.match(rendered, /一审标签 原标签\s*、\s*新标签/);
- assert.match(rendered, /标签合并 原标签、新标签/);
+ assert.match(rendered, /原标签\s+原标签/);
+ assert.match(rendered, /一审标签\s+原标签[\s、]+新标签/);
+ assert.match(rendered, /标签合并.*原标签[\s、]+新标签/);
  assert.doesNotMatch(rendered, /二审标签|未抽中/);
  assert.equal(hasErrorColor(labelAuditPanels(d)), true);
  const notes = auditNotes(d).join(' ');
@@ -63,9 +63,9 @@ test('答案词显示在原标签与标签合并，已绑定和待绑定的同�
   d.labels.answer_point_tags = ['pencil', 'each other'];
   d.comparison.stale = true;
   const rendered = text(labelAuditPanels(d));
-  assert.match(rendered, /原标签 原标签、pencil、each other/);
+  assert.match(rendered, /原标签\s+原标签[\s、]+pencil[\s、]+each other/);
   assert.match(rendered, /一审标签/);
-  assert.match(rendered, /标签合并 原标签、pencil、each other/);
+  assert.match(rendered, /标签合并.*原标签[\s、]+pencil[\s、]+each other/);
   assert.doesNotMatch(rendered, /答案考点|历史一审|历史二审|二审标签/);
   assert.doesNotMatch(rendered, /不一致/);
   assert.equal(hasKnowledgeDiff(d), false);
@@ -76,7 +76,7 @@ test('答案考点按一审实际判断显示，漏标和不同答案参与比�
   const first = d.comparison.rounds[0].checks[0];
   first.expected_answer_points = ['have seen'];
   first.assessment.answer_points = ['have seen'];
-  assert.match(text(labelAuditPanels(d)), /一审标签 原标签、have seen.*标签合并/);
+  assert.match(text(labelAuditPanels(d)), /一审标签\s+原标签[\s、]+have seen.*标签合并/);
   assert.equal(hasKnowledgeDiff(d), false);
   first.assessment.answer_points = [];
   assert.equal(hasKnowledgeDiff(d), true);
@@ -173,8 +173,8 @@ test('人工修改后标签合并行显示修改结果及已修改，原标签�
   const d = detail([], '未覆盖');
   d.labels = { knowledge: ['主题/修改后'], knowledge_manually_saved: true };
   const rendered = text(labelAuditPanels(d));
-  assert.match(rendered, /原标签 原标签/);
-  assert.match(rendered, /标签合并 修改后 已修改/);
+  assert.match(rendered, /原标签\s+原标签/);
+  assert.match(rendered, /标签合并\s+已修改\s+修改后/);
   assert.doesNotMatch(rendered, /当前标签/);
   assert.equal(hasKnowledgeDiff(d), false);
   d.labels = { knowledge: ['主题/原标签'], knowledge_manually_saved: false };
@@ -265,4 +265,30 @@ test('题型/子类始终展示到最末级叶子，仅把存在差异的末级�
   const samePanels = labelAuditPanels(d);
   assert.match(text(samePanels), /原标签\s+单词拼写\s*\/\s*句意/);
   assert.deepEqual(collectRed(samePanels), []);
+});
+
+test('知识点标签采用左对齐主次分层与胶囊标签展示，合并区使用微底承托且无描边阴影', () => {
+  const d = detail(['主题/新标签'], '已提供');
+  d.comparison.rounds[0].checks[0].assessment.knowledge = ['主题/原标签', '主题/扩展点'];
+  const panels = labelAuditPanels(d);
+  const kpSection = panels[0].children[0];
+  // children[0] 为「知识点标签 + 状态」左对齐头部，children[1..3] 分别为 原标签 / 一审标签 / 标签合并 块
+  const titleHead = kpSection.children[0];
+  assert.equal(titleHead.props.style.justifyContent, 'space-between');
+  assert.match(text(titleHead), /知识点标签\s+有差异/);
+  const cmpRows = kpSection.children.slice(1);
+  assert.equal(cmpRows.length, 3);
+  const [origRow, r1Row, mergedRow] = cmpRows;
+  for (const row of [origRow, r1Row]) {
+    assert.equal(row.props.style.flexDirection, 'column');
+    const [headNode, bodyNode] = row.children;
+    assert.equal(headNode.props.style.border, undefined);
+    assert.equal(headNode.props.style.borderBottom, undefined);
+    assert.equal(headNode.props.style.boxShadow, undefined);
+    assert.equal(bodyNode.props.style.flexWrap, 'wrap');
+    assert.ok(bodyNode.children.length >= 1);
+  }
+  assert.equal(mergedRow.props.style.flexDirection, 'column');
+  assert.ok(mergedRow.props.style.background, '标签合并块应使用微底承托');
+  assert.match(text(mergedRow), /自动合并/);
 });

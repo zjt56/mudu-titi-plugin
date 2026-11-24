@@ -389,7 +389,7 @@ def read(job, relative, *, offset=0, limit=READ_CHARS):
             "sha256": _sha(raw)}
 
 
-def read_lines(job, relative, *, start_line=1, limit=80):
+def read_lines(job, relative, *, start_line=1, limit=200):
     """Read numbered lines with an explicit continuation and a bounded response."""
     relative, raw = _read_source(job, relative)
     lines = raw.decode("utf-8", "replace").splitlines(keepends=True)

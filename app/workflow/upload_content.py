@@ -229,8 +229,8 @@ def _body_line_maps(body_lines: tuple[str, ...]):
 
 
 def _heading_key(value):
-    """标题比较口径：忽略 Markdown 标题符、画线标记与加粗。"""
-    text = re.sub(r'</?(?:u|sup|sub)>', '', str(value or ''))
+    """标题比较口径：忽略 Markdown 标题符、画线标记、着重号与加粗。"""
+    text = re.sub(r'</?(?:u|sup|sub|em)>', '', str(value or ''))
     return _structural_line(text.replace('**', '')).strip()
 
 

@@ -386,12 +386,25 @@ class ReviewRoundsTest(unittest.TestCase):
                                   'difficulty': [{'number': uid[1:], 'value': '容易'}]}) for uid in targets]
             return {'status': 'completed', 'artifacts': {'review_round': {'checks': checks}}, 'notes': [], 'findings': []}
         bad = response(first)
-        bad['artifacts']['review_round']['checks'].pop()
-        with self.assertRaises(ValueError):
+        bad_checks = bad['artifacts']['review_round']['checks']
+        missing = bad_checks.pop()
+        bad_checks.append(dict(missing, unit_id=[]))
+        with self.assertRaises(review.RoundCheckError):
             review_rounds.import_result(self.batch, first['task_id'], bad)
+        partial = json.loads((self.batch / 'workflow/review-partial' / (first['task_id'] + '.json')).read_text())
+        self.assertEqual([row['unit_id'] for row in partial['failed']], [missing['unit_id']])
+        self.assertEqual(len(partial['valid_checks']), len(bad_checks) - 1)
+        self.assertEqual(partial['discarded_checks'], [{'index': len(bad_checks) - 1, 'reason': 'invalid_unit_id'}])
+        self.assertEqual(json.loads((self.batch / partial['raw_candidate']).read_text()), bad)
         good = response(first)
+        good_checks = good['artifacts']['review_round']['checks']
+        good_checks.extend([dict(good_checks[0], unit_id='outside-partition'),
+                            dict(good_checks[0], unit_id={})])
         report = review_rounds.import_result(self.batch, first['task_id'], good)
         self.assertEqual(report['part_completed'], 1)
+        raw_candidates = [json.loads(path.read_text()) for path in
+                          (self.batch / 'workflow/review-raw-results' / first['task_id']).glob('*.json')]
+        self.assertIn(good, raw_candidates)
         self.assertNotIn('labels', review.evaluate_rounds(self.batch)['checked_rounds'])
         self.assertEqual(review_rounds.import_result(self.batch, first['task_id'], good), report)
         # The duplicate export is the same pending part, so an identical replay
@@ -409,6 +422,7 @@ class ReviewRoundsTest(unittest.TestCase):
         record = payload['rounds'][0]
         self.assertEqual([p['execution_id'] for p in record['parts']], [first['task_id'], second['task_id']])
         self.assertEqual(len(record['checks']), 16)
+        self.assertIn('labels', review.evaluate_rounds(self.batch)['checked_rounds'])
         self.assertEqual(report.get('part_completed'), 1)
         self.assertEqual(report.get('action'), 'continue')
         self.assertEqual(review_rounds.export_task(self.batch)['action'], 'complete')
@@ -599,6 +613,54 @@ class ReviewRoundsTest(unittest.TestCase):
             report = review_rounds._repair_round(self.batch, first['task_id'], {'provider': 'fixture'})
         self.assertEqual(report.get('part_completed'), 1)
         self.assertEqual(report.get('action'), 'continue')
+
+    def test_partition_coverage_gaps_are_reported_per_target(self):
+        """同一目标重复或缺失必须逐目标可修复，不能变成整片致命覆盖错误。"""
+        good = self.checks('labels')[0]
+        uid = good['unit_id']
+        valid, failed = review_rounds._partition_check_issues(
+            review, self.plan, 'labels', [good, copy.deepcopy(good)], self.batch,
+            targets=[uid])
+        self.assertEqual(valid, [])
+        self.assertEqual([row['unit_id'] for row in failed], [uid])
+        self.assertIn('exactly once', failed[0]['reason'])
+        valid, failed = review_rounds._partition_check_issues(
+            review, self.plan, 'labels', [], self.batch, targets=[uid])
+        self.assertEqual(valid, [])
+        self.assertEqual([row['unit_id'] for row in failed], [uid])
+        self.assertIn('Missing review check', failed[0]['reason'])
+        stray = copy.deepcopy(good)
+        stray['unit_id'] = 'group-owned-by-another-partition'
+        valid, failed = review_rounds._partition_check_issues(
+            review, self.plan, 'labels', [stray, good], self.batch, targets=[uid])
+        self.assertEqual(valid, [good])
+        self.assertEqual(failed, [])
+
+    def test_duplicate_target_check_is_repaired_instead_of_fatal(self):
+        self._parallel_batch()
+        first = review_rounds.export_task(self.batch, max_units_per_part=1)
+        task = json.loads((Path(first['package_dir']) / 'task.json').read_text())
+        good = self._part_response(task['prompt'], 'labels')
+        checks = good['artifacts']['review_round']['checks']
+        self.assertEqual(len(checks), 1)
+        duplicated = copy.deepcopy(good)
+        duplicated['artifacts']['review_round']['checks'] = [checks[0], copy.deepcopy(checks[0])]
+        with self.assertRaises(review.RoundCheckError) as raised:
+            review_rounds.import_result(self.batch, first['task_id'], duplicated)
+        self.assertIn('exactly once', str(raised.exception))
+        partial = json.loads((self.batch / 'workflow/review-partial'
+                              / (first['task_id'] + '.json')).read_text())
+        self.assertEqual(partial['valid_checks'], [])
+        self.assertEqual([row['unit_id'] for row in partial['failed']], [checks[0]['unit_id']])
+
+        def repair(prompt, run_dir, config, permit_parallel=False):
+            import re
+            round_id = re.search(r"ROUND: (\w+)", prompt).group(1)
+            return {'response': self._part_response(prompt, round_id)}
+
+        with patch.object(review_rounds, 'invoke', side_effect=repair):
+            report = review_rounds._repair_round(self.batch, first['task_id'], {'provider': 'fixture'})
+        self.assertEqual(report.get('part_completed'), 1)
 
     def test_inapplicable_answer_points_are_projected_at_import(self):
         self._parallel_batch()

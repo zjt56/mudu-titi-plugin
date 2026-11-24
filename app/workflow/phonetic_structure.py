@@ -21,6 +21,19 @@ def _judgement_rubric(stem):
     return any(pair <= letters for pair in JUDGEMENT_PAIRS)
 
 
+def _group_lead_has_image(unit: dict) -> bool:
+    """True when a confirmed group's raw source slice has [IMG ...] before its first printed number."""
+    if unit.get("unit_kind") != "group" or not unit.get("numbers"):
+        return False
+    stem = str(unit.get("stem") or "")
+    cut = len(stem)
+    for number in unit.get("numbers") or []:
+        match = re.search(r"(?<![\d])" + re.escape(str(number)) + r"\s*[.．、]", stem)
+        if match:
+            cut = min(cut, match.start())
+    return bool(re.search(r"\[IMG\s+[^\]]+?\]", stem[:cut]))
+
+
 def verified_groups(batch_path):
     """Rebuild from current source; no persisted flag or arbitrary attachment is proof."""
     from . import question_draft
@@ -50,7 +63,13 @@ def verified_groups(batch_path):
                                 and bool(u.get('numbers'))
                                 and legitimate_source_shape(u) == 'image_only')
                         ))}
-        if not eligible:
+        # Any group (e.g. 阅读理解 / 任务型阅读) whose original shared material before item 1
+        # consists solely of native source image(s) promoted to placement=question attachments.
+        image_material_candidates = {
+            u["unit_id"]: u.get("type") for u in confirmed
+            if u.get("unit_id") not in eligible and _group_lead_has_image(u)
+        }
+        if not eligible and not image_material_candidates:
             return {}
         draft = question_draft.build(root)
         owners = Counter(a.get("name") for item in draft["items"] for a in item.get("attachments") or []
@@ -67,14 +86,43 @@ def verified_groups(batch_path):
                     invalid_media.add(item["unit_id"])
         invalid = {p.get("unit_id") for p in draft["issues"]
                    if p.get("code") not in {"TABLE_LAYOUT_UNVERIFIED"}}
-        return {item["unit_id"]: dict(item, _source_media_batch=root.name,
-                                       _source_question_type=eligible[item['unit_id']]) for item in draft["items"]
-                if item.get("unit_id") in eligible
-                and item.get("unit_id") not in invalid | invalid_media
-                and item.get("identity_version") == "scoped-v1"
-                and item.get("unit_kind") == "group"
-                and draft["source_bindings"][item["unit_id"]].get("shared_rubric")
-                and str(item.get("stem") or "").strip()}
+        result = {item["unit_id"]: dict(item, _source_media_batch=root.name,
+                                        _source_question_type=eligible[item['unit_id']]) for item in draft["items"]
+                  if item.get("unit_id") in eligible
+                  and item.get("unit_id") not in invalid | invalid_media
+                  and item.get("identity_version") == "scoped-v1"
+                  and item.get("unit_kind") == "group"
+                  and draft["source_bindings"][item["unit_id"]].get("shared_rubric")
+                  and str(item.get("stem") or "").strip()}
+        for item in draft["items"]:
+            uid = item.get("unit_id")
+            if uid not in image_material_candidates or uid in invalid | invalid_media:
+                continue
+            if (item.get("unit_kind") != "group"
+                    or str(item.get("material") or "").strip()
+                    or item.get("materialBlocks")):
+                continue
+            group_images = [
+                a for a in (item.get("attachments") or [])
+                if isinstance(a, dict) and a.get("kind") == "image" and a.get("placement") == "question"
+            ]
+            if not group_images:
+                continue
+            binding = draft["source_bindings"].get(uid) or {}
+            media_hashes = binding.get("media_hashes") or {}
+            if not all(
+                isinstance(media_hashes.get("01_source/media/" + str(a.get("name") or "")), str)
+                and media_hashes.get("01_source/media/" + str(a.get("name") or "")) != "missing"
+                for a in group_images
+            ):
+                continue
+            result[uid] = dict(
+                item,
+                _source_media_batch=root.name,
+                _source_question_type=image_material_candidates[uid],
+                _source_image_material=True,
+            )
+        return result
     except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, IndexError):
         # Missing or malformed current evidence cannot grant a shape exemption.
         return {}
@@ -150,6 +198,10 @@ def shape(unit, verified=None):
                and source_url(a)}
     if not images.issubset(present):
         return False, False
+    if expected.get("_source_image_material"):
+        actual = [a for a in unit.get("attachments") or []
+                  if isinstance(a, dict) and a.get("kind") == "image" and a.get("placement") == "question"]
+        return bool(images and images == present and len(actual) == len(images)), False
     if expected.get("_source_question_type") == "完成句子":
         actual = [a for a in unit.get("attachments") or []
                   if isinstance(a, dict) and a.get("kind") == "image" and a.get("placement") == "question"]

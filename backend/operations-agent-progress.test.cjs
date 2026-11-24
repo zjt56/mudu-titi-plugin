@@ -323,3 +323,49 @@ test('patch and base-restore are visible as writes and never count as read-only 
   } });
   await f.run(); await f.manager.dispose();
 });
+
+test('canAdmit=false keeps heartbeat and poll freshness alive while still blocking new claims', async () => {
+  let hasWorkCalls = 0;
+  const f = await fixture({
+    managerOptions: {
+      canAdmit: () => false,
+      hasWork: async () => { hasWorkCalls++; return { has_work: true }; },
+    },
+  });
+  try {
+    f.manager.start();
+    await f.manager.tick();
+    assert.ok(hasWorkCalls >= 1, 'hasWork heartbeat must still fire while admission is blocked');
+    assert.equal(f.calls.filter(c => c.path.endsWith('/claim')).length, 0, 'new claims stay blocked');
+    const st = f.manager.status();
+    assert.ok(st.lastPollAt, 'lastPollAt must be updated');
+    assert.equal(st.pollStale, false);
+    assert.equal(st.admissionBlocked, true);
+  } finally {
+    await f.manager.dispose();
+  }
+});
+
+test('operations_code_repair normalizes workflow test file paths to unittest module names', async () => {
+  const seen = [];
+  const f = await fixture({
+    backend: (_path, init) => {
+      if (init.body?.action === 'code_repair' && init.body.input.operation === 'test') {
+        seen.push(init.body.input.tests);
+        return { request_id: init.body.request_id, status: 'completed', evidence: { passed: true } };
+      }
+    },
+    program: async ({ call }) => {
+      const res = await call('code_repair', {
+        operation: 'test',
+        tests: ['app/workflow/test_question_content.py', 'workflow/test_foo.py', 'test_bar.py'],
+      });
+      assert.equal(res.passed, true);
+      await call('verify');
+      await call('finish', { outcome: 'resolved', summary: 'ok' });
+    },
+  });
+  await f.run();
+  assert.deepEqual(seen, [['workflow.test_question_content', 'workflow.test_foo', 'workflow.test_bar']]);
+  await f.manager.dispose();
+});

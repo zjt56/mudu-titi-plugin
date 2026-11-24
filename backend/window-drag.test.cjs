@@ -20,6 +20,7 @@ test('Harness window drag is limited to the recording panel header', () => {
     closeIcon() {},
     UploadView() {},
     WorkbenchTab() {},
+    TypeReviewTab() {},
     SettingsTab() {},
   });
   const closePanel = () => {};
@@ -36,7 +37,8 @@ test('Harness window drag is limited to the recording panel header', () => {
   assert.ok(!('data-window-drag' in panel.props));
   assert.ok(!('data-window-drag' in body.props));
   const tabList = header.children.find(child => child.props.role === 'tablist');
-  assert.equal(tabList.children.length, 3);
+  assert.equal(tabList.children.length, 4);
+  assert.deepEqual(tabList.children.map(tab => tab.children[0]), ['上传试卷', '试卷审核', '题型审核', '模型与设置']);
   assert.ok(tabList.children.every(tab => tab.tag === 'button' && typeof tab.props.onClick === 'function'));
   assert.ok(header.children.some(child => child.tag === 'button' && child.props.onClick === closePanel));
 });

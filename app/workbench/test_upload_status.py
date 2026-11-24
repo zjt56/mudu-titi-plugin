@@ -151,6 +151,19 @@ class UploadStatusTests(unittest.TestCase):
         self.assertEqual(server._flow_timing({"stages": {"extract": {"started_at": "bad", "finished_at": "bad"}}}),
                          (None, None, None))
 
+    def test_flow_timing_ignores_stale_pre_extract_timestamps(self):
+        # When extract re-runs days later and reused stages retain earlier timestamps,
+        # elapsed minutes must measure the current run from extract.started_at.
+        manifest = {"created_at": "2026-11-21T09:48:38+08:00", "stages": {
+            "extract": {"started_at": "2026-11-24T13:43:58+08:00", "finished_at": "2026-11-24T13:44:21+08:00"},
+            "knowledge": {"started_at": "2026-11-21T09:50:38+08:00", "finished_at": "2026-11-21T09:54:48+08:00"},
+            "format_gate": {"status": "completed", "started_at": "2026-11-24T13:59:50+08:00",
+                            "finished_at": "2026-11-24T13:59:51+08:00"}}}
+        start, finish, minutes = server._flow_timing(manifest)
+        self.assertEqual(start, "2026-11-24T13:43:58+08:00")
+        self.assertEqual(finish, "2026-11-24T13:59:51+08:00")
+        self.assertEqual(minutes, 16)
+
     def record(self, path, value):
         target = self.folder / "07_upload" / path
         target.parent.mkdir(parents=True, exist_ok=True)

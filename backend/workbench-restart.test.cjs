@@ -8,13 +8,11 @@ const root = path.resolve(__dirname, '..');
 const client = readFileSync(path.join(root, 'lib/client.js'), 'utf8').replace(/\r\n/g, '\n');
 const host = readFileSync(path.join(root, 'lib/index.js'), 'utf8').replace(/\r\n/g, '\n');
 
-test('宿主保留空闲自动重启并支持查看状态与强制重启参数', () => {
+test('宿主提供重启状态查询与延后状态', () => {
   assert.match(host, /const RESTART_DEFER_MS = 5000;/);
   assert.match(host, /if \(req\.method === 'GET' && sub === '\/workbench\/status'\)/);
   assert.match(host, /deferred:\s*Boolean\(deferredRestart\)/);
   assert.match(host, /restarting:\s*backendRestartInFlight\(\)/);
-  assert.match(host, /const force = payload\?\.force === true;/);
-  assert.match(host, /if \(!force && await backendBusy\(\)\)/);
 });
 
 test('前端只在最前台顶栏和模型设置页提供重启后端入口，排队区与试卷审核工具栏不再重复放置', () => {

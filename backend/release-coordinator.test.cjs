@@ -173,3 +173,27 @@ test('stop cancels timer and prevents rollback or another restart after an in-fl
   assert.equal(rollbacks, 0);
   assert.equal(JSON.parse(readFileSync(path, 'utf8')).state, 'installed');
 });
+
+test('installed marker is cleared without redundant restart when backend already booted after marker time', async (t) => {
+  const { createReleaseCoordinator } = await moduleReady;
+  const dir = mkdtempSync(join(tmpdir(), 'release-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const installedAt = Math.floor((Date.now() - 60000) / 1000);
+  const path = marker(dir, { state: 'installed', at: installedAt, plan_id: 'p-reconcile', files: ['app/workflow/a.py'] });
+  let restarts = 0;
+  let seenMarkerMs = 0;
+  const c = createReleaseCoordinator({
+    markerPath: path,
+    alreadyRestarted: async (_m, markerMs) => { seenMarkerMs = markerMs; return true; },
+    canRestart: async () => false,
+    restart: async () => { restarts++; return { ok: true }; },
+  });
+  assert.equal(c.blocksAdmission(), true);
+  await c.check();
+  assert.equal(seenMarkerMs, installedAt * 1000);
+  assert.equal(restarts, 0);
+  assert.equal(c.status.state, 'active');
+  assert.equal(c.status.paused, false);
+  assert.equal(existsSync(path), false);
+  assert.equal(c.blocksAdmission(), false);
+});

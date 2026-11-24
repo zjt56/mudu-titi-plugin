@@ -395,6 +395,29 @@ class QuestionDraftTest(unittest.TestCase):
         self.source(text, [([1, 2], "group", "阅读理解", 3, 8)])
         self.assertEqual(question_draft.build(self.root)["items"][0]["stem"], "")
 
+    def test_emphasis_dot_markup_survives_draft_and_is_audited(self):
+        from workflow import question_content
+        text = "\n".join([
+            "七上 · 人教版 · 课时A计划",
+            "**Ⅰ. [跨学科]在下列四线三格中写出加点字对应的英文单词**",
+            "**1.**两个<em>黄</em>鹂鸣翠柳,一行<em>白</em>鹭上青天。",
+            "**2.**近朱者<em>赤</em>,近墨者<em>黑</em>。",
+        ])
+        self.source(text, [([1, 2], "group", "单词拼写", 2, 4)])
+        draft = question_draft.build(self.root)
+        row = draft["items"][0]
+        subs = {c["number"]: c["stem"] for c in row["subquestions"]}
+        self.assertEqual(subs[1], "两个<em>黄</em>鹂鸣翠柳,一行<em>白</em>鹭上青天。")
+        self.assertEqual(subs[2], "近朱者<em>赤</em>,近墨者<em>黑</em>。")
+        # 完整保留着重号时不报 SOURCE_EMPHASIS_MISSING
+        ok_audit = question_content.audit_batch_source(self.root, {"items": [row]})
+        self.assertNotIn("SOURCE_EMPHASIS_MISSING", [i["code"] for i in ok_audit["issues"]])
+        # 丢掉着重号时审计必须抓出 SOURCE_EMPHASIS_MISSING
+        stripped = json.loads(json.dumps(row))
+        stripped["subquestions"][0]["stem"] = "两个黄鹂鸣翠柳,一行白鹭上青天。"
+        bad_audit = question_content.audit_batch_source(self.root, {"items": [stripped]})
+        self.assertIn("SOURCE_EMPHASIS_MISSING", [i["code"] for i in bad_audit["issues"]])
+
     def test_shared_rubric_review_regressions(self):
         from workflow.shared_rubric import section_rubric
         from workflow.question_content import _generic_choice_instruction

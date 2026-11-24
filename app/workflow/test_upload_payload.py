@@ -685,6 +685,17 @@ class UploadPayloadTest(unittest.TestCase):
         q["material"] = ""
         self.assertIn("GROUP_INCOMPLETE", self.codes(self.build(batch(q))))
 
+    def test_group_shared_material_may_be_the_original_image(self):
+        # 原卷语篇以图片排入 Word：组级导语只有一个图片引用时，空文字 material 不是缺材料，
+        # 判据与本地 A8 体检、shared_rubric 的题组材料规则一致。
+        q = reading_group()
+        q["material"] = ""
+        q["stem"] = "[IMG image64.jpg]"
+        self.assertNotIn("GROUP_INCOMPLETE", self.codes(self.build(batch(q))))
+        # 导语还有文字却 material 为空，仍是真正缺材料，必须继续报。
+        q["stem"] = "[IMG image64.jpg]\n阅读下列短文，从每小题所给的选项中选出最佳选项。"
+        self.assertIn("GROUP_INCOMPLETE", self.codes(self.build(batch(q))))
+
     def test_multiple_textbook_mappings_not_dropped_or_rebound(self):
         q = question()
         kid = "REMOTE-" + q["knowledgeIds"][0]

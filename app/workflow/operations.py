@@ -541,20 +541,22 @@ def _candidate_evidence(folder, stage):
 
 
 _STAGE_SOURCE_HINTS = {
-    "parse": ["app/workflow/parser.py", "app/workflow/structure.py"],
-    "structure_gate": ["app/workflow/structure.py", "app/workflow/validation.py"],
-    "preassemble": ["app/workflow/preassemble.py", "app/workflow/assembler.py"],
-    "answers": ["app/workflow/content_stages.py", "app/workflow/local_agent.py"],
-    "explanations": ["app/workflow/content_stages.py", "app/workflow/local_agent.py"],
-    "types": ["app/workflow/content_stages.py", "app/workflow/local_agent.py"],
-    "knowledge": ["app/workflow/content_stages.py", "app/workflow/taxonomy.py"],
-    "audio": ["app/workflow/content_stages.py", "app/workflow/audio.py"],
-    "underlines": ["app/scripts/06-upload/mark_underline.py", "app/workflow/underline_layout.py"],
-    "assemble": ["app/workflow/assembler.py", "app/workflow/self_heal_actions.py"],
-    "validate": ["app/workflow/validation.py", "app/workflow/assembler.py"],
-    "format_gate": ["app/workflow/legacy_format.py", "app/workflow/validation.py"],
-    "review": ["app/workflow/review_rounds.py", "app/workflow/review.py", "app/workflow/local_agent.py"],
-    "review_gate": ["app/workflow/review.py", "app/workflow/structure.py"],
+    "extract": ["app/workflow/extract.py", "app/workflow/docx_extract.py", "app/workflow/pdf_ocr.py"],
+    "structure_gate": ["app/workflow/structure_gate.py", "app/workflow/structure_checks.py", "app/workflow/structure_ai.py", "app/workflow/question_content.py"],
+    "preassemble": ["app/workflow/preassembly.py", "app/workflow/question_draft.py", "app/workflow/question_content.py", "app/workflow/source_objects.py"],
+    "answers": ["app/workflow/agent_tasks.py", "app/workflow/answers_direct.py", "app/workflow/local_agent.py"],
+    "explanations": ["app/workflow/agent_tasks.py", "app/workflow/explanations_direct.py", "app/workflow/local_agent.py"],
+    "types": ["app/workflow/agent_tasks.py", "app/workflow/types_direct.py", "app/workflow/preassembly.py"],
+    "knowledge": ["app/workflow/agent_tasks.py", "app/workflow/knowledge_direct.py", "app/workflow/label_audit.py", "app/workflow/label_merge.py"],
+    "audio": ["app/workflow/listening_script.py", "app/workflow/optional_inputs.py"],
+    "content_snapshot": ["app/workflow/content_snapshot.py", "app/workflow/handoff.py"],
+    "meta": ["app/workflow/metadata_ai.py", "app/workflow/metadata_policy.py"],
+    "underlines": ["app/scripts/06-upload/mark_underline.py"],
+    "assemble": ["app/workflow/assemble_local.py", "app/workflow/assemble_precheck.py", "app/workflow/batch_fill.py", "app/workflow/question_content.py"],
+    "validate": ["app/workflow/checks.py", "app/workflow/final_audit.py", "app/workflow/handoff.py", "app/workflow/assemble_local.py"],
+    "format_gate": ["app/workflow/format_gate.py", "app/workflow/format_gate_core.py", "app/workflow/legacy_format.py"],
+    "review": ["app/workflow/review_rounds.py", "app/workflow/review.py", "app/workflow/review_child_source.py", "app/workflow/local_agent.py"],
+    "review_gate": ["app/workflow/review.py", "app/workflow/review_rounds.py", "app/workflow/handoff.py"],
 }
 
 
@@ -562,14 +564,74 @@ def _suspected_sources(stage, detail, issues):
     codes = " ".join([str(detail or "")] + [str(i.get("code") or "") + " " + str(i.get("message") or "") for i in issues]).lower()
     hints = list(_STAGE_SOURCE_HINTS.get(stage, []))
     if "source_binding" in codes or "review_sample_source_unverified" in codes or "source_unverified" in codes:
-        hints = ["app/workflow/structure.py", "app/workflow/review.py", "app/workflow/preassemble.py"] + hints
-    elif "format" in codes or "legacy" in codes:
-        hints = ["app/workflow/legacy_format.py"] + hints
+        hints = ["app/workflow/structure_gate.py", "app/workflow/review.py", "app/workflow/preassembly.py", "app/workflow/source_anchors.py"] + hints
+    elif "format" in codes or "legacy" in codes or "[e" in codes:
+        hints = ["app/workflow/legacy_format.py", "app/workflow/assemble_precheck.py", "app/workflow/question_content.py"] + hints
     elif "option" in codes or "table" in codes:
-        hints = ["app/workflow/self_heal_actions.py", "app/workflow/assembler.py"] + hints
+        hints = ["app/workflow/question_content.py", "app/workflow/self_heal_actions.py", "app/workflow/question_draft.py"] + hints
     elif "json" in codes or "schema" in codes:
-        hints = ["app/workflow/local_agent.py", "app/workflow/review.py"] + hints
+        hints = ["app/workflow/local_agent.py", "app/workflow/agent_protocol.py", "app/workflow/review.py"] + hints
     return list(dict.fromkeys(hints))[:6]
+
+
+def _log_tail(folder, stage, max_chars=1200):
+    path = supervisor._regular_file(Path(folder), f"workflow/logs/{stage}.log")
+    if path is None:
+        return ""
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    text = raw[-max_chars:].strip()
+    return _redact(text) if text else ""
+
+
+def _unit_excerpts(folder, unit_ids, limit=3):
+    if not unit_ids:
+        return []
+    wanted = list(dict.fromkeys(str(u) for u in unit_ids if u))[:limit]
+    wanted_set = set(wanted)
+    by_id = {}
+    confirmed = supervisor._regular_file(Path(folder), "01_source/structure.confirmed.json")
+    if confirmed is not None:
+        try:
+            data = json.loads(confirmed.read_text(encoding="utf-8"))
+            rows = data.get("units") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            for row in rows or []:
+                uid = str((row or {}).get("unit_id") or "")
+                if uid in wanted_set:
+                    by_id[uid] = {
+                        "unit_id": uid,
+                        "kind": row.get("kind"),
+                        "numbers": row.get("numbers"),
+                        "section_title": str(row.get("section_title") or "")[:120],
+                        "stem_preview": _redact(str(row.get("stem") or ""))[:400],
+                        "material_preview": _redact(str(row.get("material") or ""))[:400],
+                    }
+        except (OSError, ValueError, TypeError):
+            pass
+    batch_file = supervisor._regular_file(Path(folder), "06_batch/batch.json")
+    if batch_file is not None:
+        try:
+            bdata = json.loads(batch_file.read_text(encoding="utf-8"))
+            items = bdata.get("questions") if isinstance(bdata, dict) else (bdata if isinstance(bdata, list) else [])
+            for item in items or []:
+                if not isinstance(item, dict):
+                    continue
+                uid = str(item.get("unit_id") or item.get("source_unit_id") or "")
+                if uid in wanted_set:
+                    entry = by_id.setdefault(uid, {"unit_id": uid})
+                    subs = item.get("sub_questions") if isinstance(item.get("sub_questions"), list) else []
+                    entry["assembled"] = {
+                        "type": item.get("type") or item.get("question_type"),
+                        "sub_type": item.get("sub_type"),
+                        "option_count": len(item.get("options") or []) if isinstance(item.get("options"), list) else 0,
+                        "sub_question_count": len(subs),
+                        "sub_option_counts": [len(s.get("options") or []) if isinstance(s, dict) and isinstance(s.get("options"), list) else 0 for s in subs[:10]],
+                    }
+        except (OSError, ValueError, TypeError):
+            pass
+    return [by_id[uid] for uid in wanted if uid in by_id]
 
 
 def _recommended_action(stage, detail, issues, incident):
@@ -620,6 +682,8 @@ def _packet(folder, incident):
         "affected_unit_ids": list(unit_ids)[:40],
         "affected_units": [{"unit_id": unit["unit_id"], "numbers": unit.get("numbers"),
                             "stem_chars": len(str(unit.get("stem") or ""))} for unit in units[:12]],
+        "unit_excerpts": _unit_excerpts(folder, unit_ids),
+        "log_tail": _log_tail(folder, stage),
         "inputs": snapshot.get("stage_inputs"),
         "input_files": {key: value for key, value in snapshot.get("files", {}).items()
                         if key.startswith("input:")},
@@ -1427,27 +1491,62 @@ def _acknowledge_restart(folder, incident):
         _event(incident, "restart", "acknowledged", "新执行进程已重新认领；仍须原检查复验")
 
 
+_EXTRA_BATCH_EVIDENCE = frozenset((
+    "01_source/material-roles.json",
+    "01_source/document-meta.json",
+    "01_source/images.json",
+    "01_source/tables.json",
+    "01_source_ans/answers.raw.json",
+    "02_audio/audio.json",
+    "02_audio/transcripts.json",
+    "05_explanations/explanations.json",
+    "06_batch/batch_underlines.json",
+    "06_batch/preassemble.json",
+    "07_review/manual-review-queue.json",
+    "07_review/review-round-1.json",
+    "07_review/review-round-2.json",
+    "07_review/final-audit.json",
+    "workflow/delivery.json",
+    "workflow/batch-fill-state.json",
+    "workflow/self-heal.json",
+    "workflow/code-repair.json",
+    "workflow/metadata-ai.json",
+))
+_SECRET_EVIDENCE_MARKERS = ("secret", "credential", ".pem", ".key", "id_rsa", "password", "token")
+
+
 def _read_evidence(folder, data):
     relative = data.get("path")
     if not isinstance(relative, str) or "\\" in relative or any(p in {"", ".", ".."} for p in relative.split("/")):
         raise ValueError("unsafe_evidence_path")
     # Exact evidence filenames plus indexed candidates for the active stage only.
     # Do not expose arbitrary inputs, prompts, another stage or another batch.
-    allowed = set(self_heal.SOURCE_FILES) | set(self_heal.REPORTS)
+    allowed = set(self_heal.SOURCE_FILES) | set(self_heal.REPORTS) | _EXTRA_BATCH_EVIDENCE
     if data.get("scope") == "plugin":
         if not (re.fullmatch(r"app/workflow/[a-z0-9_]+\.py", relative)
                 or re.fullmatch(r"app/scripts/(?:[a-z0-9_][a-z0-9_-]*/)*[a-z_][a-z0-9_]*\.py", relative)
-                or re.fullmatch(r"app/workbench/[a-z0-9_]+\.py", relative)):
+                or re.fullmatch(r"app/workbench/[a-z0-9_]+\.py", relative)
+                or re.fullmatch(r"app/prompts/roles/[a-z0-9_-]+\.md", relative)
+                or re.fullmatch(r"app/references/[a-z0-9_-]+\.(?:json|md)", relative)):
             raise ValueError(
                 f"source_not_allowlisted: {relative!r} 不在只读源码白名单内"
-                "（允许 app/workflow/*.py、app/scripts/**/*.py、app/workbench/*.py）"
+                "（允许 app/workflow/*.py、app/scripts/**/*.py、app/workbench/*.py、app/prompts/roles/*.md、app/references/*.json）"
             )
         path = supervisor._regular_file(Path(__file__).resolve().parents[2], relative)
     else:
         current = _load(folder).get("incident") or {}
         candidate_paths = {row["path"] for row in _candidate_evidence(folder, current.get("stage"))}
+        stage_ids = {s.id for s in contracts.STAGES}
+        is_stage_log = relative in {"workflow/logs/" + sid + ".log" for sid in stage_ids}
+        is_stage_feedback = relative in {"workflow/repair-feedback/" + sid + ".json" for sid in stage_ids}
+        is_material = (
+            relative.startswith("01_source/materials/")
+            and relative.count("/") == 2
+            and relative.lower().endswith((".txt", ".json"))
+            and not any(marker in relative.lower() for marker in _SECRET_EVIDENCE_MARKERS)
+        )
         if (relative not in allowed and relative not in candidate_paths
-                and relative not in {"workflow/logs/" + s.id + ".log" for s in contracts.STAGES}):
+                and not is_stage_log and not is_stage_feedback and not is_material):
             sample = sorted(candidate_paths)[:6]
             hint = f"；当前阶段可读候选={sample}" if sample else ""
             raise ValueError(f"evidence_not_allowlisted: {relative!r} 不在白名单内{hint}")
@@ -1672,10 +1771,35 @@ def _request_code_repair(folder, incident, data):
                      "install_code_repair confirm=true 由受控宿主安装并重启"]}
 
 
+_AUTO_INIT_CODE_OPS = frozenset((
+    "status", "search", "read", "read_lines", "write", "patch", "patch_lines", "multi_patch", "diff",
+))
+
+
+def _normalize_test_names(tests):
+    if not isinstance(tests, list):
+        return tests
+    normalized = []
+    for entry in tests:
+        if isinstance(entry, str):
+            cleaned = entry.strip().replace("\\", "/")
+            match = re.fullmatch(r"(?:(?:app/)?workflow/)?(test_[a-z0-9_]+)\.py", cleaned)
+            normalized.append("workflow." + match.group(1) if match else cleaned)
+        else:
+            normalized.append(entry)
+    return normalized
+
+
 def _code_repair(folder, incident, data):
     from . import operations_development as dev
-    record, job = _code_job(folder, incident)
     operation = data.get("operation")
+    auto_initialized = False
+    if _incident_code_record(folder, incident) is None and operation in _AUTO_INIT_CODE_OPS:
+        _request_code_repair(folder, incident, {
+            "summary": f"自动初始化隔离代码修复工作区（{incident.get('stage') or 'unknown'}）",
+        })
+        auto_initialized = True
+    record, job = _code_job(folder, incident)
 
     # Search returns a real workspace-relative path and a continuation cursor.
     # Accepting that cursor directly for read_lines keeps the intended
@@ -1698,7 +1822,10 @@ def _code_repair(folder, incident, data):
     if operation in {"read", "read_lines", "write", "patch", "patch_lines", "multi_patch", "restore_base"} and not isinstance(path, str):
         raise ValueError("source_path_required")
     if operation == "status":
-        return _code_status(record, job)
+        status_out = _code_status(record, job)
+        if auto_initialized:
+            status_out["workspace_auto_initialized"] = True
+        return status_out
     if record.get("status") in {"installed_pending_restart", "restarted_pending_verify", "failed", "verified", "needs_human"}:
         raise ValueError("code_repair_closed_or_pending_restart: 先重启后端并复验，再 request_code_repair")
     result = {}
@@ -1706,7 +1833,7 @@ def _code_repair(folder, incident, data):
         result = dev.read(job, path, offset=data.get("offset", 0), limit=data.get("limit", 12000))
     elif operation == "read_lines":
         result = dev.read_lines(job, path, start_line=start_line,
-                                limit=data.get("limit", 80))
+                                limit=data.get("limit", 200))
     elif operation == "search":
         result = dev.search(job, data.get("query"), relative=path,
                             start_line=start_line, max_matches=data.get("max_matches", 20),
@@ -1727,10 +1854,11 @@ def _code_repair(folder, incident, data):
         result = dev.restore_base(job, path, expected_sha=data.get('expected_sha'))
     elif operation == "test":
         fast = bool(data.get("fast"))
-        evidence = _hash({"code": dev.fingerprint(job), "tests": data.get("tests"), "fast": fast})
+        normalized_tests = _normalize_test_names(data.get("tests"))
+        evidence = _hash({"code": dev.fingerprint(job), "tests": normalized_tests, "fast": fast})
         _block_repeat(incident, "code_test", "isolated_tests", evidence)
         _check_budget(incident, "repair")
-        result = dev.run_tests(job, data.get("tests"), fast=fast)
+        result = dev.run_tests(job, normalized_tests, fast=fast)
         result["output"] = result["output"][-8000:]
         _attempt(incident, "code_test", "isolated_tests", evidence,
                  "succeeded" if result["passed"] else "failed", result["output"])
@@ -1754,6 +1882,8 @@ def _code_repair(folder, incident, data):
     _save_code_record(folder, record)
     dev.save(job, record["path"])
     result["status"] = record["status"]
+    if auto_initialized:
+        result["workspace_auto_initialized"] = True
     return result
 
 
@@ -1978,7 +2108,32 @@ def action(root, folder, payload, *, enqueue=None):
                               "next_action": "检查当前候选并直接执行可验证修复；代码缺陷使用隔离修复",
                               "packet": _packet(folder, incident), "verification": checked}
                     stage_rec = (mf.load(folder).get("stages") or {}).get(incident["stage"]) or {}
-                    if (incident.get("trigger") in {"stale_running", "manual_takeover"}
+                    if record.get("status") == "restarted_pending_verify":
+                        evidence = _evidence(folder, incident)
+                        budgets = _budgets(incident)
+                        can_auto_retry = (
+                            budgets["attempts"] < budgets["attempts_limit"]
+                            and not _repeated(incident, "resume", "retry_stage_with_fresh_context", evidence)
+                        )
+                        if can_auto_retry:
+                            try:
+                                self_heal._retry_admission(
+                                    folder, incident["stage"], incident["detail"], "retry_stage_with_fresh_context"
+                                )
+                            except ValueError:
+                                can_auto_retry = False
+                        if can_auto_retry:
+                            result.update(
+                                phase="restarted_auto_resume",
+                                repair="post_restart_reverify",
+                                resume_required=True,
+                                resume_input={
+                                    "strategy": "retry_stage_with_fresh_context",
+                                    "reason": "代码修复已安装并重启生效，自动重跑原失败阶段以复验",
+                                },
+                            )
+                    if (not result.get("resume_required")
+                            and incident.get("trigger") in {"stale_running", "manual_takeover"}
                             and stage_rec.get("status") == mf.RUNNING):
                         mutating = True
                         cur_manifest = mf.load(folder)
