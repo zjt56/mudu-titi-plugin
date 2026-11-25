@@ -115,11 +115,11 @@ STAGES: tuple[Stage, ...] = (
         id="knowledge",
         title="打标签：知识点标签匹配",
         kind=AGENT,
-        depends_on=("structure_gate", "preassemble", "types", "answers"),
+        depends_on=("structure_gate", "preassemble", "types"),
         produces=("04_knowledge/knowledge.json",),
         docs=("docs/knowledge-tagging.md",),
         optimization=("parallel", "content_only"),
-        description="消费已验收题型与结构化答案，交知识点目录标签（完成句子等以答案反推考点）；下游在汇总时统一合并。",
+        description="消费已验收题型与结构化答案（含完成句子时自动先等答案，其余题型与答案并行），交知识点目录标签；下游在汇总时统一合并。",
     ),
     Stage(
         id="content_snapshot",

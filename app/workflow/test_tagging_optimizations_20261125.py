@@ -38,7 +38,24 @@ from workflow import (
 class TaggingOptimizations20261125Test(unittest.TestCase):
     # ------------------------------------------------------------ 1. 完成句子
     def test_sentence_completion_depends_on_answers_and_uses_answer_driven_rule(self):
-        self.assertIn("answers", contracts.STAGE_BY_ID["knowledge"].depends_on)
+        from workflow import quarantine_policy
+        # knowledge 不再在阶段图上硬阻塞等 answers，改为按题型软依赖：仅含完成句子且 answers 尚未终态时先等答案。
+        self.assertNotIn("answers", contracts.STAGE_BY_ID["knowledge"].depends_on)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "03_types").mkdir(parents=True)
+            (root / "03_types/types.json").write_text(
+                json.dumps({"items": [{"unit_id": "q-1", "type": "单项填空"}]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self.assertFalse(quarantine_policy.knowledge_should_wait_answers(root, {"stages": {"answers": {"status": "pending"}}}))
+            (root / "03_types/types.json").write_text(
+                json.dumps({"items": [{"unit_id": "q-1", "type": "完成句子"}]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self.assertTrue(quarantine_policy.knowledge_should_wait_answers(root, {"stages": {"answers": {"status": "pending"}}}))
+            self.assertFalse(quarantine_policy.knowledge_should_wait_answers(root, {"stages": {"answers": {"status": "completed"}}}))
+            self.assertFalse(quarantine_policy.knowledge_should_wait_answers(root, {"stages": {"answers": {"status": "needs_review"}}}))
         rubric = agent_roles.knowledge_judgment_rules(["完成句子"])
         self.assertIn("以答案推考点", rubric)
         self.assertIn("严禁拿题干非空已有内容打标", rubric)

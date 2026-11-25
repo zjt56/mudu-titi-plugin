@@ -1029,7 +1029,7 @@ def _evidence(row):
 def _types(payload, units):
     rows = _coverage(payload, units)
     for row in rows.values():
-        _fields(row, ("unit_id", "type", "subtypes", "words", "contentComplete", "evidence", "warnings"),
+        _fields(row, ("unit_id", "type", "subtypes", "words", "contentComplete", "evidence", "warnings", "quarantined"),
                 ("unit_id", "type", "subtypes", "evidence"))
         _evidence(row)
         _strings(row["subtypes"], "subtypes")
@@ -1471,7 +1471,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
         for unit in units:
             row = rows[unit["unit_id"]]
             children = _children(row, unit)
-            _fields(row, ("unit_id", "knowledge", "knowledgeIds", "subquestions", "evidence", "warnings", "textbook"),
+            _fields(row, ("unit_id", "knowledge", "knowledgeIds", "subquestions", "evidence", "warnings", "textbook", "quarantined"),
                     ("unit_id", "knowledge", "subquestions", "evidence"))
             _evidence(row)
             if textbook_enabled:

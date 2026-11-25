@@ -207,7 +207,7 @@ def validate(payload, units, typed, batch):
         uid, row = unit["unit_id"], rows[unit["unit_id"]]
         qtype = typed[uid]["type"]
         listening = str(qtype).startswith("听力")
-        _fields(row, ("unit_id", "explanation", "articleSummary", "subquestions", "evidence"),
+        _fields(row, ("unit_id", "explanation", "articleSummary", "subquestions", "evidence", "quarantined"),
                 ("unit_id", "explanation", "subquestions", "evidence"))
         if not isinstance(row.get("evidence"), list) or not row["evidence"] or any(
                 not isinstance(x, str) or not x.strip() for x in row["evidence"]):

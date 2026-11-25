@@ -162,6 +162,20 @@ def _record_success(batch_dir: Path, manifest: dict, stage: contracts.Stage) -> 
                     "rebuild_required"] = True
                 print("  ✗ 固化批次失败：" + str(exc)[:160])
                 return False
+    format_extra = {}
+    if stage.id == "format_gate":
+        try:
+            fmt_report = json.loads((batch_dir / "07_review/upload-format.json").read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            fmt_report = {}
+        q_units = fmt_report.get("quarantined_units") if isinstance(fmt_report, dict) else None
+        if isinstance(q_units, list) and q_units:
+            format_extra = {
+                "execution_completed": True,
+                "release_ready": False,
+                "quality_status": "differences",
+                "notes": f"存在 {len(q_units)} 处异常隔离单元待审核页人工修正后方可上传：" + "、".join(str(u) for u in q_units[:10]),
+            }
     mf.touch_stage(
         manifest, stage.id, mf.COMPLETED,
         input_hashes=mf.input_hashes(batch_dir, manifest, stage),
@@ -169,7 +183,8 @@ def _record_success(batch_dir: Path, manifest: dict, stage: contracts.Stage) -> 
         exit_code=0, kind=contracts.STAGE_BY_ID.get(stage.id, stage).kind,
         # Clear any stale failure note so a genuinely successful re-run does not
         # keep reporting a previous "passed: false" in the status table.
-        notes="",
+        notes=format_extra.pop("notes", ""),
+        **format_extra,
     )
     mf.record_delivery(batch_dir, manifest, stage)
     mf.mark_delivery_consumed(batch_dir, stage.id)

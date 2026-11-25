@@ -4142,6 +4142,8 @@ class Handler(BaseHTTPRequestHandler):
         if files:
             _install(folder, files)
             from workflow import unit_anomalies
+            if labels and any(k in labels for k in ("type", "subtype", "subtypes")):
+                unit_anomalies.clear_stage_anomalies(folder, "types", [unit_id])
             if labels and "knowledge" in labels:
                 unit_anomalies.clear_stage_anomalies(folder, "knowledge", [unit_id])
             if applied.get("applied") or (unit and any(k in unit for k in ("explanation", "articleSummary"))):

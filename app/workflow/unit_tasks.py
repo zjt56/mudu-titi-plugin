@@ -424,7 +424,7 @@ def merge(stage, parts, responses):
     merged = {"status": "completed", "artifacts": {path: {"items": []}}, "notes": [], "findings": []}
     if stage == "answers":
         merged["artifacts"][path] = {"answers": {}, "evidence": {}, "missing": {},
-                                     "difficulty": {}, "difficultyEvidence": {}}
+                                     "difficulty": {}, "difficultyEvidence": {}, "quarantined": {}}
     elif not item_artifacts:
         merged["artifacts"][path] = {"findings": [], "checked_units": [], "unchecked": []}
     seen = set()
@@ -480,5 +480,7 @@ def merge(stage, parts, responses):
         merged["notes"].extend(response["notes"])
         merged["findings"].extend(response["findings"])
     # Whole-batch importer requires unique notes and performs all semantic checks.
+    if stage == "answers" and not merged["artifacts"][path].get("quarantined"):
+        merged["artifacts"][path].pop("quarantined", None)
     merged["notes"] = list(dict.fromkeys(merged["notes"]))
     return merged

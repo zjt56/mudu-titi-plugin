@@ -135,7 +135,8 @@ class AnomalyViewsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
             self.assertFalse(unit_anomalies.should_quarantine({}, {"u1", "u2"}, {}))
-            self.assertFalse(unit_anomalies.should_quarantine({}, {"u2"}, {"u2": {"diagnostics": []}}))
+            # 纯暂态失败不隔离；确认的确定性失败或存在成功单元时允许隔离并由上传闸门兜底。
+            self.assertTrue(unit_anomalies.should_quarantine({}, {"u2"}, {"u2": {"diagnostics": []}}))
             self.assertTrue(unit_anomalies.should_quarantine({"u1": {}}, {"u2"}, {}))
             self.assertTrue(unit_anomalies.should_quarantine({"u1": {}}, {"u2"}, {"u2": {"diagnostics": []}}))
 
@@ -303,6 +304,113 @@ class AnomalyViewsTest(unittest.TestCase):
         self.assertEqual(len(projected), 1)
         if projected[0]["assessment"]["knowledge"] != ["语法/错误中间层/一般现在时"]:
             self.assertTrue(any("语法/错误中间层/一般现在时 -> " in entry for entry in rewrites), rewrites)
+
+    def test_quarantined_responses_carry_explicit_marker_and_types_fallback(self):
+        from workflow import quarantine_policy, unit_anomalies
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            unit = {"unit_id": "q-1", "unit_kind": "standalone", "numbers": [1],
+                    "type": "单项选择", "stem": "1. He ____ a student. A. is B. are C. am D. be"}
+            ans = unit_anomalies.quarantined_response_for_unit("answers", unit, "answer error")
+            self.assertIn("1", ans["artifacts"]["01_source_ans/answers.json"]["quarantined"])
+            exp = unit_anomalies.quarantined_response_for_unit("explanations", unit, "exp error")
+            self.assertTrue(exp["artifacts"]["04_knowledge/explanations.json"]["items"][0]["quarantined"])
+            kp = unit_anomalies.quarantined_response_for_unit("knowledge", unit, "kp error")
+            self.assertTrue(kp["artifacts"]["04_knowledge/knowledge.json"]["items"][0]["quarantined"])
+            ty = unit_anomalies.quarantined_response_for_unit("types", unit, "type error", batch_dir=root)
+            row = ty["artifacts"]["03_types/types.json"]["items"][0]
+            self.assertEqual(row["type"], "单项填空")
+            self.assertTrue(row["quarantined"])
+            self.assertTrue(row["subtypes"])
+            # 别名匹配校验通过目录检查
+            from workbench import taxonomy
+            self.assertEqual(taxonomy.check_labels(row), [])
+            # 软依赖：含完成句子才等 answers，且 answers 失败时不卡住
+            (root / "03_types").mkdir(parents=True)
+            (root / "03_types/types.json").write_text(
+                json.dumps({"items": [{"unit_id": "q-1", "type": "完成句子"}]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self.assertTrue(quarantine_policy.knowledge_should_wait_answers(root, {"stages": {"answers": {"status": "running"}}}))
+            self.assertFalse(quarantine_policy.knowledge_should_wait_answers(root, {"stages": {"answers": {"status": "failed"}}}))
+
+    def test_format_gate_defers_unit_quarantined_with_release_ready_false(self):
+        from unittest.mock import patch
+        from workflow import format_gate, unit_anomalies
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            (root / "06_batch").mkdir(parents=True)
+            (root / "06_batch/batch_meta.json").write_text(
+                json.dumps({"batch_id": "b1", "name": "test", "items": []}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            unit_anomalies.record_anomalies(root, "answers", {"q-2": "答案未绑定"})
+            fake_built = {
+                "errors": [{"code": "UNIT_QUARANTINED", "unit_id": "q-2", "message": "单元 q-2 存在未解除的异常隔离"}],
+                "warnings": [],
+                "summary": {"items": 1},
+            }
+            with patch.object(format_gate, "_shape", return_value=[]), \
+                 patch.object(format_gate, "_run_final_format_checks", return_value=None), \
+                 patch.object(format_gate, "_local_attachments", return_value=({}, {})), \
+                 patch("workflow.final_audit.run", return_value={"errors": [], "warnings": [], "source_sha256": {}}), \
+                 patch("workflow.upload_payload.build_payload", return_value=fake_built):
+                report = format_gate.run(root, write_report=True)
+            self.assertTrue(report["passed"], report["errors"])
+            self.assertEqual(report["status"], "passed")
+            self.assertFalse(report["release_ready"])
+            self.assertEqual(report["quarantined_units"], ["q-2"])
+            self.assertTrue(any(d.get("code") == "UNIT_QUARANTINED" for d in report["deferred"]))
+
+    def test_types_partition_salvages_good_units_and_quarantines_bad_unit(self):
+        from unittest.mock import patch
+        from workflow import quarantine_policy, unit_anomalies
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            units = [
+                {"unit_id": "q-1", "unit_kind": "standalone", "numbers": [1],
+                 "type": "单项填空", "stem": "1. A ____. A. a B. b C. c D. d"},
+                {"unit_id": "q-2", "unit_kind": "standalone", "numbers": [2],
+                 "type": "单词拼写", "stem": "2. It is a g____ (好) day."},
+            ]
+            part = {"unit_ids": ["q-1", "q-2"], "prompt": "p"}
+
+            def fake_build_parts(batch, stage, budget, *, max_units=1, selected_ids=None):
+                uid = selected_ids[0]
+                return {}, [{"unit_ids": [uid], "prompt": f"prompt-{uid}"}]
+
+            def fake_invoke(prompt, sub_dir, config, **kwargs):
+                if "q-1" in prompt:
+                    return {"response": {
+                        "status": "completed",
+                        "artifacts": {"03_types/types.json": {"items": [{
+                            "unit_id": "q-1", "type": "单项填空", "subtypes": ["四个选项"],
+                            "words": 5, "contentComplete": True, "evidence": ["L1"],
+                        }]}},
+                        "notes": [], "findings": [],
+                    }}
+                raise ValueError("Invalid type labels for q-2: bad subtype")
+
+            with patch("workflow.agent_tasks.confirmed_units", return_value=units), \
+                 patch("workflow.unit_tasks.build_parts", side_effect=fake_build_parts), \
+                 patch("workflow.unit_tasks.check_part_inputs", return_value=None), \
+                 patch("workflow.unit_tasks.validate_part", return_value=None), \
+                 patch("workflow.local_agent._check_input_hashes", return_value=None):
+                merged = quarantine_policy.quarantine_type_partition(
+                    root, part, ValueError("partition failed"),
+                    run_dir=root / "run", part_index=0,
+                    config={"max_input_chars": 10000}, invoke=fake_invoke,
+                    invocation_options={}, strict_hashes={},
+                )
+            items = {row["unit_id"]: row for row in merged["artifacts"]["03_types/types.json"]["items"]}
+            self.assertEqual(set(items), {"q-1", "q-2"})
+            self.assertNotIn("quarantined", items["q-1"])
+            self.assertTrue(items["q-2"].get("quarantined"))
+            self.assertEqual(items["q-2"]["type"], "单词拼写")
+            self.assertEqual(unit_anomalies.quarantined_unit_ids(root, "types"), {"q-2"})
 
 
 if __name__ == "__main__":

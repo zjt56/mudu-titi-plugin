@@ -1275,6 +1275,10 @@ def _advance_impl(batch_dir: Path, bridge: dict, stop_at: str | None = None, *, 
                         continue
                     if candidate.id == "audio" and (pending_audio or audio_prep.get("status") not in {"ready", "evidence", "done"}):
                         continue
+                    if candidate.id == "knowledge":
+                        from . import quarantine_policy
+                        if quarantine_policy.knowledge_should_wait_answers(batch_dir, manifest):
+                            continue
                     default = ["{python}", "-m", "workflow.agent", "run", "--stage", candidate.id,
                                "--batch-dir", "{batch_dir}"]
                     if (bridge.get(candidate.id) == default

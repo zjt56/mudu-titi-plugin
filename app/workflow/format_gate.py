@@ -238,7 +238,8 @@ def run(batch_dir, *, write_report: bool = True) -> dict:
     report = {"passed": False, "status": "failed", "scope": "local_upload_format",
               "rule": RULE_VERSION, "rule_sha256": {p.name: _sha(p.read_bytes()) for p in RULE_FILES},
               "final_path": FINAL_PATH, "final_sha256": None, "input_sha256": {},
-              "errors": [], "warnings": [], "deferred": [],
+              "errors": [], "warnings": [], "deferred": [], "quarantined_units": [],
+              "release_ready": False,
               "prepare_upload_required": True}
     try:
         root = _safe(batch_dir)
@@ -279,6 +280,13 @@ def run(batch_dir, *, write_report: bool = True) -> dict:
                     "source_code": "ATTACHMENT_URL_INVALID", "checked_by": "prepare-upload",
                     "local_attachment_paths": deferred_owners[issue["unit_id"]]["paths"],
                     "message": "本地附件路径与文件已校验并记录摘要；真实上传前仍须部署媒体。"})
+            elif issue.get("code") == "UNIT_QUARANTINED":
+                # 未解除的隔离单元属人工待修产出，不阻断本地 format_gate 执行、不触发运维反复建单；
+                # 但明确标记 release_ready=False，真实上传前 prepare-upload 仍做硬拦截。
+                report["deferred"].append({**issue, "checked_by": "prepare-upload"})
+                uid = str(issue.get("unit_id") or "")
+                if uid and uid not in report["quarantined_units"]:
+                    report["quarantined_units"].append(uid)
             elif issue.get("code") in DEFERRED_CODES:
                 report["deferred"].append({**issue, "checked_by": "prepare-upload"})
             else:
@@ -318,12 +326,13 @@ def run(batch_dir, *, write_report: bool = True) -> dict:
     attach(report, path=REPORT_PATH, stage="format_gate")
     report["passed"] = not report["errors"]
     report["status"] = "passed" if report["passed"] else "failed"
+    report["release_ready"] = bool(report["passed"]) and not bool(report["quarantined_units"])
     if write_report:
         try:
             write_report_file(batch_dir, report)
         except (OSError, ValueError) as exc:
             report["errors"].append({"code": "FORMAT_REPORT_WRITE_FAILED", "message": str(exc)})
-            report["passed"], report["status"] = False, "failed"
+            report["passed"], report["status"], report["release_ready"] = False, "failed", False
     return report
 
 

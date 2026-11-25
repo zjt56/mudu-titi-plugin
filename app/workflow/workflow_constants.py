@@ -38,7 +38,7 @@ EXAMPLE_REQUIRED = {
 }
 
 # 允许键与角色字段说明共用；必填键仍以 EXAMPLE_REQUIRED 为准。
-ANSWERS_ALLOWED = EXAMPLE_REQUIRED["answers"] + ("difficulty", "difficultyEvidence")
+ANSWERS_ALLOWED = EXAMPLE_REQUIRED["answers"] + ("difficulty", "difficultyEvidence", "quarantined")
 
 REVIEW_FILES = ("content-review.json", "metadata-review.json", "manual-review-queue.json")
 

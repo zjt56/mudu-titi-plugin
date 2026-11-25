@@ -18,7 +18,7 @@ import re
 from .question_identity import question_key
 
 ANOMALIES_REL = "07_review/unit-anomalies.json"
-QUARANTINE_STAGES = frozenset(("answers", "explanations", "knowledge"))
+QUARANTINE_STAGES = frozenset(("types", "answers", "explanations", "knowledge"))
 
 
 def _now_iso() -> str:
@@ -145,24 +145,39 @@ def quarantined_unit_ids(batch_dir, stage: str | None = None) -> set[str]:
 
 
 def should_quarantine(accepted: dict, pending: set, deterministic: dict) -> bool:
-    """Quarantine only isolated failures when real units succeeded; never mask a full-batch outage."""
-    return bool(pending) and bool(accepted)
+    """Quarantine isolated failures or confirmed deterministic failures; never a pure transient outage.
+
+    Upload safety is enforced downstream by `upload_payload.build_payload` (`UNIT_QUARANTINED`),
+    while `format_gate` finishes with `release_ready=False` so the pipeline never stalls.
+    """
+    return bool(pending) and (bool(accepted) or bool(deterministic))
 
 
-def quarantined_response_for_unit(stage: str, unit: dict, error: object) -> dict:
+def quarantined_response_for_unit(stage: str, unit: dict, error: object, *, batch_dir=None) -> dict:
     """Build a minimal, explicit quarantined single-unit artifact for downstream stages."""
     uid = str(unit["unit_id"])
     clean = _clean_error(error, limit=180)
     is_group = str(unit.get("unit_kind") or "") == "group"
     numbers = list(unit.get("numbers") or [])
+    if stage == "types":
+        from . import quarantine_policy
+        return quarantine_policy.quarantined_type_response(batch_dir or Path("."), unit, error)
     if stage == "answers":
         missing = {
             question_key(unit, n): [f"无（答案提取异常已隔离，待人工核对：{clean}）"]
             for n in numbers
         }
+        quarantined_map = {question_key(unit, n): clean for n in numbers}
         return {
             "status": "completed",
-            "artifacts": {"01_source_ans/answers.json": {"answers": {}, "evidence": {}, "missing": missing}},
+            "artifacts": {
+                "01_source_ans/answers.json": {
+                    "answers": {},
+                    "evidence": {},
+                    "missing": missing,
+                    "quarantined": quarantined_map,
+                }
+            },
             "notes": [f"单元 {uid} 答案校验未过，已隔离标红并继续下游流程：{clean}"],
             "findings": [],
         }
@@ -171,6 +186,7 @@ def quarantined_response_for_unit(stage: str, unit: dict, error: object) -> dict
             "unit_id": uid,
             "explanation": "无",
             "articleSummary": "无",
+            "quarantined": True,
             "evidence": [f"未提供解析材料（解析提取异常已隔离，待人工核对：{clean}）"],
             "subquestions": [{"number": n, "explanation": "无"} for n in numbers] if is_group else [],
         }
@@ -184,6 +200,7 @@ def quarantined_response_for_unit(stage: str, unit: dict, error: object) -> dict
         item = {
             "unit_id": uid,
             "knowledge": [],
+            "quarantined": True,
             "evidence": [f"知识点标签异常已隔离，待人工核对：{clean}"],
             "subquestions": [{"number": n, "knowledge": []} for n in numbers] if is_group else [],
         }

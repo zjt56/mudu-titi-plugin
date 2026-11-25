@@ -1219,7 +1219,10 @@ def main(argv=None):
             attempts = batch_dir / "workflow" / "agent-runs"
             attempts.mkdir(parents=True, exist_ok=True)
             run_dir = Path(tempfile.mkdtemp(prefix=args.stage + "-", dir=attempts))
-            result = label_execution.run(batch_dir, args.stage, config, run_dir, invoke=invoke)
+            result = label_execution.run(
+                batch_dir, args.stage, config, run_dir, invoke=invoke,
+                quarantine_failed_units=bool(config.get("quarantine_failed_units", True)),
+            )
             with _batch_lock(batch_dir, config.get("timeout_seconds", 900)):
                 _check_input_hashes(batch_dir, result["input_hashes"])
                 label_execution.check_inputs(batch_dir, args.stage, result["collected_hashes"])
@@ -1529,6 +1532,18 @@ def main(argv=None):
                             raise
                         recoverable = isinstance(exc, ValueError) or exc.code in ("response", "integration")
                         if not recoverable or attempt >= retries:
+                            if (args.stage == "types" and recoverable
+                                    and bool(config.get("quarantine_failed_units", True))):
+                                from . import quarantine_policy
+                                print(f"  分片 {index + 1}/{len(parts)}：题型校验未过，逐题抢救并隔离异常单元", flush=True)
+                                candidate = quarantine_policy.quarantine_type_partition(
+                                    batch_dir, part, exc, run_dir=run_dir, part_index=index,
+                                    config=config, invoke=invoke,
+                                    invocation_options=invocation_options,
+                                    strict_hashes=strict_hashes,
+                                )
+                                unit_tasks.validate_part(batch_dir, args.stage, part, candidate)
+                                return index, candidate, False
                             raise
                         feedback = ("\n\n上一次分片结果未通过校验：" + str(exc)[:feedback_limit]
                                     + "\n请修正并完整返回本分片全部单元的 JSON。")
@@ -1536,6 +1551,9 @@ def main(argv=None):
                     # Persist only after local validation passes so a retry never
                     # reuses an unchecked partition.
                     _store_part_snapshot(batch_dir, args.stage, part, cache_hashes, config, candidate)
+                    if args.stage == "types":
+                        from . import unit_anomalies
+                        unit_anomalies.clear_stage_anomalies(batch_dir, "types", part.get("unit_ids") or [])
                     print(f"  分片 {index + 1}/{len(parts)}：已校验并落盘快照", flush=True)
                     return index, candidate, False
                 raise AgentError("Partition attempts exhausted without a response", "integration")
