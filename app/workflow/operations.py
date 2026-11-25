@@ -98,16 +98,20 @@ def _only_transient_detail(detail):
     # An arbitrary mention of timeout/network is insufficient: it can appear
     # alongside a validator or source error in the very same unit message.
     transient = re.compile(
-        r"(?i)(?:(?:upstream\s+)?http/2\s+stream\s+failed|upstream service temporarily unavailable|"
+        r"(?i)(?:(?:upstream\s+)?http/2\s+stream\s+failed|"
+        r"upstream\s+response\s+stream\s+was\s+interrupted|"
+        r"upstream service temporarily unavailable|"
+        r"(?:[A-Za-z][A-Za-z0-9._-]*\s+)?messages stream:\s*tool input is invalid json|"
         r"(?:request\s+)?(?:timeout|timed out|rate[_ -]?limit(?:ed)?(?:\s+429)?|"
         r"temporarily unavailable|connection (?:failed|reset|error)|"
         r"network (?:error|unavailable)|model[_ -]?cooldown|"
         r"quota (?:exceeded|exhausted)|429|限流|额度不足|额度冷却|冷却中|等待外部))"
         r"[.!。]?")
+    from .local_agent import classify_failure
     for part in parts:
         # Unit diagnostics use a full-width colon between identity and error.
         message = part.split("：", 1)[-1].strip()
-        if not transient.fullmatch(message):
+        if not transient.fullmatch(message) and classify_failure(message) not in ("rate_limit", "quota"):
             return False
     return bool(parts)
 
@@ -639,6 +643,14 @@ def _unit_excerpts(folder, unit_ids, limit=3):
 def _is_model_contract_error(stage, detail):
     """Return True when failure is a transient model schema/completeness miss rather than a code defect."""
     text = str(detail or "").lower()
+    json_markers = (
+        "invalid final json response",
+        "final response must be",
+        "tool input is invalid json",
+    )
+    if stage in ("review", "knowledge", "preassemble", "answers", "explanations", "types"):
+        if any(m in text for m in json_markers):
+            return True
     if stage in ("review", "knowledge", "preassemble"):
         markers = (
             "invalid fields",
@@ -1070,13 +1082,23 @@ def _discover(folder, *, force=False):
         # but it must not keep a genuinely re-verified stage open forever: the
         # current consumer evidence is the truth for this stage, and the stale
         # request is carried on the incident as quarantined history.
-        if incident.get("status") in {"queued", "waiting_evidence", "needs_human",
-                                      "needs_deep_repair", "awaiting_execution"}:
+        code_record = _incident_code_record(folder, incident) or {}
+        can_reconcile_stage = (
+            incident.get("status") in {"queued", "waiting_evidence", "needs_human",
+                                       "needs_deep_repair", "awaiting_execution"}
+            or (incident.get("status") == "claimed" and not incident.get("write_active"))
+        )
+        if can_reconcile_stage and code_record.get("status") != "installed_pending_restart":
             stage_record = (mf.load(folder).get("stages", {}).get(incident.get("stage")) or {})
             if stage_record.get("status") in {mf.COMPLETED, mf.APPROVED}:
                 checked = _verify(folder, incident)
                 incident["verification"] = checked
                 if checked["verified"]:
+                    outbox = state.pop("resume_outbox", None)
+                    if outbox:
+                        for receipt in state.get("receipts", []):
+                            if receipt.get("request_id") == outbox.get("request_id"):
+                                receipt.update(status="completed", evidence={**(receipt.get("evidence") or {}), "executed": True})
                     quarantined = [row.get("request_id") for row in state["receipts"]
                                    if row.get("status") == "unknown" and row.get("request_id")]
                     prior = incident["status"]
@@ -1124,8 +1146,14 @@ def _discover(folder, *, force=False):
         if incident.get("status") in {"claimed", "queued"}:
             return state
         if incident.get("status") == "awaiting_execution":
+            stage_status = (mf.load(folder).get("stages", {}).get(incident["stage"]) or {}).get("status")
+            if (stage_status in {mf.PENDING, mf.RUNNING}
+                    or supervisor.execution_busy(folder, include_global_agent=False)):
+                return state
             current = _snapshot(folder, incident["stage"])
             if current != incident.get("snapshot"):
+                if code_record.get("status") == "restarted_pending_verify":
+                    _settle_code_repair(folder, incident, "needs_deep_repair")
                 incident.update(status="queued", eligible=True,
                                 queue_generation=incident.get("queue_generation", 0) + 1)
                 _event(incident, "resume", "queued", "正常流水线执行产生新证据，重新认领核验")
@@ -1211,7 +1239,7 @@ def _discover(folder, *, force=False):
     for event in self_heal._load(folder).get("events", []):
         if (event.get("stage") != stage or event.get("detail") != detail
                 or event.get("outcome") not in blocker_outcomes
-                or event.get("error_code") in {"rate_limited", "rate_limit", "model_cooldown"}
+                or event.get("error_code") in {"rate_limited", "rate_limit", "quota", "model_cooldown"}
                 or not str(event.get("signature") or "")):
             continue
         failed.append(event)
@@ -2032,7 +2060,7 @@ def action(root, folder, payload, *, enqueue=None):
     if name == 'code_repair' and data.get('operation') == 'test':
         return _background_workspace_test(root, folder, payload)
     resume = False
-    writes_artifacts = name in {"apply_repair", "install_code_repair", "regenerate_units", "recover"} or (
+    writes_artifacts = name in {"apply_repair", "install_code_repair", "regenerate_units"} or (
         name == "resume" and bool(data.get("strategy")))
     global_lock = name == "install_code_repair"
     batch_lock = name == "apply_repair"
@@ -2153,6 +2181,8 @@ def action(root, folder, payload, *, enqueue=None):
                     if (not result.get("resume_required")
                             and incident.get("trigger") in {"stale_running", "manual_takeover"}
                             and stage_rec.get("status") == mf.RUNNING):
+                        incident['write_active'] = True
+                        _save(folder, state)
                         mutating = True
                         cur_manifest = mf.load(folder)
                         mf.touch_stage(cur_manifest, incident["stage"], mf.PENDING,
@@ -2183,6 +2213,8 @@ def action(root, folder, payload, *, enqueue=None):
                             _check_budget(incident, 'repair')
                             try:
                                 with local_agent._batch_lock(folder, 0):
+                                    incident['write_active'] = True
+                                    _save(folder, state)
                                     mutating = True
                                     outcome = getattr(self_heal_actions, REPAIRS[repair])(folder, expected_inputs=expected)
                             except local_agent.AgentError as exc:
@@ -2204,6 +2236,8 @@ def action(root, folder, payload, *, enqueue=None):
                             if subtype_units:
                                 _block_repeat(incident, 'repair', 'preassembly_type_repair', evidence)
                                 _check_budget(incident, 'repair')
+                                incident['write_active'] = True
+                                _save(folder, state)
                                 mutating = True
                                 self_heal._feedback(
                                     folder, 'types',
@@ -2221,6 +2255,8 @@ def action(root, folder, payload, *, enqueue=None):
                             elif refresh_units:
                                 _block_repeat(incident, 'repair', 'refresh_preassemble', evidence)
                                 _check_budget(incident, 'repair')
+                                incident['write_active'] = True
+                                _save(folder, state)
                                 mutating = True
                                 self_heal._requeue(
                                     folder, mf.load(folder), 'preassemble',
@@ -2451,8 +2487,9 @@ def action(root, folder, payload, *, enqueue=None):
                 evidence["code"] = "inputs_changed"
             receipt.update(status=status, evidence=evidence)
             _event(incident, name, status, str(exc))
-        incident.pop('write_active', None)
-        _save(folder, state)
+        finally:
+            incident.pop('write_active', None)
+            _save(folder, state)
     if resume:
         # Durable outbox is replayable; only the FIFO admission is retried, never
         # the strategy/action. FIFO deduplicates currently queued/active batches.

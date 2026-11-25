@@ -11,7 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import agent_tasks, content_agent, local_agent, private_label_baseline, unit_tasks
+from . import agent_tasks, content_agent, local_agent, private_label_baseline, unit_anomalies, unit_tasks
 from .question_identity import question_key
 from .partition_timing import measure
 
@@ -124,7 +124,8 @@ def _envelope(stage, response, units):
     return payload
 
 
-def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False):
+def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False,
+        quarantine_failed_units=False):
     if stage not in STAGES:
         raise ValueError("Unsupported bounded labeling stage")
     batch, run_dir = Path(batch), Path(run_dir)
@@ -448,17 +449,29 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
         "deterministic_failures": {uid: {"diagnostics": r["diagnostics"],
                                           "evidence_path": str(failure_paths[uid])}
                                    for uid, r in deterministic.items()}, "calls": rounds})
+    if accepted:
+        unit_anomalies.clear_stage_anomalies(batch, stage, accepted.keys())
     if pending:
-        local_agent._check_input_hashes(batch, strict_hashes)
-        unresolved = {"status": "needs_review", "artifacts": {}, "findings": [],
-                      "notes": ["Label repair incomplete for units: " + json.dumps(
-                          {uid: errors.get(uid) for uid in sorted(pending)}, ensure_ascii=False)]}
-        if deterministic:
-            unresolved["notes"].append("Confirmed deterministic source/validator failures; model retry stopped: "
-                                       + json.dumps(sorted(deterministic), ensure_ascii=False))
-        local_agent._json_write(run_dir / "response.json", unresolved)
-        return {"response": unresolved, "input_hashes": strict_hashes, "collected_hashes": current_hashes,
-                "artifacts": {"response": str(run_dir / "response.json")}}
+        if (quarantine_failed_units and stage in unit_anomalies.QUARANTINE_STAGES
+                and unit_anomalies.should_quarantine(accepted, pending, deterministic)):
+            failed_map = {uid: errors.get(uid) for uid in sorted(pending)}
+            unit_anomalies.record_anomalies(batch, stage, failed_map, deterministic)
+            for uid in sorted(pending):
+                accepted[uid] = unit_anomalies.quarantined_response_for_unit(
+                    stage, by_id[uid], errors.get(uid)
+                )
+            pending = set()
+        else:
+            local_agent._check_input_hashes(batch, strict_hashes)
+            unresolved = {"status": "needs_review", "artifacts": {}, "findings": [],
+                          "notes": ["Label repair incomplete for units: " + json.dumps(
+                              {uid: errors.get(uid) for uid in sorted(pending)}, ensure_ascii=False)]}
+            if deterministic:
+                unresolved["notes"].append("Confirmed deterministic source/validator failures; model retry stopped: "
+                                           + json.dumps(sorted(deterministic), ensure_ascii=False))
+            local_agent._json_write(run_dir / "response.json", unresolved)
+            return {"response": unresolved, "input_hashes": strict_hashes, "collected_hashes": current_hashes,
+                    "artifacts": {"response": str(run_dir / "response.json")}}
     local_agent._check_input_hashes(batch, strict_hashes)
     check_inputs(batch, stage, current_hashes)
     for part in singles:

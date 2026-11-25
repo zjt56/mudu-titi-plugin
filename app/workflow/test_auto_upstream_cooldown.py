@@ -25,7 +25,7 @@ class UpstreamCooldownTest(unittest.TestCase):
         return f'Agent subprocess failed (exit 1, exit)：{message}；完整日志见 stderr.log'
 
     def test_only_trusted_subprocess_error_is_recognized(self):
-        for message in ('Upstream HTTP/2 stream failed', 'Upstream service temporarily unavailable'):
+        for message in ('Upstream HTTP/2 stream failed', 'Upstream response stream was interrupted', 'Upstream service temporarily unavailable'):
             self.assertTrue(auto._is_upstream_call_failure(self.failure(message)))
             self.assertTrue(auto._is_upstream_call_failure(json.dumps({'code': 'exit', 'error': self.failure(message)})))
             for text in (message, '{"message": "' + message + '"}',
@@ -35,7 +35,7 @@ class UpstreamCooldownTest(unittest.TestCase):
                 self.assertFalse(auto._is_upstream_call_failure(text), text)
 
     def test_parallel_upstream_waits_but_independent_delivery_proceeds(self):
-        for message in ('Upstream HTTP/2 stream failed', 'Upstream service temporarily unavailable'):
+        for message in ('Upstream HTTP/2 stream failed', 'Upstream response stream was interrupted', 'Upstream service temporarily unavailable'):
             with self.subTest(message=message):
                 self._parallel_case(message, False)
                 auto._clear_cooldown(self.batch)

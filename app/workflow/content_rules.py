@@ -34,6 +34,8 @@ _PHRASE_GUIDELINE_TYPES = frozenset((
 _SPELLING_GUIDELINE_TYPES = frozenset((
     "单词拼写", "完成句子", "短文填空", "选词填空", "教材语篇填空", "单项填空", "其他",
 ))
+_SENTENCE_COMPLETION_GUIDELINE_TYPES = frozenset(("完成句子",))
+_READING_GUIDELINE_TYPES = frozenset(("阅读理解",))
 
 
 def boundary_guidelines_block(stage: str = "", types=None) -> str:
@@ -64,6 +66,14 @@ def boundary_guidelines_block(stage: str = "", types=None) -> str:
             spelling = data.get("word_spelling_granularity") or []
             if spelling:
                 lines.append("【同源边界口径·适当形式填词知识点粒度】" + " ".join(str(x) for x in spelling))
+        if type_set is None or bool(type_set & _SENTENCE_COMPLETION_GUIDELINE_TYPES):
+            sc = data.get("sentence_completion_answer_driven") or []
+            if sc:
+                lines.append("【同源边界口径·完成句子以答案推考点】" + " ".join(str(x) for x in sc))
+        if type_set is None or bool(type_set & _READING_GUIDELINE_TYPES):
+            reading = data.get("reading_comprehension_tagging") or []
+            if reading:
+                lines.append("【同源边界口径·阅读理解子题角度与全文体裁】" + " ".join(str(x) for x in reading))
     return "\n".join(lines)
 
 

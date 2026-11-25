@@ -81,17 +81,11 @@
      "note": "对应一级主题+最后一级主题"
     },
     {
-     "dim": "设题角度",
-     "branch": "设题角度",
-     "show": "leaf",
-     "note": "对应听力子项",
-     "scope": "听力"
-    },
-    {
      "dim": "答案考点",
      "branch": "词汇/语法",
      "show": "leaf",
-     "note": ""
+     "note": "按各空已验收答案词/短语自动派生，不进入目录词汇/语法选点",
+     "separate": true
     }
    ]
   },
@@ -368,30 +362,47 @@
   "选词填空": {
    "dims": [
     {
-     "dim": "语篇体裁",
-     "branch": "语篇体裁",
-     "show": "below-root",
-     "note": "一级标题及子标题"
-    },
-    {
-     "dim": "主题",
-     "branch": "主题",
-     "show": "top+leaf",
-     "note": "对应一级主题+最后一级主题"
-    },
-    {
      "dim": "词汇",
      "branch": "词汇",
      "show": "below-root",
-     "note": "一级标题及子标题"
+     "note": "一级标题及子标题（单题：删除主题与语篇体裁）"
     },
     {
      "dim": "语法",
      "branch": "语法",
      "show": "below-root",
-     "note": "一级标题及子标题"
+     "note": "一级标题及子标题（单题：删除主题与语篇体裁）"
     }
-   ]
+   ],
+   "by_unit_kind": {
+    "group": {
+     "dims": [
+      {
+       "dim": "答案考点",
+       "branch": "词汇/语法",
+       "show": "leaf",
+       "note": "整题只要答案考点：按组去重派生已验收答案词/短语，不挂体裁、主题或目录词汇/语法",
+       "separate": true
+      }
+     ]
+    },
+    "standalone": {
+     "dims": [
+      {
+       "dim": "词汇",
+       "branch": "词汇",
+       "show": "below-root",
+       "note": "一级标题及子标题（单题：删除主题与语篇体裁）"
+      },
+      {
+       "dim": "语法",
+       "branch": "语法",
+       "show": "below-root",
+       "note": "一级标题及子标题（单题：删除主题与语篇体裁）"
+      }
+     ]
+    }
+   }
   },
   "补全对话": {
    "dims": [

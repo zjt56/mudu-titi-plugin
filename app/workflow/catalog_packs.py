@@ -127,6 +127,7 @@ _PREFIX_TO_PACK = {
 # 标准维度包组合 → 可读分桶名（保证同一分桶内的题型需要完全一致的维度包，
 # 绝不把跨维度题型混进同一分片导致目录膨胀或串维度误标）。
 _SIGNATURE_TO_BUCKET = {
+    (): "answer_point_only",
     ("phonetics-keyword",): "phonetics_keyword",
     ("phonetics",): "phonetics",
     ("theme", "angle-listening"): "listening_dialogue",
@@ -441,10 +442,21 @@ def load_packs(*, packs_dir: Path | None = None, catalog_path: Path | None = Non
     return loaded
 
 
-def packs_for_type(main_type: str | None) -> list[str] | None:
-    """Map one canonical question type to its exact ordered list of catalog packs.
+def _unpack_type_spec(spec) -> tuple[str | None, str | None]:
+    if isinstance(spec, tuple) and len(spec) == 2:
+        ty, uk = spec
+        return (ty.strip() if isinstance(ty, str) and ty.strip() else None,
+                uk.strip() if isinstance(uk, str) and uk.strip() else None)
+    if isinstance(spec, str) and spec.strip():
+        return spec.strip(), None
+    return None, None
 
-    Returns None for unknown/empty types so callers safely fall back to full catalog.
+
+def packs_for_type(main_type: str | None, unit_kind: str | None = None) -> list[str] | None:
+    """Map one canonical question type (+ optional unit_kind) to its exact ordered list of catalog packs.
+
+    Returns ``[]`` for valid answer-point-only shapes (e.g. ``选词填空`` group),
+    and ``None`` for unknown/empty types so callers safely fall back to full catalog.
     """
     if not isinstance(main_type, str) or not main_type.strip():
         return None
@@ -453,9 +465,11 @@ def packs_for_type(main_type: str | None) -> list[str] | None:
     rules = taxonomy.type_knowledge_rules()
     if ty not in rules:
         return None
-    exact = taxonomy.exact_knowledge_paths(ty)
-    allowed = taxonomy._allowed_prefixes(ty)
-    excluded = set(taxonomy._excluded_prefixes(ty))
+    if taxonomy.answer_point_only_type(ty, unit_kind):
+        return []
+    exact = taxonomy.exact_knowledge_paths(ty, unit_kind=unit_kind)
+    allowed = taxonomy._allowed_prefixes(ty, unit_kind=unit_kind)
+    excluded = set(taxonomy._excluded_prefixes(ty, unit_kind=unit_kind))
     if not exact and not allowed:
         return None
 
@@ -477,10 +491,10 @@ def packs_for_type(main_type: str | None) -> list[str] | None:
     return [name for name in PACK_ORDER if name in chosen]
 
 
-def bucket_for_type(main_type: str | None) -> str:
-    """Return the deterministic dimension-bucket ID for a question type."""
-    pack_list = packs_for_type(main_type)
-    if not pack_list:
+def bucket_for_type(main_type: str | None, unit_kind: str | None = None) -> str:
+    """Return the deterministic dimension-bucket ID for a question type (+ optional unit_kind)."""
+    pack_list = packs_for_type(main_type, unit_kind=unit_kind)
+    if pack_list is None:
         return "unknown"
     sig = tuple(pack_list)
     if sig in _SIGNATURE_TO_BUCKET:
@@ -488,17 +502,11 @@ def bucket_for_type(main_type: str | None) -> str:
     return "packs:" + "+".join(sig)
 
 
-def packs_for_types(types: Iterable[str | None] | None, *, catalog: dict | None = None,
+def packs_for_types(types: Iterable | None, *, catalog: dict | None = None,
                     packs_dir: Path | None = None) -> dict:
     """Assemble the exact catalog pack union + selectable paths for a set of question types.
 
-    Guarantees:
-    - If ``types`` is empty or contains any unknown/invalid type, falls back to the
-      complete leaf set (+ all exact paths) and sets ``fallback=True``.
-    - Non-leaf exact paths (like ``语音/基本读音``) are NEVER leaked to types whose
-      rules do not allow exact selection.
-    - ``单词拼写`` alone receives ``vocab-spelling`` (physically excluding ``词汇/词汇辨析/*``).
-    - Output ``paths`` preserves the authoritative ``knowledge-catalog.json`` ordering.
+    Each element of ``types`` may be a type name string or a ``(main_type, unit_kind)`` tuple.
     """
     from workbench import taxonomy
 
@@ -510,14 +518,17 @@ def packs_for_types(types: Iterable[str | None] | None, *, catalog: dict | None 
     rules = taxonomy.type_knowledge_rules()
     type_list = list(types) if types is not None else []
     per_type_packs: list[list[str]] = []
+    parsed_specs: list[tuple[str, str | None]] = []
     fallback = not type_list
     if not fallback:
-        for ty in type_list:
-            plist = packs_for_type(ty)
-            if not plist:
+        for spec in type_list:
+            ty, uk = _unpack_type_spec(spec)
+            plist = packs_for_type(ty, unit_kind=uk)
+            if plist is None or ty is None:
                 fallback = True
                 break
             per_type_packs.append(plist)
+            parsed_specs.append((ty, uk))
 
     if fallback:
         exact_by_type = {
@@ -550,17 +561,16 @@ def packs_for_types(types: Iterable[str | None] | None, *, catalog: dict | None 
         pack_path_set.update(data["packs"][name]["paths"])
 
     # Double-check every path against taxonomy._is_selectable_for_type so custom
-    # exclusions (such as _DISALLOWED_VOCAB_TYPES) stay 100% identical to taxonomy.
+    # exclusions stay 100% identical to taxonomy.
     leaves_set = set(data["leaf_order"])
-    clean_types = [ty.strip() for ty in type_list if isinstance(ty, str) and ty.strip()]
     kept_paths = [
         p for p in data["all_paths"]
         if p in pack_path_set
-        and any(taxonomy._is_selectable_for_type(p, ty, leaves_set) for ty in clean_types)
+        and any(taxonomy._is_selectable_for_type(p, ty, leaves_set, unit_kind=uk) for ty, uk in parsed_specs)
     ]
     exact_by_type = {
-        ty: sorted(taxonomy.exact_knowledge_paths(ty))
-        for ty in clean_types if taxonomy.exact_knowledge_paths(ty)
+        ty: sorted(taxonomy.exact_knowledge_paths(ty, unit_kind=uk))
+        for ty, uk in parsed_specs if taxonomy.exact_knowledge_paths(ty, unit_kind=uk)
     }
     return {
         "fallback": False,
@@ -580,7 +590,7 @@ def contiguous_bucket_runs(units: list[dict], type_resolver: Callable[[dict], st
     """
     runs: list[tuple[str, list[dict]]] = []
     for unit in units:
-        bucket = bucket_for_type(type_resolver(unit))
+        bucket = bucket_for_type(type_resolver(unit), unit_kind=unit.get("unit_kind"))
         if not runs or runs[-1][0] != bucket:
             runs.append((bucket, [unit]))
         else:

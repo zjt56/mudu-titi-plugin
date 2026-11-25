@@ -416,7 +416,8 @@ def _parallel_ready_agents(batch_dir: Path, stages: list, config: dict, *, pendi
         bounded_knowledge = _is_bounded_knowledge(invoke_config, stage_id)
         if stage_id in {"answers", "explanations"} or bounded_knowledge:
             from . import label_execution
-            result = label_execution.run(batch_dir, stage_id, invoke_config, run_dir, coordinated_imports=True)
+            result = label_execution.run(batch_dir, stage_id, invoke_config, run_dir,
+                                         coordinated_imports=True, quarantine_failed_units=True)
         else:
             result = local_agent.invoke(task["prompt"], run_dir, invoke_config,
                                         permit_parallel=True, coordinated_imports=True)
@@ -1582,15 +1583,15 @@ def _is_upstream_call_failure(text: str) -> bool:
     if not match:
         return False
     detail = text[match.end():].split('；完整日志见 stderr.log', 1)[0]
-    return any(re.fullmatch(r'(?:Error: )?(?:Upstream HTTP/2 stream failed|Upstream service temporarily unavailable)[.!]?',
-                            line.strip()) for line in detail.splitlines())
+    return any(re.fullmatch(
+        r'(?:Error: )?(?:Upstream HTTP/2 stream failed|Upstream response stream was interrupted|Upstream service temporarily unavailable)[.!]?',
+        line.strip()) for line in detail.splitlines())
 
 
 def _is_native_upstream_failure(code, message, artifacts, batch_dir, stage_id, run_dir):
     """Authenticate the native host's failed task, never its candidate text."""
     from . import content_agent
-    if (code != 'failed' or message not in ('Upstream HTTP/2 stream failed',
-                                            'Upstream service temporarily unavailable')
+    if (code != 'failed' or message not in content_agent._UPSTREAM_TRANSIENT_ERRORS
             or not isinstance(artifacts, dict) or 'candidate' in artifacts):
         return False
     try:
@@ -1647,7 +1648,7 @@ def _requeue_historical_upstream(batch_dir, manifest, bridge):
         task_id = binding['task_id']
         task_path = content_agent._task_path(task_id)
         task = json.loads(task_path.read_text(encoding='utf-8'))
-        errors = ('Upstream HTTP/2 stream failed', 'Upstream service temporarily unavailable')
+        errors = content_agent._UPSTREAM_TRANSIENT_ERRORS
         failed = progress['failed_units']
         ids = task['unit_ids']
         if (progress.get('stage') != 'answers' or progress.get('validated_units') != []

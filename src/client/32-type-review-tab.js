@@ -383,16 +383,17 @@
                 : items.map((r) => {
                     const key = itemKey(r);
                     const active = activeItem && itemKey(activeItem) === key;
-                    const hasIssue = r.needs_human || r.state === 'attention' || r.state === 'blocked';
+                    const isAnomaly = Boolean(!r.excluded && (r.is_anomaly || r.state === 'blocked' || r.verdict === 'error' || r.severity === 'blocker' || (r.format_count || 0) > 0 || !String(r.type || '').trim()));
+                    const hasIssue = !isAnomaly && Boolean(r.needs_human || r.state === 'attention');
                     return h('div', {
                       key,
                       'data-type-unit': key,
-                      className: 'wf-paper' + (active ? ' wf-active' : ''),
+                      className: 'wf-paper' + (active ? ' wf-active' : '') + (isAnomaly ? ' wf-paper-anomaly' : ''),
                       style: T.paperRow(active),
                       onClick: () => setSelectedKey(key),
                     },
                       h('span', {
-                        style: { width: 44, flexShrink: 0, fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                        style: { width: 44, flexShrink: 0, fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', ...(isAnomaly ? { color: 'var(--dsw-alias-state-error-primary)' } : null) },
                         title: Array.isArray(r.printed_numbers) && r.printed_numbers.length === 0 ? String((r.source_section || {}).title || '') : '',
                       }, Array.isArray(r.printed_numbers) && r.printed_numbers.length === 0 ? '—' : String(r.label || r.number || '')),
                       h('span', {
@@ -403,11 +404,11 @@
                         ? h('span', { style: { ...T.badge(''), flexShrink: 0, fontSize: 10.5 } }, '听力跳过')
                         : h('span', {
                             className: 'wf-review-row-dot', role: 'img',
-                            'aria-label': hasIssue ? '有审核问题' : (r.state === 'unverified' ? '尚未核对' : '无待审问题'),
-                            title: hasIssue ? (r.open_summary || '有审核问题，请查看详情') : undefined,
+                            'aria-label': isAnomaly ? '有异常问题' : (hasIssue ? '有审核问题' : (r.state === 'unverified' ? '尚未核对' : '无待审问题')),
+                            title: isAnomaly ? (r.anomaly_summary || r.open_summary || '该题存在校验或内容异常，请查看详情') : (hasIssue ? (r.open_summary || '有审核问题，请查看详情') : undefined),
                             style: {
                               width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-                              background: hasIssue ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-label-primary)',
+                              background: isAnomaly ? 'var(--dsw-alias-state-error-primary)' : (hasIssue ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-label-primary)'),
                             },
                           }),
                     );

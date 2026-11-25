@@ -136,33 +136,44 @@ def knowledge_index():
     return _knowledge_index(KNOWLEDGE_PATH.stat().st_mtime)
 
 
-_DISALLOWED_VOCAB_TYPES = ("完成句子", "短文填空", "选词填空", "教材语篇填空")
+_DISALLOWED_VOCAB_TYPES = ("完成句子", "短文填空", "教材语篇填空")
+
+
+def _clean_unit_kind(unit_kind) -> str | None:
+    if isinstance(unit_kind, str):
+        kind = unit_kind.strip()
+        if kind in ("group", "standalone"):
+            return kind
+    return None
 
 
 def _is_selectable_for_type(path: str, main_type: str | None, leaves: set[str],
                             allowed_prefixes=None, exact_paths=None,
-                            excluded_prefixes=None, types_set=None) -> bool:
+                            excluded_prefixes=None, types_set=None,
+                            unit_kind: str | None = None) -> bool:
     """判定某目录路径在指定题型下是否可选为最终知识点。"""
     valid_types = types_set if types_set is not None else _types_set()
     if not main_type or main_type not in valid_types:
         return path in leaves
-    if main_type in _DISALLOWED_VOCAB_TYPES and (
+    if not has_answer_point_dim(main_type, unit_kind) and (
             _under(path, "词汇/考察词汇") or _under(path, "词汇/答案考点")):
         return False
     if exact_paths is None:
-        exact_paths = exact_knowledge_paths(main_type)
+        exact_paths = exact_knowledge_paths(main_type, unit_kind=unit_kind)
     if excluded_prefixes is None:
-        excluded_prefixes = _excluded_prefixes(main_type)
+        excluded_prefixes = _excluded_prefixes(main_type, unit_kind=unit_kind)
     if exact_paths:
         return path in exact_paths and not any(
             _under(path, excluded) for excluded in excluded_prefixes)
     return path in leaves and knowledge_path_allowed(
         path, main_type, allowed_prefixes,
-        excluded_prefixes=excluded_prefixes, exact_paths=exact_paths)
+        excluded_prefixes=excluded_prefixes, exact_paths=exact_paths,
+        unit_kind=unit_kind)
 
 
-@lru_cache(maxsize=64)
-def _knowledge_tree_cached(k_mtime: float, f_mtime: float, t_mtime: float, clean_type: str):
+@lru_cache(maxsize=128)
+def _knowledge_tree_cached(k_mtime: float, f_mtime: float, t_mtime: float,
+                           clean_type: str, clean_kind: str):
     by_path, leaves = _knowledge_index(k_mtime)
     nodes = {path: {**point, "leaf": path in leaves, "selectable": path in leaves, "children": []}
              for path, point in by_path.items()}
@@ -179,17 +190,18 @@ def _knowledge_tree_cached(k_mtime: float, f_mtime: float, t_mtime: float, clean
     scoped = bool(clean_type and clean_type in valid_types)
     if not scoped:
         return {"version": version, "complete": True, "scoped": False,
-                "type": "", "allowed_prefixes": [], "total": len(nodes),
+                "type": "", "unit_kind": "", "allowed_prefixes": [], "total": len(nodes),
                 "selectable_total": len(leaves), "leaf_total": len(leaves), "items": roots}
-    allowed = list(_allowed_prefixes_cached(t_mtime, clean_type))
-    exact = _exact_paths_cached(t_mtime, clean_type)
-    excluded = _excluded_prefixes_cached(t_mtime, clean_type)
+    uk = clean_kind or None
+    allowed = list(_allowed_prefixes_cached(t_mtime, clean_type, uk))
+    exact = _exact_paths_cached(t_mtime, clean_type, uk)
+    excluded = _excluded_prefixes_cached(t_mtime, clean_type, uk)
 
     def prune(node):
         path = node["path"]
         if any(_under(path, ex) for ex in excluded):
             return None
-        if clean_type in _DISALLOWED_VOCAB_TYPES and (
+        if not has_answer_point_dim(clean_type, uk) and (
                 _under(path, "词汇/考察词汇") or _under(path, "词汇/答案考点")):
             return None
         if exact and path in exact:
@@ -201,7 +213,8 @@ def _knowledge_tree_cached(k_mtime: float, f_mtime: float, t_mtime: float, clean
                 children.append(kept)
         is_sel = _is_selectable_for_type(
             path, clean_type, leaves, allowed, exact,
-            excluded_prefixes=excluded, types_set=valid_types)
+            excluded_prefixes=excluded, types_set=valid_types,
+            unit_kind=uk)
         if not is_sel and not children:
             return None
         return {**node, "selectable": is_sel, "children": children}
@@ -221,19 +234,23 @@ def _knowledge_tree_cached(k_mtime: float, f_mtime: float, t_mtime: float, clean
     pruned_roots = [kept for root in roots if (kept := prune(root)) is not None]
     total_nodes, selectable_count = count_tree(pruned_roots)
     return {"version": version, "complete": False, "scoped": True,
-            "type": clean_type, "allowed_prefixes": [*allowed, *sorted(exact)],
+            "type": clean_type, "unit_kind": clean_kind,
+            "answer_point_only": answer_point_only_type(clean_type, uk),
+            "allowed_prefixes": [*allowed, *sorted(exact)],
             "total": total_nodes, "selectable_total": selectable_count,
             "leaf_total": selectable_count, "items": pruned_roots}
 
 
-def knowledge_tree(main_type: str | None = None):
-    """目录树；传 main_type 时只保留该题型允许的知识点分支，名称里的斜线不是新层级。"""
+def knowledge_tree(main_type: str | None = None, unit_kind: str | None = None):
+    """目录树；传 main_type（及可选 unit_kind）时只保留允许的知识点分支。"""
     clean_type = main_type.strip() if isinstance(main_type, str) else ""
+    clean_kind = _clean_unit_kind(unit_kind) or ""
     return _knowledge_tree_cached(
         KNOWLEDGE_PATH.stat().st_mtime,
         FRAMEWORK_PATH.stat().st_mtime,
         TYPE_KNOWLEDGE_PATH.stat().st_mtime,
         clean_type,
+        clean_kind,
     )
 
 
@@ -258,13 +275,13 @@ def knowledge_catalog_for_prompt():
             "leaf_total": len(leaves), "points": points}
 
 
-def require_knowledge(paths, main_type=None):
+def require_knowledge(paths, main_type=None, unit_kind=None):
     """工作台写入只接受目录中的完整叶子路径，不接受自由值或容器强制转换。"""
     if not isinstance(paths, list) or any(not isinstance(p, str) or not p.strip() for p in paths):
         raise ValueError("knowledge 必须是目录叶子路径的字符串列表")
-    resolved = resolve_knowledge(paths, main_type)
-    if exact_knowledge_paths(main_type) and main_type and any(
-            not knowledge_path_allowed(path.strip(), main_type) for path in paths):
+    resolved = resolve_knowledge(paths, main_type, unit_kind=unit_kind)
+    if exact_knowledge_paths(main_type, unit_kind=unit_kind) and main_type and any(
+            not knowledge_path_allowed(path.strip(), main_type, unit_kind=unit_kind) for path in paths):
         raise ValueError("知识点超出该题型允许的精确目录路径")
     if resolved["unknown"] or resolved["non_leaf"]:
         raise ValueError("知识点必须从目录叶子选择；目录外路径："
@@ -272,21 +289,24 @@ def require_knowledge(paths, main_type=None):
     return list(dict.fromkeys(point["path"] for point in resolved["resolved"]))
 
 
-def knowledge_search(query: str = "", limit: int = 40, main_type: str | None = None):
-    """只返回可选知识点：按题型限定范围（含精确路径节点），目录非叶节点不入库。"""
+def knowledge_search(query: str = "", limit: int = 40, main_type: str | None = None,
+                     unit_kind: str | None = None):
+    """只返回可选知识点：按题型（及可选 unit_kind）限定范围，目录非叶节点不入库。"""
     by_path, leaves = knowledge_index()
     clean_type = main_type.strip() if isinstance(main_type, str) else ""
+    uk = _clean_unit_kind(unit_kind)
     scoped = bool(clean_type and clean_type in types())
     if scoped:
-        allowed = _allowed_prefixes(clean_type)
-        exact = exact_knowledge_paths(clean_type)
-        excluded = _excluded_prefixes(clean_type)
+        allowed = _allowed_prefixes(clean_type, unit_kind=uk)
+        exact = exact_knowledge_paths(clean_type, unit_kind=uk)
+        excluded = _excluded_prefixes(clean_type, unit_kind=uk)
         valid_types = _types_set()
         candidates = sorted(
             path for path in by_path
             if _is_selectable_for_type(
                 path, clean_type, leaves, allowed, exact,
-                excluded_prefixes=excluded, types_set=valid_types))
+                excluded_prefixes=excluded, types_set=valid_types,
+                unit_kind=uk))
     else:
         candidates = sorted(leaves)
     keyword = (query or "").strip().lower()
@@ -310,10 +330,80 @@ def _closest_leaf(path, limit=1):
     return difflib.get_close_matches((path or "").strip().strip("/"), list(leaves), n=limit, cutoff=0.78)
 
 
-def resolve_knowledge(paths, main_type=None):
+@lru_cache(maxsize=4)
+def _root_leaf_index_cached(mtime: float) -> dict[tuple[str, str], tuple[str, ...]]:
+    """Index catalog leaves by (root_dimension, leaf_name) for unique-leaf lookup."""
+    _by_path, leaves = knowledge_index()
+    buckets: dict[tuple[str, str], list[str]] = {}
+    for leaf_path in sorted(leaves):
+        parts = leaf_path.split("/")
+        if len(parts) < 2:
+            continue
+        key = (parts[0], parts[-1])
+        buckets.setdefault(key, []).append(leaf_path)
+    return {key: tuple(values) for key, values in buckets.items()}
+
+
+def canonicalize_unique_leaf(path: str, main_type: str | None = None, unit_kind: str | None = None) -> str:
+    """Resolve an unambiguous intermediate-segment typo to its unique catalog leaf.
+
+    Only rewrites when:
+    1. ``path`` is not already an exact catalog node;
+    2. ``path`` has at least ``root/.../leaf`` (2+ segments);
+    3. Under the same root dimension, there is **exactly one** catalog leaf with
+       the exact same final leaf name (e.g. extra/typo middle folder such as
+       ``语法/动词/动词的非谓语形式/动词-ing形式/现在分词`` or
+       ``主题/人与社会/社会服务与人沟通/人际交往``);
+    4. When ``main_type`` is given, the canonical leaf is allowed for that type.
+
+    Ambiguous leaf names, invented leaf names, or forbidden dimensions are
+    returned unchanged so strict validation still rejects them.
+    """
+    if not isinstance(path, str):
+        return path
+    cleaned = path.strip().strip("/")
+    if not cleaned or "/" not in cleaned:
+        return path
+    by_path, _leaves = knowledge_index()
+    if cleaned in by_path:
+        return path
+    parts = [part.strip() for part in cleaned.split("/") if part.strip()]
+    if len(parts) < 2:
+        return path
+    matches = _root_leaf_index_cached(KNOWLEDGE_PATH.stat().st_mtime).get((parts[0], parts[-1]), ())
+    if len(matches) != 1:
+        return path
+    canonical = matches[0]
+    if main_type and main_type in types():
+        if not knowledge_path_allowed(canonical, main_type, unit_kind=unit_kind):
+            return path
+    return canonical
+
+
+def canonicalize_knowledge_paths(paths, main_type: str | None = None, unit_kind: str | None = None):
+    """Apply :func:`canonicalize_unique_leaf` to a list of paths, deduplicating in order."""
+    if not isinstance(paths, list):
+        return paths, []
+    result = []
+    rewrites = []
+    seen = set()
+    for item in paths:
+        if not isinstance(item, str):
+            result.append(item)
+            continue
+        canonical = canonicalize_unique_leaf(item, main_type=main_type, unit_kind=unit_kind)
+        if canonical != item:
+            rewrites.append((item, canonical))
+        if canonical not in seen:
+            seen.add(canonical)
+            result.append(canonical)
+    return result, rewrites
+
+
+def resolve_knowledge(paths, main_type=None, unit_kind=None):
     """解析完整目录路径；保留名称中的斜线，用目录路径前缀判定叶子。"""
     by_path, leaves = knowledge_index()
-    exact = exact_knowledge_paths(main_type) if main_type else set()
+    exact = exact_knowledge_paths(main_type, unit_kind=unit_kind) if main_type else set()
     resolved, unknown, non_leaf = [], [], []
     # 不把错误的字符串当作逐字符路径列表，也不因错误的容器而抛异常。
     if paths is None:
@@ -362,28 +452,68 @@ def _type_rules_cached(mtime: float):
     return _read(TYPE_KNOWLEDGE_PATH).get("by_type", {})
 
 
-@lru_cache(maxsize=128)
-def _exact_paths_cached(mtime: float, main_type: str | None) -> frozenset[str]:
+@lru_cache(maxsize=256)
+def _type_dims_cached(mtime: float, main_type: str | None, unit_kind: str | None = None) -> tuple[dict, ...]:
+    if not isinstance(main_type, str) or not main_type:
+        return ()
+    rule = _type_rules_cached(mtime).get(main_type)
+    if not isinstance(rule, dict):
+        return ()
+    uk = _clean_unit_kind(unit_kind)
+    by_kind = rule.get("by_unit_kind")
+    if uk and isinstance(by_kind, dict) and isinstance(by_kind.get(uk), dict):
+        dims = by_kind[uk].get("dims")
+        if isinstance(dims, list):
+            return tuple(dims)
+    dims = rule.get("dims")
+    return tuple(dims) if isinstance(dims, list) else ()
+
+
+def type_dims(main_type: str | None, unit_kind: str | None = None) -> list[dict]:
+    """返回指定题型（及可选 group/standalone 形态）的维度定义列表。"""
+    return list(_type_dims_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime, main_type, _clean_unit_kind(unit_kind)))
+
+
+def has_answer_point_dim(main_type: str | None, unit_kind: str | None = None) -> bool:
+    """该题型（在指定形态下）是否启用「答案考点」自动词条派生。"""
+    return any(dim.get("dim") == "答案考点" for dim in type_dims(main_type, unit_kind))
+
+
+def answer_point_only_type(main_type: str | None, unit_kind: str | None = None) -> bool:
+    """该题型在指定形态下是否只保留独立答案考点（目录 knowledge 应为空）。"""
+    dims = type_dims(main_type, unit_kind)
+    return bool(dims) and all(dim.get("dim") == "答案考点" and dim.get("separate") for dim in dims)
+
+
+@lru_cache(maxsize=256)
+def _exact_paths_cached(mtime: float, main_type: str | None, unit_kind: str | None = None) -> frozenset[str]:
     rules = _type_rules_cached(mtime)
-    specs = rules.values() if main_type is None else (rules.get(main_type, {}),)
-    return frozenset(dim["branch"] + "/" + dim["scope"] for spec in specs
-                     for dim in spec.get("dims", []) if dim.get("show") == "exact")
+    if main_type is None:
+        all_dims = [dim for spec in rules.values() for dim in spec.get("dims", [])]
+        for spec in rules.values():
+            for sub in (spec.get("by_unit_kind") or {}).values():
+                if isinstance(sub, dict):
+                    all_dims.extend(sub.get("dims") or [])
+    else:
+        all_dims = _type_dims_cached(mtime, main_type, _clean_unit_kind(unit_kind))
+    return frozenset(dim["branch"] + "/" + dim["scope"]
+                     for dim in all_dims if dim.get("show") == "exact")
 
 
-@lru_cache(maxsize=128)
-def _excluded_prefixes_cached(mtime: float, main_type: str | None) -> tuple[str, ...]:
+@lru_cache(maxsize=256)
+def _excluded_prefixes_cached(mtime: float, main_type: str | None, unit_kind: str | None = None) -> tuple[str, ...]:
     excluded = []
-    for dim in _type_rules_cached(mtime).get(main_type, {}).get("dims", []):
+    for dim in _type_dims_cached(mtime, main_type, _clean_unit_kind(unit_kind)):
         for item in dim.get("exclude", []) or []:
             if isinstance(item, str) and item.strip() and item.strip() not in excluded:
                 excluded.append(item.strip())
     return tuple(excluded)
 
 
-@lru_cache(maxsize=128)
-def _allowed_prefixes_cached(mtime: float, main_type: str | None) -> tuple[str, ...]:
+@lru_cache(maxsize=256)
+def _allowed_prefixes_cached(mtime: float, main_type: str | None, unit_kind: str | None = None) -> tuple[str, ...]:
     prefixes = []
-    for dim in _type_rules_cached(mtime).get(main_type, {}).get("dims", []):
+    for dim in _type_dims_cached(mtime, main_type, _clean_unit_kind(unit_kind)):
         if dim.get("show") == "exact" or dim.get("separate"):
             continue
         # branch 的复合值是多个维度根，不是知识点路径。
@@ -398,43 +528,43 @@ def _allowed_prefixes_cached(mtime: float, main_type: str | None) -> tuple[str, 
 
 
 def type_knowledge_rules():
-    """27 类的维度来源；只使用 by_type.dims，不使用旧 defaults/hints。"""
+    """27 类的维度来源；只使用 by_type.dims（及可选 by_unit_kind），不使用旧 defaults/hints。"""
     return _type_rules_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime)
 
 
-def exact_knowledge_paths(main_type=None):
+def exact_knowledge_paths(main_type=None, unit_kind=None):
     """Catalog nodes selectable only as exact paths for the given question type."""
     if main_type is not None and not isinstance(main_type, str):
         return set()
-    return set(_exact_paths_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime, main_type))
+    return set(_exact_paths_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime, main_type, _clean_unit_kind(unit_kind)))
 
 
-def knowledge_path_allowed(path, main_type, prefixes=None, *, excluded_prefixes=None, exact_paths=None):
+def knowledge_path_allowed(path, main_type, prefixes=None, *, excluded_prefixes=None, exact_paths=None, unit_kind=None):
     if prefixes is None:
-        prefixes = _allowed_prefixes(main_type)
+        prefixes = _allowed_prefixes(main_type, unit_kind=unit_kind)
     # 某些题型在允许维度内部仍排除特定子分支（如单词拼写不用「词汇/词汇辨析」）。
     if excluded_prefixes is None:
-        excluded_prefixes = _excluded_prefixes(main_type)
+        excluded_prefixes = _excluded_prefixes(main_type, unit_kind=unit_kind)
     if any(_under(path, excluded) for excluded in excluded_prefixes):
         return False
     if exact_paths is None:
-        exact_paths = exact_knowledge_paths(main_type)
+        exact_paths = exact_knowledge_paths(main_type, unit_kind=unit_kind)
     if exact_paths:
         return path in exact_paths
     return any(_under(path, prefix) for prefix in prefixes)
 
 
-def _excluded_prefixes(main_type):
+def _excluded_prefixes(main_type, unit_kind=None):
     """题型级排除的知识点子前缀（dim.exclude）。
 
     例如单词拼写虽允许「词汇」维度，但不用「词汇/词汇辨析」这一子类：
     拼写/词形落 词汇/拼写与词形 而不是 词汇辨析/<词性>辨析。
     """
-    return list(_excluded_prefixes_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime, main_type))
+    return list(_excluded_prefixes_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime, main_type, _clean_unit_kind(unit_kind)))
 
 
-def _allowed_prefixes(main_type):
-    return list(_allowed_prefixes_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime, main_type))
+def _allowed_prefixes(main_type, unit_kind=None):
+    return list(_allowed_prefixes_cached(TYPE_KNOWLEDGE_PATH.stat().st_mtime, main_type, _clean_unit_kind(unit_kind)))
 
 
 def _under(path, prefix):
@@ -464,10 +594,11 @@ def _main_type(value, problems):
     return main_type
 
 
-def _check_labels(values, prefixes=None):
+def _check_labels(values, prefixes=None, unit_kind=None):
     if not isinstance(values, dict):
         return ["标签必须是对象"]
     problems = []
+    uk = _clean_unit_kind(unit_kind if unit_kind is not None else values.get("unit_kind"))
     main_type = _main_type(values.get("type", ""), problems)
     subs = _string_list(values["subtypes"], "subtypes", problems) if "subtypes" in values else []
     if subs:
@@ -491,7 +622,7 @@ def _check_labels(values, prefixes=None):
     if bad_cats:
         problems.append(f"分类 {bad_cats} 不合法，只能是 {'/'.join(categories())}")
     paths = _string_list(values["knowledge"], "knowledge", problems) if "knowledge" in values else []
-    resolved = resolve_knowledge(paths, main_type)
+    resolved = resolve_knowledge(paths, main_type, unit_kind=uk)
     if resolved["unknown"]:
         # 路径笔误（尤其主题里的「沟通/际沟通」「与/于」之类）很常见：报出最接近的
         # 目录叶子，方便模型/运维一次改对；只提示、不自动替换、不放宽校验。
@@ -503,29 +634,31 @@ def _check_labels(values, prefixes=None):
     if resolved["non_leaf"]:
         problems.append(f"知识点必须是叶子，这些是中间层：{resolved['non_leaf']}")
     if main_type in types():
-        allowed = _allowed_prefixes(main_type) if prefixes is None else prefixes
+        allowed = _allowed_prefixes(main_type, unit_kind=uk) if prefixes is None else prefixes
         bad = [path for path in paths
-               if not knowledge_path_allowed(path, main_type, allowed)
-               or (main_type in ("完成句子", "短文填空", "选词填空", "教材语篇填空")
+               if not knowledge_path_allowed(path, main_type, allowed, unit_kind=uk)
+               or (not has_answer_point_dim(main_type, uk)
                    and (_under(path, "词汇/考察词汇") or _under(path, "词汇/答案考点")))]
         if bad:
-            problems.append(f"「{main_type}」知识点超出允许维度/范围（{'、'.join([*allowed, *sorted(exact_knowledge_paths(main_type))])}）：{bad}")
+            allowed_desc = "、".join([*allowed, *sorted(exact_knowledge_paths(main_type, unit_kind=uk))]) or "仅答案考点（目录知识点留空）"
+            problems.append(f"「{main_type}」知识点超出允许维度/范围（{allowed_desc}）：{bad}")
     return problems
 
 
-def check_labels(values: dict) -> list[str]:
+def check_labels(values: dict, unit_kind: str | None = None) -> list[str]:
     """草稿校验：可缺主类、子类、知识点；已填值须合法且符合题型维度。
 
     列表字段必须是字符串列表；只有单词拼写允许多个子类。不检查完整性、
     组级必带维度或子题上下文；正式批次请用 check_question_labels。
     """
-    return _check_labels(values)
+    return _check_labels(values, unit_kind=unit_kind)
 
 
-def _unit_dims():
+def _unit_dims(unit_kind: str | None = None):
+    uk = _clean_unit_kind(unit_kind)
     result = {}
     for main_type in types():
-        allow = _allowed_prefixes(main_type)
+        allow = _allowed_prefixes(main_type, unit_kind=uk)
         # 其他的体裁/主题由实际材料决定，不能凭题型强制推定。
         need = [dim for dim in ("语篇体裁", "主题") if dim in allow] if main_type != "其他" else []
         result[main_type] = {
@@ -537,17 +670,18 @@ def _unit_dims():
 
 
 # 保留公开常量供旧调用方读取；校验每次读取按 mtime 缓存的最新目录。
-UNIT_DIMS = _unit_dims()
+UNIT_DIMS = _unit_dims("group")
 
 
-def check_unit_dims(main_type: str, knowledge) -> list[str]:
+def check_unit_dims(main_type: str, knowledge, unit_kind: str | None = "group") -> list[str]:
     """组级维度校验（含听力/阅读范围）；不代替目录叶子或完整题目校验。"""
     problems = []
+    uk = _clean_unit_kind(unit_kind)
     main_type = _main_type(main_type, problems)
     if not main_type:
         return problems + ["主类不能为空"]
     paths = _string_list(knowledge, "knowledge", problems)
-    rule = _unit_dims().get(main_type)
+    rule = _unit_dims(uk).get(main_type)
     if not rule:
         return problems
     banned = [path for path in paths if any(_under(path, dim) for dim in rule["forbid"])]
@@ -556,9 +690,10 @@ def check_unit_dims(main_type: str, knowledge) -> list[str]:
         problems.append(f"「{main_type}」组级不挂 {'/'.join(rule['forbid'])}：{banned}；"
                         f"整组题型不再把这些维度下放到子题")
     outside = [path for path in paths if path not in banned and
-               not knowledge_path_allowed(path, main_type, rule["allow"])]
+               not knowledge_path_allowed(path, main_type, rule["allow"], unit_kind=uk)]
     if outside:
-        problems.append(f"「{main_type}」组级知识点超出允许维度/范围（{'、'.join([*rule['allow'], *sorted(exact_knowledge_paths(main_type))])}）：{outside}")
+        allowed_desc = "、".join([*rule["allow"], *sorted(exact_knowledge_paths(main_type, unit_kind=uk))]) or "仅答案考点（目录知识点留空）"
+        problems.append(f"「{main_type}」组级知识点超出允许维度/范围（{allowed_desc}）：{outside}")
     missing = [dim for dim in rule["need"] if not any(_under(path, dim) for path in paths)]
     if missing:
         problems.append(f"「{main_type}」组级缺必带维度：{'/'.join(missing)}")
@@ -568,7 +703,7 @@ def check_unit_dims(main_type: str, knowledge) -> list[str]:
 def check_per_question_required(main_type: str, knowledge) -> list[str]:
     """逐题（per-question）题型的必带维度校验。
 
-    与 check_unit_dims 同口径读取 _unit_dims()[main_type]["need"]，但作用于单个
+    与 check_unit_dims 同口径读取 _unit_dims("standalone")[main_type]["need"]，但作用于单个
     题目/子题自身的标签，而非整组。整组题型由 check_unit_dims 在组级负责，这里
     只对非整组题型生效；单词拼写/单项填空/翻译/语音题等 need 为空者不受影响。
     """
@@ -578,7 +713,7 @@ def check_per_question_required(main_type: str, knowledge) -> list[str]:
     # 不算硬错误，因此不做逐题必带维度强制（避免合法作文被判缺失而卡流程）。
     if main_type == "书面表达":
         return []
-    rule = _unit_dims().get(main_type)
+    rule = _unit_dims("standalone").get(main_type)
     if not rule or not rule["need"]:
         return []
     problems = []
@@ -595,11 +730,8 @@ _READING_TYPES = {"阅读理解", "任务型阅读", "读写综合"}
 _CLOZE_TYPES = {"完形填空", "语法选择"}
 
 
-# 整篇/整个大题只做组级标签（体裁、主题、内容）的题型；子题不要求、也不承载
-# 细分知识点。听力长对话/短文理解属于"一材料带多题"，与阅读同理只在组级评估；
-# 其余题组（如听力短对话、单项选择）按小题分别标注。
-# 用户 2026-11-05 口径：下列题型一律以整组为单位打标签，子题 knowledge=[]，
-# 不做小题标签判断、不做小题二审。
+# 整篇/整个大题只做组级标签的题型；子题不要求、也不承载细分知识点（knowledge=[]）。
+# 注：阅读理解设题角度仍标在组题级 knowledge，但具体设题角度须逐小题分析每道小题的问法后去重汇总。
 WHOLE_UNIT_TYPES = frozenset((
     "阅读理解", "任务型阅读", "完形填空", "语法选择", "听力信息转换",
     "读写综合", "选词填空", "短文填空", "教材语篇填空",
@@ -616,8 +748,9 @@ def check_question_labels(question) -> list[str]:
 
     支持 question_type/type、filterMetadata.subtypes/categories、可选的
     knowledgeIds/knowledge_ids。子题未声明题型时只继承题型用于规则选择，
-    不继承知识点或子类；整组题型的子题 knowledge 可为空，不再要求阅读角度或逐小题考点；
-    独立单题按自身题型校验。只校验目录与结构，不判断标签语义是否符合原题。
+    不继承知识点或子类；整组题型子题 knowledge 可为空；
+    选词填空整题（group）仅保留独立答案考点，允许目录 knowledge=[]；
+    独立单题按自身题型（standalone 维度）校验。
     """
     def validate(item, parent_type=None, location="题目", parent_is_group=False):
         if not isinstance(item, dict):
@@ -636,7 +769,13 @@ def check_question_labels(question) -> list[str]:
         if not isinstance(filters, dict):
             problems.append("filterMetadata 必须是对象")
             filters = {}
-        values = {"type": main_type}
+        children = item.get("subquestions", [])
+        if not isinstance(children, list):
+            problems.append("subquestions 必须是列表")
+            children = []
+        is_group = bool(children) or item.get("unit_kind") == "group"
+        effective_kind = "group" if (is_group and parent_type is None) else "standalone"
+        values = {"type": main_type, "unit_kind": effective_kind}
         for key in ("difficulty", "knowledge"):
             if key in item:
                 values[key] = item[key]
@@ -650,40 +789,32 @@ def check_question_labels(question) -> list[str]:
         if (parent_type is None or type_keys) and subtypes(main_type) and not subs:
             problems.append(f"主类「{main_type}」必须填写目录子类")
         paths = values.get("knowledge", [])
-        # 以组题为准的题型（完形/阅读/任务型阅读/信息转换/补全对话等）：
-        # 只要求组级 knowledge 非空，子题 knowledge 可空（不强制）。
+        ap_only = parent_type is None and answer_point_only_type(main_type, effective_kind)
+        # 整组题型只要求组级 knowledge 非空，子题可空；
+        # 仅答案考点题型（如选词填空整题）目录 knowledge 允许为空（答案词条另行派生）。
         child_of_whole = parent_type is not None and (whole_unit_type(parent_type) or parent_is_group)
-        if not isinstance(paths, list) or (not paths and not child_of_whole):
+        if not isinstance(paths, list) or (not paths and not child_of_whole and not ap_only):
             problems.append("knowledge 必须是非空知识点列表")
         prefixes = None
         if parent_type in _CLOZE_TYPES:
             prefixes = ["词汇", "语法"]
         elif parent_type in _READING_TYPES:
             prefixes = [p for p in _allowed_prefixes(main_type) if p != "语篇体裁"]
-        problems.extend(_check_labels(values, prefixes))
+        problems.extend(_check_labels(values, prefixes, unit_kind=effective_kind))
         clean_paths = [p.strip() for p in paths if isinstance(p, str) and p.strip()] if isinstance(paths, list) else []
         if (parent_type in _READING_TYPES and not whole_unit_type(parent_type)
                 and not any(_under(p, "设题角度/阅读") for p in clean_paths)):
             problems.append("阅读子题必须包含设题角度/阅读叶子")
-        expected_ids = [point["id"] for point in resolve_knowledge(clean_paths, main_type)["resolved"]]
+        expected_ids = [point["id"] for point in resolve_knowledge(clean_paths, main_type, unit_kind=effective_kind)["resolved"]]
         for key in ("knowledgeIds", "knowledge_ids"):
             if key in item:
                 ids = _string_list(item[key], key, problems)
                 # IDs 是无序标签集合；同一 ID 不应重复，不能漏项或附加项。
                 if len(ids) != len(set(ids)) or set(ids) != set(expected_ids):
                     problems.append(f"{key} 与 knowledge 目录叶子 ID 不一致")
-        children = item.get("subquestions", [])
-        if not isinstance(children, list):
-            problems.append("subquestions 必须是列表")
-            children = []
-        is_group = bool(children) or item.get("unit_kind") == "group"
         if is_group and parent_type is None and main_type in types():
-            problems.extend(check_unit_dims(main_type, clean_paths))
-        elif main_type in types():
-            # 逐题（per-question）题型不走整组单元校验，但 _unit_dims 里为其规定的
-            # 必带维度（如听力短对话的「主题」）仍必须落到本题标签上。此前只在
-            # is_group 分支执行，导致听力短对话/判断/排序/问答/听力其他/书面表达
-            # 等逐题题型只打「设题角度」也能通过，主题成批漏标（2026-11-19 修复）。
+            problems.extend(check_unit_dims(main_type, clean_paths, unit_kind="group"))
+        elif parent_type is None and main_type in types():
             problems.extend(check_per_question_required(main_type, clean_paths))
         for index, child in enumerate(children, 1):
             problems.extend(validate(child, main_type, f"子题[{index}]", parent_is_group=is_group))

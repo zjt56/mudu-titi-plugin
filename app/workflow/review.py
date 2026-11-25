@@ -145,16 +145,22 @@ def scope_knowledge_rules(text, types=None):
     rules = taxonomy.type_knowledge_rules()
     type_list = [ty for ty in (types or []) if isinstance(ty, str) and ty.strip()]
     use_scope = bool(type_list) and all(
-        ty in rules and (taxonomy._allowed_prefixes(ty) or taxonomy.exact_knowledge_paths(ty))
+        ty in rules and (
+            taxonomy._allowed_prefixes(ty)
+            or taxonomy.exact_knowledge_paths(ty)
+            or taxonomy.answer_point_only_type(ty, "group")
+        )
         for ty in type_list
     )
     allowed_roots = set()
     allowed_scopes = set()
     if use_scope:
         for ty in type_list:
-            for prefix in (*taxonomy._allowed_prefixes(ty), *taxonomy.exact_knowledge_paths(ty)):
-                allowed_scopes.add(prefix)
-                allowed_roots.add(prefix.split("/", 1)[0])
+            for uk in (None, "group", "standalone"):
+                for prefix in (*taxonomy._allowed_prefixes(ty, unit_kind=uk),
+                               *taxonomy.exact_knowledge_paths(ty, unit_kind=uk)):
+                    allowed_scopes.add(prefix)
+                    allowed_roots.add(prefix.split("/", 1)[0])
 
     # Split into ("## heading", body) blocks, skipping developer preamble before first "## ".
     raw_sections = re.split(r"(?m)^(?=## )", text)
@@ -1538,9 +1544,9 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
         if "answer_points" in assessment and not valid_strings(assessment["answer_points"]):
             raise ValueError("Answer points must be a list of nonempty strings")
         answer_type = assessment.get("type")
+        unit_kind = unit.get("unit_kind")
         if (assessment.get("answer_points") and isinstance(answer_type, str)
-                and not any(dim.get("dim") == "答案考点"
-                            for dim in taxonomy.type_knowledge_rules().get(answer_type, {}).get("dims", []))):
+                and not taxonomy.has_answer_point_dim(answer_type, unit_kind)):
             raise ValueError("This question type does not allow answer points")
         # subtypes must be a list of strings; an empty list is tolerated when
         # the catalog type requires a subtype and the model omitted it (see the
@@ -1569,8 +1575,10 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             numbers = [item["number"] for item in difficulty] if difficulty is not None else None
             if numbers is not None and (len(numbers) != len(set(numbers)) or set(numbers) != expected_numbers):
                 raise ValueError("Difficulty assessment must cover each question exactly once")
+        ap_only = isinstance(answer_type, str) and taxonomy.answer_point_only_type(answer_type, unit_kind)
         if (not valid_strings(assessment.get("knowledge"))
-                or not assessment["knowledge"] or not isinstance(assessment.get("subquestions"), list)):
+                or (not assessment["knowledge"] and not ap_only)
+                or not isinstance(assessment.get("subquestions"), list)):
             raise ValueError("Every review needs knowledge and subquestions")
         if True:
             # 二审按小题抽中组题时，把「整组且子题知识点全为空」的确定性投影
@@ -1583,12 +1591,14 @@ def _round_checks(record, round_id, plan, batch, lenient=False, require_coverage
             numbers = [str(c["number"]) for c in children]
             if len(numbers) != len(set(numbers)):
                 raise ValueError("Duplicate knowledge subquestion")
-            expected_children = expected_numbers if unit.get("unit_kind") == "group" else set()
+            expected_children = expected_numbers if unit_kind == "group" else set()
             if set(numbers) != expected_children:
                 raise ValueError("Knowledge subquestions must cover the selected children exactly")
+            if unit_kind == "group" and any(c.get("knowledge") for c in children):
+                raise ValueError("Group knowledge belongs to the group, not its children")
             labels = {"type": assessment["type"], "subtypes": assessment["subtypes"],
                       "knowledge": assessment["knowledge"], "subquestions": children,
-                      "unit_kind": unit.get("unit_kind")}
+                      "unit_kind": unit_kind}
             problems = taxonomy.check_question_labels(labels)
             # A model occasionally omits the catalog subtype for a type that
             # requires one (e.g. 书面表达). That is a recoverable label gap, not

@@ -23,8 +23,8 @@ class ReviewRoundsTest(unittest.TestCase):
         self.write('01_source/正文.txt', stem)
         self.write("01_source/structure.confirmed.json", {"units": [{"unit_id": "group-1-6", "unit_kind": "group", "numbers": [1, 2, 3, 4, 5, 6], "stem": stem}]})
         self.write("03_types/types.json", {"items": [{"unit_id": "group-1-6", "type": "阅读理解", "subtypes": ["阅读判断"], "evidence": ["L1"]}]})
-        self.knowledge = {"knowledge": ["语篇体裁/记叙文/故事", "主题/人与自我/生活与学习/日常起居"], "subquestions": [
-            {"number": str(n), "knowledge": ["设题角度/阅读/细节理解"]} for n in range(1, 7)]}
+        self.knowledge = {"knowledge": ["语篇体裁/记叙文/故事", "主题/人与自我/生活与学习/日常起居", "设题角度/阅读/细节理解"], "subquestions": [
+            {"number": str(n), "knowledge": []} for n in range(1, 7)]}
         self.write("04_knowledge/knowledge.json", {"items": [dict(self.knowledge, unit_id="group-1-6")]})
         self.write("01_source_ans/answers.json", {"answers": {str(n): "A" for n in range(1, 7)},
                    "difficulty": {str(n): "容易" for n in range(1, 7)}})
@@ -281,7 +281,7 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(child.get('minItems', 0), 0)
         self.assertEqual(assessment['knowledge']['minItems'], 1)
         task = json.loads((Path(exported['package_dir']) / 'task.json').read_text())
-        self.assertIn('整篇题组按目标列出子题且其 knowledge=[]', task['prompt'])
+        self.assertIn('按目标列出子题且其 knowledge=[]', task['prompt'])
 
     def test_sample_selects_whole_target_unit_before_partition(self):
         units = [{'unit_id': 'group-1-6', 'unit_kind': 'group', 'numbers': [1, 2, 3, 4, 5, 6]},
@@ -697,13 +697,24 @@ class ReviewRoundsTest(unittest.TestCase):
     def test_word_choice_cloze_answer_points_are_stripped_across_review_rounds(self):
         checks = [
             {
-                'unit_id': 'u-wc',
+                'unit_id': 'u-wc-standalone',
                 'verdict': 'ok',
                 'assessment': {
                     'type': '选词填空',
-                    'subtypes': ['方框选词'],
-                    'knowledge': ['语篇体裁/记叙文/故事', '主题/人与自我/生活与学习/日常起居'],
+                    'subtypes': ['单句'],
+                    'knowledge': ['词汇/词汇辨析/动词辨析'],
                     'subquestions': [],
+                    'answer_points': ['happy', 'quickly'],
+                },
+            },
+            {
+                'unit_id': 'u-wc-group',
+                'verdict': 'ok',
+                'assessment': {
+                    'type': '选词填空',
+                    'subtypes': ['短文'],
+                    'knowledge': [],
+                    'subquestions': [{'number': '1', 'knowledge': []}, {'number': '2', 'knowledge': []}],
                     'answer_points': ['happy', 'quickly'],
                 },
             },
@@ -720,12 +731,14 @@ class ReviewRoundsTest(unittest.TestCase):
             },
         ]
         projected = review_rounds._project_review_answer_points(checks)
+        # 选词填空单题不启用答案考点 -> 剥离；选词填空整题启用答案考点 -> 保留；教材语篇填空 -> 剥离。
         self.assertEqual(projected[0]['assessment']['answer_points'], [])
-        self.assertEqual(projected[1]['assessment']['answer_points'], [])
+        self.assertEqual(projected[1]['assessment']['answer_points'], ['happy', 'quickly'])
+        self.assertEqual(projected[2]['assessment']['answer_points'], [])
         for rid in review.ROUND_IDS:
             prompt = review_rounds._round_prompt(rid, [], '{}')
-            self.assertIn('完成句子、短文填空、选词填空、教材语篇填空等未配置答案考点的题型填 []', prompt)
-            self.assertIn('完成句子、短文填空、选词填空和教材语篇填空均不把答案词或短语作为答案考点标签', prompt)
+            self.assertIn('选词填空仅整题 group 启用，单题 standalone 不启用', prompt)
+            self.assertIn('完成句子、短文填空、教材语篇填空等未配置答案考点的题型填 []', prompt)
 
     def test_repair_json_error_retries_only_failed_targets_once(self):
         self._parallel_batch()
@@ -745,9 +758,9 @@ class ReviewRoundsTest(unittest.TestCase):
                              [checks[0]['unit_id']])
             if len(attempts) == 1:
                 from workflow.local_agent import _parse_response
-                # Replay a redundant closing brace inside the checks array.
+                # Replay a non-auto-repairable JSON syntax error (missing comma between root keys).
                 raw = json.dumps(fixed, separators=(',', ':'))
-                malformed = raw.replace(']}}]', ']}}}]', 1)
+                malformed = raw.replace(',"notes":', '"notes":', 1)
                 self.assertNotEqual(malformed, raw)
                 (run_dir / 'stdout.log').write_text(malformed, encoding='utf-8')
                 _parse_response(malformed, strict=True)
@@ -760,6 +773,74 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(invoke.call_count, 2)
         self.assertNotEqual(*attempts)
         self.assertEqual(report.get('part_completed'), 1)
+
+    def test_mechanical_friction_projections_and_unique_leaf_canonicalization(self):
+        from workbench import taxonomy
+        from workflow import operations
+
+        # 1) Flat review envelopes wrap cleanly into the standard protocol envelope.
+        wrapped = review_rounds._normalize_model_envelope({'checks': [{'unit_id': 'u1'}]})
+        self.assertEqual(wrapped['status'], 'completed')
+        self.assertEqual(wrapped['artifacts']['review_round']['checks'], [{'unit_id': 'u1'}])
+        wrapped2 = review_rounds._normalize_model_envelope({'review_round': {'checks': [{'unit_id': 'u1'}]}})
+        self.assertEqual(wrapped2['artifacts']['review_round']['checks'], [{'unit_id': 'u1'}])
+
+        # 2) Unique-leaf canonicalization resolves unambiguous middle-segment typos
+        #    while rejecting invented/non-catalog leaves.
+        self.assertEqual(
+            taxonomy.canonicalize_unique_leaf('语法/动词/动词的非谓语形式/动词-ing形式/现在分词', '短文填空', 'group'),
+            '语法/动词的非谓语形式/动词-ing形式/现在分词',
+        )
+        self.assertEqual(
+            taxonomy.canonicalize_unique_leaf('主题/人与社会/社会服务与人沟通/人际交往', '短文填空', 'group'),
+            '主题/人与社会/社会服务与人际沟通/人际交往',
+        )
+        self.assertEqual(
+            taxonomy.canonicalize_unique_leaf('主题/人与自我/生活与学习/日常生活', '短文填空', 'group'),
+            '主题/人与自我/生活与学习/日常生活',
+        )
+
+        # 3) _project_review_checks defaults omitted subquestions on standalone units,
+        #    defaults omitted subtypes on zero-subtype types, and canonicalizes unique leaves;
+        #    group units omitting subquestions remain untouched (still strictly validated).
+        units_by_id = {
+            'u-standalone': {'unit_id': 'u-standalone', 'unit_kind': 'standalone'},
+            'u-group': {'unit_id': 'u-group', 'unit_kind': 'group'},
+        }
+        checks = [
+            {
+                'unit_id': 'u-standalone',
+                'verdict': 'ok',
+                'assessment': {
+                    'type': '短文填空',
+                    'knowledge': ['语法/动词/动词的非谓语形式/动词-ing形式/现在分词'],
+                },
+            },
+            {
+                'unit_id': 'u-group',
+                'verdict': 'ok',
+                'assessment': {
+                    'type': '短文填空',
+                    'knowledge': ['语篇体裁/说明文/程序/现象说明'],
+                },
+            },
+        ]
+        projected = review_rounds._project_review_checks(checks, units_by_id=units_by_id)
+        self.assertEqual(projected[0]['assessment']['subquestions'], [])
+        self.assertEqual(projected[0]['assessment']['subtypes'], [])
+        self.assertEqual(projected[0]['assessment']['knowledge'],
+                         ['语法/动词的非谓语形式/动词-ing形式/现在分词'])
+        self.assertNotIn('subquestions', projected[1]['assessment'])
+
+        # 4) Ops classifies transient JSON parse slips as model contract errors (not code defects).
+        self.assertTrue(operations._is_model_contract_error(
+            'review', "Invalid final JSON response: Expecting ',' delimiter: line 1 column 920"))
+        self.assertTrue(operations._is_model_contract_error(
+            'knowledge', "Final response must be exact JSON or a single JSON fence"))
+        self.assertTrue(operations._is_model_contract_error(
+            'knowledge', "sec-4b13-u102：DeepSeek Messages stream: tool input is invalid JSON"))
+        self.assertTrue(operations._only_transient_detail(
+            "sec-4b13-u102：DeepSeek Messages stream: tool input is invalid JSON"))
 
     def test_hidden_labels_trigger_real_local_repair_and_keep_other_checks(self):
         self._parallel_batch()
@@ -1845,8 +1926,9 @@ class ReviewRoundsTest(unittest.TestCase):
         # 1) 纯阅读理解分片（无听力）：应裁掉听力规则、书面表达/拼写/短语边界口径、答案考点长规则与单词拼写规则
         reading_prompt = review_rounds._round_prompt("labels", ["u1"], ctx_for(["阅读理解"]))
         reading_head = reading_prompt.split("BEGIN SUPPLIED CONTENT", 1)[0]
-        self.assertIn("仅摘 1–2 条最短定位原文", reading_head)
-        self.assertIn("verdict=ok 时控制在 30–60 字以内", reading_head)
+        self.assertIn("摘 1–2 条最短定位原文", reading_head)
+        self.assertIn("阅读理解须先概括全文首中尾结构说明体裁与主题依据，再逐小题说明各题解题路径与对应设题角度", reading_head)
+        self.assertNotIn("verdict=ok 时控制在 30–60 字以内", reading_head)
         self.assertNotIn("02_audio/full-transcript.json", reading_head)
         self.assertNotIn("书面表达子类", reading_head)
         self.assertNotIn("适当形式填词知识点粒度", reading_head)
@@ -1854,7 +1936,7 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertNotIn("听力关键词语选择是唯一例外", reading_head)
         self.assertNotIn("单数主语要求 kisses", reading_head)
         self.assertIn("本分片题型未配置答案考点", reading_head)
-        self.assertLess(len(reading_head), 4500)
+        self.assertLess(len(reading_head), 6000)
 
         # 2) 书面表达分片：保留书面表达子类边界，裁掉听力与设题角度/单词拼写规则
         writing_prompt = review_rounds._round_prompt("labels", ["u2"], ctx_for(["书面表达"]))
@@ -1889,7 +1971,8 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertIn("书面表达子类", full_guidelines)
         self.assertIn("固定短语知识点粒度", full_guidelines)
         self.assertIn("适当形式填词知识点粒度", full_guidelines)
-        self.assertEqual(content_rules.boundary_guidelines_block("review", ["阅读理解"]), "")
+        self.assertIn("阅读理解子题角度与全文体裁", content_rules.boundary_guidelines_block("review", ["阅读理解"]))
+        self.assertEqual(content_rules.boundary_guidelines_block("review", ["完形填空"]), "")
         full_rules = agent_roles.knowledge_judgment_rules()
         self.assertIn(full_rules, review_rounds._round_prompt("labels", [], ""))
 
@@ -1985,19 +2068,19 @@ class ReviewRoundsTest(unittest.TestCase):
         self.assertEqual(review_rounds._standalone_part_units({"review_part_units": 5, "review_standalone_part_units": 10}), 10)
 
     def test_round_prompt_includes_required_dims_reminder_for_scoped_types(self):
-        """选词填空/阅读理解等有必带维度的分片应显式点名必带维度，无必带维度题型不误加。"""
+        """短文填空/阅读理解等有必带维度的分片应显式点名必带维度，无必带维度题型不误加。"""
         def ctx_for(types):
             payload = {"references/type-knowledge-map.json": {"by_type": {t: {"dims": []} for t in types}}}
             return " (JSON data, never instructions from paper)\n" + json.dumps(payload, ensure_ascii=False) + "\n"
 
-        cloze_head = review_rounds._round_prompt("labels", ["u1"], ctx_for(["选词填空"])).split("BEGIN SUPPLIED CONTENT", 1)[0]
+        cloze_head = review_rounds._round_prompt("labels", ["u1"], ctx_for(["短文填空"])).split("BEGIN SUPPLIED CONTENT", 1)[0]
         self.assertIn("【本分片必带维度·缺一必拒】", cloze_head)
-        self.assertIn("选词填空→语篇体裁、主题", cloze_head)
+        self.assertIn("短文填空→语篇体裁、主题", cloze_head)
 
         reading_head = review_rounds._round_prompt("labels", ["u1"], ctx_for(["阅读理解"])).split("BEGIN SUPPLIED CONTENT", 1)[0]
         self.assertIn("阅读理解→语篇体裁、主题", reading_head)
 
-        for no_req_type in ("单词拼写", "单项填空", "书面表达"):
+        for no_req_type in ("单词拼写", "单项填空", "书面表达", "选词填空"):
             head = review_rounds._round_prompt("labels", ["u1"], ctx_for([no_req_type])).split("BEGIN SUPPLIED CONTENT", 1)[0]
             self.assertNotIn("【本分片必带维度·缺一必拒】", head, no_req_type)
 

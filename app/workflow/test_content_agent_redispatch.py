@@ -69,6 +69,19 @@ class RedispatchTests(unittest.TestCase):
         (broker._task_path(base['task_id']).parent / 'candidate-0001.json').write_text('{}')
         self.assertFalse(broker._retryable_upstream_task(base))
 
+    def test_stream_tool_input_json_glitch_is_retryable(self):
+        base = self.task()
+        for error in ('DeepSeek Messages stream: tool input is invalid JSON',
+                      'Messages stream: tool input is invalid JSON'):
+            with self.subTest(error=error):
+                self.assertTrue(broker._is_upstream_transient_error(error))
+                self.assertTrue(broker._retryable_upstream_task(dict(base, error=error)))
+        for error in ('DeepSeek Messages stream: tool input is invalid JSON extra',
+                      'tool input is invalid JSON',
+                      'sec-1：DeepSeek Messages stream: tool input is invalid JSON'):
+            with self.subTest(error=error):
+                self.assertFalse(broker._is_upstream_transient_error(error))
+
     def test_bounded_chain_and_ambiguous_receipts(self):
         previous = self.task()
         for index in range(1, 4):

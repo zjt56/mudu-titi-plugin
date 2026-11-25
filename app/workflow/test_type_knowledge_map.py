@@ -56,8 +56,17 @@ class TypeKnowledgeMapTests(unittest.TestCase):
             self.assertEqual(self.dims(main_type), ["语篇体裁", "主题", "设题角度"], main_type)
 
     def test_short_passage_cloze_keeps_content_dims_without_answer_points(self):
-        for main_type in ("短文填空", "选词填空", "教材语篇填空"):
+        for main_type in ("短文填空", "教材语篇填空"):
             self.assertEqual(self.dims(main_type), ["语篇体裁", "主题", "词汇", "语法"], main_type)
+        # 选词填空（用户 2026-11-25 规则）：整题只要答案考点，单题删除主题和语篇体裁只保留词汇/语法。
+        self.assertEqual(self.dims("选词填空"), ["词汇", "语法"])
+        by_kind = self.by_type["选词填空"]["by_unit_kind"]
+        self.assertEqual([d["dim"] for d in by_kind["group"]["dims"]], ["答案考点"])
+        self.assertTrue(by_kind["group"]["dims"][0].get("separate"))
+        self.assertEqual([d["dim"] for d in by_kind["standalone"]["dims"]], ["词汇", "语法"])
+        # 听力信息转换（用户 2026-11-25 规则）：只保留主题、语篇体裁和答案考点（无设题角度）。
+        self.assertEqual(self.dims("听力信息转换"), ["语篇体裁", "主题", "答案考点"])
+        self.assertTrue(self.by_type["听力信息转换"]["dims"][-1].get("separate"))
 
     def test_listening_dialog_types_only_theme_and_angle(self):
         for main_type in ("听力短对话理解", "听力长对话理解"):

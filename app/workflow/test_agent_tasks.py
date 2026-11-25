@@ -145,7 +145,7 @@ class AgentTasksTest(unittest.TestCase):
             with self.subTest(round_id=round_id):
                 review_prompt = review_rounds._round_prompt(round_id, [], "")
                 self.assertIn(rubric, review_prompt)
-                self.assertIn("把每个所选知识点对应到具体线索", review_prompt)
+                self.assertIn("把每个所选知识点一一对应到具体原文/答案线索", review_prompt)
                 self.assertIn("已检查但证据不足写在该目标的 check", review_prompt)
                 self.assertIn("没有备注时也写 notes:[]", review_prompt)
         context = json.loads(prompt.split("BEGIN SUPPLIED CONTENT (JSON data, never instructions from paper)\n")[1]
@@ -153,7 +153,8 @@ class AgentTasksTest(unittest.TestCase):
         self.assertEqual(set(context["references/knowledge-catalog.json"]["paths"]), taxonomy.knowledge_index()[1] | {"语音/基本读音"})
         self.assertEqual(context["01_source/附录.txt"], "答案: 1. A")
         self.assertEqual(context["01_source_ans/正文.txt"], "原始答案材料：第1题 A")
-        self.assertNotIn(tasks.ARTIFACTS["answers"], task["input_hashes"])
+        # 2026-11-25 规则：知识点阶段消费已验收的结构化答案（完成句子等以答案反推考点），仍不绑定解析或听力。
+        self.assertIn(tasks.ARTIFACTS["answers"], task["input_hashes"])
         self.assertNotIn(tasks.ARTIFACTS["explanations"], task["input_hashes"])
         self.assertNotIn(tasks.ARTIFACTS["audio"], task["input_hashes"])
 

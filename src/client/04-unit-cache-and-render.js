@@ -97,6 +97,8 @@
         b.unit_total || 0,
         b.open_findings || 0,
         b.needs_human || 0,
+        b.anomaly_count || 0,
+        b.stage_blocked ? '1' : '0',
         st.running ? '1' : '0',
         cur.id || '',
         cur.status || '',
@@ -115,6 +117,9 @@
         return true;
       }
       if (row && row.state && row.state !== 'unverified' && !hasRound1) {
+        return true;
+      }
+      if (row && row.is_anomaly && !cached.is_anomaly) {
         return true;
       }
       return false;

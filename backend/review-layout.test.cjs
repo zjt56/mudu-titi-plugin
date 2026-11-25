@@ -96,7 +96,7 @@ test('左侧题目列表：每题有独立边框分隔，选中态加深并带�
   assert.doesNotMatch(client, /\.wf-paper\.wf-active:hover\{filter:brightness/);
 });
 
-test('左侧题号列表使用橙色问题圆点，正常题使用默认文字色且不展示待审徽标', () => {
+test('左侧题号列表区分黄色待审圆点与红色异常高亮，正常题使用默认文字色', () => {
   const from = client.indexOf('filteredRows.map((r) => {');
   const to = client.indexOf('\n          })),', from);
   assert.ok(from >= 0 && to > from);
@@ -106,7 +106,7 @@ test('左侧题号列表使用橙色问题圆点，正常题使用默认文字�
   const row = (data) => render(h, { paperRow: () => ({}), badge: () => ({}) }, '', () => {},
     { unit_id: 'q1', number: 1, type: '单项填空', ...data });
   for (const data of [{ needs_human: true, open_count: 2, open_summary: '知识点差异' },
-                      { state: 'attention' }, { state: 'blocked' }]) {
+                      { state: 'attention' }]) {
     const result = row(data);
     const dot = result.children.at(-1);
     assert.equal(dot.props.className, 'wf-review-row-dot');
@@ -114,7 +114,25 @@ test('左侧题号列表使用橙色问题圆点，正常题使用默认文字�
     assert.equal(dot.props['aria-label'], '有审核问题');
     assert.equal(dot.children.length, 0);
   }
+  for (const data of [
+    { state: 'blocked' },
+    { verdict: 'error', open_summary: '答案与原卷不符' },
+    { is_anomaly: true, anomaly_summary: '打标签未过' },
+    { type: '' },
+    { format_count: 1 },
+  ]) {
+    const result = row(data);
+    assert.match(result.props.className, /wf-paper-anomaly/);
+    // 只对异常题号标红，整行保持默认底色与边框
+    assert.equal(result.children[0].props.style.color, 'var(--dsw-alias-state-error-primary)');
+    assert.equal(result.children[1].props.style.color, undefined);
+    const dot = result.children.at(-1);
+    assert.equal(dot.props.className, 'wf-review-row-dot');
+    assert.equal(dot.props.style.background, 'var(--dsw-alias-state-error-primary)');
+    assert.equal(dot.props['aria-label'], '有异常问题');
+  }
   assert.equal(row({ needs_human: true, open_summary: '知识点差异' }).children.at(-1).props.title, '知识点差异');
+  assert.equal(row({ is_anomaly: true, anomaly_summary: '阶段校验未过' }).children.at(-1).props.title, '阶段校验未过');
   assert.equal(row({ state: 'ok' }).children.at(-1).props.style.background, 'var(--dsw-alias-label-primary)');
   assert.equal(row({ state: 'unverified' }).children.at(-1).props['aria-label'], '尚未核对');
   assert.equal(row({ excluded: true }).children.at(-1).children[0], '听力跳过');

@@ -71,10 +71,15 @@
       const h = React.createElement;
       const paths = Array.isArray(props.paths) ? props.paths : [];
       const mainType = String(props.mainType || '').trim();
+      const unitKind = String(props.unitKind || '').trim();
       const onChange = props.onChange || (() => {});
-      const fetchTree = props.fetchTree || ((t, signal) =>
-        jget('/knowledge/tree' + (t ? '?type=' + encodeURIComponent(t) : ''), signal));
-      const cacheKey = mainType || '__ALL__';
+      const fetchTree = props.fetchTree || ((t, signal, uk) => {
+        const params = [];
+        if (t) params.push('type=' + encodeURIComponent(t));
+        if (uk) params.push('unit_kind=' + encodeURIComponent(uk));
+        return jget('/knowledge/tree' + (params.length ? '?' + params.join('&') : ''), signal);
+      });
+      const cacheKey = (mainType || '__ALL__') + '|' + (unitKind || '');
       const [query, setQuery] = React.useState('');
       const [treeData, setTreeData] = React.useState(() => KNOWLEDGE_TREE_CACHE.get(cacheKey) || null);
       const [loading, setLoading] = React.useState(() => !KNOWLEDGE_TREE_CACHE.has(cacheKey));
@@ -96,7 +101,7 @@
         let alive = true;
         setLoading(true);
         setLoadError('');
-        Promise.resolve(fetchTree(mainType, ac.signal))
+        Promise.resolve(fetchTree(mainType, ac.signal, unitKind))
           .then((data) => {
             if (!alive) return;
             const normalized = data && Array.isArray(data.items) ? data : { items: [], scoped: false, type: mainType, selectable_total: 0 };
@@ -305,7 +310,9 @@
               : loadError
                 ? h('div', { style: { padding: '14px 12px', fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' } }, loadError)
                 : visibleItems.length === 0
-                  ? h('div', { style: { padding: '18px 12px', textAlign: 'center', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, searching ? '当前题型下未找到匹配知识点' : '该题型暂无可选知识点')
+                  ? h('div', { style: { padding: '18px 12px', textAlign: 'center', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
+                      searching ? '当前题型下未找到匹配知识点'
+                        : (treeData && treeData.answer_point_only ? '整题仅保留自动派生的答案考点，无需选择目录知识点' : '该题型暂无可选知识点'))
                   : renderNodes(visibleItems, 0),
           ),
         ),

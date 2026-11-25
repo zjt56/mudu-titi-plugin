@@ -129,16 +129,30 @@ def _balanced_groups(units, max_units, drafts):
 
 
 def _prune_knowledge_catalog(subset):
-    """Keep only catalog packs and type-knowledge rules allowed for this shard's types."""
+    """Keep only catalog packs and type-knowledge rules allowed for this shard's types (+ unit_kind)."""
     types_doc = subset.get(agent_tasks.ARTIFACTS["types"])
     if not isinstance(types_doc, dict) or not isinstance(types_doc.get("items"), list):
         return
-    part_types = {str(r.get("type") or "").strip() for r in types_doc["items"]
-                  if isinstance(r, dict) and str(r.get("type") or "").strip()}
+    unit_kind_by_uid = {
+        str(u.get("unit_id") or ""): u.get("unit_kind")
+        for u in (subset.get("confirmed_units_with_stable_ids") or [])
+        if isinstance(u, dict) and isinstance(u.get("unit_id"), str)
+    }
+    part_types = set()
+    part_specs = set()
+    for r in types_doc["items"]:
+        if not isinstance(r, dict):
+            continue
+        ty = str(r.get("type") or "").strip()
+        if not ty:
+            continue
+        part_types.add(ty)
+        uk = unit_kind_by_uid.get(str(r.get("unit_id") or ""))
+        part_specs.add((ty, uk if uk in ("group", "standalone") else None))
     if not part_types:
         return
     from . import catalog_packs
-    pack_info = catalog_packs.packs_for_types(sorted(part_types))
+    pack_info = catalog_packs.packs_for_types(sorted(part_specs, key=lambda x: (x[0], x[1] or "")))
     if pack_info["fallback"]:
         return
     allowed_paths = set(pack_info["paths"])
@@ -334,9 +348,19 @@ def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=Non
                 units, lambda u: types_by_uid.get(u["unit_id"])
             )
             groups = []
-            for _bucket, run_units in bucket_runs:
-                if balance_work and len(run_units) > max_units:
-                    groups.extend(_balanced_groups(run_units, max_units, drafts))
+            # 长语篇题组（阅读/完形/短文填空等）每片至多 2 组，避免多篇长文挤在同一分片导致跳读与粗糙打标。
+            _HEAVY_PASSAGE_BUCKETS = frozenset(("reading", "discourse", "mixed_cloze", "dialogue"))
+            for bucket, run_units in bucket_runs:
+                bucket_cap = min(max_units, 2) if (
+                    bucket in _HEAVY_PASSAGE_BUCKETS
+                    and any(u.get("unit_kind") == "group" for u in run_units)
+                ) else max_units
+                if len(run_units) > bucket_cap:
+                    if balance_work:
+                        groups.extend(_balanced_groups(run_units, bucket_cap, drafts))
+                    else:
+                        for i in range(0, len(run_units), bucket_cap):
+                            groups.append(run_units[i:i + bucket_cap])
                 else:
                     groups.append(run_units)
         else:

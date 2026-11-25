@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /** Windows/POSIX-native model router for the workflow command provider. */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -247,7 +247,9 @@ function makeProfile(baseProfile, provider, model) {
     providerBlocks(join(dshHome, 'profiles', 'desktop', 'cordis.patch.yml')));
   // Content-address the complete overlay, including provider endpoints/model
   // catalogs. Never reuse a copied desktop package.json or stale provider patch.
-  const content = `${overlay}\n- id: agent-default-model\n  config:\n    provider: ${JSON.stringify(provider)}\n    model: ${JSON.stringify(model)}\n    reasoningEffort: null\n`;
+  // Redirect session persistence away from ~/.dsh/sessions so ephemeral attempt
+  // directories never accumulate thousands of zstd sessions scanned by DSH host.
+  const content = `${overlay}\n- id: agent-default-model\n  config:\n    provider: ${JSON.stringify(provider)}\n    model: ${JSON.stringify(model)}\n    reasoningEffort: null\n- id: session-persistence-jsonl\n  config:\n    root: !!js process.env.WF_DSH_SESSION_ROOT || dshHomePath('tmp-wf-sessions')\n`;
   const key = createHash('sha256').update(`headless-overlay-v1\0${content}`).digest('hex').slice(0, 24);
   const name = `wf-plugin-route-${key}`;
   const dir = join(dshHome, 'profiles', name);
@@ -296,12 +298,19 @@ const available = overlayProviders(patchText);
 if (available.size && !available.has(selected.provider)) {
   fail(`provider "${selected.provider}" 不在路由 profile 的可用 provider 中（可用: ${[...available].sort().join(', ')}）。请在插件设置里重新选择模型`);
 }
-const result = runDsh(bin, ['--profile', 'headless', '--patch', routePatch, '-'], readFileSync(promptFile), env);
+const ephemeralSessionRoot = mkdtempSync(join(tmpdir(), 'wf-dsh-session-'));
+env.WF_DSH_SESSION_ROOT = ephemeralSessionRoot;
+let result;
+try {
+  result = runDsh(bin, ['--profile', 'headless', '--patch', routePatch, '-'], readFileSync(promptFile), env);
+} finally {
+  try { rmSync(ephemeralSessionRoot, { recursive: true, force: true }); } catch {}
+}
 if (result.status === 0 && result.stdout) {
   writeFileSync(responseFile, result.stdout, 'utf8');
   process.exit(0);
 }
 if (result.stderr) process.stderr.write(result.stderr);
-if (/DAILY_LIMIT_EXCEEDED|daily usage limit|usage limit has been reached/i.test(result.stderr || '')) console.error('wf-router: RATE_LIMIT: daily/quota exhausted');
+if (/DAILY_LIMIT_EXCEEDED|daily usage limit|usage limit has been reached|usage limit reached|GoUsageLimitError/i.test(result.stderr || '')) console.error('wf-router: RATE_LIMIT: daily/quota exhausted');
 else if (/429|RATE_LIMIT|rate[ _]limit|QUOTA|too many requests/i.test(result.stderr || '')) console.error('wf-router: RATE_LIMIT: throttled');
 fail(`dsh call failed (profile=${profile} model=${selected.model} exit=${result.status ?? 1})`, result.status || 1);

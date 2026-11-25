@@ -238,8 +238,7 @@ def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None, ap_ct
         main_type = type_item.get('type') or type_item.get('question_type')
         if (item.get('question_type') or item.get('type')) != main_type:
             return []
-        if not any(dim.get('dim') == '答案考点'
-                   for dim in rules.get(main_type, {}).get('dims', [])):
+        if not taxonomy.has_answer_point_dim(main_type, unit.get('unit_kind')):
             return []
         children = item.get('subquestions') if unit['unit_kind'] == 'group' else [item]
         terms = []
@@ -298,20 +297,24 @@ def label_payload(row, batch_item, subs, folder, unit_id=None, *, ap_ctx=None, r
                     knowledge.append(str(path).strip())
     main_type = (unit_labels.get("type") or item.get("question_type") or item.get("type")
                  or row.get("question_type") or row.get("type") or "")
+    unit_kind = (row.get("unit_kind") or item.get("unit_kind")
+                 or ("group" if len(subs) > 1 else "standalone"))
+    is_group = unit_kind == "group"
     from workflow import label_merge
     uid_key = str(unit_id or row.get("unit_id") or "")
     r1_kwargs = {"round1_assessment": r1_assessments.get(uid_key)} if isinstance(r1_assessments, dict) else {}
     merged_info = label_merge.merged_unit_knowledge(
-        folder, uid_key, knowledge, main_type=main_type, manual_labels=unit_labels, **r1_kwargs
+        folder, uid_key, knowledge, main_type=main_type, manual_labels=unit_labels,
+        is_group=is_group, **r1_kwargs,
     ) if uid_key else {"knowledge": knowledge, "auto_merged": knowledge, "added_from_round1": [], "has_round1": False, "manually_edited": explicit_knowledge}
     if not explicit_knowledge and merged_info.get("has_round1"):
         knowledge = list(merged_info["knowledge"])
-    resolved = taxonomy.resolve_knowledge(knowledge, main_type)
+    resolved = taxonomy.resolve_knowledge(knowledge, main_type, unit_kind=unit_kind)
     # 旧批次可能保存不带顶级维度的叶子路径；展示和维度校验统一使用
     # 唯一解析出的当前目录全路径，避免加载时误报目录外路径。
     if resolved["resolved"] and not resolved["unknown"] and not resolved["non_leaf"]:
         knowledge = list(dict.fromkeys(point["path"] for point in resolved["resolved"]))
-        resolved = taxonomy.resolve_knowledge(knowledge, main_type)
+        resolved = taxonomy.resolve_knowledge(knowledge, main_type, unit_kind=unit_kind)
     from workflow.metadata_policy import MISSING
     values = {
         "source": item.get("source") or filters.get("source") or row.get("source") or MISSING,
@@ -319,6 +322,7 @@ def label_payload(row, batch_item, subs, folder, unit_id=None, *, ap_ctx=None, r
         "year": str(item.get("year") or filters.get("year") or row.get("year") or ""),
         "location": item.get("location") or filters.get("location") or row.get("location") or "",
         "type": main_type,
+        "unit_kind": unit_kind,
         "subtypes": filters.get("subtypes") or ([item.get("subtype")] if item.get("subtype") else []),
         "difficulty": (taxonomy.difficulty_name(item.get("difficulty"))
                        or taxonomy.difficulty_name(filters.get("difficulty"))
@@ -329,13 +333,17 @@ def label_payload(row, batch_item, subs, folder, unit_id=None, *, ap_ctx=None, r
         "knowledge": knowledge,
         "knowledgeIds": [point["id"] for point in resolved["resolved"]],
     }
-    warnings = taxonomy.check_labels(values)
-    warnings += taxonomy.check_unit_dims(values["type"], knowledge)
+    warnings = taxonomy.check_labels(values, unit_kind=unit_kind)
+    if is_group:
+        warnings += taxonomy.check_unit_dims(values["type"], knowledge, unit_kind="group")
+    else:
+        warnings += taxonomy.check_per_question_required(values["type"], knowledge)
     if item.get("source_notice") or row.get("source_notice"):
         warnings.append(item.get("source_notice") or row["source_notice"])
     values["scope"] = "unit"
     values["unit_id"] = str(unit_id or row.get("unit_id") or "")
     values["answer_point_tags"] = answer_point_tags(folder, values["unit_id"], ap_ctx=ap_ctx)
+    values["answer_point_only"] = taxonomy.answer_point_only_type(main_type, unit_kind)
     values["subquestion_count"] = len([s for s in subs if s.get("stem") or s.get("options")])
     values["knowledge_editable"] = True
     values["knowledge_manually_saved"] = explicit_knowledge
@@ -567,26 +575,36 @@ def review_comparison(folder: Path, unit_id, numbers, *, rc_ctx=None, ap_ctx=Non
                                                      rationale)]
                 if isinstance(reviewed_answers, list):
                     assessment = {**assessment, "answer_points": reviewed_answers}
+                inferred_kind = "group" if (isinstance(assessment.get("subquestions"), list) and assessment["subquestions"]) or len(numbers) > 1 else "standalone"
                 def _ap_disabled(t):
-                    rule = rules.get(t.strip()) if isinstance(t, str) and t.strip() else None
-                    return bool(rule and not any(dim.get("dim") == "答案考点" for dim in rule.get("dims", [])))
-                if _ap_disabled(labels.get("type")) or _ap_disabled(assessment.get("type")):
-                    assessment = {key: value for key, value in assessment.items() if key != "answer_points"}
+                    return bool(isinstance(t, str) and t.strip() and t.strip() in rules
+                                and not taxonomy.has_answer_point_dim(t.strip(), inferred_kind))
+                orig_ap_disabled = _ap_disabled(labels.get("type"))
+                rev_ap_disabled = _ap_disabled(assessment.get("type"))
+                rev_ap_only = (isinstance(assessment.get("type"), str)
+                               and taxonomy.answer_point_only_type(assessment["type"].strip(), inferred_kind))
+                if orig_ap_disabled:
                     expected_answers = []
-                elif not expected_answers and not answer_point_tags(folder, uid, number=check.get("number"), ap_ctx=ap_ctx):
+                if rev_ap_disabled:
                     assessment = {key: value for key, value in assessment.items() if key != "answer_points"}
+                elif (not rev_ap_only
+                      and not expected_answers
+                      and not answer_point_tags(folder, uid, number=check.get("number"), ap_ctx=ap_ctx)):
+                    assessment = {key: value for key, value in assessment.items() if key != "answer_points"}
+                diffs = [
+                    {"field": field, "original": labels[field], "reviewed": assessment[field]}
+                    for field in ("type", "subtypes", "knowledge")
+                    if field in labels and field in assessment
+                    and (sorted(set(labels[field])) if isinstance(labels[field], list) else labels[field])
+                    != (sorted(set(assessment[field])) if isinstance(assessment[field], list) else assessment[field])
+                ]
                 entry["checks"].append({"unit_id": uid, "number": check.get("number"),
                                         "scope": ("subquestion" if str(check.get("number") or "").strip()
                                                   else "unit"),
                                         "verdict": check.get("verdict"), "rationale": check.get("rationale"),
                                         "assessment": assessment, "evidence": check.get("evidence"),
                                         "expected_answer_points": expected_answers,
-                                        "differences": [
-                                            {"field": field, "original": labels[field], "reviewed": assessment[field]}
-                                            for field in ("type", "subtypes", "knowledge")
-                                            if field in labels and field in assessment
-                                            and (sorted(set(labels[field])) if isinstance(labels[field], list) else labels[field])
-                                            != (sorted(set(assessment[field])) if isinstance(assessment[field], list) else assessment[field])]})
+                                        "differences": diffs})
             entry["status"] = "已提供" if entry["checks"] else "未覆盖"
             entry["source"] = source_name
             entry["execution_id"] = record.get("execution_id")
@@ -594,12 +612,14 @@ def review_comparison(folder: Path, unit_id, numbers, *, rc_ctx=None, ap_ctx=Non
     from workflow import label_merge
     r1_entry = next((r for r in result["rounds"] if r.get("round_id") == "labels"), None)
     r1_unit_check = next((c for c in (r1_entry or {}).get("checks", []) if isinstance(c, dict) and isinstance(c.get("assessment"), dict)), None)
+    is_group = len(numbers) > 1 or bool(originals)
     result["merged"] = label_merge.merged_unit_knowledge(
         folder,
         uid,
         labels.get("knowledge") or [],
         main_type=labels.get("type"),
         round1_assessment=(r1_unit_check or {}).get("assessment"),
+        is_group=is_group,
     )
     return result
 

@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from workbench import media_audit, taxonomy
+from workbench import anomaly_views, media_audit, taxonomy
 
 from .batch_overview import (
     _flow_timing, _is_batch_uploaded, _is_queued_unfinished, _parse_iso,
@@ -240,8 +240,10 @@ def candidates_by_number(folder, *, unit_id=None):
 
 
 def _batch_units_map(folder):
-    batch = load(folder / "06_batch" / "batch_meta.json") or load(folder / "06_batch" / "batch.json") or {}
-    units = batch if isinstance(batch, list) else batch.get("units", batch.get("items", []))
+    batch = load(folder / "06_batch" / "batch_meta.json") or load(folder / "06_batch" / "batch.json")
+    units = (batch if isinstance(batch, list) else batch.get("units", batch.get("items", []))) if batch else []
+    if not units:
+        units = anomaly_views.load_preview_batch_items(folder)
     # Current source partitions take precedence over obsolete merged batches
     # for the review display; formal data is not silently rewritten.
     if isinstance(units, list) and source_group_candidates is not None:
@@ -2356,10 +2358,12 @@ def _overview_key(folder):
                      "07_review/manual-review-queue.json", "07_review/review-rounds.json",
                      "07_review/content-review.json", "07_review/metadata-review.json",
                      "07_review/unchecked.json", "06_batch/batch_meta.json", "06_batch/batch.json",
+                     "06_batch/batch.base.json", "06_batch/question-draft.json", "03_types/types.json",
                      "01_source/structure.confirmed.json",
                      "07_review/extraction-report.json", "07_review/structure-gate.json",
                      "07_review/validation-report.json", "07_review/overall-review-report.json",
                      "07_review/upload-format.json", "07_review/review-gate.json",
+                     "07_review/unit-anomalies.json",
                      "02_audio/audio_map.json",
                      "receipt.json", "07_upload/receipt.json", "07_upload/preflight.json"):
         path = folder / relative
@@ -2369,7 +2373,7 @@ def _overview_key(folder):
         except OSError:
             parts.append((relative, "missing"))
     # 升级后须重算旧投影，包含从入口迁出的耗时计算。
-    for filename in ("server.py", "batch_overview.py"):
+    for filename in ("server.py", "batch_overview.py", "anomaly_views.py"):
         try:
             code = Path(__file__).with_name(filename).stat()
             parts.append((filename, code.st_mtime_ns, code.st_size))
@@ -2520,6 +2524,21 @@ def _live_overview(value, name, folder):
         value["flow_minutes"] = flow_minutes
         if manifest.get("updated_at"):
             value["updated_at"] = manifest.get("updated_at")
+    adv_busy = bool(advance.get("running") or advance.get("queued") or advance.get("waiting") or work)
+    raw_stage_blocked = any(
+        isinstance(rec, dict)
+        and sid not in ("upload_gate", "upload", "publish_gate")
+        and not (sid == "review_gate" and rec.get("status") == "needs_review")
+        and str(rec.get("status") or "") in ("failed", "blocked")
+        for sid, rec in ((manifest.get("stages") or {}).items())
+    )
+    if adv_busy:
+        value["stage_blocked"] = False
+    elif raw_stage_blocked:
+        value["stage_blocked"] = True
+        value["has_anomaly"] = True
+        if not value.get("anomaly_count"):
+            value["anomaly_count"] = 1
     value["queue_removed"] = queue_removed(folder)
     value["observed_at"] = datetime.now(timezone.utc).isoformat()
     return value
@@ -2566,6 +2585,10 @@ def _overview_uncached(name, folder):
         diagnostics = _diagnose.diagnose(folder)
     except (OSError, ValueError, KeyError, ImportError):
         diagnostics = None
+    anomaly_info = anomaly_views.decorate_anomaly_rows(
+        folder, rows, manifest=manifest, diagnostics=diagnostics, advance=advance
+    )
+    counts["anomaly"] = anomaly_info["anomaly_unit_count"]
     # 内容审核之后仍须完成最终格式检查，随后才移出上传队列。
     flow_done = final_format_complete(folder, manifest)
     upload = upload_state(name, include_unreviewed=False)
@@ -2593,6 +2616,12 @@ def _overview_uncached(name, folder):
             "batch_findings": batch_findings,
             "needs_human": sum(1 for row in rows if row["needs_human"]),
             "format_units": sum(1 for row in rows if row.get("format_count")),
+            "has_anomaly": anomaly_info["has_anomaly"],
+            "anomaly_count": anomaly_info["anomaly_count"],
+            "anomaly_unit_count": anomaly_info["anomaly_unit_count"],
+            "stage_blocked": anomaly_info["stage_blocked"],
+            "anomaly_reasons": anomaly_info["anomaly_reasons"],
+            "anomaly_summary": anomaly_info["anomaly_summary"],
             "media": media_summary,
             "extraction": load(folder / "07_review" / "extraction-report.json", {}),
             "structure_gate": load(folder / "07_review" / "structure-gate.json", {}),
@@ -2938,6 +2967,16 @@ def _prepare_batch_detail_context(folder: Path, name: str):
         except (ImportError, OSError, ValueError, TypeError, KeyError):
             r1_assessments = {}
     adv_running = bool(advance_state(name).get("running"))
+    try:
+        from workflow import diagnose as _diagnose
+        detail_diag = _diagnose.diagnose(folder)
+    except (OSError, ValueError, KeyError, ImportError):
+        detail_diag = None
+    precollected_anomalies = anomaly_views.collect_unit_stage_anomalies(folder, manifest, detail_diag, rows)
+    anomaly_views.decorate_anomaly_rows(
+        folder, rows, manifest=manifest, diagnostics=detail_diag,
+        advance={"running": adv_running}, precollected=precollected_anomalies,
+    )
     shared = {
         "batch": name,
         "meta": report.get("meta", manifest.get("meta", {})),
@@ -2962,7 +3001,7 @@ def _prepare_batch_detail_context(folder: Path, name: str):
         "snapshot_pair": snapshot_pair, "batch_map": batch_map,
         "all_cands_by_num": all_cands_by_num, "scoped_cands_by_uid": scoped_cands_by_uid,
         "ap_ctx": ap_ctx, "rc_ctx": rc_ctx, "r1_assessments": r1_assessments,
-        "adv_running": adv_running, "shared": shared,
+        "adv_running": adv_running, "precollected_anomalies": precollected_anomalies, "shared": shared,
     }
 
 
@@ -3114,6 +3153,11 @@ def _build_unit_detail(folder: Path, name: str, unit_id, ctx: dict, *, row_overr
 
     findings = detail_findings(numbers)
     row = mark_row(row, findings)
+    anomaly_views.decorate_anomaly_rows(
+        folder, [row], manifest=manifest,
+        advance={"running": ctx["adv_running"]},
+        precollected=ctx.get("precollected_anomalies"),
+    )
     label_findings, format_findings, other_findings = split_findings(findings)
     whole_unit = taxonomy.whole_unit_type(row.get("type") or batch_item.get("type") or "")
     label_open = group_duplicate_findings(label_findings, whole_unit=whole_unit)
@@ -3173,6 +3217,9 @@ def _build_unit_detail(folder: Path, name: str, unit_id, ctx: dict, *, row_overr
         "label_findings": label_open, "format_findings": format_open,
         "open_findings": len(label_open), "format_open": len(format_open),
         "needs_human": bool(label_open),
+        "is_anomaly": bool(row.get("is_anomaly")),
+        "anomaly_reasons": list(row.get("anomaly_reasons") or []),
+        "anomaly_summary": str(row.get("anomaly_summary") or ""),
     }
     if bool(numbers) != bool(ctx["all_numbers"]):
         unit_payload["stage"] = stage_cards(manifest, bool(numbers), ctx["adv_running"])
@@ -3207,7 +3254,10 @@ def _units_bundle_key_str(folder: Path, name: str) -> str:
         parts.append(("server-code", "unknown"))
     for rel in ("01_source/extraction.json", "02_audio/audio_map.json",
                 "01_source/正文.txt", "01_source/structure.confirmed.json",
-                "06_batch/batch_meta.json", "06_batch/batch.json"):
+                "06_batch/batch_meta.json", "06_batch/batch.json",
+                "06_batch/batch.base.json", "06_batch/question-draft.json", "03_types/types.json",
+                "07_review/validation-report.json", "07_review/upload-format.json",
+                "07_review/unit-anomalies.json"):
         p = folder / rel
         try:
             st = p.stat()
@@ -3583,19 +3633,23 @@ class Handler(BaseHTTPRequestHandler):
                     page_size=raw_size,
                 ))
             if decoded_path == "/api/knowledge/tree":
-                main_type = (parse_qs(parsed.query).get("type") or [""])[0].strip() or None
-                return self.send_json(taxonomy.knowledge_tree(main_type=main_type))
+                qs = parse_qs(parsed.query)
+                main_type = (qs.get("type") or [""])[0].strip() or None
+                unit_kind = (qs.get("unit_kind") or [""])[0].strip() or None
+                return self.send_json(taxonomy.knowledge_tree(main_type=main_type, unit_kind=unit_kind))
             if decoded_path == "/api/knowledge":
                 qs = parse_qs(parsed.query)
                 query = qs.get("q", [""])[0]
                 limit = qs.get("limit", ["40"])[0]
                 main_type = (qs.get("type") or [""])[0].strip() or None
+                unit_kind = (qs.get("unit_kind") or [""])[0].strip() or None
                 try:
                     limit = int(limit)
                 except ValueError:
                     limit = 40
                 return self.send_json({"version": taxonomy.knowledge_version(),
-                                       "items": taxonomy.knowledge_search(query, limit, main_type=main_type)})
+                                       "items": taxonomy.knowledge_search(query, limit, main_type=main_type,
+                                                                          unit_kind=unit_kind)})
             parts = decoded_path.strip("/").split("/")
             if len(parts) == 3 and parts[:2] == ["api", "batches"]:
                 return self.send_json(overview(parts[2]))
@@ -3997,11 +4051,14 @@ class Handler(BaseHTTPRequestHandler):
                     if key in labels:
                         merged[key] = labels[key]
                 subtypes = merged.get("subtypes") or ([merged["subtype"]] if merged.get("subtype") else [])
-                main_type = merged.get("type") or next((row.get("type") or row.get("question_type")
-                    for row in rows if str(row.get("unit_id")) == str(unit_id)), None)
-                knowledge = taxonomy.require_knowledge(merged.get("knowledge", []), main_type)
+                matched_row = next((row for row in rows if str(row.get("unit_id")) == str(unit_id)), {})
+                main_type = merged.get("type") or matched_row.get("type") or matched_row.get("question_type")
+                numbers = [str(n) for n, own in owner.items() if str(own) == str(unit_id)]
+                unit_kind = (matched_row.get("unit_kind") or labels.get("unit_kind")
+                             or ("group" if len(numbers) > 1 else "standalone"))
+                knowledge = taxonomy.require_knowledge(merged.get("knowledge", []), main_type, unit_kind=unit_kind)
                 merged["knowledge"] = knowledge
-                resolved = taxonomy.resolve_knowledge(knowledge, main_type)
+                resolved = taxonomy.resolve_knowledge(knowledge, main_type, unit_kind=unit_kind)
                 # 清空或改成未知路径时也同步清空旧 ID，避免名字与关联脱节。
                 merged["knowledgeIds"] = [point["id"] for point in resolved["resolved"]]
                 filters = dict(merged.get("filterMetadata") or {})
@@ -4013,13 +4070,15 @@ class Handler(BaseHTTPRequestHandler):
                 found = taxonomy.check_labels({
                     "type": merged.get("type"), "subtypes": subtypes,
                     "difficulty": merged.get("difficulty"), "categories": filters["categories"],
-                    "knowledge": knowledge,
-                })
-                found += taxonomy.check_unit_dims(merged.get("type"), knowledge)
+                    "knowledge": knowledge, "unit_kind": unit_kind,
+                }, unit_kind=unit_kind)
+                if unit_kind == "group":
+                    found += taxonomy.check_unit_dims(merged.get("type"), knowledge, unit_kind="group")
+                else:
+                    found += taxonomy.check_per_question_required(merged.get("type"), knowledge)
                 merged["labelWarnings"] = found
                 merged["unit_id"] = str(unit_id)
                 merged["applies_to"] = "unit"
-                numbers = [str(n) for n, own in owner.items() if str(own) == str(unit_id)]
                 merged["numbers"] = sorted(numbers, key=lambda x: int(x)) if numbers else []
                 merged["inherit_subquestions"] = len(merged["numbers"]) > 1
                 merged["updated_by"] = "workbench"

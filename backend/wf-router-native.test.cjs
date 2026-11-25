@@ -274,3 +274,30 @@ test('native router routes preassemble via roles.types when preassemble is not s
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /model=types-role-model/);
 });
+
+test('native router redirects session persistence to an ephemeral dir and cleans it up', t => {
+  const f = fixture(t);
+  const recordFile = path.join(f.dir, 'recorded-session-root.txt');
+  const captureScript = path.join(f.dir, 'capture-session-root.js');
+  fs.writeFileSync(captureScript, `
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const root = process.env.WF_DSH_SESSION_ROOT || '';
+    fs.writeFileSync(${JSON.stringify(recordFile)}, root, 'utf8');
+    if (root) fs.writeFileSync(path.join(root, 'dummy.jsonl'), '{}');
+    console.log('OK');
+  `, 'utf8');
+  const result = spawnSync(process.execPath, [router, f.prompt, f.response], {
+    encoding: 'utf8',
+    env: { ...process.env, WF_PLUGIN_DIR: f.plugin, DSH_HOME: f.home, DSH_BIN: captureScript },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const routeProfile = fs.readdirSync(path.join(f.home, 'profiles')).find(name => name.startsWith('wf-plugin-route-'));
+  const patch = fs.readFileSync(path.join(f.home, 'profiles', routeProfile, 'cordis.patch.yml'), 'utf8');
+  assert.match(patch, /id:\s*session-persistence-jsonl/);
+  assert.match(patch, /WF_DSH_SESSION_ROOT/);
+  const recordedRoot = fs.readFileSync(recordFile, 'utf8').trim();
+  assert.ok(recordedRoot && recordedRoot.includes('wf-dsh-session-'), `unexpected session root: ${recordedRoot}`);
+  assert.equal(fs.existsSync(recordedRoot), false, 'ephemeral session root must be removed after run');
+  assert.equal(fs.existsSync(path.join(f.home, 'sessions')), false, 'must not write to DSH_HOME/sessions');
+});

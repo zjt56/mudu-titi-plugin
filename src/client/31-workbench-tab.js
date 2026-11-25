@@ -392,6 +392,14 @@
           }
         }
         const upload = uploadStates[active.name] || { state: 'checking', message: '正在查询上传状态…' };
+        const refreshActiveOverview = () => {
+          invalidateBatchUnits(active.name);
+          jget('/batches/' + encodeURIComponent(active.name)).then((full) => {
+            if (!full || typeof full !== 'object') return;
+            setActive((cur) => (cur && cur.name === active.name ? { ...cur, overview: full } : cur));
+          }).catch(() => {});
+          loadBatches();
+        };
         return h(React.Fragment, null, h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 } },
           // 来源横条：独立卡片，与下方工作区留出间隙；操作按钮统一右对齐。
           h('div', { style: { ...T.toolbar, margin: '10px 12px', padding: '10px 14px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 10, background: 'var(--dsw-alias-bg-layer-1)', flexShrink: 0 } },
@@ -442,6 +450,7 @@
             rows,
             unitId: active.unitId,
             onSelectUnit: (uid) => setActive({ ...active, unitId: uid }),
+            onUnitMutated: refreshActiveOverview,
           }),
         ), deleteDialog);
       }
@@ -464,10 +473,14 @@
         return Boolean(rec && (rec.state === 'staged' || rec.submitted_at || rec.remote_confirmation_required));
       }
 
-      // 判断批次是否仍在「上传试卷 → 排队区」且尚未完成；排队区未完成批次不进入试卷审核内容。
+      // 判断批次是否仍在「上传试卷 → 排队区」且尚未完成；若批次已在当前阶段阻断/失败且无活跃执行，
+      // 同步透出到「试卷审核」卡片页标红展示，避免异常试卷被隐藏。
       function isBatchPendingInQueue(b) {
         if (!b || typeof b !== 'object') return false;
-        return !b.flow_done && !isBatchUploaded(b) && !b.queue_removed;
+        if (b.flow_done || isBatchUploaded(b) || b.queue_removed) return false;
+        const adv = b.advance || {};
+        if (b.stage_blocked && !(adv.running || adv.queued || adv.waiting)) return false;
+        return true;
       }
 
       function matchReviewFilter(b, filterKey) {
@@ -570,15 +583,16 @@
                   ? h(EmptyState, { title: emptyTitleMap[reviewFilter] || (hasActiveWork ? '排队区的试卷尚未处理完成，完成后会自动出现在这里。' : TEXT.noPaper) })
                   : list.map((b) => {
               const uploadedCard = isBatchUploaded(b);
+              const anomalyCard = !uploadedCard && Boolean(b.has_anomaly || Number(b.anomaly_count || 0) > 0 || b.stage_blocked);
               return h('div', {
                 key: b.name,
-                className: 'wf-card-hover',
+                className: 'wf-card-hover' + (anomalyCard ? ' wf-card-anomaly' : ''),
                 style: {
                   ...T.cardClickable,
                   width: '94%',
                   marginLeft: 'auto',
                   marginRight: 'auto',
-                  ...(uploadedCard ? { background: 'rgba(34, 197, 94, 0.06)', borderColor: 'rgba(34, 197, 94, 0.24)' } : null),
+                  ...(uploadedCard ? { background: 'rgba(34, 197, 94, 0.06)', borderColor: 'rgba(34, 197, 94, 0.24)' } : (anomalyCard ? { background: 'rgba(220, 38, 38, 0.06)', borderColor: 'rgba(220, 38, 38, 0.28)' } : null)),
                 },
                 onMouseEnter: () => scheduleHoverPrefetch(b.name),
                 onMouseLeave: cancelHoverPrefetch,

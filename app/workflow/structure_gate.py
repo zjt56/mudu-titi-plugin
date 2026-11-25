@@ -745,9 +745,12 @@ def _build_scoped_units(sections: list[dict], groups: list[dict], source_lines: 
                 units.append(unit)
         section_units = [u for u in units if start < u["source_span"]["start_line"] <= end]
         peer_options = max([len(question_parts(local, n)["options"]) for n in numbers] or [0])
+        if peer_options < 2:
+            peer_options = 0
         for unit in section_units:
-            unit["source_expected_options"] = (max([len(question_parts(unit["stem"].splitlines(), n)["options"])
-                                                    for n in unit["numbers"]] or [0]) if group_flag else peer_options)
+            cnt = (max([len(question_parts(unit["stem"].splitlines(), n)["options"])
+                        for n in unit["numbers"]] or [0]) if group_flag else peer_options)
+            unit["source_expected_options"] = cnt if cnt >= 2 else 0
     try:
         return assign_scoped(units, source_lines, sections=sections, visual_columns=visual_columns) if units else []
     except ValueError:
@@ -881,11 +884,14 @@ def _build_units(sections: list[dict], groups: list[dict], source_lines: list[st
     for section in sections:
         numbers = _section_numbers(section)
         peer_count = max([len(question_parts(source_lines, n)["options"]) for n in numbers] or [0])
+        if peer_count < 2:
+            peer_count = 0
         for unit in units:
             if set(unit["numbers"]).issubset(numbers):
                 if unit["unit_kind"] == "group":
                     # 同一阅读大题可同时含选择题与限词数问答，不能跨材料套用选项数。
-                    unit["source_expected_options"] = max([len(question_parts(unit["stem"].splitlines(), n)["options"]) for n in unit["numbers"]] or [0])
+                    cnt = max([len(question_parts(unit["stem"].splitlines(), n)["options"]) for n in unit["numbers"]] or [0])
+                    unit["source_expected_options"] = cnt if cnt >= 2 else 0
                 else:
                     unit["source_expected_options"] = peer_count
     return units

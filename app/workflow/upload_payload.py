@@ -1083,12 +1083,17 @@ class _Builder:
                             and isinstance(stem, str) and re.fullmatch(r"_{2,}", stem.strip())):
                         # The question bank renders the structured number and strips its repeat from the stem.
                         subquestion["stem"] = f"{number}."
-            # Aggregate names and IDs only on the wire, after the local audit.
+            # 只要是组题，标签统一落在组题级，不在子题中呈现：先将历史子题标签（如有）
+            # 归并去重到组级，再清空各子题的 knowledge / knowledge_ids。
             paths = output.get("knowledge", []) + [path for c in output["subquestions"] for path in c.get("knowledge", [])]
             output["knowledge"] = list(dict.fromkeys(paths))
             if self.version:
                 ids = output.get("knowledge_ids", []) + [kid for c in output["subquestions"] for kid in c.get("knowledge_ids", [])]
                 output["knowledge_ids"] = list(dict.fromkeys(ids))
+            for subquestion in output["subquestions"]:
+                subquestion["knowledge"] = []
+                if self.version:
+                    subquestion["knowledge_ids"] = []
             self.summary["questions"] += len(children)
         elif not child:
             self.summary["questions"] += 1
@@ -1163,7 +1168,7 @@ def _source_table_stems(batch, batch_dir):
 
 
 ANSWER_POINT_CONTAINER_PATH = "词汇/考察词汇"
-_ANSWER_POINT_UNIT_SCOPED_TYPES = frozenset({"听力信息转换"})
+_ANSWER_POINT_UNIT_SCOPED_TYPES = frozenset({"听力信息转换", "选词填空"})
 
 
 def collect_answer_point_names(batch, batch_dir) -> list[str]:
@@ -1179,15 +1184,8 @@ def collect_answer_point_names(batch, batch_dir) -> list[str]:
         if not isinstance(item, dict) or not isinstance(item.get("unit_id"), str):
             continue
         unit_id = item["unit_id"]
-        children = item.get("subquestions")
-        if item.get("unit_kind") == "group" and isinstance(children, list) and children:
-            if (item.get("question_type") or item.get("type")) in _ANSWER_POINT_UNIT_SCOPED_TYPES:
-                batches = [answer_point_tags(batch_dir, unit_id)]
-            else:
-                batches = [answer_point_tags(batch_dir, unit_id, number=child.get("number"))
-                           for child in children if isinstance(child, dict)]
-        else:
-            batches = [answer_point_tags(batch_dir, unit_id)]
+        # 只要是组题，标签（含答案考点）均统一归属组题级，不再下放到子题。
+        batches = [answer_point_tags(batch_dir, unit_id)]
         for names in batches:
             for name in names or []:
                 if isinstance(name, str) and name.strip() and name.strip() not in seen:
@@ -1208,17 +1206,8 @@ def _project_answer_point_tags(batch, batch_dir):
         if not isinstance(item, dict) or not isinstance(item.get("unit_id"), str):
             continue
         unit_id = item["unit_id"]
-        children = item.get("subquestions")
-        if item.get("unit_kind") == "group" and isinstance(children, list) and children:
-            if (item.get("question_type") or item.get("type")) in _ANSWER_POINT_UNIT_SCOPED_TYPES:
-                names = answer_point_tags(batch_dir, unit_id)
-                targets = [(item, names)]
-            else:
-                targets = [(child, answer_point_tags(batch_dir, unit_id,
-                            number=child.get("number"))) for child in children
-                           if isinstance(child, dict)]
-        else:
-            targets = [(item, answer_point_tags(batch_dir, unit_id))]
+        # 只要是组题，答案考点统一追加在组题级 knowledge，不在子题中呈现。
+        targets = [(item, answer_point_tags(batch_dir, unit_id))]
         for target, names in targets:
             paths = list(target.get("knowledge") or [])
             for name in names:

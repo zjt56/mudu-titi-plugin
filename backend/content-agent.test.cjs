@@ -227,6 +227,21 @@ test('agent/error tool-call JSON slip also recovers without killing the stage', 
   await f.manager.dispose();
 });
 
+test('DeepSeek Messages stream invalid tool input JSON recovers in the same session', async () => {
+  let turns = 0;
+  const f = await fixture({ program: async a => {
+    turns += 1;
+    if (turns === 1) throw new Error('DeepSeek Messages stream: tool input is invalid JSON');
+    await a.call('submit_candidate', { candidate: { recoveredFromDeepSeekStream: true } });
+  } });
+  await f.run();
+  assert.equal(f.agents[0].turns, 2);
+  assert.match(f.agents[0].agent.messages.map(m => m.content[0].text).join('\n'), /合法 JSON/);
+  assert.deepEqual(states(f), ['running', 'completed']);
+  assert.deepEqual(f.calls.find(call => call.body?.action === 'submit_candidate').body.args, { candidate: { recoveredFromDeepSeekStream: true } });
+  await f.manager.dispose();
+});
+
 test('duplicate host error events for one malformed call consume one recovery and keep staged parts', async () => {
   const message = 'Tool call "content_stage_candidate": Expected \',\' or \'}\' after property value in JSON at position 9117';
   const f = await fixture({ program: async a => {

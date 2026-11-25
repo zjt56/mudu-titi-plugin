@@ -178,7 +178,7 @@ class UploadPayloadTest(unittest.TestCase):
             self.assertFalse(report["passed"])
             self.assertIn("REMOTE_KNOWLEDGE_MISSING", self.codes(report))
 
-    def test_child_answer_points_stay_on_their_question_in_upload_copy(self):
+    def test_group_answer_points_attach_to_group_not_children_in_upload_copy(self):
         with tempfile.TemporaryDirectory() as directory:
             catalog = deepcopy(self.catalog)
             vocabulary = next(point for point in catalog["points"]
@@ -200,14 +200,15 @@ class UploadPayloadTest(unittest.TestCase):
             source = batch(item)
             with patch("workbench.server.answer_point_tags",
                        side_effect=lambda _folder, _uid, number=None, **_kw:
-                           ["first"] if number == 56 else ["second"] if number == 57 else []):
+                           ["first", "second"] if number is None else []):
                 report = self.build(source, catalog=catalog, batch_dir=Path(directory))
             self.assertTrue(report["passed"], report["errors"])
             group = report["payload"]["items"][0]
-            children = {child["number"]: child for child in group["subquestions"]}
-            self.assertIn("词汇/考察词汇/first", children[56]["knowledge"])
-            self.assertIn("词汇/考察词汇/second", children[57]["knowledge"])
-            self.assertNotIn("词汇/考察词汇/second", children[56]["knowledge"])
+            self.assertIn("词汇/考察词汇/first", group["knowledge"])
+            self.assertIn("词汇/考察词汇/second", group["knowledge"])
+            for child in group["subquestions"]:
+                self.assertEqual(child["knowledge"], [])
+                self.assertEqual(child["knowledge_ids"], [])
 
     def test_group_audits_local_before_wire_union(self):
         data = batch(reading_group())
@@ -222,9 +223,10 @@ class UploadPayloadTest(unittest.TestCase):
         self.assertEqual(group["knowledge"][:2], before["items"][0]["knowledge"])
         self.assertEqual(len(group["knowledge"]), 5)
         self.assertEqual(len(group["knowledge_ids"]), 5)
-        self.assertEqual(len(group["subquestions"][0]["knowledge_ids"]), 1)
-        self.assertEqual(len(group["subquestions"][1]["knowledge_ids"]), 1)
-        self.assertNotEqual(group["subquestions"][0]["knowledge_ids"], group["subquestions"][1]["knowledge_ids"])
+        # 只要是组题，上传载荷的标签统一落在组题级，子题 knowledge / knowledge_ids 清空。
+        for child in group["subquestions"]:
+            self.assertEqual(child["knowledge"], [])
+            self.assertEqual(child["knowledge_ids"], [])
         self.assertEqual(data, before)
         self.assertEqual(report["summary"]["questions"], 3)
 

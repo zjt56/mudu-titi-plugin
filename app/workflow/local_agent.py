@@ -52,7 +52,9 @@ DEFAULTS = {"provider": "dsh", "timeout_seconds": 900, "max_input_chars": 180000
 # 429, QUOTA or RATE_LIMIT. Never infer a provider failure from those substrings.
 _ERROR_CODES = {
     "quota": {"quota", "insufficient_quota", "quota_exceeded",
-              "daily_limit_exceeded", "insufficient_balance", "balance_not_enough"},
+              "daily_limit_exceeded", "monthly_limit_exceeded",
+              "insufficient_balance", "balance_not_enough",
+              "gousagelimiterror", "usage_limit_error", "usage_limit_reached"},
     "rate_limit": {"rate_limit", "rate_limit_exceeded", "too_many_requests"},
     "authentication": {"authentication", "authentication_error", "invalid_api_key",
                        "unauthorized", "permission_denied", "forbidden"},
@@ -121,7 +123,13 @@ def failure_details(stderr_text: str) -> tuple[str, int | None]:
         except (ValueError, RecursionError):
             continue
         visit(value)
-        plain_parts.append(text[consumed:match.start()])
+        prefix = text[consumed:match.start()]
+        # SDK/CLI error prefix immediately before a JSON error object, e.g. `429: {"type":"GoUsageLimitError",...}`.
+        if isinstance(value, dict) and any(k in value for k in ("error", "error_code", "code", "type", "message")):
+            m_status = re.search(r"(?:^|[\s：:])([45]\d\d):\s*$", prefix)
+            if m_status:
+                statuses.append(int(m_status.group(1)))
+        plain_parts.append(prefix)
         consumed = match.start() + length
     plain_parts.append(text[consumed:])
     plain_text = "\n".join(plain_parts)
@@ -131,6 +139,8 @@ def failure_details(stderr_text: str) -> tuple[str, int | None]:
     if codes:
         return codes[0], status
     if status in (401, 403):
+        return "authentication", status
+    if re.search(r"Authentication Fails\b.*?\bapi key\b.*?\binvalid\b", plain_text, re.I):
         return "authentication", status
     if status == 402:
         return "quota", status
@@ -456,9 +466,56 @@ def _parse_response(text, *, strict=False):
                     break
                 except (ValueError, RecursionError):
                     continue
-            # 审核等严格模式也允许“补齐结构闭合”：模型常少写一个根右花括号或
-            # 在字符串里输出原始制表符；这类修补只补括号/容错控制字符，绝不删改
-            # 内容。真正的截断（内容缺项）仍会因解析失败而拒绝。
+            # 审核等严格模式也允许“补齐结构闭合”：模型常少写一个根右花括号、
+            # 在字符串里输出原始制表符，或在深层嵌套结束处多写 1 个重复的 `}`/`]`
+            # （例如 checks 末项的 `]}}}]}}`）。这类修补仅处理结构括号/控制字符，
+            # 绝不删改任何键值或内容；真正的截断与非重复语法错误仍会拒绝。
+            def _prev_nonspace(value, index):
+                pos = index - 1
+                while pos >= 0 and value[pos] in " \t\r\n":
+                    pos -= 1
+                return pos
+
+            def _repair_redundant_closers(value, *, lenient=False):
+                candidate = value
+                for _ in range(3):
+                    try:
+                        parsed = load_json(candidate, lenient=lenient)
+                    except json.JSONDecodeError as err:
+                        pos = err.pos
+                        if pos >= len(candidate):
+                            return None
+                        ch = candidate[pos]
+                        if ch in "}]":
+                            prev = _prev_nonspace(candidate, pos)
+                            if prev >= 0 and candidate[prev] == ch:
+                                candidate = candidate[:pos] + candidate[pos + 1:]
+                                continue
+                            if prev >= 0 and candidate[prev] == ",":
+                                # 尾随逗号（如 {"a":1,} / ["x",]）：删除逗号不改内容。
+                                candidate = candidate[:prev] + candidate[prev + 1:]
+                                continue
+                        elif ch == "," and err.msg == "Extra data":
+                            prev1 = _prev_nonspace(candidate, pos)
+                            prev2 = _prev_nonspace(candidate, prev1) if prev1 >= 0 else -1
+                            if prev1 >= 0 and prev2 >= 0 and candidate[prev1] == "}" and candidate[prev2] == "}":
+                                candidate = candidate[:prev1] + candidate[prev1 + 1:]
+                                continue
+                        return None
+                    except (ValueError, RecursionError):
+                        return None
+                    return parsed if isinstance(parsed, dict) else None
+                try:
+                    parsed = load_json(candidate, lenient=lenient)
+                except (ValueError, RecursionError):
+                    return None
+                return parsed if isinstance(parsed, dict) else None
+
+            if repaired is None and (text.endswith("}") or text.endswith("]")):
+                for lenient in (False, True):
+                    repaired = _repair_redundant_closers(text, lenient=lenient)
+                    if repaired is not None:
+                        break
             if repaired is None and (text.endswith("}") or text.endswith("]")):
                 for extra in ("}", "}}", "}}}"):
                     for lenient in (False, True):
@@ -490,6 +547,14 @@ def _parse_response(text, *, strict=False):
         raise AgentError(f"Invalid final JSON response: {exc}", "response") from exc
     if not isinstance(response, dict):
         raise AgentError("Final response must be a JSON object", "response")
+    if strict and "status" not in response and "artifacts" not in response:
+        # 审核允许模型省略外层协议外壳，直接返回 {"checks":[...]} 或 {"review_round":{"checks":[...]}}，
+        # 由上层 _normalize_model_envelope 规范化并严格校验。
+        if set(response) == {"checks"} and isinstance(response["checks"], list):
+            return response
+        if (set(response) == {"review_round"} and isinstance(response["review_round"], dict)
+                and isinstance(response["review_round"].get("checks"), list)):
+            return response
     if response.get("status") not in ("completed", "needs_review"):
         raise AgentError("Final response status must be completed or needs_review", "response")
     if not isinstance(response.get("artifacts"), dict):

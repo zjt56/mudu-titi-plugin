@@ -33,7 +33,11 @@ def _type_review_is_pending(row: dict) -> bool:
     """统一待审口径：与前端红点及 status=open 筛选保持严格一致。"""
     if bool(row.get("excluded")):
         return False
-    return bool(row.get("needs_human")) or str(row.get("state") or "") in ("attention", "blocked")
+    return (
+        bool(row.get("is_anomaly"))
+        or bool(row.get("needs_human"))
+        or str(row.get("state") or "") in ("attention", "blocked")
+    )
 
 
 def _type_review_row(batch: dict, row: dict) -> dict:
@@ -60,7 +64,12 @@ def _type_review_row(batch: dict, row: dict) -> dict:
         "type": main_type,
         "subtypes": subtypes,
         "state": str(row.get("state") or ""),
+        "verdict": str(row.get("verdict") or ""),
+        "severity": str(row.get("severity") or ""),
+        "format_count": int(row.get("format_count") or 0),
         "needs_human": needs_human,
+        "is_anomaly": bool(row.get("is_anomaly")),
+        "anomaly_summary": str(row.get("anomaly_summary") or ""),
         "excluded": excluded,
         "open_summary": str(row.get("open_summary") or ""),
         "open_findings": row.get("open_findings"),

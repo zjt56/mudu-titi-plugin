@@ -176,14 +176,16 @@ class AgentProtocolTest(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "Windows agent lock remains exclusive")
     def test_auto_parallel_calls_use_real_processes_and_portable_import(self):
-        from workflow import auto, agent, local_agent, agent_prepare
+        from workflow import auto, agent, local_agent, agent_prepare, explanations_direct
         self.mark_delivered("types")
+        self.mark_delivered("answers")
+        (self.batch / "01_source/附录.txt").write_text("答案: 1. A\n【解析】原卷第1题解析。", encoding="utf-8")
         marker = self.root / "markers"
         marker.mkdir()
         script = self.root / "agent.py"
         script.write_text('''import json, pathlib, sys, time
 prompt = sys.stdin.read()
-stage = "answers" if "Stage: answers" in prompt else "knowledge"
+stage = "explanations" if "Stage: explanations" in prompt else "knowledge"
 root = pathlib.Path(sys.argv[1])
 (root / stage).write_text("started")
 deadline = time.monotonic() + 5
@@ -191,7 +193,7 @@ while len(list(root.iterdir())) < 2 and time.monotonic() < deadline:
     time.sleep(0.01)
 if len(list(root.iterdir())) < 2:
     raise SystemExit("model calls did not overlap")
-if stage == "answers":
+if stage == "explanations":
     result = {"status": "needs_review", "artifacts": {}, "notes": ["need evidence"], "findings": []}
 else:
     result = {"status": "completed", "artifacts": {"04_knowledge/knowledge.json": {"items": [{"unit_id": "q-1", "knowledge": ["词汇/词汇辨析/动词辨析"], "subquestions": [], "evidence": ["正文 L1"]}]}}, "notes": [], "findings": []}
@@ -204,11 +206,12 @@ print(json.dumps(result, ensure_ascii=False))
         with patch.object(auto, "PARALLEL_AGENTS_ENABLED", True), \
              patch.object(agent, "configured", return_value=True), \
              patch.object(local_agent, "load_config", return_value=config), \
-             patch.object(agent_prepare, "prepare_answers"):
+             patch.object(agent_prepare, "prepare_answers"), \
+             patch.object(explanations_direct, "build_payload", return_value=None):
             outcome = auto.advance(self.batch, bridge, stop_at="assemble")
-        self.assertEqual({p.name for p in marker.iterdir()}, {"answers", "knowledge"})
+        self.assertEqual({p.name for p in marker.iterdir()}, {"explanations", "knowledge"})
         saved = mf.load(self.batch)
-        self.assertEqual(saved["stages"]["answers"]["status"], mf.NEEDS_REVIEW)
+        self.assertEqual(saved["stages"]["explanations"]["status"], mf.NEEDS_REVIEW)
         self.assertEqual(saved["stages"]["types"]["status"], mf.COMPLETED)
         self.assertEqual(saved["stages"]["knowledge"]["status"], mf.COMPLETED)
         knowledge = json.loads((self.batch / agent_tasks.ARTIFACTS["knowledge"]).read_text())
@@ -231,6 +234,7 @@ print(json.dumps(result, ensure_ascii=False))
 
     def _saved_knowledge_result(self):
         self.mark_delivered("types")
+        self.mark_delivered("answers")
         manifest = mf.load(self.batch)
         mf.reconcile_deliveries(self.batch, manifest)
         mf.save(self.batch, manifest)
@@ -356,6 +360,7 @@ print(json.dumps(result, ensure_ascii=False))
         from workflow import auto, local_agent
 
         self.mark_delivered("types")
+        self.mark_delivered("answers")
         stage = contracts.STAGE_BY_ID["knowledge"]
         with patch.object(protocol, "export_task",
                           side_effect=local_agent.AgentError("lock held", "lock_timeout")), \

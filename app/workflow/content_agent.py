@@ -29,13 +29,22 @@ SERVICE_TTL = 15
 UPSTREAM_RETRY_COOLDOWN = 60
 UPSTREAM_MAX_REDISPATCHES = 3
 _UPSTREAM_TRANSIENT_ERRORS = frozenset(("Upstream HTTP/2 stream failed",
+                                         "Upstream response stream was interrupted",
                                          "Upstream service temporarily unavailable"))
+# 宿主流式响应在 tool_call 参数分片拼装/解析阶段原生报错（如
+# `DeepSeek Messages stream: tool input is invalid JSON`）时同样没有任何候选产出，
+# 属于模型输出层的抖动而不是内容/校验失败；只接受完整原文（可带 provider 前缀），
+# 不做子串匹配，避免把真实内容错误或将到的近似文案当成可重试。
+_STREAM_TOOL_INPUT_JSON = re.compile(
+    r"(?:[A-Za-z][A-Za-z0-9._-]*\s+)?Messages stream:\s*tool input is invalid JSON")
 
 
 def _is_upstream_transient_error(error):
     if not isinstance(error, str):
         return False
     if error in _UPSTREAM_TRANSIENT_ERRORS:
+        return True
+    if _STREAM_TOOL_INPUT_JSON.fullmatch(error.strip()):
         return True
     # 第三方中转站偶发的通用 400 网关拒收（无具体字段校验错误，且未产出任何候选）
     if ("第三方中转站" in error

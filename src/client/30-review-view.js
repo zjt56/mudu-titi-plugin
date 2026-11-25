@@ -55,7 +55,7 @@
       const currentRowRef = React.useRef(currentRow);
       currentRowRef.current = currentRow;
       const currentRowKey = currentRow
-        ? (String(currentRow.state || '') + ':' + (currentRow.needs_human ? '1' : '0') + ':' + String(currentRow.open_findings || 0))
+        ? (String(currentRow.state || '') + ':' + (currentRow.needs_human ? '1' : '0') + ':' + (currentRow.is_anomaly ? '1' : '0') + ':' + String(currentRow.open_findings || 0) + ':' + String(currentRow.anomaly_summary || ''))
         : '';
       const load = React.useCallback(async (opts) => {
         if (!mounted.current) return;
@@ -483,7 +483,8 @@
       const allRows = rows || [];
       const filteredRows = React.useMemo(() => {
         return allRows.filter((r) => {
-          if (filter === 'open' && !r.needs_human) return false;
+          const rowAnomaly = Boolean(r && !r.excluded && (r.is_anomaly || r.state === 'blocked' || r.verdict === 'error' || r.severity === 'blocker' || (r.format_count || 0) > 0 || !String(r.type || '').trim()));
+          if (filter === 'open' && !r.needs_human && !rowAnomaly) return false;
           if (q) {
             const hay = (String(r.label || '') + String(r.number || '') + String(r.type || '') + String((r.knowledge || []).join(' '))).toLowerCase();
             if (!hay.includes(q.toLowerCase())) return false;
@@ -1106,15 +1107,16 @@
           filteredRows.length === 0 ? h('div', { style: { ...T.hint, padding: 12 } }, '没有符合条件的题组') : filteredRows.map((r) => {
             const uid = r.unit_id || r.number;
             const active = uid === unitId;
-            const hasIssue = r.needs_human || r.state === 'attention' || r.state === 'blocked';
+            const isAnomaly = Boolean(!r.excluded && (r.is_anomaly || r.state === 'blocked' || r.verdict === 'error' || r.severity === 'blocker' || (r.format_count || 0) > 0 || !String(r.type || '').trim()));
+            const hasIssue = !isAnomaly && Boolean(r.needs_human || r.state === 'attention');
             return h('div', {
-              key: uid, className: 'wf-paper' + (active ? ' wf-active' : ''),
+              key: uid, className: 'wf-paper' + (active ? ' wf-active' : '') + (isAnomaly ? ' wf-paper-anomaly' : ''),
               'data-unit': uid,
               style: T.paperRow(active),
               onClick: () => onSelectUnit(uid),
             },
-              // 题号列只放原卷印刷题号：无号题组用「—」，不能把大题标题（读起来像题干）塞进题号列。
-              h('span', { style: { width: 44, flexShrink: 0, fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: Array.isArray(r.printed_numbers) && r.printed_numbers.length === 0 ? String((r.source_section || {}).title || '') : '' },
+              // 题号列只放原卷印刷题号：无号题组用「—」，异常题只对题号标红。
+              h('span', { style: { width: 44, flexShrink: 0, fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', ...(isAnomaly ? { color: 'var(--dsw-alias-state-error-primary)' } : null) }, title: Array.isArray(r.printed_numbers) && r.printed_numbers.length === 0 ? String((r.source_section || {}).title || '') : '' },
                 Array.isArray(r.printed_numbers) && r.printed_numbers.length === 0
                   ? '—'
                   : String(r.label || r.number)),
@@ -1126,10 +1128,10 @@
                 ? h('span', { style: { ...T.badge(''), flexShrink: 0, fontSize: 10.5 } }, '听力跳过')
                 : h('span', {
                   className: 'wf-review-row-dot', role: 'img',
-                  'aria-label': hasIssue ? '有审核问题' : (r.state === 'unverified' ? '尚未核对' : '无待审问题'),
-                  title: hasIssue ? (r.open_summary || '有审核问题，请查看详情') : undefined,
+                  'aria-label': isAnomaly ? '有异常问题' : (hasIssue ? '有审核问题' : (r.state === 'unverified' ? '尚未核对' : '无待审问题')),
+                  title: isAnomaly ? (r.anomaly_summary || r.open_summary || '该题存在校验或内容异常，请查看详情') : (hasIssue ? (r.open_summary || '有审核问题，请查看详情') : undefined),
                   style: { width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-                    background: hasIssue ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-label-primary)' },
+                    background: isAnomaly ? 'var(--dsw-alias-state-error-primary)' : (hasIssue ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-label-primary)') },
                 }),
             );
           })),
@@ -1145,6 +1147,24 @@
       } else if (!detail) {
         workCol = h(EmptyState, { flex: true, title: TEXT.loading });
       } else {
+        const detailRow = detail.row || currentRow || {};
+        const detailAnomalyReasons = Array.isArray(detail.anomaly_reasons) && detail.anomaly_reasons.length
+          ? detail.anomaly_reasons
+          : (Array.isArray(detailRow.anomaly_reasons) && detailRow.anomaly_reasons.length
+            ? detailRow.anomaly_reasons
+            : (currentRow && Array.isArray(currentRow.anomaly_reasons) ? currentRow.anomaly_reasons : []));
+        const detailIsAnomaly = Boolean(
+          !detailRow.excluded && (
+            detail.is_anomaly || detailRow.is_anomaly || (currentRow && currentRow.is_anomaly)
+            || detailRow.state === 'blocked' || detailRow.verdict === 'error'
+            || !String(detail.type || detailRow.type || '').trim()
+            || (detail.format_open || 0) > 0
+            || detailAnomalyReasons.length > 0
+          )
+        );
+        const detailAnomalyText = detailAnomalyReasons.length
+          ? detailAnomalyReasons.join('；')
+          : (detail.anomaly_summary || detailRow.anomaly_summary || (currentRow && currentRow.anomaly_summary) || (!String(detail.type || detailRow.type || '').trim() ? '题型缺失（未判定）' : '存在校验或内容异常'));
         workCol = h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 } },
           contextPaper ? h('div', {
             style: {
@@ -1305,12 +1325,26 @@
               h('div', { style: T.card },
                 ...labelAuditPanels(detail),
               ),
-              // 审核说明：只描述一审与原标签的差异；修改/通过按钮已移至顶部题号行右侧
+              // 审核说明：描述异常说明及一审与原标签的差异；修改/通过按钮已移至顶部题号行右侧
               (() => {
                 const lines = auditNotes(detail);
                 const kpDiff = hasKnowledgeDiff(detail);
+                const anomalyItems = detailIsAnomaly
+                  ? (detailAnomalyReasons.length ? detailAnomalyReasons : [detailAnomalyText])
+                  : [];
                 return h('div', { style: T.card },
                   h('div', { style: { ...T.cardTitle } }, '审核说明'),
+                  anomalyItems.map((reason, idx) => h('div', {
+                    key: 'anomaly-' + idx,
+                    style: {
+                      fontSize: 12,
+                      color: 'var(--dsw-alias-state-error-primary)',
+                      fontWeight: 500,
+                      padding: '3px 0',
+                      lineHeight: 1.6,
+                      borderTop: idx ? '1px dashed var(--dsw-alias-border-l1)' : 'none',
+                    },
+                  }, '· 异常：' + reason)),
                   lines.length
                     ? lines.map((t, i) => {
                         const isDiffNote = /^(?:题型差异|子类差异)：/.test(String(t || ''));
@@ -1322,11 +1356,11 @@
                             fontWeight: isDiffNote ? 600 : 400,
                             padding: '3px 0',
                             lineHeight: 1.6,
-                            borderTop: i ? '1px dashed var(--dsw-alias-border-l1)' : 'none',
+                            borderTop: (i || anomalyItems.length) ? '1px dashed var(--dsw-alias-border-l1)' : 'none',
                           },
                         }, '· ' + t);
                       })
-                    : h('div', { style: T.hint }, kpDiff ? '差异已在上方「知识点标签」中标出。' : '各轮与原标签一致，无差异。'),
+                    : (!anomalyItems.length ? h('div', { style: T.hint }, kpDiff ? '差异已在上方「知识点标签」中标出。' : '各轮与原标签一致，无差异。') : null),
                 );
               })(),
             ),

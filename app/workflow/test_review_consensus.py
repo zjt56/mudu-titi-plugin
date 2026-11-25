@@ -238,7 +238,7 @@ class ConsensusTest(unittest.TestCase):
 
     @patch.object(review, '_verify_round_sources', return_value=None)
     def test_listening_passage_group_compares_only_at_group_level(self, _verify_sources):
-        # 听力短文是一材料带多题：小题知识点差异不应再生成逐题 finding。
+        # 只要是组题，标签统一打在组题级，不在子题中呈现：子题带非空标签直接拒收，空子题正常通过且无 child_knowledge finding。
         self.put('03_types/types.json', {'items': [{'unit_id': 'g', 'type': '听力短文理解', 'subtypes': ['选择5题']}]})
         self.plan = review.prepare_round_plan(self.batch)
         payload = self.payload()
@@ -250,6 +250,12 @@ class ConsensusTest(unittest.TestCase):
         first_check['assessment']['subquestions'] = [
             {'number': str(i), 'knowledge': (['设题角度/听力/推理判断'] if i == 1 else [])}
             for i in range(1, 11)]
+        rejected = review.evaluate_rounds(self.batch, payload)
+        self.assertFalse(rejected['execution_completed'])
+        self.assertTrue(any('Group knowledge belongs to the group' in str(e.get('message', '')) for e in rejected['errors']))
+
+        first_check['assessment']['subquestions'] = [
+            {'number': str(i), 'knowledge': []} for i in range(1, 11)]
         result = review.evaluate_rounds(self.batch, payload)
         self.assertTrue(result['execution_completed'], result['errors'])
         self.assertEqual([f for f in result['findings'] if f['field'] == 'child_knowledge'], [])

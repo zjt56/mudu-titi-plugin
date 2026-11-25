@@ -285,6 +285,74 @@ class LocalAgentTest(unittest.TestCase):
         with self.assertRaises(agent.AgentError):
             agent._parse_response(valid + "}}extra")
 
+    def test_parse_response_repairs_redundant_internal_closer_without_losing_fields(self):
+        # 真实线上复现：模型在 checks 数组结束前或数组元素间多写 1 个重复 `}`，
+        # 或在根级 `,"notes":` 前多写 1 个重复 `}`；应仅删除冗余括号并保留全部字段。
+        expected = {
+            "status": "completed",
+            "artifacts": {
+                "review_round": {
+                    "checks": [
+                        {
+                            "unit_id": "sec-1-u105",
+                            "verdict": "ok",
+                            "assessment": {
+                                "type": "短文填空",
+                                "subtypes": [],
+                                "knowledge": ["语篇体裁/说明文/程序/现象说明"],
+                                "subquestions": [{"number": "1", "knowledge": []}],
+                                "answer_points": [],
+                            },
+                        }
+                    ]
+                }
+            },
+            "notes": [],
+            "findings": [],
+        }
+        raw = json.dumps(expected, ensure_ascii=False, separators=(",", ":"))
+        # 1) checks 数组末项后多一个 `}`（线上 repair-1c88 / repair-json-cb07 同款）
+        extra_in_array = raw.replace('[]}}]}},', '[]}}}]}},', 1)
+        self.assertNotEqual(extra_in_array, raw)
+        self.assertEqual(agent._parse_response(extra_in_array, strict=True), expected)
+        # 2) checks 数组两项之间多一个 `}`
+        two_checks = {
+            **expected,
+            "artifacts": {"review_round": {"checks": [
+                {"unit_id": "u1", "verdict": "ok"},
+                {"unit_id": "u2", "verdict": "ok"},
+            ]}},
+        }
+        raw_two = json.dumps(two_checks, ensure_ascii=False, separators=(",", ":"))
+        extra_between = raw_two.replace('},{"unit_id":"u2"', '}},{"unit_id":"u2"', 1)
+        self.assertEqual(agent._parse_response(extra_between, strict=True), two_checks)
+        # 3) 对象内数组多一个重复 `]`
+        extra_bracket = raw.replace('"subtypes":[]', '"subtypes":[]]', 1)
+        self.assertEqual(agent._parse_response(extra_bracket, strict=True), expected)
+        # 4) 根级 `,"notes":` 前多一个 `}` 提前闭合根对象
+        premature_root = raw.replace('}]}},"notes":', '}]}}},"notes":', 1)
+        self.assertNotEqual(premature_root, raw)
+        self.assertEqual(agent._parse_response(premature_root, strict=True), expected)
+        # 5) 尾随逗号（对象/数组闭合前多写 `,`）无损修补
+        trailing_comma = raw.replace('"findings":[]}', '"findings":[],}', 1)
+        self.assertEqual(agent._parse_response(trailing_comma, strict=True), expected)
+        # 6) 审核模式允许省略外层协议外壳（{"checks":[...]} / {"review_round":{"checks":[...]}}），
+        #    非审核模式仍严格要求 status/artifacts。
+        flat_checks = json.dumps({"checks": [{"unit_id": "u1", "verdict": "ok"}]}, ensure_ascii=False)
+        self.assertEqual(agent._parse_response(flat_checks, strict=True),
+                         {"checks": [{"unit_id": "u1", "verdict": "ok"}]})
+        with self.assertRaises(agent.AgentError):
+            agent._parse_response(flat_checks, strict=False)
+        # 7) 非重复括号错误、缺逗号、多对象拼接与重复键仍必须拒绝
+        for bad in (
+            '{"status":"completed","artifacts":{"a":[1,2}]}}',
+            raw.replace(',"notes":', '"notes":', 1),
+            raw + raw,
+            '{"status":"completed","artifacts":{"review_round":{"checks":[]}}},"status":"needs_review"}',
+        ):
+            with self.subTest(bad=bad), self.assertRaises(agent.AgentError):
+                agent._parse_response(bad, strict=True)
+
     def test_unit_merge_supports_explanations_and_knowledge_partitions(self):
         from workflow import unit_tasks
         parts = [{"unit_ids": ["u1"]}, {"unit_ids": ["u2"]}]

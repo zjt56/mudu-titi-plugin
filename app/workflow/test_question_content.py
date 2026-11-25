@@ -508,6 +508,36 @@ class ImageOptionEvidenceTest(unittest.TestCase):
             self.assertIn("image34.jpg", img_issues_bad[0]["message"])
             self.assertNotIn("image36.jpg", img_issues_bad[0]["message"])
 
+    def test_degree_unit_and_sentence_final_letter_not_parsed_as_option(self):
+        # 180°C. / 98°F. 及句末孤立单字母（如 Vitamin C. / Grade A.）绝不能误判成选项，
+        # 历史结构里残留的 source_expected_options=1 也不得把非选择题判缺选项。
+        from workflow import question_content as qc
+        lines = [
+            "**1****.**Before baking the cookies,remember to preheat(预热) the <u>o</u>________(烤箱) to 180°C.",
+            "**2****.**Water boils at 100°C. Remember to be careful.",
+            "**3****.**Oranges are rich in Vitamin C.",
+        ]
+        p1 = qc.question_parts(lines, 1)
+        self.assertEqual(p1["options"], [])
+        self.assertTrue(p1["stem"].endswith("180°C."), p1["stem"])
+        p2 = qc.question_parts(lines, 2)
+        self.assertEqual(p2["options"], [])
+        self.assertIn("100°C.", p2["stem"])
+        p3 = qc.question_parts(lines, 3)
+        self.assertEqual(p3["options"], [])
+        self.assertTrue(p3["stem"].endswith("Vitamin C."), p3["stem"])
+
+        unit = {
+            "unit_id": "u1",
+            "unit_kind": "standalone",
+            "type": "单词拼写",
+            "numbers": [1],
+            "stem": lines[0],
+            "source_expected_options": 1,
+        }
+        res = qc.audit_source_unit(unit, lines)
+        self.assertTrue(res["passed"], res["issues"])
+
 
 if __name__ == "__main__":
     unittest.main()

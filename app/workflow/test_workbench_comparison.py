@@ -60,7 +60,7 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(finding_bucket({'field': 'child_knowledge'}), 'label')
         child = finding_comparison({'unit_id': 'group-1-6', 'field': 'child_knowledge',
                                     'reason': '第2题知识点不一致'}, comparison, list(range(1, 7)), {})
-        self.assertEqual(child['original'], ['设题角度/阅读/细节理解'])
+        self.assertEqual(child['original'], [])
         self.assertEqual(child['rounds'][0]['checks'][0]['value'], child['original'])
         type_comparison = finding_comparison({'unit_id': 'group-1-6', 'field': 'type'}, comparison, list(range(1, 7)), {})
         self.assertEqual(type_comparison['rounds'][0]['checks'][0]['value'], '阅读理解')

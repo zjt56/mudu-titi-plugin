@@ -75,6 +75,9 @@ def _is_non_option_inline(text: str, match, index: int, raw: list, accepted: lis
     if any(other.start() >= line_start for other in accepted):
         return False  # 同一行前面已有选项标签：横排选项 A.… B.…
     tail = text[match.start():]
+    # 0) 温度/角度单位（180°C. / 37°C. / 98°F. 等）：紧跟在度数符号 °/º 后的字母绝不是选项。
+    if match.start() > 0 and text[match.start() - 1] in "°º":
+        return True
     # 1) 题干行内英文缩写（A.M. / B.C. / D.C. / A.D. / A.I. / E.g. / J.K. 等）
     if _DOTTED_ACRONYM.match(tail):
         return True
@@ -93,6 +96,12 @@ def _is_non_option_inline(text: str, match, index: int, raw: list, accepted: lis
         # 4) 题干行内出现 A.（如 "Grade A."），但后文另起一行有正式行首 A.
         if letter == "A" and any(other.group(1) == "A" and _at_line_start(text, other.start()) for other in later):
             return True
+        # 5) 句末孤立单字母（如 "Vitamin C." / "Plan B." / "Grade A."）：
+        #    全题仅有这一处行内命中、后文为空且紧前非图片标记，绝不是选择题选项。
+        if not later and not text[match.end():].strip():
+            before = text[line_start:match.start()].rstrip()
+            if not before.endswith("]"):
+                return True
     return False
 
 
@@ -814,7 +823,11 @@ def audit_source_unit(unit: dict, source_lines: list[str] | None = None) -> dict
             scoped_shared = question_parts(['0.' + '\n'.join([lines[first_option][offset:]] + lines[first_option + 1:])], 0)['options']
             for part in parts.values():
                 part['options'] = []
-    max_options = 0 if scoped_shared else max([int(unit.get("source_expected_options") or 0), *[len(p["options"]) for p in parts.values()]])
+    declared_expected = int(unit.get("source_expected_options") or 0)
+    if declared_expected < 2:
+        # 选择题至少需要 2 个选项；历史结构里残留的 1（常由 180°C. 等行内单字母误判所致）不作为选项基准。
+        declared_expected = 0
+    max_options = 0 if scoped_shared else max([declared_expected, *[len(p["options"]) for p in parts.values()]])
     choice_group = any(hint in str(unit.get("type") or "") for hint in ("完形", "语法选择"))
     if len(numbers) == 1 and unit.get("source_span", {}).get("number_binding") == "single_writing_section":
         # A writing section is bounded only by its own section, so its raw stem

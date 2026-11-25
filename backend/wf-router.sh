@@ -194,6 +194,11 @@ else:
                 break
     lines = lines[:start] + nb + lines[end:]
 
+if not any(re.match(r'^- id:\s*session-persistence-jsonl\b', ln) for ln in lines):
+    lines.append("- id: session-persistence-jsonl")
+    lines.append("  config:")
+    lines.append("    root: !!js process.env.WF_DSH_SESSION_ROOT || dshHomePath('tmp-wf-sessions')")
+
 open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 print("patched agent-default-model -> %s / %s" % (provider, model), file=sys.stderr)
 PY
@@ -271,10 +276,12 @@ DEEPSEEK_API_KEY_V="$(cred_key DEEPSEEK_API_KEY || true)"
 MAGPIE_GATEWAY_KEY_V="$(cred_key MAGPIE_GATEWAY_KEY || true)"
 OPENCODE_GO_API_KEY_V="$(cred_key OPENCODE_GO_API_KEY || true)"
 
+TMP_SESSION_ROOT="$(mktemp -d)"
 run_once() {
   DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY_V" \
   MAGPIE_GATEWAY_KEY="$MAGPIE_GATEWAY_KEY_V" \
   OPENCODE_GO_API_KEY="$OPENCODE_GO_API_KEY_V" \
+  WF_DSH_SESSION_ROOT="$TMP_SESSION_ROOT" \
   "$DSH_BIN" --profile "$TMP_PROFILE" - < "$prompt"
 }
 
@@ -282,6 +289,7 @@ TMP_OUT="$(mktemp)"
 TMP_ERR="$(mktemp)"
 RC=0
 run_once > "$TMP_OUT" 2> "$TMP_ERR" || RC=$?
+rm -rf "$TMP_SESSION_ROOT" 2>/dev/null || true
 
 if [ "$RC" -eq 0 ] && [ -s "$TMP_OUT" ]; then
   cat "$TMP_OUT" > "$response"
@@ -291,7 +299,7 @@ fi
 
 # 失败：把 stderr 写出去，供工作流 classify_failure 判断限流/额度。
 cat "$TMP_ERR" >&2
-if grep -Eiq 'DAILY_LIMIT_EXCEEDED|daily usage limit|usage limit has been reached' "$TMP_ERR"; then
+if grep -Eiq 'DAILY_LIMIT_EXCEEDED|daily usage limit|usage limit has been reached|usage limit reached|GoUsageLimitError' "$TMP_ERR"; then
   log "RATE_LIMIT: daily/quota exhausted"
 elif grep -Eiq '429|RATE_LIMIT|rate[_ ]limit|QUOTA|too many requests' "$TMP_ERR"; then
   log "RATE_LIMIT: throttled"

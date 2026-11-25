@@ -60,8 +60,9 @@ def load(stage: str, artifact: str | None = None) -> dict:
     elif stage == "knowledge":
         from workbench.taxonomy import WHOLE_UNIT_TYPES
         replacements["knowledge_hierarchy"] = (
-            "- [ ] 整组题型（" + "、".join(sorted(WHOLE_UNIT_TYPES))
-            + "）只在组级打标；每个确认子题仍须覆盖，子题 `knowledge=[]`，不逐题打设题角度或其他标签。")
+            "- [ ] 只要是组题（含 " + "、".join(sorted(WHOLE_UNIT_TYPES))
+            + " 等整组题型及其他任意组题），标签一律只打在组题级，不在子题中呈现；每个确认子题仍须覆盖且子题 `knowledge=[]`。"
+            + "其中阅读理解的设题角度虽标在组级，但须逐小题分析每道小题的问法后去重汇总到组级。")
     for name, value in replacements.items():
         token = "{{" + name + "}}"
         if role["body"].count(token) != 1:
@@ -97,29 +98,38 @@ def knowledge_judgment_rules(types=None) -> str:
                 type_set = frozenset(cleaned)
                 roots = set()
                 for ty in type_set:
-                    for prefix in (*taxonomy._allowed_prefixes(ty), *taxonomy.exact_knowledge_paths(ty)):
-                        roots.add(prefix.split("/", 1)[0])
+                    for uk in (None, "group", "standalone"):
+                        for prefix in (*taxonomy._allowed_prefixes(ty, unit_kind=uk),
+                                       *taxonomy.exact_knowledge_paths(ty, unit_kind=uk)):
+                            roots.add(prefix.split("/", 1)[0])
                 allowed_roots = frozenset(roots)
                 has_listening = any(ty.startswith("听力") for ty in type_set)
 
     parts = [
         "\n【共用知识点判定口径】\n",
-        "1. 先确定题型和层级，再选完整目录叶子。题型表 dims 是允许范围；组级仅把允许的主题、语篇体裁作为必带维度（其他题型除外），"
-        "其余维度按实际考点逐项判断。历史参考中的宽泛举例与本段冲突时以本段为准。\n",
+        "1. 先确定题型和层级（整题 group vs 单题 standalone），再选完整目录叶子。题型表 dims（及 by_unit_kind）是允许范围；"
+        "组级仅把允许的主题、语篇体裁作为必带维度（其他题型除外），其余维度按实际考点逐项判断。历史参考中的宽泛举例与本段冲突时以本段为准。\n",
     ]
     if type_set is None or bool(type_set & _NO_AP_FILL_RULE_TYPES):
         parts.append(
-            "完成句子、短文填空、选词填空和教材语篇填空均不把答案词或短语作为答案考点标签。完成句子按实际考点打词汇和语法标签；"
-            "短文填空、选词填空和教材语篇填空按材料打体裁、主题，再按组内实际考点打词汇、语法标签。\n"
+            "完成句子必须「以答案推考点」：先核对空格/划线处实际标准答案（词形、短语、句式或从句），由答案反推词汇与语法叶子，严禁拿题干非空已有内容打标；不打答案考点词条、不挂主题或语篇体裁。"
+            "选词填空按形态区分：整题（group，如短文/多句词框）只要答案考点（目录 knowledge=[]，不打体裁、主题或目录词汇/语法，由已验收答案自动派生并在一审填写 answer_points）；"
+            "单题（standalone，如单句选词）删除主题与语篇体裁，只按实际考点打词汇、语法标签（不打答案考点词条）。"
+            "短文填空和教材语篇填空按材料打体裁、主题，再按组内实际考点打词汇、语法标签（不把答案词作为答案考点）。\n"
+        )
+    if type_set is None or bool(type_set & {"听力信息转换", "其他"}):
+        parts.append(
+            "听力信息转换只保留「主题 + 语篇体裁 + 答案考点」：目录 knowledge 仅填主题与语篇体裁（不挂设题角度/听力，也不从目录选词汇/语法），"
+            "答案考点走独立派生与一审 answer_points 字段。\n"
         )
     if type_set is None or bool(type_set & {"听力关键词语选择", "其他"}):
         parts.append(
-            "听力关键词语选择是唯一例外：knowledge 只填原目录节点『语音/基本读音』，该节点虽有子级也直接选，"
+            "听力关键词语选择是唯一精确路径例外：knowledge 只填原目录节点『语音/基本读音』，该节点虽有子级也直接选，"
             "不选任何子类或其他语音、词汇、语法标签。答案考点走原有独立字段或派生链路，不填入 knowledge。按确认的单元层级提交。\n"
         )
     parts.append(
-        "2. 每个叶子先定位题干、答案对照、材料主旨或设问证据。能用一个更具体的叶子解释作答原因时，不再加描述同一原因的泛项；"
-        "有不同证据支持的独立考点分别保留。不要因某词出现在干扰项、背景里或解析顺带提到就打标。\n"
+        "2. 细致核对、拒绝粗糙套话：每个叶子必须先定位题干、空格标准答案、全文主旨或具体设问证据。能用一个更具体的叶子解释作答原因时，不再加描述同一原因的泛项；"
+        "有不同证据支持的独立考点须逐项保留，不可遗漏并列核心考点，也不要因某词出现在干扰项、背景里或解析顺带提到就打标。\n"
         "选点前先独立说明正确答案靠哪条规则或哪句原文得出。对拟加的第二个知识点逐个核对：它是否解释了另一个实际作答步骤？"
         "例如选出 There be 句型时，错误选项中含 This 或 That 不构成指示代词考点。\n"
     )
@@ -136,7 +146,7 @@ def knowledge_judgment_rules(types=None) -> str:
         if allowed_roots is None or "主题" in allowed_roots:
             item4.append(
                 "主题取完整材料或相关听力对话的主话题，地点、职业和单个名词可为背景线索。只有独立且有实质内容的第二主题才并列。"
-                "先用一句话概括材料主要在讲什么，再选叶子。多个主题都说得通时，优先选能直接解释材料核心事件、主要目的或中心观点的那一个。"
+                "先通读全文并用一句话概括材料主要在讲什么，再选叶子。多个主题都说得通时，优先选能直接解释材料核心事件、主要目的或中心观点的那一个。"
                 "例如全文围绕一个纪念日的由来和纪念含义，可取文化习俗；只有材料主要讲社会状况如何变化时，才取社会发展。"
             )
             if has_listening:
@@ -145,14 +155,19 @@ def knowledge_judgment_rules(types=None) -> str:
                 )
         if allowed_roots is None or "语篇体裁" in allowed_roots:
             item4.append(
-                "同一篇按主要写作功能判断体裁：介绍事物特征用介绍类短文，阐释原因、原理或道理用事理阐释；出现某人物不等于人物传记。"
+                "语篇体裁必须通读全文判断，严禁只看首段或其中一小段：综合文章开头引入、主体展开方式与结尾落点判定全文主要写作功能——"
+                "例如首段用故事/经历引入、后文大段科普介绍或阐释原理的，全文应判说明文而非记叙文；首段引出现象、后文展开观点论证的，应判议论文。"
+                "介绍事物特征用介绍类短文，阐释原因、原理或道理用事理阐释；出现某人物不等于人物传记。"
             )
         if item4:
             parts.append("4. " + "".join(item4) + "\n")
     if allowed_roots is None or "设题角度" in allowed_roots:
         item5 = (
             "5. 设题角度按得到答案的方法判断。原文或转写可直接定位答案是细节理解，需结合线索推出未明说的信息才是推理；"
-            "例如直接说出地点按细节理解，凭环境线索才能判断发生地才是地点推断。整组题按各子题独立核对角度，有证据的角度在组级去重汇总。"
+            "例如直接说出地点按细节理解，凭环境线索才能判断发生地才是地点推断。"
+            "「阅读理解」组题的设题角度仍标在组题级 knowledge（子题 knowledge=[]），但具体标签必须来源于逐小题的问法分析："
+            "先逐一分析每道小题（如五道小题 Q1–Q5）的设问方式与解题路径，确定每小题对应的设题角度/阅读/* 叶子，再去重汇总标在组题级 knowledge，严禁笼统只打泛化角度或漏标个别小题角度。"
+            "其余整组题型（任务型阅读、读写综合、听力长对话理解、听力短文理解）同样按各子题独立核对角度后在组级去重汇总，子题 knowledge=[]。"
             "优先选能够准确描述解题任务的具体角度。例如推断文章来源有专用的文章出处标签且题型允许时，用文章出处；"
             "不要再为同一道小题追加泛化的推理判断。组内其他题确实考一般推理时，组级仍保留推理判断。"
         )
@@ -160,8 +175,8 @@ def knowledge_judgment_rules(types=None) -> str:
             item5 += "听力可用材料不足时不得用选项场景或转写占位冒充完整对话。"
         parts.append(item5 + "\n")
     parts.append(
-        "6. 事实依据使用当前题目的正文、共享材料、选项和能唯一关联的原答案、原解析或听力文字。"
-        "证据缺失时明确指出判断局限，避免用题型提示强凑可选标签或自造目录项。\n"
+        "6. 事实依据使用当前题目的完整正文、共享材料、选项和能唯一关联的原答案、原解析或听力文字。"
+        "逐题认真审读后再落标，禁止仅凭首句/题干表层词草率打标；证据缺失时明确指出判断局限，避免用题型提示强凑可选标签或自造目录项。\n"
     )
     return "".join(parts)
 

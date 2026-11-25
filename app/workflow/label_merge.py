@@ -187,17 +187,19 @@ def load_round1_assessments(batch_dir: Path) -> dict[str, dict]:
     return result
 
 
-def _is_valid_merged_candidate(canonical: str, main_type: str | None, *, is_group: bool = False) -> bool:
+def _is_valid_merged_candidate(canonical: str, main_type: str | None, *,
+                               is_group: bool = False) -> bool:
     if not main_type or main_type not in taxonomy.types():
         return True
-    if not taxonomy.knowledge_path_allowed(canonical, main_type):
+    unit_kind = "group" if is_group else "standalone"
+    if not taxonomy.knowledge_path_allowed(canonical, main_type, unit_kind=unit_kind):
         return False
-    if main_type in ("完成句子", "短文填空", "选词填空", "教材语篇填空") and (
+    if not taxonomy.has_answer_point_dim(main_type, unit_kind) and (
         taxonomy._under(canonical, "词汇/考察词汇") or taxonomy._under(canonical, "词汇/答案考点")
     ):
         return False
     if is_group:
-        rule = taxonomy._unit_dims().get(main_type)
+        rule = taxonomy._unit_dims("group").get(main_type)
         if rule and any(taxonomy._under(canonical, dim) for dim in rule.get("forbid") or []):
             return False
     return True
@@ -216,11 +218,12 @@ def merge_knowledge_lists(
     seen = set(base)
     merged = list(base)
     added: list[str] = []
+    unit_kind = "group" if is_group else "standalone"
     for path in reviewed:
         if path in seen:
             continue
         # Only merge paths that resolve to valid catalog leaves for this question type.
-        resolved = taxonomy.resolve_knowledge([path], main_type)
+        resolved = taxonomy.resolve_knowledge([path], main_type, unit_kind=unit_kind)
         if not resolved.get("resolved") or resolved.get("unknown") or resolved.get("non_leaf"):
             continue
         canonical = resolved["resolved"][0]["path"]
@@ -322,6 +325,7 @@ def project_batch_merged_knowledge(batch: dict, batch_dir: Path | str | None) ->
         whole_unit = bool(main_type and taxonomy.whole_unit_type(main_type))
 
         # 1. Unit/group-level knowledge merge (or manual override).
+        # 只要是组题，标签统一打在组题级，不在子题中呈现或合并。
         info = merged_unit_knowledge(
             folder,
             uid,
@@ -334,20 +338,11 @@ def project_batch_merged_knowledge(batch: dict, batch_dir: Path | str | None) ->
         if info["manually_edited"] or info["has_round1"]:
             item["knowledge"] = info["knowledge"]
             _sync_knowledge_ids(item, info["knowledge"], main_type)
-
-        # 2. Non-whole-unit group children that carry their own knowledge tags.
-        if is_group and isinstance(children, list) and children and not whole_unit:
-            if not info["manually_edited"] and r1:
-                child_r1 = _child_r1_knowledge_map(r1)
-                for child in children:
-                    if not isinstance(child, dict):
-                        continue
-                    c_orig = _clean_paths(child.get("knowledge"))
-                    num = str(child.get("number") or "").strip()
-                    c_rev = child_r1.get(str(int(num))) if num.isdigit() else []
-                    # Only merge child knowledge if the child already carries knowledge tags.
-                    if c_orig and c_rev:
-                        c_merged, _ = merge_knowledge_lists(c_orig, c_rev, main_type=main_type, is_group=False)
-                        child["knowledge"] = c_merged
-                        _sync_knowledge_ids(child, c_merged, main_type)
+        if is_group and isinstance(children, list) and children:
+            for child in children:
+                if not isinstance(child, dict):
+                    continue
+                if child.get("knowledge"):
+                    child["knowledge"] = []
+                    _sync_knowledge_ids(child, [], main_type)
     return result

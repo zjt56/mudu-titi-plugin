@@ -99,8 +99,12 @@ test('isBatchPendingInQueue 准确识别上传排队区未完成批次，且试�
   assert.equal(isBatchPendingInQueue({ name: 'u3', flow_done: false, upload_status: { receipt: { state: 'staged' } } }), false);
   // 显式移出排队区：不再处于排队区，不隐藏
   assert.equal(isBatchPendingInQueue({ name: 'r1', flow_done: false, uploaded: false, queue_removed: true }), false);
+  // 阶段异常停滞且无活跃运行：透出到试卷卡片页标红展示，不隐藏在后台；若正在续跑则仍留在排队区
+  assert.equal(isBatchPendingInQueue({ name: 'b1', flow_done: false, stage_blocked: true }), false);
+  assert.equal(isBatchPendingInQueue({ name: 'b2', flow_done: false, stage_blocked: true, advance: { running: true } }), true);
   assert.equal(isBatchPendingInQueue(null), false);
 
   assert.match(client, /const baseList = \(batches \|\| \[\]\)\.filter\(\(b\) => !isBatchPendingInQueue\(b\)\)/);
+  assert.match(client, /wf-card-anomaly/);
   assert.match(client, /setServerActiveWork\(Boolean\(d && d\.has_active_work\)\)/);
 });

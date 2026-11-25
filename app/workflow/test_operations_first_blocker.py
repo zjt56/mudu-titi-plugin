@@ -54,6 +54,7 @@ class FirstBlockerTests(unittest.TestCase):
     def test_transient_wait_and_quality_output_do_not_create_incident(self):
         op.service_heartbeat(True)
         for stage, detail in [('validate', 'rate_limit 429'), ('validate', '额度冷却'),
+                              ('knowledge', 'sec-1-u1：429: {"type":"GoUsageLimitError","message":"OpenCode Go usage limit reached (monthly, resets in 10d)."}'),
                               ('review_gate', 'quality differences')]:
             self.candidate.return_value = (stage, detail)
             self.assertEqual(op.incidents(self.root)['incidents'], [])

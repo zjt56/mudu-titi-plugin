@@ -114,7 +114,11 @@ def _is_batch_uploaded(batch: dict) -> bool:
 
 
 def _is_queued_unfinished(batch: dict) -> bool:
-    """判断批次是否仍在「上传试卷 → 排队区」且自动流程尚未完成。"""
+    """判断批次是否仍在「上传试卷 → 排队区」且自动流程尚未完成。
+
+    若批次已在当前阶段发生失败/阻断且当前无活跃推进任务（stage_blocked=True），
+    同步透出到「试卷审核」卡片页标红展示，不隐藏在后台。
+    """
     if not isinstance(batch, dict):
         return False
     if batch.get("flow_done") is True:
@@ -122,6 +126,9 @@ def _is_queued_unfinished(batch: dict) -> bool:
     if _is_batch_uploaded(batch):
         return False
     if batch.get("queue_removed"):
+        return False
+    adv = batch.get("advance") or {}
+    if batch.get("stage_blocked") and not (adv.get("running") or adv.get("queued") or adv.get("waiting")):
         return False
     return batch.get("flow_done") is False
 

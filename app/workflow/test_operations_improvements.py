@@ -323,6 +323,118 @@ class OperationsImprovementsTest(unittest.TestCase):
             op.unfreeze(self.root, folder)
         self.assertIn("unknown_receipt_quarantine", str(ctx.exception))
 
+    def test_awaiting_execution_does_not_preempt_running_stage(self):
+        folder = _seed_batch(self.root, "await-running-batch")
+        manifest = mf.load(folder)
+        mf.touch_stage(manifest, "assemble", mf.PENDING, notes="requeued for reverify")
+        mf.save(folder, manifest)
+        op._save(folder, {
+            "identity": op._identity(folder),
+            "incident": {
+                "incident_id": "inc-await", "stage": "assemble", "status": "awaiting_execution",
+                "mode": "repair", "eligible": False, "attempt_id": None,
+                "session_id": "sess-1", "lease_expires_at": 0,
+                "snapshot": op._snapshot(folder, "assemble"),
+                "detail": "assemble failed", "attempts": [], "events": [],
+                "queue_generation": 1,
+            },
+            "receipts": [], "failures": {},
+        })
+        op._save_code_record(folder, {
+            "job_id": "cr-await", "path": str(self.root / "unused.json"),
+            "status": "restarted_pending_verify", "incident_id": "inc-await",
+        })
+        # Pipeline transitions stage from pending -> running (snapshot changes!)
+        manifest = mf.load(folder)
+        mf.touch_stage(manifest, "assemble", mf.RUNNING, notes="running")
+        mf.save(folder, manifest)
+        v1 = op.view(self.root, folder)
+        self.assertEqual(v1["incident"]["status"], "awaiting_execution")
+        self.assertEqual(op._code_record(folder)["status"], "restarted_pending_verify")
+
+        # Even if stage becomes failed while batch execution lock is still held, do not preempt
+        manifest = mf.load(folder)
+        mf.touch_stage(manifest, "assemble", mf.FAILED, notes="still failing")
+        mf.save(folder, manifest)
+        with mock.patch.object(op.supervisor, "execution_busy", return_value=True):
+            v2 = op.view(self.root, folder)
+            self.assertEqual(v2["incident"]["status"], "awaiting_execution")
+
+        # Once stage finished (failed) and execution lock is released, re-queue and settle restarted_pending_verify
+        with mock.patch.object(op.supervisor, "execution_busy", return_value=False):
+            v3 = op.view(self.root, folder)
+            self.assertEqual(v3["incident"]["status"], "queued")
+            self.assertEqual(op._code_record(folder)["status"], "failed")
+
+    def test_recover_readonly_verify_does_not_set_write_active(self):
+        folder = _seed_batch(self.root, "recover-ro-batch")
+        op._save(folder, {
+            "identity": op._identity(folder),
+            "incident": {
+                "incident_id": "inc-ro", "stage": "knowledge", "status": "claimed",
+                "mode": "repair", "eligible": False, "attempt_id": "att-ro",
+                "session_id": "sess-ro", "lease_expires_at": 9999999999.0,
+                "execution_process": op._process_identity(),
+                "execution_first": True,
+                "snapshot": op._snapshot(folder, "knowledge"),
+                "detail": "knowledge failed", "attempts": [], "events": [],
+            },
+            "receipts": [], "failures": {},
+        })
+        observed = {}
+
+        def spy_verify(f, inc):
+            observed["write_active"] = (op._load(f).get("incident") or {}).get("write_active")
+            observed["lease_active"] = op.lease_active(f)
+            return {"verified": False, "stage": "knowledge", "reason": "not yet"}
+
+        with mock.patch.object(op, "_verify", side_effect=spy_verify):
+            receipt = op.action(self.root, folder, {
+                "action": "recover", "request_id": "req-ro",
+                "incident_id": "inc-ro", "attempt_id": "att-ro", "session_id": "sess-ro", "input": {},
+            })
+        self.assertEqual(receipt["status"], "completed")
+        self.assertIsNone(observed["write_active"])
+        self.assertFalse(observed["lease_active"])
+
+    def test_claimed_incident_reconciles_when_stage_completed_by_pipeline(self):
+        folder = _seed_batch(self.root, "claimed-reconcile-batch")
+        manifest = mf.load(folder)
+        mf.touch_stage(manifest, "knowledge", mf.COMPLETED, notes="done by pipeline")
+        mf.save(folder, manifest)
+        op._save(folder, {
+            "identity": op._identity(folder),
+            "incident": {
+                "incident_id": "inc-cr", "stage": "knowledge", "status": "claimed",
+                "mode": "repair", "eligible": False, "attempt_id": "att-cr",
+                "session_id": "sess-cr", "lease_expires_at": 9999999999.0,
+                "execution_process": op._process_identity(),
+                "execution_first": True,
+                "snapshot": op._snapshot(folder, "knowledge"),
+                "detail": "knowledge failed", "attempts": [], "events": [],
+            },
+            "receipts": [], "failures": {},
+        })
+        # installed_pending_restart must NOT be reconciled before restart
+        op._save_code_record(folder, {
+            "job_id": "cr-inst", "path": str(self.root / "unused.json"),
+            "status": "installed_pending_restart", "incident_id": "inc-cr",
+        })
+        with mock.patch.object(op, "_verify", return_value={"verified": True, "evidence_id": "ev-1", "stage": "knowledge"}):
+            v_wait = op.view(self.root, folder)
+            self.assertEqual(v_wait["incident"]["status"], "claimed")
+
+        # After restart (restarted_pending_verify), pipeline completion reconciles claimed incident immediately
+        op._save_code_record(folder, {
+            "job_id": "cr-inst", "path": str(self.root / "unused.json"),
+            "status": "restarted_pending_verify", "incident_id": "inc-cr",
+        })
+        with mock.patch.object(op, "_verify", return_value={"verified": True, "evidence_id": "ev-2", "stage": "knowledge"}):
+            v_done = op.view(self.root, folder)
+            self.assertEqual(v_done["incident"]["status"], "resolved")
+            self.assertEqual(v_done["incident"]["resolution_source"], "pipeline_progress")
+            self.assertEqual(op._code_record(folder)["status"], "verified")
+
 
 if __name__ == "__main__":
     unittest.main()

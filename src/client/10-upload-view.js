@@ -443,6 +443,7 @@
                 const done = progress.done, total = progress.total;
                 const pct = exiting ? 100 : (total ? Math.round(done / total * 100) : 0);
                 const active = !exiting && b.name === sel;
+                const blockedInQueue = !exiting && Boolean(b.stage_blocked);
                 const promotedStamp = !exiting ? promotedRanks[b.name] : null;
                 const rowCls = 'wf-queue-row' + (exiting ? ' wf-queue-row-exiting' : (promotedStamp ? ' wf-queue-row-promoted' : ''));
                 return h('div', {
@@ -451,7 +452,8 @@
                   onClick: exiting ? undefined : () => setSel(b.name),
                   style: {
                     display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 9, cursor: exiting ? 'default' : 'pointer',
-                    background: active ? 'var(--wf-sel-bg)' : 'transparent',
+                    background: active ? 'var(--wf-sel-bg)' : (blockedInQueue ? 'rgba(220, 38, 38, 0.05)' : 'transparent'),
+                    border: blockedInQueue ? '1px solid rgba(220, 38, 38, 0.35)' : '1px solid transparent',
                     marginBottom: 3,
                     transition: 'background .16s',
                   },
@@ -463,15 +465,15 @@
                       flex: '0 0 auto', width: 22, height: 22, borderRadius: 7,
                       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                       fontSize: 11.5, fontWeight: 700,
-                      background: exiting ? 'rgba(22,163,74,.16)' : 'var(--dsw-alias-bg-layer-2)',
-                      color: exiting ? '#15803d' : (active ? 'var(--wf-brand)' : 'var(--dsw-alias-label-secondary)'),
+                      background: exiting ? 'rgba(22,163,74,.16)' : (blockedInQueue ? 'rgba(220,38,38,.14)' : 'var(--dsw-alias-bg-layer-2)'),
+                      color: exiting ? '#15803d' : (blockedInQueue ? 'var(--dsw-alias-state-error-primary)' : (active ? 'var(--wf-brand)' : 'var(--dsw-alias-label-secondary)')),
                     },
-                  }, exiting ? '✓' : String(entry.rank)),
+                  }, exiting ? '✓' : (blockedInQueue ? '!' : String(entry.rank))),
                   h('div', { style: { flex: 1, minWidth: 0 } },
-                    h('div', { style: { fontSize: 12.5, fontWeight: 600, color: exiting ? '#15803d' : (active ? 'var(--wf-brand)' : 'var(--dsw-alias-label-primary)'), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, (b.paper && b.paper.title) || b.name),
-                    h('div', { style: { ...T.hint, fontSize: 11, marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, exiting ? '已完成，已移出排队区' : ((cur.id ? shortStageName(cur) : (st.hint || '等待')) + (total ? ' · ' + done + '/' + total : ''))),
+                    h('div', { style: { fontSize: 12.5, fontWeight: 600, color: exiting ? '#15803d' : (blockedInQueue ? 'var(--dsw-alias-state-error-primary)' : (active ? 'var(--wf-brand)' : 'var(--dsw-alias-label-primary)')), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, (b.paper && b.paper.title) || b.name),
+                    h('div', { style: { ...T.hint, fontSize: 11, marginTop: 1, color: blockedInQueue ? 'var(--dsw-alias-state-error-primary)' : T.hint.color, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, exiting ? '已完成，已移出排队区' : ((cur.id ? shortStageName(cur) : (st.hint || '等待')) + (blockedInQueue ? ' · 异常停滞' : '') + (total ? ' · ' + done + '/' + total : ''))),
                     h('div', { style: { height: 3, borderRadius: 999, background: 'var(--dsw-alias-bg-layer-2)', marginTop: 6, overflow: 'hidden' } },
-                      h('div', { style: { width: pct + '%', height: '100%', borderRadius: 999, background: exiting ? '#16a34a' : 'var(--wf-brand)', opacity: .75, transition: 'width .3s ease' } })),
+                      h('div', { style: { width: pct + '%', height: '100%', borderRadius: 999, background: exiting ? '#16a34a' : (blockedInQueue ? 'var(--dsw-alias-state-error-primary)' : 'var(--wf-brand)'), opacity: .75, transition: 'width .3s ease' } })),
                   ),
                   h('span', { style: { flex: '0 0 auto', fontSize: 11, color: exiting ? '#15803d' : 'var(--dsw-alias-label-secondary)', fontVariantNumeric: 'tabular-nums' } }, pct + '%'),
                 );

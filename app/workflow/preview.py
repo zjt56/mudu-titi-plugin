@@ -645,15 +645,21 @@ def source_group_candidates(batch_dir: Path, items: list[dict]) -> list[dict]:
 
 
 def _rows_from_batch(batch_dir: Path, review_rows: list[dict]) -> list[dict] | None:
-    """有正式批次时，按题库字段（material / stem / options / subquestions）出卡片。"""
+    """有正式批次时按题库字段出卡片；既无 batch.json 也无 report.json 行时只读回退到前置产物。"""
     path = batch_dir / "06_batch" / "batch.json"
-    if not path.is_file():
-        return None
-    try:
-        batch = json.loads(path.read_text(encoding="utf-8-sig"))
-    except json.JSONDecodeError:
-        return None
-    items = batch.get("items") or []
+    items = None
+    if path.is_file():
+        try:
+            batch = json.loads(path.read_text(encoding="utf-8-sig"))
+            items = batch.get("items") or []
+        except json.JSONDecodeError:
+            items = None
+    if not items and not review_rows:
+        try:
+            from workbench.anomaly_views import load_preview_batch_items
+            items = load_preview_batch_items(batch_dir)
+        except ImportError:
+            items = None
     if not items:
         return None
     items = source_group_candidates(batch_dir, items)
@@ -684,7 +690,7 @@ def _rows_from_batch(batch_dir: Path, review_rows: list[dict]) -> list[dict] | N
         filters = item.get("filterMetadata") if isinstance(item.get("filterMetadata"), dict) else {}
         item_subtypes = item.get("subtypes") if isinstance(item.get("subtypes"), list) else filters.get("subtypes")
         rows.append({
-            "unit_id": uid if scoped else item.get("id", ""),
+            "unit_id": uid if scoped else (item.get("id") or uid),
             **{key: item[key] for key in ("identity_version", "section_id", "source_section", "question_ids", "printed_numbers") if key in item},
             **({"printed_numbers": printed_numbers} if printed_numbers is not None else {}),
             "number": str(nums[0]),

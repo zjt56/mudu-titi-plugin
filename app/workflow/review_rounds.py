@@ -136,14 +136,14 @@ def _agent_roles():
     return agent_roles
 
 
-_NO_AP_REMINDER_TYPES = frozenset(("完成句子", "短文填空", "选词填空", "教材语篇填空"))
+_NO_AP_REMINDER_TYPES = frozenset(("完成句子", "短文填空", "教材语篇填空"))
 
 
 def _answer_point_types():
     from workbench import taxonomy
     return frozenset(
-        name for name, rule in taxonomy.type_knowledge_rules().items()
-        if any(dim.get("dim") == "答案考点" for dim in rule.get("dims") or ())
+        name for name in taxonomy.type_knowledge_rules()
+        if any(taxonomy.has_answer_point_dim(name, uk) for uk in (None, "group", "standalone"))
     )
 
 
@@ -246,8 +246,16 @@ def _round_prompt(round_id, targets, context):
         + ("单词拼写若为「用所给词的适当形式填空」，即使涉及派生词性变化（如 invent→inventor）也只填单一子类 [\"适当形式\"]，不叠加「词形转换」；仅当同时给出两类独立提示线索时才多选。"
            if has_spelling else "")
         + "【叶子即终点·维度自洽】assessment.knowledge 必须逐字照抄 references/knowledge-catalog.json 的 paths（严禁拼接更深子级或混拼不同分支；exact_paths_by_type 精确路径不下选），"
-        "且严格遵守 references/type-knowledge-map.json 允许维度。无法在允许维度找到有语义证据的合法叶子时，用 verdict=uncertain、assessment=null 并说明缺失证据，不得为了目录校验挑一个『最近』的知识点，也不得改主类迁就知识点。"
-        "【标签分层】整组题型（阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话）只判组级知识点，整篇题组按目标列出子题且其 knowledge=[]（单题 subquestions=[]）；"
+        "且严格遵守 references/type-knowledge-map.json 允许维度（含 by_unit_kind）。无法在允许维度找到有语义证据的合法叶子时，用 verdict=uncertain、assessment=null 并说明缺失证据，不得为了目录校验挑一个『最近』的知识点，也不得改主类迁就知识点。"
+        "【标签分层与专项规则】"
+        "① 阅读理解（组题）：全部标签（语篇体裁 + 主题 + 设题角度/阅读/*）标在组题级 assessment.knowledge，subquestions[i].knowledge 保持 []；"
+        "其中文体必须通读全文（首段、主体展开与结尾落点）再判断，严禁只看首段或其中一小段；设题角度必须逐小题分析每道小题的问法与解题路径（如五道小题逐题分析），再把各小题得出的「设题角度/阅读/*」去重汇总到组题级。"
+        "② 选词填空：整题（unit_kind=group）只要答案考点——assessment.knowledge 填 []、subquestions[i].knowledge 填 []，不打主题/语篇体裁/目录词汇语法，在 assessment.answer_points 填去重答案词/短语；"
+        "单题（unit_kind=standalone）删除主题和语篇体裁，只判「词汇/语法」并省略 answer_points。"
+        "③ 完成句子：必须以空格/划线处的标准答案反推词汇与语法考点，禁止拿题干非空已有内容打标。"
+        "④ 听力信息转换：assessment.knowledge 只保留「主题 + 语篇体裁」（不挂设题角度/听力，不从目录选词汇/语法），答案考点填在 assessment.answer_points。"
+        "⑤ 只要是组题（unit_kind=group，不限题型——含阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空整题/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话/语音题等），"
+        "全部标签均只打在组题级 assessment.knowledge，不在子题中呈现；组题按目标列出子题且其 knowledge=[]（单题 subquestions=[]）；"
         "子题 knowledge=[] 与题组级 options=[]（选项在各子题）均为合规设计，严禁据此报错或判 uncertain。",
     ]
 
@@ -257,19 +265,19 @@ def _round_prompt(round_id, targets, context):
 
     if has_ap:
         lines.append(
-            "【答案考点】仅当 assessment.type 在维度表启用「答案考点」时，在 assessment.answer_points 独立填写审核范围内的正确答案词或短语数组"
-            "（选择题先将答案字母映射到正确选项文字，填空保留实际词形，组题逐空去重；仅填单词或短语，跳过完整句子、纯数字和占位）；"
-            "完成句子、短文填空、选词填空、教材语篇填空等未配置答案考点的题型填 []。"
+            "【答案考点】仅当 assessment.type（在当前 group/standalone 形态下）在维度表启用「答案考点」时，在 assessment.answer_points 独立填写审核范围内的正确答案词或短语数组"
+            "（选择题先将答案字母映射到正确选项文字，填空保留实际词形，组题逐空去重；仅填单词或短语，跳过完整句子、纯数字和占位；选词填空仅整题 group 启用，单题 standalone 不启用）；"
+            "完成句子、短文填空、教材语篇填空等未配置答案考点的题型填 []。"
         )
     elif has_no_ap_fill:
         lines.append(
-            "【答案考点】完成句子、短文填空、选词填空、教材语篇填空等未配置答案考点的题型填 []（或省略 answer_points）。"
+            "【答案考点】完成句子、短文填空、教材语篇填空及选词填空单题等未配置答案考点的题型填 []（或省略 answer_points）。"
         )
     else:
         lines.append("【答案考点】本分片题型未配置答案考点，answer_points 省略或填 []。")
 
     media_rule = (
-        "【媒体与引证·输出精简】不得凭占位符声称已看图或已听音频；遇图片/音频能力受限仅客观记录局限，不臆造不匹配。"
+        "【媒体与引证·细致审读】不得凭占位符声称已看图或已听音频；遇图片/音频能力受限仅客观记录局限，不臆造不匹配。"
     )
     if has_listening:
         media_rule += (
@@ -277,11 +285,13 @@ def _round_prompt(round_id, targets, context):
             "转写属文本证据不代表听过音频，回应已消解的细节不得判矛盾。"
         )
     media_rule += (
-        "evidence 每条 check 仅摘 1–2 条最短定位原文（至少 1 条来自 01_source/正文.txt 且含实质文字），"
+        "evidence 每条 check 摘 1–2 条最短定位原文（至少 1 条来自 01_source/正文.txt 且含实质文字），"
         "必须是绑定文件的单段逐字连续片段（严禁改写拼写/词形/标点、严禁跨段拼接或加省略号、禁止整段或逐小题抄录）。"
-        "rationale 用简体中文写实质语义依据，把每个所选知识点对应到具体线索（禁用 'What the question tests' 等英文模板前缀）。"
-        "分级限长：verdict=ok 时控制在 30–60 字以内（简列题型与核心考点依据，组题简述主题与设题角度即可，不必逐小题展开长篇解析）；"
-        "仅 verdict=error/uncertain 时展开写明具体缺陷或缺失证据。提交前核对 rationale 与 assessment 不自相矛盾，移除仅由背景或干扰项支撑的可选标签。"
+        "rationale 用简体中文写细致、精炼且有实质语义依据的结构化分析（每题控制在 100–220 字左右，简明列出要点即可，不重复抄录长段原文或写冗余铺垫；禁用 'What the question tests' 等英文模板前缀，拒绝敷衍套话）："
+        "① 阅读理解须先概括全文首中尾结构说明体裁与主题依据，再逐小题说明各题解题路径与对应设题角度；"
+        "② 完成句子须点明空格标准答案及由该答案反推的具体词汇/语法考点；"
+        "③ 其余题型把每个所选知识点一一对应到具体原文/答案线索，并排查是否遗漏并列核心考点或误挂背景/干扰项标签。"
+        "verdict=error/uncertain 时展开写明具体缺陷或缺失证据。提交前核对 rationale 与 assessment 不自相矛盾。"
         "非 ok 问题可附精确的 issue_key（点明受影响字段与缺陷，勿写泛化分类）及可选 resolution_key（明确修法时填写，不确定则省略）。"
     )
     lines.append(media_rule)
@@ -804,21 +814,30 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
         catalog_key = 'references/knowledge-catalog.json'
         tkm_key = 'references/type-knowledge-map.json'
         names = set()
+        specs = set()
         cand_names = {_declared_section_type(unit) for unit in selected}
         if cand_names and None not in cand_names:
             names = cand_names
+            for unit in selected:
+                ty = _declared_section_type(unit)
+                if ty:
+                    specs.add((ty, unit.get('unit_kind')))
         if not names and raw_types_by_unit:
             cand_names = {raw_types_by_unit.get(unit['unit_id']) for unit in selected}
             if cand_names and None not in cand_names:
                 names = cand_names
         # Keep the declared scope available for independent judgment, with the
         # delivered type's allowed dimensions available even when they differ.
-        names.update(raw_types_by_unit[u['unit_id']] for u in selected
-                     if raw_types_by_unit.get(u['unit_id']))
+        for u in selected:
+            raw_ty = raw_types_by_unit.get(u['unit_id'])
+            if raw_ty:
+                names.add(raw_ty)
+                specs.add((raw_ty, u.get('unit_kind')))
         rules_key = 'skills-reference/knowledge-matching-rules.md'
         if names:
             if catalog_key in subset:
-                subset[catalog_key] = review.compact_knowledge_catalog(sorted(names))
+                compact_targets = sorted(specs, key=lambda x: (x[0], x[1] or '')) if specs else sorted(names)
+                subset[catalog_key] = review.compact_knowledge_catalog(compact_targets)
             if isinstance(subset.get(rules_key), str):
                 subset[rules_key] = review.scope_knowledge_rules(subset[rules_key], sorted(names))
             if isinstance(subset.get(tkm_key), dict):
@@ -930,7 +949,7 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
     for unit in units:
         flag = _is_listening_unit(unit)
         run_key = (
-            (flag, catalog_packs.bucket_for_type(_unit_type_for_bucket(unit)))
+            (flag, catalog_packs.bucket_for_type(_unit_type_for_bucket(unit), unit_kind=unit.get('unit_kind')))
             if max_units is not None else flag
         )
         if max_units is not None and run_key in run_index:
@@ -942,11 +961,27 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
         else:
             runs[-1][1].append(unit)
 
-    def split_run(run_units):
+    _SINGLE_UNIT_REVIEW_BUCKETS = frozenset(('reading', 'discourse'))
+    _HEAVY_REVIEW_BUCKETS = frozenset(('mixed_cloze', 'dialogue'))
+
+    def split_run(run_key, run_units):
         effective_max = max_units
-        if (standalone_max_units is not None
+        bucket_name = run_key[1] if (isinstance(run_key, tuple) and len(run_key) == 2) else None
+        has_writing = any(_unit_type_for_bucket(u) == '书面表达' for u in run_units)
+        has_group = any(u.get('unit_kind') == 'group' for u in run_units)
+        if effective_max is not None and (
+                (bucket_name in _SINGLE_UNIT_REVIEW_BUCKETS and has_group) or has_writing):
+            # 长阅读/长语篇题组（阅读理解/任务型阅读/读写综合/完形/语法选择/听力信息转换）与书面表达：
+            # 每片 1 个单元并行盲审，既保证全文体裁与逐小题设题角度的细致分析，
+            # 也避免多篇长文或两篇作文合并单片导致高延迟推理模型触发 480s 超时。
+            effective_max = 1
+        elif (standalone_max_units is not None
                 and all(u.get('unit_kind') == 'standalone' for u in run_units)):
             effective_max = max(1, int(standalone_max_units))
+        elif (effective_max is not None and bucket_name in _HEAVY_REVIEW_BUCKETS
+                and has_group):
+            # 其余长语篇题组（短文填空/补全对话等）每片至多 2 组。
+            effective_max = min(effective_max, 2)
         if effective_max is not None and len(run_units) > effective_max:
             part_count = math.ceil(len(run_units) / effective_max)
             base_size, extra = divmod(len(run_units), part_count)
@@ -963,8 +998,8 @@ def _partition_contexts(base, budget, max_units=None, round_id="sample", target_
         return split_within_budget(run_units)
 
     parts = []
-    for _, run_units in runs:
-        parts.extend(split_run(run_units))
+    for run_key, run_units in runs:
+        parts.extend(split_run(run_key, run_units))
     return parts
 
 
@@ -1016,12 +1051,60 @@ def _project_review_answer_points(checks):
             main_type = assessment.get("type")
             points = assessment.get("answer_points")
             rule = rules.get(main_type) if isinstance(main_type, str) else None
+            subquestions = assessment.get("subquestions")
+            inferred_kind = "group" if isinstance(subquestions, list) and subquestions else "standalone"
             if (rule and isinstance(points, list) and points
                     and all(isinstance(p, str) and p.strip() for p in points)
-                    and not any(dim.get("dim") == "答案考点" for dim in rule["dims"])):
+                    and not taxonomy.has_answer_point_dim(main_type, inferred_kind)):
                 check = {**check, "assessment": {**assessment, "answer_points": []}}
         projected.append(check)
     return projected
+
+
+def _project_review_checks(checks, units_by_id=None):
+    """Apply lossless deterministic projections before strict review validation.
+
+    1. Standalone units omitting ``subquestions`` (or passing ``None``) default to ``[]``.
+    2. Types with no catalog subtypes omitting ``subtypes`` (or passing ``None``) default to ``[]``.
+    3. Unambiguous unique-leaf knowledge path typos (same root dimension + unique
+       catalog leaf name) are canonicalized; ambiguous/invented paths remain untouched.
+    4. Inapplicable ``answer_points`` are cleared (delegating to ``_project_review_answer_points``).
+    """
+    from workbench import taxonomy
+
+    if not isinstance(checks, list):
+        return checks
+    units_by_id = units_by_id if isinstance(units_by_id, dict) else {}
+    catalog_types = taxonomy.types()
+    projected = []
+    for check in checks:
+        assessment = check.get("assessment") if isinstance(check, dict) else None
+        if isinstance(assessment, dict):
+            uid = check.get("unit_id")
+            unit = units_by_id.get(uid) if isinstance(uid, str) else None
+            unit_kind = unit.get("unit_kind") if isinstance(unit, dict) else None
+            main_type = assessment.get("type")
+            updated = None
+            if unit_kind == "standalone" and assessment.get("subquestions") is None:
+                updated = dict(assessment) if updated is None else updated
+                updated["subquestions"] = []
+            if (isinstance(main_type, str) and main_type in catalog_types
+                    and not taxonomy.subtypes(main_type)
+                    and assessment.get("subtypes") is None):
+                updated = dict(assessment) if updated is None else updated
+                updated["subtypes"] = []
+            knowledge = assessment.get("knowledge")
+            if isinstance(knowledge, list) and knowledge:
+                canon, rewrites = taxonomy.canonicalize_knowledge_paths(
+                    knowledge, main_type=main_type if isinstance(main_type, str) else None,
+                    unit_kind=unit_kind)
+                if rewrites:
+                    updated = dict(assessment) if updated is None else updated
+                    updated["knowledge"] = canon
+            if updated is not None:
+                check = {**check, "assessment": updated}
+        projected.append(check)
+    return _project_review_answer_points(projected)
 
 
 def _partition_target_key(review, round_id, target):
@@ -1263,6 +1346,14 @@ def _normalize_model_envelope(result):
     """
     if not isinstance(result, dict):
         return result
+    if "status" not in result and "artifacts" not in result:
+        if set(result) == {"checks"} and isinstance(result["checks"], list):
+            return {"status": "completed", "artifacts": {ARTIFACT: {"checks": result["checks"]}},
+                    "notes": [], "findings": []}
+        if (set(result) == {ARTIFACT} and isinstance(result[ARTIFACT], dict)
+                and isinstance(result[ARTIFACT].get("checks"), list)):
+            return {"status": "completed", "artifacts": {ARTIFACT: result[ARTIFACT]},
+                    "notes": [], "findings": []}
     status = result.get('status')
     if status not in ('completed', 'needs_review'):
         return result
@@ -2099,7 +2190,13 @@ def _import_result(batch_dir, task_id, result):
                         "index": index,
                         "reason": "invalid_unit_id" if key is None else "outside_partition",
                     })
-        projected = _project_review_answer_points(projected)
+        units_by_id = {}
+        try:
+            units_by_id = {u["unit_id"]: u for u in review._confirmed_review_units(batch)
+                           if isinstance(u, dict) and u.get("unit_id")}
+        except Exception:
+            units_by_id = {}
+        projected = _project_review_checks(projected, units_by_id=units_by_id)
         if projected != original_checks:
             # Retain the submitted envelope. Coverage, receipts and later
             # provenance checks bind the same projected response.

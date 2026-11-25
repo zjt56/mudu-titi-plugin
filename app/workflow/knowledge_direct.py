@@ -34,7 +34,8 @@ def _fixed_path_for_type(main_type: str) -> str | None:
 
 
 def tag_units(batch_dir: Path | str, units: list[dict] | None = None) -> dict[str, dict]:
-    """Deterministically tag units whose type has a single exact knowledge path."""
+    """Deterministically tag units whose type has a single exact knowledge path
+    or an answer-point-only rule (e.g. ``选词填空`` group -> ``knowledge=[]``)."""
     batch = Path(batch_dir).resolve()
     types_path = batch / agent_tasks.ARTIFACTS["types"]
     if not types_path.is_file():
@@ -54,6 +55,22 @@ def tag_units(batch_dir: Path | str, units: list[dict] | None = None) -> dict[st
     for unit in units:
         uid = unit["unit_id"]
         main_type = type_by_id.get(uid, "")
+        unit_kind = unit.get("unit_kind")
+        if taxonomy.answer_point_only_type(main_type, unit_kind):
+            row = {
+                "unit_id": uid,
+                "knowledge": [],
+                "subquestions": (
+                    [{"number": str(n), "knowledge": []} for n in (unit.get("numbers") or [])]
+                    if unit_kind == "group"
+                    else []
+                ),
+                "evidence": [f"固定题型规则直标：{main_type}（整题）仅保留答案考点，目录知识点留空"],
+            }
+            if taxonomy.check_labels({**row, "type": main_type, "unit_kind": unit_kind}):
+                continue
+            direct[uid] = row
+            continue
         fixed_path = _fixed_path_for_type(main_type)
         if not fixed_path:
             continue
@@ -62,12 +79,12 @@ def tag_units(batch_dir: Path | str, units: list[dict] | None = None) -> dict[st
             "knowledge": [fixed_path],
             "subquestions": (
                 [{"number": str(n), "knowledge": []} for n in (unit.get("numbers") or [])]
-                if unit.get("unit_kind") == "group"
+                if unit_kind == "group"
                 else []
             ),
             "evidence": [f"固定题型规则直标：{main_type} -> {fixed_path}"],
         }
-        if taxonomy.check_labels({**row, "type": main_type}):
+        if taxonomy.check_labels({**row, "type": main_type, "unit_kind": unit_kind}):
             continue
         direct[uid] = row
     return direct

@@ -40,6 +40,7 @@
               h(KnowledgePicker, {
                 paths: labels?.knowledge || [],
                 mainType: labels?.type || '',
+                unitKind: isGroup ? 'group' : 'standalone',
                 onChange: (arr) => setL('knowledge', arr),
                 fetchTree: fetchKnowledgeTree,
               }),
