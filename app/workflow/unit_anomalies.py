@@ -204,8 +204,8 @@ def clear_stage_anomalies(batch_dir, stage: str, unit_ids) -> None:
 def resolve_stage_anomalies(batch_dir, stage: str, unit_ids, *, actor: str = "workbench") -> None:
     """Mark quarantined entries as manually resolved in the ledger without mutating stage artifacts.
 
-    Never rewrites `03_types/types.json`, `04_knowledge/knowledge.json`, etc., so upstream
-    `output_hashes` in `manifest.json` stay untouched and never trigger full-stage re-runs.
+    Skips units that were never quarantined (neither in ledger nor in stage artifact markers)
+    so normal edits never pollute `07_review/unit-anomalies.json` with noise records.
     """
     wanted = {str(uid).strip() for uid in (unit_ids or ()) if str(uid).strip()}
     if not wanted:
@@ -213,12 +213,17 @@ def resolve_stage_anomalies(batch_dir, stage: str, unit_ids, *, actor: str = "wo
     with _anomaly_lock(batch_dir):
         data = load_anomalies(batch_dir)
         units = dict(data.get("units") or {})
+        artifact_flagged = {
+            row["unit_id"] for row in artifact_quarantined_entries(batch_dir, stage=stage)
+        }
         stamp = _now_iso()
         changed = False
         for uid in sorted(wanted):
             before = [e for e in (units.get(uid) or []) if isinstance(e, dict)]
             others = [e for e in before if str(e.get("stage") or "") != stage]
             existing = next((e for e in before if str(e.get("stage") or "") == stage), None)
+            if existing is None and uid not in artifact_flagged:
+                continue
             if existing is not None and not existing.get("quarantined") and existing.get("resolved_at"):
                 continue
             resolved_entry = dict(existing or {"stage": stage})

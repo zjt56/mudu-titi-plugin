@@ -287,6 +287,15 @@ def build_parts(batch, stage, max_input_chars, max_units=15, *, selected_ids=Non
         if stage == "knowledge":
             for key in _KNOWLEDGE_DROP:
                 subset.pop(key, None)
+            from . import quarantine_policy
+            types_items = (subset.get(agent_tasks.ARTIFACTS["types"]) or {}).get("items") or []
+            shard_needs_answers = any(
+                isinstance(r, dict)
+                and str(r.get("type") or "").strip() in quarantine_policy.ANSWER_DEPENDENT_KNOWLEDGE_TYPES
+                for r in types_items
+            )
+            if not shard_needs_answers:
+                subset.pop(agent_tasks.ARTIFACTS["answers"], None)
             _prune_knowledge_catalog(subset)
         if stage == "assemble":
             for key in _ASSEMBLE_DROP:

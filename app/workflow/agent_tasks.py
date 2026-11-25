@@ -499,9 +499,11 @@ def _collect(batch, stage, speculative=False, allow_pending_audio=False):
                     textbook.CATALOG_PATH.read_bytes()).hexdigest()
         else:
             contexts["textbook_matching"] = tb_state
-        # 知识点标注依赖已验收的结构化答案（完成句子等需以答案反推考点）；
-        # 无答案来源/测试跳过 answers 时平滑降级，不阻塞流程。
-        if not speculative:
+        # 知识点标注始终保留不可变原卷参考答案文本（附录/答案正文）作辅助线索，
+        # 但仅在含完成句子等答案反推题型时才绑定动态阶段产物 answers.json，
+        # 避免修改单题答案导致无关题型的知识点分片缓存失效重跑。
+        from . import quarantine_policy
+        if not speculative and quarantine_policy.batch_has_answer_dependent_knowledge_types(batch):
             add(ARTIFACTS["answers"], False)
         add("01_source_ans/正文.txt", False)
         add("01_source/附录.txt", False)

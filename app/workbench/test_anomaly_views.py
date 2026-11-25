@@ -538,6 +538,10 @@ class AnomalyViewsTest(unittest.TestCase):
             cleared = upload_payload.build_payload({"items": []}, batch_dir=root)
             self.assertFalse(any(err.get("code") == "UNIT_QUARANTINED" for err in cleared["errors"]))
 
+            # 从未被隔离过的正常题调用 resolve_stage_anomalies 不写冗余记录到台账
+            unit_anomalies.resolve_stage_anomalies(root, "types", ["q-never-quarantined"])
+            self.assertNotIn("q-never-quarantined", unit_anomalies.load_anomalies(root)["units"])
+
             # 正则词边界：题号含 0429 或正文含 connection 不得误判为暂态错误
             self.assertFalse(unit_anomalies._is_transient_error("Invalid label for q-0429: missing subtype"))
             self.assertFalse(unit_anomalies._is_transient_error("Sentence connection logic mismatch in rationale"))

@@ -82,10 +82,14 @@ class LabelPartReuseTest(unittest.TestCase):
                 self.assertNotIn("Who went", parts[0]["prompt"])
                 self.assertIn("Paper title", parts[0]["prompt"])
                 self.assertIn("End of paper", parts[0]["prompt"])
-                if stage in ("answers", "explanations"):
+                self.assertEqual([u["unit_id"] for u in value["confirmed_units_with_stable_ids"]], ["q-1"])
+                if stage in ("answers", "explanations", "knowledge"):
                     self.assertNotIn("01_source/structure.confirmed.json", value)
                 else:
-                    self.assertEqual([u["unit_id"] for u in value["01_source/structure.confirmed.json"]["units"]], ["q-1"])
+                    # types 阶段去除了冗余的 units 副本，仅在有非单元元数据时保留精简结构对象。
+                    struct = value.get("01_source/structure.confirmed.json")
+                    if isinstance(struct, dict):
+                        self.assertNotIn("units", struct)
                 self.assertNotIn("workflow/manifest.json", base["input_hashes"])
                 self.assertIn("01_source/正文.txt", base["input_hashes"])
                 self.assertTrue(any(Path(k).is_absolute() and Path(k).resolve() == self.original.resolve()
@@ -137,11 +141,22 @@ class LabelPartReuseTest(unittest.TestCase):
         self.assertEqual(before[1], after[1])
 
     def test_answer_change_does_not_retag_knowledge(self):
-        # knowledge now consumes only types/structure; answers merge at assemble.
+        # 不含完成句子时，knowledge 不绑定答案，改答案不让知识点分片失效重跑。
         before = self.keys()
         self.answers["answers"]["1"] = "D"
         self.write(agent_tasks.ARTIFACTS["answers"], self.answers)
         self.assertEqual(self.keys(), before)
+
+    def test_answer_change_retags_only_sentence_completion_shard(self):
+        # 含完成句子时，改完成句子答案只让该完成句子分片失效，同卷其他阅读理解分片缓存键不变。
+        self.types["items"][0] = dict(self.types["items"][0], type="完成句子", subtypes=["汉语提示"])
+        self.write(agent_tasks.ARTIFACTS["types"], self.types)
+        before = self.keys()
+        self.answers["answers"]["1"] = "take off"
+        self.write(agent_tasks.ARTIFACTS["answers"], self.answers)
+        after = self.keys()
+        self.assertNotEqual(after[0], before[0])
+        self.assertEqual(after[1], before[1])
 
     def test_source_txt_change_localizes_only_with_exact_original_and_stable_spans(self):
         for stage in unit_context.STAGES:

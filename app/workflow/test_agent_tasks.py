@@ -153,10 +153,16 @@ class AgentTasksTest(unittest.TestCase):
         self.assertEqual(set(context["references/knowledge-catalog.json"]["paths"]), taxonomy.knowledge_index()[1] | {"语音/基本读音"})
         self.assertEqual(context["01_source/附录.txt"], "答案: 1. A")
         self.assertEqual(context["01_source_ans/正文.txt"], "原始答案材料：第1题 A")
-        # 2026-11-25 规则：知识点阶段消费已验收的结构化答案（完成句子等以答案反推考点），仍不绑定解析或听力。
-        self.assertIn(tasks.ARTIFACTS["answers"], task["input_hashes"])
+        # 2026-11-25 软依赖规则：非完成句子批次保留原卷参考答案文本，但不硬绑定动态产物 answers.json；
+        # 仅含完成句子时才绑定 answers.json，仍不绑定解析或听力。
+        self.assertNotIn(tasks.ARTIFACTS["answers"], task["input_hashes"])
         self.assertNotIn(tasks.ARTIFACTS["explanations"], task["input_hashes"])
         self.assertNotIn(tasks.ARTIFACTS["audio"], task["input_hashes"])
+        sc_types = copy.deepcopy(self.types)
+        sc_types["items"][0] = dict(sc_types["items"][0], type="完成句子", subtypes=["汉语提示"])
+        self.write(tasks.ARTIFACTS["types"], sc_types)
+        sc_task = tasks.build_task(self.batch, "knowledge")
+        self.assertIn(tasks.ARTIFACTS["answers"], sc_task["input_hashes"])
 
     def test_knowledge_drops_repeated_type_fields_from_agent_output(self):
         candidate = copy.deepcopy(self.knowledge)
