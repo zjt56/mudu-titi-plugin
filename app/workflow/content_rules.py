@@ -128,19 +128,6 @@ def _children(row, unit):
     return children
 
 
-def _substantive(text, minimum):
-    body = text.replace(AI_MARK, "").strip()
-    return len(re.sub(r"\s|[^\w\u4e00-\u9fff]", "", body)) >= minimum
-
-
-def _ai_within_limit(text):
-    """AI 补写上限：中文 ≤50 字，英文 ≤50 词（取较大者判断）。"""
-    body = text.replace(AI_MARK, "").strip()
-    cjk = len(re.findall(r"[\u4e00-\u9fff]", body))
-    words = len(re.findall(r"[A-Za-z][A-Za-z'-]*", body))
-    return cjk <= AI_MAX_CJK and words <= AI_MAX_WORDS
-
-
 def _check_generated(text, label, minimum):
     """AI 标记不能使自撰内容合法，也不能把真实输入静默清成缺失。"""
     if AI_MARK in text:

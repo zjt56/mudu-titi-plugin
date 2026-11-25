@@ -505,6 +505,35 @@ class MonitoringOptimizationsTest(unittest.TestCase):
 
         self.assertFalse(agent._review_inputs_ready(self.batch, allow_pending_audio=False))
 
+    def test_stale_audio_binding_is_pending_for_review_and_invalidated_in_delivery(self):
+        from workflow import agent_tasks, manifest as mf, review_rounds
+        self._put("01_source/正文.txt", "1. She ___ a book. A. reads B. read C. reading D. to read")
+        self._put("attachments/audio.mp3", "fake")
+        manifest = mf.new_manifest(
+            "test-stale-audio",
+            self.batch,
+            {
+                "source": {"path": str(self.batch / "01_source/正文.txt"), "sha256": "x", "exists": True},
+                "audio": {"path": str(self.batch / "attachments/audio.mp3"), "sha256": "y", "exists": True},
+            },
+            {},
+        )
+        manifest["stages"]["validate"] = {"status": mf.COMPLETED}
+        manifest["stages"]["audio"] = {"status": mf.COMPLETED}
+        self._put("workflow/manifest.json", manifest)
+        self._put("02_audio/audio_map.json", {"unit_binding": {"version": 1, "sha256": "stale", "listening_units": []}, "items": []})
+        self._put("02_audio/segment-evidence.json", {"generator": "audio.segment/v2", "unit_binding": {"version": 1, "sha256": "stale", "listening_units": []}, "items": []})
+
+        self.assertTrue(review_rounds._audio_pending(self.batch))
+        _, _, missing_pending, _ = agent_tasks._collect(self.batch, "review", allow_pending_audio=True)
+        self.assertTrue(any("03_types/types.json" in row for row in missing_pending))
+        with self.assertRaises(ValueError):
+            agent_tasks._collect(self.batch, "review", allow_pending_audio=False)
+
+        invalidated = mf.reconcile_deliveries(self.batch, manifest)
+        self.assertIn("audio", invalidated)
+        self.assertEqual(manifest["stages"]["audio"]["status"], mf.INVALIDATED)
+
     def test_scope_knowledge_rules_and_prefix_ordering(self):
         from workflow import review
         rules_path = Path(review.__file__).resolve().parents[1] / "skills-reference/knowledge-matching-rules.md"
@@ -628,6 +657,22 @@ class MonitoringOptimizationsTest(unittest.TestCase):
             first[0]["title"] = "MUTATED"
             second = sync_practice.heading_candidates(sample_text)
             self.assertNotEqual(second[0]["title"], "MUTATED")
+
+    def test_orphan_running_skips_when_recent_activity_exists_and_contract_error_recommends_resume(self):
+        self._put("01_source/正文.txt", "1. hi")
+        manifest = mf.new_manifest("test-orphan", self.batch, {"source": {"path": str(self.batch / "01_source/正文.txt"), "sha256": "x"}}, {})
+        manifest["stages"]["preassemble"] = {
+            "status": mf.RUNNING,
+            "started_at": "2020-01-01T00:00:00+00:00",
+        }
+        self._put("workflow/manifest.json", manifest)
+        self._put("workflow/logs/preassemble.log", "active write")
+        with patch.object(op, "_execution_busy", return_value=False):
+            stage_id, _ = op._stale_running_candidate(self.batch, manifest)
+            self.assertIsNone(stage_id)
+
+        action = op._recommended_action("review", "Invalid fields; absent=['findings', 'notes']", [], {})
+        self.assertIn("resume(retry_stage_with_fresh_context)", action)
 
 
 if __name__ == "__main__":

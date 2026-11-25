@@ -164,6 +164,19 @@ class UploadStatusTests(unittest.TestCase):
         self.assertEqual(finish, "2026-11-24T13:59:51+08:00")
         self.assertEqual(minutes, 16)
 
+    def test_flow_timing_excludes_multi_day_idle_gaps(self):
+        manifest = {"created_at": "2026-11-22T16:06:17+08:00", "stages": {
+            "extract": {"started_at": "2026-11-22T16:06:17+08:00", "finished_at": "2026-11-22T16:06:30+08:00"},
+            "knowledge": {"started_at": "2026-11-22T16:19:54+08:00", "finished_at": "2026-11-22T16:23:17+08:00"},
+            "preassemble": {"started_at": "2026-11-24T22:26:12+08:00", "finished_at": "2026-11-24T22:27:02+08:00"},
+            "review": {"started_at": "2026-11-24T22:27:07+08:00", "finished_at": "2026-11-24T22:34:20+08:00"},
+            "format_gate": {"status": "completed", "started_at": "2026-11-24T22:34:20+08:00",
+                            "finished_at": "2026-11-24T22:34:21+08:00"}}}
+        start, finish, minutes = server._flow_timing(manifest)
+        self.assertEqual(start, "2026-11-22T16:06:17+08:00")
+        self.assertEqual(finish, "2026-11-24T22:34:21+08:00")
+        self.assertEqual(minutes, 25)
+
     def record(self, path, value):
         target = self.folder / "07_upload" / path
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -265,7 +265,7 @@ test('整包执行 WfPanel -> 切到「题型审核」-> 加载分页列表并�
   const detailTree = mountOrUpdate(rv.type, rv.props, 'rv-b1');
   assert.ok(detailTree, 'ReviewView 单题加载后应正常渲染');
   const detailJson = JSON.stringify(detailTree, (_k, v) => (typeof v === 'function' ? '[fn]' : v));
-  assert.doesNotMatch(detailJson, /整卷预览/, '题型审核视图不渲染整卷预览按钮');
+  assert.doesNotMatch(detailJson, /预览对照|整卷预览/, '题型审核视图不渲染预览对照按钮');
   assert.doesNotMatch(detailJson, /AI解析|AI文章大意|听力材料补全/, '题型审核视图不渲染 AI解析/AI文章大意/听力材料补全 按钮');
   assert.doesNotMatch(detailJson, /"标签审核"/, '右侧不再展示「标签审核」标题');
   assert.match(detailJson, /"知识点标签"/, '右侧直接以「知识点标签」作为小标题');

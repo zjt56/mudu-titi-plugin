@@ -279,6 +279,36 @@ class DocxExtractTests(unittest.TestCase):
         self.assertFalse(by_name["option.png"].get("decorative"))
         self.assertFalse(by_name["passage.png"].get("decorative"))
 
+    def test_flat_option_slot_images_are_protected_from_decorative_tagging(self):
+        def fake_png(width, height, total_bytes):
+            head = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", width, height)
+            return head + b"\x00" * max(0, total_bytes - len(head))
+
+        rels = "".join(
+            f'<Relationship Id="r{i}" Type="{R}/image" Target="media/{name}"/>'
+            for i, name in enumerate(["clockA.png", "clockB.png", "clockC.png", "badge.png"], 1)
+        )
+        body = (
+            f'<w:p>{image("r4")}<w:r><w:t>(  )9.What time is it?</w:t></w:r></w:p>'
+            f'<w:p>'
+            f'<w:r><w:t>A.</w:t></w:r>{image("r1")}'
+            f'<w:r><w:tab/><w:t>B.</w:t></w:r>{image("r2")}'
+            f'<w:r><w:tab/><w:t>C.</w:t></w:r>{image("r3")}'
+            f'</w:p>'
+        )
+        self.make_docx(body, rels=rels, parts={
+            "word/media/clockA.png": fake_png(149, 61, 3945),
+            "word/media/clockB.png": fake_png(149, 61, 4048),
+            "word/media/clockC.png": fake_png(149, 61, 3847),
+            "word/media/badge.png": fake_png(149, 61, 3900),  # 同尺寸但不在选项位 -> 仍判装饰徽章
+        })
+        result = extract_docx(self.source, self.out)
+        by_name = {m["name"]: m for m in result["media"]}
+        self.assertFalse(by_name["clockA.png"].get("decorative"))
+        self.assertFalse(by_name["clockB.png"].get("decorative"))
+        self.assertFalse(by_name["clockC.png"].get("decorative"))
+        self.assertTrue(by_name["badge.png"].get("decorative"))
+
     def test_emphasis_dot_extracts_em_and_respects_style_override(self):
         styles = (
             '<w:style w:type="character" w:styleId="Dotted">'

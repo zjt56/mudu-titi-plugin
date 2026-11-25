@@ -139,9 +139,9 @@ test('插件图标同步改为中性灰', () => {
   assert.match(icon, /#8a94a6/);
 });
 
-test('整卷预览按钮使用独立样式类与显式 hover/active 状态，点击不再发白看不见', () => {
-  const idx = client.indexOf("'整卷预览'");
-  assert.ok(idx >= 0, '找不到整卷预览按钮');
+test('预览对照按钮使用独立样式类与显式 hover/active 状态，点击不再发白看不见', () => {
+  const idx = client.indexOf("docIcon(14), '预览对照'");
+  assert.ok(idx >= 0, '找不到预览对照按钮');
   const btnChunk = client.slice(Math.max(0, idx - 260), idx + 40);
   assert.match(btnChunk, /className: 'wf-paper-preview-btn'/);
   assert.doesNotMatch(btnChunk, /wf-btn-primary/);
@@ -149,4 +149,63 @@ test('整卷预览按钮使用独立样式类与显式 hover/active 状态，点
   assert.match(client, /\.wf-paper-preview-btn\{[^}]*display:inline-flex/);
   assert.match(client, /\.wf-paper-preview-btn:not\(:disabled\):hover\{[^}]*background:color-mix/);
   assert.match(client, /\.wf-paper-preview-btn:not\(:disabled\):active\{[^}]*background:color-mix/);
+});
+
+test('预览对照弹窗支持左右双栏 Word 原文件对照、离线 vendor 静态库与按题目同步滚动', () => {
+  assert.ok(fs.existsSync(path.resolve(__dirname, '..', 'lib', 'vendor', 'jszip.min.js')), '缺少离线 jszip.min.js');
+  assert.ok(fs.existsSync(path.resolve(__dirname, '..', 'lib', 'vendor', 'docx-preview.min.js')), '缺少离线 docx-preview.min.js');
+  const host = fs.readFileSync(path.resolve(__dirname, '..', 'lib', 'index.js'), 'utf8');
+  assert.match(host, /sub\.startsWith\('\/vendor\/'\)/, 'Host 必须暴露 /wf-plugin/vendor/* 白名单静态路由');
+  assert.match(client, /title: '预览对照'/);
+  assert.match(client, /Word 原文件对照/);
+  assert.match(client, /wf-compare-split/);
+  assert.match(client, /同步滚动：已开启/);
+  assert.match(client, /定位原文/);
+  assert.match(client, /\/source-docx/);
+
+  // 抽出纯函数验证按题目锚点匹配（避开卷末参考答案）与分段线性插值
+  const start = client.indexOf('function normalizeCompareText(');
+  const end = client.indexOf('function PaperPreviewModal(');
+  assert.ok(start > 0 && end > start, '找不到预览对照同步滚动纯函数区');
+  const helperCode = client.slice(start, end) + '\nreturn { normalizeCompareText, buildCompareSearchProfile, matchCompareAnchors, interpolateSyncedScroll };';
+  const helpers = new Function(helperCode)();
+
+  const items = [
+    { source_section: { title: '一、单项选择' }, number: 1, stem: '— Good morning, Eric!' },
+    { source_section: { title: '二、完形填空' }, unit_kind: 'group', numbers: [11, 12], material: 'Last Sunday my family went to the zoo together.' },
+    { source_section: { title: '三、看图写话' }, number: 21, stem: '[IMG q21.png]' },
+    { source_section: { title: '四、阅读理解' }, unit_kind: 'group', numbers: [22, 23], material: 'Pandas are one of the most popular animals in China.' },
+  ];
+  const profiles = items.map((it) => helpers.buildCompareSearchProfile(it, { secChanged: true, secTitle: it.source_section.title }));
+  const rightRaw = [
+    '七年级英语单元测试',
+    '一、单项选择',
+    '1. — Good morning, Eric!  A. Hello  B. Thanks',
+    '二、完形填空',
+    'Last Sunday my family went to the zoo together. We saw many animals.',
+    '11. A. big  B. small',
+    '三、看图写话',
+    '四、阅读理解',
+    'Pandas are one of the most popular animals in China. They love bamboo.',
+    '参考答案',
+    '1. A  11. B  21. Look at the picture.  22. C',
+    '一、单项选择 答案解析',
+  ];
+  const rightBlocks = rightRaw.map((raw) => ({ raw, norm: helpers.normalizeCompareText(raw) }));
+  const anchors = helpers.matchCompareAnchors(profiles, rightBlocks);
+  assert.deepEqual(
+    anchors.map((a) => [a.idx, a.blockIdx]),
+    [[0, 1], [1, 3], [2, 6], [3, 7]],
+    '应按题顺序精准锚定到右侧正文区且不落入卷末参考答案',
+  );
+
+  // 左侧展开答案后高度变大（比如 0..2000），右侧仍为 0..1000，按锚点插值应精准停在对应题段
+  const pairs = [
+    { src: 100, dst: 80 },
+    { src: 900, dst: 480 },
+    { src: 1600, dst: 800 },
+  ];
+  assert.equal(helpers.interpolateSyncedScroll(100, pairs, 2000, 1000), 80);
+  assert.equal(helpers.interpolateSyncedScroll(500, pairs, 2000, 1000), 280);
+  assert.equal(helpers.interpolateSyncedScroll(900, pairs, 2000, 1000), 480);
 });

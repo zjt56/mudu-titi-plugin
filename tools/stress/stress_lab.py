@@ -189,7 +189,7 @@ def build_fixture(root: Path, seed: int, *, standalone_count=None, only_standalo
     _write(root, "01_source/extraction.json", {})
     _write(root, "01_source/metadata.json", meta)
     (root / "01_source/media").mkdir(parents=True, exist_ok=True)
-    from .agent_tasks import confirmed_units
+    from workflow.agent_tasks import confirmed_units
     units = confirmed_units(root)
     draft = question_draft.ensure(root)
     base = batch_fill.initialize(root)
@@ -241,11 +241,11 @@ def build_fixture(root: Path, seed: int, *, standalone_count=None, only_standalo
     subprocess.run([sys.executable, "scripts/05-meta/assign_meta.py", "--batch",
                     str(root / "06_batch/batch.json"), "--out",
                     str(root / "06_batch/batch_meta.base.json"), "--report"],
-                   capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
+                   capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[2] / "app"))
     subprocess.run([sys.executable, "scripts/06-upload/mark_underline.py", "--batch",
                     str(root / "06_batch/batch_meta.base.json"), "--out",
                     str(root / "06_batch/batch_meta.json"), "--docx", "", "--apply"],
-                   capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
+                   capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[2] / "app"))
     for relative in ("06_batch/batch_meta.base.json", "06_batch/batch_meta.json"):
         if not (root / relative).is_file():
             raise AssertionError("meta output missing " + relative)
@@ -268,7 +268,7 @@ def build_fixture(root: Path, seed: int, *, standalone_count=None, only_standalo
     audit = question_content.audit_batch_source(root, final_view)
     if not audit.get("passed"):
         raise AssertionError({"audit": audit.get("issues", [])[:4]})
-    from . import final_audit
+    from workflow import final_audit
     original = root / "00_original/source.txt"
     original.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(root / "01_source/正文.txt", original)

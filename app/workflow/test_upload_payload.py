@@ -87,7 +87,7 @@ class UploadPayloadTest(unittest.TestCase):
         report = self.build(batch(item))
         self.assertTrue(report["passed"], report["errors"])
         group = report["payload"]["items"][0]
-        self.assertEqual(group["material"], "They saw __56__ and __57__.")
+        self.assertEqual(group["material"], "\u3000\u3000They saw __56__ and __57__.")
         self.assertEqual([child["stem"] for child in group["subquestions"]],
                          ["56.", "Choose the meaning of <u>visit</u>.", "______"])
         self.assertEqual(group["subquestions"][0]["options"], original["subquestions"][0]["options"])
@@ -1030,7 +1030,7 @@ class UploadPayloadTest(unittest.TestCase):
         before = deepcopy(q)
         report = self.build(batch(q))
         self.assertTrue(report["passed"], report["errors"])
-        self.assertEqual(report["payload"]["items"][0]["material"], before["material"])
+        self.assertEqual(report["payload"]["items"][0]["material"], "\u3000\u3000" + before["material"])
         self.assertEqual(q, before)
 
     def test_formatted_field_title_prefixes_rejected_parent_and_child(self):
@@ -1216,3 +1216,22 @@ class AliasAlignmentTests(unittest.TestCase):
         )
         # 本地输入对象不被原地修改
         self.assertEqual(item["stem"], "你的玩偶是什么颜色的?(doll)\n______")
+
+    def test_cloze_10_blanks_plus_extension_question_passes_count_check(self):
+        item = reading_group()
+        item["question_type"] = "完形填空"
+        item["filterMetadata"]["subtypes"] = ["10空"]
+        item["material"] = " ".join(f"It is <u>　{i}　</u>." for i in range(1, 11))
+        item["numbers"] = list(range(1, 12))
+        item["subquestions"] = [
+            {"number": i, "stem": "______", "options": ["A. a", "B. b", "C. c", "D. d"],
+             "answer": "A", "explanation": "无", "knowledge": ["词汇/词汇辨析/动词辨析"]}
+            for i in range(1, 11)
+        ] + [
+            {"number": 11, "stem": "[新考法·写作手法]How does the writer lead into the topic?",
+             "options": ["A. By a story.", "B. By a number.", "C. By a question.", "D. By a quote."],
+             "answer": "C", "explanation": "无", "knowledge": ["词汇/词汇辨析/动词辨析"]}
+        ]
+        report = upload_payload.build_payload(batch(item), self.catalog)
+        self.assertTrue(report["passed"], report["errors"])
+        self.assertNotIn("SUBQUESTION_COUNT_MISMATCH", {e.get("code") for e in report["errors"]})

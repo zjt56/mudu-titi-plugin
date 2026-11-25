@@ -605,12 +605,6 @@ def _rubric_lines(lines, unit_type):
     return rubric
 
 
-def _section_rubric(lines, unit):
-    from .shared_rubric import section_rubric
-    return section_rubric(lines, (unit.get("source_span") or {}).get("start_line"),
-                          unit.get("type") or "")
-
-
 def _numbered_marked_heading(unit, proof, lines, headings, fresh):
     """Bind a marked instruction to an independently located printed question."""
     from .sync_practice import _scoped_mark_window, source_marks

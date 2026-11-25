@@ -191,6 +191,131 @@ def expand_standalone_answer_lines(text):
     return "\n".join(out)
 
 
+# 完形/阅读/语篇等大长材料组题：正文段落统一采用首行缩进两字符（两个全角空格 \u3000\u3000）。
+LONG_MATERIAL_GROUP_TYPES = frozenset({
+    "完形填空",
+    "阅读理解",
+    "任务型阅读",
+    "语法选择",
+    "短文填空",
+    "选词填空",
+    "教材语篇填空",
+    "读写综合",
+})
+NON_LONG_MATERIAL_GROUP_TYPES = frozenset({
+    "补全对话",
+    "听力短对话理解",
+    "听力长对话理解",
+    "听力判断",
+    "听力排序",
+    "语音题",
+    "情景运用",
+})
+_INDENT_SKIP_IMG_ONLY = re.compile(r"^(?:\[IMG\s+[^\]]+\]\s*)+$", re.I)
+_INDENT_SKIP_SECTION_TAG = re.compile(
+    r"^(?:[（(]?\s*[A-Z]\s*[)）]?|(?:Passage|Text|Section|Part)\s*[A-Z0-9]+)$",
+    re.I,
+)
+_INDENT_SKIP_NOTE = re.compile(r"^(?:※\s*Notes?|Notes?|注|提示|【提示】|\*\s*[A-Za-z\u4e00-\u9fff])", re.I)
+_INDENT_SKIP_SPEAKER = re.compile(r"^(?:[A-Z](?:&[A-Z])?|[A-Z][a-z]{1,15}(?:\s+[A-Z][a-z]{1,12})?|Woman|Man|Boy|Girl|Host|Interviewer|Reporter)\s*[：:]")
+_INDENT_SKIP_OPTION = re.compile(r"^(?:[A-G][\.\、\)\s]|①|②|③|④|⑤|⑥|⑦)")
+
+
+def _looks_like_dialogue_material(text: str) -> bool:
+    lines = [ln.strip() for ln in str(text or "").replace("\r\n", "\n").splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return False
+    speaker_lines = sum(1 for ln in lines if _INDENT_SKIP_SPEAKER.match(ln))
+    return speaker_lines >= 2 and speaker_lines >= len(lines) * 0.4
+
+
+def is_long_material_group(item) -> bool:
+    """Return True if item is a grouped question with long prose/passage material needing 2-char indent."""
+    if not isinstance(item, dict):
+        return False
+    material = item.get("material")
+    if not isinstance(material, str) or not material.strip():
+        return False
+    is_group = (
+        item.get("unit_kind") == "group"
+        or (isinstance(item.get("subquestions"), list) and len(item["subquestions"]) > 0)
+    )
+    if not is_group:
+        return False
+    qtype = str(item.get("type") or item.get("question_type") or "").strip()
+    if qtype in NON_LONG_MATERIAL_GROUP_TYPES:
+        return False
+    if _looks_like_dialogue_material(material):
+        return False
+    if qtype in LONG_MATERIAL_GROUP_TYPES:
+        return True
+    # Fallback for untyped or generic grouped passage items: require substantial prose length outside tables/images.
+    plain = re.sub(r"\[TABLE(?:\s+\d+)?\][\s\S]*?\[/TABLE\]", "", material, flags=re.I)
+    plain = re.sub(r"\[IMG\s+[^\]]+\]", "", plain, flags=re.I).strip()
+    if len(plain) < 120:
+        return False
+    # Exclude short word-bank / alphabet-song lists (many very short lines without prose sentences).
+    prose_lines = [ln.strip() for ln in plain.splitlines() if ln.strip()]
+    if prose_lines and max(len(ln) for ln in prose_lines) < 45:
+        return False
+    return True
+
+
+def format_long_material_indent(text: str) -> str:
+    """Apply idempotent 2-fullwidth-space (``\\u3000\\u3000``) first-line indent to prose paragraphs.
+
+    Skips ``[TABLE ...]...[/TABLE]`` blocks, blank lines, standalone ``[IMG ...]`` lines,
+    passage labels (``A`` / ``Passage A``), notes (``※Notes:``), dialogue turns, option lines,
+    and obvious short centered headings without sentence punctuation.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return text
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out = []
+    in_table = False
+    seen_prose = False
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^\[TABLE(?:\s+\d+)?\]", stripped, re.I):
+            in_table = True
+            out.append(line)
+            if re.search(r"\[/TABLE\]\s*$", stripped, re.I):
+                in_table = False
+            continue
+        if in_table:
+            out.append(line)
+            if re.search(r"\[/TABLE\]\s*$", stripped, re.I):
+                in_table = False
+            continue
+        if not stripped:
+            out.append("")
+            continue
+        if (
+            _INDENT_SKIP_IMG_ONLY.match(stripped)
+            or _INDENT_SKIP_SECTION_TAG.match(stripped)
+            or _INDENT_SKIP_NOTE.match(stripped)
+            or _INDENT_SKIP_SPEAKER.match(stripped)
+            or _INDENT_SKIP_OPTION.match(stripped)
+        ):
+            out.append(line)
+            continue
+        # Preserve an obvious short title at the very start of a passage (e.g. "A Trip to Beijing")
+        # when it has no sentence-ending punctuation and no cloze blank.
+        clean_title = re.sub(r"\*{2,}", "", stripped).strip()
+        if (
+            not seen_prose
+            and len(clean_title) <= 42
+            and not re.search(r"[.。!?！？:：,，;；]|_{2,}|<u>", clean_title)
+            and len(lines) > 1
+        ):
+            out.append(stripped)
+            continue
+        seen_prose = True
+        body = line.lstrip(" \t\u3000\xa0")
+        out.append("\u3000\u3000" + body)
+    return "\n".join(out)
+
+
 def normalize_blank_text(text):
     """库侧空档写法：<u>　26　</u> → __26__，行内纯空档 → ______，独立整行答题横线保留为整行。
 
@@ -279,6 +404,29 @@ def decorative_names(batch_dir, extraction=None) -> set[str]:
             match = re.fullmatch(r"\[IMG\s+([^\]]+)\]", str(unit.get("stem") or "").strip())
             if match:
                 protected.add(Path(match.group(1).strip()).name)
+    from workflow import docx_extract
+    body_lines: list[str] = []
+    for rel in ("01_source/正文.txt", "01_source/原始正文.txt"):
+        body_path = root / rel
+        if not body_path.is_file():
+            continue
+        try:
+            body_lines = body_path.read_text(encoding="utf-8-sig").splitlines()
+        except OSError:
+            continue
+        break
+    if body_lines:
+        img_counts: dict[str, int] = {}
+        for line in body_lines:
+            if "[IMG" not in line:
+                continue
+            for match in IMAGE.finditer(line):
+                nm = Path(match.group(1).strip()).name
+                if nm:
+                    img_counts[nm] = img_counts.get(nm, 0) + 1
+        for nm in docx_extract.option_image_names(body_lines):
+            if img_counts.get(nm, 0) == 1:
+                protected.add(nm)
     meta = _safe_json(root / "01_source" / "metadata.json")
     if isinstance(meta, dict):
         for key in ("source", "paper_title", "evidence"):
@@ -292,7 +440,6 @@ def decorative_names(batch_dir, extraction=None) -> set[str]:
                             names.add(nm)
     media_dir = root / "01_source" / "media"
     if media_dir.is_dir():
-        from workflow import docx_extract
         for path in media_dir.iterdir():
             if (not path.is_file() or path.name in protected or path.name in names
                     or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}):
@@ -301,23 +448,17 @@ def decorative_names(batch_dir, extraction=None) -> set[str]:
             if dim and docx_extract.is_decorative_media(dim[0], dim[1], path.stat().st_size, 1):
                 names.add(path.name)
     # 卷头「扫码练听力」等扫码行紧邻的二维码图标同样不属于试题图片。
-    for rel in ("01_source/正文.txt", "01_source/原始正文.txt"):
-        body_path = root / rel
-        if not body_path.is_file():
-            continue
-        try:
-            head_lines = body_path.read_text(encoding="utf-8-sig").splitlines()[:30]
-        except OSError:
-            continue
-        for idx, line in enumerate(head_lines):
-            if re.search(r"扫码(?:练|听|查看|观看|获取)", line):
-                window = head_lines[max(0, idx - 1):min(len(head_lines), idx + 2)]
-                for wline in window:
-                    for match in IMAGE.finditer(wline):
-                        nm = Path(match.group(1).strip()).name
-                        if nm not in protected:
-                            names.add(nm)
-        break
+    head_lines = body_lines[:30]
+    for idx, line in enumerate(head_lines):
+        if re.search(r"扫码(?:练|听|查看|观看|获取)", line):
+            window = head_lines[max(0, idx - 1):min(len(head_lines), idx + 2)]
+            for wline in window:
+                for match in IMAGE.finditer(wline):
+                    nm = Path(match.group(1).strip()).name
+                    if nm not in protected:
+                        names.add(nm)
+    # 受保护图片（纯图题干、选项位图）一律优先于旧 extraction.json 中的装饰标记。
+    names -= protected
     return names
 
 
@@ -430,6 +571,8 @@ def normalize_item(item, media_map=None, meta=None, materials=None, audio=None, 
         if isinstance(data.get(key), str):
             data[key] = replace_images(data[key], placement, None, media_map, attachments,
                                        decorative_names=decor or None)
+    if isinstance(data.get("material"), str) and is_long_material_group(data):
+        data["material"] = format_long_material_indent(data["material"])
 
     if isinstance(data.get("options"), list):
         result = []

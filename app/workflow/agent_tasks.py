@@ -302,7 +302,8 @@ def _collect(batch, stage, speculative=False, allow_pending_audio=False):
     stage = "types" if stage == "preassemble" else stage
     batch = Path(batch).resolve()
     contexts, hashes, missing = {}, {}, []
-    if stage in ('audio', 'review'):
+    audio_pair = [None, None]
+    if stage == 'audio' or (stage == 'review' and not allow_pending_audio):
         from audio.consistency import pair_is_consistent, read_pair
         audio_pair = read_pair(batch)
         if not pair_is_consistent(batch, audio_pair):
@@ -1339,7 +1340,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
         # 图片/音频能力受限与原卷空白作答网格不是内容缺失：只有这类单元
         # 允许 contentComplete=false，其余仍如实阻断并等待真实修复。
         from .question_content import capability_limited_source
-        from .upload_payload import _extension_child
+        from .upload_payload import _extension_child, material_blank_numbers, normalize_blank_text
         appendix = ""
         try:
             appendix_path = _safe_path(batch, "01_source/附录.txt")
@@ -1377,9 +1378,13 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                         if m.group(1) and not has_choice_options:
                             continue
                         expected = int(m.group(1) or m.group(2))
-                        non_ext = (len([c for c in children if not _extension_child(draft_row, c)])
-                                   if m.group(1) else len(children))
-                        allowed_counts = {len(children), non_ext} if m.group(1) else {len(children)}
+                        non_ext = len([c for c in children if not _extension_child(draft_row, c)])
+                        allowed_counts = {len(children), non_ext}
+                        if m.group(2) and row.get("type") == "完形填空":
+                            blank_nums = material_blank_numbers(normalize_blank_text(draft_row.get("material")))
+                            child_nums = {c.get("number") for c in children if isinstance(c.get("number"), int)}
+                            if blank_nums and blank_nums.issubset(child_nums):
+                                allowed_counts.add(len(blank_nums))
                         if expected not in allowed_counts:
                             ext_note = (f"（其中选择题 {non_ext} 题、拓展设问 {len(children) - non_ext} 题，"
                                         f"请改选 选择{len(children)}题）"

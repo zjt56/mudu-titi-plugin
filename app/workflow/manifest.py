@@ -534,8 +534,16 @@ def reconcile_deliveries(batch_dir, manifest: dict) -> list[str]:
                 from . import stage_semantics
                 if record.get("semantic_version") == stage_semantics.VERSION:
                     mismatch = stage_semantics.output_signatures(batch, stage) != record.get("semantic_outputs")
-            if missing or mismatch:
-                reason = ("交付清单发现缺少产物：" + ", ".join(missing)) if missing else "交付清单发现产物指纹变化"
+            audio_stale = None
+            if not missing and not mismatch and stage.id == "audio" and status != SKIPPED:
+                from audio.consistency import pair_is_consistent, read_pair
+                pair = read_pair(batch)
+                evidence = pair[1] if len(pair) > 1 else None
+                if isinstance(evidence, dict) and isinstance(evidence.get("unit_binding"), dict):
+                    if not pair_is_consistent(batch, pair):
+                        audio_stale = "音频切片绑定已过期或映射不一致"
+            if missing or mismatch or audio_stale:
+                reason = audio_stale or (("交付清单发现缺少产物：" + ", ".join(missing)) if missing else "交付清单发现产物指纹变化")
                 if stage.id not in invalidated:
                     invalidated.append(stage.id)
                 new = {"status": "stale", "reason": reason, "artifacts": _delivery_artifacts(batch, stage),
@@ -610,7 +618,7 @@ def record_delivery(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
         if (Path(batch_dir) / batch_fill.STATE).is_file() and (Path(batch_dir) / batch_fill.ARTIFACTS[stage.id]).is_file():
             late_audio = stage.id == 'audio' and checked.get('passed') is True
             from . import stage_semantics
-            before = batch_fill._read(Path(batch_dir), batch_fill.BATCH) if late_audio else None
+            before = None
             current_views = [target for target in ('assemble', 'meta', 'underlines')
                              if late_audio and manifest['stages'].get(target, {}).get('status') in (COMPLETED, APPROVED)
                              and not is_stale(batch_dir, manifest, contracts.STAGE_BY_ID[target])[0]]
@@ -619,6 +627,9 @@ def record_delivery(batch_dir, manifest: dict, stage: contracts.Stage) -> None:
             backups = {rel: (Path(batch_dir) / rel).read_bytes() for rel in protected
                        if late_audio and (Path(batch_dir) / rel).is_file()}
             try:
+                if late_audio:
+                    batch_fill.initialize(batch_dir)
+                    before = batch_fill._read(Path(batch_dir), batch_fill.BATCH)
                 batch_fill.sync(batch_dir, stage.id)
                 if late_audio and before != batch_fill._read(Path(batch_dir), batch_fill.BATCH):
                     batch_fill.project_audio_views(batch_dir, before)

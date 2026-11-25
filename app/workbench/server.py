@@ -63,28 +63,44 @@ MEDIA_KINDS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
 DOC_SUFFIXES = (".docx", ".pdf")
 AUDIO_SUFFIXES = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac")
-STAGE_TITLES = {s.id: s.title for s in wf_contracts.STAGES} if wf_contracts else {}
-STAGE_KINDS = {s.id: s.kind for s in wf_contracts.STAGES} if wf_contracts else {}
-STAGE_ORDER = [s.id for s in wf_contracts.STAGES] if wf_contracts else []
-TERMINAL_OK = set(wf_manifest.TERMINAL_OK) if wf_manifest else {"ok", "skipped"}
-# 只有“已修复/驳回”才算处理完；已接受的风险仍然要人持续看见，所以仍进“需人工”。
-RESOLVED_STATES = ("fixed", "rejected")
-SEVERITY_ORDER = {"blocker": 3, "major": 2, "minor": 1}
-# 人工介入只处理“标签对不对”：知识点、来源、分类、题型、难度。
-LABEL_FIELDS = {"knowledge", "child_knowledge", "knowledgeids", "knowledge_points", "type", "subtype", "subtypes", "sample", "labels",
-                "difficulty", "difficultyvalue", "source", "source_type", "sourcetype", "year",
-                "location", "region", "filtermetadata", "categories", "category", "textbook",
-                "grade", "topic"}
-# 文字、格式、图片、编号属于前置流程（提取/结构检查）该解决的问题，不进标签审核。
-FORMAT_FIELDS = {"stem", "options", "option", "answer", "material", "materialblocks", "number",
-                 "unit_id", "unit_kind", "kind", "evidence", "issues", "attachments", "attachment",
-                 "image", "images", "media", "table", "structure", "grouping", "alignment", "blank",
-                 "punctuation", "wording", "explanation", "summary", "材料", "解析"}
 SIDE_EFFECTS = ("upload", "publish", "delete")
 _lock = threading.RLock()
+_batch_locks_guard = threading.Lock()
+_batch_locks: dict[str, threading.RLock] = {}
 _batches_snapshot = None
 _batches_epoch = 0
 _batches_read_lock = threading.Lock()
+_remote_worker_client = None
+_remote_worker_lock = threading.Lock()
+
+
+def _batch_lock(name: str) -> threading.RLock:
+    with _batch_locks_guard:
+        lock = _batch_locks.get(name)
+        if lock is None:
+            lock = threading.RLock()
+            _batch_locks[name] = lock
+        return lock
+
+
+def _is_split_worker() -> bool:
+    from workbench import execution_client
+    return execution_client.is_split_mode()
+
+
+def _remote_worker():
+    global _remote_worker_client
+    from workbench import execution_client
+    with _remote_worker_lock:
+        if _remote_worker_client is None or _remote_worker_client._workflows_dir != WORKFLOWS:
+            _remote_worker_client = execution_client.RemoteWorkerClient(WORKFLOWS)
+        return _remote_worker_client
+
+
+def _is_advance_running(name: str) -> bool:
+    if _is_split_worker():
+        return bool((_remote_worker().advance_state(name) or {}).get("running"))
+    return bool((_advance_state.get(name) or {}).get("running"))
 # 听力切段后台任务（安装 / 切段共用一把闸，避免并发下载与切片）。
 _audio_job = {"running": False, "kind": "", "batch": "", "lock": threading.Lock()}
 # CHANGELOG 保留：超过两天的变更记录定期自动删除（用户 2026-11-19 要求）。
@@ -104,9 +120,20 @@ def serialized(function):
         # locks/atomic files. Exempting /api/operations/service avoids holding
         # the global write lock and busting _batches_snapshot every 5 seconds.
         if function.__name__ == "do_POST" and args:
-            post_path = urlparse(getattr(args[0], "path", "")).path
+            post_path = unquote(urlparse(getattr(args[0], "path", "")).path)
             if post_path.startswith("/api/content-agent/") or post_path == "/api/operations/service":
                 return function(*args, **kwargs)
+            # Single-batch mutations (resolve/edit/advance) use a fine-grained
+            # per-batch lock so reviewing Batch A never blocks Batch B.
+            parts = [p for p in post_path.split("/") if p]
+            if len(parts) >= 4 and parts[0] == "api" and parts[1] == "batches" and parts[3] not in ("delete",):
+                try:
+                    with _batch_lock(parts[2]):
+                        return function(*args, **kwargs)
+                finally:
+                    with _lock:
+                        _batches_epoch += 1
+                        _batches_snapshot = None
         with _lock:
             try:
                 return function(*args, **kwargs)
@@ -240,554 +267,49 @@ def candidate(folder, unit_id, *, batch_map=None):
     return (draft, path) if isinstance(draft, dict) else ({}, None)
 
 
-def source_lines(folder):
-    path = folder / "01_source" / "正文.txt"
-    if not path.is_file():
-        return []
-    return path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+from .preview_render import (  # noqa: E402
+    AUDIO_EXTS,
+    _cell_text_images,
+    _clean_preview_band_title,
+    _clean_preview_heading,
+    _extract_preview_lesson_bands,
+    _extract_preview_section_meta,
+    _locate_source_docx,
+    attach_media,
+    audio_blocks,
+    audio_map,
+    paper_preview,
+    paper_uses_bulk_bold,
+    read_source_docx,
+    source_blocks,
+    source_lines,
+    structured_rows,
+    table_structure,
+)
 
 
-def table_structure(folder):
-    """Word 抽出的表格结构（含合并跨度），按表号索引，供预览沿用原表格网格。"""
-    data = load(folder / "01_source" / "extraction.json", {})
-    tables = {}
-    for table in (data.get("tables") if isinstance(data, dict) else None) or []:
-        if isinstance(table, dict) and table.get("number") is not None:
-            tables[str(table["number"])] = table
-    return tables
+from .stage_views import (  # noqa: E402
+    FORMAT_FIELDS,
+    LABEL_FIELDS,
+    RESOLVED_STATES,
+    SEVERITY_ORDER,
+    STAGE_KINDS,
+    STAGE_ORDER,
+    STAGE_TITLES,
+    TERMINAL_OK,
+    active_stage_ids,
+    as_number,
+    finding_bucket,
+    findings_for,
+    group_duplicate_findings,
+    is_open,
+    manifest_dependency_satisfied,
+    mark_row,
+    paper_info,
+    split_findings,
+    stage_cards,
+)
 
-
-def _cell_text_images(raw):
-    names = [Path(m.group(1).strip()).name for m in re.finditer(r"\[IMG\s+([^\]]+)\]", raw)]
-    text = re.sub(r"\[IMG\s+[^\]]+\]", "", raw).strip()
-    # 图片原本占位在文字之前/之后时，去掉留下的空行，避免单元格开头多一个换行。
-    text = re.sub(r"^(?:<br\s*/?>\s*)+", "", text, flags=re.I)
-    text = re.sub(r"(?:\s*<br\s*/?>)+$", "", text, flags=re.I)
-    return text.strip(), names
-
-
-def structured_rows(table, flat_rows):
-    """结构化表格行（含 rowspan/colspan）；与正文网格不同形时返回 None。
-
-    预览按 01_source/正文.txt 切片，只有 Word 表格的行数与每行列宽都和正文
-    网格一致，才能用它的合并跨度渲染；否则退回按 `|` 切分的平面表格，不猜。
-    """
-    if not isinstance(table, dict):
-        return None
-    rows = table.get("rows")
-    if not isinstance(rows, list) or not rows or len(rows) != len(flat_rows):
-        return None
-    structured = []
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            return None
-        before, after = row.get("grid_before", 0), row.get("grid_after", 0)
-        if any(type(value) is not int or not 0 <= value <= 1000 for value in (before, after)):
-            return None
-        cells = []
-        width = before + after
-        for _ in range(before):
-            cells.append({"text": "", "images": [], "rowspan": 1, "colspan": 1})
-        for cell in row.get("cells") or []:
-            if not isinstance(cell, dict):
-                return None
-            colspan, rowspan = cell.get("colspan", 1), cell.get("rowspan", 1)
-            if (type(colspan) is not int or colspan < 1
-                    or type(rowspan) is not int or rowspan < 1):
-                return None
-            width += colspan
-            if cell.get("merge_origin") is not None:
-                continue
-            text, names = _cell_text_images(str(cell.get("text") or "").replace("\n", "<br>"))
-            cells.append({"text": text, "images": [{"name": name} for name in names],
-                          "rowspan": rowspan, "colspan": colspan,
-                          "header": bool(cell.get("header"))})
-        for _ in range(after):
-            cells.append({"text": "", "images": [], "rowspan": 1, "colspan": 1})
-        if width != len(flat_rows[index]):
-            return None
-        structured.append({"cells": cells})
-    return structured
-
-
-def source_blocks(lines, tables=None, *, extraction=None):
-    # Keep the original table-number mapping API and the newer full extraction
-    # positional API. Native evidence must retain its full-text/reference checks.
-    if extraction is None and isinstance(tables, dict) and any(
-            key in tables for key in ("tables", "source_objects", "blocks", "source_sha256")):
-        extraction, tables = tables, None
-    tables = tables if isinstance(tables, dict) else {}
-
-    def cell_content(text):
-        names = [Path(m.group(1).strip()).name
-                 for m in re.finditer(r"\[IMG\s+([^\]]+)\]", text)]
-        return re.sub(r"\[IMG\s+[^\]]+\]", "", text).strip(), names
-
-    def native_block(marker):
-        if not isinstance(extraction, dict):
-            return None
-        from workflow.source_objects import resolve_table
-        try:
-            native, _ = resolve_table(extraction, marker)
-        except (AttributeError, TypeError, ValueError):
-            return None
-        if native is None:
-            return None
-        rows, images, spans = [], [], []
-        try:
-            for row in native.get("rows") or []:
-                cells, cell_images, cell_spans = [], [], []
-                before, after = row.get("grid_before", 0), row.get("grid_after", 0)
-                if any(type(n) is not int or not 0 <= n <= 1000 for n in (before, after)):
-                    return None
-                def append_cell(text, rowspan=1, colspan=1):
-                    cleaned, names = cell_content(text)
-                    cells.append(cleaned)
-                    cell_images.append(names)
-                    cell_spans.append({"rowspan": rowspan, "colspan": colspan})
-                for _ in range(before):
-                    append_cell("")
-                for cell in row.get("cells") or []:
-                    if cell.get("merge_origin") is not None:
-                        continue
-                    rs, cs = cell.get("rowspan", 1), cell.get("colspan", 1)
-                    if any(type(n) is not int or not 1 <= n <= 1000 for n in (rs, cs)):
-                        return None
-                    append_cell(str(cell.get("text") or ""), rs, cs)
-                for _ in range(after):
-                    append_cell("")
-                rows.append(cells)
-                images.append(cell_images)
-                spans.append(cell_spans)
-        except (AttributeError, TypeError, ValueError):
-            return None
-        return {"type": "table", "rows": rows, "cellImages": images, "cellSpans": spans}
-
-    blocks = []
-    table = None
-    table_images = []
-    table_lines = []
-    table_depth = 0
-    table_number = None
-    for line in lines:
-        stripped = line.strip()
-        # Count inline markers too: nested Word tables are serialized inside a
-        # cell with <br>, and an inner closing marker cannot close its parent.
-        openings = len(re.findall(r"\[TABLE(?:\s[^\]]*)?\]", line))
-        closings = len(re.findall(r"\[/TABLE\]", line))
-        if table is None and stripped.startswith("[TABLE"):
-            table = []
-            table_images = []
-            match = re.match(r"\[TABLE(?:\s+(\d+))?\]", stripped)
-            table_number = match.group(1) if match else None
-            table_lines = [line]
-            table_depth = openings - closings
-            continue
-        if table is not None:
-            table_lines.append(line)
-            table_depth += openings - closings
-            if table_depth <= 0:
-                # Bind complete text, never a table number alone: a stale table
-                # must not lend its spans or cell boundaries to another source.
-                block = native_block("\n".join(table_lines))
-                if block is None:
-                    block = {"type": "table", "rows": table, "cellImages": table_images}
-                    # Explicit legacy mappings have no native reference contract.
-                    # Never use them to bypass rejected extraction evidence.
-                    if extraction is None:
-                        structured = structured_rows(tables.get(str(table_number)), table)
-                        if structured is not None:
-                            block["structured"] = structured
-                blocks.append(block)
-                table = None
-                table_images = []
-                table_lines = []
-                table_number = None
-                continue
-            # Legacy text has no merge evidence. Preserve all rows (including
-            # blank single-cell rows), and keep each image with its own text.
-            values = [cell_content(raw_cell) for raw_cell in line.split("|")]
-            table.append([text for text, _ in values])
-            table_images.append([names for _, names in values])
-            continue
-        cursor = 0
-        for match in re.finditer(r"\[IMG\s+([^\]]+)\]", line):
-            if match.start() > cursor:
-                blocks.append({"type": "text", "text": line[cursor:match.start()]})
-            blocks.append({"type": "image", "name": Path(match.group(1).strip()).name})
-            cursor = match.end()
-        if cursor < len(line):
-            text = line[cursor:].strip()
-            if text:
-                blocks.append({"type": "text", "text": text})
-    return blocks
-
-
-def attach_media(blocks, folder, name):
-    media_root = (folder / "01_source" / "media").resolve()
-
-    def media_url(image_name):
-        target = (media_root / image_name).resolve()
-        ok = target.parent == media_root and target.is_file()
-        return f"/api/batches/{name}/media/{image_name}" if ok else None
-
-    for block in blocks:
-        if block.get("type") == "image":
-            block["url"] = media_url(block["name"])
-            continue
-        if block.get("type") == "table":
-            grid = block.get("cellImages") or []
-            block["cellImages"] = [
-                [
-                    [{"name": image_name, "url": media_url(image_name)} for image_name in cell]
-                    for cell in row
-                ]
-                for row in grid
-            ]
-            for row in block.get("structured") or []:
-                for cell in row.get("cells") or []:
-                    cell["images"] = [{"name": image.get("name"), "url": media_url(image.get("name"))}
-                                      for image in cell.get("images") or []]
-    return blocks
-
-
-AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac")
-
-
-def audio_map(folder: Path) -> dict:
-    """unit_id → 已切好的听力片段；读取 02_audio/audio_map.json，文件存在才纳入。"""
-    path = folder / "02_audio" / "audio_map.json"
-    mapping = {}
-    from audio.consistency import pair_is_consistent, read_pair
-    pair = read_pair(folder)
-    if not pair_is_consistent(folder, pair):
-        return mapping
-    data = pair[0] or {}
-    for item in data.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        unit = str(item.get("unit_id") or "").strip()
-        rel = str(item.get("file") or "").strip()
-        if not unit or not rel:
-            continue
-        target = (folder / rel).resolve()
-        if target.parent == (folder / "02_audio").resolve() and target.is_file():
-            mapping[unit] = {"name": target.name, "file": rel,
-                             "start": item.get("start"), "end": item.get("end")}
-    return mapping
-
-
-def audio_blocks(folder: Path, name: str, unit_ids, *, mapping=None) -> list:
-    """把单元的听力片段作为附件块，供题目详情播放与下载。"""
-    if mapping is None:
-        mapping = audio_map(folder)
-    blocks = []
-    for uid in unit_ids:
-        info = mapping.get(str(uid))
-        if not info:
-            continue
-        block = {"type": "audio", "name": info["name"], "label": "听力音频附件",
-                 "url": f"/api/batches/{name}/audio/{info['name']}",
-                 "start": info.get("start"), "end": info.get("end")}
-        if block not in blocks:
-            blocks.append(block)
-    return blocks
-
-
-def as_number(value):
-    """把 'LOCAL-01'、'Q001'、'AH-2025-031'、1 统一成 '31'/'1' 这样的纯题号。
-
-    取最后一段数字：前缀（AH-2025）不参与比较，只认题号本身；
-    前导零也一并去掉，避免 'LOCAL-01' 和 '1' 对不上。
-    """
-    groups = re.findall(r"\d+", str(value or ""))
-    return str(int(groups[-1])) if groups else ""
-
-
-def findings_for(queue, numbers, number_map, unit_id="", scoped=False):
-    """挑出属于这一行的差异。
-
-    scoped-v1 批次里同一题号会在每个大题重号（Ⅰ/Ⅱ/Ⅲ 都从 1 开始），只能按单元
-    身份绑定；按数字绑定会把别的大题的差异算到本行，或者让本行真实差异漏掉，
-    列表上就出现「队列里有待审差异、行上却没有待审核标签」。
-    """
-    wanted = {as_number(n) for n in numbers if as_number(n)}
-    key = str(unit_id or "").strip()
-    result = []
-    items = queue.get("items", []) if isinstance(queue, dict) else []
-    for item in items if isinstance(items, list) else []:
-        if not isinstance(item, dict):
-            continue
-        unit = str(item.get("unit_id") or "").strip()
-        if scoped:
-            # 单元级差异只归属本单元；批次级差异（无 unit_id）不标到具体题行。
-            if unit and unit == key:
-                result.append(item)
-            continue
-        number = as_number(number_map.get(unit) or unit)
-        if number in wanted:
-            result.append(item)
-    return result
-
-
-def is_open(finding):
-    return str(finding.get("status") or "") not in RESOLVED_STATES
-
-
-def finding_bucket(finding):
-    """把一条发现分成 label（标签审核）/ format（前置流程）。
-
-    label：知识点、来源、分类、题型、难度这类“入库标签对不对”；
-    format：题干、选项、答案、编号、结构、图片这类内容与格式问题，
-            应该在提取和结构检查阶段解决，不该混进人工标签审核队列。
-    """
-    field = str(finding.get("field") or "").strip().lower()
-    # 结构闸门阻断的题号/分组归属确认需人工决断，必须可见可处理，不当作静默格式错误。
-    if str(finding.get("review_type") or "").lower() == "structure":
-        return "label"
-    if field in LABEL_FIELDS:
-        return "label"
-    if field in FORMAT_FIELDS:
-        return "format"
-    return "other"
-
-
-def split_findings(findings):
-    label, fmt, other = [], [], []
-    for finding in findings:
-        bucket = finding_bucket(finding)
-        {"label": label, "format": fmt}.get(bucket, other).append(finding)
-    return label, fmt, other
-
-
-def group_duplicate_findings(findings, whole_unit=False):
-    """只合并可证明完全相同的未决意见；组级标签也不能跨字段或冲突合并。"""
-    groups = []
-    by_key = {}
-    for finding in findings:
-        if not is_open(finding):
-            continue
-        unit = str(finding.get("unit_id") or "").strip()
-        field = str(finding.get("field") or "").strip().lower()
-        reason = str(finding.get("reason") or finding.get("question") or "").strip()
-        fid = str(finding.get("finding_id") or "").strip()
-        # Identical wording alone is insufficient: evidence and structured
-        # observations carry the target and the actual conflicting values.
-        try:
-            content = json.dumps({k: v for k, v in finding.items() if k != "finding_id"},
-                                 sort_keys=True, ensure_ascii=False)
-        except (TypeError, ValueError):
-            content = None
-        key = ((unit, field, reason, content)
-               if (unit and field and reason and fid and content is not None
-                   and (finding.get("evidence") or finding.get("round_sources"))) else None)
-        if key is not None and key in by_key:
-            by_key[key].append(finding)
-        else:
-            members = [finding]
-            groups.append(members)
-            if key is not None:
-                by_key[key] = members
-    result = []
-    for members in groups:
-        item = dict(members[0])
-        item["member_ids"] = [f.get("finding_id") for f in members]
-        item["members"] = [dict(f) for f in members]
-        result.append(item)
-    return result
-
-
-def mark_row(row, findings):
-    opened = [f for f in findings if is_open(f)]
-    label_open = [f for f in opened if finding_bucket(f) == "label"]
-    fmt_open = [f for f in opened if finding_bucket(f) == "format"]
-    row = dict(row)
-    row["open_count"] = len(label_open)
-    row["format_count"] = len(fmt_open)
-    row["finding_count"] = len(findings)
-    row["severity"] = max((str(f.get("severity") or "") for f in label_open),
-                          key=lambda s: SEVERITY_ORDER.get(s, 0), default="")
-    row["format_severity"] = max((str(f.get("severity") or "") for f in fmt_open),
-                                 key=lambda s: SEVERITY_ORDER.get(s, 0), default="")
-    row["needs_human"] = bool(label_open)
-    # 待审差异必须能一眼看出「审的是哪一项、原标签是什么、本轮判了什么」，
-    # 不能只显示一个数字让人以为“题目正常却被标待审核”。
-    diffs = []
-    for finding in label_open:
-        text = str(finding.get("reason") or finding.get("question") or "").strip()
-        if not text:
-            continue
-        field = str(finding.get("field") or "").strip()
-        label = {"type": "题型", "subtypes": "子类", "knowledge": "知识点"}.get(field, field)
-        diffs.append((f"{label}：" if label and not text.startswith(label) else "") + text)
-    row["open_diffs"] = list(dict.fromkeys(diffs))[:8]
-    row["open_summary"] = "；".join(row["open_diffs"])
-    return row
-
-
-def paper_info(folder: Path, report, manifest) -> dict:
-    """试卷名取自入库批次；旧批次缺来源时依次用已识别元数据、原卷 Word 文件名。"""
-    from workflow.metadata_policy import MISSING, paper_meta
-
-    def known(*values):
-        return next((value for value in values if value and str(value).strip() != MISSING), None)
-
-    batch = load(folder / "06_batch" / "batch.json", {}) or {}
-    meta = (report.get("meta") if isinstance(report, dict) else None) or (manifest or {}).get("meta") or {}
-    detected = {}
-    if not known(batch.get("source"), meta.get("source"), meta.get("title")):
-        text_path = folder / "01_source" / "正文.txt"
-        if text_path.is_file():
-            try:
-                from workflow import denoise
-                detected = denoise.extract_meta(text_path.read_text(encoding="utf-8-sig").splitlines()) or {}
-            except (OSError, ValueError):
-                detected = {}
-    descriptor = (load(folder / "attachments" / "batch.json", {})
-                  or load(INBOX / folder.name / "batch.json", {}) or {})
-    # 课时拆分件正文没有卷头：来源仍要按证据还原，最后一档才是原卷文件名。
-    resolved = paper_meta({
-        "paper_title": known(batch.get("source"), meta.get("source"), meta.get("title"),
-                             meta.get("paper_title"), detected.get("source"), descriptor.get("title")),
-        "source": known(batch.get("source"), meta.get("source"), detected.get("source")),
-        "source_type": known(batch.get("source_type"), meta.get("source_type"), detected.get("source_type")),
-        "year": batch.get("year") or meta.get("year") or detected.get("year"),
-    }, folder)
-    title = str(resolved.get("paper_title") or MISSING)
-    if title != MISSING and re.search(r"\bUnit\s+\d+$", title):
-        text_path = folder / "01_source" / "正文.txt"
-        head_text = ""
-        if text_path.is_file():
-            try:
-                with text_path.open("r", encoding="utf-8-sig") as fh:
-                    head_text = "".join(fh.readline() for _ in range(15))
-            except OSError:
-                head_text = ""
-        from workflow.metadata_ai import extract_unit_subtopic
-        subtopic, _ = extract_unit_subtopic(head_text, str(batch.get("batch") or folder.name))
-        if subtopic and subtopic not in title:
-            title = f"{title} {subtopic}"
-    return {"title": title,
-            "batch": str(batch.get("batch") or folder.name),
-            "source": str(resolved.get("source") or MISSING),
-            "source_type": str(resolved.get("source_type") or MISSING),
-            "folder": folder.name, "year": resolved.get("year"),
-            "region": batch.get("region") or meta.get("region") or detected.get("region"),
-            "subject": batch.get("subject") or meta.get("subject") or "english"}
-
-
-def active_stage_ids(manifest, cards=None):
-    """Actual running stages with satisfied dependencies (display only).
-
-    Dependency readiness alone never implies that a worker has started. Parallel
-    workers persist their running status before execution; project only those
-    records as active without changing dispatch or ledger state.
-    """
-    if wf_contracts is None or wf_manifest is None:
-        return set()
-    stages = (manifest or {}).get("stages") or {}
-    cards = cards if cards is not None else [
-        {"id": sid, "status": (stages.get(sid) or {}).get("status")} for sid in STAGE_ORDER]
-    active = set()
-    for card in cards:
-        sid = card.get("id")
-        if card.get("status") != "running":
-            continue
-        spec = wf_contracts.STAGE_BY_ID.get(sid)
-        if spec is None:
-            continue
-        if all(manifest_dependency_satisfied(manifest, dep) for dep in spec.depends_on):
-            active.add(sid)
-    return active
-
-
-def manifest_dependency_satisfied(manifest, dep_id):
-    """Execution-level readiness of one dependency, without consumer audit.
-
-    Display only: a dependency counts as met once it is executed (or explicitly
-    skipped) and not marked for rebuild. Dispatch still uses the strict
-    ``manifest.dependency_satisfied`` including ``inspect_stage``.
-    """
-    record = ((manifest or {}).get("stages") or {}).get(dep_id) or {}
-    if record.get("rebuild_required"):
-        return False
-    if record.get("status") in TERMINAL_OK:
-        return True
-    if (dep_id == "review_gate" and record.get("status") == "needs_review"
-            and record.get("execution_completed") is True
-            and record.get("continue_unqualified") is True
-            and not record.get("release_ready")):
-        return True
-    return False
-
-
-def stage_cards(manifest, has_output: bool = False, advance_running: bool = False, diagnostics=None,
-                batch_folder=None, runtime_activity=None, audio_state=None) -> dict:
-    stages = (manifest or {}).get("stages") or {}
-    recorded_running = (manifest or {}).get("status") == "running" or any(
-        record.get("status") == "running" for record in stages.values() if isinstance(record, dict))
-    running_unknown = bool(recorded_running and not advance_running)
-    # 统一卡点诊断：把各阶段分散的真实原因翻译成一句人话 + 修复命令（只读视图）。
-    diag_by_stage = {}
-    if isinstance(diagnostics, dict):
-        for item in diagnostics.get("items") or []:
-            if isinstance(item, dict) and item.get("stage"):
-                diag_by_stage[item["stage"]] = item
-    from workflow.substeps import project as project_substeps
-    substeps = project_substeps(manifest, batch_folder, runtime_activity, audio_state)
-    cards = []
-    for sid in (STAGE_ORDER or list(stages)):
-        record = stages.get(sid) or {}
-        card = {"id": sid, "title": STAGE_TITLES.get(sid, sid),
-                "kind": STAGE_KINDS.get(sid) or record.get("kind") or "",
-                "status": record.get("status") or "pending",
-                "execution_completed": bool(record.get("execution_completed")),
-                "continue_unqualified": bool(record.get("continue_unqualified")),
-                "quality_status": record.get("quality_status") or "",
-                "release_ready": bool(record.get("release_ready")),
-                "description": (wf_contracts.STAGE_BY_ID[sid].description if wf_contracts and sid in wf_contracts.STAGE_BY_ID else ""),
-                "depends_on": list(wf_contracts.STAGE_BY_ID[sid].depends_on) if wf_contracts and sid in wf_contracts.STAGE_BY_ID else [],
-                "notes": record.get("notes") or "",
-                "substeps": substeps.get(sid, [])}
-        if record.get("rebuild_required") and card["status"] in TERMINAL_OK:
-            # A retained old result is not the result of the requested rebuild.
-            card["status"] = "invalidated"
-        diag = diag_by_stage.get(sid)
-        if diag:
-            card["reason"] = diag.get("reason") or ""
-            card["detail"] = diag.get("detail") or ""
-            card["hint"] = diag.get("hint") or ""
-            card["command"] = diag.get("command") or ""
-            card["blocking"] = bool(diag.get("blocking"))
-        cards.append(card)
-    if wf_execution_state is not None:
-        progress = wf_execution_state.projection(manifest or {}, stage_ids=[card["id"] for card in cards])
-        done = progress["done"]
-        current = next((card for card in cards if card["id"] == progress["current"]), None)
-    else:
-        done = sum(1 for card in cards if card["status"] in TERMINAL_OK)
-        current = next((card for card in cards if card["status"] not in TERMINAL_OK), None)
-    # 并行显示（只读投影）：实际已登记 running 且依赖满足的阶段同时显示“处理中”。
-    # pending 只代表等待，即使依赖已经满足也不能冒充执行，不改任何执行或台账语义。
-    active_ids = active_stage_ids(manifest, cards)
-    for card in cards:
-        card["active"] = card["id"] in active_ids
-    early = ("extract", "structure_gate", "preassemble")
-    stale = bool(has_output and current and (done == 0 or current["id"] in early))
-    if advance_running:
-        hint = "工作台正在处理"
-    elif running_unknown:
-        hint = "台账记录运行中，实际状态未知；外部 CLI 可能仍在运行，请先核实"
-    elif current is None:
-        hint = "流程已完成"
-    elif stale:
-        hint = f"台账未同步（已有内容，标记停在「{current['title']}」）"
-    else:
-        waiting = {"agent": "等待代理执行", "human": "等待人工确认"}.get(current["kind"], "等待执行")
-        hint = f"{waiting}（{current['title']}）"
-    return {"items": cards, "done": done, "total": len(cards), "current": current,
-            "hint": hint, "stale": stale, "running_unknown": running_unknown,
-            "diagnostics": diagnostics if isinstance(diagnostics, dict) else None}
 
 
 _advance_state: dict[str, dict] = {}
@@ -837,6 +359,10 @@ def queue_removed(folder) -> bool:
 def remove_from_queue(name: str, reason: str = "") -> dict:
     """Move one batch out of 排队区 without deleting or editing its data."""
     folder = batch_dir(name)
+    if _is_split_worker():
+        res = _remote_worker().remove_from_queue(name, reason=reason)
+        _invalidate_overview_batch(folder, name)
+        return res
     with _lock:
         with _advance_queue_lock:
             _advance_queue[:] = [entry for entry in _advance_queue
@@ -864,6 +390,7 @@ def restore_queue(name: str) -> dict:
     with _lock:
         _advance_state.pop(name, None)
     _invalidate_overview_batch(folder, name)
+    _wake_supervisor()
     return {"restored": True, "batch": name, "batch_dir": str(folder)}
 
 
@@ -1266,6 +793,21 @@ def _ensure_advance_worker():
 
 def advance_worker_health() -> dict:
     """Cheap queue reconciliation/health; no disk scan or task cancellation."""
+    if _is_split_worker():
+        snap = _remote_worker().read_state()
+        adv = snap.get("advance_state") or {}
+        queue = snap.get("queue") or []
+        running_batches = sorted(k for k, v in adv.items() if isinstance(v, dict) and v.get("running"))
+        return {
+            "worker_alive": bool(snap.get("alive")),
+            "active_workers": len(running_batches),
+            "max_concurrent_batches": _max_concurrent_batches(),
+            "running_batches": running_batches,
+            "running_without_worker": False,
+            "queue_length": len(queue),
+            "queue_oldest_age_seconds": None,
+            "worker_start_error": None,
+        }
     _ensure_advance_worker()
     with _lock:
         with _advance_queue_lock:
@@ -1309,6 +851,14 @@ def work_in_flight() -> bool:
     核实），比阶段重跑代价更高，所以同样不能在被回收时进行。探测不到状态时保守
     返回 True。
     """
+    if _is_split_worker():
+        # In split-worker mode, batch advances live in workbench.worker; only
+        # local API-owned uploads or audio jobs block hot-restarting the API plane.
+        if any(bool((j or {}).get("running")) for j in _upload_jobs.values()):
+            return True
+        if bool((_audio_job or {}).get("running")):
+            return True
+        return False
     try:
         # 不阻塞在全局写锁上：若 _lock 正被保存/复验长时间持有，说明后端正在忙，
         # 立刻返回 True，避免 /api/health 超时被宿主误判为空闲。
@@ -1463,7 +1013,7 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
                                     "waiting_for": predecessor, "updated_at": now()}
         return {"started": False, "waiting": True, "waiting_for": predecessor, **ctx_info,
                 "reason": f"需等待前一份试卷「{predecessor}」全部完成并移出排队区后再开始"}
-    if (_advance_state.get(name) or {}).get("running"):
+    if _is_advance_running(name):
         return {"started": False, "running": True, **ctx_info}
     with _advance_queue_lock:
         q_names = [(entry.get("name") if isinstance(entry, dict) else entry) for entry in _advance_queue]
@@ -1504,6 +1054,15 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
                     pass
         if prepare is not None:
             details.update(prepare())
+    if _is_split_worker():
+        if reset_budget:
+            _invalidate_overview_batch(folder, name)
+        return _remote_worker().enqueue(
+            name,
+            reset_budget=reset_budget,
+            operations_expectation=operations_expectation,
+            details=details,
+        )
     with _lock:
         _advance_state[name] = {"running": False, "queued": True, "queued_at": now(), **details}
     with _advance_queue_lock:
@@ -1526,6 +1085,11 @@ def _launch_advance(name: str, folder: Path, *, prepare=None, operations_expecta
 @serialized
 def start_advance(name: str, *, reset_budget=True) -> dict:
     """Run one local pass; automatic callers preserve durable retry accounting."""
+    if _is_split_worker():
+        folder = batch_dir(name)
+        if reset_budget and (folder / QUEUE_REMOVED).is_file():
+            restore_queue(name)
+        return _remote_worker().enqueue(name, reset_budget=reset_budget)
     if auto_flow is None:
         raise ValueError("流水线模块不可用")
     folder = batch_dir(name)
@@ -1557,7 +1121,10 @@ def _dispatch_supervised(name):
 
 
 def advance_state(name: str) -> dict:
-    state = dict(_advance_state.get(name) or {"running": False})
+    if _is_split_worker():
+        state = _remote_worker().advance_state(name)
+    else:
+        state = dict(_advance_state.get(name) or {"running": False})
     try:
         folder = batch_dir(name)
         path = folder / "workflow/supervisor.json"
@@ -2278,6 +1845,8 @@ def _cancel_running_batch(name: str, folder: Path, wait_seconds: float = 90.0) -
     mid-flight; a stage that does not honor the marker keeps the batch protected
     and the caller gets ``stopped=False`` so nothing is deleted under a live run.
     """
+    if _is_split_worker():
+        return _remote_worker().cancel_batch(name, wait_seconds=wait_seconds)
     import time as _time
     from workflow import auto as wf_auto
     try:
@@ -2359,7 +1928,7 @@ def purge_batch(name: str, confirm_name: str) -> dict:
     with wf_supervisor.advance_claim(folder, include_global_agent=False) as acquired:
         if not acquired:
             raise ValueError("批次正在运行或执行运维动作，请稍后删除")
-        if ((_advance_state.get(name) or {}).get("running")
+        if (_is_advance_running(name)
                 or (_upload_jobs.get(name) or {}).get("running")
                 or (_audio_job.get("running") and _audio_job.get("batch") == name)
                 or ai_supplement.is_running(folder)):
@@ -3009,7 +2578,34 @@ def _flow_timing(manifest):
     start = min(started) if started else _parse_iso((manifest or {}).get("created_at"))
     minutes = None
     if start is not None and finish is not None and finish >= start:
-        minutes = int(round((finish - start).total_seconds() / 60.0))
+        intervals = []
+        for stage_id, record in stages.items():
+            if not isinstance(record, dict) or stage_id in _POST_FLOW_TIMING_STAGES:
+                continue
+            s = _parse_iso(record.get("started_at"))
+            f = _parse_iso(record.get("finished_at"))
+            if s is not None and f is not None and f >= s:
+                if s >= start and f <= finish:
+                    intervals.append((s, f))
+            elif f is not None and start <= f <= finish:
+                intervals.append((f, f))
+            elif s is not None and start <= s <= finish:
+                intervals.append((s, s))
+        if intervals:
+            intervals.sort(key=lambda pair: (pair[0], pair[1]))
+            merged = [intervals[0]]
+            for s, f in intervals[1:]:
+                prev_s, prev_f = merged[-1]
+                # Gaps longer than 2 hours indicate an idle pause between sessions,
+                # not active pipeline execution time.
+                if (s - prev_f).total_seconds() <= 7200:
+                    merged[-1] = (prev_s, max(prev_f, f))
+                else:
+                    merged.append((s, f))
+            active_seconds = sum((e - b).total_seconds() for b, e in merged)
+            minutes = int(round(active_seconds / 60.0))
+        else:
+            minutes = int(round((finish - start).total_seconds() / 60.0))
     return (start.isoformat(timespec="seconds") if start else None,
             finish.isoformat(timespec="seconds"), minutes)
 
@@ -3211,7 +2807,7 @@ def operations_work_state():
                 or not (folder / "workflow/manifest.json").is_file()):
             continue
         try:
-            adv_running = bool((_advance_state.get(folder.name) or {}).get("running"))
+            adv_running = _is_advance_running(folder.name)
             stat_key = _work_state_stat_key(folder, adv_running, operations.LEDGER)
             folder_key = str(folder)
             with _CACHE_GUARD:
@@ -3280,7 +2876,8 @@ def _batches_live_fingerprint():
             (k, bool(v.get("running")), v.get("ok"), v.get("step"), v.get("finished_at"))
             for k, v in _upload_jobs.items() if isinstance(v, dict)))
         aud = (bool(_audio_job.get("running")), _audio_job.get("kind"), _audio_job.get("batch"))
-    return (str(WORKFLOWS), str(INBOX), tuple(disk), adv, upl, aud)
+    worker_seq = _remote_worker().state_seq() if _is_split_worker() else 0
+    return (str(WORKFLOWS), str(INBOX), tuple(disk), adv, upl, aud, worker_seq)
 
 
 def cached_list_batches():
@@ -3307,190 +2904,18 @@ def cached_list_batches():
         return result
 
 
-TYPE_REVIEW_MAX_PAGE_SIZE = 20
-TYPE_REVIEW_DEFAULT_PAGE_SIZE = 20
-UNTYPED_TYPE_VALUE = "__untyped__"
-UNTYPED_TYPE_LABEL = "未判定"
+from .type_review_api import (  # noqa: E402
+    TYPE_REVIEW_DEFAULT_PAGE_SIZE,
+    TYPE_REVIEW_MAX_PAGE_SIZE,
+    UNTYPED_TYPE_LABEL,
+    UNTYPED_TYPE_VALUE,
+    _batch_sort_ts,
+    _match_type_review_raw,
+    _type_review_is_pending,
+    _type_review_row,
+    type_review_units,
+)
 
-
-def _batch_sort_ts(batch: dict) -> tuple:
-    """与前端「试卷审核」一致的最新时间排序键（降序）。"""
-    for field in ("flow_finished_at", "updated_at", "created_at"):
-        val = str(batch.get(field) or "").strip()
-        if val:
-            return (val, str(batch.get("name") or ""))
-    return ("", str(batch.get("name") or ""))
-
-
-def _type_review_is_pending(row: dict) -> bool:
-    """统一待审口径：与前端红点及 status=open 筛选保持严格一致。"""
-    if bool(row.get("excluded")):
-        return False
-    return bool(row.get("needs_human")) or str(row.get("state") or "") in ("attention", "blocked")
-
-
-def _type_review_row(batch: dict, row: dict) -> dict:
-    b_name = str(batch.get("name") or "")
-    paper = batch.get("paper") if isinstance(batch.get("paper"), dict) else {}
-    paper_title = str(paper.get("title") or b_name)
-    uploaded = bool(batch.get("uploaded") or batch.get("upload_pending_confirmation"))
-    uid = str(row.get("unit_id") or row.get("number") or "")
-    main_type = str(row.get("type") or "").strip()
-    subtypes = [str(s).strip() for s in (row.get("subtypes") or []) if str(s).strip()]
-    needs_human = bool(row.get("needs_human"))
-    excluded = bool(row.get("excluded"))
-    section = row.get("source_section") if isinstance(row.get("source_section"), dict) else None
-    return {
-        "batch_name": b_name,
-        "paper_title": paper_title,
-        "uploaded": uploaded,
-        "unit_id": uid,
-        "number": row.get("number"),
-        "numbers": list(row.get("numbers") or []),
-        "printed_numbers": row.get("printed_numbers"),
-        "label": row.get("label") if row.get("label") not in (None, "") else (row.get("number") or ""),
-        "unit_kind": str(row.get("unit_kind") or ""),
-        "type": main_type,
-        "subtypes": subtypes,
-        "state": str(row.get("state") or ""),
-        "needs_human": needs_human,
-        "excluded": excluded,
-        "open_summary": str(row.get("open_summary") or ""),
-        "open_findings": row.get("open_findings"),
-        "difficulty": row.get("difficulty"),
-        "source_section": section,
-        "knowledge": [str(k).strip() for k in (row.get("knowledge") or []) if str(k).strip()],
-    }
-
-
-def _match_type_review_raw(batch: dict, row: dict, main_type: str, tokens: list[str]) -> bool:
-    if not tokens:
-        return True
-    b_name = str(batch.get("name") or "")
-    paper = batch.get("paper") if isinstance(batch.get("paper"), dict) else {}
-    paper_title = str(paper.get("title") or b_name)
-    section = row.get("source_section") if isinstance(row.get("source_section"), dict) else {}
-    label = row.get("label") if row.get("label") not in (None, "") else (row.get("number") or "")
-    parts = [
-        main_type or UNTYPED_TYPE_LABEL,
-        " ".join(str(s).strip() for s in (row.get("subtypes") or []) if str(s).strip()),
-        paper_title,
-        b_name,
-        str(label),
-        str(row.get("number") or ""),
-        str(section.get("title") or ""),
-        str(section.get("context") or ""),
-        " ".join(str(k).strip() for k in (row.get("knowledge") or []) if str(k).strip()),
-    ]
-    hay = " ".join(parts).lower()
-    return all(tok in hay for tok in tokens)
-
-
-def type_review_units(*, question_type: str = "", query: str = "", status: str = "all",
-                      uploaded: str = "all", page: int = 1,
-                      page_size: int = TYPE_REVIEW_DEFAULT_PAGE_SIZE) -> dict:
-    """按题型分页返回跨批次轻量题组列表，每页最多 20 题，仅对本页 20 题构造完整行对象。"""
-    ps = max(1, min(TYPE_REVIEW_MAX_PAGE_SIZE, int(page_size)))
-    status_norm = "open" if str(status or "").strip().lower() == "open" else "all"
-    raw_uploaded = str(uploaded or "").strip().lower()
-    uploaded_norm = raw_uploaded if raw_uploaded in ("unuploaded", "uploaded") else "all"
-    raw_selected = str(question_type or "").strip()
-    if raw_selected in ("", "all", "全部", "全部题型"):
-        selected = ""
-    elif raw_selected in (UNTYPED_TYPE_VALUE, UNTYPED_TYPE_LABEL):
-        selected = UNTYPED_TYPE_VALUE
-    else:
-        selected = raw_selected
-    q_text = str(query or "").strip()
-    q_tokens = [tok for tok in q_text.lower().split() if tok]
-
-    batches = [b for b in (cached_list_batches() or []) if isinstance(b, dict)]
-    batches.sort(key=_batch_sort_ts, reverse=True)
-
-    all_total = 0
-    all_pending = 0
-    counts_by_type: dict[str, int] = {}
-    pending_by_type: dict[str, int] = {}
-    extra_types: list[str] = []
-    extra_set: set[str] = set()
-    catalog_types = list(taxonomy.types())
-    catalog_set = set(catalog_types)
-    matched_pairs: list[tuple[dict, dict]] = []
-
-    for b in batches:
-        if _is_queued_unfinished(b):
-            continue
-        is_uploaded = _is_batch_uploaded(b)
-        if uploaded_norm == "unuploaded" and is_uploaded:
-            continue
-        if uploaded_norm == "uploaded" and not is_uploaded:
-            continue
-        rows = b.get("rows")
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            all_total += 1
-            main_type = str(row.get("type") or "").strip()
-            t_key = main_type or UNTYPED_TYPE_VALUE
-            counts_by_type[t_key] = counts_by_type.get(t_key, 0) + 1
-            is_pending = _type_review_is_pending(row)
-            if is_pending:
-                all_pending += 1
-                pending_by_type[t_key] = pending_by_type.get(t_key, 0) + 1
-            if main_type and main_type not in catalog_set and main_type not in extra_set:
-                extra_set.add(main_type)
-                extra_types.append(main_type)
-            if status_norm == "open" and not is_pending:
-                continue
-            if selected == UNTYPED_TYPE_VALUE:
-                if main_type:
-                    continue
-            elif selected and main_type != selected:
-                continue
-            if q_tokens and not _match_type_review_raw(b, row, main_type, q_tokens):
-                continue
-            matched_pairs.append((b, row))
-
-    type_entries = [
-        {
-            "name": t_name,
-            "value": t_name,
-            "count": counts_by_type.get(t_name, 0),
-            "pending": pending_by_type.get(t_name, 0),
-        }
-        for t_name in (*catalog_types, *extra_types)
-    ]
-    if counts_by_type.get(UNTYPED_TYPE_VALUE, 0) > 0:
-        type_entries.append({
-            "name": UNTYPED_TYPE_LABEL,
-            "value": UNTYPED_TYPE_VALUE,
-            "count": counts_by_type[UNTYPED_TYPE_VALUE],
-            "pending": pending_by_type.get(UNTYPED_TYPE_VALUE, 0),
-        })
-
-    total = len(matched_pairs)
-    total_pages = max(1, (total + ps - 1) // ps)
-    current_page = max(1, min(total_pages, int(page)))
-    start = (current_page - 1) * ps
-    page_items = [_type_review_row(b, row) for b, row in matched_pairs[start : start + ps]]
-
-    return {
-        "items": page_items,
-        "total": total,
-        "page": current_page,
-        "page_size": ps,
-        "max_page_size": TYPE_REVIEW_MAX_PAGE_SIZE,
-        "total_pages": total_pages,
-        "selected_type": selected,
-        "query": q_text,
-        "status": status_norm,
-        "uploaded": uploaded_norm,
-        "all_total": all_total,
-        "all_pending": all_pending,
-        "types": type_entries,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -3502,1417 +2927,66 @@ def type_review_units(*, question_type: str = "", query: str = "", status: str =
 #   2) mark upload_gate approved  绑定冻结文件与目标（actor = 本机操作员）
 #   3) upload --yes    真正写入上传暂存
 # ---------------------------------------------------------------------------
-# 英语听力切段（可选能力）：适配器 + 懒下载。
-# 不点击「安装」不会下载任何依赖；安装与切段都放后台线程，不占用服务锁。
-# 详见 docs/audio.md。
+# 英语听力切段与云端题库上传后台任务（已拆至 audio_jobs.py / batch_upload.py）
 # ---------------------------------------------------------------------------
-def _audio_modules():
-    from audio import bootstrap as audio_bootstrap
-    from audio import config as audio_config
-    from audio import segment as audio_segment
-    return audio_config, audio_bootstrap, audio_segment
-
-
-def audio_overview():
-    cfgmod, boot, _ = _audio_modules()
-    cfg = cfgmod.load()
-    data_dir = Path(cfgmod.data_dir(cfg))
-    return {"ok": True, "config": cfg, "config_path": str(cfgmod.user_config_path()),
-            "defaults_path": str(cfgmod.config_path()),
-            "data_dir": str(data_dir), "venv_python": str(boot.venv_python(cfg)),
-            "hf_endpoint": cfgmod.resolve_hf_endpoint(cfg),
-            "python_version": sys.version.split()[0],
-            "platform_key": boot.platform_key(),
-            "vendor_python": bool(boot.vendor_python(cfg)),
-            "vendor_ffmpeg": bool((boot.VENDOR_DIR / "ffmpeg" / boot.platform_key() / "bin").is_dir()),
-            "ready": boot.ready(cfg),
-            "ffmpeg": boot.tool_path("ffmpeg"), "ffprobe": boot.tool_path("ffprobe"),
-            "busy": _audio_job["running"], "job": _audio_job["kind"]}
-
-
-def audio_status(batch: str | None = None):
-    cfgmod, boot, _ = _audio_modules()
-    cfg = cfgmod.load()
-    state = boot.read_status(Path(cfgmod.data_dir(cfg)), batch)
-    # 不覆盖 state["ok"]：它是后台任务自己的成功/失败标记。
-    state.update({"request_ok": True, "ready": boot.ready(cfg), "busy": _audio_job["running"],
-                  "job": _audio_job["kind"]})
-    if batch:
-        state["batch"] = batch
-        if state.get("running") and time() - float(state.get("updated") or 0) > _AUDIO_STALE_GRACE \
-                and not _audio_has_live_worker(batch):
-            # 状态文件残留（进程已被杀、后端重启过）：界面不能再显示“正在运行”，
-            # 否则用户会一直等一个不存在的任务。下次点切段/自动推进时会真正重跑。
-            state["stale"] = True
-            state["running"] = False
-            state["detail"] = "切段进程已中断（状态为残留），可重新开始"
-    return state
-
-
-# 后台听力任务稳定性的时间参数（秒）：心跳在 progress 里刷新。
-_AUDIO_STALE_GRACE = 5             # 状态刚写入时的宽限，避免误报残留
-_AUDIO_WATCHDOG_SECONDS = 900       # 看门狗：>15min 无心跳则把任务判失败并清理，避免永久卡住
-_AUDIO_WATCHDOG_TICK = 30
-
-
-def _audio_batch_folder(batch: str | None) -> Path | None:
-    """把批次名解析成在 workflows 下的真实目录；越界或不存在时返回 None。"""
-    if not batch:
-        return None
-    try:
-        root = WORKFLOWS.resolve()
-        folder = (WORKFLOWS / batch).resolve()
-    except OSError:
-        return None
-    if folder.parent != root or not folder.is_dir():
-        return None
-    return folder
-
-
-def _audio_has_live_worker(batch: str | None) -> bool:
-    """切段任务是否真的还活着（用于区分“真在跑”与“进程已死的残留状态”）。
-
-    状态文件会活过后端重启：进程被强杀时线程的 finally 不会执行，running=True
-    会一直留着。因此不能用状态文件当存活证据，也不能依赖 `ps`（Windows 没有，
-    旧实现在 Windows 上恒返回 True，导致僵死状态永远清不掉）。权威证据只有两个：
-    本进程的后台任务仍在跑，或本批次的 02_audio/.segment.lock 仍被某个进程持有。
-    """
-    if _audio_job["running"] and (not batch or _audio_job.get("batch") == batch):
-        return True
-    folder = _audio_batch_folder(batch)
-    if folder is None:
-        return False
-    try:
-        from audio.segment import lock_is_held
-    except (ImportError, OSError):
-        return True  # 探针不可用时保守等待，不误判重开
-    try:
-        return lock_is_held(folder)
-    except OSError:
-        return True
-
-
-def _audio_reap_stale(kind: str, batch, data_dir: Path, boot) -> None:
-    """清理“状态 running 但进程已死”的僵死任务，避免永久卡住无法重开。
-
-    只要有存活证据（本进程任务或批次锁）就不动；没有就立即重置，不再等 10 分钟
-    心跳——残留状态本身不是运行证据。
-    """
-    state = boot.read_status(data_dir, batch)
-    if not state.get("running"):
-        return
-    if _audio_has_live_worker(batch):
-        return  # 有真实进程在跑，交给看门狗，不抢占
-    boot.write_status(data_dir, batch=batch, job=state.get("job") or kind, running=False,
-                      ok=False, phase="error",
-                      detail="", error="切段任务已中断（无存活进程，状态文件为残留），已自动重置，可重跑")
+from .audio_jobs import (  # noqa: E402
+    _AUDIO_STALE_GRACE,
+    _AUDIO_WATCHDOG_SECONDS,
+    _AUDIO_WATCHDOG_TICK,
+    _audio_batch_folder,
+    _audio_has_live_worker,
+    _audio_modules,
+    _audio_reap_stale,
+    audio_overview,
+    audio_status,
+    start_audio_job_impl as _start_audio_job_impl,
+)
 
 
 @serialized
 def start_audio_job(kind: str, options: dict) -> dict:
-    cfgmod, boot, segment_mod = _audio_modules()
-    cfg = cfgmod.load()
-    data_dir = Path(cfgmod.data_dir(cfg))
-    batch = Path(options["folder"]).name if kind == "segment" and options.get("folder") else None
-    if batch:
-        _audio_reap_stale(kind, batch, data_dir, boot)
-        if _audio_has_live_worker(batch):
-            raise ValueError("该批次已有切段任务在运行，请等它结束")
-    with _audio_job["lock"]:
-        if _audio_job["running"]:
-            raise ValueError("已有听力任务在运行，请等它结束后再试")
-        _audio_job.update({"running": True, "kind": kind, "batch": batch})
-
-    # 每个任务独立的“最后心跳”标记，供看门狗判断是否卡死。
-    beat = {"at": time()}
-
-    def worker():
-        watchdog_stop = threading.Event()
-
-        def watchdog():
-            while not watchdog_stop.wait(_AUDIO_WATCHDOG_TICK):
-                if time() - beat["at"] > _AUDIO_WATCHDOG_SECONDS:
-                    try:
-                        boot.write_status(data_dir, batch=batch, job=kind, running=False, ok=False,
-                                          phase="error", detail="",
-                                          error=f"切段任务超过 {_AUDIO_WATCHDOG_SECONDS}s 无进展，判定僵死并清理；可重跑")
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return
-
-        threading.Thread(target=watchdog, daemon=True).start()
-        try:
-            def progress(phase, pct, detail):
-                beat["at"] = time()
-                boot.write_status(data_dir, batch=batch, job=kind, running=True, ok=None,
-                                  phase=phase, pct=pct, detail=detail, error="")
-            beat["at"] = time()
-            boot.write_status(data_dir, batch=batch, job=kind, running=True, ok=None,
-                              phase="start", pct=0, detail="任务开始", error="")
-            if kind == "bootstrap":
-                boot.bootstrap(cfg, force=bool(options.get("force")))
-                boot.write_status(data_dir, batch=batch, job=kind, running=False, ok=True,
-                                  phase="done", pct=100, detail="运行时就绪", error="")
-            else:
-                result = segment_mod.run(Path(options["folder"]), cfg, options.get("audio"), progress)
-                pending = result.get("needs_review_units") or []
-                passed = result.get("ok") is True and not pending
-                boot.write_status(data_dir, batch=batch, job=kind, running=False, ok=passed,
-                                  phase="done" if passed else "needs_review", pct=100,
-                                  detail=("听力切段已完成" if passed else
-                                          "候选切片已保存，边界待核对：" + "、".join(pending[:12])), error="")
-        except Exception as exc:  # noqa: BLE001 - 后台任务须把失败写进状态文件
-            boot.write_status(data_dir, batch=batch, job=kind, running=False, ok=False,
-                              phase="error", detail="", error=str(exc))
-        finally:
-            watchdog_stop.set()
-            with _audio_job["lock"]:
-                _audio_job.update({"running": False, "kind": "", "batch": ""})
-
-    threading.Thread(target=worker, daemon=True).start()
-    return {"started": True, "kind": kind, "batch": batch}
+    return _start_audio_job_impl(kind, options)
 
 
-# 结构闸门/审核闸门未过时 runner 会拒绝，错误原样回显。
-#
-# 上传可能持续数分钟（网络 + 远端校验），因此放在后台线程执行，
-# 不占用服务锁，避免阻塞其他请求。
-# ---------------------------------------------------------------------------
 _upload_jobs = {}
+_UNREVIEWED_SUMMARY_CACHE: dict[tuple, dict] = {}
 
-
-def _run_runner(args):
-    return subprocess.run([sys.executable, "-m", "workflow.runner", *args],
-                          cwd=str(ROOT), capture_output=True, text=True, timeout=1800,
-                          env=dict(os.environ))
-
-
-def _prepare_failure_summary(report):
-    """Summarize blocking findings without letting advisory warnings bury them."""
-    if not isinstance(report, dict):
-        return ""
-    errors = report.get("errors") or ([report["error"]] if report.get("error") else [])
-    if not isinstance(errors, list):
-        errors = [errors]
-    groups = {}
-    for item in errors:
-        if isinstance(item, dict):
-            message = str(item.get("message") or item.get("code") or "上传预检错误")
-            code = str(item.get("code") or "")
-            field = str(item.get("field") or "")
-            unit = str(item.get("unit_id") or "")
-        else:
-            message, code, field, unit = str(item), "", "", ""
-        key = (code, message, field)
-        group = groups.setdefault(key, {"count": 0, "units": []})
-        group["count"] += 1
-        if unit and unit not in group["units"] and len(group["units"]) < 3:
-            group["units"].append(unit)
-    lines = [f"上传准备未通过：{len(errors)} 项阻断错误"] if errors else ["上传预检未通过"]
-    for (code, message, field), group in groups.items():
-        detail = message + (f" [{code}]" if code and code != message else "")
-        detail += f"（{group['count']} 项"
-        if field:
-            detail += f"，字段：{field}"
-        if group["units"]:
-            detail += "，示例单元：" + "、".join(group["units"])
-        lines.append("- " + detail + "）")
-    warnings = report.get("warnings")
-    content = report.get("content_source")
-    content_warnings = content.get("warnings") if isinstance(content, dict) else None
-    count = (len(warnings) if isinstance(warnings, list) else 0) + (len(content_warnings) if isinstance(content_warnings, list) else 0)
-    if count:
-        lines.append(f"另有 {count} 项非阻断警告。")
-    return "\n".join(lines)
-
-
-def _validate_ever_passed(validate_stage, manifest_mod=None):
-    """Return True if validate is completed or was invalidated after passing."""
-    from workflow.execution_state import validate_ever_passed
-    return validate_ever_passed(validate_stage)
-
-
-def _check_upload_preconditions(folder, unreviewed_revision, attempt_token):
-    """Check existing evidence before any remote media is written."""
-    from workflow import contracts, manifest, runner
-    from workflow.label_audit import inspect_file
-    state = manifest.load(folder)
-    summary = runner.unreviewed_summary(folder, state)
-    # 用户明确要求：未完成审核 / 有审核差异 都不阻碍上传到题库服务器。
-    # 只在“已带确认令牌但审核revision变了”时提示重新确认，不做硬拦截。
-    if attempt_token and (not unreviewed_revision or summary.get('revision') != unreviewed_revision):
-        raise ValueError('审核状态已变化，请重新查看并确认上传')
-    # 用户要求：内容过期/变化（is_stale）或人工改解析导致下游失效不阻碍上传——
-    # 只要 validate 曾通过（completed，或从 completed 被标为 invalidated）即可上传；
-    # 标签/结构等“内容对不对”的硬校验仍在下面执行。
-    if not _validate_ever_passed(state.get('stages', {}).get('validate'), manifest):
-        raise ValueError('批次校验未通过：请先完成本地体检（validate）')
-    labels = inspect_file(folder / '06_batch' / 'batch_meta.json')
-    if not labels.get('passed'):
-        raise ValueError('批次标签校验未通过，请先检查标签')
-    flow = runner.flowchart_checks(folder, state)
-    if not flow.get('passed'):
-        first = next(iter(flow.get('errors') or []), {})
-        raise ValueError('试卷结构校验未通过：' + str(first.get('message') or '请检查原卷'))
-
-
-def _stage_upload_media(folder):
-    """Stage only media referenced by a stable final batch, after the upload click."""
-    import hashlib
-    from workflow import media_inventory, media_transfer, upload
-    from workflow.local_agent import _batch_lock
-
-    source = folder / '06_batch' / 'batch_meta.json'
-    if not source.exists():
-        return None
-    # Serialize with workflow imports. Workbench and independent external edits
-    # are detected by the stable reads and digest comparisons below.
-    with _batch_lock(folder, 1500):
-        root_fd = media_transfer._open_root(folder)
-        try:
-            raw = media_transfer._read_file(root_fd, '06_batch/batch_meta.json')
-        finally:
-            media_transfer._close_root(root_fd)
-        from workflow.agent_protocol import _load
-        metadata = _load(raw)
-        # 若媒体已按内容寻址部署（07_upload/media-map.json 存在且覆盖批次全部附件
-        # 文件名），直接复用该映射，避免重复 SSH 部署；也避免 referenced_media 对
-        # 已部署 flat-hash 附件（/source-media/<sha>-…，非批次目录名前缀）误报
-        # “Attachment URL is not owned by this batch”。仅当映射完整覆盖时复用。
-        existing_map = folder / '07_upload' / 'media-map.json'
-        if existing_map.is_file():
-            try:
-                deployed = json.loads(existing_map.read_text(encoding='utf-8-sig'))
-            except (OSError, ValueError):
-                deployed = None
-            if isinstance(deployed, dict):
-                needed = set()
-                def _collect(node):
-                    if isinstance(node, dict):
-                        for a in (node.get('attachments') or []):
-                            if isinstance(a, dict) and a.get('name'):
-                                needed.add(a['name'])
-                        for c in (node.get('subquestions') or []):
-                            _collect(c)
-                for item in (metadata.get('items') or []):
-                    _collect(item)
-                if needed and all(
-                        isinstance(deployed.get(n), str)
-                        and deployed[n].startswith('/source-media/')
-                        for n in needed):
-                    # 与正常路径保持同构：(mapping, source_hash)。缺少元组会导致
-                    # 调用方 `mapping, source_hash = staged` 解包失败。
-                    return {n: deployed[n] for n in needed}, hashlib.sha256(raw).hexdigest()
-        refs = media_inventory.referenced_media(folder, metadata)
-        if not refs:
-            return None
-        destination = media_transfer._settings()
-        if destination[0] != 'ubuntu@101.43.1.57':
-            raise ValueError('此 SSH 目标没有经过验证的媒体目录，无法自动暂存媒体')
-        batch_id = metadata.get('batch_id') or wf_manifest.load(folder)['workflow_id']
-    # Do not hold the UI/workflow locks while SSH is transferring files: status
-    # requests must remain responsive. Revalidate both metadata and every file.
-    mapping = media_transfer.stage_media(folder, refs,
-        static_root='/home/ubuntu/mudu-quiz/static/source-media', batch_id=batch_id,
-        settings=destination)
-    with _batch_lock(folder, 1500):
-        if media_inventory.referenced_media(folder, metadata) != refs:
-            raise ValueError('批次媒体在暂存期间发生变化，请重新上传')
-        root_fd = media_transfer._open_root(folder)
-        try:
-            if media_transfer._read_file(root_fd, '06_batch/batch_meta.json') != raw:
-                raise ValueError('正式批次在媒体暂存期间发生变化，请重新上传')
-        finally:
-            media_transfer._close_root(root_fd)
-        upload._write(upload._path(folder, 'media-map.json'), upload._bytes(mapping))
-        return mapping, hashlib.sha256(raw).hexdigest()
-
-
-def _run_batch_upload(name, actor, unreviewed_revision='', attempt_token=''):
-    job = _upload_jobs[name]
-
-    def step(label, args):
-        job["step"] = label
-        proc = _run_runner(args)
-        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-        job["output"] = out[-4000:]
-        return proc.returncode, out, proc.stdout or ""
-
-    try:
-        folder = batch_dir(name)
-        job["step"] = "检查连接，必要时启动 SSH 隧道"
-        from workbench import ssh_tunnel
-        job["output"] = ssh_tunnel.ensure_upload_connection()
-        job['step'] = '检查批次与确认状态'
-        _check_upload_preconditions(folder, unreviewed_revision, attempt_token)
-        job["step"] = "暂存引用的媒体"
-        staged = _stage_upload_media(folder)
-        preflight_path = folder / "07_upload" / "preflight.json"
-        try:
-            preflight_before = preflight_path.stat().st_mtime_ns
-        except OSError:
-            preflight_before = None
-
-        def _fresh_preflight():
-            try:
-                if preflight_path.stat().st_mtime_ns == preflight_before:
-                    return None
-            except OSError:
-                return None
-            data = load(preflight_path)
-            if isinstance(data, dict) and (data.get("passed") is False or data.get("errors")):
-                return data
-            return None
-
-        if staged:
-            from workflow import upload as upload_flow
-            mapping, source_hash = staged
-            job["step"] = "准备上传（冻结请求）"
-            try:
-                report = upload_flow.prepare(folder, media_map=mapping)
-            except Exception:
-                fresh = _fresh_preflight()
-                if fresh is not None:
-                    job.update(ok=False, error=_prepare_failure_summary(fresh), output="")
-                    return
-                raise
-            if report.get('source_sha256') != source_hash:
-                raise ValueError('正式批次在媒体暂存后发生变化，请重新上传')
-            rc = 0 if report.get('passed') is True else 1
-            stdout = json.dumps(report, ensure_ascii=False)
-            out = stdout
-            job["output"] = out[-4000:]
-        else:
-            rc, out, stdout = step("准备上传（冻结请求）", ["prepare-upload", "--batch-dir", str(folder)])
-        if rc != 0:
-            try:
-                report = json.loads(stdout)
-            except (ValueError, TypeError):
-                report = None
-            if not (isinstance(report, dict) and (report.get("passed") is False or report.get("errors"))):
-                report = _fresh_preflight()
-            if isinstance(report, dict) and (report.get("passed") is False or report.get("errors")):
-                job.update(ok=False, error=_prepare_failure_summary(report), output="")
-            else:
-                job.update(ok=False, error="上传准备未通过：" + (out.splitlines()[-1] if out else str(rc)))
-            return
-        mark_args = ["mark", "--batch-dir", str(folder), "--stage", "upload_gate",
-                     "--status", "approved", "--actor", actor,
-                     "--note", "通过插件「上传批次」按钮确认" + ("（含未审核内容）" if attempt_token else "")]
-        if attempt_token:
-            mark_args += ['--unreviewed-revision', unreviewed_revision, '--unreviewed-attempt', attempt_token]
-        rc, out, _ = step("确认上传闸门", mark_args)
-        if rc != 0:
-            job.update(ok=False, error="上传确认失败：" + (out.splitlines()[-1] if out else str(rc)))
-            return
-        upload_args = ["upload", "--batch-dir", str(folder), "--yes"]
-        if attempt_token:
-            upload_args += ['--unreviewed-attempt', attempt_token]
-        rc, out, _ = step("写入云端上传暂存", upload_args)
-        if rc != 0:
-            job.update(ok=False, error="上传未完成：" + (out.splitlines()[-1] if out else str(rc)))
-            return
-        job.update(ok=True, step="已上传")
-    except Exception as exc:  # noqa: BLE001 - 后台任务，错误回显给面板
-        job.update(ok=False, error=str(exc))
-    finally:
-        job["running"] = False
-        job["finished_at"] = time()
+from .batch_upload import (  # noqa: E402
+    _cached_unreviewed_summary,
+    _check_upload_preconditions,
+    _prepare_failure_summary,
+    _run_batch_upload,
+    _run_runner,
+    _stage_upload_media,
+    _validate_ever_passed,
+    start_batch_upload_impl as _start_batch_upload_impl,
+    upload_state,
+)
 
 
 @serialized
 def start_batch_upload(name, actor="本机操作员", *, allow_unreviewed=False, unreviewed_revision=''):
-    folder = batch_dir(name)  # 批次不存在直接抛错
-    if type(allow_unreviewed) is not bool:
-        raise ValueError('allow_unreviewed 必须是布尔值')
-    if allow_unreviewed:
-        from workflow.runner import unreviewed_summary
-        current = unreviewed_summary(folder, wf_manifest.load(folder))
-        if not isinstance(unreviewed_revision, str) or not unreviewed_revision or current['revision'] != unreviewed_revision:
-            raise ValueError('审核状态已变化，请重新查看并确认')
-    elif unreviewed_revision:
-        raise ValueError('未明确确认不能指定未审核版本')
-    attempt_token = uuid.uuid4().hex if allow_unreviewed else ''
-    existing = upload_state(name)
-    if existing.get('state') == 'unknown':
-        raise ValueError('上次上传结果未知，请先在远端核实，不能重复上传')
-    if existing.get('state') == 'accepted':
-        raise ValueError('该批次已有上传暂存回执，请勿重复上传')
-    with _lock:
-        job = _upload_jobs.get(name)
-        if job and job.get("running"):
-            raise ValueError("该批次正在上传中，请稍候")
-        _upload_jobs[name] = {"running": True, "ok": None, "step": "开始", "output": "",
-                              "error": "", "started_at": time()}
-    threading.Thread(target=_run_batch_upload, args=(name, actor, unreviewed_revision, attempt_token), daemon=True).start()
-    return {"started": True}
-
-
-_UNREVIEWED_SUMMARY_CACHE: dict[tuple, dict] = {}
-
-
-def _cached_unreviewed_summary(folder: Path) -> dict:
-    """Cache unreviewed_summary by review input fingerprint so 3s polls stay sub-millisecond."""
-    cache_key = (str(folder), _review_inputs_key(folder))
-    hit = _UNREVIEWED_SUMMARY_CACHE.get(cache_key)
-    if hit is not None:
-        return dict(hit)
-    from workflow.runner import unreviewed_summary
-    summary = unreviewed_summary(folder, wf_manifest.load(folder))
-    if isinstance(summary, dict):
-        if len(_UNREVIEWED_SUMMARY_CACHE) >= 32:
-            _UNREVIEWED_SUMMARY_CACHE.clear()
-        _UNREVIEWED_SUMMARY_CACHE[cache_key] = dict(summary)
-    return summary
-
-
-def upload_state(name, *, include_unreviewed=True):
-    """Project in-memory progress and durable upload evidence after a restart."""
-    folder = batch_dir(name)
-    with _lock:
-        job = dict(_upload_jobs.get(name) or {})
-    result = {"running": False, "ok": None, "step": "", "output": "", "error": "",
-              "state": "idle", "receipt": None}
-    result.update(job)
-    if include_unreviewed:
-        try:
-            result['unreviewed'] = _cached_unreviewed_summary(folder)
-            if result['unreviewed'].get('revision'):
-                result['requires_unreviewed_confirmation'] = not result['unreviewed']['passed']
-        except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
-            result['unreviewed'] = {'passed': False, 'revision': '', 'counts': {},
-                                    'errors': [{'message': str(exc)}]}
-    receipt = load(folder / "07_upload" / "receipt.json")
-    receipt = receipt if isinstance(receipt, dict) and receipt.get("id") else None
-    attempts = []
-    for path in (folder / "07_upload" / "attempts").glob("*.json"):
-        item = load(path)
-        if isinstance(item, dict):
-            attempts.append(item)
-    if not receipt:
-        receipt = next((a.get("receipt") for a in attempts if a.get("state") == "accepted"
-                        and isinstance(a.get("receipt"), dict) and a["receipt"].get("id")), None)
-    result["receipt"] = receipt
-    # A receipt is written before its attempt becomes accepted. It settles that
-    # attempt, but cannot settle a different in-flight payload.
-    uncertain = next((a for a in attempts if a.get("state") in ("submitting", "unknown")
-                      and not (receipt and a.get("payload_sha256")
-                               and a.get("payload_sha256") == receipt.get("payload_sha256"))), None)
-    rejected = next((a for a in attempts if a.get("state") in ("rejected", "batch_conflict")), None)
-    preflight = load(folder / "07_upload" / "preflight.json")
-    if result["running"]:
-        result["state"] = "running"
-    elif uncertain:
-        recoverable = bool(uncertain.get('key_binding') and uncertain.get('api_base'))
-        result.update(state="failed" if recoverable else "unknown", ok=False)
-        result["step"] = ("提交结果未知，可用原 Key 和冻结请求恢复" if recoverable
-                          else result["step"] or "提交结果未知")
-        result["error"] = result["error"] or str(uncertain.get("details") or uncertain.get("error_code")
-                                                or "提交结果未知，请先在远端工作台核实")
-    elif receipt:
-        # A later preflight failure cannot erase evidence of an accepted upload.
-        # Keep its diagnostic visible without enabling a duplicate submission.
-        if receipt.get('state') in ('staged_attachments_pending', 'attachment_rejected'):
-            result.update(state="failed", ok=False)
-            result["step"] = "审核附件未追加完成"
-            error = receipt.get('attachment_error') or {}
-            result["error"] = str(error.get('details') or error.get('code')
-                                  or "审核附件未追加完成，请重试或检查远端暂存")
-        else:
-            result.update(state="accepted", ok=True)
-            result["step"] = "已暂存，等待远端确认"
-    elif job.get("ok") is False:
-        result["state"] = "failed"
-    elif rejected:
-        result.update(state="failed", ok=False)
-        result["step"] = result["step"] or "上传被拒绝"
-        result["error"] = result["error"] or str(rejected.get("details") or rejected.get("error_code")
-                                                or "上传被拒绝")
-    elif isinstance(preflight, dict) and preflight.get("passed") is False:
-        result.update(state="failed", ok=False)
-        result["step"] = result["step"] or "上传准备未通过"
-        result["error"] = result["error"] or _prepare_failure_summary(preflight)
-    elif job.get("ok") is True:
-        result.update(state="unknown", ok=False, error="上传完成但未找到暂存回执，请先在远端核实")
-    return result
-
-
-def unit_label_path(folder: Path, unit_id) -> Path:
-    """标签按“单元”存一份：组题整体打标，子题不各存一份。"""
-    safe = re.sub(r"[^0-9A-Za-z._-]", "_", str(unit_id or "").strip())
-    if not safe:
-        raise ValueError("缺少单元 ID")
-    return folder / "candidates" / "units" / f"{safe}.json"
-
-
-def load_unit_labels(folder: Path, unit_id) -> dict:
-    try:
-        data = load(unit_label_path(folder, unit_id), {})
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _knowledge_projection(path):
-    """「二级/末级」短名投影，与 preview 快速核对标签的写法一致。"""
-    parts = [p for p in str(path or "").split("/") if p.strip()]
-    if not parts:
-        return ""
-    if len(parts) == 1:
-        return parts[0]
-    if len(parts) == 2:
-        return parts[1]
-    return parts[1] + "/" + parts[-1]
-
-
-def drop_short_knowledge_copies(paths):
-    """去掉同一知识点的短名副本，保留目录全路径。
-
-    旧批次/预览行会把 `设题角度/阅读/细节理解` 记成 `阅读/细节理解`、
-    把 `主题/人与社会/历史、社会与文化/文化习俗` 记成 `人与社会/文化习俗`
-    这类「二级/末级」写法；它与全路径指向同一叶子，混在一起会在修改标签
-    弹窗里显示两遍，并让短名被校验成目录外路径。
-    """
-    unique = []
-    for raw in paths or []:
-        path = str(raw or "").strip()
-        if path and path not in unique:
-            unique.append(path)
-    return [path for path in unique
-            if not any(other != path and (other.endswith("/" + path)
-                                          or _knowledge_projection(other) == path)
-                       for other in unique)]
-
-
-def _pending_answer_point_tags(folder, unit_id, *, number=None, review_hashes=None):
-    """Read historical candidates only while their original inputs still match."""
-    pending = load(folder / "04_knowledge/answer-point-tags.pending.json", {})
-    if (not isinstance(pending, dict) or pending.get("status") != "pending_catalog_binding"
-            or pending.get("batch") != folder.name or not isinstance(pending.get("labels"), list)):
-        return []
-    rules = taxonomy.type_knowledge_rules()
-    candidates = dict.fromkeys(
-        entry["name"] for entry in pending["labels"]
-        if isinstance(entry, dict) and entry.get("unit_id") == unit_id
-        and isinstance(entry.get("name"), str) and entry["name"].strip()
-        and entry.get("proposed_path") == "词汇/答案考点/" + entry["name"]
-        and isinstance(entry.get("question_type"), str)
-        and any(dim.get("dim") == "答案考点"
-                for dim in rules.get(entry["question_type"], {}).get("dims", []))
-        and (number is None or any(isinstance(source, dict) and str(source.get("number")) == str(number)
-                                  for source in (entry.get("sources") or [])))
+    return _start_batch_upload_impl(
+        name, actor, allow_unreviewed=allow_unreviewed, unreviewed_revision=unreviewed_revision
     )
-    if not candidates:
-        return []
-    hashes = pending.get("source_sha256")
-    if not isinstance(hashes, dict):
-        return []
-    for relative in ("06_batch/batch_meta.json", "01_source_ans/answers.json"):
-        if review_hashes is not None and review_hashes.get(relative) != hashes.get(relative):
-            return []
-        try:
-            if hashlib.sha256((folder / relative).read_bytes()).hexdigest() != hashes.get(relative):
-                return []
-        except OSError:
-            return []
-    return list(candidates)
 
 
-def _answer_point_terms(answer, options):
-    from workflow.content_rules import is_placeholder
-    from workflow.wire_format import OPTION_PREFIX, option_strings
-
-    if is_placeholder(answer):
-        return []
-    text = re.sub(r'</?(?:u|b|strong|em|i)>|\*\*', '', answer, flags=re.I).strip()
-    if options:
-        if not re.fullmatch(r'[A-Z]', text):
-            return []
-        choices = [option[match.end():] for option in option_strings(options)
-                   if (match := OPTION_PREFIX.match(option)) and match.group(1) == text]
-        if len(choices) != 1:
-            return []
-        text = re.sub(r'</?(?:u|b|strong|em|i)>|\*\*', '', choices[0], flags=re.I)
-        text = re.sub(r'\s+[（(]\s*[）)]\s*$', '', text)
-    text = text.strip()
-    numbered = list(re.finditer(r'(?<!\S)(\d+)[.．、]\s*(\S.*?)(?=\s+\d+[.．、]|$)', text, re.S))
-    if (len(numbered) > 1 and numbered[0].start() == 0
-            and [part[1] for part in numbered] == [str(index + 1) for index in range(len(numbered))]):
-        text = ';'.join(part[2] for part in numbered)
-    terms = []
-    for piece in re.split(r'[/／;；]', text):
-        term = ' '.join(piece.split())
-        if not re.fullmatch(r"[A-Za-z]+(?:['’\-‐‑⁃][A-Za-z]+)*(?: [A-Za-z]+(?:['’\-‐‑⁃][A-Za-z]+)*)*", term):
-            continue
-        if re.match(r"(?i)^(?:(?:I|he|she|it|we|you|they|this|that|there)(?:['’](?:m|re|s|ve|d|ll) | (?:am|is|are|was|were|have|has|had|do|does|did|will|can|must|should)\b))", term):
-            continue
-        terms.append(term)
-    return terms
-
-
-def _prepare_answer_point_ctx(folder):
-    """Pre-load batch-level inputs for answer_point_tags so bulk detail avoids N*disk reads."""
-    from workflow.agent_tasks import confirmed_units
-
-    answer_path = '01_source_ans/answers.json'
-    type_path = '03_types/types.json'
-    batch_path = '06_batch/batch_meta.json'
-    try:
-        manifest = wf_manifest.load(folder)
-        record = manifest['stages']['answers']
-        if (record.get('status') != wf_manifest.COMPLETED or record.get('rebuild_required')
-                or not (record.get('output_hashes') or {}).get(answer_path)
-                or wf_manifest.is_stale(folder, manifest, wf_contracts.STAGE_BY_ID['answers'])[0]):
-            return {'status': 'empty'}
-        c_units = confirmed_units(folder)
-        batch = load(folder / batch_path, {})
-        type_data = load(folder / type_path, {})
-        answers_obj = load(folder / answer_path, {})
-        rows = batch.get('items', []) if isinstance(batch, dict) else []
-        type_rows = type_data.get('items', []) if isinstance(type_data, dict) else []
-        by_uid = {}
-        for item in rows:
-            if isinstance(item, dict) and item.get('unit_id') is not None:
-                by_uid.setdefault(item.get('unit_id'), []).append(item)
-        types_by_uid = {}
-        for item in type_rows:
-            if isinstance(item, dict) and item.get('unit_id') is not None:
-                types_by_uid.setdefault(item.get('unit_id'), []).append(item)
-        units_by_uid = {}
-        for row in c_units:
-            if isinstance(row, dict) and row.get('unit_id') not in units_by_uid:
-                units_by_uid[row.get('unit_id')] = row
-        file_hashes = {}
-        for relative in (answer_path, type_path, batch_path):
-            try:
-                file_hashes[relative] = wf_manifest.sha256_file(folder / relative)
-            except OSError:
-                file_hashes[relative] = None
-        return {
-            'status': 'ready',
-            'units_by_uid': units_by_uid,
-            'by_uid': by_uid,
-            'types_by_uid': types_by_uid,
-            'answers': answers_obj.get('answers', {}) if isinstance(answers_obj, dict) else {},
-            'rules': taxonomy.type_knowledge_rules(),
-            'file_hashes': file_hashes,
-        }
-    except FileNotFoundError:
-        return {'status': 'pending'}
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        return {'status': 'empty'}
-
-
-def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None, ap_ctx=None):
-    """Project original answer points from the accepted keys and final options."""
-    from workflow.agent_tasks import _answer_comparison_text, confirmed_units
-    from workflow.question_identity import question_key
-
-    answer_path = '01_source_ans/answers.json'
-    type_path = '03_types/types.json'
-    batch_path = '06_batch/batch_meta.json'
-    try:
-        if ap_ctx is not None:
-            if ap_ctx.get('status') == 'pending':
-                return _pending_answer_point_tags(folder, unit_id, number=number, review_hashes=review_hashes)
-            if ap_ctx.get('status') != 'ready':
-                return []
-            if review_hashes is not None and any(
-                    not review_hashes.get(relative)
-                    or review_hashes[relative] != ap_ctx['file_hashes'].get(relative)
-                    for relative in (answer_path, type_path, batch_path)):
-                return []
-            unit = ap_ctx['units_by_uid'].get(unit_id)
-            matches = ap_ctx['by_uid'].get(unit_id, [])
-            type_matches = ap_ctx['types_by_uid'].get(unit_id, [])
-            rules = ap_ctx['rules']
-            answers = ap_ctx['answers']
-        else:
-            manifest = wf_manifest.load(folder)
-            record = manifest['stages']['answers']
-            if (record.get('status') != wf_manifest.COMPLETED or record.get('rebuild_required')
-                    or not (record.get('output_hashes') or {}).get(answer_path)
-                    or wf_manifest.is_stale(folder, manifest, wf_contracts.STAGE_BY_ID['answers'])[0]):
-                return []
-            if review_hashes is not None and any(
-                    not review_hashes.get(relative)
-                    or review_hashes[relative] != wf_manifest.sha256_file(folder / relative)
-                    for relative in (answer_path, type_path, batch_path)):
-                return []
-            unit = next((row for row in confirmed_units(folder) if row['unit_id'] == unit_id), None)
-            batch = load(folder / batch_path, {})
-            type_data = load(folder / type_path, {})
-            rows = batch.get('items', []) if isinstance(batch, dict) else []
-            type_rows = type_data.get('items', []) if isinstance(type_data, dict) else []
-            matches = [item for item in rows if isinstance(item, dict) and item.get('unit_id') == unit_id]
-            type_matches = [item for item in type_rows if isinstance(item, dict) and item.get('unit_id') == unit_id]
-            rules = taxonomy.type_knowledge_rules()
-            answers = load(folder / answer_path, {}).get('answers', {})
-        if unit is None or len(matches) != 1 or len(type_matches) != 1:
-            return []
-        item = matches[0]
-        type_item = type_matches[0]
-        main_type = type_item.get('type') or type_item.get('question_type')
-        if (item.get('question_type') or item.get('type')) != main_type:
-            return []
-        if not any(dim.get('dim') == '答案考点'
-                   for dim in rules.get(main_type, {}).get('dims', [])):
-            return []
-        children = item.get('subquestions') if unit['unit_kind'] == 'group' else [item]
-        terms = []
-        for child_number in unit['numbers']:
-            if number is not None and str(number) != str(child_number):
-                continue
-            key = question_key(unit, child_number)
-            children_at_number = [child for child in children or [] if isinstance(child, dict)
-                                  and str(child.get('number')) == str(child_number)]
-            if len(children_at_number) != 1:
-                continue
-            child = children_at_number[0]
-            if unit.get('identity_version') == 'scoped-v1' and child.get('question_id') != key:
-                continue
-            value, current = answers.get(key), child.get('answer')
-            if (isinstance(value, str) and isinstance(current, str)
-                    and _answer_comparison_text(value) == _answer_comparison_text(current)):
-                terms.extend(_answer_point_terms(value, child.get('options') or item.get('options') or []))
-        return list(dict.fromkeys(terms))
-    except FileNotFoundError:
-        return _pending_answer_point_tags(folder, unit_id, number=number, review_hashes=review_hashes)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        return []
-
-
-def label_payload(row, batch_item, subs, folder, unit_id=None, *, ap_ctx=None, r1_assessments=None):
-    """当前标签值 + 目录校验结果，供人工核对/修改。
-
-    优先级：单元标签草稿（人工改过的）> 批次单元 > 行汇总 > 子题。
-    """
-    item = batch_item if isinstance(batch_item, dict) else {}
-    unit_labels = load_unit_labels(folder, unit_id or row.get("unit_id") or "") if unit_id or row.get("unit_id") else {}
-    if unit_labels:
-        item = {**item, **unit_labels}
-    filters = item.get("filterMetadata") if isinstance(item.get("filterMetadata"), dict) else {}
-    knowledge = []
-    explicit_knowledge = "knowledge" in unit_labels
-    if explicit_knowledge:
-        knowledge_sources = [unit_labels["knowledge"]]
-    else:
-        knowledge_sources = [item.get("knowledge")]
-        # 预览行里的知识点是「二级/末级」短名投影（preview 的 knowledge_projection /
-        # 重新分组候选的 source_projection），只能用于卷面速览；与批次全路径合并
-        # 会让同一条知识点出现两遍，且短名会被判成「目录外路径」。
-        if not row.get("source_projection") and not row.get("knowledge_projection"):
-            knowledge_sources.append(row.get("knowledge"))
-    for source in knowledge_sources:
-        for path in source or []:
-            if str(path).strip() and str(path).strip() not in knowledge:
-                knowledge.append(str(path).strip())
-    knowledge = drop_short_knowledge_copies(knowledge)
-    if not knowledge and not explicit_knowledge:
-        for sub in subs:
-            for path in sub.get("knowledge") or []:
-                if str(path).strip() and str(path).strip() not in knowledge:
-                    knowledge.append(str(path).strip())
-    main_type = (unit_labels.get("type") or item.get("question_type") or item.get("type")
-                 or row.get("question_type") or row.get("type") or "")
-    from workflow import label_merge
-    uid_key = str(unit_id or row.get("unit_id") or "")
-    r1_kwargs = {"round1_assessment": r1_assessments.get(uid_key)} if isinstance(r1_assessments, dict) else {}
-    merged_info = label_merge.merged_unit_knowledge(
-        folder, uid_key, knowledge, main_type=main_type, manual_labels=unit_labels, **r1_kwargs
-    ) if uid_key else {"knowledge": knowledge, "auto_merged": knowledge, "added_from_round1": [], "has_round1": False, "manually_edited": explicit_knowledge}
-    if not explicit_knowledge and merged_info.get("has_round1"):
-        knowledge = list(merged_info["knowledge"])
-    resolved = taxonomy.resolve_knowledge(knowledge, main_type)
-    # 旧批次可能保存不带顶级维度的叶子路径；展示和维度校验统一使用
-    # 唯一解析出的当前目录全路径，避免加载时误报目录外路径。
-    if resolved["resolved"] and not resolved["unknown"] and not resolved["non_leaf"]:
-        knowledge = list(dict.fromkeys(point["path"] for point in resolved["resolved"]))
-        resolved = taxonomy.resolve_knowledge(knowledge, main_type)
-    from workflow.metadata_policy import MISSING
-    values = {
-        "source": item.get("source") or filters.get("source") or row.get("source") or MISSING,
-        "source_type": item.get("source_type") or filters.get("source_type") or row.get("source_type") or MISSING,
-        "year": str(item.get("year") or filters.get("year") or row.get("year") or ""),
-        "location": item.get("location") or filters.get("location") or row.get("location") or "",
-        "type": main_type,
-        "subtypes": filters.get("subtypes") or ([item.get("subtype")] if item.get("subtype") else []),
-        "difficulty": (taxonomy.difficulty_name(item.get("difficulty"))
-                       or taxonomy.difficulty_name(filters.get("difficulty"))
-                       or taxonomy.difficulty_name(filters.get("difficultyValue"))
-                       or taxonomy.difficulty_name(row.get("difficulty"))),
-        "categories": filters.get("categories") or [MISSING],
-        "difficultyValue": filters.get("difficultyValue"),
-        "knowledge": knowledge,
-        "knowledgeIds": [point["id"] for point in resolved["resolved"]],
-    }
-    warnings = taxonomy.check_labels(values)
-    warnings += taxonomy.check_unit_dims(values["type"], knowledge)
-    if item.get("source_notice") or row.get("source_notice"):
-        warnings.append(item.get("source_notice") or row["source_notice"])
-    values["scope"] = "unit"
-    values["unit_id"] = str(unit_id or row.get("unit_id") or "")
-    values["answer_point_tags"] = answer_point_tags(folder, values["unit_id"], ap_ctx=ap_ctx)
-    values["subquestion_count"] = len([s for s in subs if s.get("stem") or s.get("options")])
-    values["knowledge_editable"] = True
-    values["knowledge_manually_saved"] = explicit_knowledge
-    values["knowledge_merged_from_round1"] = merged_info.get("added_from_round1", [])
-    values["stored_in"] = (str(unit_label_path(folder, unit_id or row.get("unit_id")).relative_to(folder))
-                           if (unit_id or row.get("unit_id")) else None)
-    values["resolvedKnowledge"] = [{"path": p["path"], "id": p["id"], "name": p["name"]}
-                                   for p in resolved["resolved"]]
-    values["warnings"] = warnings
-    return values
-
-
-def preview_labels(labels: dict, subs: list, batch_item: dict, row: dict) -> dict:
-    """原卷预览旁的快速核对标签：来源类型、知识点（二级与末级）、难度、词数。"""
-    def _words(text):
-        return len(re.findall(r"[A-Za-z][A-Za-z'’\-]*", str(text or "")))
-    def _short_knowledge(path):
-        # 只显示二级与最后一级（最多两个）：如 主题/人与自然/自然生态/地理环境 → 人与自然/地理环境
-        parts = [p for p in str(path or "").split("/") if p.strip()]
-        if not parts:
-            return ""
-        if len(parts) == 1:
-            return parts[0]
-        if len(parts) == 2:
-            return parts[1]
-        return "/".join([parts[1], parts[-1]])
-    parts = [batch_item.get("material") or row.get("material") or batch_item.get("stem") or row.get("stem") or ""]
-    for sub in subs or []:
-        parts.append(sub.get("stem") or "")
-        for opt in sub.get("options") or []:
-            parts.append(opt.get("text") if isinstance(opt, dict) else opt)
-    words = _words("\n".join(str(p) for p in parts))
-    source_type = str(labels.get("source_type") or "").strip()
-    knowledge = [_short_knowledge(p) for p in (labels.get("knowledge") or []) if str(p).strip()]
-    return {
-        "source_type": source_type,
-        "type": str(labels.get("type") or "").strip(),
-        "subtypes": list(labels.get("subtypes") or []),
-        "knowledge": knowledge,
-        "difficulty": str(labels.get("difficulty") or "").strip(),
-        "word_count": words,
-    }
-
-
-def has_unverified_review_history(folder: Path) -> bool:
-    """仅判断目录中是否存在格式像归档的文件，不推断来源或审核范围。"""
-    # Windows lacks POSIX directory-fd flags. Keep the same bounded, symlink-free
-    # check using resolved paths and identity snapshots instead of disabling it.
-    if _WINDOWS:
-        try:
-            root = Path(folder).resolve(strict=True)
-            workflow = root / "workflow"
-            history = workflow / "review-history"
-            if not workflow.is_dir() or workflow.is_symlink() or not history.is_dir() or history.is_symlink():
-                return False
-            for entry in history.iterdir():
-                if not re.fullmatch(r"[0-9a-f]{32}\.json", entry.name) or entry.is_symlink():
-                    continue
-                try:
-                    resolved = entry.resolve(strict=True)
-                    resolved.relative_to(history)
-                    info = resolved.stat()
-                    if not stat.S_ISREG(info.st_mode) or info.st_size > 32 * 1024 * 1024:
-                        continue
-                    with resolved.open("rb") as stream:
-                        data = json.load(stream)
-                    if isinstance(data, dict) and isinstance(data.get("plan"), dict) and isinstance(data.get("rounds"), list):
-                        return True
-                except (OSError, UnicodeError, ValueError, RecursionError):
-                    continue
-        except OSError:
-            return False
-        return False
-    opened = []
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    try:
-        root_fd = os.open(folder, flags)
-        opened.append(root_fd)
-        workflow_fd = os.open("workflow", flags, dir_fd=root_fd)
-        opened.append(workflow_fd)
-        history_fd = os.open("review-history", flags, dir_fd=workflow_fd)
-        opened.append(history_fd)
-        for name in os.listdir(history_fd):
-            if not re.fullmatch(r"[0-9a-f]{32}\.json", name):
-                continue
-            try:
-                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=history_fd)
-                with os.fdopen(fd, "rb") as stream:
-                    info = os.fstat(stream.fileno())
-                    if not stat.S_ISREG(info.st_mode) or info.st_size > 32 * 1024 * 1024:
-                        continue
-                    data = json.load(stream)
-                if isinstance(data, dict) and isinstance(data.get("plan"), dict) and isinstance(data.get("rounds"), list):
-                    return True
-            except (OSError, UnicodeError, ValueError, RecursionError):
-                continue
-    except OSError:
-        return False
-    finally:
-        for fd in reversed(opened):
-            os.close(fd)
-    return False
-
-
-def _prepare_review_comparison_ctx(folder: Path):
-    """Load batch-level review snapshot, bound inputs, and round indices once."""
-    snapshot = load(folder / "07_review/review-comparison.json", {})
-    snapshot_valid = (isinstance(snapshot, dict) and snapshot.get("version") == 1
-                      and snapshot.get("execution_completed") is True
-                      and isinstance(snapshot.get("plan"), dict)
-                      and isinstance(snapshot.get("rounds"), list))
-    if snapshot_valid:
-        records = snapshot.get("rounds", [])
-        checked = {"labels"}
-        plan = snapshot.get("plan") or {}
-        snapshot_original = snapshot.get("original") or {}
-        source_name = "07_review/review-comparison.json"
-        try:
-            from workflow import review as _review
-            current_plan = _review.prepare_round_plan(folder)
-            snapshot_stale = current_plan.get("input_binding") != snapshot.get("input_binding")
-        except (ImportError, OSError, ValueError, TypeError, KeyError):
-            snapshot_stale = False
-    else:
-        snapshot_stale = False
-        payload = load(folder / "07_review/review-rounds.json", {})
-        records = payload.get("rounds", []) if isinstance(payload, dict) else []
-        try:
-            from workflow import review
-            evaluated = review.evaluate_rounds(folder, payload)
-            checked = set(evaluated.get("checked_rounds", []))
-            plan = evaluated.get("plan") or {}
-        except (ImportError, OSError, ValueError, TypeError, KeyError):
-            checked, plan = set(), {}
-        snapshot_original = {}
-        source_name = "07_review/review-rounds.json"
-
-    hashes = plan.get("input_hashes") or {}
-
-    def bound(relative):
-        if snapshot_valid:
-            key = {"03_types/types.json": "types", "04_knowledge/knowledge.json": "knowledge",
-                   "01_source_ans/answers.json": "answers"}.get(relative)
-            return snapshot_original.get(key, {}) if key else {}
-        return load(folder / relative, {}) if checked and relative in hashes else {}
-
-    def index_unique(data):
-        rows = data.get("items", []) if isinstance(data, dict) else []
-        grouped = {}
-        for row in rows:
-            if isinstance(row, dict):
-                key = str(row.get("unit_id") or "")
-                grouped.setdefault(key, []).append(row)
-        return {k: v[0] for k, v in grouped.items() if len(v) == 1}
-
-    return {
-        "records": records,
-        "checked": checked,
-        "hashes": hashes,
-        "snapshot_stale": bool(snapshot_stale),
-        "source_name": source_name,
-        "types_by_uid": index_unique(bound("03_types/types.json")),
-        "knowledge_by_uid": index_unique(bound("04_knowledge/knowledge.json")),
-        "answers": bound("01_source_ans/answers.json"),
-        "history_exists": has_unverified_review_history(folder),
-        "rules": taxonomy.type_knowledge_rules(),
-    }
-
-
-def review_comparison(folder: Path, unit_id, numbers, *, rc_ctx=None, ap_ctx=None):
-    """读取输入绑定有效的两轮判断及其原始标签，保留逐题抽样范围。"""
-    uid = str(unit_id or "")
-    if rc_ctx is None:
-        rc_ctx = _prepare_review_comparison_ctx(folder)
-    records = rc_ctx["records"]
-    checked = rc_ctx["checked"]
-    hashes = rc_ctx["hashes"]
-    snapshot_stale = rc_ctx["snapshot_stale"]
-    source_name = rc_ctx["source_name"]
-    types = rc_ctx["types_by_uid"].get(uid, {})
-    knowledge = rc_ctx["knowledge_by_uid"].get(uid, {})
-    answers = rc_ctx["answers"]
-    rules = rc_ctx["rules"]
-    labels = {key: row[key] for key, row in (("type", types), ("subtypes", types), ("knowledge", knowledge)) if key in row}
-    children = {}
-    for child in knowledge.get("subquestions", []) if isinstance(knowledge.get("subquestions"), list) else []:
-        if isinstance(child, dict) and str(child.get("number", "")).isdigit():
-            children.setdefault(str(int(child["number"])), []).append(child)
-    originals = {n: {"child_knowledge": rows[0]["knowledge"]} for n, rows in children.items()
-                 if len(rows) == 1 and "knowledge" in rows[0]}
-    difficulty = answers.get("difficulty", {}) if isinstance(answers, dict) else {}
-    if isinstance(difficulty, dict):
-        for n in numbers:
-            if str(n).isdigit() and str(int(n)) in difficulty:
-                originals.setdefault(str(int(n)), {})["difficulty"] = difficulty[str(int(n))]
-    result = {"original": {"source": "审核输入" if checked else None, "unit_id": uid,
-                           "labels": labels, "subquestions": originals}, "rounds": [],
-              "stale": bool(snapshot_stale),
-              "snapshot_source": source_name}
-    wanted = {str(int(n)) for n in numbers if str(n).isdigit()}
-    history_exists = rc_ctx["history_exists"]
-    for rid, name in (("labels", "一审"),):
-        matches = [r for r in records if isinstance(r, dict) and r.get("round_id") == rid] if isinstance(records, list) else []
-        entry = {"round_id": rid, "name": name,
-                 "status": ("上一版审核快照" if snapshot_stale else
-                            ("待重新审核" if matches else ("历史来源未验证" if history_exists else "未提供"))),
-                 "checks": []}
-        if rid in checked and len(matches) == 1:
-            record = matches[0]
-            for check in record.get("checks", []):
-                if not isinstance(check, dict) or str(check.get("unit_id") or "") != uid:
-                    continue
-                if rid == "sample":
-                    raw = check.get("number")
-                    if raw is not None and str(raw).strip():
-                        # 逐题抽样：只保留抽中的该小题。
-                        if not str(raw).isdigit() or str(int(raw)) not in wanted:
-                            continue
-                    # 整组抽样：number 为空表示整组核对，覆盖本单元全部小题。
-                assessment = check.get("assessment") if isinstance(check.get("assessment"), dict) else {}
-                expected_answers = answer_point_tags(folder, uid, number=check.get("number"), review_hashes=hashes, ap_ctx=ap_ctx)
-                reviewed_answers = assessment.get("answer_points")
-                if reviewed_answers is None and assessment and check.get("verdict") == "ok" and expected_answers:
-                    # Older runs already stated some answers in their reasons.
-                    # Only recover those exact terms against the same bound inputs.
-                    rationale = str(check.get("rationale") or "")
-                    reviewed_answers = [value for value in expected_answers
-                                        if re.search(r"(?<![A-Za-z'-])" + re.escape(value) + r"(?![A-Za-z'-])",
-                                                     rationale)]
-                if isinstance(reviewed_answers, list):
-                    assessment = {**assessment, "answer_points": reviewed_answers}
-                def _ap_disabled(t):
-                    rule = rules.get(t.strip()) if isinstance(t, str) and t.strip() else None
-                    return bool(rule and not any(dim.get("dim") == "答案考点" for dim in rule.get("dims", [])))
-                if _ap_disabled(labels.get("type")) or _ap_disabled(assessment.get("type")):
-                    assessment = {key: value for key, value in assessment.items() if key != "answer_points"}
-                    expected_answers = []
-                elif not expected_answers and not answer_point_tags(folder, uid, number=check.get("number"), ap_ctx=ap_ctx):
-                    assessment = {key: value for key, value in assessment.items() if key != "answer_points"}
-                entry["checks"].append({"unit_id": uid, "number": check.get("number"),
-                                        "scope": ("subquestion" if str(check.get("number") or "").strip()
-                                                  else "unit"),
-                                        "verdict": check.get("verdict"), "rationale": check.get("rationale"),
-                                        "assessment": assessment, "evidence": check.get("evidence"),
-                                        "expected_answer_points": expected_answers,
-                                        "differences": [
-                                            {"field": field, "original": labels[field], "reviewed": assessment[field]}
-                                            for field in ("type", "subtypes", "knowledge")
-                                            if field in labels and field in assessment
-                                            and (sorted(set(labels[field])) if isinstance(labels[field], list) else labels[field])
-                                            != (sorted(set(assessment[field])) if isinstance(assessment[field], list) else assessment[field])]})
-            entry["status"] = "已提供" if entry["checks"] else "未覆盖"
-            entry["source"] = source_name
-            entry["execution_id"] = record.get("execution_id")
-        result["rounds"].append(entry)
-    from workflow import label_merge
-    r1_entry = next((r for r in result["rounds"] if r.get("round_id") == "labels"), None)
-    r1_unit_check = next((c for c in (r1_entry or {}).get("checks", []) if isinstance(c, dict) and isinstance(c.get("assessment"), dict)), None)
-    result["merged"] = label_merge.merged_unit_knowledge(
-        folder,
-        uid,
-        labels.get("knowledge") or [],
-        main_type=labels.get("type"),
-        round1_assessment=(r1_unit_check or {}).get("assessment"),
-    )
-    return result
-
-
-def finding_comparison(finding, comparison, numbers, number_map):
-    """以字段和精确题号读取各轮判断，不将抽样结论外推到其他小题。"""
-    uid = comparison["original"]["unit_id"]
-    target = str(finding.get("unit_id") or "")
-    field = str(finding.get("field") or "")
-    child_match = re.fullmatch(r"subquestions\[number=(\d+)\]\.(\w+)", field)
-    number = str(int(child_match.group(1))) if child_match else None
-    key = child_match.group(2) if child_match else field
-    key = {"knowledgeids": "knowledge", "knowledge_points": "knowledge", "subtype": "subtypes"}.get(key.lower(), key)
-    if child_match and key == "knowledge":
-        key = "child_knowledge"
-    if target != uid:
-        mapped = str(number_map.get(target) or "")
-        if not mapped.isdigit() or sum(str(v) == mapped for v in number_map.values()) != 1:
-            return None
-        number = str(int(mapped))
-    if key in ("difficulty", "child_knowledge") and number is None:
-        matched = re.search(r"第\s*(\d{1,3})\s*题", str(finding.get("reason") or finding.get("question") or ""))
-        number = str(int(matched.group(1))) if matched else None
-    if key == "sample" and number is None:
-        matched = re.search(r"第\s*(\d{1,3})\s*题", str(finding.get("reason") or finding.get("question") or ""))
-        number = str(int(matched.group(1))) if matched else None
-    wanted = {str(int(n)) for n in numbers if str(n).isdigit()}
-    if number and number not in wanted:
-        return None
-    if key in ("difficulty", "child_knowledge") and number is None:
-        return None
-    original = comparison["original"]["subquestions"].get(number, {}) if number and key != "sample" else comparison["original"]["labels"]
-    out = {"scope": "subquestion" if number else "unit", "number": number, "field": key,
-           "original": original.get(key), "original_provided": key in original,
-           "source": comparison["original"]["source"], "rounds": []}
-    for round_entry in comparison["rounds"]:
-        item = {k: v for k, v in round_entry.items() if k != "checks"}
-        checks = []
-        for check in round_entry["checks"]:
-            raw_number = str(check.get("number") or "").strip()
-            if round_entry["round_id"] == "sample" and number and raw_number and raw_number != number:
-                # 逐题抽样的二审只取抽中的该小题；整组抽样（无题号）覆盖整组。
-                continue
-            assessment = check.get("assessment") or {}
-            if key in ("difficulty", "child_knowledge"):
-                collection = assessment.get("difficulty" if key == "difficulty" else "subquestions")
-                matching = [v for v in collection if isinstance(v, dict) and str(v.get("number")) == number] if isinstance(collection, list) else []
-                value_key = "value" if key == "difficulty" else "knowledge"
-                present = len(matching) == 1 and value_key in matching[0]
-                value = matching[0].get(value_key) if present else None
-            else:
-                present = key in assessment
-                value = assessment.get(key)
-            if not present:
-                continue
-            selected = dict(check)
-            selected["value"] = value
-            def comparable(v):
-                return sorted(set(v)) if isinstance(v, list) and all(isinstance(x, str) for x in v) else v
-            selected["differences"] = ([{"scope": out["scope"], "number": number, "field": key,
-                                         "original": out["original"], "reviewed": value}]
-                                       if out["original_provided"] and comparable(value) != comparable(out["original"]) else [])
-            checks.append(selected)
-        item["checks"] = checks
-        if item["status"] == "已提供" and not checks:
-            target_covered = any(
-                not str(c.get("number") or "").strip() or str(c.get("number")) == number
-                for c in round_entry["checks"])
-            item["status"] = ("未覆盖" if round_entry["round_id"] == "sample" and number
-                              and not target_covered else "未涉及")
-        out["rounds"].append(item)
-    return out
-
-
-def paper_uses_bulk_bold(lines):
-    """Detect document-wide bold runs for display, without touching source data."""
-    body = []
-    for line in lines:
-        text = re.sub(r'<(?:/?(?:u|sup|sub|em)|br\s*/?)>', '', line.strip(), flags=re.I)
-        if not text or text.startswith(('[IMG ', '[TABLE ', '[/TABLE]')):
-            continue
-        body.append(text)
-    return len(body) >= 20 and sum(
-        bool(re.fullmatch(r'(?:\s*\*\*[^*]+\*\*\s*)+', line))
-        for line in body
-    ) >= 0.85 * len(body)
-
-
-def _clean_preview_heading(text: str) -> str:
-    s = re.sub(r"\[IMG\s+[^\]]+\]", "", str(text or ""), flags=re.I)
-    s = re.sub(r"\*{2,}", "", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _extract_preview_section_meta(source_txt: str, sections: list) -> list[dict]:
-    """Attach optional part header and section-level instruction from 正文.txt to each section."""
-    if not sections:
-        return []
-    raw_lines = [ln.strip() for ln in str(source_txt or "").replace("\r\n", "\n").split("\n")]
-    clean_lines = [_clean_preview_heading(ln) for ln in raw_lines]
-    norm_lines = [re.sub(r"[\s\u3000]+", "", cl) for cl in clean_lines]
-    part_re = re.compile(r"^第[一二三四五六七八九十\d]+部分")
-    q_start_re = re.compile(r"^(?:[（(]\s*[)）]\s*)?\d{1,3}\s*[.．、)]")
-    group_lead_re = re.compile(r"^(?:听下面|阅读(?:下列|下面)|根据(?:对话|短文)|[A-E]$)")
-    sec_head_re = re.compile(r"^(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]|[IVX]{1,4}|[一二三四五六七八九十]+)\s*[.．、]")
-
-    enriched = []
-    cursor = 0
-    for sec in sections:
-        if not isinstance(sec, dict):
-            continue
-        title = _clean_preview_heading(sec.get("title") or "")
-        if not title:
-            continue
-        target_norm = re.sub(r"[\s\u3000]+", "", title)
-        hit = -1
-        for idx in range(cursor, len(norm_lines)):
-            if norm_lines[idx] == target_norm or (target_norm and target_norm in norm_lines[idx]):
-                hit = idx
-                break
-        part_title = ""
-        instruction_lines = []
-        if hit >= 0:
-            cursor = hit + 1
-            for back in range(hit - 1, max(-1, hit - 5), -1):
-                if not clean_lines[back]:
-                    continue
-                if part_re.match(clean_lines[back]):
-                    part_title = clean_lines[back]
-                    break
-                if sec_head_re.match(clean_lines[back]) or q_start_re.match(clean_lines[back]):
-                    break
-            if "书面表达" not in title:
-                for fwd in range(hit + 1, min(len(raw_lines), hit + 8)):
-                    raw_ln = raw_lines[fwd]
-                    cl = clean_lines[fwd]
-                    if not cl or cl == "扫码练听力":
-                        continue
-                    if "[TABLE" in raw_ln.upper():
-                        break
-                    if "[IMG" in raw_ln.upper():
-                        continue
-                    if not re.search(r"[\u4e00-\u9fff]", cl):
-                        break
-                    if (q_start_re.match(cl) or part_re.match(cl) or sec_head_re.match(cl)
-                            or group_lead_re.match(cl)):
-                        break
-                    instruction_lines.append(cl)
-        qs = [int(n) for n in (sec.get("questions") or []) if str(n).isdigit()]
-        enriched.append({
-            "title": title,
-            "part": part_title,
-            "instruction": "\n".join(instruction_lines).strip(),
-            "questions": qs,
-        })
-    return enriched
-
-
-def _clean_preview_band_title(text: str) -> str:
-    s = _clean_preview_heading(text)
-    while len(s) >= 2 and (
-        (s[0] == "【" and s[-1] == "】")
-        or (s[0] == "[" and s[-1] == "]")
-        or (s[0] == "(" and s[-1] == ")")
-        or (s[0] == "（" and s[-1] == "）")
-    ):
-        s = s[1:-1].strip()
-    return s
-
-
-def _extract_preview_lesson_bands(source_txt: str) -> list[tuple[int, str]]:
-    """Extract lesson-practice band headers (e.g. 【一、A 基础巩固】/【二、B 能力提升】/【二、B 创新阅读专练】) with 1-based line numbers."""
-    if not source_txt:
-        return []
-    bracket_re = re.compile(r"^(?:【[^】]{2,32}】|\[[^\]]{2,32}\]|（[^）]{2,32}）|\([^)]{2,32}\))$")
-    bracket_skip_re = re.compile(r"^(?:答案|参考答案|解析|文章大意|听力原文|评分标准|提示|注意)$")
-    plain_band_re = re.compile(
-        r"^(?:(?:[一二三四五六七八九十]+[、.．]\s*)?(?:[A-Z]\s*[.．、]?\s*)?)?"
-        r"(?:基础巩固|基础过关|基础达标|基础训练|能力提升|能力突破|能力训练|"
-        r"创新性训练|创新训练|创新阅读专练|重要考点集训|考点集训|素养提升|"
-        r"拓展提升|拓展训练|综合提升|综合训练|语篇提能|培优提升|思维拓展|达标训练|核心素养)$"
-    )
-    bands = []
-    for idx, raw_ln in enumerate(str(source_txt).replace("\r\n", "\n").split("\n"), 1):
-        cl = _clean_preview_heading(raw_ln)
-        if not cl:
-            continue
-        stripped = _clean_preview_band_title(cl)
-        if not stripped or bracket_skip_re.match(stripped):
-            continue
-        if (bracket_re.match(cl) and re.search(r"[\u4e00-\u9fff]", stripped)) or plain_band_re.match(stripped):
-            bands.append((idx, stripped))
-    return bands
-
-
-def paper_preview(name: str) -> dict:
-    """Return full-paper preview data (title, metadata tags, ordered assembled items)."""
-    from workflow.metadata_policy import MISSING
-    from workflow import wire_format
-    folder = batch_dir(name)
-    batch = load(folder / "06_batch" / "batch_meta.json") or load(folder / "06_batch" / "batch.json") or {}
-    meta = load(folder / "01_source" / "metadata.json", {}) or {}
-    raw_items = batch.get("items") if isinstance(batch.get("items"), list) else []
-    src_path = folder / "01_source" / "正文.txt"
-    source_txt = src_path.read_text(encoding="utf-8", errors="replace") if src_path.is_file() else ""
-    src_lines = source_txt.replace("\r\n", "\n").split("\n") if source_txt else []
-    structure = load(folder / "01_source" / "structure.json", {}) or {}
-    sec_list = _extract_preview_section_meta(source_txt, structure.get("sections") or [])
-    lesson_bands = _extract_preview_lesson_bands(source_txt)
-    num_to_sec = {}
-    for sec in sec_list:
-        for qn in sec["questions"]:
-            num_to_sec.setdefault(qn, sec)
-
-    items = []
-    for raw_it in raw_items:
-        if not isinstance(raw_it, dict):
-            continue
-        it = dict(raw_it)
-        if source_txt and "[IMG" in source_txt and isinstance(it.get("materialBlocks"), list):
-            att_imgs = None
-            if isinstance(it.get("attachments"), list):
-                att_imgs = {
-                    str(a.get("name") or str(a.get("url") or "").rsplit("/", 1)[-1]).strip()
-                    for a in it["attachments"]
-                    if isinstance(a, dict) and a.get("kind") == "image"
-                }
-            wire_format.restore_table_cell_images(it["materialBlocks"], source_txt, allowed_images=att_imgs)
-        existing_sec = it.get("source_section")
-        if isinstance(existing_sec, dict) and str(existing_sec.get("title") or "").strip():
-            sec_copy = dict(existing_sec)
-            band_title = ""
-            lb = sec_copy.get("lesson_band")
-            if isinstance(lb, dict):
-                sl = lb.get("start_line")
-                if isinstance(sl, int) and 1 <= sl <= len(src_lines):
-                    cand = _clean_preview_band_title(src_lines[sl - 1])
-                    if cand:
-                        band_title = cand
-                if not band_title:
-                    band_title = _clean_preview_band_title(lb.get("label") or "")
-            elif lesson_bands:
-                sec_start = sec_copy.get("start_line")
-                if isinstance(sec_start, int):
-                    for b_line, b_title in lesson_bands:
-                        if b_line <= sec_start:
-                            band_title = b_title
-                        else:
-                            break
-            if band_title:
-                sec_copy["band"] = band_title
-            it["source_section"] = sec_copy
-        else:
-            first_num = None
-            if str(it.get("number") or "").isdigit():
-                first_num = int(it["number"])
-            elif isinstance(it.get("numbers"), list):
-                for n in it["numbers"]:
-                    if str(n).isdigit():
-                        first_num = int(n)
-                        break
-            if first_num is None and isinstance(it.get("subquestions"), list):
-                for sub in it["subquestions"]:
-                    if isinstance(sub, dict) and str(sub.get("number") or "").isdigit():
-                        first_num = int(sub["number"])
-                        break
-            matched_sec = num_to_sec.get(first_num) if first_num is not None else None
-            if matched_sec:
-                inst = matched_sec["instruction"]
-                stem_norm = re.sub(r"[\s\u3000]+", "", _clean_preview_heading(it.get("stem") or ""))
-                inst_norm = re.sub(r"[\s\u3000]+", "", inst)
-                if inst_norm and stem_norm and (inst_norm in stem_norm or stem_norm in inst_norm):
-                    inst = ""
-                it["source_section"] = {
-                    "title": matched_sec["title"],
-                    "part": matched_sec["part"],
-                    "instruction": inst,
-                }
-        items.append(it)
-
-    first = next((it for it in items if isinstance(it, dict)), {})
-    filters = first.get("filterMetadata") if isinstance(first.get("filterMetadata"), dict) else {}
-    title = str(batch.get("title") or meta.get("paper_title") or meta.get("title") or folder.name).strip()
-    source_type = str(first.get("source_type") or filters.get("source_type") or batch.get("source_type") or meta.get("source_type") or "").strip()
-    year = str(first.get("year") or filters.get("year") or batch.get("year") or meta.get("year") or "").strip()
-    categories = filters.get("categories") or batch.get("categories") or meta.get("categories") or []
-    if isinstance(categories, str):
-        categories = [c.strip() for c in categories.split(",") if c.strip()]
-    return {
-        "title": title,
-        "source_type": source_type,
-        "year": year,
-        "categories": [str(c) for c in categories if str(c).strip() and str(c).strip() != MISSING],
-        "items": items,
-    }
-
+from .review_views import (  # noqa: E402
+    _answer_point_terms,
+    _knowledge_projection,
+    _pending_answer_point_tags,
+    _prepare_answer_point_ctx,
+    _prepare_review_comparison_ctx,
+    answer_point_tags,
+    drop_short_knowledge_copies,
+    finding_comparison,
+    has_unverified_review_history,
+    label_payload,
+    load_unit_labels,
+    preview_labels,
+    review_comparison,
+    unit_label_path,
+)
 
 def _prepare_batch_detail_context(folder: Path, name: str):
     """Load whole-paper shared inputs once for detail() and units_bundle()."""
@@ -5472,13 +3546,14 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def _check_request_security(self, *, is_post: bool, decoded_path: str) -> bool:
-        host_header = self.headers.get("Host", "")
+        headers = getattr(self, "headers", None) or {}
+        host_header = headers.get("Host", "")
         if host_header:
             host_only = _extract_host_only(host_header)
             if host_only not in _ALLOWED_LOOPBACK_HOSTS:
                 self.send_json({"error": "拒绝非本机 Host 请求"}, 403)
                 return False
-        origin = (self.headers.get("Origin") or "").strip()
+        origin = (headers.get("Origin") or "").strip()
         if origin:
             parsed_origin = urlparse(origin)
             origin_host = (parsed_origin.hostname or "").lower()
@@ -5487,12 +3562,12 @@ class Handler(BaseHTTPRequestHandler):
                 return False
         expected_token = os.environ.get("WF_WORKBENCH_TOKEN", "").strip()
         if expected_token and decoded_path != "/api/health":
-            provided = self.headers.get("X-Workbench-Token", "")
+            provided = headers.get("X-Workbench-Token", "")
             if not provided or not hmac.compare_digest(provided, expected_token):
                 self.send_json({"error": "缺少或无效的访问令牌"}, 401)
                 return False
         if is_post:
-            ct = (self.headers.get("Content-Type") or "").strip().lower()
+            ct = (headers.get("Content-Type") or "").strip().lower()
             if decoded_path == "/api/uploads":
                 if "multipart/form-data" not in ct:
                     self.send_json({"error": "上传接口要求 multipart/form-data"}, 415)
@@ -5513,10 +3588,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, value, status=200):
         body = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        etag = getattr(self, "_pending_etag", None)
+        if etag is not None:
+            self._pending_etag = None
         try:
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("X-Content-Type-Options", "nosniff")
+            if etag:
+                self.send_header("ETag", etag)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -5531,9 +3611,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if decoded_path == "/api/health":
+                split_mode = _is_split_worker()
+                worker_busy = _remote_worker().is_busy() if split_mode else False
                 return self.send_json({"ok": True, "instance_id": os.environ.get("WF_BACKEND_INSTANCE_ID", ""),
                                        "started_at": _SERVER_STARTED_AT,
+                                       "split_worker": split_mode,
                                        "busy": work_in_flight(),
+                                       "worker_busy": worker_busy,
                                        "advance_worker": advance_worker_health(),
                                        "workflow_runtime_version": wf_execution_state.RUNTIME_VERSION if wf_execution_state else None,
                                        "self_heal_supervisor": _workflow_supervisor.health() if _workflow_supervisor else {"running": False}})
@@ -5547,7 +3631,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(audio_status((query.get("batch") or [""])[0] or None))
             if decoded_path == "/api/operations/incidents":
                 from workflow import operations
-                operations.recover_resumes(WORKFLOWS, _launch_advance)
+                launcher = (
+                    (lambda name, folder, **kw: _remote_worker().enqueue(
+                        name,
+                        operations_expectation=kw.get("operations_expectation"),
+                        reset_budget=bool(kw.get("reset_budget", False)),
+                    ))
+                    if _is_split_worker() else _launch_advance
+                )
+                operations.recover_resumes(WORKFLOWS, launcher)
                 return self.send_json(operations.incidents(WORKFLOWS))
             if decoded_path == "/api/operations/work-state":
                 return self.send_json(operations_work_state())
@@ -5593,6 +3685,30 @@ class Handler(BaseHTTPRequestHandler):
                 payload = {"batches": batches}
                 if is_review_list:
                     payload["has_active_work"] = has_active_work
+                worker_seq = _remote_worker().state_seq() if _is_split_worker() else 0
+                raw_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                etag = f'W/"{_batches_epoch}-{worker_seq}-{hashlib.sha1(raw_json).hexdigest()[:16]}"'
+                req_headers = getattr(self, "headers", None)
+                if req_headers and req_headers.get("If-None-Match") == etag and hasattr(self, "wfile"):
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    return
+                if type(self).send_json is Handler.send_json and hasattr(self, "wfile"):
+                    try:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json; charset=utf-8")
+                        self.send_header("X-Content-Type-Options", "nosniff")
+                        self.send_header("ETag", etag)
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("Content-Length", str(len(raw_json)))
+                        self.end_headers()
+                        self.wfile.write(raw_json)
+                    except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                        pass
+                    return
+                self._pending_etag = etag
                 return self.send_json(payload)
             if decoded_path == "/api/taxonomy":
                 return self.send_json(taxonomy.taxonomy())
@@ -5700,8 +3816,44 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "ai-supplement":
                 from workflow import ai_supplement
                 return self.send_json({"ok": True, **ai_supplement.read_progress(batch_dir(parts[2]))})
+            if len(parts) == 3 and parts[:2] == ["api", "vendor"]:
+                fname = Path(parts[2]).name
+                if fname not in {"jszip.min.js", "docx-preview.min.js"}:
+                    return self.send_json({"error": "not found"}, 404)
+                vendor_dir = (ROOT.parent / "lib" / "vendor").resolve()
+                target = (vendor_dir / fname).resolve()
+                if target.parent != vendor_dir or not target.is_file():
+                    return self.send_json({"error": "vendor asset missing"}, 404)
+                data = target.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                return self.wfile.write(data)
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "paper-preview":
                 return self.send_json(paper_preview(parts[2]))
+            if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "source-docx":
+                info, raw = read_source_docx(parts[2])
+                if parse_qs(parsed.query).get("format") == ["raw"]:
+                    if raw is None:
+                        return self.send_json(info, 404)
+                    self.send_response(200)
+                    self.send_header(
+                        "Content-Type",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    return self.wfile.write(raw)
+                if raw is None:
+                    return self.send_json(info)
+                return self.send_json({
+                    **info,
+                    "base64": base64.b64encode(raw).decode("ascii"),
+                })
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "material-roles":
                 return self.send_json(get_material_roles(parts[2]))
             self.send_json({"error": "not found"}, 404)
@@ -6108,6 +4260,9 @@ def _changelog_prune_loop():
 def _wake_supervisor():
     """Resume the idle-paused watchdog when new work appears (never raises)."""
     try:
+        if _is_split_worker():
+            _remote_worker().wake_supervisor()
+            return
         if _workflow_supervisor is not None:
             _workflow_supervisor.wake()
     except Exception:  # noqa: BLE001 - a wake failure must not block uploads/advance
@@ -6117,6 +4272,12 @@ def _wake_supervisor():
 def serve(http_server):
     """Start background recovery only with an actual server lifecycle."""
     global _workflow_supervisor
+    if _is_split_worker():
+        try:
+            http_server.serve_forever()
+        finally:
+            http_server.server_close()
+        return
     from dataclasses import replace as _dc_replace
     from workflow import supervisor as wf_supervisor
     from workflow.supervisor import SupervisorConfig, WorkflowSupervisor

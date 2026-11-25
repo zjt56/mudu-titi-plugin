@@ -341,6 +341,53 @@ class P3TimeoutRetryAndTranscriptTests(unittest.TestCase):
             # 1 initial + 1 bounded timeout retry = 2 calls (does NOT burn a 3rd attempt).
             self.assertEqual(len(calls), 2)
 
+    def test_partitioned_run_splits_multi_unit_timeout_and_recovers(self):
+        from workflow import unit_tasks
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp) / "b"
+            (batch / "workflow").mkdir(parents=True)
+            cfg = dict(local_agent.DEFAULTS, retries=2, timeout_retries=1, max_input_chars=100000, part_concurrency=1, assemble_part_units=1)
+            part = {"unit_ids": ["u-1", "u-2"], "prompt": "FULL_PROMPT"}
+            calls = []
+
+            def fake_invoke(prompt, run_dir, config, **kwargs):
+                calls.append(prompt)
+                if prompt == "FULL_PROMPT":
+                    raise local_agent.AgentError("Content task time budget exceeded", "timeout")
+                uid = "u-1" if "u-1" in prompt else "u-2"
+                return {"response": {"artifacts": {"06_batch/batch.json": {"items": [{"unit_id": uid}]}}}, "artifacts": {}}
+
+            def fake_build_parts(b, stage, max_chars, max_units=15, selected_ids=None, **kw):
+                if selected_ids is None:
+                    return {"prompt": "FULL_PROMPT", "input_hashes": {}}, [part]
+                return {"prompt": f"SUB_{selected_ids[0]}", "input_hashes": {}}, [
+                    {"unit_ids": list(selected_ids), "prompt": f"SUB_{selected_ids[0]}"}
+                ]
+
+            def fake_merge(stage, parts_list, responses):
+                items = []
+                for resp in responses:
+                    items.extend(resp["artifacts"]["06_batch/batch.json"]["items"])
+                return {"status": "completed", "artifacts": {"06_batch/batch.json": {"items": items}}}
+
+            with patch.object(local_agent, "load_config", return_value=cfg), \
+                    patch.object(local_agent, "_agent_lock", return_value=nullcontext()), \
+                    patch.object(local_agent, "_check_input_hashes"), \
+                    patch.object(local_agent, "_record_assemble_guard"), \
+                    patch.object(local_agent, "_store_part_snapshot"), \
+                    patch.object(local_agent, "_load_part_snapshot", return_value=None), \
+                    patch.object(local_agent, "invoke", side_effect=fake_invoke), \
+                    patch.object(unit_tasks, "build_parts", side_effect=fake_build_parts), \
+                    patch.object(unit_tasks, "check_part_inputs"), \
+                    patch.object(unit_tasks, "validate_part"), \
+                    patch.object(unit_tasks, "merge", side_effect=fake_merge), \
+                    patch("workflow.agent_tasks.confirmed_units", return_value=[{"unit_id": "u-1"}, {"unit_id": "u-2"}]), \
+                    patch("workflow.agent_tasks.build_task", return_value={"prompt": "FULL_PROMPT", "input_hashes": {}}), \
+                    patch("workflow.agent_tasks.accept_result", return_value={"completed": True}):
+                code = local_agent.main(["--stage", "assemble", "--batch-dir", str(batch)])
+            self.assertEqual(code, 0)
+            self.assertEqual(calls, ["FULL_PROMPT", "SUB_u-1", "SUB_u-2"])
+
 
 class P4RunnerParallelStagesTests(unittest.TestCase):
     def test_runner_source_includes_answers_in_parallel_trio(self):

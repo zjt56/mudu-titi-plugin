@@ -119,6 +119,85 @@ class TablePreviewTest(unittest.TestCase):
             rows = preview["items"][0]["materialBlocks"][0]["rows"]
             self.assertEqual(rows[0]["cells"][0]["text"], "[IMG image2.jpeg]")
             self.assertEqual(rows[1]["cells"][0]["text"], "[IMG image3.jpeg]")
+            self.assertFalse(preview["has_source_docx"])
+
+    def test_read_source_docx_returns_original_bytes_and_display_name(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            wf_root = Path(tmp)
+            b_with = wf_root / "b_docx"
+            (b_with / "attachments").mkdir(parents=True)
+            (b_with / "01_source").mkdir(parents=True)
+            sample_bytes = b"PK\x03\x04fake-docx-payload"
+            (b_with / "attachments" / "source.docx").write_bytes(sample_bytes)
+            (b_with / "01_source" / "metadata.json").write_text(
+                json.dumps({
+                    "source_evidence": {
+                        "grade": {"origin": "filename", "text": "26秋七上单元测试.docx"},
+                    },
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            b_empty = wf_root / "b_empty"
+            (b_empty / "01_source").mkdir(parents=True)
+
+            old_wf = server.WORKFLOWS
+            try:
+                server.WORKFLOWS = wf_root
+                info, raw = server.read_source_docx("b_docx")
+                miss_info, miss_raw = server.read_source_docx("b_empty")
+                preview = server.paper_preview("b_docx")
+            finally:
+                server.WORKFLOWS = old_wf
+
+            self.assertTrue(info["ok"])
+            self.assertEqual(info["filename"], "26秋七上单元测试.docx")
+            self.assertEqual(info["size"], len(sample_bytes))
+            self.assertEqual(raw, sample_bytes)
+            self.assertTrue(preview["has_source_docx"])
+
+            self.assertFalse(miss_info["ok"])
+            self.assertEqual(miss_info["kind"], "missing")
+            self.assertIsNone(miss_raw)
+
+    def test_paper_preview_indents_long_material_group_paragraphs(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            wf_root = Path(tmp)
+            batch = wf_root / "b_indent"
+            (batch / "01_source").mkdir(parents=True)
+            (batch / "06_batch").mkdir(parents=True)
+            batch_data = {
+                "name": "b_indent",
+                "items": [
+                    {
+                        "id": "g1",
+                        "unit_kind": "group",
+                        "type": "阅读理解",
+                        "material": "First paragraph of passage.\nSecond paragraph of passage.",
+                        "subquestions": [{"number": 1, "stem": "What is it?"}],
+                    },
+                    {
+                        "id": "g2",
+                        "unit_kind": "group",
+                        "type": "补全对话",
+                        "material": "A: Hi!\nB: Hello!",
+                        "subquestions": [{"number": 2, "stem": "______"}],
+                    },
+                ],
+            }
+            (batch / "06_batch" / "batch.json").write_text(json.dumps(batch_data, ensure_ascii=False), encoding="utf-8")
+            old_wf = server.WORKFLOWS
+            try:
+                server.WORKFLOWS = wf_root
+                preview = server.paper_preview("b_indent")
+            finally:
+                server.WORKFLOWS = old_wf
+            self.assertEqual(
+                preview["items"][0]["material"],
+                "\u3000\u3000First paragraph of passage.\n\u3000\u3000Second paragraph of passage.",
+            )
+            self.assertEqual(preview["items"][1]["material"], "A: Hi!\nB: Hello!")
 
 
 if __name__ == "__main__":

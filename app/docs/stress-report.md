@@ -70,9 +70,9 @@
 从 app 目录执行，使用本机可用的 Python 命令：
 
 ```bash
-WF_STRUCTURE_AI=0 PYTHONDONTWRITEBYTECODE=1 python3 scripts/stress_pipeline.py --runs 60 --seed-start 901 --report /tmp/recovery-stress.json
-WF_STRUCTURE_AI=0 PYTHONDONTWRITEBYTECODE=1 python3 scripts/stress_modules.py
-WF_STRUCTURE_AI=0 PYTHONDONTWRITEBYTECODE=1 python3 scripts/stress_profile.py --report /tmp/recovery-profile.json
+WF_STRUCTURE_AI=0 PYTHONDONTWRITEBYTECODE=1 python3 ../tools/stress/stress_pipeline.py --runs 60 --seed-start 901 --report /tmp/recovery-stress.json
+WF_STRUCTURE_AI=0 PYTHONDONTWRITEBYTECODE=1 python3 ../tools/stress/stress_modules.py
+WF_STRUCTURE_AI=0 PYTHONDONTWRITEBYTECODE=1 python3 ../tools/stress/stress_profile.py --report /tmp/recovery-profile.json
 ```
 
 真实模型 probe 必须单独显式执行，使用当前本机配置，产生实际模型调用与耗时记录：

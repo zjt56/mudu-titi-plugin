@@ -199,6 +199,8 @@ def _stale_running_candidate(folder, manifest, *, force=False):
         age = _stage_age_seconds(record)
         busy = _execution_busy(folder)
         if not busy and (force or (age is not None and age >= ORPHAN_RUNNING_GRACE_SECONDS)):
+            if not force and _recent_stage_activity(folder, spec.id, ORPHAN_RUNNING_GRACE_SECONDS):
+                continue
             detail = f"阶段 {spec.id} 处于运行中但无活跃执行锁（已滞留 {int(age) if age is not None else 0}s），疑似僵死"
             return spec.id, detail
         if spec.id == "review":
@@ -634,10 +636,26 @@ def _unit_excerpts(folder, unit_ids, limit=3):
     return [by_id[uid] for uid in wanted if uid in by_id]
 
 
+def _is_model_contract_error(stage, detail):
+    """Return True when failure is a transient model schema/completeness miss rather than a code defect."""
+    text = str(detail or "").lower()
+    if stage in ("review", "knowledge", "preassemble"):
+        markers = (
+            "invalid fields",
+            "every review needs knowledge",
+            "review checks must cover each target",
+            "need repair:",
+        )
+        return any(m in text for m in markers)
+    return False
+
+
 def _recommended_action(stage, detail, issues, incident):
     codes = " ".join([str(detail or "")] + [str(i.get("code") or "") for i in issues]).lower()
     if incident.get("escalation"):
         return "request_code_repair"
+    if _is_model_contract_error(stage, detail):
+        return "resume(retry_stage_with_fresh_context)（模型输出契约缺漏，优先局部重问/刷新上下文，不要改代码）"
     if stage in ("review", "review_gate"):
         if "review_sample_source_unverified" in codes or "source_binding" in codes or "source_unverified" in codes:
             return "resume(upstream_rederive) 或 request_code_repair"

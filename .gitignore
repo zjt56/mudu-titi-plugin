@@ -55,3 +55,6 @@ app/workflow/local-agent.json.bak-*
 # 本机个人配置（含本机绝对路径，不随仓库提交；参考 *.example.json）
 app/workflow/local-agent.json
 app/workflow/ocr-config.json
+
+# 本地执行器运行状态（含访问令牌），不进仓库
+/runtime/

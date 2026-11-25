@@ -52,6 +52,60 @@ test('proxyToBackend does not mark backend unready or retry when client aborts m
   assert.equal(ensured, 0, 'client abort must not trigger ensureBackend');
 });
 
+test('proxyToBackend refreshes x-workbench-token on retry after backend restart or 401 rotation', async () => {
+  const code = host.slice(host.indexOf('async function proxyToBackend('), host.indexOf('// 写入 router 时'));
+  const seenTokens = [];
+  const backend = { port: 8791, ready: true, token: 'old-tok' };
+  let callCount = 0;
+  const proxy = vm.runInNewContext(code + '\nproxyToBackend', {
+    Buffer, AbortController, setTimeout, clearTimeout,
+    backend,
+    backendAuthHeaders: () => (backend.token ? { 'x-workbench-token': backend.token } : {}),
+    ensureBackend: async () => {
+      backend.token = 'new-tok';
+      backend.ready = true;
+      return { ok: true, token: backend.token };
+    },
+    fetch: async (_url, init) => {
+      callCount += 1;
+      seenTokens.push(init.headers['x-workbench-token']);
+      if (callCount === 1) {
+        return {
+          status: 401,
+          headers: new Map([['content-type', 'application/json']]),
+          arrayBuffer: async () => Buffer.from('{"error":"缺少或无效的访问令牌"}'),
+        };
+      }
+      return {
+        status: 200,
+        headers: new Map([['content-type', 'application/json']]),
+        arrayBuffer: async () => Buffer.from('{"batches":[]}'),
+      };
+    },
+  });
+
+  const req = Readable.from([]);
+  req.method = 'GET';
+  req.url = '/wf-plugin/api/batches';
+  req.headers = {};
+  req.resume();
+  await new Promise((r) => req.once('end', r));
+
+  let statusCode = 0;
+  let bodyOut = '';
+  const res = new EventEmitter();
+  res.writableEnded = false;
+  res.destroyed = false;
+  res.writeHead = (s) => { statusCode = s; };
+  res.end = (b) => { bodyOut = String(b || ''); res.writableEnded = true; };
+
+  await proxy(req, res, '/api/batches');
+
+  assert.deepEqual(seenTokens, ['old-tok', 'new-tok']);
+  assert.equal(statusCode, 200);
+  assert.equal(bodyOut, '{"batches":[]}');
+});
+
 test('proxyToBackend uses extended timeout for uploads and delete/purge endpoints', () => {
   assert.match(host, /subPath === '\/api\/uploads'/);
   assert.match(host, /delete\|purge/);

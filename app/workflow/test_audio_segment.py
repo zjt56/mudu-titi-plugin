@@ -707,6 +707,41 @@ class AudioVersionBindingTest(unittest.TestCase):
                 segment.cut(source, out, dict(item, unit_binding={'sha256': 'two'}))
             self.assertEqual(len(calls), 2)
 
+    def test_nonlistening_type_change_preserves_audio_binding(self):
+        from audio.binding import listening_context
+        from audio.consistency import pair_is_consistent
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = _batch(Path(tmp), numbers=(1, 2))
+            types_path = batch / '03_types/types.json'
+            types = json.loads(types_path.read_text())
+            types['items'][1]['type'] = '单项填空'
+            types['items'][1]['subtypes'] = ['四个选项']
+            types_path.write_text(json.dumps(types, ensure_ascii=False), encoding='utf-8')
+            binding, units = listening_context(batch)
+            self.assertEqual([u['unit_id'] for u in units], ['q-1'])
+            cut_path = batch / '02_audio/seg-q-1.mp3'
+            cut_path.write_bytes(b'real-cut-placeholder')
+            row = {'unit_id': 'q-1', 'file': '02_audio/seg-q-1.mp3', 'start': 0.0,
+                   'end': 5.0, 'file_sha256': segment._file_digest(cut_path), 'evidence': ['cut source']}
+            evidence = {'generator': 'audio.segment/v2', 'unit_binding': binding, 'items': [row]}
+            mapping = {'unit_binding': binding, 'items': [
+                {key: row[key] for key in ('unit_id', 'file', 'start', 'end')}]}
+            self.assertTrue(pair_is_consistent(batch, [mapping, evidence]))
+
+            # Updating a non-listening unit's type/subtypes must not invalidate listening cuts.
+            types['items'][1]['type'] = '翻译'
+            types['items'][1]['subtypes'] = ['英翻汉']
+            types_path.write_text(json.dumps(types, ensure_ascii=False), encoding='utf-8')
+            self.assertEqual(listening_context(batch)[0], binding)
+            self.assertTrue(pair_is_consistent(batch, [mapping, evidence]))
+
+            # Switching a non-listening unit into a listening type must invalidate.
+            types['items'][1]['type'] = '听力关键词语选择'
+            types['items'][1]['subtypes'] = []
+            types_path.write_text(json.dumps(types, ensure_ascii=False), encoding='utf-8')
+            self.assertNotEqual(listening_context(batch)[0], binding)
+            self.assertFalse(pair_is_consistent(batch, [mapping, evidence]))
+
 
 if __name__ == "__main__":
     unittest.main()

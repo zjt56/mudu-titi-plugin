@@ -1,7 +1,12 @@
 """Adversarial checks for the stress harness's own assertions."""
 import copy
+import sys
 import unittest
-from workflow import stress_lab
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "app"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stress_lab
 
 
 class StressOracleTest(unittest.TestCase):
@@ -56,7 +61,7 @@ class StressOracleTest(unittest.TestCase):
         from workflow import format_gate
         self.assertEqual(stress_lab.valid_knowledge("听力关键词语选择", [], "standalone"), ["语音/基本读音"])
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "synth"
+            root = Path(tmp).resolve() / "synth"
             fixture = stress_lab.build_fixture(root, 912, standalone_count=2)
             self.assertTrue(fixture.units)
             (root / "07_review/upload-format.json").unlink(missing_ok=True)

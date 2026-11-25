@@ -12,8 +12,11 @@ import tempfile
 import time
 from pathlib import Path
 from unittest.mock import patch
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from workflow import local_agent, self_heal, stress_lab
+_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_ROOT / "app"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stress_lab
+from workflow import local_agent, self_heal
 
 CASES = (("empty_paragraph", 701), ("listening_stem", 702), ("two_defects", 703),
          ("nonrepairable_prose", 704), ("blank_structure", 705), ("invalid_label", 706),

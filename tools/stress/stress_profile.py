@@ -10,8 +10,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from workflow import batch_fill, format_gate, manifest as mf, question_draft, runner, stress_lab
+_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_ROOT / "app"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stress_lab
+from workflow import batch_fill, format_gate, manifest as mf, question_draft, runner
 
 
 def main():

@@ -1897,7 +1897,13 @@ def _audio_pending(batch_dir):
     from . import manifest as mf
     manifest = mf.load(batch_dir)
     audio_status = (manifest.get("stages") or {}).get("audio", {}).get("status")
-    return audio_status not in mf.TERMINAL_OK
+    if audio_status not in mf.TERMINAL_OK:
+        return True
+    if audio_status != mf.SKIPPED:
+        from audio.consistency import pair_is_consistent, read_pair
+        if not pair_is_consistent(batch_dir, read_pair(batch_dir)):
+            return True
+    return False
 
 
 def _has_nonlistening_cache(batch_dir):

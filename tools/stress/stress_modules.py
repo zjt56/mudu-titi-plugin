@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "app"))
 
 from workflow import (batch_fill, format_gate, legacy_format, manifest as mf,
                       stage_semantics, supervisor, upload_payload)  # noqa: E402

@@ -278,6 +278,17 @@ class ContentAgentTests(unittest.TestCase):
         self.assertFalse(state['accepted'])
         self.accept.assert_not_called()
 
+    def test_time_budget_exceeded_without_error_code_maps_to_timeout(self):
+        task, thread, result = self.start()
+        self.claim(task)
+        state = broker.dispatch('POST', f"/api/content-agent/tasks/{task['task_id']}/state", {
+            'session_id': 'session-A', 'status': 'failed',
+            'error': 'Content task time budget exceeded'})['task']
+        self.assertEqual(state['error_code'], 'timeout')
+        thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result['error'].code, 'timeout')
+
     def claim(self, task, session="session-A"):
         return broker.dispatch("POST", f"/api/content-agent/tasks/{task['task_id']}/claim",
                                {"session_id": session})

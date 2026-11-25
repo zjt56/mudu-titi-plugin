@@ -208,17 +208,6 @@ def order_prompt_context(subset):
     return ordered
 
 
-def _mark_leaf(point, all_points):
-    """Add leaf/leafTerminal to one catalog point without changing its content."""
-    if not isinstance(point, dict) or not isinstance(point.get("path"), str):
-        return point
-    path = point["path"]
-    is_leaf = not any(isinstance(other, dict) and isinstance(other.get("path"), str)
-                      and other["path"].startswith(path + "/") for other in all_points)
-    return {**point, "leaf": is_leaf,
-            "leafTerminal": "叶子：到此为止，不得再拼接子级" if is_leaf else "非叶子：需继续选到叶子"}
-
-
 _LOAD_CACHE = {}
 # Only one read-only evaluation shares bytes/parsed units. No verdict or source
 # bytes survive into a later request, and concurrent threads have separate scopes.
@@ -1180,26 +1169,6 @@ def _short_paths(value):
         return "、".join(str(v).split("/")[-1] for v in value) or "空"
     return str(value)
 
-
-def _label_changes(old, new):
-    changes = []
-    if old.get("type") != new.get("type"):
-        changes.append(f"题型：{old.get('type')} → {new.get('type')}")
-    if old.get("subtypes") != new.get("subtypes"):
-        changes.append(f"子类：{_short_paths(old.get('subtypes'))} → {_short_paths(new.get('subtypes'))}")
-    return changes
-
-
-def _knowledge_changes(old, assessment):
-    changes = []
-    if old.get("knowledge") != assessment.get("knowledge"):
-        changes.append(f"知识点：{_short_paths(old.get('knowledge'))} → {_short_paths(assessment.get('knowledge'))}")
-    prior = {str(c["number"]): c.get("knowledge") for c in old.get("subquestions", [])}
-    current = {str(c["number"]): c.get("knowledge") for c in assessment.get("subquestions", [])}
-    for number in dict.fromkeys((*prior, *current)):
-        if number not in prior or number not in current or prior[number] != current[number]:
-            changes.append(f"第{number}题知识点：{_short_paths(prior.get(number))} → {_short_paths(current.get(number))}")
-    return changes
 
 def _sample_source_binding(batch, plan, check):
     """Derive target-level source attribution without changing model output."""

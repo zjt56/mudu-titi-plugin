@@ -1144,6 +1144,8 @@ def dispatch(method, path, payload=None):
                     task.update(error=str(payload.get("error") or "Child host ended task")[:2400], retryable=False)
                     if _tool_budget_receipt(task):
                         task["error_code"] = TOOL_BUDGET_CODE
+                    elif status == "failed" and str(payload.get("error") or "").startswith("Content task time budget exceeded"):
+                        task["error_code"] = "timeout"
                     # Preserve typed transport evidence without turning a model
                     # stream failure into a source/answer validation failure.
                     if (status == 'failed' and payload.get('error_code') == 'timeout'

@@ -1347,6 +1347,64 @@ def main(argv=None):
                                   if concurrency > 1 and len(parts) > 1 else {})
             queued_at = time.monotonic()
 
+            def _split_timed_out_part(index, part, prefix="split"):
+                ids = list(part["unit_ids"])
+                mid = len(ids) // 2
+                halves = [ids[:mid], ids[mid:]]
+                sub_parts, sub_responses = [], []
+                for h_idx, half_ids in enumerate(halves):
+                    _, built = unit_tasks.build_parts(
+                        batch_dir, args.stage, config["max_input_chars"],
+                        max_units=max(1, len(half_ids)), selected_ids=half_ids,
+                    )
+                    for s_idx, sub_part in enumerate(built):
+                        unit_tasks.check_part_inputs(batch_dir, sub_part)
+                        sub_cand = None
+                        try:
+                            reused_sub = _load_part_snapshot(batch_dir, args.stage, sub_part, cache_hashes, config)
+                            if reused_sub is not None:
+                                unit_tasks.validate_part(batch_dir, args.stage, sub_part, reused_sub)
+                                sub_cand = reused_sub
+                                print(f"  分片 {index + 1}/{len(parts)}：复用拆分快照，不再调用模型", flush=True)
+                        except (ValueError, OSError):
+                            sub_cand = None
+                        if sub_cand is None:
+                            sub_feedback = ""
+                            for sub_attempt in range(retries + 1):
+                                sub_dir = run_dir / f"part-{index + 1:04d}-{prefix}-{h_idx + 1}-{s_idx + 1}-attempt-{sub_attempt + 1:02d}"
+                                room = max(0, config["max_input_chars"] - len(sub_part["prompt"]))
+                                if sub_feedback and room < 80:
+                                    raise AgentError("Partition leaves no room for validation feedback; increase max_input_chars", "input_limit")
+                                sub_delivered = sub_part["prompt"] + sub_feedback[:room]
+                                _check_input_hashes(batch_dir, strict_hashes)
+                                print(f"  分片 {index + 1}/{len(parts)}：超时拆分后重试"
+                                      f"（{len(sub_part['unit_ids'])} 单元，{len(sub_part['prompt']) // 1000}K 字符，第 {sub_attempt + 1} 次）", flush=True)
+                                try:
+                                    sub_res = invoke(sub_delivered, sub_dir, config, **invocation_options)
+                                    _check_input_hashes(batch_dir, strict_hashes)
+                                    try:
+                                        unit_tasks.check_part_inputs(batch_dir, sub_part)
+                                    except ValueError as inp_exc:
+                                        raise AgentError(str(inp_exc), "context_changed") from inp_exc
+                                    sub_cand = sub_res["response"]
+                                    unit_tasks.validate_part(batch_dir, args.stage, sub_part, sub_cand)
+                                    _store_part_snapshot(batch_dir, args.stage, sub_part, cache_hashes, config, sub_cand)
+                                    break
+                                except (AgentError, ValueError) as sub_exc:
+                                    if isinstance(sub_exc, AgentError) and sub_exc.code == "timeout" and len(sub_part["unit_ids"]) > 1:
+                                        sub_cand = _split_timed_out_part(index, sub_part, prefix=f"{prefix}-{h_idx + 1}-{s_idx + 1}")
+                                        _store_part_snapshot(batch_dir, args.stage, sub_part, cache_hashes, config, sub_cand)
+                                        break
+                                    sub_recoverable = isinstance(sub_exc, ValueError) or sub_exc.code in ("response", "integration")
+                                    if not sub_recoverable or sub_attempt >= retries:
+                                        raise
+                                    sub_feedback = ("\n\n上一次分片结果未通过校验：" + str(sub_exc)[:feedback_limit]
+                                                    + "\n请修正并完整返回本分片全部单元的 JSON。")
+                                    continue
+                        sub_parts.append(sub_part)
+                        sub_responses.append(sub_cand)
+                return unit_tasks.merge(args.stage, sub_parts, sub_responses)
+
             def run_part(index, part):
                 wait_seconds = round(time.monotonic() - queued_at, 4) if invocation_options else 0
                 unit_tasks.check_part_inputs(batch_dir, part)
@@ -1392,6 +1450,13 @@ def main(argv=None):
                             unit_tasks.validate_part(batch_dir, args.stage, part, candidate)
                     except (AgentError, ValueError) as exc:
                         if isinstance(exc, AgentError) and exc.code == "timeout":
+                            if len(part["unit_ids"]) > 1:
+                                print(f"  分片 {index + 1}/{len(parts)}：调用超时，拆分为更小分片重试", flush=True)
+                                candidate = _split_timed_out_part(index, part)
+                                unit_tasks.validate_part(batch_dir, args.stage, part, candidate)
+                                _store_part_snapshot(batch_dir, args.stage, part, cache_hashes, config, candidate)
+                                print(f"  分片 {index + 1}/{len(parts)}：拆分执行已校验并落盘快照", flush=True)
+                                return index, candidate, False
                             if timeout_attempts < max_timeout_retries and attempt < retries:
                                 timeout_attempts += 1
                                 print(f"  分片 {index + 1}/{len(parts)}：调用超时，执行第 {timeout_attempts} 次重试", flush=True)

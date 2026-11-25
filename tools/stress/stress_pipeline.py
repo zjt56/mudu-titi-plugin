@@ -11,8 +11,10 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from workflow import stress_lab
+_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_ROOT / "app"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stress_lab
 
 DEFECTS = ("none", "empty_paragraph", "listening_stem", "stale_format_report",
            "nonrepairable_prose", "corrupt_report", "missing_final", "invalid_label",

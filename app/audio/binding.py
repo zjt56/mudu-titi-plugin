@@ -28,9 +28,11 @@ def listening_context(batch):
         uid = unit['unit_id']
         row = types[uid]
         numbers = [int(number) for number in unit['numbers']]
-        semantic.append({'unit': unit, 'type': row['type'], 'subtypes': sorted(row['subtypes'])})
         if row['type'].startswith('听力'):
+            semantic.append({'unit': unit, 'type': row['type'], 'subtypes': sorted(row['subtypes'])})
             listening.append({'unit_id': uid, 'numbers': numbers, 'type': row['type']})
+        else:
+            semantic.append({'unit': unit, 'listening': False})
     semantic.sort(key=lambda row: row['unit']['unit_id'])
     digest = hashlib.sha256(json.dumps(semantic, ensure_ascii=False, sort_keys=True,
                                      separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()

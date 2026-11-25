@@ -16,7 +16,11 @@ import json
 import re
 from pathlib import Path
 
-from workflow.docx_extract import image_dimensions as image_size, is_decorative_media
+from workflow.docx_extract import (
+    image_dimensions as image_size,
+    is_decorative_media,
+    option_image_names,
+)
 
 IMG_REF = re.compile(r"\[IMG\s+([^\]]+)\]")
 EXCLUSIONS = "media-exclusions.json"
@@ -135,6 +139,7 @@ def audit(folder: Path, numbers=None):
             refs.setdefault(name, []).append(index)
     starts = _question_starts(lines, numbers or [])
     scoped_owners = _scoped_image_owners(folder, lines)
+    option_imgs = option_image_names(lines)
     exclusions = load_exclusions(folder)
     excluded = {str(x) for x in exclusions.get("excluded", [])}
     items = []
@@ -153,6 +158,8 @@ def audit(folder: Path, numbers=None):
             verdict, reason = "unused", "正文没有 [IMG] 引用，不属于任何小题（常见于卷头广告、水印）"
         elif path.name in scoped_owners:
             verdict, reason = "question", "已由 scoped 单元的有效来源切片证明图片归属"
+        elif path.name in option_imgs and len(positions) == 1:
+            verdict, reason = "question", "正文中作为题目选项图片引用"
         elif positions and starts and min(positions) < starts[0][0]:
             verdict, reason = "header", "只出现在第一道题之前，属于卷头/说明区"
         elif is_decorative_media(size[0] if size else None, size[1] if size else None, file_bytes, len(positions)):

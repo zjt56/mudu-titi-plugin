@@ -20,7 +20,12 @@ from workbench import taxonomy, textbook
 from workflow import label_audit
 from workflow.metadata_policy import MISSING
 from workflow.question_content import group_material_from_media, material_blank_numbers
-from workflow.wire_format import expand_standalone_answer_lines, normalize_blank_text
+from workflow.wire_format import (
+    expand_standalone_answer_lines,
+    format_long_material_indent,
+    is_long_material_group,
+    normalize_blank_text,
+)
 
 from workflow.workflow_constants import AI_MARK
 
@@ -1036,6 +1041,12 @@ class _Builder:
             self.error("OPTION_COUNT_TOO_SMALL", "选择题至少需要两个选项", uid)
         subtypes = filters.get("subtypes", [])
         numerals = {"二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6}
+        cloze_blank_numbers = (
+            material_blank_numbers(normalize_blank_text(output.get("material")))
+            if (not child and kind == "group" and main_type == "完形填空")
+            else set()
+        )
+        child_number_set = {c.get("number") for c in children if isinstance(c, dict) and _positive(c.get("number"))}
         for subtype in subtypes if isinstance(subtypes, list) else []:
             if not isinstance(subtype, str):
                 continue
@@ -1046,16 +1057,18 @@ class _Builder:
             count = re.fullmatch(r"选择(\d+)题|(\d+)空", subtype)
             if not child and kind == "group" and count:
                 expected = int(count.group(1) or count.group(2))
-                # ☆拓展设问 属于本题组的正式小题（形式可为简答/选择，与 1、2、3… 同属该题型）：
+                # ☆拓展设问 / 新考法追问属于本题组的正式小题：
                 # 选择N题按本组全部结构化子题数计数（如 3 选择 + 1 拓展设问 = 选择4题），
-                # 同时兼容历史上已按不含拓展设问标出的 选择3题。
-                non_ext = len([c for c in children if not _extension_child(data, c)]) if count.group(1) else len(children)
-                allowed_counts = {len(children), non_ext} if count.group(1) else {len(children)}
+                # 同时兼容不含拓展设问标出的 选择3题；完形填空 N空 亦兼容正文实际空数与非拓展子题数。
+                non_ext = len([c for c in children if not _extension_child(data, c)])
+                allowed_counts = {len(children), non_ext}
+                if count.group(2) and cloze_blank_numbers and cloze_blank_numbers.issubset(child_number_set):
+                    allowed_counts.add(len(cloze_blank_numbers))
                 if expected not in allowed_counts:
                     self.error("SUBQUESTION_COUNT_MISMATCH",
                                f"子类{subtype}与 {len(children)} 个结构化子题不符"
                                + (f"（其中选择题 {non_ext} 题、拓展设问 {len(children) - non_ext} 题）"
-                                  if len(children) != non_ext else ""), uid)
+                                  if count.group(1) and len(children) != non_ext else ""), uid)
         if children:
             numbers = [c.get("number") for c in children if isinstance(c, dict) and _positive(c.get("number"))]
             if len(numbers) != len(set(numbers)):
@@ -1097,6 +1110,8 @@ class _Builder:
                 normalized = normalize_blank_text(re.sub(r"\*{2,}", "", output[key]).strip())
                 if key == "stem" and main_type != "书面表达":
                     normalized = expand_standalone_answer_lines(normalized)
+                if key == "material" and is_long_material_group(output):
+                    normalized = format_long_material_indent(normalized)
                 output[key] = normalized
         if isinstance(output.get("options"), list):
             output["options"] = [re.sub(r"\*{2,}", "", opt) if isinstance(opt, str) else opt for opt in output["options"]]

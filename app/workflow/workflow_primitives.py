@@ -8,11 +8,63 @@ for full backward compatibility.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import tempfile
 from pathlib import Path, PurePosixPath
 
 from .question_identity import validate_units
+
+
+def read_json_safe(path, fallback=None):
+    """Read a UTF-8 (with optional BOM) JSON file, returning fallback on missing/corrupt."""
+    p = Path(path)
+    if not p.is_file():
+        return fallback
+    try:
+        return json.loads(p.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, ValueError):
+        return fallback
+
+
+def write_json_atomic(path, value, *, indent=2, sort_keys=False) -> Path:
+    """Atomically write JSON to path using a same-directory temp file + replace."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(value, ensure_ascii=False, indent=indent, sort_keys=sort_keys) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return target
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path) -> str:
+    h = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def canonical_sha256(value) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _json(path):

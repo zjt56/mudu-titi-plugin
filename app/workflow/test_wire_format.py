@@ -209,6 +209,55 @@ class WireFormatTest(unittest.TestCase):
             atts = [(a["name"], a["placement"], a.get("optionKey")) for a in out.get("attachments") or []]
             self.assertEqual(atts, [("image10.png", "option", "A")])
 
+    def test_flat_option_slot_images_override_stale_decorative_flag_and_attach_to_options(self):
+        def fake_png(width, height, total_bytes):
+            head = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", width, height)
+            return head + b"\x00" * max(0, total_bytes - len(head))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            source = batch / "01_source"
+            media = source / "media"
+            media.mkdir(parents=True)
+            for name in ("image12.png", "image13.png", "image14.png", "badge.png"):
+                (media / name).write_bytes(fake_png(149, 61, 3945))
+            # 模拟旧提取产物把 149x61 电子表选项图误标为 decorative=True
+            (source / "extraction.json").write_text(json.dumps({
+                "media": [
+                    {"name": "image12.png", "width": 149, "height": 61, "size": 3945, "decorative": True},
+                    {"name": "image13.png", "width": 149, "height": 61, "size": 4048, "decorative": True},
+                    {"name": "image14.png", "width": 149, "height": 61, "size": 3847, "decorative": True},
+                    {"name": "badge.png", "width": 149, "height": 61, "size": 3900, "decorative": True},
+                ]
+            }), encoding="utf-8")
+            (source / "正文.txt").write_text(
+                "(　　)9.What time is it?\n"
+                "A.[IMG image12.png]\tB.[IMG image13.png]\tC.[IMG image14.png]\n"
+                "[IMG badge.png]10.Which one is right?\n",
+                encoding="utf-8",
+            )
+
+            decor = decorative_names(batch)
+            self.assertNotIn("image12.png", decor)
+            self.assertNotIn("image13.png", decor)
+            self.assertNotIn("image14.png", decor)
+            self.assertIn("badge.png", decor)
+
+            media_map = {p.name: f"01_source/media/{p.name}" for p in media.iterdir()}
+            item = {
+                "unit_kind": "standalone",
+                "stem": "What time is it?",
+                "options": ["A.[IMG image12.png]", "B.[IMG image13.png]", "C.[IMG image14.png]"],
+            }
+            out = normalize_item(item, media_map=media_map, decorative_names=decor)
+            self.assertEqual(out["options"], ["A.", "B.", "C."])
+            atts = [(a["name"], a["placement"], a.get("optionKey")) for a in out.get("attachments") or []]
+            self.assertEqual(atts, [
+                ("image12.png", "option", "A"),
+                ("image13.png", "option", "B"),
+                ("image14.png", "option", "C"),
+            ])
+
     def test_restore_table_cell_images_pure_image_cells_and_merges(self):
         from workflow.wire_format import restore_table_cell_images
 
@@ -283,6 +332,62 @@ class WireFormatTest(unittest.TestCase):
             normalize_blank_text("Boys and girls,________ ________________________."),
             "Boys and girls,______ ______.",
         )
+
+    def test_long_material_group_first_line_indent_rule(self):
+        from workflow.wire_format import format_long_material_indent, is_long_material_group
+
+        cloze = {
+            "unit_kind": "group",
+            "type": "完形填空",
+            "material": (
+                "A Trip to Huangshan\n"
+                "Last summer, I went to Mount Huangshan with my family.\n"
+                "  On a sunny afternoon, we arrived at the foot of the mountain.\n"
+                "[IMG p1.png]\n"
+                "[TABLE 1]\n"
+                "Day | Plan\n"
+                "[/TABLE]\n"
+                "※Notes: foot 山脚"
+            ),
+            "subquestions": [{"number": 1, "stem": "______"}],
+        }
+        self.assertTrue(is_long_material_group(cloze))
+        indented = format_long_material_indent(cloze["material"])
+        self.assertEqual(
+            indented,
+            "A Trip to Huangshan\n"
+            "\u3000\u3000Last summer, I went to Mount Huangshan with my family.\n"
+            "\u3000\u3000On a sunny afternoon, we arrived at the foot of the mountain.\n"
+            "[IMG p1.png]\n"
+            "[TABLE 1]\n"
+            "Day | Plan\n"
+            "[/TABLE]\n"
+            "※Notes: foot 山脚",
+        )
+        # 幂等：重复调用不会叠加成 4 个空格
+        self.assertEqual(format_long_material_indent(indented), indented)
+
+        # normalize_item 自动对完形/阅读组题材料加首行缩进两格
+        out = normalize_item(cloze)
+        self.assertTrue(out["material"].splitlines()[1].startswith("\u3000\u3000Last summer"))
+
+        # 补全对话与独立题不得加首行缩进
+        dialogue = {
+            "unit_kind": "group",
+            "type": "补全对话",
+            "material": "A: Hello, Andy.\nB: Hi, Amy.\nA: How are you?",
+            "subquestions": [{"number": 1, "stem": "______"}],
+        }
+        self.assertFalse(is_long_material_group(dialogue))
+        self.assertEqual(normalize_item(dialogue)["material"], dialogue["material"])
+
+        standalone = {
+            "unit_kind": "standalone",
+            "type": "单项填空",
+            "material": "Long note text for standalone item.",
+            "stem": "Choose A.",
+        }
+        self.assertFalse(is_long_material_group(standalone))
 
 if __name__ == "__main__":
     unittest.main()

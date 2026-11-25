@@ -315,13 +315,6 @@ def _project_unit_to_body_file(unit, clean_to_raw, body):
     return dict(unit, source_span=projected_span, source_section=projected_section)
 
 
-def _strip_answer_marker(value):
-    """Drop a leading answer letter / 【解析】 marker from an appendix line."""
-    text = re.sub(r"^\s*(?:[A-H]\s*[.、)）]?\s*)?", "", value or "")
-    text = re.sub(r"^\s*【\s*(?:解析|答案|分析|详解|考点|点拨)\s*】\s*[:：]?\s*", "", text)
-    return text or value
-
-
 _QUOTE_MAP = str.maketrans({"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'",
                             "\u300c": '"', "\u300d": '"', "\u300e": '"', "\u300f": '"'})
 

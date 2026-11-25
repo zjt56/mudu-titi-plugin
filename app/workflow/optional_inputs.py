@@ -16,20 +16,6 @@ ANSWER_FILES = ("01_source_ans/正文.txt", "01_source/附录.txt")
 SOURCE_DIRS = ("01_source_ans", "01_source")
 
 
-def _text_files(batch_dir: Path):
-    root = Path(batch_dir)
-    for relative in ANSWER_FILES:
-        path = root / relative
-        if path.is_file():
-            yield path
-    materials = root / "01_source/materials"
-    if materials.is_dir():
-        yield from sorted(materials.glob("attachment_*.txt"))
-    body = root / "01_source/正文.txt"
-    if body.is_file():
-        yield body
-
-
 def _nonempty(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8-sig", errors="ignore").strip()

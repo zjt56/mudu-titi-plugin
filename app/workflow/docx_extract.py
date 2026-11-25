@@ -143,6 +143,32 @@ def image_dimensions(path: Path) -> tuple[int, int] | None:
     return image_dimensions_from_bytes(head)
 
 
+_OPTION_IMG_RE = re.compile(
+    r"(?:^|[\s\u3000|\]])(?:\*{1,3})?[A-H](?:\*{1,3})?\s*[.．、)]\s*"
+    r"\[IMG\s+([^\]]+)\]"
+    r"(?=\s*(?:$|\||(?:\*{1,3})?[A-H](?:\*{1,3})?\s*[.．、)]))"
+)
+
+
+def option_image_names(lines) -> set[str]:
+    """提取正文中作为选项本体出现的图片文件名（如 ``A.[IMG x] B.[IMG y] C.[IMG z]``）。
+
+    这类图片即使呈扁长形态（如电子表时间图 149×61），也属于题目选项内容，
+    不得按装饰胶囊/栏目徽章规则过滤。
+    """
+    if isinstance(lines, str):
+        lines = lines.splitlines()
+    names: set[str] = set()
+    for line in lines or ():
+        if not isinstance(line, str) or "[IMG" not in line:
+            continue
+        for match in _OPTION_IMG_RE.finditer(line):
+            name = Path(match.group(1).strip()).name
+            if name:
+                names.add(name)
+    return names
+
+
 def is_decorative_media(width: int | None, height: int | None, size: int, count: int = 1) -> bool:
     """识别页眉横幅、栏目装饰胶囊（新考法/熟词生义等）及高频小图标，供提取与下游过滤共用。"""
     if count >= 2 and 0 < size <= 20480 and (height is None or height <= 120):
@@ -635,12 +661,16 @@ def extract_docx(source: Path, output_dir: Path) -> dict:
             append_content(body)
             # 源头标记高频小图标、扁平栏目徽章（如 新考法/熟词生义）及横幅水印，
             # 供下游在提干/材料/解析/标题剥离时与实质内容配图区分，不删原文件。
+            # 出现在选项位（如 A.[IMG x] B.[IMG y] C.[IMG z]）且唯一出现的图片受保护。
+            option_imgs = option_image_names(block["text"] for block in blocks)
             counts: dict[str, int] = {}
             for entry in extractor.media:
                 nm = entry.get("name") or ""
                 counts[nm] = counts.get(nm, 0) + 1
             for entry in extractor.media:
                 nm = entry.get("name") or ""
+                if nm in option_imgs and counts.get(nm, 0) == 1:
+                    continue
                 size = entry.get("size") or 0
                 if isinstance(size, int) and is_decorative_media(
                         entry.get("width"), entry.get("height"), size, counts.get(nm, 0)):

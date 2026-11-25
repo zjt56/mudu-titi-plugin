@@ -1730,20 +1730,6 @@ def _clear_cooldown(batch_dir: Path) -> None:
         pass
 
 
-def _stage_has_outputs(batch_dir: Path, stage) -> bool:
-    """A needs_review agent result is continuable only with its declared files."""
-    return bool(stage.produces) and all((Path(batch_dir) / relative).is_file()
-                                        for relative in stage.produces)
-
-
-def _first_unfinished_stage(manifest: dict) -> str:
-    """First stage not in a terminal-ok state, for cooldown reporting."""
-    for stage in contracts.STAGES:
-        if manifest.get("stages", {}).get(stage.id, {}).get("status") not in mf.TERMINAL_OK:
-            return stage.id
-    return contracts.STAGES[-1].id
-
-
 def poll_batch(batch_dir: Path, bridge: dict, *, interval: float = 5.0,
                max_polls: int = 0, stop_at: str | None = None) -> dict:
     """Poll one existing batch and wake the next ready stage.
