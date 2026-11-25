@@ -3452,9 +3452,16 @@ def apply_manual_content(folder: Path, unit_id, unit, expected, files, current,
             record["output_hashes"] = {artifact: hashlib.sha256(raw.replace("\n", os.linesep).encode("utf-8")).hexdigest()}
             if record.get("semantic_version") == stage_semantics.VERSION:
                 record["semantic_outputs"] = {artifact: stage_semantics.digest(stage_semantics.without_clocks(explanations))}
+            # 同步更新 assemble 对 batch_meta.json 的输出哈希，确保进入人工审核后的修改不触发上游/下游重跑。
+            asm_rec = current.get("stages", {}).get("assemble")
+            if isinstance(asm_rec, dict) and asm_rec.get("status") == wf_manifest.COMPLETED:
+                raw_batch = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+                out_hashes = dict(asm_rec.get("output_hashes") or {})
+                if target in out_hashes:
+                    out_hashes[target] = hashlib.sha256(raw_batch.replace("\n", os.linesep).encode("utf-8")).hexdigest()
+                    asm_rec["output_hashes"] = out_hashes
             wf_manifest.record_decision(current, "explanations", "manual_edit", "workbench",
                                         f"{unit_id}: {', '.join(edit)}", result["paths"])
-            wf_manifest.invalidate_downstream(folder, current, "assemble", "工作台人工修改解析/大意，旧检查与审核结果失效")
     return result
 
 _ALLOWED_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -4069,6 +4076,10 @@ class Handler(BaseHTTPRequestHandler):
                         merged[key] = labels[key]
                 subtypes = merged.get("subtypes") or ([merged["subtype"]] if merged.get("subtype") else [])
                 main_type = merged.get("type") or matched_row.get("type") or matched_row.get("question_type")
+                if "type" in labels and str(labels.get("type") or "").strip():
+                    submitted_type = str(labels["type"]).strip()
+                    if submitted_type not in taxonomy.types():
+                        raise ValueError(f"主类题型「{submitted_type}」不在目录中，请从正式目录选择")
                 numbers = [str(n) for n, own in owner.items() if str(own) == str(unit_id)]
                 unit_kind = (matched_row.get("unit_kind") or labels.get("unit_kind")
                              or ("group" if len(numbers) > 1 else "standalone"))
@@ -4147,8 +4158,7 @@ class Handler(BaseHTTPRequestHandler):
             applied["skipped"].append("items")
             warnings.append("小题改动仅保存为草稿")
         if files and current is not None:
-            if not applied["applied"] and (unit or items):
-                wf_manifest.invalidate_downstream(folder, current, "review", "工作台编辑了题面，旧审核结果失效")
+            # 进入人工审核后的修改不影响上游、也不失效下游，避免后台 supervisor 自动拉起重跑。
             current["updated_at"] = wf_manifest.now_iso()
             files[manifest_rel] = current
         if files:

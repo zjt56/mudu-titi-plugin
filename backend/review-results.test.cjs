@@ -266,15 +266,24 @@ test('题型/子类始终展示到最末级叶子，仅把存在差异的末级�
   assert.deepEqual(collectRed(samePanels), []);
 });
 
-test('知识点标签采用左对齐主次分层与胶囊标签展示，合并区与各行样式一致且无描边阴影', () => {
+test('知识点标签采用左对齐主次分层与胶囊标签展示，头部右侧放紧凑修改按钮且不再显示一致/有差异', () => {
   const d = detail(['主题/新标签'], '已提供');
   d.comparison.rounds[0].checks[0].assessment.knowledge = ['主题/原标签', '主题/扩展点'];
-  const panels = labelAuditPanels(d);
+  let edited = false;
+  const panels = labelAuditPanels(d, () => { edited = true; });
   const kpSection = panels[0].children[0];
-  // children[0] 为「知识点标签 + 状态」左对齐头部，children[1..3] 分别为 原标签 / 一审标签 / 标签合并 块
+  // children[0] 为「知识点标签 + 修改按钮」头部，children[1..3] 分别为 原标签 / 一审标签 / 标签合并 块
   const titleHead = kpSection.children[0];
   assert.equal(titleHead.props.style.justifyContent, 'space-between');
-  assert.match(text(titleHead), /知识点标签\s+有差异/);
+  assert.match(text(titleHead), /知识点标签\s+修改/);
+  assert.doesNotMatch(text(titleHead), /有差异|一致|待审核/);
+  const editBtn = titleHead.children[1];
+  assert.equal(editBtn.tag, 'button');
+  assert.equal(editBtn.props.style.fontSize, 11);
+  editBtn.props.onClick();
+  assert.equal(edited, true);
+  // 顶部工具栏已移除「通过」按钮（decideAll）
+  assert.doesNotMatch(source, /const decideAll = async \(status\)/);
   const cmpRows = kpSection.children.slice(1);
   assert.equal(cmpRows.length, 3);
   const [origRow, r1Row, mergedRow] = cmpRows;

@@ -224,7 +224,9 @@
             },
           },
             hasKids
-              ? h('span', { className: 'wf-tree-caret', 'aria-hidden': 'true' }, isOpen ? '▾' : '▸')
+              ? h('span', { className: 'wf-tree-caret' + (isOpen ? ' is-open' : ''), 'aria-hidden': 'true' },
+                  h('svg', { width: 13, height: 13, viewBox: '0 0 12 12', fill: 'currentColor' },
+                    h('path', { d: 'M2.5 1.5L10.5 6L2.5 10.5Z' })))
               : h('span', { className: 'wf-tree-check', 'aria-hidden': 'true' }, isChecked ? '✓' : ''),
             h('span', { className: 'wf-tree-label' }, node.name || node.path),
             hasKids ? h('span', { className: 'wf-tree-count' }, String(count)) : null,

@@ -121,6 +121,10 @@ test('内容预览卡挂在原卷预览卡片之后、右栏之前，并按题�
   assert.ok(previewButton > 0 && mount > previewButton && rightColumn > mount,
     '卡片必须紧跟原卷预览，且不进入右侧标签审核栏');
   assert.ok(source.includes("key: 'content:' + String(detail.unit_id || detail.label || '')"));
+  // 「原卷修改」与下方「解析修改」采用一致的紧凑按钮尺寸
+  const compactStyle = "...T.miniBtnPrimary, padding: '3px 10px', fontSize: 11.5, lineHeight: 1.4, whiteSpace: 'nowrap'";
+  assert.ok(source.includes(compactStyle + ", marginLeft: 'auto'"), '原卷修改按钮应使用紧凑尺寸');
+  assert.ok(source.includes(compactStyle + " },\n        onClick: onEdit,\n      }, '解析修改')"), '下方解析与大意卡片按钮应为「解析修改」且与原卷修改保持同尺寸');
 });
 
 test('内容预览只读：不调用写接口、不出现可编辑控件', () => {

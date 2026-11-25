@@ -782,7 +782,9 @@
             fontSize: 11.5,
             fontWeight: 500,
             lineHeight: 1.4,
-            color: 'var(--dsw-alias-label-secondary)',
+            color: (o.mismatch && !(o.diffPaths instanceof Set && o.diffPaths.size))
+              ? 'var(--dsw-alias-state-error-primary)'
+              : 'var(--dsw-alias-label-secondary)',
           },
         },
           h('span', null, label),
@@ -792,7 +794,7 @@
           style: { display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 5, marginBottom: 10 },
         }, headRow, valueNode);
       }
-      function labelAuditPanels(detail) {
+      function labelAuditPanels(detail, onEditLabels) {
         const comp = detail.comparison || {};
         const orig = (comp.original && comp.original.labels) || {};
         const cur = detail.labels || {};
@@ -847,16 +849,15 @@
           : (mergedInfo && Array.isArray(mergedInfo.knowledge) ? mergedInfo.knowledge : autoMerged);
         const mergedPaths = hasMerged ? cleanPaths([...new Set([...mergedBase, ...answerPaths])]) : null;
         const kpPending = !r1 || !r1.assessment;
-        const kpStatusColor = kpPending
-          ? 'var(--dsw-alias-label-secondary)'
-          : (r1Mismatch ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-secondary)');
-        const kpStatusText = kpPending ? '待审核' : (r1Mismatch ? '有差异' : '一致');
         const kpRows = h('div', { style: { padding: '0 0 2px' } },
           h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, margin: '0 0 12px' } },
             h('span', { style: { fontSize: 13.5, fontWeight: 600, letterSpacing: '-.01em', color: 'var(--dsw-alias-label-primary)' } }, '知识点标签'),
-            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: (!kpPending && r1Mismatch) ? 600 : 500, color: kpStatusColor, whiteSpace: 'nowrap' } },
-              (!kpPending && r1Mismatch) ? h('span', { style: { width: 6, height: 6, borderRadius: '50%', background: 'var(--dsw-alias-state-error-primary)', flexShrink: 0 } }) : null,
-              kpStatusText),
+            onEditLabels ? h('button', {
+              type: 'button',
+              className: 'wf-btn-primary',
+              style: { ...(T.miniBtnPrimary || {}), padding: '2px 8px', fontSize: 11, lineHeight: 1.4, borderRadius: 6, whiteSpace: 'nowrap' },
+              onClick: onEditLabels,
+            }, '修改') : null,
           ),
           cmpRow('原标签', kpShort(displayedOrigPaths), { titles: displayedOrigPaths, diffPaths: origDiffPaths.size ? origDiffPaths : undefined }),
           cmpRow('一审标签', kpShort(r1Paths), { pending: kpPending, mismatch: r1Mismatch, diffPaths: r1Mismatch && (r1Diff?.size || origDiffPaths.size) ? r1Diff : undefined, titles: r1Paths }),
@@ -1250,37 +1251,19 @@
               title: '左栏查看已组装试卷，右栏对照 Word 原文件排版',
               onClick: openPaperPreview,
             }, '预览对照'),
-            // 修改/通过 放在题号与标签行右侧（已取消驳回）。
-            (() => {
-              const decideAll = async (status) => {
-                setBusy(status);
-                try {
-                  const ids = [];
-                  (groupedFindings || []).forEach((g) => { (g.ids && g.ids.length ? g.ids : [g.finding_id]).forEach((id) => { if (id) ids.push(id); }); });
-                  (fmtFindings || []).forEach((f) => { if (f.finding_id) ids.push(f.finding_id); });
-                  for (const id of ids) await jpost('/batches/' + encodeURIComponent(batchName) + '/decisions', { item: { finding_id: id, status, note: '' } });
-                  setBusy('');
-                  invalidateBatchUnits(batchName);
-                  await load({ force: true, silent: true });
-                  if (typeof onUnitMutated === 'function') onUnitMutated();
-                } catch (e) { setErr(String(e.message || e)); setBusy(''); }
-              };
-              return h('div', { style: { display: 'inline-flex', gap: 8, flexShrink: 0, marginLeft: 'auto' } },
-                h('button', { type: 'button', className: 'wf-btn', style: { ...T.btn, whiteSpace: 'nowrap' }, onClick: () => setLabelDlg(true) }, '修改'),
-                h('button', { type: 'button', className: 'wf-btn-primary', style: { ...T.btnPrimary, whiteSpace: 'nowrap' }, disabled: busy === 'accepted', onClick: () => decideAll('accepted') }, busy === 'accepted' ? '处理中…' : '通过'),
-              );
-            })(),
           ),
           h('div', { className: 'wf-scroll wf-review-container' },
            h('div', { className: 'wf-review-layout' },
             // 左：原卷预览 + 小题
             h('div', { className: 'wf-review-main', style: { minWidth: 0 } },
               h('div', { style: T.card },
-                h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 10 } },
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 } },
                   h('span', { style: { fontSize: 13.5, fontWeight: 600, whiteSpace: 'nowrap' } }, TEXT.sourcePreview),
-                  // 「原卷修改」入口：放在原卷预览卡片右上角。
+                  // 「原卷修改」入口：放在原卷预览卡片右上角（紧凑按钮，与下方「解析修改」同尺寸）。
                   h('button', {
-                    className: 'wf-btn-primary', style: { ...T.btnPrimary, marginLeft: 'auto' }, disabled: !content,
+                    className: 'wf-btn-primary',
+                    style: { ...T.miniBtnPrimary, padding: '3px 10px', fontSize: 11.5, lineHeight: 1.4, whiteSpace: 'nowrap', marginLeft: 'auto' },
+                    disabled: !content,
                     onClick: () => setContentDlg(true),
                   }, '原卷修改'),
                 ),
@@ -1333,9 +1316,9 @@
                   : null,
               ),
               h('div', { style: T.card },
-                ...labelAuditPanels(detail),
+                ...labelAuditPanels(detail, () => setLabelDlg(true)),
               ),
-              // 审核说明：描述异常说明及一审与原标签的差异；修改/通过按钮已移至顶部题号行右侧
+              // 审核说明：描述异常说明及一审与原标签的差异；修改入口已移至上方「知识点标签」卡片右上角
               (() => {
                 const lines = auditNotes(detail);
                 const kpDiff = hasKnowledgeDiff(detail);

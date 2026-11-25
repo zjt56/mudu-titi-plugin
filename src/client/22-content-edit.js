@@ -103,8 +103,17 @@
             : h('span', { style: { ...T.hint, fontSize: 12 } }, '暂无解析'),
         ),
       );
-      const summarySection = h('div', { key: 'summary', className: 'wf-content-section', style: { marginTop: 6 } },
-        sectionHead('文章大意', summaryBadge),
+      const editBtn = onEdit ? h('button', {
+        type: 'button',
+        className: 'wf-btn-primary',
+        style: { ...T.miniBtnPrimary, padding: '3px 10px', fontSize: 11.5, lineHeight: 1.4, whiteSpace: 'nowrap' },
+        onClick: onEdit,
+      }, '解析修改') : null;
+      const summaryRight = (summaryBadge || editBtn)
+        ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 8 } }, summaryBadge, editBtn)
+        : null;
+      const summarySection = h('div', { key: 'summary', className: 'wf-content-section' },
+        sectionHead('文章大意', summaryRight),
         model.summary
           ? h('div', { className: 'wf-content-quote' }, normalText(model.summary))
           : h('div', { className: 'wf-content-empty', style: T.hint },
@@ -139,14 +148,7 @@
               model.written ? '书面表达不要求解析。' : '暂无答案解析')
           : null,
       );
-      // 「修改」固定在卡片右上角。
-      return h('div', { style: { ...T.card, marginTop: 12, marginBottom: 0, position: 'relative' } },
-        onEdit ? h('button', {
-          type: 'button',
-          className: 'wf-btn-primary',
-          style: { ...T.btnPrimary, position: 'absolute', top: 10, right: 12, zIndex: 1 },
-          onClick: onEdit,
-        }, '修改') : null,
+      return h('div', { style: { ...T.card, marginTop: 12, marginBottom: 0 } },
         summarySection,
         parseSection,
       );

@@ -100,6 +100,14 @@ test('目录树节点可点击添加并保留原标签，且修改标签弹窗�
   await flushEffects();
   const tree = render();
 
+  // 目录树分支节点使用清晰的矢量 SVG 三角（不再使用极小的 Unicode ▸/▾ 字符）
+  const branchButton = walk(tree, (n) => n.tag === 'button' && n.props && n.props['data-path'] === '主题');
+  assert.ok(branchButton, '目录树应渲染分支节点「主题」');
+  const caret = branchButton.children[0];
+  assert.match(caret.props.className, /wf-tree-caret/);
+  assert.equal(caret.children[0].tag, 'svg');
+  assert.equal(caret.children[0].props.width, 13);
+
   // 找到「新标签」对应的目录树叶子按钮并点击添加
   const leafButton = walk(tree, (n) => n.tag === 'button' && n.props && n.props['data-path'] === '主题/新标签');
   assert.ok(leafButton, '目录树应渲染可选叶子按钮「主题/新标签」');

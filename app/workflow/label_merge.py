@@ -299,12 +299,78 @@ def _child_r1_knowledge_map(assessment: dict | None) -> dict[str, list[str]]:
     return out
 
 
-def project_batch_merged_knowledge(batch: dict, batch_dir: Path | str | None) -> dict:
-    """Return a copy of ``batch`` with 「标签合并」 knowledge applied for upload.
+def _apply_manual_non_knowledge_labels(item: dict, manual: dict) -> str | None:
+    """Project manual non-knowledge edits from `candidates/units/<uid>.json` into upload copy.
 
-    Only updates ``knowledge`` (and matching ``knowledgeIds``/``knowledge_ids``),
-    never ``type``, ``difficulty``, ``subtypes``, etc.
-    Manual edits in ``candidates/units/<unit_id>.json`` override auto-merged tags.
+    Keeps all alias keys (`question_type`/`type`, top-level vs `filterMetadata.*`) strictly
+    in sync so `upload_payload.build_payload` never sees `ALIAS_CONFLICT` or `UNKNOWN_FIELD`.
+    """
+    if not isinstance(manual, dict) or not manual:
+        return str(item.get("type") or item.get("question_type") or "").strip() or None
+
+    filters = item.get("filterMetadata")
+    if not isinstance(filters, dict):
+        filters = {}
+        item["filterMetadata"] = filters
+
+    manual_type = str(manual.get("type") or "").strip()
+    if manual_type:
+        if "question_type" in item or "type" not in item:
+            item["question_type"] = manual_type
+        if "type" in item:
+            item["type"] = manual_type
+
+    if "subtypes" in manual or "subtype" in manual:
+        raw_subs = manual.get("subtypes")
+        if raw_subs is None and manual.get("subtype"):
+            raw_subs = [manual["subtype"]]
+        subs = [str(x).strip() for x in (raw_subs or []) if str(x).strip()]
+        filters["subtypes"] = subs
+        if "subtypes" in item:
+            item["subtypes"] = list(subs)
+
+    if "categories" in manual:
+        cats = [str(x).strip() for x in (manual.get("categories") or []) if str(x).strip()]
+        filters["categories"] = cats
+        if "categories" in item:
+            item["categories"] = list(cats)
+
+    manual_diff = str(manual.get("difficulty") or "").strip()
+    if manual_diff:
+        item["difficulty"] = manual_diff
+        if "difficulty" in filters:
+            filters["difficulty"] = manual_diff
+
+    if "difficultyValue" in manual and manual["difficultyValue"] is not None:
+        filters["difficultyValue"] = manual["difficultyValue"]
+
+    for src_key in ("source", "source_type", "year"):
+        if src_key in manual and manual[src_key] not in (None, ""):
+            raw_val = manual[src_key]
+            if src_key == "year":
+                if isinstance(raw_val, int) and not isinstance(raw_val, bool):
+                    val = raw_val
+                else:
+                    text = str(raw_val).strip()
+                    val = int(text) if text.isdigit() else text
+            else:
+                val = str(raw_val).strip()
+            if val not in ("", None):
+                filters[src_key] = val
+                if src_key in item:
+                    item[src_key] = val
+
+    return str(item.get("question_type") or item.get("type") or "").strip() or None
+
+
+def project_batch_merged_knowledge(batch: dict, batch_dir: Path | str | None) -> dict:
+    """Return a copy of ``batch`` with manual unit labels & 「标签合并」 applied for upload.
+
+    - Automatic Round 1 merge ONLY updates ``knowledge`` (never ``type``/``difficulty``).
+    - Explicit human edits in ``candidates/units/<unit_id>.json`` (via 「修改标签」)
+      project all edited label fields (``type``, ``subtypes``, ``difficulty``,
+      ``categories``, ``source*``, ``knowledge``) in strict upload-payload shape
+      without requiring any upstream/downstream pipeline re-run.
     """
     result = deepcopy(batch)
     if batch_dir is None or not isinstance(result, dict) or not isinstance(result.get("items"), list):
@@ -317,12 +383,11 @@ def project_batch_merged_knowledge(batch: dict, batch_dir: Path | str | None) ->
         uid = str(item.get("unit_id") or item.get("id") or "").strip()
         if not uid:
             continue
-        main_type = str(item.get("type") or item.get("question_type") or "").strip() or None
         manual = load_manual_unit_labels(folder, uid)
+        main_type = _apply_manual_non_knowledge_labels(item, manual)
         r1 = r1_map.get(uid)
         children = item.get("subquestions")
         is_group = (item.get("unit_kind") == "group") or (isinstance(children, list) and bool(children))
-        whole_unit = bool(main_type and taxonomy.whole_unit_type(main_type))
 
         # 1. Unit/group-level knowledge merge (or manual override).
         # 只要是组题，标签统一打在组题级，不在子题中呈现或合并。

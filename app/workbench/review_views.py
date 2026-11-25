@@ -235,9 +235,14 @@ def answer_point_tags(folder, unit_id, *, number=None, review_hashes=None, ap_ct
             return []
         item = matches[0]
         type_item = type_matches[0]
-        main_type = type_item.get('type') or type_item.get('question_type')
-        if (item.get('question_type') or item.get('type')) != main_type:
-            return []
+        manual_labels = load_unit_labels(folder, unit_id)
+        manual_type = str(manual_labels.get('type') or '').strip() if isinstance(manual_labels, dict) else ''
+        if manual_type:
+            main_type = manual_type
+        else:
+            main_type = type_item.get('type') or type_item.get('question_type')
+            if (item.get('question_type') or item.get('type')) != main_type:
+                return []
         if not taxonomy.has_answer_point_dim(main_type, unit.get('unit_kind')):
             return []
         children = item.get('subquestions') if unit['unit_kind'] == 'group' else [item]

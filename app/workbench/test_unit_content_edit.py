@@ -97,26 +97,28 @@ class UnitContentEditTest(unittest.TestCase):
         self.assertEqual(self.batch_row()["articleSummary"], "")
         self.assertEqual(self.manual_edits()["articleSummary"], "")
 
-    def test_downstream_gates_are_invalidated_after_a_real_change(self):
+    def test_manual_content_edit_does_not_invalidate_upstream_or_downstream(self):
         workflow = self.folder / "workflow"
         workflow.mkdir(parents=True, exist_ok=True)
         stages = {name: {"status": mf.COMPLETED, "input_hashes": {}, "output_hashes": {}}
-                  for name in ("explanations", "assemble", "validate", "review", "upload", "upload_gate")}
+                  for name in ("types", "explanations", "assemble", "validate", "review", "format_gate", "upload", "upload_gate")}
         stages["upload"]["status"] = mf.SKIPPED
+        stages["upload_gate"]["status"] = mf.SKIPPED
         (workflow / "manifest.json").write_text(
             json.dumps({"stages": stages, "status": "completed"}, ensure_ascii=False), encoding="utf-8")
         self.save({"articleSummary": "改动后的大意"})
         current = mf.load(self.folder)
-        for name in ("assemble", "validate", "review", "upload", "upload_gate"):
-            self.assertEqual(current["stages"][name]["status"], mf.INVALIDATED, name)
-        # 解析产物本身是人工确认的：重登记而不是标成过期重跑。
+        # 进入人工审核后的修改不触发上游或下游重跑，已完成阶段保持原态。
+        for name in ("types", "explanations", "assemble", "validate", "review", "format_gate"):
+            self.assertEqual(current["stages"][name]["status"], mf.COMPLETED, name)
         explanations = current["stages"]["explanations"]
-        self.assertEqual(explanations["status"], mf.COMPLETED)
         self.assertEqual(explanations["output_hashes"], mf.output_hashes(
             self.folder, server.wf_contracts.STAGE_BY_ID["explanations"]))
         self.assertIn("workflow/manual-content-edits.json", " ".join(current["human_decisions"][-1]["evidence"]))
-        # 人工编辑记录本身不是阶段完成凭据，也不能被伪造成审核通过。
-        self.assertNotEqual(current["stages"]["review"]["status"], mf.COMPLETED)
+        # 仅改题面草稿也不再把 review 标成 INVALIDATED。
+        self.save({}, items=[{"number": 1, "stem": "手改题干"}])
+        after_draft = mf.load(self.folder)
+        self.assertEqual(after_draft["stages"]["review"]["status"], mf.COMPLETED)
 
     def test_label_only_save_does_not_touch_formal_content(self):
         self.save({})
@@ -189,10 +191,10 @@ class UnitContentEditTest(unittest.TestCase):
             json.dumps({"stages": stages, "status": "completed"}, ensure_ascii=False),
             encoding="utf-8",
         )
-        # 人工修改大意会将 validate 标记为 invalidated，但 history 保留了曾经 completed 的记录。
+        # 人工修改大意不触发下游失效重跑，validate 保持 completed，批次仍可正常上传。
         self.save({"articleSummary": "人工修订后的文章大意"})
         current = mf.load(self.folder)
-        self.assertEqual(current["stages"]["validate"]["status"], mf.INVALIDATED)
+        self.assertEqual(current["stages"]["validate"]["status"], mf.COMPLETED)
 
         with patch.object(runner, "unreviewed_summary", return_value={"revision": "r1"}), \
                 patch.object(label_audit, "inspect_file", return_value={"passed": True}), \
@@ -214,10 +216,10 @@ class UnitContentEditTest(unittest.TestCase):
             json.dumps({"stages": stages, "status": "failed"}, ensure_ascii=False),
             encoding="utf-8",
         )
-        # 即使从未通过体检的批次再经历人工改解析（validate: failed -> invalidated），仍必须拦截上传。
+        # 从未通过体检的批次经历人工改解析后，validate 保持 failed（不被失效掩盖），仍必须拦截上传。
         self.save({"explanation": "人工修订解析"})
         current = mf.load(self.folder)
-        self.assertEqual(current["stages"]["validate"]["status"], mf.INVALIDATED)
+        self.assertEqual(current["stages"]["validate"]["status"], mf.FAILED)
 
         with patch.object(runner, "unreviewed_summary", return_value={"revision": "r1"}), \
                 patch.object(label_audit, "inspect_file", return_value={"passed": True}), \

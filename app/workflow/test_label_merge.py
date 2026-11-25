@@ -356,6 +356,74 @@ class LabelMergeTests(unittest.TestCase):
                 self.assertEqual(third["q-1"]["knowledge"], [KP_B])
                 self.assertEqual(spy.call_count, 2)
 
+    def test_manual_type_and_metadata_edits_project_into_upload_payload_without_rerun(self):
+        from workbench import server
+        from workflow import manifest as wf_manifest, upload_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            batch_dir = Path(tmp).resolve()
+            # 原始批次里是旧题型（其他），模拟人工在审核页修改成 单项填空/四个选项 + 合法知识点。
+            batch = {
+                "batch_id": "b-manual",
+                "name": "人工改题型不重跑测试",
+                "items": [{
+                    "unit_id": "q-1",
+                    "id": "q-1",
+                    "unit_kind": "standalone",
+                    "number": 1,
+                    "numbers": [1],
+                    "question_type": "其他",
+                    "stem": "1. He ____ a student.",
+                    "options": ["A. is", "B. are", "C. am", "D. be"],
+                    "answer": "A",
+                    "explanation": "主语第三人称单数用 is。",
+                    "difficulty": "容易",
+                    "filterMetadata": {"subtypes": [], "categories": [], "source": "测试卷", "source_type": "中考真题", "year": 2025},
+                    "knowledge": ["词汇/词汇辨析/动词辨析"],
+                    "subquestions": [],
+                }],
+            }
+            _write_json(batch_dir / "06_batch/batch_meta.json", batch)
+            _write_json(batch_dir / "01_source/structure.confirmed.json", {
+                "units": [{
+                    "unit_id": "q-1", "unit_kind": "standalone", "numbers": [1],
+                    "type": "单项填空", "stem": "1. He ____ a student.",
+                    "source_span": {"start_line": 1, "end_line": 1},
+                }]
+            })
+            stages = {name: {"status": wf_manifest.COMPLETED, "input_hashes": {}, "output_hashes": {}}
+                      for name in ("types", "answers", "knowledge", "assemble", "validate", "review", "format_gate")}
+            _write_json(batch_dir / "workflow/manifest.json", {"stages": stages, "status": "completed"})
+
+            # 非法主类直接拒绝保存
+            with self.assertRaisesRegex(ValueError, "不在目录中"):
+                server.Handler.save_units(batch_dir, "q-1", [], {"type": "不存在的编造题型", "subtypes": []})
+
+            # 合法改题型/子类/难度/知识点：保存后零阶段失效，且上传 payload 严格按新题型和装配结构生效
+            new_kp = "语法/动词/系动词"
+            if new_kp not in taxonomy.knowledge_index()[1]:
+                new_kp = next(p for p in sorted(taxonomy.knowledge_index()[1]) if p.startswith("语法/"))
+            server.Handler.save_units(batch_dir, "q-1", [], {
+                "type": "单项填空",
+                "subtypes": ["四个选项"],
+                "difficulty": "适中",
+                "categories": ["优选题"],
+                "knowledge": [new_kp],
+            })
+            manifest_after = wf_manifest.load(batch_dir)
+            for name in ("types", "answers", "knowledge", "assemble", "validate", "review", "format_gate"):
+                self.assertEqual(manifest_after["stages"][name]["status"], wf_manifest.COMPLETED, name)
+
+            built = upload_payload.build_payload(batch, catalog=None, batch_dir=batch_dir)
+            non_catalog_errors = [e for e in built["errors"] if e.get("code") != "CATALOG_REQUIRED"]
+            self.assertEqual(non_catalog_errors, [], non_catalog_errors)
+            up_item = built["payload"]["items"][0]
+            self.assertEqual(up_item["type"], "单项填空")
+            self.assertEqual(up_item["filterMetadata"]["subtypes"], ["四个选项"])
+            self.assertEqual(up_item["filterMetadata"]["categories"], ["优选题"])
+            self.assertEqual(up_item["difficulty"], "中")
+            self.assertEqual(up_item["knowledge"], [new_kp])
+
 
 if __name__ == "__main__":
     unittest.main()
