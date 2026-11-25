@@ -196,14 +196,13 @@ def quarantine_type_partition(
     failed_map: dict[str, object] = {}
     deterministic: dict[str, dict] = {}
 
-    if len(unit_ids) == 1:
-        uid = unit_ids[0]
-        failed_map[uid] = exc
-        deterministic[uid] = {"diagnostics": [str(exc)]}
-        unit_anomalies.record_anomalies(batch, "types", failed_map, deterministic)
-        return quarantined_type_response(batch, by_id[uid], exc)
-
+    # 单题分片与多题分片统一走带错误反馈的轻量抢救重试（最多 1 次补充反馈），仍失败才兜底隔离。
     feedback_limit = min(int(config.get("retry_feedback_chars", 1200) or 1200), 1600)
+    initial_feedback = (
+        f"\n\n上一次题型校验未通过：{str(exc)[:feedback_limit]}\n请严格按目录题型与子类修正后重新返回。"
+        if len(unit_ids) == 1 else ""
+    )
+    max_salvage_tries = 1 if len(unit_ids) == 1 else 2
     for s_idx, uid in enumerate(unit_ids):
         _, built = unit_tasks.build_parts(
             batch, "types", config["max_input_chars"], max_units=1, selected_ids=[uid],
@@ -218,8 +217,8 @@ def quarantine_type_partition(
 
         salvaged = None
         last_exc: Exception | None = None
-        feedback = ""
-        for sub_attempt in range(2):
+        feedback = initial_feedback
+        for sub_attempt in range(max_salvage_tries):
             sub_dir = run_dir / f"part-{part_index + 1:04d}-isolate-{s_idx + 1:02d}-try-{sub_attempt + 1:02d}"
             room = max(0, int(config["max_input_chars"]) - len(single["prompt"]))
             delivered = single["prompt"] + (feedback[:room] if feedback and room >= 80 else "")

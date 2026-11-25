@@ -199,6 +199,7 @@ class RunnerAutoTest(unittest.TestCase):
                              and not (stages.get(dep) or {}).get('rebuild_required')
                              for dep in contracts.upstream_of(stage_id)))
         for patcher in (patch('workflow.self_heal.recover', return_value={}),
+                        patch('workflow.operations.handoff_if_available', return_value=None),
                         patch('workflow.local_agent._agent_lock', side_effect=lambda *_a, **_kw: nullcontext()),
                         patch('workflow.agent_protocol._agent_lock', side_effect=lambda *_a, **_kw: nullcontext()),
                         patch.object(auto, '_auto_prepare_audio', return_value={'status': 'ready'}),
@@ -273,7 +274,9 @@ class RunnerAutoTest(unittest.TestCase):
             return {"status": "ready", "prompt": stage}
 
         def invoke(prompt, run_dir, config, permit_parallel=False, coordinated_imports=False):
-            if permit_parallel and prompt in {"answers", "audio"}:
+            if "上一次返回未通过校验" in prompt:
+                retries.append(prompt)
+            elif permit_parallel and prompt in {"answers", "audio"}:
                 barrier.wait()
                 with lock:
                     completed.add(prompt)
@@ -474,8 +477,14 @@ class RunnerAutoTest(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text('{}')
             if stage.id == 'review':
-                self.assertTrue(audio_imported.is_set(), 'Review ran before audio delivery')
-            calls.append(stage.id)
+                # 规则 15：非听力审核分片可在听力未验收时先行运行并返回 exit 8 等待听力切段；
+                # 只有听力已验收完成后 review 才进入 COMPLETED。
+                calls.append(stage.id)
+                if not audio_completed:
+                    return 8
+                self.assertTrue(audio_imported.is_set(), 'Final review ran before audio delivery')
+            else:
+                calls.append(stage.id)
             with local_agent._agent_lock(5):
                 current = mf.load(batch)
                 mf.touch_stage(current, stage.id, mf.COMPLETED)
@@ -514,7 +523,7 @@ class RunnerAutoTest(unittest.TestCase):
         if audio_completed:
             self.assertLess(calls.index('audio'), calls.index('review'))
         else:
-            self.assertNotIn('review', calls)
+            # 规则 15：听力未验收时 review 可先跑非听力分片并等待（返回 8），但不能标记完成。
             self.assertEqual(mf.load(self.batch)['stages']['review']['status'], mf.PENDING)
         self.assertEqual(calls.count('audio'), 1)
 
@@ -814,7 +823,7 @@ class RunnerAutoTest(unittest.TestCase):
         self.assertEqual(mf.load(self.batch)["stages"]["assemble"]["status"], mf.PENDING)
 
     def test_audio_needs_review_does_not_block_assemble_but_blocks_review(self):
-        """听力待复核不阻断解析/知识点/组装；只有内容审核(review)必须等听力完成。"""
+        """规则 15：听力待复核不阻断解析/知识点/组装与非听力审核；format_gate 必须等听力完成。"""
         self._isolate_scheduler()
         self._ready_after_structure()
         patcher = patch.object(auto, 'ZERO_TOUCH', False)
@@ -823,16 +832,16 @@ class RunnerAutoTest(unittest.TestCase):
         with patch.object(runner, "_execute_command", side_effect=self._execute_offline(
                 {"audio": (mf.NEEDS_REVIEW, 3)}, calls)):
             outcome = auto.advance(self.batch, {s.id: ["offline"] for s in contracts.STAGES})
-        # 听力不再挡组装：assemble 会执行；但 review 因 audio 未完成而等待。
+        # 听力不挡组装与非听力审核；但 format_gate 依赖 ("review_gate", "audio")，因 audio 未完成而等待。
         self.assertIn("assemble", calls)
-        self.assertNotIn("review", calls)
         self.assertIn("audio", calls)
+        self.assertNotIn("format_gate", calls)
         pending = {s["stage"]: s for s in outcome["pending_stages"]}
-        self.assertIn("audio", pending["review"]["unmet_dependencies"])
+        self.assertIn("audio", pending["format_gate"]["unmet_dependencies"])
         manifest = mf.load(self.batch)
         self.assertEqual(manifest["stages"]["audio"]["status"], mf.NEEDS_REVIEW)
         self.assertEqual(manifest["stages"]["assemble"]["status"], mf.COMPLETED)
-        self.assertEqual(manifest["stages"]["review"]["status"], mf.PENDING)
+        self.assertEqual(manifest["stages"]["format_gate"]["status"], mf.PENDING)
 
     def test_multiple_failures_reported_once_without_retry(self):
         self._isolate_scheduler()

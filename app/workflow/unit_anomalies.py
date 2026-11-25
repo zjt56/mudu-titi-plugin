@@ -27,10 +27,14 @@ QUARANTINE_STAGES = frozenset(("types", "answers", "explanations", "knowledge"))
 
 _THREAD_LOCK = threading.Lock()
 _TRANSIENT_ERROR_RE = re.compile(
-    r"timeout|timed\s*out|rate[_\s-]?limit|429|quota|insufficient[_\s-]?balance|"
-    r"authentication|invalid[_\s-]?api[_\s-]?key|401|403|connection|network|"
-    r"temporarily\s+unavailable|service\s+unavailable|502|503|504|context_changed|"
-    r"changed\s+during|provider\b|interrupted|aborted|cancelled",
+    r"\btimeout\b|timed\s*out|rate[_\s-]?limit|(?<![\w-])(?:401|403|429|502|503|504)(?![\w-])|"
+    r"\bquota\b|insufficient[_\s-]?balance|\bauthentication\b|invalid[_\s-]?api[_\s-]?key|"
+    r"connection\s+(?:reset|refused|closed|error|timed?\s*out)|"
+    r"network\s+(?:error|timeout|unreachable)|"
+    r"temporarily\s+unavailable|service\s+unavailable|"
+    r"context_changed|changed\s+during|"
+    r"(?:upstream|fake)\s+provider|provider\s+(?:error|failed|unavailable)|"
+    r"\binterrupted\b|\baborted\b|\bcancelled\b",
     re.I,
 )
 
@@ -52,8 +56,11 @@ def anomalies_path(batch_dir) -> Path:
 
 @contextmanager
 def _anomaly_lock(batch_dir, timeout: float = 15.0):
-    """Serialize read-modify-write across both threads and processes."""
-    lock_path = Path(batch_dir) / "07_review" / ".unit-anomalies.lock"
+    """Serialize read-modify-write across both threads and processes.
+
+    Lock file lives under `workflow/` alongside `.run.lock`, never inside `07_review/`.
+    """
+    lock_path = Path(batch_dir) / "workflow" / ".unit-anomalies.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with _THREAD_LOCK:
         handle = None
@@ -194,62 +201,57 @@ def clear_stage_anomalies(batch_dir, stage: str, unit_ids) -> None:
             _save_anomalies(batch_dir, {"version": 1, "updated_at": _now_iso(), "units": units})
 
 
-def clear_artifact_quarantine_flag(batch_dir, stage: str, unit_ids) -> None:
-    """Clear `quarantined` flag from the stage artifact for manually fixed units."""
+def resolve_stage_anomalies(batch_dir, stage: str, unit_ids, *, actor: str = "workbench") -> None:
+    """Mark quarantined entries as manually resolved in the ledger without mutating stage artifacts.
+
+    Never rewrites `03_types/types.json`, `04_knowledge/knowledge.json`, etc., so upstream
+    `output_hashes` in `manifest.json` stay untouched and never trigger full-stage re-runs.
+    """
     wanted = {str(uid).strip() for uid in (unit_ids or ()) if str(uid).strip()}
     if not wanted:
         return
-    batch = Path(batch_dir)
-    rel_map = {
-        "types": "03_types/types.json",
-        "explanations": "04_knowledge/explanations.json",
-        "knowledge": "04_knowledge/knowledge.json",
-        "answers": "01_source_ans/answers.json",
-    }
-    rel = rel_map.get(stage)
-    if not rel:
-        return
-    target = batch / rel
-    if not target.is_file():
-        return
-    with _anomaly_lock(batch):
-        try:
-            payload = json.loads(target.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
-            return
-        if not isinstance(payload, dict):
-            return
+    with _anomaly_lock(batch_dir):
+        data = load_anomalies(batch_dir)
+        units = dict(data.get("units") or {})
+        stamp = _now_iso()
         changed = False
-        if stage == "answers":
-            qmap = payload.get("quarantined")
-            if isinstance(qmap, dict) and qmap:
-                # Resolve question keys belonging to the wanted unit_ids via confirmed structure.
-                keys_to_drop = set()
-                confirmed = batch / "01_source/structure.confirmed.json"
-                if confirmed.is_file():
-                    try:
-                        units = json.loads(confirmed.read_text(encoding="utf-8-sig")).get("units") or []
-                        for unit in units:
-                            if isinstance(unit, dict) and str(unit.get("unit_id") or "") in wanted:
-                                for n in (unit.get("numbers") or []):
-                                    keys_to_drop.add(question_key(unit, n))
-                    except (OSError, ValueError):
-                        pass
-                for k in list(qmap):
-                    if k in keys_to_drop or k in wanted:
-                        qmap.pop(k, None)
-                        changed = True
-                if changed and not qmap:
-                    payload.pop("quarantined", None)
-        else:
-            items = payload.get("items")
-            if isinstance(items, list):
-                for row in items:
-                    if isinstance(row, dict) and str(row.get("unit_id") or "") in wanted:
-                        if row.pop("quarantined", None) is not None:
-                            changed = True
+        for uid in sorted(wanted):
+            before = [e for e in (units.get(uid) or []) if isinstance(e, dict)]
+            others = [e for e in before if str(e.get("stage") or "") != stage]
+            existing = next((e for e in before if str(e.get("stage") or "") == stage), None)
+            if existing is not None and not existing.get("quarantined") and existing.get("resolved_at"):
+                continue
+            resolved_entry = dict(existing or {"stage": stage})
+            resolved_entry["stage"] = stage
+            resolved_entry["quarantined"] = False
+            resolved_entry["resolved_at"] = stamp
+            resolved_entry["resolved_by"] = actor
+            others.append(resolved_entry)
+            units[uid] = others
+            changed = True
         if changed:
-            _atomic_write_json(target, payload)
+            _save_anomalies(batch_dir, {"version": 1, "updated_at": stamp, "units": units})
+
+
+def clear_artifact_quarantine_flag(batch_dir, stage: str, unit_ids) -> None:
+    """Back-compat alias: record manual resolution in the ledger without mutating stage artifacts."""
+    resolve_stage_anomalies(batch_dir, stage, unit_ids)
+
+
+def _resolved_keys(batch_dir, stage: str | None = None) -> set[tuple[str, str]]:
+    data = load_anomalies(batch_dir)
+    resolved: set[tuple[str, str]] = set()
+    for uid, entries in (data.get("units") or {}).items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("quarantined") is False and entry.get("resolved_at"):
+                est = str(entry.get("stage") or "")
+                if stage is None or est == stage:
+                    resolved.add((str(uid), est))
+    return resolved
 
 
 def quarantined_entries(batch_dir, stage: str | None = None) -> list[dict]:
@@ -336,12 +338,16 @@ def artifact_quarantined_entries(batch_dir, stage: str | None = None) -> list[di
 
 
 def all_quarantined_entries(batch_dir, stage: str | None = None) -> list[dict]:
-    """Union of ledger entries and artifact-level `quarantined` markers (deduped by unit+stage)."""
+    """Union of active ledger entries and unresolved artifact-level `quarantined` markers."""
+    resolved = _resolved_keys(batch_dir, stage=stage)
     merged: dict[tuple[str, str], dict] = {}
     for entry in quarantined_entries(batch_dir, stage=stage):
         merged[(entry["unit_id"], entry["stage"])] = entry
     for entry in artifact_quarantined_entries(batch_dir, stage=stage):
-        merged.setdefault((entry["unit_id"], entry["stage"]), entry)
+        key = (entry["unit_id"], entry["stage"])
+        if key in resolved:
+            continue
+        merged.setdefault(key, entry)
     return [merged[k] for k in sorted(merged)]
 
 

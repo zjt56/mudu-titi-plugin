@@ -528,10 +528,21 @@ class AnomalyViewsTest(unittest.TestCase):
                     for err in blocked["errors"]),
                 blocked["errors"],
             )
-            # 清除产物标记后解除拦截
-            unit_anomalies.clear_artifact_quarantine_flag(root, "types", ["q-9"])
+            # 清除隔离只写台账 resolved 标记，绝不改写上游 types.json（保护 manifest output_hashes）
+            before_bytes = (root / "03_types/types.json").read_bytes()
+            unit_anomalies.resolve_stage_anomalies(root, "types", ["q-9"])
+            self.assertEqual((root / "03_types/types.json").read_bytes(), before_bytes)
+            # 锁文件在 workflow/ 下，绝不污染 07_review/
+            self.assertTrue((root / "workflow/.unit-anomalies.lock").exists())
+            self.assertFalse((root / "07_review/.unit-anomalies.lock").exists())
             cleared = upload_payload.build_payload({"items": []}, batch_dir=root)
             self.assertFalse(any(err.get("code") == "UNIT_QUARANTINED" for err in cleared["errors"]))
+
+            # 正则词边界：题号含 0429 或正文含 connection 不得误判为暂态错误
+            self.assertFalse(unit_anomalies._is_transient_error("Invalid label for q-0429: missing subtype"))
+            self.assertFalse(unit_anomalies._is_transient_error("Sentence connection logic mismatch in rationale"))
+            self.assertTrue(unit_anomalies._is_transient_error("HTTP 429 rate limit exceeded"))
+            self.assertTrue(unit_anomalies._is_transient_error("Connection reset by peer"))
 
             # 含完成句子时，knowledge 的 manifest input_hashes 绑定 answers.json，答案后出立即感知变化
             st = wf_manifest.new_manifest("b", root, {}, {})
