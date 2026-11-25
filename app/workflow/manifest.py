@@ -364,7 +364,7 @@ def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use
                 if media.is_file():
                     hashes[f"source:01_source/media/{media.name}"] = _fp(media)
     if stage.id in ("explanations", "assemble"):
-        # 解析/装配需要答案来源；knowledge 只需题型/结构（答案在装配合并）。
+        # 解析/装配需要答案来源；knowledge 仅在含完成句子等答案反推题型时绑定 answers.json。
         sources = ("01_source_ans/正文.txt", "01_source/附录.txt")
         if stage.id == "assemble":
             sources += ("01_source_ans/answers.json",)
@@ -372,6 +372,10 @@ def _input_fingerprint(batch_dir, manifest: dict, stage: contracts.Stage, *, use
             full = Path(batch_dir) / rel
             if full.is_file():
                 hashes[f"source:{rel}"] = _fp(full)
+    if stage.id == "knowledge":
+        from . import quarantine_policy
+        if quarantine_policy.batch_has_answer_dependent_knowledge_types(batch_dir):
+            hashes["source:01_source_ans/answers.json"] = _fp(Path(batch_dir) / "01_source_ans/answers.json")
     if stage.id == "assemble":
         # 装配合并结构元数据、抽取表格等；这些内容变化必须重装。
         for rel in ("01_source/extraction.json",):

@@ -203,31 +203,66 @@ def quarantine_type_partition(
         unit_anomalies.record_anomalies(batch, "types", failed_map, deterministic)
         return quarantined_type_response(batch, by_id[uid], exc)
 
+    feedback_limit = min(int(config.get("retry_feedback_chars", 1200) or 1200), 1600)
     for s_idx, uid in enumerate(unit_ids):
         _, built = unit_tasks.build_parts(
             batch, "types", config["max_input_chars"], max_units=1, selected_ids=[uid],
         )
         single = built[0]
-        unit_tasks.check_part_inputs(batch, single)
-        local_agent._check_input_hashes(batch, strict_hashes)
-        sub_dir = run_dir / f"part-{part_index + 1:04d}-isolate-{s_idx + 1:02d}"
+        # 输入完整性校验放在 try 之外：中途输入变化必须直接中止阶段，绝不当作单题隔离。
         try:
-            res = invoke(single["prompt"], sub_dir, config, **invocation_options)
-            local_agent._check_input_hashes(batch, strict_hashes)
             unit_tasks.check_part_inputs(batch, single)
-            cand = res["response"]
-            unit_tasks.validate_part(batch, "types", single, cand)
+        except ValueError as inp_exc:
+            raise local_agent.AgentError(str(inp_exc), "context_changed") from inp_exc
+        local_agent._check_input_hashes(batch, strict_hashes)
+
+        salvaged = None
+        last_exc: Exception | None = None
+        feedback = ""
+        for sub_attempt in range(2):
+            sub_dir = run_dir / f"part-{part_index + 1:04d}-isolate-{s_idx + 1:02d}-try-{sub_attempt + 1:02d}"
+            room = max(0, int(config["max_input_chars"]) - len(single["prompt"]))
+            delivered = single["prompt"] + (feedback[:room] if feedback and room >= 80 else "")
+            try:
+                res = invoke(delivered, sub_dir, config, **invocation_options)
+            except local_agent.AgentError as call_exc:
+                if call_exc.code not in ("response", "integration"):
+                    raise
+                last_exc = call_exc
+                feedback = f"\n\n上一次结果格式无效：{str(call_exc)[:feedback_limit]}\n请只返回一个完整合法的 JSON 对象。"
+                continue
+            except ValueError as call_exc:
+                last_exc = call_exc
+                feedback = f"\n\n上一次结果未通过校验：{str(call_exc)[:feedback_limit]}\n请修正后重新返回本单元完整 JSON。"
+                continue
+
+            # 模型返回后立刻检查输入是否中途变化（在 try 外，绝不吞掉 context_changed）。
+            local_agent._check_input_hashes(batch, strict_hashes)
+            try:
+                unit_tasks.check_part_inputs(batch, single)
+            except ValueError as inp_exc:
+                raise local_agent.AgentError(str(inp_exc), "context_changed") from inp_exc
+
+            try:
+                cand = res["response"]
+                unit_tasks.validate_part(batch, "types", single, cand)
+                salvaged = cand
+                break
+            except ValueError as val_exc:
+                last_exc = val_exc
+                feedback = f"\n\n上一次题型校验未通过：{str(val_exc)[:feedback_limit]}\n请严格按目录题型与子类修正后重新返回。"
+                continue
+
+        if salvaged is not None:
             passed_ids.append(uid)
             sub_parts.append(single)
-            sub_responses.append(cand)
-        except (local_agent.AgentError, ValueError) as unit_exc:
-            if (isinstance(unit_exc, local_agent.AgentError)
-                    and unit_exc.code not in ("response", "integration")):
-                raise
-            failed_map[uid] = unit_exc
-            deterministic[uid] = {"diagnostics": [str(unit_exc)]}
+            sub_responses.append(salvaged)
+        else:
+            err_obj = last_exc or exc
+            failed_map[uid] = err_obj
+            deterministic[uid] = {"diagnostics": [str(err_obj)]}
             sub_parts.append(single)
-            sub_responses.append(quarantined_type_response(batch, by_id[uid], unit_exc))
+            sub_responses.append(quarantined_type_response(batch, by_id[uid], err_obj))
 
     if passed_ids:
         unit_anomalies.clear_stage_anomalies(batch, "types", passed_ids)

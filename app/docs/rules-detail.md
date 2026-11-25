@@ -116,7 +116,8 @@
 
 ## 规则 41：选词填空（整题）只要答案考点；选词填空（单题）与教材语篇填空不加答案考点
 
-- 落地：`app/references/type-knowledge-map.json`、`app/workbench/taxonomy.py`、`app/workflow/upload_payload.py`、`app/workflow/agent_roles.py`、`app/workflow/review_rounds.py`。
+- 落地：`app/references/type-knowledge-map.json`、`app/workbench/taxonomy.py`、`app/workflow/upload_payload.py`、`app/workflow/agent_roles.py`、`app/workflow/review_rounds.py`、`app/workflow/quarantine_policy.py`、`app/workflow/unit_anomalies.py`、`app/workflow/format_gate.py`。
+- 补充落地（单题异常隔离与软依赖）：`unit_anomalies.py`（进程+线程双锁原子写、台账+产物 `quarantined` 双保险、禁混合暂态误隔离与全批 0 成功隔离）、`quarantine_policy.py`（`types` 分片逐题抢救与大题标题兜底、`knowledge->answers` 含完成句子软依赖与输入指纹绑定）、`format_gate.py`/`runner.py`（`UNIT_QUARANTINED` 本地放行执行并记 `release_ready=False`，真实上传 `upload_payload` 硬拦截）。
 
 ## 规则 42：中文一级大题标题与前置无号大题全链路同源口径
 

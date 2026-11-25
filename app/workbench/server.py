@@ -3960,11 +3960,13 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(patch, dict):
                 if any(k in patch for k in ("explanation", "articleSummary", "subquestions")):
                     unit_anomalies.clear_stage_anomalies(folder, "explanations", [unit_id])
+                    unit_anomalies.clear_artifact_quarantine_flag(folder, "explanations", [unit_id])
                 if "answer" in patch or any(
                     isinstance(sq, dict) and "answer" in sq
                     for sq in (patch.get("subquestions") or [])
                 ):
                     unit_anomalies.clear_stage_anomalies(folder, "answers", [unit_id])
+                    unit_anomalies.clear_artifact_quarantine_flag(folder, "answers", [unit_id])
             return result
 
     @staticmethod
@@ -4053,20 +4055,32 @@ class Handler(BaseHTTPRequestHandler):
                     relative = target.relative_to(folder).as_posix()
                     files[relative] = merged
                     saved.append(relative)
+            label_diff = {"type_changed": False, "kp_changed": False, "kp_nonempty": False, "ap_only": False}
             if labels:
                 target = unit_label_path(folder, unit_id)
                 merged = dict(load(target, {}))
+                matched_row = next((row for row in rows if str(row.get("unit_id")) == str(unit_id)), {})
+                prev_type = str(merged.get("type") or matched_row.get("type") or matched_row.get("question_type") or "").strip()
+                prev_sub_raw = merged.get("subtypes") or ([merged["subtype"]] if merged.get("subtype") else (matched_row.get("subtypes") or []))
+                prev_subtypes = sorted(str(x).strip() for x in (prev_sub_raw or []) if str(x).strip())
+                prev_kp_raw = merged.get("knowledge") if "knowledge" in merged else (matched_row.get("knowledge") or [])
+                prev_knowledge = [str(x).strip() for x in (prev_kp_raw or []) if str(x).strip()]
                 for key in ("type", "subtype", "subtypes", "difficulty", "difficultyValue", "categories",
                             "knowledge", "source", "source_type", "year", "location"):
                     if key in labels:
                         merged[key] = labels[key]
                 subtypes = merged.get("subtypes") or ([merged["subtype"]] if merged.get("subtype") else [])
-                matched_row = next((row for row in rows if str(row.get("unit_id")) == str(unit_id)), {})
                 main_type = merged.get("type") or matched_row.get("type") or matched_row.get("question_type")
                 numbers = [str(n) for n, own in owner.items() if str(own) == str(unit_id)]
                 unit_kind = (matched_row.get("unit_kind") or labels.get("unit_kind")
                              or ("group" if len(numbers) > 1 else "standalone"))
                 knowledge = taxonomy.require_knowledge(merged.get("knowledge", []), main_type, unit_kind=unit_kind)
+                new_type = str(main_type or "").strip()
+                new_subtypes = sorted(str(x).strip() for x in (subtypes or []) if str(x).strip())
+                label_diff["type_changed"] = (new_type != prev_type) or (new_subtypes != prev_subtypes)
+                label_diff["kp_changed"] = [str(x).strip() for x in knowledge if str(x).strip()] != prev_knowledge
+                label_diff["kp_nonempty"] = bool(knowledge)
+                label_diff["ap_only"] = bool(taxonomy.answer_point_only_type(main_type, unit_kind))
                 merged["knowledge"] = knowledge
                 resolved = taxonomy.resolve_knowledge(knowledge, main_type, unit_kind=unit_kind)
                 # 清空或改成未知路径时也同步清空旧 ID，避免名字与关联脱节。
@@ -4142,12 +4156,19 @@ class Handler(BaseHTTPRequestHandler):
         if files:
             _install(folder, files)
             from workflow import unit_anomalies
-            if labels and any(k in labels for k in ("type", "subtype", "subtypes")):
+            # 前端保存标签时会传整套 labels；仅当用户实际修改了题型/子类，或未改知识点（显式确认题型）时
+            # 才清除 types 隔离，避免只改知识点就误解除兜底题型的隔离。
+            if (labels and any(k in labels for k in ("type", "subtype", "subtypes"))
+                    and (label_diff["type_changed"] or not label_diff["kp_changed"])):
                 unit_anomalies.clear_stage_anomalies(folder, "types", [unit_id])
-            if labels and "knowledge" in labels:
+                unit_anomalies.clear_artifact_quarantine_flag(folder, "types", [unit_id])
+            if (labels and "knowledge" in labels
+                    and (label_diff["kp_changed"] or (not label_diff["type_changed"] and (label_diff["kp_nonempty"] or label_diff["ap_only"])))):
                 unit_anomalies.clear_stage_anomalies(folder, "knowledge", [unit_id])
+                unit_anomalies.clear_artifact_quarantine_flag(folder, "knowledge", [unit_id])
             if applied.get("applied") or (unit and any(k in unit for k in ("explanation", "articleSummary"))):
                 unit_anomalies.clear_stage_anomalies(folder, "explanations", [unit_id])
+                unit_anomalies.clear_artifact_quarantine_flag(folder, "explanations", [unit_id])
             # 小题改动（含 answer）只落 candidates/ 草稿：未经答案来源绑定与原文一致性校验，
             # 也未写回正式答案产物。此处绝不解除 answers 隔离，否则上传闸门会放过「无答案」占位；
             # answers 隔离只在正式答案写入（save_content_edit）或阶段重新导入通过校验后清除。

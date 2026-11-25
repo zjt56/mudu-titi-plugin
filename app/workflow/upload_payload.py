@@ -1257,7 +1257,7 @@ def build_payload(batch: dict, catalog: dict | None = None, *, batch_id=None, na
         builder.warnings.extend(layout["warnings"])
         from . import unit_anomalies
         _stage_labels = {"types": "题型识别", "answers": "答案提取", "explanations": "解析提取", "knowledge": "知识点打标"}
-        for entry in unit_anomalies.quarantined_entries(batch_dir):
+        for entry in unit_anomalies.all_quarantined_entries(batch_dir):
             stage_name = _stage_labels.get(entry["stage"], entry["stage"] or "未知阶段")
             reason = entry["reason"] or "存在未修复异常"
             builder.error(

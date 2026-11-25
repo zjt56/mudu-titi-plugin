@@ -453,12 +453,12 @@ def run(batch, stage, config, run_dir, *, invoke=None, coordinated_imports=False
         unit_anomalies.clear_stage_anomalies(batch, stage, accepted.keys())
     if pending:
         if (quarantine_failed_units and stage in unit_anomalies.QUARANTINE_STAGES
-                and unit_anomalies.should_quarantine(accepted, pending, deterministic)):
+                and unit_anomalies.should_quarantine(accepted, pending, deterministic, errors)):
             failed_map = {uid: errors.get(uid) for uid in sorted(pending)}
             unit_anomalies.record_anomalies(batch, stage, failed_map, deterministic)
             for uid in sorted(pending):
                 accepted[uid] = unit_anomalies.quarantined_response_for_unit(
-                    stage, by_id[uid], errors.get(uid)
+                    stage, by_id[uid], errors.get(uid), batch_dir=batch
                 )
             pending = set()
         else:
