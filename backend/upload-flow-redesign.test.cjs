@@ -5,11 +5,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const client = fs.readFileSync(path.resolve(__dirname, '..', 'lib/client.js'), 'utf8');
 const server = fs.readFileSync(path.resolve(__dirname, '..', 'app/workbench/server.py'), 'utf8');
+// 阶段顺序与阶段卡投影已从 server.py 拆到 stage_views.py，server.py 只导入使用。
+const stageViews = fs.readFileSync(path.resolve(__dirname, '..', 'app/workbench/stage_views.py'), 'utf8');
 
 test('后端阶段卡复用契约顺序与 flow_done 口径，客户端无需维护第二份阶段顺序', () => {
   assert.match(server, /"flow_done":\s*flow_done/);
-  assert.match(server, /STAGE_ORDER = \[s\.id for s in wf_contracts\.STAGES\]/);
-  assert.match(server, /for sid in \(STAGE_ORDER or list\(stages\)\)/);
+  assert.match(server, /from \.stage_views import \([^)]*\bSTAGE_ORDER\b/);
+  assert.match(stageViews, /STAGE_ORDER = \[s\.id for s in wf_contracts\.STAGES\]/);
+  assert.match(stageViews, /for sid in \(STAGE_ORDER or list\(stages\)\)/);
 });
 
 test('排队区只列处理中的试卷；内容审核与上传格式检查结束的从队列消失', () => {
