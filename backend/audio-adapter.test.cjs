@@ -24,7 +24,7 @@ test('听力切段默认不安装、不启用', () => {
 
 test('设置页有听力切段卡片并挂在 SettingsTab 里', () => {
   assert.match(client, /function AudioSettings\(/);
-  const settings = client.slice(client.indexOf('function SettingsTab()'));
+  const settings = client.slice(client.indexOf('function SettingsTab('));
   assert.match(settings, /\['audio', '听力切分'\]/);
   assert.match(settings, /\['audio', AudioSettings\]/);
   assert.match(settings, /visited\[id\] \? h\(Component, /);

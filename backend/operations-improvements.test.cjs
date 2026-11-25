@@ -222,5 +222,5 @@ test('OperationsPanel renders unfreeze button and detail modal only when applica
   assert.match(feedText, /定位第3题题干为空/);
   assert.match(feedText, /已回填缺失题干并复验/);
   assert.doesNotMatch(feedText, /heartbeat/);
-  assert.match(clientSrc, /className:\s*'wf-upload-right'[\s\S]*?className:\s*'wf-flow-card'[\s\S]*?diagBanner\(selBatch, stage\),[\s\S]*?\),\s*h\(OperationsPanel/);
+  assert.match(clientSrc, /className:\s*'wf-upload-right'[\s\S]*?className:\s*'wf-flow-card'[\s\S]*?diagBanner\(selBatch, stage, refresh, flowFeedback\),[\s\S]*?\),\s*h\(OperationsPanel/);
 });

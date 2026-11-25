@@ -63,7 +63,7 @@ class MediaUploadPipelineTests(unittest.TestCase):
             events.append(('prepare', kwargs['media_map']))
             return {'passed': True, 'source_sha256': raw_hash}
         def runner(args):
-            events.append((args[0], None))
+            events.append((args[0], args[1:]))
             return SimpleNamespace(returncode=0, stdout='', stderr='')
         jobs = {'batch': {'running': True}}
         with patch.object(server, 'WORKFLOWS', self.root), patch.object(server, '_upload_jobs', jobs), \
@@ -71,7 +71,12 @@ class MediaUploadPipelineTests(unittest.TestCase):
              patch.object(server, '_stage_upload_media', side_effect=lambda folder: (events.append(('stage', None)) or (self.mapping, raw_hash))), \
              patch('workflow.upload.prepare', side_effect=prepare), patch.object(server, '_run_runner', side_effect=runner):
             server._run_batch_upload('batch', 'actor')
-        self.assertEqual(events, [('stage', None), ('prepare', self.mapping), ('mark', None), ('upload', None)])
+        self.assertEqual(events, [
+            ('stage', None), ('prepare', self.mapping),
+            ('mark', ['--batch-dir', str(self.batch), '--stage', 'upload_gate',
+                      '--status', 'approved', '--actor', 'actor', '--note', '通过插件「上传批次」按钮确认']),
+            ('upload', ['--batch-dir', str(self.batch), '--yes']),
+        ])
         self.assertTrue(jobs['batch']['ok'])
 
     def test_transfer_failure_stops_prepare_and_preserves_map(self):

@@ -219,7 +219,7 @@ test('manager tools round-trip real Python receipts, preserve failure truth and 
   assert.deepEqual(agent.route, { provider: 'fake-provider', model: 'fake-model' });
   assert.equal(agent.disposed, true);
   assert.equal(agent.conclusions, 1);
-  assert.match(agent.sections[0].text, /不得上传/);
+  assert.match(agent.sections[0].text, /绝不自动上传发布/);
   const readSchema = agent.definitions.get('operations_read_evidence').parameters;
   assert.deepEqual(readSchema.required, ['path']);
   assert.equal(readSchema.properties.path.type, 'string');

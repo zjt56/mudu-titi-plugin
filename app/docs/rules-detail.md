@@ -1,10 +1,10 @@
 # AGENTS.md 硬规则落地细节
 
-本文件从 `AGENTS.md` 第二节原样移出（2026-11-25），记录每条硬规则的落地文件、函数与回归测试。规则原则以 AGENTS.md 为准；改规则时两处同步，编号一一对应（原文有两条 43，第二条记为“43（第2条）”）。
+本文件从 `AGENTS.md` 第二节原样移出（2026-11-25），记录每条硬规则的落地文件、函数与回归测试。规则原则以 AGENTS.md 为准；改规则时两处同步，编号一一对应。
 
 ## 规则 6：审核范围
 
-- 落地：`app/workflow/diagnose.py`、`app/workflow/operations.py`。
+- 当前审核契约见 `app/workflow/contracts.py`，一审与历史二审记录见 `app/workflow/review.py`，标签合并见 `app/workflow/label_merge.py`。差异诊断与运维见 `app/workflow/diagnose.py`、`app/workflow/operations.py`。
 
 ## 规则 9：质量≠执行
 
@@ -126,10 +126,6 @@
 
 - 落地：`app/workflow/upload_content.py`、`structure_gate.py`、`question_identity.py`、`question_content.py`、`question_draft.py`、`shared_rubric.py`、`phonetic_structure.py`、`upload_numbering.py`、`structure_ai.py`、`preview.py`、`agent_tasks.py`、`review_rounds.py`、`app/workbench/server.py`、`lib/client.js`；回归 `workflow.test_answer_inferred_image_group`。
 
-## 规则 43（第2条）：题干边界洁净、解析附件保留与提示词减负通用规则
-
-- 落地：`app/workflow/question_draft.py`、`lesson_bands.py`、`wire_format.py`、`question_content.py`、`assemble_local.py`、`unit_tasks.py`、`app/scripts/06-upload/audit_sentence_blanks.py`。
-
 ## 规则 44：提取层“容器与题内分离、语境与作答分离”通用规则
 
 - 落地：`app/workflow/extract.py`、`lesson_bands.py`、`question_content.py`、`structure_gate.py`、`sync_practice.py`、`agent_protocol.py`；回归 `app/workflow/test_golden_layouts.py`。
@@ -145,3 +141,7 @@
 ## 规则 48：大长材料组题正文段落统一首行缩进两字符（`\u3000\u3000`）
 
 - 落地：`app/workflow/wire_format.py`、`app/workflow/upload_payload.py`、`app/workbench/preview_render.py`、`lib/client.js`。
+
+## 规则 50：题干边界洁净、解析附件保留与提示词减负通用规则
+
+- 落地：`app/workflow/question_draft.py`、`lesson_bands.py`、`wire_format.py`、`question_content.py`、`assemble_local.py`、`unit_tasks.py`、`app/scripts/06-upload/audit_sentence_blanks.py`。

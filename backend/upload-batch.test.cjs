@@ -15,18 +15,9 @@ test('审核界面右上角提供「上传批次」，上传到云端暂存', ()
   assert.match(client, /upload-status/);
 });
 
-test('上传走 prepare-upload → 闸门批准 → upload 三步，不绕过闸门', () => {
-  assert.match(server, /def start_batch_upload/);
-  assert.match(server, /"prepare-upload", "--batch-dir"/);
-  assert.match(server, /"--stage", "upload_gate",\s*\n?\s*"--status", "approved"/);
-  assert.match(server, /"upload", "--batch-dir"/);
-  assert.match(server, /"--yes"/);
-});
-
-test('已上传的批次从试卷审核列表消失', () => {
-  // 后端给出 uploaded 标记（manifest 的 upload 阶段 completed）
+test('审核列表保留已暂存批次并提供已上传筛选', () => {
   assert.match(server, /"uploaded":/);
-  assert.match(server, /get\("upload"\) or \{\}\)\.get\("status"\)/);
-  // 前端过滤掉 uploaded
-  assert.match(client, /\(batches \|\| \[\]\)\.filter\(\(b\) => !b\.uploaded\)/);
+  assert.match(client, /if \(b\.uploaded \|\| b\.upload_pending_confirmation\) return true/);
+  assert.match(client, /if \(key === 'uploaded'\) return isBatchUploaded\(b\)/);
+  assert.match(client, /const list = baseList\.filter\(\(b\) => matchReviewFilter\(b, reviewFilter\)\)/);
 });

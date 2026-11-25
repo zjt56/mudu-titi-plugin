@@ -196,17 +196,28 @@ class SubstepsTest(unittest.TestCase):
         self.put("workflow/manifest.json", {"stages": {"validate": {"status": "failed"}}})
         report = {"checks": [{"check": CHECKS[0].name, "passed": False}]}
         self.put("07_review/validation-report.json", report)
-        cached = {"stage": {"items": [{"id": "validate", "substeps": [{"status": "old"}]}]}}
-        original = copy.deepcopy(cached)
-        with patch.object(server, "advance_state", return_value={}), patch.object(server, "upload_state", return_value={}):
-            first = server._live_overview(cached, "fixture", self.root)
+        original_builder = server._overview_uncached
+        projections = []
+
+        def build(name, folder):
+            projected = original_builder(name, folder)
+            projections.append(copy.deepcopy(projected))
+            return projected
+
+        with patch.object(server, "batch_dir", return_value=self.root), \
+                patch.object(server, "_OVERVIEW_CACHE", {}) as server_cache, \
+                patch.object(server, "_overview_uncached", side_effect=build), \
+                patch.object(server, "advance_state", return_value={}), \
+                patch.object(server, "upload_state", return_value={}):
+            first = server.overview("fixture")
             report["checks"][0]["passed"] = True
             self.put("07_review/validation-report.json", report)
-            second = server._live_overview(cached, "fixture", self.root)
+            second = server.overview("fixture")
         get = lambda value: next(c for c in value["stage"]["items"] if c["id"] == "validate")["substeps"][0]["status"]
         self.assertEqual(get(first), "failed")
         self.assertEqual(get(second), "completed")
-        self.assertEqual(cached, original)
+        self.assertEqual(len(projections), 2)
+        self.assertEqual(list(server_cache.values()), projections)
 
     def test_audio_bootstrap_can_observe_work_before_parent_running_commit(self):
         self.put("workflow/manifest.json", {"inputs": {"audio": {"path": "audio.mp3"}},

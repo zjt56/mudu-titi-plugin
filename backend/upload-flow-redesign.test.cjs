@@ -15,37 +15,12 @@ test('后端阶段卡复用契约顺序与 flow_done 口径，客户端无需维
   assert.match(stageViews, /for sid in \(STAGE_ORDER or list\(stages\)\)/);
 });
 
-test('排队区只列处理中的试卷；内容审核与上传格式检查结束的从队列消失', () => {
-  assert.match(client, /const pendingBatches = batches\.filter\(\(b\) => !b\.flow_done && !b\.uploaded(?: && !b\.queue_removed)?\)/);
-  assert.match(client, /const finishedBatches = batches\.filter\(\(b\) => b\.flow_done && !b\.uploaded\)/);
-  // 队列行遍历的是 pendingBatches，不是全部 batches。
-  assert.match(client, /pendingBatches\.map\(\(b, i\)/);
-});
-
 test('上传后不再自动跳到审核页，且排队区下方不再显示待人工确认卡片', () => {
   // onUploaded 只刷新计数，不再 setTab('review')。
   assert.match(client, /onUploaded: \(\) => \{ setUploadedTick\(\(x\) => x \+ 1\); \}/);
   // 已移除排队区下方的「已完成 N 份 · 待人工确认 / 前往人工确认 →」卡片。
   assert.doesNotMatch(client, /wf-handoff/);
   assert.doesNotMatch(client, /前往人工确认 →/);
-});
-
-test('当前试卷内容审核与上传格式检查结束后自动切到下一份未结束的，流程图开始新流程', () => {
-  assert.match(client, /pending\.some\(\(b\) => b\.name === cur\) \? cur : pending\[0\]\.name/);
-  // 流程图只跟踪处理中的试卷。
-  assert.match(client, /const selBatch = pendingBatches\.find\(\(b\) => b\.name === sel\) \|\| pendingBatches\[0\]/);
-  // 无任务时仍显示完整中性流程图，已完成的确认入口保留在左侧。
-  assert.match(client, /const isFlowOverview = !selBatch/);
-  assert.match(client, /compactFlowStages\(sourceItems, isFlowOverview\)/);
-  assert.doesNotMatch(client, /const flowDone =|!selBatch \? flowDone/);
-  // 排队区常驻显示：即使没有处理中的试卷也保留这块区域和空状态，
-  // 不因队列为空而整块收起；内容审核与上传格式检查结束的试卷仍不占用队列。
-  assert.match(client, /排队区常驻显示/);
-  assert.match(client, /const queue = h\('div', \{ style: \{ flex: 1, minHeight: 190/);
-  assert.match(client, /pendingBatches\.length === 0\s*\n?\s*\? h\(EmptyState/);
-  assert.doesNotMatch(client, /没有任何处理中试卷时整块排队区收起/);
-  // 主图保留真实节点状态，头部不再重复进度条与更新时间。
-  assert.doesNotMatch(client, /pctAll|进度更新：|setLastRefresh/);
 });
 
 test('流程图精修：紧凑两行节点名、方向箭头、已完成段用中性色、无重复阶段进度', () => {

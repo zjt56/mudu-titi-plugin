@@ -142,28 +142,54 @@ class WorkerSplitIntegrationTests(unittest.TestCase):
                         proc.kill()
 
     def test_api_batches_etag_and_304_not_modified(self):
+        pending = {"name": "pending", "flow_done": False, "rows": [{"number": 2}]}
+        done = {"name": "done", "flow_done": True, "uploaded": False,
+                "rows": [{"unit_id": "unit-1"}], "extraction": {}, "structure_gate": {},
+                "diagnostics": {}, "stage": {"items": [], "hint": "completed"}}
+        uploaded = {"name": "uploaded", "flow_done": True, "uploaded": True}
+        batches = [pending, done, uploaded]
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         port = httpd.server_address[1]
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
         try:
-            with mock.patch.object(server, "cached_list_batches", return_value=[{"name": "b1", "uploaded": False}]), \
+            with mock.patch.object(server, "cached_list_batches", return_value=batches), \
+                    mock.patch.object(server, "_is_split_worker", return_value=False), \
                     mock.patch.dict(os.environ, {"WF_WORKBENCH_TOKEN": ""}, clear=False):
-                url = f"http://127.0.0.1:{port}/api/batches?lite=1"
-                with urllib.request.urlopen(url, timeout=5.0) as resp:
-                    self.assertEqual(resp.status, 200)
-                    etag = resp.headers.get("ETag")
-                    self.assertTrue(etag and etag.startswith('W/"'))
-                    body = json.loads(resp.read().decode("utf-8"))
-                    self.assertEqual(len(body["batches"]), 1)
-
-                req = urllib.request.Request(url, headers={"If-None-Match": etag})
-                with self.assertRaises(urllib.error.HTTPError) as ctx:
-                    urllib.request.urlopen(req, timeout=5.0)
-                self.assertEqual(ctx.exception.code, 304)
+                base = f"http://127.0.0.1:{port}/api/batches"
+                cases = {
+                    "": {"batches": batches},
+                    "?lite=1": {"batches": [
+                        {"name": "pending", "flow_done": False, "first_unit_id": "2"},
+                        {"name": "done", "flow_done": True, "uploaded": False,
+                         "structure_gate": {}, "diagnostics": {}, "stage": done["stage"],
+                         "first_unit_id": "unit-1"}, uploaded]},
+                    "?review_list=1&unuploaded=1": {"has_active_work": True, "batches": [
+                        {"name": "done", "flow_done": True, "uploaded": False,
+                         "stage": {"hint": "completed"}, "first_unit_id": "unit-1"}]},
+                }
+                etags = set()
+                for query, expected in cases.items():
+                    with self.subTest(query=query):
+                        url = base + query
+                        with urllib.request.urlopen(url, timeout=5.0) as resp:
+                            self.assertEqual(resp.status, 200)
+                            etag = resp.headers.get("ETag")
+                            self.assertTrue(etag and etag.startswith('W/"'))
+                            etags.add(etag)
+                            self.assertEqual(json.loads(resp.read().decode("utf-8")), expected)
+                        req = urllib.request.Request(url, headers={"If-None-Match": etag})
+                        with self.assertRaises(urllib.error.HTTPError) as ctx:
+                            urllib.request.urlopen(req, timeout=5.0)
+                        self.assertEqual(ctx.exception.code, 304)
+                self.assertEqual(len(etags), len(cases))
+                self.assertEqual(done["rows"], [{"unit_id": "unit-1"}])
+                self.assertEqual(done["stage"], {"items": [], "hint": "completed"})
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
 
     def test_health_does_not_deadlock_with_concurrent_cached_list_batches(self):
         # Regression test for AB-BA lock inversion between _batches_read_lock

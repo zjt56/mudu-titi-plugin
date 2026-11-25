@@ -110,13 +110,13 @@ class ActivityTest(unittest.TestCase):
             self.assertEqual(activity.read(self.batch)['stage'], 'structure_gate')
             raise RuntimeError('gate-failure')
         # Decorator wraps before any transactional implementation; no manifest mutation.
-        with patch('workflow.local_agent._agent_lock', side_effect=gate):
+        with patch('workflow.local_agent._batch_lock', side_effect=gate):
             with self.assertRaisesRegex(RuntimeError, 'gate-failure'):
                 runner.do_structure_gate(self.batch, {})
         self.assertEqual(activity.read(self.batch), {})
 
     def test_cached_projection_gets_live_activity_and_runtime_without_mutation(self):
-        cached = {'stage': {'items': [{'id': 'extract', 'status': 'completed', 'active': False}]}}
+        cached = {'stage': {'items': [{'id': 'extract', 'status': 'pending', 'active': False}]}}
         with patch.object(server, 'advance_state', return_value={'running': True}), \
              patch.object(server, 'upload_state', return_value={'running': False}):
             with activity.track(self.batch, 'extract', '卷头识别仍在执行'):

@@ -51,10 +51,11 @@ class EfficiencyProjectionTests(unittest.TestCase):
         with patch.object(server.wf_execution_state, 'local_complete', return_value=True), \
              patch.object(operations, 'view', side_effect=AssertionError('discovery forbidden')), \
              patch.object(operations, '_save', side_effect=AssertionError('ledger write forbidden')):
-            for status in ['resolved', 'cancelled', 'needs_human', 'needs_deep_repair']:
+            for status in ['resolved', 'cancelled']:
                 self.write('workflow/operations.json', {'identity': identity, 'incident': {'status': status}})
                 self.assertFalse(server.operations_work_state()['has_work'], status)
-            for status in ['queued', 'claimed', 'awaiting_execution']:
+            # 历史待人工与待深修状态仍须交给运维接手；读投影本身不得写台账。
+            for status in ['queued', 'claimed', 'awaiting_execution', 'needs_human', 'needs_deep_repair']:
                 self.write('workflow/operations.json', {'identity': identity, 'incident': {'status': status}})
                 self.assertTrue(server.operations_work_state()['has_work'], status)
 

@@ -68,6 +68,21 @@ class OverviewSnapshotTest(unittest.TestCase):
                 self.assertEqual(server.overview("paper-a"), fresh)
                 self.assertEqual(recompute.call_count, 1)
 
+    def test_projection_module_change_invalidates_fingerprint(self):
+        server_path = Path(__file__).with_name("server.py")
+        projection_path = server_path.with_name("batch_overview.py")
+        original_stat = Path.stat
+
+        def updated_stat(path, *args, **kwargs):
+            if path == projection_path:
+                stat = original_stat(path, *args, **kwargs)
+                return mock.Mock(st_mtime_ns=stat.st_mtime_ns + 1, st_size=stat.st_size)
+            return original_stat(path, *args, **kwargs)
+
+        before = server._overview_key(self.batch)
+        with mock.patch.object(Path, "stat", updated_stat):
+            self.assertNotEqual(before, server._overview_key(self.batch))
+
     def test_snapshot_is_ignored_when_the_file_is_corrupt(self):
         workflows, env = self._patches()
         with workflows, env:

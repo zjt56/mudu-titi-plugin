@@ -739,15 +739,28 @@ test('purge cancels and awaits an active attempt before removing persistence', a
   assert.equal(f.agents.length, 1); await f.manager.dispose();
 });
 
-test('purge polling acknowledges tickets once, retries only ack and supports missing endpoint', async t => {
+test('purge polling acknowledges tickets once, retries only ack and supports missing endpoint', { timeout: 5000 }, async t => {
   const stored = await storedFixture(t); let acks = 0, stats = 0;
   const f = await fixture({ rows: [], persistence: { stat: async (...args) => { stats++; return stored.persistence.stat(...args); } },
     managerOptions: { cwd: stored.cwd }, backend: (path, init) => {
       if (path === '/api/content-agent/purges') return { purges: [{ purge_id: 'purge/one', sessions: [stored.binding] }] };
       if (path === '/api/content-agent/purges/purge%2Fone') { acks++; assert.deepEqual(init.body, { status: 'completed' }); if (acks === 1) throw new Error('ack lost'); return { ok: true }; }
     } });
-  f.manager.start(); await f.manager.tick(); assert.match(f.manager.status().lastPurgeError, /ack lost/);
-  await f.manager.tick(); assert.equal(acks, 2); assert.equal(stats, 2); assert.equal(f.manager.status().purgeCount, 1);
+  t.after(() => f.manager.dispose());
+  async function pollUntil(predicate) {
+    const deadline = Date.now() + 2000;
+    do {
+      await f.manager.tick();
+      await new Promise(resolve => setTimeout(resolve, 5));
+      if (predicate()) return;
+    } while (Date.now() < deadline);
+    assert.fail('Background purge acknowledgement did not reach the expected state');
+  }
+  f.manager.start();
+  await pollUntil(() => /ack lost/.test(f.manager.status().lastPurgeError));
+  await pollUntil(() => acks === 2);
+  assert.equal(stats, 2);
+  assert.equal(f.manager.status().purgeCount, 1);
   await f.manager.dispose();
   for (const response of [null, {}, { error: 'not_found' }, { purges: [] }]) {
     const old = await fixture({ rows: [], backend: path => path.endsWith('/purges') ? response : undefined });

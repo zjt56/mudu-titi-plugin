@@ -15,6 +15,7 @@ function stateIndexOf(name) {
   return (body.slice(0, decl).match(/useState\(/g) || []).length;
 }
 const BATCHES_STATE = stateIndexOf('batches');
+const SELECTED_STATE = stateIndexOf('sel');
 const REFRESH_ERROR_STATE = stateIndexOf('refreshError');
 // refresh 同理按 UploadView 中 useCallback 的声明顺序推算（前面已有 sortQueueBatches）。
 const REFRESH_CALLBACK = (() => {
@@ -33,7 +34,14 @@ function renderFlow(items, current = items[0], options = {}) {
     flow_done: !!options.finished, advance: options.advance || {}, stage: { items, current, done: 0, total: items.length } };
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter((x) => x != null && x !== false) }),
-    useState(initial) { const index = stateIndex++; return [index === BATCHES_STATE ? (options.batches || [batch]) : index === REFRESH_ERROR_STATE ? (options.refreshError || initial) : initial, value => updates.push({ index, value })]; },
+    useState(initial) {
+      const index = stateIndex++;
+      let value = typeof initial === 'function' ? initial() : initial;
+      if (index === BATCHES_STATE) value = options.batches || [batch];
+      if (index === SELECTED_STATE) value = options.selected || '';
+      if (index === REFRESH_ERROR_STATE) value = options.refreshError || value;
+      return [value, next => updates.push({ index, value: next })];
+    },
     useRef: (current) => ({ current }), useEffect() {}, useMemo: (fn) => fn(),
     useCallback: (callback) => { callbacks.push(callback); return callback; },
   };
@@ -281,6 +289,36 @@ test('unknown configured stages affect their preceding visible class without add
   const { tree } = renderFlow(items, items[items.length - 1]);
   assert.equal(nodesOf(tree).length, 12);
   assert.match(tipOf(nodeOf(tree, 'upload')), /失败/);
+});
+
+test('upload queue only renders unfinished batches and stays visible when empty', () => {
+  const batches = [
+    { name: 'pending', flow_done: false },
+    { name: 'finished', flow_done: true },
+    { name: 'uploaded', uploaded: true },
+    { name: 'removed', queue_removed: true },
+  ];
+  const queueRows = tree => walk(tree, node => (node.props.className || '').split(' ').includes('wf-queue-row'));
+  const { tree } = renderFlow(stages(), null, { batches });
+  assert.deepEqual(queueRows(tree).map(row => row.props.key), ['pending']);
+  const empty = renderFlow(stages(), null, { batches: batches.slice(1) }).tree;
+  assert.equal(queueRows(empty).length, 0);
+  assert.match(text(empty), /排队区/);
+  assert.ok(walk(empty, node => node.props.title === '暂无处理中的试卷').length);
+});
+
+test('polling selects the next batch by upload order when the current batch finishes', async () => {
+  const batches = [
+    { name: 'later', queue_order_ts: 3 },
+    { name: 'current', queue_order_ts: 1, flow_done: true },
+    { name: 'next', queue_order_ts: 2 },
+  ];
+  const fixture = renderFlow(stages(), null, { batches, selected: 'current', jget: async () => ({ batches }) });
+  assert.ok(walk(fixture.tree, node => node.props.key === 'operations:next').length);
+  await fixture.refresh();
+  const selection = fixture.updates.find(update => update.index === SELECTED_STATE);
+  assert.equal(selection.value('current'), 'next');
+  assert.equal(selection.value('later'), 'later');
 });
 
 test('late polling responses cannot overwrite newer progress and errors remain visible', async () => {

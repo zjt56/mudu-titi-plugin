@@ -43,12 +43,12 @@ class StageParallelDisplayTest(unittest.TestCase):
         self.assertNotIn("answers", active)
 
     def test_stage_with_unmet_dependency_is_not_active(self):
-        # answers 未完成时 explanations（依赖 answers）不得显示为并行处理中。
-        manifest = _manifest({"types": "completed", "answers": "pending",
-                               "explanations": "pending", "knowledge": "running"})
+        # 未完成的前置交付阻断其消费者，但不阻断无关分支。
+        manifest = _manifest({"types": "pending", "knowledge": "running",
+                               "content_snapshot": "running"})
         active, _ = self._active(manifest)
-        self.assertIn("knowledge", active)
-        self.assertNotIn("explanations", active)
+        self.assertIn("content_snapshot", active)
+        self.assertNotIn("knowledge", active)
 
     def test_rebuild_marked_dependency_blocks_activity(self):
         manifest = _manifest({"types": "running", "answers": "completed",

@@ -25,7 +25,7 @@ function handler(post, get = async () => ({}), refresh = async () => {}) {
 test('waiting and queued receipts explain why work has not started', () => {
   const ctx = helpers();
   assert.match(ctx.advanceReceiptFeedback({ started: false, waiting: true, waiting_for: '前卷' }).message, /前卷/);
-  assert.match(ctx.advanceReceiptFeedback({ started: true, queued: true, running: false }).message, /队列/);
+  assert.match(ctx.advanceReceiptFeedback({ started: true, queued: true, running: false, queue_position: 2 }).message, /队列/);
   assert.match(ctx.advanceReceiptFeedback({ external: true, running: true }).message, /另一执行器/);
   assert.match(ctx.advanceReceiptFeedback({ running: true }).message, /已在处理/);
 });
@@ -37,7 +37,7 @@ test('HTTP 200 rejection is an error, never assumed started', () => {
 });
 test('queued click immediately updates batch and refreshes, without running-only polling', async () => {
   let posts = 0, reads = 0, refreshes = 0;
-  const h = handler(async () => { posts++; return { started: true, queued: true, running: false }; },
+  const h = handler(async () => { posts++; return { started: true, queued: true, running: false, queue_position: 2 }; },
     async () => { reads++; }, async () => { refreshes++; });
   await h.ctx.advance('甲卷');
   assert.equal(posts, 1); assert.equal(reads, 0); assert.equal(refreshes, 1);

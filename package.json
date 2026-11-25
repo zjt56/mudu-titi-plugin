@@ -1,7 +1,7 @@
 {
   "name": "md-upload-tiku",
   "version": "0.1.0",
-  "description": "md upload tiku（英语录题与题库上传）DSH 插件：唯一前端是 lib/client.js 的原生面板，app/ 只提供工作流与纯 REST API 后端，不含任何浏览器页面。支持在 Harness 内选模型（含第三方）、分别指定两轮审核模型；模型路由经 MUDU_AGENT_CONFIG + wf-router.sh 注入。",
+  "description": "md upload tiku（英语录题与题库上传）DSH 插件：唯一前端是 lib/client.js 的原生面板，app/ 只提供工作流与纯 REST API 后端，不含任何浏览器页面。支持在 Harness 内选模型（含第三方）、指定一审模型并由程序合并标签；模型路由经 MUDU_AGENT_CONFIG + wf-router.sh 注入。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -18,6 +18,8 @@
     "cordis.patch.yml",
     "config/",
     "backend/",
+    "src/client/",
+    "tools/build-client.mjs",
     "locale/",
     "icon.svg",
     "README.md",
