@@ -13,6 +13,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path, PurePosixPath
 
 from .question_identity import validate_units
@@ -48,6 +49,34 @@ def write_json_atomic(path, value, *, indent=2, sort_keys=False) -> Path:
             pass
         raise
     return target
+
+
+def write_json(path, value, *, indent=2) -> None:
+    """Non-atomic JSON write: create parents, UTF-8, ensure_ascii=False, trailing newline.
+
+    Byte-identical to the historical per-module helpers (structure_gate/ingest _write_json).
+    Prefer write_json_atomic for new files: switching an existing writer to it changes
+    file mode (mkstemp 0600) and inode replacement semantics.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(value, ensure_ascii=False, indent=indent) + "\n", encoding="utf-8")
+
+
+def write_text_atomic(path, text) -> None:
+    """Atomically replace a UTF-8 text file via a per-process/thread temp name; the temp is removed on failure."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.parent / f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def sha256_bytes(data: bytes) -> str:

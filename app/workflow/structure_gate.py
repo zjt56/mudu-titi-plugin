@@ -25,6 +25,7 @@ from pathlib import Path
 
 from . import denoise
 from .extract import _plain, guide_numbers, material_label, source_group_partitions
+from .workflow_primitives import write_json as _primitives_write_json
 
 # 组合题家族：这些题型整组作为一个单元，而不是拆成逐题
 GROUP_TYPE_HINTS = (
@@ -1627,5 +1628,4 @@ def run_gate(batch_dir: Path, *, output_dir: Path | None = None) -> dict:
 
 
 def _write_json(path: Path, payload) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    _primitives_write_json(path, payload, indent=1)

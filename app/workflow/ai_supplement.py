@@ -29,6 +29,7 @@ from . import (
     supervisor,
     upload_content,
 )
+from .workflow_primitives import write_text_atomic as _primitives_write_text_atomic
 
 SUMMARY_ELIGIBLE_TYPES = frozenset({
     "完形填空", "阅读理解", "任务型阅读", "短文填空",
@@ -218,17 +219,7 @@ def _extract_unit_transcript(batch_dir: Path, unit_id: str) -> dict | None:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
+    _primitives_write_text_atomic(path, text)
 
 
 def _pid_alive(pid) -> bool:

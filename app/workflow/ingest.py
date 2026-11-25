@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 
 from . import contracts, manifest as mf
+from .workflow_primitives import write_json as _primitives_write_json
 
 REVIEW_DIR = "07_review"
 
@@ -588,8 +589,7 @@ def _load(path: Path):
 
 
 def _write_json(path: Path, payload) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    _primitives_write_json(path, payload, indent=1)
 
 
 def record_units(batch_dir: Path, result: dict) -> int:
