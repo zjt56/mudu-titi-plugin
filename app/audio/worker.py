@@ -83,53 +83,15 @@ def model_slot(model_dir, max_parallel):
 
     同一模型缓存共享预算。不要删除锁文件：unlink 会使并发进程锁住不同 inode。
     """
+    from workflow import filelock
     root = Path(model_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    handles = []
-    acquired = None
-    if os.name == "nt":
-        import msvcrt
-        def lock(handle):
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        def unlock(handle):
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-    else:
-        import fcntl
-        def lock(handle):
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        def unlock(handle):
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    try:
-        for index in range(max_parallel):
-            handle = (root / f".worker-slot-{index}.lock").open("a+b")
-            if os.name == "nt" and handle.tell() == 0:
-                handle.write(b"\0")
-                handle.flush()
-            handles.append(handle)
-        waiting_reported = False
-        while acquired is None:
-            for handle in handles:
-                try:
-                    lock(handle)
-                    acquired = handle
-                    break
-                except OSError as exc:
-                    import errno
-                    if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                        raise
-            if acquired is None:
-                if not waiting_reported:
-                    progress("queue", "等待模型资源槽（并行上限 " + str(max_parallel) + "）")
-                    waiting_reported = True
-                time.sleep(0.1)
+    paths = [root / f".worker-slot-{index}.lock" for index in range(max_parallel)]
+    with filelock.acquire_slot_lock(
+        paths,
+        poll_interval=0.1,
+        on_wait=lambda: progress("queue", "等待模型资源槽（并行上限 " + str(max_parallel) + "）"),
+    ):
         yield
-    finally:
-        if acquired is not None:
-            unlock(acquired)
-        for handle in handles:
-            handle.close()
 
 
 def _load_asr(whisperx, args, language, local_files_only):

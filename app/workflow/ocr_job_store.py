@@ -153,42 +153,17 @@ class JobStore:
 
     @contextmanager
     def lock(self, timeout=0):
+        from . import filelock
         self.directory.mkdir(parents=True, exist_ok=True)
-        stream = open(self.directory / ".lock", "a+b")
-        deadline = time.monotonic() + max(0, timeout)
-        acquired = False
         try:
-            while True:
+            with filelock.file_lock(self.directory / ".lock", timeout=max(0.0, float(timeout)), poll_interval=0.05):
+                self.locked = True
                 try:
-                    if os.name == "nt":
-                        import msvcrt
-                        stream.seek(0)
-                        if not stream.read(1):
-                            stream.write(b"0")
-                            stream.flush()
-                        stream.seek(0)
-                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-                    else:
-                        import fcntl
-                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    acquired = self.locked = True
-                    break
-                except (BlockingIOError, OSError):
-                    if time.monotonic() >= deadline:
-                        raise StoreError("waiting") from None
-                    time.sleep(min(.05, max(0, deadline - time.monotonic())))
-            yield self
-        finally:
-            if acquired:
-                if os.name == "nt":
-                    import msvcrt
-                    stream.seek(0)
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-            self.locked = False
-            stream.close()
+                    yield self
+                finally:
+                    self.locked = False
+        except TimeoutError:
+            raise StoreError("waiting") from None
 
     def load(self):
         if not self.locked:

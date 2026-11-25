@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -35,10 +36,12 @@ def precheck(payload: dict, timeout: int = 120, batch_dir: str | Path | None = N
             if name == "check_structure.py" and batch_dir is not None:
                 command.extend(["--source-batch-dir", str(Path(batch_dir).resolve())])
             try:
+                sub_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
                 proc = subprocess.run(
                     command,
                     cwd=str(ROOT), capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=timeout,
+                    env=sub_env,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 problems.append(f"{name}: 预检无法执行（{exc}）")

@@ -155,8 +155,10 @@ def preflight(cfg: dict | None = None) -> None:
         version = tuple(sys.version_info[:2])
     else:
         try:
+            probe_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
             result = subprocess.run([python, '-c', 'import sys; print("%d.%d" % sys.version_info[:2])'],
-                                    capture_output=True, text=True, timeout=15, check=True)
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                    timeout=15, check=True, env=probe_env)
             version = tuple(int(part) for part in result.stdout.strip().split('.'))
             if len(version) != 2:
                 raise ValueError('invalid version')

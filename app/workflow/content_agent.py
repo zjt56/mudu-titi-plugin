@@ -104,33 +104,10 @@ def _lock():
 @contextmanager
 def _process_lock():
     """An OS-owned persisted lock: process death releases ownership on restart."""
+    from . import filelock
     QUEUE_ROOT.mkdir(parents=True, exist_ok=True)
-    with (QUEUE_ROOT / ".lock").open("a+b") as stream:
-        if os.name == "nt":
-            import msvcrt
-            stream.seek(0, os.SEEK_END)
-            if stream.tell() == 0:
-                stream.write(b"\0")
-                stream.flush()
-            while True:
-                stream.seek(0)
-                try:
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(.02)
-            try:
-                yield
-            finally:
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(stream, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(stream, fcntl.LOCK_UN)
+    with filelock.file_lock(QUEUE_ROOT / ".lock"):
+        yield
 
 
 _TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")

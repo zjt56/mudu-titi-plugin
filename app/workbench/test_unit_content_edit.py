@@ -247,6 +247,224 @@ class UnitContentEditTest(unittest.TestCase):
         self.assertIn("Answer not verbatim-bound", text)
         self.assertIn("答案提取", text)
 
+    def test_label_save_rejects_invalid_subtypes_immediately(self):
+        # 合法主类 + 不属于该主类的子类：保存时即阻断，不再拖到上传才报错。
+        with self.assertRaisesRegex(ValueError, "不属于"):
+            server.Handler.save_units(
+                self.folder, "q-1", [],
+                {"type": "单项填空", "subtypes": ["首字母"]},
+            )
+        # 无子类的主类提交子类：阻断（若目录中存在无子类主类）。
+        no_sub_type = next((t for t in server.taxonomy.types() if not server.taxonomy.subtypes(t)), None)
+        if no_sub_type:
+            with self.assertRaisesRegex(ValueError, "没有子类"):
+                server.Handler.save_units(
+                    self.folder, "q-1", [],
+                    {"type": no_sub_type, "subtypes": ["四个选项"]},
+                )
+        # 非单词拼写主类提交多个子类：阻断。
+        with self.assertRaisesRegex(ValueError, "只能单选"):
+            server.Handler.save_units(
+                self.folder, "q-1", [],
+                {"type": "单项填空", "subtypes": ["四个选项", "三个选项"]},
+            )
+        # 合法主类 + 合法子类：正常保存。
+        saved = server.Handler.save_units(
+            self.folder, "q-1", [],
+            {"type": "单项填空", "subtypes": ["四个选项"]},
+        )
+        self.assertTrue(saved["saved"])
+
+    def test_install_retries_transient_windows_permission_error(self):
+        from unittest.mock import patch
+        from workflow import agent_tasks
+
+        final = self.folder / "06_batch/batch_meta.json"
+        real_replace = agent_tasks.os.replace
+        attempts = {"count": 0}
+
+        def flaky_replace(src, dst):
+            if Path(dst) == final.resolve() and attempts["count"] < 2:
+                attempts["count"] += 1
+                raise PermissionError(13, "WinError 5 simulated sharing violation")
+            return real_replace(src, dst)
+
+        with patch.object(agent_tasks.os, "replace", side_effect=flaky_replace):
+            res = self.save({"articleSummary": "重试后落盘成功"})
+        self.assertTrue(res["applied"]["applied"])
+        self.assertEqual(attempts["count"], 2)
+        self.assertEqual(self.batch_row()["articleSummary"], "重试后落盘成功")
+
+    def test_manual_content_edit_refreshes_receipts_and_prepare_upload_passes_e2e(self):
+        from unittest.mock import patch
+        from workflow import execution_state, handoff, upload, upload_client
+        from workflow.test_upload_payload import catalog_snapshot
+
+        folder = self.folder
+        # 构造一份完整的已通过 validate / review_gate / format_gate 的真实可上传批次。
+        (folder / "01_source").mkdir(parents=True, exist_ok=True)
+        (folder / "01_source_ans").mkdir(parents=True, exist_ok=True)
+        (folder / "03_types").mkdir(parents=True, exist_ok=True)
+        (folder / "07_review").mkdir(parents=True, exist_ok=True)
+        (folder / "workflow").mkdir(parents=True, exist_ok=True)
+
+        source_txt = "一、单项填空\n1. What did Bill get?\nA. A pen\nB. A book\nC. A bag\nD. A cap\n"
+        (folder / "01_source/正文.txt").write_text(source_txt, encoding="utf-8")
+        (folder / "01_source/structure.confirmed.json").write_text(json.dumps({
+            "version": 1,
+            "units": [{
+                "unit_id": "q-1", "unit_kind": "standalone", "numbers": [1],
+                "source_span": {"start_line": 1, "end_line": 6},
+                "source_section": {"title": "一、单项填空"},
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        (folder / "03_types/types.json").write_text(json.dumps({
+            "items": [{
+                "unit_id": "q-1", "type": "单项填空", "subtypes": ["四个选项"],
+                "words": 5, "contentComplete": True, "evidence": ["L2"],
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        (folder / "01_source_ans/answers.json").write_text(json.dumps({
+            "answers": {"1": "A"}, "missing": {}, "evidence": {"1": ["答案：A"]},
+        }, ensure_ascii=False), encoding="utf-8")
+        (folder / "04_knowledge/knowledge.json").write_text(json.dumps({
+            "items": [{
+                "unit_id": "q-1", "knowledge": ["词汇/词汇辨析/动词辨析"],
+                "subquestions": [], "evidence": ["did"],
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+
+        batch_item = {
+            "unit_id": "q-1", "id": "q-1", "number": 1, "numbers": [1],
+            "unit_kind": "standalone", "stem": "What did Bill get?",
+            "material": "",
+            "options": [
+                {"label": "A", "text": "A pen"},
+                {"label": "B", "text": "A book"},
+                {"label": "C", "text": "A bag"},
+                {"label": "D", "text": "A cap"},
+            ],
+            "answer": "A",
+            "explanation": "旧解析",
+            "articleSummary": "旧大意",
+            "subquestions": [],
+            "question_type": "单项填空",
+            "difficulty": "容易",
+            "knowledge": ["词汇/词汇辨析/动词辨析"],
+            "source_type": "中考真题",
+            "year": 2025,
+            "source": "模拟期中卷",
+            "location": "第一部分 第1题",
+            "version": "原卷扫描版",
+            "authorization": "已获授权",
+            "filterMetadata": {
+                "subtypes": ["四个选项"],
+                "difficultyValue": 0.85,
+                "categories": ["优选题"],
+            },
+        }
+        batch_path = folder / "06_batch/batch_meta.json"
+        batch_path.write_text(json.dumps({
+            "batch_id": "test-e2e-batch", "name": "测试卷", "items": [batch_item],
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        old_batch_sha = mf.sha256_file(batch_path)
+        old_exp_sha = mf.sha256_file(folder / "04_knowledge/explanations.json")
+
+        (folder / "07_review/validation-report.json").write_text(json.dumps({
+            "passed": True, "batch_sha256": old_batch_sha, "checks": [], "blocking_failures": [],
+        }, ensure_ascii=False), encoding="utf-8")
+        (folder / "07_review/review-gate.json").write_text(json.dumps({
+            "passed": True, "batch_sha256": old_batch_sha, "errors": [],
+        }, ensure_ascii=False), encoding="utf-8")
+        (folder / "07_review/upload-format.json").write_text(json.dumps({
+            "passed": True, "final_sha256": old_batch_sha, "errors": [],
+        }, ensure_ascii=False), encoding="utf-8")
+
+        stages = {
+            sid: {"status": mf.COMPLETED, "input_hashes": {}, "output_hashes": {}}
+            for sid in execution_state.LOCAL_STAGES
+        }
+        stages["explanations"]["output_hashes"] = {"04_knowledge/explanations.json": old_exp_sha}
+        stages["assemble"]["output_hashes"] = {"06_batch/batch_meta.json": old_batch_sha}
+        stages["validate"]["output_hashes"] = {
+            "07_review/validation-report.json": mf.sha256_file(folder / "07_review/validation-report.json"),
+        }
+        stages["review_gate"]["output_hashes"] = {
+            "07_review/review-gate.json": mf.sha256_file(folder / "07_review/review-gate.json"),
+        }
+        stages["format_gate"]["output_hashes"] = {
+            "07_review/upload-format.json": mf.sha256_file(folder / "07_review/upload-format.json"),
+        }
+        stages["upload_gate"] = {"status": mf.SKIPPED, "input_hashes": {}, "output_hashes": {}}
+        stages["upload"] = {"status": mf.SKIPPED, "input_hashes": {}, "output_hashes": {}}
+        stages["publish_gate"] = {"status": mf.SKIPPED, "input_hashes": {}, "output_hashes": {}}
+        (folder / "workflow/manifest.json").write_text(json.dumps({
+            "workflow_id": "test-e2e-batch",
+            "status": "pending_confirmation",
+            "stages": stages,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 在不调用任何外部校验脚本的情况下模拟确定性 validate + format_gate 复验通过。
+        from workflow import format_gate, runner
+
+        def fake_do_validate(batch_dir, manifest, *, lock_held=False, refresh_only=False):
+            new_sha = mf.sha256_file(Path(batch_dir) / "06_batch/batch_meta.json")
+            (Path(batch_dir) / "07_review/validation-report.json").write_text(json.dumps({
+                "passed": True, "batch_sha256": new_sha, "checks": [], "blocking_failures": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            cur = mf.load(batch_dir)
+            spec = server.wf_contracts.STAGE_BY_ID["validate"]
+            mf.touch_stage(cur, "validate", mf.COMPLETED, output_hashes=mf.output_hashes(batch_dir, spec))
+            mf.save(batch_dir, cur)
+            return 0
+
+        def fake_format_run(batch_dir, write_report=True):
+            new_sha = mf.sha256_file(Path(batch_dir) / "06_batch/batch_meta.json")
+            rep = {"passed": True, "final_sha256": new_sha, "errors": []}
+            if write_report:
+                format_gate.write_report_file(batch_dir, rep)
+            return rep
+
+        with patch.object(runner, "do_validate", side_effect=fake_do_validate) as mocked_val, \
+                patch.object(format_gate, "run", side_effect=fake_format_run) as mocked_fg:
+            res = self.save({"explanation": "人工修订后的精准解析", "articleSummary": "人工修订大意"})
+
+        self.assertTrue(res["applied"]["applied"])
+        mocked_val.assert_called_once()
+        mocked_fg.assert_called_once()
+
+        new_batch_sha = mf.sha256_file(batch_path)
+        self.assertNotEqual(new_batch_sha, old_batch_sha)
+
+        # 三份下游回执哈希全部与新 batch_meta.json 对齐，handoff 严格校验全部通过。
+        fresh_manifest = mf.load(folder)
+        self.assertEqual(
+            fresh_manifest["stages"]["assemble"]["output_hashes"]["06_batch/batch_meta.json"],
+            new_batch_sha,
+        )
+        for stage_id in ("validate", "review_gate", "format_gate"):
+            inspect = handoff.inspect_stage(folder, fresh_manifest, stage_id)
+            self.assertTrue(inspect["passed"], f"{stage_id}: {inspect}")
+
+        # execution_state.local_complete 保持 True（supervisor 不会误判过期重跑）。
+        self.assertTrue(execution_state.local_complete(folder, fresh_manifest))
+
+        # 端到端 prepare-upload：冻结产物通过并包含人工修订后的解析和大意。
+        cat = catalog_snapshot()
+        with patch("workflow.upload_content.inspect_content", return_value={"passed": True, "errors": [], "warnings": [], "source_sha256": "s"}):
+            prep = upload.prepare(
+                folder,
+                catalog=cat,
+                config=upload_client.load_config(),
+                check_media=False,
+                ensure_catalog=False,
+            )
+        self.assertTrue(prep["passed"], prep)
+        frozen_payload = json.loads((folder / prep["payload_file"]).read_text(encoding="utf-8"))
+        self.assertEqual(frozen_payload["items"][0]["explanation"], "人工修订后的精准解析")
+        self.assertEqual(frozen_payload["items"][0]["articleSummary"], "人工修订大意")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -203,6 +203,8 @@ def quarantine_type_partition(
         if len(unit_ids) == 1 else ""
     )
     max_salvage_tries = 1 if len(unit_ids) == 1 else 2
+
+    singles: list[tuple[int, str, dict]] = []
     for s_idx, uid in enumerate(unit_ids):
         _, built = unit_tasks.build_parts(
             batch, "types", config["max_input_chars"], max_units=1, selected_ids=[uid],
@@ -214,7 +216,18 @@ def quarantine_type_partition(
         except ValueError as inp_exc:
             raise local_agent.AgentError(str(inp_exc), "context_changed") from inp_exc
         local_agent._check_input_hashes(batch, strict_hashes)
+        singles.append((s_idx, uid, single))
 
+    concurrency = local_agent._part_concurrency(config)
+    parallel_salvage = len(singles) > 1 and concurrency > 1
+    salvage_options = (
+        {**dict(invocation_options or {}), "permit_parallel": True}
+        if parallel_salvage
+        else dict(invocation_options or {})
+    )
+
+    def _salvage_one(entry: tuple[int, str, dict]) -> tuple[int, str, dict, dict | None, Exception | None]:
+        s_idx, uid, single = entry
         salvaged = None
         last_exc: Exception | None = None
         feedback = initial_feedback
@@ -223,7 +236,7 @@ def quarantine_type_partition(
             room = max(0, int(config["max_input_chars"]) - len(single["prompt"]))
             delivered = single["prompt"] + (feedback[:room] if feedback and room >= 80 else "")
             try:
-                res = invoke(delivered, sub_dir, config, **invocation_options)
+                res = invoke(delivered, sub_dir, config, **salvage_options)
             except local_agent.AgentError as call_exc:
                 if call_exc.code not in ("response", "integration"):
                     raise
@@ -251,7 +264,17 @@ def quarantine_type_partition(
                 last_exc = val_exc
                 feedback = f"\n\n上一次题型校验未通过：{str(val_exc)[:feedback_limit]}\n请严格按目录题型与子类修正后重新返回。"
                 continue
+        return s_idx, uid, single, salvaged, last_exc
 
+    if parallel_salvage:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(concurrency, len(singles))) as pool:
+            outcomes = list(pool.map(_salvage_one, singles))
+    else:
+        outcomes = [_salvage_one(entry) for entry in singles]
+
+    outcomes.sort(key=lambda row: row[0])
+    for _, uid, single, salvaged, last_exc in outcomes:
         if salvaged is not None:
             passed_ids.append(uid)
             sub_parts.append(single)

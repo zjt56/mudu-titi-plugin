@@ -123,40 +123,9 @@ def record_result(folder, result):
 @contextlib.contextmanager
 def _try_file_lock(path):
     """Acquire a nonblocking OS lock, never remove its inode."""
-    handle = None
-    acquired = False
-    if path.is_symlink():
-        yield False
-        return
-    try:
-        handle = path.open("a+b")
-        if os.name == "nt":
-            import msvcrt
-            handle.seek(0, os.SEEK_END)
-            if not handle.tell():
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        acquired = True
-    except OSError:
-        pass
-    try:
+    from . import filelock
+    with filelock.try_file_lock(path) as acquired:
         yield acquired
-    finally:
-        if handle is not None:
-            if acquired:
-                if os.name == "nt":
-                    import msvcrt
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            handle.close()
 
 
 def _auto_lock_path(folder):

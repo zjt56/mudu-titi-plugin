@@ -13,6 +13,7 @@ def verified_groups(batch_path):
     """Rebuild evidence from the supplied batch location, never candidate flags."""
     from . import denoise, question_draft, source_objects
     from .agent_tasks import confirmed_units
+    from .sync_practice import plain_text
     from .wire_format import normalize_blank_text
     path = Path(batch_path).resolve()
     root = path.parent.parent if path.parent.name == "06_batch" else path.parent
@@ -29,7 +30,7 @@ def verified_groups(batch_path):
                     or span.get("basis") not in {"ai_classified", "cleaned_source"}
                     or any(type(n) is not int for n in (start, end, heading, stop))
                     or not 1 <= heading < start <= end <= stop <= len(lines)
-                    or lines[heading - 1].strip() != str(section.get("title") or "").strip()):
+                    or plain_text(lines[heading - 1]).strip() != plain_text(str(section.get("title") or "")).strip()):
                 continue
             text = "\n".join(lines[start - 1:end]).strip()
             if text != str(unit.get("stem") or "").strip():

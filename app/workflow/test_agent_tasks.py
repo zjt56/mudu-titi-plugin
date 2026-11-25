@@ -79,6 +79,18 @@ class AgentTasksTest(unittest.TestCase):
         self.assertTrue(report["completed"])
         self.assertEqual(artifact.read_bytes(), original)
 
+    def test_completed_result_installs_artifact_and_backup(self):
+        # 回归：_install 必须自带 manifest 绑定，否则校验通过后仍抛 NameError。
+        target = self.batch / tasks.ARTIFACTS["types"]
+        original = target.read_bytes()
+        candidate = copy.deepcopy(self.types)
+        candidate["items"][0]["words"] = 8
+        report = tasks.accept_result(self.batch, "types", self.result("types", candidate))
+        self.assertTrue(report["completed"], report)
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), candidate)
+        self.assertEqual(Path(str(target) + ".bak").read_bytes(), original)
+        self.assertEqual(list(target.parent.glob(".agent-*")), [])
+
     def test_actual_gate_units_get_stable_ids_without_mutation(self):
         self.assertNotIn("unit_id", self.units[0])
         self.assertEqual(tasks.confirmed_units(self.batch)[0]["unit_id"], "q-1")

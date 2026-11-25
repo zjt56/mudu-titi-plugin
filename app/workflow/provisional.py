@@ -272,7 +272,8 @@ def _answer_sources(batch, manifest):
     if Path(original).suffix.lower() == ".docx":
         heading = extract._plain(appendix.splitlines()[0]).strip()
         sections = [section for section in structure.get("sections", [])
-                    if heading in (section.get("title"), str(section.get("title", "")) + " 参考答案")]
+                    if heading in (extract._plain(str(section.get("title", ""))).strip(),
+                                   extract._plain(str(section.get("title", ""))).strip() + " 参考答案")]
         if len(sections) != 1 or not set(numbers).issubset(set(sections[0].get("questions", []))):
             return []
         section = sections[0]

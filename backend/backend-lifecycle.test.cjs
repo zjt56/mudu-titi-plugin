@@ -352,3 +352,154 @@ test('watchdog scheduler is idempotent and stops cleanly', () => {
     assert.equal(f.startBackendWatchdog(), true);
   } finally { f.stopBackendWatchdog(); }
 });
+
+test('Windows shutdown kills both backend and split worker trees via taskkill and reaps stale worker', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-win-lifecycle-'));
+  const runtimeDir = path.join(dataDir, 'runtime');
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.writeFileSync(path.join(runtimeDir, 'worker-endpoint.json'), JSON.stringify({
+    pid: 4242, port: 19999, host: '127.0.0.1', token: 't',
+  }));
+  const execCalls = [];
+  const winProcess = {
+    platform: 'win32',
+    arch: 'x64',
+    pid: 1,
+    env: { ...process.env, WF_SPLIT_WORKER: '1' },
+    kill: () => true,
+  };
+  const spawned = [];
+  const api = (() => {
+    const backend = { proc: null, instanceId: '', port: 18891, ready: false, lastError: '' };
+    const context = {
+      backend, WORKBENCH_PORT: backend.port, WORKFLOW_DIR: path.join(root, 'app'),
+      process: winProcess, AbortController, fetch: async () => ({ ok: true, json: async () => ({ ok: true }) }),
+      setTimeout: (fn, ms) => setTimeout(fn, Math.min(ms, 20)), clearTimeout, randomUUID,
+      createServer: net.createServer,
+      join: path.join, resolve: path.resolve, mkdirSync: fs.mkdirSync,
+      existsSync: fs.existsSync, readFileSync: fs.readFileSync, statSync: fs.statSync,
+      renameSync: fs.renameSync, appendFileSync: fs.appendFileSync, readlinkSync: () => '', Buffer,
+      resolveDataRoot: () => dataDir, resolvePython: () => 'C:\\Python312\\python.exe',
+      materializeAgentConfig: () => '',
+      questionBankSettings: { runtimeEnv: () => ({}) },
+      ocrSettings: { runtimeEnv: () => ({}) },
+      console: { log() {}, error() {} },
+      execFileSync: (cmd, args) => {
+        execCalls.push({ cmd, args });
+        if (cmd === 'tasklist') return '"python.exe","4242","Console","1","10,000 K"\r\n';
+        if (cmd === 'taskkill') {
+          const pid = Number(args[1]);
+          const child = spawned.find(c => c.pid === pid);
+          if (child && child.exitCode === null) {
+            child.exitCode = 0;
+            queueMicrotask(() => child.emit('exit', 0, null));
+          }
+          return '';
+        }
+        return '';
+      },
+      spawn: (python, args) => {
+        const child = new EventEmitter();
+        child.pid = 5000 + spawned.length;
+        child.exitCode = null;
+        child.signalCode = null;
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.args = args;
+        child.kill = () => true;
+        spawned.push(child);
+        return child;
+      },
+    };
+    vm.createContext(context);
+    return vm.runInContext(
+      lifecycle + '\n({ backend, workerDaemon, spawnBackend, ensureWorkerDaemon, stopBackend, stopWorkerDaemon, reapStaleWorkerProcesses })',
+      context,
+    );
+  })();
+  try {
+    // 1) Windows 上启动 worker 前应按 worker-endpoint.json 清理残留孤儿 worker（pid 4242）
+    const worker = api.ensureWorkerDaemon();
+    assert.ok(worker);
+    assert.ok(execCalls.some(c => c.cmd === 'tasklist' && c.args.includes('PID eq 4242')));
+    assert.ok(execCalls.some(c => c.cmd === 'taskkill' && c.args.includes('4242') && c.args.includes('/T')));
+
+    // 2) 同时停止 backend 与 split worker 时，均走 taskkill /T /F 且无残留存活子进程
+    const srv = api.spawnBackend();
+    assert.ok(srv);
+    assert.equal(await api.stopBackend(), true);
+    assert.equal(await api.stopWorkerDaemon('test_shutdown'), true);
+    assert.ok(execCalls.some(c => c.cmd === 'taskkill' && c.args.includes(String(srv.pid)) && c.args.includes('/T')));
+    assert.ok(execCalls.some(c => c.cmd === 'taskkill' && c.args.includes(String(worker.pid)) && c.args.includes('/T')));
+    assert.equal(spawned.filter(c => c.exitCode === null && c.signalCode === null).length, 0);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('Windows resolvePython prefers py launcher / standard install paths and detects Microsoft Store alias', () => {
+  const pySection = host.slice(host.indexOf('const PYTHON_MIN ='), host.indexOf('// 数据根：'));
+  function runResolve({ execFileSyncImpl, existsImpl, env = {} }) {
+    const backend = { lastError: '' };
+    const winProcess = {
+      platform: 'win32',
+      arch: 'x64',
+      env: { LOCALAPPDATA: 'C:\\Users\\demo\\AppData\\Local', ...env },
+    };
+    const context = {
+      backend,
+      PLUGIN_DIR: 'C:\\plugin',
+      process: winProcess,
+      join: path.win32.join,
+      homedir: () => 'C:\\Users\\demo',
+      existsSync: existsImpl || (() => false),
+      execFileSync: execFileSyncImpl,
+    };
+    vm.createContext(context);
+    return {
+      result: vm.runInContext(pySection + '\nresolvePython()', context),
+      backend,
+    };
+  }
+
+  // Case 1: py -3.12 succeeds and resolves to real sys.executable
+  const tried1 = [];
+  const r1 = runResolve({
+    execFileSyncImpl: (cmd, args) => {
+      tried1.push([cmd, args[0]]);
+      if (cmd === 'py' && args[0] === '-3.12') {
+        return '3.12|C:\\Users\\demo\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\n';
+      }
+      throw new Error('not found');
+    },
+  });
+  assert.equal(r1.result, 'C:\\Users\\demo\\AppData\\Local\\Programs\\Python\\Python312\\python.exe');
+  assert.deepEqual(tried1[0], ['py', '-3.12']);
+
+  // Case 2: py unavailable, falls back to %LOCALAPPDATA%\Programs\Python\Python312\python.exe
+  const localPy = 'C:\\Users\\demo\\AppData\\Local\\Programs\\Python\\Python312\\python.exe';
+  const r2 = runResolve({
+    existsImpl: (p) => p === localPy,
+    execFileSyncImpl: (cmd) => {
+      if (cmd === localPy) return '3.12|' + localPy + '\n';
+      throw new Error('not found');
+    },
+  });
+  assert.equal(r2.result, localPy);
+
+  // Case 3: only Microsoft Store alias exists -> reports dedicated actionable hint
+  const r3 = runResolve({
+    execFileSyncImpl: (cmd) => {
+      if (cmd === 'python') {
+        return '3.12|C:\\Users\\demo\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe\n';
+      }
+      const err = new Error('not found');
+      if (cmd === 'python3') {
+        err.stderr = 'Python was not found; run without arguments to install from the Microsoft Store';
+      }
+      throw err;
+    },
+  });
+  assert.equal(r3.result, null);
+  assert.match(r3.backend.lastError, /Microsoft Store 应用执行别名/);
+});

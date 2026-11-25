@@ -1067,27 +1067,10 @@ def cut(audio: Path, out_dir: Path, item: dict) -> list[str]:
 @contextmanager
 def _batch_segment_lock(batch: Path):
     """Cross-process lock shared by automatic and manual audio segmentation."""
+    from workflow import filelock
     lock_path = Path(batch) / "02_audio" / ".segment.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+") as handle:
-        if os.name == "nt":
-            import msvcrt
-            handle.seek(0)
-            handle.write("0")
-            handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            if os.name == "nt":
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with filelock.file_lock(lock_path):
+        yield
 
 
 def lock_is_held(batch: Path) -> bool:
@@ -1097,32 +1080,8 @@ def lock_is_held(batch: Path) -> bool:
     不等于真在跑；锁才是权威证据。POSIX 用 flock、Windows 用 msvcrt 字节锁，
     与 _batch_segment_lock 的加锁方式保持一致。
     """
-    path = Path(batch) / "02_audio" / ".segment.lock"
-    if not path.is_file():
-        return False
-    try:
-        handle = path.open("r+b")
-    except OSError:
-        # 打不开（例如文件被独占）说明另一个进程正在用它。
-        return True
-    with handle:
-        if os.name == "nt":
-            import msvcrt
-            handle.seek(0)
-            try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError:
-                return True
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            return False
-        import fcntl
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return False
+    from workflow import filelock
+    return filelock.is_file_locked(Path(batch) / "02_audio" / ".segment.lock")
 
 
 def run(batch: Path, cfg: dict | None = None, audio: str | None = None,

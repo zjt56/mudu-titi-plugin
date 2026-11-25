@@ -401,11 +401,14 @@ def _scoped_source_slice(unit: dict, lines: list[str], *, batch_dir=None) -> lis
         offset = compact.index(wanted)
         selected = window[owners[offset]:owners[offset + len(wanted) - 1] + 1]
         if span.get("number_binding") == "single_writing_section" and span.get("printed_numbers") == []:
-            from .sync_practice import writing_prompt
+            from .sync_practice import plain_text, writing_prompt
             section = unit.get("source_section") or {}
-            if start >= 2 and section.get("start_line") == start - 1:
-                heading = lines[start - 2].strip()
-                if heading == section.get("title") and writing_prompt(heading):
+            heading_line = section.get("start_line")
+            if (isinstance(heading_line, int) and 1 <= heading_line < start
+                    and not any(line.strip() for line in lines[heading_line:start - 1])):
+                heading = lines[heading_line - 1].strip()
+                if (plain_text(heading).strip() == plain_text(str(section.get("title") or "")).strip()
+                        and writing_prompt(heading)):
                     selected = [heading, *selected]
     # 板块栏目标题（如 【三、B 创新阅读专练】）只是容器分隔，可能落在确认窗口/题组
     # 导语里，但绝不能作为预览内容显示。此处统一剔除，避免混进上一题题干（用户 2026-11-19）。

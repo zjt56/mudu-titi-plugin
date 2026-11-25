@@ -104,34 +104,9 @@ def audio_candidates_acceptable(batch_dir) -> bool:
 @contextmanager
 def _segment_snapshot_lock(batch):
     """Hold the cutter's lock without waiting behind a long transcription."""
-    path = batch / '02_audio/.segment.lock'
-    with path.open('a+b') as handle:
-        acquired = False
-        try:
-            if os.name == 'nt':
-                import msvcrt
-                handle.seek(0, os.SEEK_END)
-                if not handle.tell():
-                    handle.write(b'0')
-                    handle.flush()
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            acquired = True
-        except OSError as exc:
-            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                raise
-        try:
-            yield acquired
-        finally:
-            if acquired:
-                if os.name == 'nt':
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    from . import filelock
+    with filelock.try_file_lock(batch / '02_audio/.segment.lock') as acquired:
+        yield acquired
 
 
 def _audio(batch):

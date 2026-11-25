@@ -607,7 +607,7 @@ def _rubric_lines(lines, unit_type):
 
 def _numbered_marked_heading(unit, proof, lines, headings, fresh):
     """Bind a marked instruction to an independently located printed question."""
-    from .sync_practice import _scoped_mark_window, source_marks
+    from .sync_practice import _scoped_mark_window, plain_text, source_marks
 
     span = unit.get("source_span") or {}
     numbers = unit.get("numbers") or []
@@ -618,7 +618,8 @@ def _numbered_marked_heading(unit, proof, lines, headings, fresh):
         return ""
     start, end, owner = window
     heading = lines[owner["start_line"] - 1].strip()
-    if heading != str((unit.get("source_section") or {}).get("title") or "").strip() or not source_marks(heading):
+    if (plain_text(heading).strip() != plain_text(str((unit.get("source_section") or {}).get("title") or "")).strip()
+            or not source_marks(heading)):
         return ""
     first, last = proof.get("start_line"), proof.get("end_line")
     if not (type(first) is int and type(last) is int and owner["start_line"] < start <= first <= last <= end):
@@ -655,16 +656,23 @@ def _standalone_marked_heading(unit, proof, source, cleaned_lines, fresh):
     rows = source.splitlines() if proof.get("line_basis") == "01_source/正文.txt" else cleaned_lines
     start, end = proof.get("start_line"), proof.get("end_line")
     heading_line, section_end = section.get("start_line"), section.get("end_line")
-    if (not all(type(value) is int for value in (start, end, heading_line, section_end))
-            or not 1 <= heading_line <= start <= end <= section_end <= len(rows)
-            or start != span.get("start_line")
-            or end > span.get("end_line", 0)
-            or any(line.strip() for line in rows[end:span["end_line"]])):
+    span_start, span_end = span.get("start_line"), span.get("end_line")
+    # The independently rebuilt window may begin on the first content line while
+    # the confirmed span still holds blank separators before it (e.g. a marked
+    # 书面表达 directive line, a blank line, then item 1). That is not content
+    # loss, so allow it; every skipped span line must stay blank and the rest of
+    # the span must remain empty so the heading still belongs to this unit.
+    if (not all(type(value) is int for value in
+                (start, end, heading_line, section_end, span_start, span_end))
+            or not 1 <= heading_line < start <= end <= span_end <= section_end <= len(rows)
+            or not heading_line <= span_start <= start
+            or any(line.strip() for line in rows[heading_line:start - 1])
+            or any(line.strip() for line in rows[end:span_end])):
         return ""
+    from .sync_practice import heading_hit, plain_text, source_marks, writing_prompt
     heading = rows[heading_line - 1].strip()
-    if heading != str(section.get("title") or "").strip():
+    if plain_text(heading).strip() != plain_text(str(section.get("title") or "")).strip():
         return ""
-    from .sync_practice import heading_hit, source_marks, writing_prompt
     hit = heading_hit(heading) or {}
     unnumbered_translate = (
         span.get("number_binding") == "unnumbered_section"

@@ -155,7 +155,7 @@ def load(batch_dir) -> dict:
     return value
 
 
-def _replace_with_retry(temporary, target, attempts=10, delay=0.05):
+def _replace_with_retry(temporary, target, attempts=10, delay=0.05, *, replace_fn=None):
     """os.replace 重试 Windows 共享冲突窗口。
 
     面板/概览读取、杀毒软件扫描新临时文件时，Windows 会短暂拒绝替换目标
@@ -163,9 +163,10 @@ def _replace_with_retry(temporary, target, attempts=10, delay=0.05):
     一次瞬时拒绝就会让监督器停在 scheduled 并留下"[WinError 5] 拒绝访问"。
     短暂重试后仍失败才抛出真实错误，语义不变。
     """
+    replace = os.replace if replace_fn is None else replace_fn
     for attempt in range(attempts):
         try:
-            os.replace(temporary, target)
+            replace(temporary, target)
             return
         except PermissionError:
             if attempt == attempts - 1:

@@ -886,7 +886,38 @@ def _check_upload_editable(batch: Path) -> None:
             raise ValueError("此批次已批准上传或已上传，不能补充覆盖已绑定内容")
 
 
-def _refresh_post_edit_gates(batch: Path, *, lock_held: bool = False) -> tuple[int | None, bool | None]:
+def _sync_batch_and_review_receipt_hashes(batch: Path, fresh: dict, *, old_batch_sha: str | None = None) -> None:
+    """Keep assemble/underlines output_hashes and review-gate.json batch_sha256 bound to batch_meta.json."""
+    batch_path = batch / "06_batch" / "batch_meta.json"
+    if not batch_path.is_file():
+        return
+    new_batch_sha = mf.sha256_file(batch_path)
+    stages = fresh.get("stages") if isinstance(fresh, dict) else None
+    if isinstance(stages, dict):
+        for sid in ("assemble", "underlines"):
+            rec = stages.get(sid)
+            if not isinstance(rec, dict) or rec.get("status") != mf.COMPLETED:
+                continue
+            out_hashes = dict(rec.get("output_hashes") or {})
+            if "06_batch/batch_meta.json" in out_hashes:
+                out_hashes["06_batch/batch_meta.json"] = new_batch_sha
+                rec["output_hashes"] = out_hashes
+    rg_path = batch / "07_review" / "review-gate.json"
+    if rg_path.is_file() and not rg_path.is_symlink():
+        try:
+            rg = json.loads(rg_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            rg = None
+        if isinstance(rg, dict) and rg.get("batch_sha256"):
+            prev_sha = rg.get("batch_sha256")
+            if (not old_batch_sha or prev_sha == old_batch_sha) and prev_sha != new_batch_sha:
+                rg["batch_sha256"] = new_batch_sha
+                _atomic_write_text(rg_path, json.dumps(rg, ensure_ascii=False, indent=2) + "\n")
+                if isinstance(stages, dict) and isinstance(stages.get("review_gate"), dict) and stages["review_gate"].get("output_hashes"):
+                    stages["review_gate"]["output_hashes"] = mf.output_hashes(batch, contracts.STAGE_BY_ID["review_gate"])
+
+
+def _refresh_post_edit_gates(batch: Path, *, lock_held: bool = False, old_batch_sha: str | None = None) -> tuple[int | None, bool | None]:
     """Re-run validate and refresh format_gate when already completed so local_complete stays intact.
 
     Uses only the per-batch `.run.lock` (never the global cross-batch `_agent_lock`)
@@ -924,6 +955,7 @@ def _refresh_post_edit_gates(batch: Path, *, lock_held: bool = False) -> tuple[i
                 fresh = mf.load(batch)
                 spec = contracts.STAGE_BY_ID["format_gate"]
                 if format_passed and validate_code == 0:
+                    _sync_batch_and_review_receipt_hashes(batch, fresh, old_batch_sha=old_batch_sha)
                     if deferred_write:
                         format_gate.write_report_file(batch, report)
                     mf.touch_stage(
@@ -954,6 +986,10 @@ def _refresh_post_edit_gates(batch: Path, *, lock_held: bool = False) -> tuple[i
                 fresh = mf.load(batch)
                 fresh.setdefault("stages", {})["validate"] = prev_validate
                 fresh["status"] = mf.derive_status(fresh)
+                mf.save(batch, fresh)
+            elif validate_code == 0:
+                fresh = mf.load(batch)
+                _sync_batch_and_review_receipt_hashes(batch, fresh, old_batch_sha=old_batch_sha)
                 mf.save(batch, fresh)
             return validate_code, format_passed
     except RuntimeError:
@@ -1201,6 +1237,7 @@ def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None
                 _write_progress(batch, res, batch_identity=identity)
                 return res
 
+            old_batch_sha = mf.sha256_file(batch_path) if batch_path.is_file() else None
             _atomic_write_text(batch_path, json.dumps(batch_data, ensure_ascii=False, indent=2) + "\n")
             manual_path = batch / manual_content.RELATIVE
             _atomic_write_text(manual_path, json.dumps(manual_data, ensure_ascii=False, indent=2) + "\n")
@@ -1215,7 +1252,7 @@ def supplement(batch_dir: Path, mode: str, *, invoke_fn=None, job_id: str | None
                 "completed": total, "applied": len(applied_keys),
                 "message": f"已写入 {len(applied_keys)} 项，正在刷新本地体检与格式检查…", "error": "",
             }, batch_identity=identity)
-            validate_code, format_passed = _refresh_post_edit_gates(batch, lock_held=False)
+            validate_code, format_passed = _refresh_post_edit_gates(batch, lock_held=False, old_batch_sha=old_batch_sha)
 
         recheck_deferred = validate_code == "deferred"
         label = "听力材料转录" if mode == "listeningScript" else ("文章大意" if mode == "articleSummary" else "解析")
@@ -1455,6 +1492,7 @@ def save_content_edit(batch_dir: Path, unit_id: str, patch: dict, *, lock_held: 
     if not changed:
         return {"applied": False, "message": "内容未变化"}
 
+    old_batch_sha = mf.sha256_file(batch_path) if batch_path.is_file() else None
     batch_path.write_text(json.dumps(batch_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if exp_summary_updates or exp_expl_updates:
         manual_path = batch / manual_content.RELATIVE
@@ -1465,7 +1503,7 @@ def save_content_edit(batch_dir: Path, unit_id: str, patch: dict, *, lock_held: 
         if exp_expl_updates:
             _sync_explanations_artifact(batch, exp_expl_updates, "explanation")
 
-    validate_code, format_passed = _refresh_post_edit_gates(batch, lock_held=lock_held)
+    validate_code, format_passed = _refresh_post_edit_gates(batch, lock_held=lock_held, old_batch_sha=old_batch_sha)
 
     return {
         "applied": True,

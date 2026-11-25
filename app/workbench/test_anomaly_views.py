@@ -286,6 +286,66 @@ class AnomalyViewsTest(unittest.TestCase):
         self.assertTrue(check(merged, "原卷横线连排未断开"))
         self.assertTrue(check({"unit_id": "x1"}, cue, batch_item=lambda uid: merged if uid == "x1" else {}))
 
+    def test_collapsed_batch_underline_uses_raw_source_span_and_ignores_format_defect_wording(self):
+        """回归 6126 Unit8 第 1 题：batch_meta 将原卷 16 字符横线折叠为 6 字符 ______ 且评语含「格式缺陷」。"""
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            # 原卷 01_source/正文.txt：u34 为 16 字符连排长横线，u35 为真正短横线（仅 6 字符）。
+            (folder / "01_source").mkdir(parents=True)
+            (folder / "01_source/正文.txt").write_text(
+                "\n".join([
+                    "**Ⅲ. 根据汉语意思完成句子,每空一词**",
+                    "**1****.**秋去冬来,大自然的变化悄然发生。",
+                    "As fall turns into winter,changes in nature will ________________ quietly.",
+                    "**2****.**他错过了早班车。",
+                    "He ______ the early bus.",
+                ]),
+                encoding="utf-8",
+            )
+            _write_json(folder / "01_source/structure.confirmed.json", {
+                "version": 1,
+                "units": [
+                    {"unit_id": "u34", "unit_kind": "standalone", "numbers": [1],
+                     "source_span": {"start_line": 2, "end_line": 3}},
+                    {"unit_id": "u35", "unit_kind": "standalone", "numbers": [2],
+                     "source_span": {"start_line": 4, "end_line": 5}},
+                ],
+            })
+            # batch_meta.json 经 wire_format 规范化后两题都变成 6 字符 ______。
+            _write_json(folder / "06_batch/batch_meta.json", {"items": [
+                {"unit_id": "u34",
+                 "stem": "秋去冬来,大自然的变化悄然发生。\nAs fall turns into winter,changes in nature will ______ quietly.",
+                 "answer": "take place"},
+                {"unit_id": "u35",
+                 "stem": "他错过了早班车。\nHe ______ the early bus.",
+                 "answer": "failed to catch"},
+            ]})
+            verdict_u34 = (
+                "labels：标准答案为 take place，按预期答案其核心是表示‘发生’的动词短语，主语 changes 与之搭配；"
+                "will 为题干已知助动词，只要求动词原形，不另立将来时考点。但本节明确要求‘每空一词’，"
+                "本题仅一个空却需填两个词，答案词数与作答指令冲突，属实质性答案格式缺陷，故判 error。"
+            )
+            rows = [
+                {"unit_id": "u34", "number": "1", "type": "完成句子", "state": "attention",
+                 "verdict": "error", "needs_human": True, "open_summary": verdict_u34},
+                {"unit_id": "u35", "number": "2", "type": "完成句子", "state": "attention",
+                 "verdict": "error", "needs_human": True,
+                 "open_summary": "labels：本节要求每空一词，本题仅一个空却填三个词，属实质性答案格式缺陷，故判 error。"},
+                {"unit_id": "u36", "number": "3", "type": "完成句子", "state": "attention",
+                 "verdict": "error", "needs_human": True,
+                 "open_summary": "labels：本题缺少动词且与每空一词冲突，属实质性答案格式缺陷。"},
+            ]
+            summary = anomaly_views.decorate_anomaly_rows(
+                folder, rows, manifest={"stages": {}}, advance={"running": False},
+            )
+            # u34：原卷 16 字符横线足以容纳 2 词，且评语仅抱怨“每空一词”连排格式缺陷 -> 不标红。
+            self.assertFalse(rows[0]["is_anomaly"], rows[0])
+            # u35：原卷同样只有 6 字符短横线（不足以容纳 3 词）-> 仍标红。
+            self.assertTrue(rows[1]["is_anomaly"], rows[1])
+            # u36：夹带“缺少动词”实质问题 -> 仍标红。
+            self.assertTrue(rows[2]["is_anomaly"], rows[2])
+            self.assertEqual(summary["anomaly_unit_count"], 2)
+
     def test_review_check_path_canonicalization_records_rewrite_log(self):
         from workflow import review_rounds
 

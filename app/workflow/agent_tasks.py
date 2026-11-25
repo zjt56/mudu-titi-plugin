@@ -1467,9 +1467,11 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                         + ("、".join(reasons) or "原因未记录") + "），按配置继续流程")
         return
     if stage == "knowledge":
+        from . import unit_anomalies
         _normalize_knowledge_payload(payload, notes, textbook_enabled=textbook_enabled)
         rows = _coverage(payload, units)
         typed = _types(context[ARTIFACTS["types"]], units)
+        quarantined_knowledge = unit_anomalies.quarantined_unit_ids(batch, "knowledge")
         for unit in units:
             row = rows[unit["unit_id"]]
             children = _children(row, unit)
@@ -1498,8 +1500,7 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
                     _evidence(child)
             main_type = typed[unit["unit_id"]]["type"]
             unit_kind = unit.get("unit_kind")
-            from . import unit_anomalies
-            if (unit["unit_id"] in unit_anomalies.quarantined_unit_ids(batch, "knowledge")
+            if (unit["unit_id"] in quarantined_knowledge
                     and not row.get("knowledge") and not any(c.get("knowledge") for c in children)):
                 continue
             whole = taxonomy.whole_unit_type(main_type)
@@ -1586,6 +1587,8 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
         source_text = "\n".join(v for v in context.values() if isinstance(v, str))
         source_draft = None
         source_bindings = {}
+        from . import unit_anomalies
+        quarantined_knowledge = unit_anomalies.quarantined_unit_ids(batch, "knowledge")
         for unit in units:
             row = rows[unit["unit_id"]]
             children = _children(row, unit)
@@ -1665,8 +1668,6 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             main_type_asm = typed[unit["unit_id"]]["type"]
             whole_unit = taxonomy.whole_unit_type(main_type_asm)
             ap_only_asm = taxonomy.answer_point_only_type(main_type_asm, unit.get("unit_kind"))
-            from . import unit_anomalies
-            quarantined_knowledge = unit_anomalies.quarantined_unit_ids(batch, "knowledge")
             # 与知识点阶段同一口径：组题（有子题或 unit_kind=group）子题 knowledge 可空，
             # 选词填空整题允许目录 knowledge=[]；被隔离的知识点异常单元也允许以空标签流转到审核页标红，
             # 最终由 format_gate / upload_payload 的 UNIT_QUARANTINED 拦截上传。
@@ -1837,6 +1838,8 @@ def _findings(findings, units):
 
 def _install(batch, files):
     """Validate every target first, stage all bytes, then replace with rollback."""
+    from . import manifest as mf
+
     targets = {rel: _safe_path(batch, rel) for rel in files}
     for rel in files:
         _safe_path(batch, rel + ".bak")
@@ -1859,9 +1862,9 @@ def _install(batch, files):
                 fd, name = tempfile.mkstemp(prefix=".agent-backup-", dir=path.parent)
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(previous[rel])
-                os.replace(name, backup)
+                mf._replace_with_retry(name, backup, replace_fn=os.replace)
             _safe_path(batch, rel)
-            os.replace(temps[rel], path)
+            mf._replace_with_retry(temps[rel], path, replace_fn=os.replace)
             installed.append(rel)
     except Exception:
         for rel in reversed(installed):
@@ -1872,7 +1875,7 @@ def _install(batch, files):
                 fd, name = tempfile.mkstemp(prefix=".agent-rollback-", dir=path.parent)
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(previous[rel])
-                os.replace(name, path)
+                mf._replace_with_retry(name, path, replace_fn=os.replace)
         raise
     finally:
         for path in temps.values():

@@ -60,61 +60,27 @@ def _anomaly_lock(batch_dir, timeout: float = 15.0):
 
     Lock file lives under `workflow/` alongside `.run.lock`, never inside `07_review/`.
     """
+    from . import filelock
+
     lock_path = Path(batch_dir) / "workflow" / ".unit-anomalies.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
     with _THREAD_LOCK:
-        handle = None
-        locked = False
         try:
-            handle = lock_path.open("a+b")
-            deadline = time.monotonic() + max(0.5, float(timeout))
-            while True:
-                try:
-                    if os.name == "nt":
-                        import msvcrt
-                        handle.seek(0, os.SEEK_END)
-                        if not handle.tell():
-                            handle.write(b"0")
-                            handle.flush()
-                        handle.seek(0)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                    else:
-                        import fcntl
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    locked = True
-                    break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(f"Timed out acquiring anomaly ledger lock: {lock_path}")
-                    time.sleep(0.02)
-            yield
-        finally:
-            if handle is not None:
-                if locked:
-                    try:
-                        if os.name == "nt":
-                            import msvcrt
-                            handle.seek(0)
-                            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                        else:
-                            import fcntl
-                            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                    except OSError:
-                        pass
-                try:
-                    handle.close()
-                except OSError:
-                    pass
+            with filelock.file_lock(lock_path, timeout=max(0.5, float(timeout)), poll_interval=0.02):
+                yield
+        except TimeoutError as exc:
+            raise TimeoutError(f"Timed out acquiring anomaly ledger lock: {lock_path}") from exc
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
+    from . import manifest as mf
+
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(
         f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.tmp"
     )
     try:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+        mf._replace_with_retry(tmp, path)
     finally:
         if tmp.exists():
             try:
@@ -136,8 +102,42 @@ def load_anomalies(batch_dir) -> dict:
     return data
 
 
+_CACHE_LOCK = threading.Lock()
+_QUARANTINE_CACHE: dict[tuple[str, str | None], tuple[tuple, list[dict]]] = {}
+_QUARANTINE_CACHE_MAX = 256
+
+
+def _invalidate_quarantine_cache(batch_dir) -> None:
+    prefix = str(Path(batch_dir).resolve())
+    with _CACHE_LOCK:
+        for key in [k for k in _QUARANTINE_CACHE if k[0] == prefix]:
+            _QUARANTINE_CACHE.pop(key, None)
+
+
+def _quarantine_fingerprint(batch: Path, stage: str | None) -> tuple:
+    rels: list[str] = [ANOMALIES_REL]
+    if stage is None or stage == "types":
+        rels.append("03_types/types.json")
+    if stage is None or stage == "explanations":
+        rels.append("04_knowledge/explanations.json")
+    if stage is None or stage == "knowledge":
+        rels.append("04_knowledge/knowledge.json")
+    if stage is None or stage == "answers":
+        rels.extend(("01_source_ans/answers.json", "01_source/structure.confirmed.json"))
+    sig = []
+    for rel in rels:
+        path = batch / rel
+        try:
+            st = path.stat()
+            sig.append((rel, st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append((rel, 0, 0))
+    return tuple(sig)
+
+
 def _save_anomalies(batch_dir, data: dict) -> None:
     _atomic_write_json(anomalies_path(batch_dir), data)
+    _invalidate_quarantine_cache(batch_dir)
 
 
 def record_anomalies(
@@ -344,16 +344,28 @@ def artifact_quarantined_entries(batch_dir, stage: str | None = None) -> list[di
 
 def all_quarantined_entries(batch_dir, stage: str | None = None) -> list[dict]:
     """Union of active ledger entries and unresolved artifact-level `quarantined` markers."""
-    resolved = _resolved_keys(batch_dir, stage=stage)
+    batch = Path(batch_dir).resolve()
+    cache_key = (str(batch), stage)
+    fingerprint = _quarantine_fingerprint(batch, stage)
+    with _CACHE_LOCK:
+        cached = _QUARANTINE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == fingerprint:
+            return [dict(row) for row in cached[1]]
+    resolved = _resolved_keys(batch, stage=stage)
     merged: dict[tuple[str, str], dict] = {}
-    for entry in quarantined_entries(batch_dir, stage=stage):
+    for entry in quarantined_entries(batch, stage=stage):
         merged[(entry["unit_id"], entry["stage"])] = entry
-    for entry in artifact_quarantined_entries(batch_dir, stage=stage):
+    for entry in artifact_quarantined_entries(batch, stage=stage):
         key = (entry["unit_id"], entry["stage"])
         if key in resolved:
             continue
         merged.setdefault(key, entry)
-    return [merged[k] for k in sorted(merged)]
+    rows = [merged[k] for k in sorted(merged)]
+    with _CACHE_LOCK:
+        if len(_QUARANTINE_CACHE) >= _QUARANTINE_CACHE_MAX:
+            _QUARANTINE_CACHE.clear()
+        _QUARANTINE_CACHE[cache_key] = (fingerprint, [dict(row) for row in rows])
+    return rows
 
 
 def quarantined_unit_ids(batch_dir, stage: str | None = None) -> set[str]:

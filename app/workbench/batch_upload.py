@@ -26,9 +26,12 @@ def _srv():
 
 def _run_runner(args):
     srv = _srv()
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run([sys.executable, "-m", "workflow.runner", *args],
-                          cwd=str(srv.ROOT), capture_output=True, text=True, timeout=1800,
-                          env=dict(os.environ))
+                          cwd=str(srv.ROOT), capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=1800,
+                          env=env)
 
 
 def _prepare_failure_summary(report):

@@ -23,7 +23,7 @@ _BLANK_COUNT_CONFLICT_CUE = re.compile(
     r"空数|占一空|一个空|单空|仅给两段|填入一个空|每空.*(?:冲突|矛盾)|(?:冲突|矛盾).*每空"
 )
 _GENERAL_FORMAT_ONLY_CUE = re.compile(
-    r"(?:全角|半角|标点|空格|缩进|对齐|换行|断行|连字符|下划线(?:长度|连排|偏移)|横线(?:长度|连排|未断开)|加粗(?:范围|偏移)|排版(?:格式|瑕疵|问题)|格式(?:不规范|瑕疵|问题))"
+    r"(?:全角|半角|标点|空格|缩进|对齐|换行|断行|连字符|下划线(?:长度|连排|偏移)|横线(?:长度|连排|未断开)|加粗(?:范围|偏移)|排版(?:格式|瑕疵|问题|缺陷)|(?:实质性)?(?:答案)?格式(?:不规范|瑕疵|问题|缺陷))"
 )
 _SUBSTANTIVE_ERROR_CUE = re.compile(
     r"答案错误|答案有误|答案不符|答案与原卷|答案缺失|无答案|漏题|缺题干|缺选项|缺材料|缺失题干|缺失选项|缺失材料|错别字|乱码|截断|串题|原卷缺失|图片缺失|题型错误|无法作答"
@@ -32,7 +32,7 @@ _SUBSTANTIVE_ERROR_CUE = re.compile(
 )
 # 去掉格式描述后，剩余文字仍带“错/不符/缺/漏/不确定”等判断词，即视为夹带实质问题。
 _RESIDUAL_ERROR_CUE = re.compile(r"错|误|不符|不一致|不对|缺|漏|无法|不确定|串|冲突|矛盾")
-_FORMAT_NOISE = re.compile(_GENERAL_FORMAT_ONLY_CUE.pattern + r"|排版|格式|不规范|瑕疵")
+_FORMAT_NOISE = re.compile(_GENERAL_FORMAT_ONLY_CUE.pattern + r"|排版|格式缺陷|格式|不规范|瑕疵")
 _ONE_WORD_NOISE = re.compile(
     _BLANK_COUNT_CONFLICT_CUE.pattern + "|" + _ONE_WORD_BLANK_CUE.pattern + "|" + _FORMAT_NOISE.pattern + r"|冲突|矛盾"
 )
@@ -82,57 +82,86 @@ def _stem_answer_pairs(source: object) -> list[tuple[str, str]]:
     return pairs
 
 
-def _merged_blank_evidence(*sources: object) -> bool:
+def _merged_blank_evidence(*sources: object, source_text: str = "") -> bool:
     """结构上能否证明“每空一词”空数冲突只是原稿把多段横线连排成一条。
 
     取第一个带题干+答案的来源（列表行优先，其次批次条目）：至少一个小题横线段数少于答案词数
     且横线总长足以容纳全部词，才算连排；任一小题段数少于词数但横线长度不足，即为真实空位冲突。
-    拿不到结构证据时一律不豁免（保守标红）。
+    当 batch_meta.json 已被 wire_format 统一折叠为 6 字符 `______` 时，回查原卷 `01_source/正文.txt`
+    对应 `source_span` 的原始下划线长度作为权威证据。拿不到结构证据时一律不豁免（保守标红）。
     """
+    raw_runs = _blank_runs(source_text) if source_text else []
     for source in sources:
         pairs = _stem_answer_pairs(source)
         if not pairs:
             continue
+        pair_runs = [_blank_runs(stem) for stem, _ in pairs]
+        aligned_raw: list[list[int]] | None = None
+        if raw_runs and sum(len(r) for r in pair_runs) == len(raw_runs):
+            aligned_raw = []
+            cursor = 0
+            for r in pair_runs:
+                aligned_raw.append(raw_runs[cursor:cursor + len(r)])
+                cursor += len(r)
+        elif raw_runs and len(pairs) == 1:
+            aligned_raw = [raw_runs]
         merged = False
-        for stem, answer in pairs:
-            runs = _blank_runs(stem)
+        for idx, ((stem, answer), runs) in enumerate(zip(pairs, pair_runs)):
             words = len(_ANSWER_WORD.findall(answer))
             if not runs or words <= len(runs):
                 continue
-            if sum(runs) < words * _MIN_UNDERLINE_PER_WORD:
+            effective_sum = sum(runs)
+            if effective_sum < words * _MIN_UNDERLINE_PER_WORD and aligned_raw is not None:
+                raw_slice = aligned_raw[idx]
+                if len(raw_slice) == len(runs):
+                    effective_sum = max(effective_sum, sum(raw_slice))
+            if effective_sum < words * _MIN_UNDERLINE_PER_WORD:
                 return False
             merged = True
         return merged
     return False
 
 
-def _is_source_format_only_complaint(row: dict, detail: str, batch_item: object = None) -> bool:
+def _is_source_format_only_complaint(
+    row: dict,
+    detail: str,
+    batch_item: object = None,
+    source_text: object = None,
+) -> bool:
     """原稿固有排版/格式瑕疵不算实质内容异常；判定口径从严，宁可标红也不吞错。
 
     - 命中实质错误词（漏题、答案不符、缺题干/选项、词形/单复数/时态、答案少词/多词等）一律标红；
     - 去掉格式描述后剩余文字仍带“错/不符/缺/漏/不确定”等判断词，同样标红；
     - “每空一词”空数冲突与横线连排类抱怨会改变空位数量，必须有横线结构证据
-      （见 _merged_blank_evidence）才不标红。batch_item 可为批次条目或 unit_id -> 条目 的惰性读取函数。
+      （见 _merged_blank_evidence）才不标红。batch_item / source_text 可为值或 unit_id -> 值 的惰性读取函数。
     """
     text = str(detail or "").strip()
     if not text or _SUBSTANTIVE_ERROR_CUE.search(text):
         return False
 
+    def _uid() -> str:
+        return str((row or {}).get("unit_id") or "").strip()
+
     def _item() -> object:
         if callable(batch_item):
-            return batch_item(str((row or {}).get("unit_id") or "").strip())
+            return batch_item(_uid())
         return batch_item
+
+    def _src() -> str:
+        if callable(source_text):
+            return str(source_text(_uid()) or "")
+        return str(source_text or "")
 
     if _ONE_WORD_BLANK_CUE.search(text) and _BLANK_COUNT_CONFLICT_CUE.search(text):
         if _RESIDUAL_ERROR_CUE.search(_ONE_WORD_NOISE.sub(" ", text)):
             return False
-        return _merged_blank_evidence(row, _item())
+        return _merged_blank_evidence(row, _item(), source_text=_src())
     if not _GENERAL_FORMAT_ONLY_CUE.search(text):
         return False
     if _RESIDUAL_ERROR_CUE.search(_FORMAT_NOISE.sub(" ", text)):
         return False
     if _MERGED_LINE_CUE.search(text):
-        return _merged_blank_evidence(row, _item())
+        return _merged_blank_evidence(row, _item(), source_text=_src())
     return True
 
 
@@ -419,6 +448,36 @@ def decorate_anomaly_rows(
             return {}
         return batch_items_by_uid.get(unit_id) or {}
 
+    source_span_by_uid: dict[str, str] | None = None
+
+    def source_text_for(unit_id: str) -> str:
+        """按 unit_id 惰性读取 01_source/正文.txt 对应 source_span，避免 batch_meta 折叠横线掩盖原卷长横线。"""
+        nonlocal source_span_by_uid
+        if source_span_by_uid is None:
+            source_span_by_uid = {}
+            src_path = folder / "01_source" / "正文.txt"
+            struct_path = folder / "01_source" / "structure.confirmed.json"
+            if src_path.is_file() and struct_path.is_file():
+                try:
+                    lines = src_path.read_text(encoding="utf-8-sig").splitlines()
+                    struct = load(struct_path, {}) or {}
+                    for unit in (struct.get("units") or []) if isinstance(struct, dict) else []:
+                        if not isinstance(unit, dict):
+                            continue
+                        key = str(unit.get("unit_id") or "").strip()
+                        span = unit.get("source_span")
+                        if not key or not isinstance(span, dict):
+                            continue
+                        start = int(span.get("start_line") or 0)
+                        end = int(span.get("end_line") or 0)
+                        if 1 <= start <= end <= len(lines):
+                            source_span_by_uid[key] = "\n".join(lines[start - 1:end])
+                except (OSError, ValueError, TypeError):
+                    pass
+        if not unit_id:
+            return ""
+        return source_span_by_uid.get(unit_id, "")
+
     anomaly_unit_count = 0
     for row in rows:
         if not isinstance(row, dict):
@@ -455,7 +514,9 @@ def decorate_anomaly_rows(
             if (
                 str(row.get("state") or "") != "blocked"
                 and str(row.get("severity") or "") != "blocker"
-                and _is_source_format_only_complaint(row, raw_summary, batch_item=batch_item_for)
+                and _is_source_format_only_complaint(
+                    row, raw_summary, batch_item=batch_item_for, source_text=source_text_for,
+                )
             ):
                 pass
             else:
