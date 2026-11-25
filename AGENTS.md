@@ -17,7 +17,8 @@
 | `app/prompts/roles/` | 8 个内置子 Agent 的角色提示词（职责/权限/自检/出问题怎么办） |
 | `app/workflow/` | 工作流实现（`contracts.py` 是 19 个阶段的唯一契约） |
 | `backend/` | 路由脚本 `wf-router.sh`、`route_pick.py`、插件宿主桥接 |
-| `lib/` | 宿主插件与前端（`client.js`、`index.js`） |
+| `lib/` | 宿主插件与前端（`index.js`；`client.js` 是**生成文件**，勿直接改） |
+| `src/client/` | 前端源码片段，`node tools/build-client.mjs` 拼接生成 `lib/client.js` |
 | `config/` | `model-router.json`（模型/子 Agent 路由）、策略配置 |
 | `CHANGELOG/` | **项目变更记录**（见第三节，强制维护） |
 | `ISSUES/` | **卡点台账**：`open/` 未修复待办清单，`fixed/` 已修复留档（见硬规则 24） |
@@ -122,6 +123,7 @@
     - **单文件软红线**：生产代码单文件超过 **1,500 行** 时，新增实质功能前须先按职责拆出独立子模块并在原入口保持向后兼容重导出，禁止继续往巨石文件堆砌逻辑。
     - **禁止并行补丁与重复样板**：修缺陷须落在统一入口（如 `docx_extract`、`wire_format`、`workflow_primitives`），禁止在多个消费端复制特判，禁止新增 `*_legacy.py` 或并行开关；JSON 原子读写与 SHA-256 优先复用 `workflow.workflow_primitives`。
     - **非生产工具隔离**：合成压测、基准脚本与调研工具一律放入 `tools/`，不得混入 `app/workflow/` 或 `app/scripts/` 生产目录。
+    - **前端单文件已拆分（2026-11-25）**：`lib/client.js` 由 `src/client/*.js` 按 `manifest.json` 顺序拼接生成。改前端只改 `src/client/` 片段，再运行 `node tools/build-client.mjs`；若已直接改了 `lib/client.js`，运行 `--adopt` 拆回。`backend/client-build.test.mjs` 校验两边逐字节一致。新增大块逻辑放进对应片段，单片段同样适用 1,500 行软红线。
 
 ## 三、变更记录制度（强制）
 

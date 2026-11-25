@@ -1,0 +1,84 @@
+{
+  "note": "lib/client.js 由本目录片段按 segments 顺序拼接生成：改这里的 *.js，然后运行 node tools/build-client.mjs。anchor/offset 用于 --adopt 把直接改过的 lib/client.js 拆回片段（anchor 须在 lib/client.js 中恰好出现一次）。",
+  "dist": "lib/client.js",
+  "segments": [
+    {
+      "file": "00-prelude.js"
+    },
+    {
+      "file": "01-styles.js",
+      "anchor": "    // 注入一次全局样式：hover/focus/滚动条/块级排版（内联样式表达不了）。",
+      "offset": 0
+    },
+    {
+      "file": "02-api.js",
+      "anchor": "    // ---- API helpers（全部走 /wf-plugin/api/*）----",
+      "offset": 0
+    },
+    {
+      "file": "03-image-cache.js",
+      "anchor": "    // ---- 图片缓存 + 同步命中表 + 并发限流预取 ---------------------------------------",
+      "offset": 0
+    },
+    {
+      "file": "04-unit-cache-and-render.js",
+      "anchor": "    // ---- 整卷单元详情缓存（LRU，最多保留 8 份试卷，确保大于首屏预取数 4 份）----------",
+      "offset": 0
+    },
+    {
+      "file": "10-upload-view.js",
+      "anchor": "    // 上传试卷视图",
+      "offset": 1
+    },
+    {
+      "file": "11-operations-and-diagnostics.js",
+      "anchor": "    function operationsView(incident, context = {}) {",
+      "offset": 0
+    },
+    {
+      "file": "20-knowledge-picker.js",
+      "anchor": "    // 知识点目录树选择组件：搜索框 + 已选知识点 + 按题型过滤的多选树状目录",
+      "offset": 1
+    },
+    {
+      "file": "21-label-and-content-modal.js",
+      "anchor": "    // 修改标签弹窗（左右两列：左列知识点目录树，右列题型/子类/难度/分类/年份/来源）",
+      "offset": 1
+    },
+    {
+      "file": "22-content-edit.js",
+      "anchor": "    // 审核页只读内容预览：文章大意 / 解析",
+      "offset": 1
+    },
+    {
+      "file": "23-paper-preview.js",
+      "anchor": "    // 预览对照辅助：离线 docx-preview 加载器 + 按题目锚点匹配与同步插值",
+      "offset": 1
+    },
+    {
+      "file": "30-review-view.js",
+      "anchor": "    // 审阅视图（原工作台三栏：单元列表 + 工作区原文/小题/标签/待人工）",
+      "offset": 1
+    },
+    {
+      "file": "31-workbench-tab.js",
+      "anchor": "    // 试卷审核视图：列表 + 统计（进入后切换到审阅）",
+      "offset": 1
+    },
+    {
+      "file": "32-type-review-tab.js",
+      "anchor": "    // 题型审核视图：跨批次按题型分页审核（每页最多 20 题，禁用整卷预拉取以控缓存）",
+      "offset": 1
+    },
+    {
+      "file": "40-settings.js",
+      "anchor": "    // 模型与设置",
+      "offset": 1
+    },
+    {
+      "file": "90-panel-and-apply.js",
+      "anchor": "    // 面板外壳：三个标签页",
+      "offset": 1
+    }
+  ]
+}
