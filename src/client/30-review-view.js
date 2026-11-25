@@ -782,9 +782,7 @@
             fontSize: 11.5,
             fontWeight: 500,
             lineHeight: 1.4,
-            color: (o.mismatch && !(o.diffPaths instanceof Set && o.diffPaths.size))
-              ? 'var(--dsw-alias-state-error-primary)'
-              : 'var(--dsw-alias-label-secondary)',
+            color: 'var(--dsw-alias-label-secondary)',
           },
         },
           h('span', null, label),
@@ -1098,7 +1096,19 @@
       // ---- 中栏：题组列表（过滤 + 搜索 + 键盘高亮）----
       // 列表筛选只保留「全部 / 待审」两个入口。
       const filterTabs = [['all', '全部'], ['open', '待审']];
-      const listCol = h('div', { className: 'wf-review-list-col', style: { flex: '0 1 220px', minWidth: 140, borderRight: '1px solid var(--dsw-alias-border-l1)', display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--dsw-alias-bg-layer-1)' } },
+      const floatingShadow = '0 4px 16px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06)';
+      const listCol = h('div', {
+        className: 'wf-review-list-col',
+        style: {
+          flex: '0 1 220px', minWidth: 140,
+          border: '1px solid var(--dsw-alias-border-l1)',
+          borderRadius: 12,
+          boxShadow: floatingShadow,
+          overflow: 'hidden',
+          display: 'flex', flexDirection: 'column', minHeight: 0,
+          background: 'var(--dsw-alias-bg-layer-1)',
+        },
+      },
         h('div', { style: { padding: '10px 10px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
           h('div', { style: { display: 'flex', gap: 4, flexWrap: 'nowrap', marginBottom: 8 } },
             filterTabs.map(([id, lbl]) => h('button', {
@@ -1193,7 +1203,15 @@
               : null,
             contextPaper.uploaded ? h('span', { style: { ...T.badge(''), flexShrink: 0, fontSize: 10.5 } }, '已上传') : null,
           ) : null,
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', height: 44, borderBottom: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)', flexShrink: 0, flexWrap: 'nowrap', overflow: 'hidden' } },
+          h('div', {
+            style: {
+              display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', minHeight: 44,
+              border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 12,
+              background: 'var(--dsw-alias-bg-layer-1)',
+              boxShadow: floatingShadow,
+              marginBottom: 10, flexShrink: 0, flexWrap: 'nowrap', overflow: 'hidden',
+            },
+          },
             h('span', {
               style: { fontWeight: 600, fontSize: 14.5, whiteSpace: 'nowrap', flexShrink: 0 },
               title: detail.source_section ? [detail.source_section.context, detail.source_section.title].filter(Boolean).join(' · ') : '',
@@ -1253,7 +1271,7 @@
             }, '预览对照'),
           ),
           h('div', { className: 'wf-scroll wf-review-container' },
-           h('div', { className: 'wf-review-layout' },
+           h('div', { className: 'wf-review-layout', style: { padding: '2px 2px 4px' } },
             // 左：原卷预览 + 小题
             h('div', { className: 'wf-review-main', style: { minWidth: 0 } },
               h('div', { style: T.card },
@@ -1438,6 +1456,6 @@
       if (hideListCol) {
         return h('div', { style: { flex: 1, display: 'flex', minHeight: 0, minWidth: 0 } }, workCol);
       }
-      return h('div', { style: { flex: 1, display: 'flex', minHeight: 0 } }, listCol, workCol);
+      return h('div', { style: { flex: 1, display: 'flex', gap: 12, padding: '12px 14px 14px', minHeight: 0, minWidth: 0, background: 'var(--dsw-alias-bg-base)' } }, listCol, workCol);
     }
 

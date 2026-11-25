@@ -23,7 +23,7 @@ test('题型审核默认全部题型、每页最多20题、支持快速搜索与
   assert.ok(idx > 0 && endIdx > idx, '找不到 TypeReviewTab');
   const body = client.slice(idx, endIdx);
 
-  // 默认全部题型
+  // 默认全部题型（按钮直接显示「全部题型」，不带「选择题型：」前缀，且不渲染顶部搜索框）
   assert.match(body, /const \[selectedType, setSelectedType\] = React\.useState\(''\)/);
   assert.match(body, /if \(!selectedType\) return '全部题型';/);
   // 分页请求（每页最多20题，绝不整批缓存/拉取）
@@ -31,10 +31,12 @@ test('题型审核默认全部题型、每页最多20题、支持快速搜索与
   assert.match(body, /jget\('\/type-review\/units\?' \+ qs\.toString\(\)/);
   assert.doesNotMatch(body, /loadBatchUnitsBundle/);
   assert.doesNotMatch(body, /SHARED_BATCHES_CACHE/);
-  // 底下快速搜索框 + 选择题型弹窗按钮 + 上一页/下一页
-  assert.match(body, /placeholder:\s*'快速搜索题型 \/ 题号 \/ 试卷 \/ 知识点…'/);
+  // 顶部通栏筛选卡片：直接显示当前题型的弹窗按钮 + 所属试卷同行左对齐 + 上一页/下一页（已移除顶部搜索框）
+  assert.doesNotMatch(body, /placeholder:\s*'快速搜索题型 \/ 题号 \/ 试卷 \/ 知识点…'/);
   assert.match(body, /'aria-haspopup':\s*'dialog'/);
-  assert.match(body, /'选择题型：' \+ selectedTypeLabel/);
+  assert.match(body, /h\('span', null, selectedTypeLabel\)/);
+  assert.doesNotMatch(body, /'选择题型：'/);
+  assert.match(body, /'所属试卷：' \+ activePaperTitle/);
   assert.doesNotMatch(body, /title:\s*'恢复为默认全部题型'/);
   assert.match(body, /h\(ModalShell,[\s\S]*?title:\s*'选择题型'/);
   assert.match(body, /chooseType\(''\)/);
@@ -108,8 +110,10 @@ test('TypeReviewTab 渲染态：展示全部题型筛选栏、分页器、快速
 
   const tree = TypeReviewTab({ isActive: true, uploadedTick: 0 });
   const json = JSON.stringify(tree, (_k, v) => (typeof v === 'function' ? '[fn]' : v));
-  assert.match(json, /选择题型：全部题型/);
-  assert.match(json, /快速搜索题型 \/ 题号 \/ 试卷 \/ 知识点/);
+  assert.doesNotMatch(json, /选择题型：/);
+  assert.match(json, /"全部题型"/);
+  assert.match(json, /"所属试卷：2025中考"/);
+  assert.doesNotMatch(json, /快速搜索题型 \/ 题号 \/ 试卷 \/ 知识点/);
   assert.doesNotMatch(json, /"全部批次"/);
   assert.doesNotMatch(json, /"未上传"/);
   assert.doesNotMatch(json, /"已上传"/);

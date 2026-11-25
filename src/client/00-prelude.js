@@ -132,7 +132,7 @@ window.__ModuleLoader__.load({
       scroll: { flex: 1, overflow: 'auto', padding: 18 },
       card: {
         border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 12, padding: 16, marginBottom: 14,
-        background: 'var(--dsw-alias-bg-layer-1)', boxShadow: '0 1px 2px rgba(16,24,40,.04), 0 8px 24px rgba(16,24,40,.035)',
+        background: 'var(--dsw-alias-bg-layer-1)', boxShadow: '0 4px 16px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06)',
       },
       cardTitle: { fontSize: 14, fontWeight: 600, letterSpacing: '-.01em', margin: '0 0 12px', color: 'var(--dsw-alias-label-primary)', display: 'flex', alignItems: 'center', gap: 8 },
       label: { minWidth: 88, fontSize: 12.5, color: 'var(--dsw-alias-label-secondary)' },
@@ -172,8 +172,8 @@ window.__ModuleLoader__.load({
       emptyTitle: { fontSize: 13, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
       emptyHint: { fontSize: 12, marginTop: 5, maxWidth: 340, lineHeight: 1.7 },
       cardClickable: {
-        border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 10, padding: '10px 12px', marginBottom: 8,
-        background: 'var(--dsw-alias-bg-layer-1)', boxShadow: '0 1px 2px rgba(0,0,0,.05)', cursor: 'pointer',
+        border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 12, padding: '10px 12px', marginBottom: 8,
+        background: 'var(--dsw-alias-bg-layer-1)', boxShadow: '0 4px 14px rgba(15, 23, 42, 0.07), 0 1px 3px rgba(15, 23, 42, 0.05)', cursor: 'pointer',
         transition: 'border-color .16s, box-shadow .16s',
       },
       paperCardTitle: { fontWeight: 600, fontSize: 13, lineHeight: 1.35, color: 'var(--dsw-alias-label-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },

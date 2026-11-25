@@ -72,6 +72,7 @@ test('答案词显示在原标签与标签合并，已绑定和待绑定的同�
 
 test('答案考点按一审实际判断显示，漏标和不同答案参与比较', () => {
   const d = detail([], '未覆盖');
+  d.labels.answer_point_tags = ['have seen'];
   const first = d.comparison.rounds[0].checks[0];
   first.expected_answer_points = ['have seen'];
   first.assessment.answer_points = ['have seen'];
@@ -290,6 +291,7 @@ test('知识点标签采用左对齐主次分层与胶囊标签展示，头部�
   for (const row of [origRow, r1Row]) {
     assert.equal(row.props.style.flexDirection, 'column');
     const [headNode, bodyNode] = row.children;
+    assert.equal(headNode.props.style.color, 'var(--dsw-alias-label-secondary)', '原标签/一审标签字段名颜色固定不变');
     assert.equal(headNode.props.style.border, undefined);
     assert.equal(headNode.props.style.borderBottom, undefined);
     assert.equal(headNode.props.style.boxShadow, undefined);

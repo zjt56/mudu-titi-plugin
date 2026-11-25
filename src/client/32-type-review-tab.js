@@ -299,13 +299,18 @@
         );
       };
 
+      const floatingShadow = '0 4px 16px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06)';
+      const activePaperTitle = activeItem ? String(activeItem.paper_title || activeItem.batch_name || '').trim() : '';
       const typeFilterBar = h('div', {
         role: 'region',
         'aria-label': '题型审核筛选',
         style: {
           display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px 10px',
-          padding: '10px 18px', borderBottom: '1px solid var(--dsw-alias-border-l1)',
-          background: 'var(--dsw-alias-bg-base)', flexShrink: 0,
+          margin: '10px 14px 0', padding: '9px 14px', borderRadius: 12,
+          border: '1px solid var(--dsw-alias-border-l1)',
+          background: 'var(--dsw-alias-bg-layer-1)',
+          boxShadow: floatingShadow,
+          flexShrink: 0,
         },
       },
         filterChip('all', '全部', allTotal),
@@ -320,42 +325,28 @@
             ...T.btn,
             display: 'inline-flex', alignItems: 'center', gap: 6,
             padding: '5px 12px', fontWeight: selectedType ? 600 : 500,
-            background: selectedType ? 'var(--wf-sel-bg)' : 'var(--dsw-alias-bg-layer-1)',
+            background: selectedType ? 'var(--wf-sel-bg)' : 'var(--dsw-alias-bg-base)',
             borderColor: selectedType ? 'var(--wf-sel-border)' : 'var(--dsw-alias-border-l2)',
           },
-          title: '打开弹窗查看并选择全部题型',
+          title: '点击切换题型',
         },
-          h('span', null, '选择题型：' + selectedTypeLabel),
+          h('span', null, selectedTypeLabel),
           h('span', { style: { fontSize: 10.5, opacity: 0.7 } }, '▾'),
         ),
-        h('div', { style: { position: 'relative', display: 'flex', alignItems: 'center', flex: '1 1 220px', maxWidth: 340, minWidth: 160 } },
-          h('input', {
-            className: 'wf-input',
-            type: 'search',
-            'aria-label': '快速搜索题型或题目',
-            value: searchInput,
-            placeholder: '快速搜索题型 / 题号 / 试卷 / 知识点…',
-            style: { ...T.input, width: '100%', padding: '5px 28px 5px 10px' },
-            onChange: (e) => setSearchInput(e.target.value),
-            onKeyDown: (e) => {
-              if (e.key === 'Enter') {
-                setAppliedQuery(String(searchInput || '').trim());
-                setPage(1);
-              }
-            },
-          }),
-          searchInput ? h('button', {
-            type: 'button',
-            'aria-label': '清空搜索',
-            title: '清空搜索',
-            onClick: () => { setSearchInput(''); setAppliedQuery(''); setPage(1); },
-            style: {
-              position: 'absolute', right: 6, border: 'none', background: 'transparent',
-              color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer', fontSize: 13, lineHeight: 1, padding: '2px 4px',
-            },
-          }, '×') : null,
-        ),
-        h('span', { style: { flex: 1 } }),
+        activePaperTitle ? h('div', {
+          style: {
+            flex: '1 1 160px', minWidth: 0, display: 'flex', alignItems: 'center', gap: 6,
+            overflow: 'hidden', textAlign: 'left', fontSize: 12, color: 'var(--dsw-alias-label-secondary)',
+          },
+        },
+          h('span', {
+            style: { fontWeight: 500, color: 'var(--dsw-alias-label-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+            title: activePaperTitle,
+          }, '所属试卷：' + activePaperTitle),
+          activeItem && activeItem.uploaded
+            ? h('span', { style: { ...T.badge(''), flexShrink: 0, fontSize: 10.5 } }, '已上传')
+            : null,
+        ) : h('span', { style: { flex: 1 } }),
         h('button', { className: 'wf-btn', style: T.btn, disabled: loading, onClick: () => loadPage() }, loading ? '加载中…' : TEXT.reload),
       );
 
@@ -363,7 +354,10 @@
         className: 'wf-review-list-col',
         style: {
           flex: '0 1 220px', minWidth: 140,
-          borderRight: '1px solid var(--dsw-alias-border-l1)',
+          border: '1px solid var(--dsw-alias-border-l1)',
+          borderRadius: 12,
+          boxShadow: floatingShadow,
+          overflow: 'hidden',
           display: 'flex', flexDirection: 'column', minHeight: 0,
           background: 'var(--dsw-alias-bg-layer-1)',
         },
@@ -452,7 +446,7 @@
         rightPane = h(EmptyState, {
           flex: true,
           title: '没有符合条件的题目',
-          hint: '可以调整搜索词、点击「选择题型」切换其他题型，或切回「全部」状态查看。',
+          hint: '可以点击「全部题型」切换其他题型，或切回「全部」状态查看。',
           action: (selectedType || appliedQuery || statusFilter !== 'all')
             ? h('button', {
                 className: 'wf-btn',
@@ -473,11 +467,6 @@
           disableKeyNav: true,
           hidePaperPreview: true,
           hideAiSupplement: true,
-          contextPaper: {
-            title: activeItem.paper_title,
-            batchName: activeItem.batch_name,
-            uploaded: activeItem.uploaded,
-          },
           onUnitMutated: () => loadPage({ silent: true }),
         });
       }
@@ -556,9 +545,9 @@
       ) : null;
 
       return h(React.Fragment, null,
-        h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 } },
+        h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, background: 'var(--dsw-alias-bg-base)' } },
           typeFilterBar,
-          h('div', { style: { flex: 1, display: 'flex', minHeight: 0, minWidth: 0 } },
+          h('div', { style: { flex: 1, display: 'flex', gap: 12, padding: '12px 14px 14px', minHeight: 0, minWidth: 0 } },
             listCol,
             rightPane,
           ),

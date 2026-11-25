@@ -400,9 +400,9 @@
           }).catch(() => {});
           loadBatches();
         };
-        return h(React.Fragment, null, h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 } },
-          // 来源横条：独立卡片，与下方工作区留出间隙；操作按钮统一右对齐。
-          h('div', { style: { ...T.toolbar, margin: '10px 12px', padding: '10px 14px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 10, background: 'var(--dsw-alias-bg-layer-1)', flexShrink: 0 } },
+        return h(React.Fragment, null, h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--dsw-alias-bg-base)' } },
+          // 来源横条：独立悬浮卡片，与下方工作区留出间隙；操作按钮统一右对齐。
+          h('div', { style: { ...T.toolbar, margin: '10px 14px 0', padding: '9px 14px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 12, background: 'var(--dsw-alias-bg-layer-1)', boxShadow: '0 4px 16px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06)', flexShrink: 0 } },
             h('span', { style: T.toolbarTitle }, (active.overview?.paper?.title || active.name)),
             h('span', { style: { ...T.hint, marginLeft: 4 } }, '↑/↓ 或 k/j 切换题组'),
             h('span', { style: { flex: 1 } }),
