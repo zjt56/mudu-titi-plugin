@@ -27,20 +27,113 @@ _GENERAL_FORMAT_ONLY_CUE = re.compile(
 )
 _SUBSTANTIVE_ERROR_CUE = re.compile(
     r"答案错误|答案有误|答案不符|答案与原卷|答案缺失|无答案|漏题|缺题干|缺选项|缺材料|缺失题干|缺失选项|缺失材料|错别字|乱码|截断|串题|原卷缺失|图片缺失|题型错误|无法作答"
+    # 答案语义/词形类实质错误：同一句即使夹带格式描述也必须标红。
+    r"|词形|单复数|时态|答案少词|答案多词|少一词|多一词|漏词|拼写|语法形式|空位数量不确定|空位数量不符|空位数不确定|空位数不符"
 )
+# 去掉格式描述后，剩余文字仍带“错/不符/缺/漏/不确定”等判断词，即视为夹带实质问题。
+_RESIDUAL_ERROR_CUE = re.compile(r"错|误|不符|不一致|不对|缺|漏|无法|不确定|串|冲突|矛盾")
+_FORMAT_NOISE = re.compile(_GENERAL_FORMAT_ONLY_CUE.pattern + r"|排版|格式|不规范|瑕疵")
+_ONE_WORD_NOISE = re.compile(
+    _BLANK_COUNT_CONFLICT_CUE.pattern + "|" + _ONE_WORD_BLANK_CUE.pattern + "|" + _FORMAT_NOISE.pattern + r"|冲突|矛盾"
+)
+# 横线连排/合并会改变可见空位数量，只有结构证据成立时才算原稿排版瑕疵。
+_MERGED_LINE_CUE = re.compile(r"连排|连成|未断开|合并|一条长")
+_UNDERLINE_TAG = re.compile(r"<u>([\s\u3000_]*)</u>", re.I)
+_UNDERSCORE_RUN = re.compile(r"_{2,}")
+_ANSWER_WORD = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)*")
+# 原稿一词一空约 8 个下划线；连排后总长至少按每词 6 个计，才认定这条长横线能容纳全部答案词。
+_MIN_UNDERLINE_PER_WORD = 6
 
 
-def _is_source_format_only_complaint(row: dict, detail: str) -> bool:
-    """原稿固有排版/格式瑕疵（如每空一词连排长横线、标点/空格/对齐/下划线偏移）不算实质内容异常。
+def _blank_runs(stem: str) -> list[int]:
+    """题干里每段作答横线的长度：<u>…</u> 按内部字符数，裸下划线按连续长度。"""
+    runs: list[int] = []
 
-    一旦同时包含实质内容缺陷关键词（漏题、答案不符、缺题干/选项、乱码截断等），一律仍按实质异常标红。
+    def _tag(match: re.Match) -> str:
+        runs.append(max(len(match.group(1)), 1))
+        return " "
+
+    rest = _UNDERLINE_TAG.sub(_tag, str(stem or ""))
+    runs.extend(len(m.group(0)) for m in _UNDERSCORE_RUN.finditer(rest))
+    return runs
+
+
+def _answer_text(value: object) -> str:
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v) for v in value if v is not None)
+    return str(value or "")
+
+
+def _stem_answer_pairs(source: object) -> list[tuple[str, str]]:
+    """来源里可用于结构判断的（题干, 答案）对：小题优先，其次单元自身。"""
+    if not isinstance(source, dict):
+        return []
+    pairs: list[tuple[str, str]] = []
+    for sub in source.get("subquestions") or []:
+        if not isinstance(sub, dict):
+            continue
+        stem, answer = str(sub.get("stem") or ""), _answer_text(sub.get("answer"))
+        if stem.strip() and answer.strip():
+            pairs.append((stem, answer))
+    if not pairs:
+        stem, answer = str(source.get("stem") or ""), _answer_text(source.get("answer"))
+        if stem.strip() and answer.strip():
+            pairs.append((stem, answer))
+    return pairs
+
+
+def _merged_blank_evidence(*sources: object) -> bool:
+    """结构上能否证明“每空一词”空数冲突只是原稿把多段横线连排成一条。
+
+    取第一个带题干+答案的来源（列表行优先，其次批次条目）：至少一个小题横线段数少于答案词数
+    且横线总长足以容纳全部词，才算连排；任一小题段数少于词数但横线长度不足，即为真实空位冲突。
+    拿不到结构证据时一律不豁免（保守标红）。
+    """
+    for source in sources:
+        pairs = _stem_answer_pairs(source)
+        if not pairs:
+            continue
+        merged = False
+        for stem, answer in pairs:
+            runs = _blank_runs(stem)
+            words = len(_ANSWER_WORD.findall(answer))
+            if not runs or words <= len(runs):
+                continue
+            if sum(runs) < words * _MIN_UNDERLINE_PER_WORD:
+                return False
+            merged = True
+        return merged
+    return False
+
+
+def _is_source_format_only_complaint(row: dict, detail: str, batch_item: object = None) -> bool:
+    """原稿固有排版/格式瑕疵不算实质内容异常；判定口径从严，宁可标红也不吞错。
+
+    - 命中实质错误词（漏题、答案不符、缺题干/选项、词形/单复数/时态、答案少词/多词等）一律标红；
+    - 去掉格式描述后剩余文字仍带“错/不符/缺/漏/不确定”等判断词，同样标红；
+    - “每空一词”空数冲突与横线连排类抱怨会改变空位数量，必须有横线结构证据
+      （见 _merged_blank_evidence）才不标红。batch_item 可为批次条目或 unit_id -> 条目 的惰性读取函数。
     """
     text = str(detail or "").strip()
     if not text or _SUBSTANTIVE_ERROR_CUE.search(text):
         return False
+
+    def _item() -> object:
+        if callable(batch_item):
+            return batch_item(str((row or {}).get("unit_id") or "").strip())
+        return batch_item
+
     if _ONE_WORD_BLANK_CUE.search(text) and _BLANK_COUNT_CONFLICT_CUE.search(text):
-        return True
-    return bool(_GENERAL_FORMAT_ONLY_CUE.search(text))
+        if _RESIDUAL_ERROR_CUE.search(_ONE_WORD_NOISE.sub(" ", text)):
+            return False
+        return _merged_blank_evidence(row, _item())
+    if not _GENERAL_FORMAT_ONLY_CUE.search(text):
+        return False
+    if _RESIDUAL_ERROR_CUE.search(_FORMAT_NOISE.sub(" ", text)):
+        return False
+    if _MERGED_LINE_CUE.search(text):
+        return _merged_blank_evidence(row, _item())
+    return True
 
 
 def load_preview_batch_items(folder: Path) -> list[dict]:
@@ -307,6 +400,25 @@ def decorate_anomaly_rows(
 
     stage_blocked_idle = bool(stage_blocked and not adv_active)
 
+    batch_items_by_uid: dict[str, dict] | None = None
+
+    def batch_item_for(unit_id: str) -> dict:
+        """按 unit_id 惰性读取批次条目（只在需要横线结构证据时读盘一次）。"""
+        nonlocal batch_items_by_uid
+        if batch_items_by_uid is None:
+            batch_items_by_uid = {}
+            try:
+                items = load_preview_batch_items(folder)
+            except (OSError, ValueError, TypeError):
+                items = []
+            for it in items:
+                key = str(it.get("unit_id") or it.get("id") or "").strip()
+                if key:
+                    batch_items_by_uid.setdefault(key, it)
+        if not unit_id:
+            return {}
+        return batch_items_by_uid.get(unit_id) or {}
+
     anomaly_unit_count = 0
     for row in rows:
         if not isinstance(row, dict):
@@ -343,7 +455,7 @@ def decorate_anomaly_rows(
             if (
                 str(row.get("state") or "") != "blocked"
                 and str(row.get("severity") or "") != "blocker"
-                and _is_source_format_only_complaint(row, raw_summary)
+                and _is_source_format_only_complaint(row, raw_summary, batch_item=batch_item_for)
             ):
                 pass
             else:

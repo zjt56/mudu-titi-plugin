@@ -225,6 +225,26 @@ class UnitContentEditTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "批次校验未通过"):
                 server._check_upload_preconditions(self.folder, None, None)
 
+    def test_answer_draft_keeps_answers_quarantine_and_blocks_upload(self):
+        from workflow import unit_anomalies, upload_payload
+
+        unit_anomalies.record_anomalies(self.folder, "answers", {"q-1": "Answer not verbatim-bound"})
+        result = self.save(None, [{"number": 1, "answer": "B"}])
+        # 小题答案只落 candidates/ 草稿：正式批次答案不变，草稿路径有记录。
+        self.assertIn("items", result["applied"]["skipped"])
+        self.assertTrue(any(path.startswith("candidates/") for path in result["saved"]), result["saved"])
+        self.assertEqual(self.batch_row()["answer"], "A")
+        self.assertTrue(any("答案提取隔离仍保留" in w for w in result["warnings"]), result["warnings"])
+        # 草稿未经答案来源绑定与原文校验：answers 隔离必须保留，上传仍被阻断并带原始原因。
+        self.assertEqual(unit_anomalies.quarantined_unit_ids(self.folder, "answers"), {"q-1"})
+        payload = upload_payload.build_payload({"items": []}, batch_dir=self.folder)
+        blocked = [err for err in payload["errors"]
+                   if err.get("code") == "UNIT_QUARANTINED" and err.get("unit_id") == "q-1"]
+        self.assertTrue(blocked, payload["errors"])
+        text = json.dumps(blocked, ensure_ascii=False)
+        self.assertIn("Answer not verbatim-bound", text)
+        self.assertIn("答案提取", text)
+
 
 if __name__ == "__main__":
     unittest.main()

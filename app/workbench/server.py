@@ -4146,8 +4146,12 @@ class Handler(BaseHTTPRequestHandler):
                 unit_anomalies.clear_stage_anomalies(folder, "knowledge", [unit_id])
             if applied.get("applied") or (unit and any(k in unit for k in ("explanation", "articleSummary"))):
                 unit_anomalies.clear_stage_anomalies(folder, "explanations", [unit_id])
-            if items and any("answer" in item for item in items if isinstance(item, dict)):
-                unit_anomalies.clear_stage_anomalies(folder, "answers", [unit_id])
+            # 小题改动（含 answer）只落 candidates/ 草稿：未经答案来源绑定与原文一致性校验，
+            # 也未写回正式答案产物。此处绝不解除 answers 隔离，否则上传闸门会放过「无答案」占位；
+            # answers 隔离只在正式答案写入（save_content_edit）或阶段重新导入通过校验后清除。
+            if (items and any(isinstance(item, dict) and "answer" in item for item in items)
+                    and unit_id in unit_anomalies.quarantined_unit_ids(folder, "answers")):
+                warnings.append("答案改动仅为草稿，答案提取隔离仍保留；写入正式答案后才解除，解除前不能上传")
         return {"saved": saved, "warnings": warnings, "applied": applied}
 
 

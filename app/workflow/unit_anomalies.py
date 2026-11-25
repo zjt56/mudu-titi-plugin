@@ -132,7 +132,8 @@ def quarantined_entries(batch_dir, stage: str | None = None) -> list[dict]:
             rows.append({
                 "unit_id": str(uid),
                 "stage": entry_stage,
-                "reason": str(entry.get("reason") or ""),
+                # record_anomalies 写入的是 error；reason 仅兼容旧台账。
+                "reason": str(entry.get("reason") or entry.get("error") or ""),
                 "deterministic": bool(entry.get("deterministic")),
             })
     return rows

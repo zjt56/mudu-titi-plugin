@@ -146,6 +146,7 @@ class AnomalyViewsTest(unittest.TestCase):
             blocked = upload_payload.build_payload({"items": []}, batch_dir=folder)
             self.assertTrue(
                 any(err.get("code") == "UNIT_QUARANTINED" and err.get("unit_id") == "u2"
+                    and "Answer not verbatim-bound" in str(err)
                     for err in blocked["errors"]),
                 blocked["errors"],
             )
@@ -177,6 +178,12 @@ class AnomalyViewsTest(unittest.TestCase):
     def test_one_word_per_blank_merged_underline_is_not_flagged_as_red_anomaly(self):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
+            # u1：原卷四词连排成一条 32 字符长横线（结构证据成立）；u6：横线过短，空数冲突真实存在。
+            _write_json(folder / "06_batch/batch.json", {"items": [
+                {"unit_id": "u1", "stem": "________________________________, we should keep trying.",
+                 "answer": "Last but not least"},
+                {"unit_id": "u6", "stem": "He ______ the early bus.", "answer": "failed to catch"},
+            ]})
             rows = [
                 {
                     "unit_id": "u1",
@@ -214,15 +221,62 @@ class AnomalyViewsTest(unittest.TestCase):
                     "needs_human": True,
                     "open_summary": "labels：题干存在格式问题且缺选项D。",
                 },
+                {
+                    "unit_id": "u5",
+                    "number": "5",
+                    "type": "完成句子",
+                    "state": "attention",
+                    "verdict": "error",
+                    "needs_human": True,
+                    "open_summary": "labels：题干下划线排版有问题，答案词形错误。",
+                },
+                {
+                    "unit_id": "u6",
+                    "number": "6",
+                    "type": "完成句子",
+                    "state": "attention",
+                    "verdict": "error",
+                    "needs_human": True,
+                    "open_summary": "labels：该答案三词填入一个空，与大题“每空一词”冲突。",
+                },
             ]
             summary = anomaly_views.decorate_anomaly_rows(folder, rows, manifest={"stages": {}}, advance={"running": False})
-            # u1（每空一词连线）与 u3（纯标点/空格排版瑕疵）均不标红
+            # u1（每空一词连线，且横线结构证据成立）与 u3（纯标点/空格排版瑕疵）均不标红
             self.assertFalse(rows[0]["is_anomaly"])
             self.assertFalse(rows[2]["is_anomaly"])
             # u2（答案与原卷不符）与 u4（缺选项）含实质内容错误，仍须标红
             self.assertTrue(rows[1]["is_anomaly"])
             self.assertTrue(rows[3]["is_anomaly"])
-            self.assertEqual(summary["anomaly_unit_count"], 2)
+            # u5（格式描述夹带答案词形错误）与 u6（横线长度不足以容纳答案词，空数冲突真实）必须标红
+            self.assertTrue(rows[4]["is_anomaly"])
+            self.assertTrue(rows[5]["is_anomaly"])
+            self.assertEqual(summary["anomaly_unit_count"], 4)
+
+    def test_format_filter_keeps_answer_semantic_errors_red(self):
+        check = anomaly_views._is_source_format_only_complaint
+        for text in (
+            "题干下划线排版有问题，答案词形错误",
+            "单复数错误，空格多余",
+            "时态错误；换行断行",
+            "标点全角，答案少词",
+            "全角标点不规范，空位数量不确定",
+            "缩进不齐，且与原句不一致",
+        ):
+            self.assertFalse(check({}, text), text)
+        self.assertTrue(check({}, "题干全角标点与空格排版不规范"))
+        # 每空一词：没有横线结构证据不豁免；小题横线总长足以容纳全部答案词才豁免。
+        cue = "该答案四词填入一个空，与大题“每空一词”冲突。"
+        self.assertFalse(check({}, cue))
+        merged = {"subquestions": [{"stem": "________________________________, we should keep trying.",
+                                    "answer": "Last but not least"}]}
+        self.assertTrue(check(merged, cue))
+        short = {"subquestions": [{"stem": "______, we should keep trying.", "answer": "Last but not least"}]}
+        self.assertFalse(check(short, cue))
+        self.assertFalse(check(merged, cue + "且答案时态错误"))
+        # 横线连排类通用格式抱怨同样需要结构证据；批次条目可经惰性函数按 unit_id 提供。
+        self.assertFalse(check({}, "原卷横线连排未断开"))
+        self.assertTrue(check(merged, "原卷横线连排未断开"))
+        self.assertTrue(check({"unit_id": "x1"}, cue, batch_item=lambda uid: merged if uid == "x1" else {}))
 
     def test_review_check_path_canonicalization_records_rewrite_log(self):
         from workflow import review_rounds
