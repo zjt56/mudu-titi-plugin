@@ -139,16 +139,15 @@ test('插件图标同步改为中性灰', () => {
   assert.match(icon, /#8a94a6/);
 });
 
-test('预览对照按钮使用独立样式类与显式 hover/active 状态，点击不再发白看不见', () => {
-  const idx = client.indexOf("docIcon(14), '预览对照'");
+test('预览对照按钮为普通按钮样式，与工具栏其他按钮一致，不用主色实心', () => {
+  // 2026-11-25 起预览对照改为普通 wf-btn 按钮（去掉图标与独立样式类）。
+  const idx = client.indexOf("}, '预览对照'),");
   assert.ok(idx >= 0, '找不到预览对照按钮');
-  const btnChunk = client.slice(Math.max(0, idx - 260), idx + 40);
-  assert.match(btnChunk, /className: 'wf-paper-preview-btn'/);
+  const btnChunk = client.slice(Math.max(0, idx - 260), idx + 20);
+  assert.match(btnChunk, /className: 'wf-btn'/);
+  assert.match(btnChunk, /onClick: openPaperPreview/);
   assert.doesNotMatch(btnChunk, /wf-btn-primary/);
   assert.doesNotMatch(btnChunk, /color: '#ffffff'/);
-  assert.match(client, /\.wf-paper-preview-btn\{[^}]*display:inline-flex/);
-  assert.match(client, /\.wf-paper-preview-btn:not\(:disabled\):hover\{[^}]*background:color-mix/);
-  assert.match(client, /\.wf-paper-preview-btn:not\(:disabled\):active\{[^}]*background:color-mix/);
 });
 
 test('预览对照弹窗支持左右双栏 Word 原文件对照、离线 vendor 静态库与按题目同步滚动', () => {

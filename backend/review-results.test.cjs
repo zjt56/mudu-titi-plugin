@@ -267,7 +267,7 @@ test('题型/子类始终展示到最末级叶子，仅把存在差异的末级�
   assert.deepEqual(collectRed(samePanels), []);
 });
 
-test('知识点标签采用左对齐主次分层与胶囊标签展示，合并区使用微底承托且无描边阴影', () => {
+test('知识点标签采用左对齐主次分层与胶囊标签展示，合并区与各行样式一致且无描边阴影', () => {
   const d = detail(['主题/新标签'], '已提供');
   d.comparison.rounds[0].checks[0].assessment.knowledge = ['主题/原标签', '主题/扩展点'];
   const panels = labelAuditPanels(d);
@@ -289,6 +289,7 @@ test('知识点标签采用左对齐主次分层与胶囊标签展示，合并�
     assert.ok(bodyNode.children.length >= 1);
   }
   assert.equal(mergedRow.props.style.flexDirection, 'column');
-  assert.ok(mergedRow.props.style.background, '标签合并块应使用微底承托');
-  assert.match(text(mergedRow), /自动合并/);
+  // 2026-11-25 起「标签合并」与上方各行样式一致：不加底色、不显示「自动合并」，仅人工修改时显示「已修改」。
+  assert.equal(mergedRow.props.style.background, undefined, '标签合并块不应再加底色');
+  assert.doesNotMatch(text(mergedRow), /自动合并/);
 });
