@@ -932,7 +932,7 @@
         return panels;
       }
 
-      // 审核说明：越短越好，只一句话说清差异。审核范畴只有「知识点标签」，
+      // 审核说明：完整展示题型/子类差异及一审差异原因（不截断），长文本由卡片内可滑动区域承载。
       // 难度/来源/分类等基本标签不参与审核，也不在这里罗列。
       function auditNotes(detail) {
         const comp = detail.comparison || {};
@@ -955,15 +955,25 @@
         const notes = [];
         if (mainDiffs.length) notes.push('题型差异：' + mainDiffs.join('、') + '（原「' + (baseType || '无') + '」）');
         if (subDiffs.length) notes.push('子类差异：' + subDiffs.join('、') + '（原「' + (baseSub || '无') + '」）');
-        if (notes.length) return notes;
-        // 有知识点差异时，用一句简短原因说明为什么会不一致（有就写，没有就空）。
         const kpDiff = (typeof hasKnowledgeDiff === 'function') ? hasKnowledgeDiff(detail) : false;
-        if (kpDiff) {
-          const reason = ((r1 && r1.checks) || []).map((c) => String(c.rationale || '').trim()).find(Boolean) || '';
-          const short = reason ? reason.slice(0, 60) : '一审与原标签判断不同';
-          return ['差异原因：' + short];
+        const checks = (r1 && r1.checks) || [];
+        const hasFlaggedCheck = checks.some((c) => c && (c.verdict === 'error' || c.verdict === 'uncertain'));
+        if (notes.length || kpDiff || hasFlaggedCheck) {
+          const reasons = [];
+          const seen = new Set();
+          for (const c of checks) {
+            const text = String((c && c.rationale) || '').trim();
+            if (!text || seen.has(text)) continue;
+            seen.add(text);
+            reasons.push(text);
+          }
+          if (reasons.length) {
+            reasons.forEach((r) => notes.push('差异原因：' + r));
+          } else if (kpDiff && !notes.length) {
+            notes.push('差异原因：一审与原标签判断不同');
+          }
         }
-        return [];
+        return notes;
       }
       // 是否有一审与原标签不一致的知识点（仅用于审核说明的空态文案）。
       function hasKnowledgeDiff(detail) {
@@ -1334,33 +1344,35 @@
                   : [];
                 return h('div', { style: T.card },
                   h('div', { style: { ...T.cardTitle } }, '审核说明'),
-                  anomalyItems.map((reason, idx) => h('div', {
-                    key: 'anomaly-' + idx,
-                    style: {
-                      fontSize: 12,
-                      color: 'var(--dsw-alias-state-error-primary)',
-                      fontWeight: 500,
-                      padding: '3px 0',
-                      lineHeight: 1.6,
-                      borderTop: idx ? '1px dashed var(--dsw-alias-border-l1)' : 'none',
-                    },
-                  }, '· 异常：' + reason)),
-                  lines.length
-                    ? lines.map((t, i) => {
-                        const isDiffNote = /^(?:题型差异|子类差异)：/.test(String(t || ''));
-                        return h('div', {
-                          key: i,
-                          style: {
-                            fontSize: 12,
-                            color: isDiffNote ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-primary)',
-                            fontWeight: isDiffNote ? 600 : 400,
-                            padding: '3px 0',
-                            lineHeight: 1.6,
-                            borderTop: (i || anomalyItems.length) ? '1px dashed var(--dsw-alias-border-l1)' : 'none',
-                          },
-                        }, '· ' + t);
-                      })
-                    : (!anomalyItems.length ? h('div', { style: T.hint }, kpDiff ? '差异已在上方「知识点标签」中标出。' : '各轮与原标签一致，无差异。') : null),
+                  h('div', { className: 'wf-audit-notes-body' },
+                    anomalyItems.map((reason, idx) => h('div', {
+                      key: 'anomaly-' + idx,
+                      style: {
+                        fontSize: 12,
+                        color: 'var(--dsw-alias-state-error-primary)',
+                        fontWeight: 500,
+                        padding: '3px 0',
+                        lineHeight: 1.6,
+                        borderTop: idx ? '1px dashed var(--dsw-alias-border-l1)' : 'none',
+                      },
+                    }, '· 异常：' + reason)),
+                    lines.length
+                      ? lines.map((t, i) => {
+                          const isDiffNote = /^(?:题型差异|子类差异)：/.test(String(t || ''));
+                          return h('div', {
+                            key: i,
+                            style: {
+                              fontSize: 12,
+                              color: isDiffNote ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-primary)',
+                              fontWeight: isDiffNote ? 600 : 400,
+                              padding: '3px 0',
+                              lineHeight: 1.6,
+                              borderTop: (i || anomalyItems.length) ? '1px dashed var(--dsw-alias-border-l1)' : 'none',
+                            },
+                          }, '· ' + t);
+                        })
+                      : (!anomalyItems.length ? h('div', { style: T.hint }, kpDiff ? '差异已在上方「知识点标签」中标出。' : '各轮与原标签一致，无差异。') : null),
+                  ),
                 );
               })(),
             ),

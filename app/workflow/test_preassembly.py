@@ -98,18 +98,36 @@ class PreassemblyTest(unittest.TestCase):
             if spec.id == 'types':
                 self.assertTrue(preassembly.check(batch)['passed'])
                 runner._record_success(batch, state, spec)
+            elif spec.id == 'knowledge':
+                self.assertTrue(mf.dependency_satisfied(mf.load(batch), 'answers'))
+                dispatched.append('knowledge')
+                return 3
             else:
                 self.assertIn(spec.id, ('content_snapshot', 'meta', 'underlines'))
-                self.assertIn('knowledge', dispatched)
+                self.assertIn('answers', dispatched)
                 mf.touch_stage(state, spec.id, mf.COMPLETED)
             mf.save(batch, state)
             return 0
         def labels(batch, stages, config, *, while_running, pending_audio=False):
             self.assertTrue(mf.dependency_satisfied(mf.load(batch), 'types'))
-            dispatched.extend(s.id for s in stages)
+            stage_ids = [s.id for s in stages]
+            dispatched.extend(stage_ids)
             while_running()
             self.assertIn('content_snapshot', commands)
-            return {s.id: 3 for s in stages}
+            if 'answers' in stage_ids:
+                # knowledge 依赖 answers：首轮先派发 answers + explanations，完成后次轮派发 knowledge。
+                self.put('01_source_ans/answers.json', {'answers': {'1': 'A'}, 'evidence': {'1': ['原文']}, 'missing': {}})
+                self.put('04_knowledge/explanations.json', {'items': [{
+                    'unit_id': 'q-1', 'explanation': '原卷解析。', 'articleSummary': '无',
+                    'subquestions': [], 'evidence': ['01_source/附录.txt L2']}]})
+                st = mf.load(batch)
+                for sid in stage_ids:
+                    runner._record_success(batch, st, contracts.STAGE_BY_ID[sid])
+                    st['stages'][sid]['imported'] = True
+                    st['stages'][sid]['qualified'] = True
+                mf.save(batch, st)
+                return {sid: 0 for sid in stage_ids}
+            return {sid: 3 for sid in stage_ids}
         with patch('workflow.self_heal.recover', return_value={}), \
              patch.object(agent, 'configured', return_value=True), \
              patch.object(local_agent, 'load_config', return_value={}), \
@@ -341,6 +359,12 @@ class PreassemblyTest(unittest.TestCase):
         state = mf.load(self.root)
         runner._record_success(self.root, state, contracts.STAGE_BY_ID['types'])
         mf.save(self.root, state)
+        self.put('01_source_ans/正文.txt', '1.A')
+        ans_pkg = agent_protocol.export_task(self.root, 'answers')
+        ans_res = {'status': 'completed', 'artifacts': {'01_source_ans/answers.json': {
+            'answers': {'1': 'A'}, 'evidence': {'1': ['01_source_ans/正文.txt L1']}, 'missing': {},
+        }}, 'notes': [], 'findings': []}
+        self.assertTrue(self.import_response(ans_pkg, ans_res)['completed'])
         with patch.object(local_agent, 'authentication_binding', return_value={'revision': 3}), \
              patch.object(local_agent, 'invoke', side_effect=local_agent.AgentError('fake provider', 'authentication')):
             outcome = auto._parallel_ready_agents(
@@ -382,7 +406,7 @@ class PreassemblyTest(unittest.TestCase):
             ids = json.loads(re.search(r'Return ONLY these exact unit IDs: (\[.*?\])\.', prompt)[1])
             dispatched.append(ids)
             if len(dispatched) == 6:
-                raise local_agent.AgentError('simulated interruption after five accepted parts', 'timeout')
+                raise local_agent.AgentError('simulated interruption after five accepted parts', 'provider')
             response = copy.deepcopy(self.response)
             response['artifacts']['03_types/types.json']['items'] = [
                 dict(self.payload['items'][0], unit_id=uid) for uid in ids]

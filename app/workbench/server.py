@@ -3955,7 +3955,17 @@ class Handler(BaseHTTPRequestHandler):
             except AgentError as exc:
                 raise ValueError(busy) from exc
             locks.enter_context(ai_supplement.content_write_lock(folder, timeout=5.0))
-            return ai_supplement.save_content_edit(folder, unit_id, patch, lock_held=True)
+            result = ai_supplement.save_content_edit(folder, unit_id, patch, lock_held=True)
+            from workflow import unit_anomalies
+            if isinstance(patch, dict):
+                if any(k in patch for k in ("explanation", "articleSummary", "subquestions")):
+                    unit_anomalies.clear_stage_anomalies(folder, "explanations", [unit_id])
+                if "answer" in patch or any(
+                    isinstance(sq, dict) and "answer" in sq
+                    for sq in (patch.get("subquestions") or [])
+                ):
+                    unit_anomalies.clear_stage_anomalies(folder, "answers", [unit_id])
+            return result
 
     @staticmethod
     @serialized
@@ -4131,6 +4141,13 @@ class Handler(BaseHTTPRequestHandler):
             files[manifest_rel] = current
         if files:
             _install(folder, files)
+            from workflow import unit_anomalies
+            if labels and "knowledge" in labels:
+                unit_anomalies.clear_stage_anomalies(folder, "knowledge", [unit_id])
+            if applied.get("applied") or (unit and any(k in unit for k in ("explanation", "articleSummary"))):
+                unit_anomalies.clear_stage_anomalies(folder, "explanations", [unit_id])
+            if items and any("answer" in item for item in items if isinstance(item, dict)):
+                unit_anomalies.clear_stage_anomalies(folder, "answers", [unit_id])
         return {"saved": saved, "warnings": warnings, "applied": applied}
 
 

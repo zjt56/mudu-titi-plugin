@@ -253,6 +253,11 @@ def _round_prompt(round_id, targets, context):
         "② 选词填空：整题（unit_kind=group）只要答案考点——assessment.knowledge 填 []、subquestions[i].knowledge 填 []，不打主题/语篇体裁/目录词汇语法，在 assessment.answer_points 填去重答案词/短语；"
         "单题（unit_kind=standalone）删除主题和语篇体裁，只判「词汇/语法」并省略 answer_points。"
         "③ 完成句子：必须以空格/划线处的标准答案反推词汇与语法考点，禁止拿题干非空已有内容打标。"
+        "【原稿格式瑕疵 ≠ 实质内容错误·通用标准】以下原稿固有排版/格式问题，只要能读懂题意、答案与原卷参考答案逐字一致且能独立判型打标，一律填 verdict=ok，严禁判 error/uncertain："
+        "⑴ 横线/空档连排或长短不一（如「每空一词/每空仅填一词」大题中原卷将多词下划线连排成单条长横线、空数少于答案词数）；"
+        "⑵ 全角/半角标点、空格、换行断行、软连字符、缩进对齐或加粗/下划线范围轻微偏移；"
+        "⑶ 原卷印刷角标（如[情境题][新考法]☆）或指令措辞轻微宽泛（如写「用单词填空」但含短语）。"
+        "只有真正影响做题或入库准确性的实质缺陷（漏题/缺题干/缺选项/缺材料/串题/答案与原卷不符或答案本身错误/乱码截断/关键内容缺失）才判 verdict=error。"
         "④ 听力信息转换：assessment.knowledge 只保留「主题 + 语篇体裁」（不挂设题角度/听力，不从目录选词汇/语法），答案考点填在 assessment.answer_points。"
         "⑤ 只要是组题（unit_kind=group，不限题型——含阅读理解/任务型阅读/完形填空/语法选择/听力信息转换/读写综合/选词填空整题/短文填空/教材语篇填空/听力短文理解/听力长对话理解/补全对话/语音题等），"
         "全部标签均只打在组题级 assessment.knowledge，不在子题中呈现；组题按目标列出子题且其 knowledge=[]（单题 subquestions=[]）；"
@@ -1061,7 +1066,7 @@ def _project_review_answer_points(checks):
     return projected
 
 
-def _project_review_checks(checks, units_by_id=None):
+def _project_review_checks(checks, units_by_id=None, *, rewrite_log=None):
     """Apply lossless deterministic projections before strict review validation.
 
     1. Standalone units omitting ``subquestions`` (or passing ``None``) default to ``[]``.
@@ -1101,6 +1106,9 @@ def _project_review_checks(checks, units_by_id=None):
                 if rewrites:
                     updated = dict(assessment) if updated is None else updated
                     updated["knowledge"] = canon
+                    if isinstance(rewrite_log, list):
+                        for raw_path, canon_path in rewrites:
+                            rewrite_log.append(f"{uid or '?'}: {raw_path} -> {canon_path}")
             if updated is not None:
                 check = {**check, "assessment": updated}
         projected.append(check)
@@ -2196,13 +2204,21 @@ def _import_result(batch_dir, task_id, result):
                            if isinstance(u, dict) and u.get("unit_id")}
         except Exception:
             units_by_id = {}
-        projected = _project_review_checks(projected, units_by_id=units_by_id)
+        rewrite_log = []
+        projected = _project_review_checks(projected, units_by_id=units_by_id, rewrite_log=rewrite_log)
         if projected != original_checks:
             # Retain the submitted envelope. Coverage, receipts and later
             # provenance checks bind the same projected response.
             raw_path = "workflow/review-raw-results/" + task_id + "/" + review._digest(result) + ".json"
             _save(batch, raw_path, result)
-            result = {**result, "artifacts": {**artifacts, ARTIFACT: {**candidate, "checks": projected}}}
+            merged_notes = list(result.get("notes") or []) if isinstance(result.get("notes"), list) else []
+            if rewrite_log:
+                merged_notes.append("目录唯一叶子路径规范化：" + "；".join(rewrite_log))
+            result = {
+                **result,
+                "notes": merged_notes,
+                "artifacts": {**artifacts, ARTIFACT: {**candidate, "checks": projected}},
+            }
     # Near-verbatim quotes are rewritten to the exact bound substring before
     # hashing/validation, so a trivial typographic difference no longer fails
     # the whole round while paraphrases still fail closed.

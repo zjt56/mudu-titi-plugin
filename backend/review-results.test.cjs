@@ -46,8 +46,7 @@ test('标签合并将原标签与一审知识点去重合并，且不再展示�
  assert.doesNotMatch(rendered, /二审标签|未抽中/);
  assert.equal(hasErrorColor(labelAuditPanels(d)), true);
  const notes = auditNotes(d).join(' ');
- assert.match(notes, /差异原因：/);
- assert.ok(notes.replace('差异原因：', '').length <= 60 + 4);
+ assert.match(notes, /差异原因：依据第一段补充社区生活知识点/);
 });
 test('一审未完成时标签合并显示待审核占位，不显示二审', () => {
  const d = { unit_kind: 'standalone', labels: { knowledge: ['主题/原标签'] },
@@ -292,4 +291,28 @@ test('知识点标签采用左对齐主次分层与胶囊标签展示，合并�
   // 2026-11-25 起「标签合并」与上方各行样式一致：不加底色、不显示「自动合并」，仅人工修改时显示「已修改」。
   assert.equal(mergedRow.props.style.background, undefined, '标签合并块不应再加底色');
   assert.doesNotMatch(text(mergedRow), /自动合并/);
+});
+
+test('审核说明完整展示超长差异原因（不截断）并采用可滑动区域', () => {
+  const longReason = '本题考查固定搭配与上下文语境推理：第一段明确交代人物在社区志愿服务中的分工，原标签仅标了日常活动，遗漏了社区生活与人际沟通两个核心主题维度；同时第 2 小题需要结合第二段转折句判断作者态度，因此一审补充对应知识点并保留完整说明。';
+  assert.ok(longReason.length > 100);
+  const d = detail([], '未覆盖');
+  d.comparison.original.labels.type = '阅读理解';
+  d.comparison.rounds[0].checks = [
+    {
+      assessment: { type: '阅读理解', subtypes: ['细节理解'], knowledge: ['主题/原标签', '主题/社区生活'] },
+      rationale: longReason,
+    },
+    {
+      assessment: { knowledge: ['主题/原标签', '主题/社区生活'] },
+      rationale: '补充核对：第二条去重后的独立说明也应完整保留。',
+    },
+  ];
+  const notes = auditNotes(d);
+  assert.ok(notes.some((n) => n.startsWith('子类差异：')));
+  assert.ok(notes.includes('差异原因：' + longReason), '超长差异原因不应被 60 字截断');
+  assert.ok(notes.includes('差异原因：补充核对：第二条去重后的独立说明也应完整保留。'));
+  // 审核说明卡片内容区使用独立可纵向滑动容器
+  assert.match(source, /\.wf-audit-notes-body\{[^}]*max-height:200px[^}]*overflow-y:auto/);
+  assert.match(source, /className:\s*'wf-audit-notes-body'/);
 });

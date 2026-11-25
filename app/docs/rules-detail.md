@@ -114,7 +114,7 @@
 
 - 落地：`app/workflow/changelog_retention.py`、`app/workbench/server.py`；测试 `workflow.test_changelog_retention`；记录 `CHANGELOG/2026-11-19-changelog-ignore-and-retention.md`。
 
-## 规则 41：选词填空与教材语篇填空不加答案考点
+## 规则 41：选词填空（整题）只要答案考点；选词填空（单题）与教材语篇填空不加答案考点
 
 - 落地：`app/references/type-knowledge-map.json`、`app/workbench/taxonomy.py`、`app/workflow/upload_payload.py`、`app/workflow/agent_roles.py`、`app/workflow/review_rounds.py`。
 

@@ -141,10 +141,11 @@
         + '.wf-review-layout .wf-review-main{min-width:0;max-width:100%;width:auto;min-height:0;max-height:100%;overflow-y:auto;overflow-x:hidden}'
         // 右栏审核内容与左侧预览各自独立纵向滚动。
         + '.wf-review-layout .wf-review-notes{min-width:0;max-width:100%;width:auto;min-height:0;max-height:100%;overflow-y:auto;overflow-x:hidden;align-self:stretch}'
-        + '.wf-review-layout .wf-review-main::-webkit-scrollbar,.wf-review-layout .wf-review-notes::-webkit-scrollbar{width:6px;height:6px}'
-        + '.wf-review-layout .wf-review-main::-webkit-scrollbar-thumb,.wf-review-layout .wf-review-notes::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2);border-radius:999px}'
-        + '.wf-review-layout .wf-review-main::-webkit-scrollbar-thumb:hover,.wf-review-layout .wf-review-notes::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-label-secondary)}'
-        + '.wf-review-layout .wf-review-main::-webkit-scrollbar-track,.wf-review-layout .wf-review-notes::-webkit-scrollbar-track{background:transparent}'
+        + '.wf-audit-notes-body{max-height:200px;overflow-y:auto;overflow-x:hidden;padding-right:4px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}'
+        + '.wf-review-layout .wf-review-main::-webkit-scrollbar,.wf-review-layout .wf-review-notes::-webkit-scrollbar,.wf-audit-notes-body::-webkit-scrollbar{width:6px;height:6px}'
+        + '.wf-review-layout .wf-review-main::-webkit-scrollbar-thumb,.wf-review-layout .wf-review-notes::-webkit-scrollbar-thumb,.wf-audit-notes-body::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2);border-radius:999px}'
+        + '.wf-review-layout .wf-review-main::-webkit-scrollbar-thumb:hover,.wf-review-layout .wf-review-notes::-webkit-scrollbar-thumb:hover,.wf-audit-notes-body::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-label-secondary)}'
+        + '.wf-review-layout .wf-review-main::-webkit-scrollbar-track,.wf-review-layout .wf-review-notes::-webkit-scrollbar-track,.wf-audit-notes-body::-webkit-scrollbar-track{background:transparent}'
         // 内容预览卡（文章大意/解析）：只读；长文按行数截断，展开后保留原文换行。
         + '.wf-content-section{margin-top:10px}'
         + '.wf-content-section+.wf-content-section{border-top:1px solid var(--dsw-alias-border-l1);padding-top:10px}'

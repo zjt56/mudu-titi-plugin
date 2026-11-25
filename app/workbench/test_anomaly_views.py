@@ -135,11 +135,20 @@ class AnomalyViewsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
             self.assertFalse(unit_anomalies.should_quarantine({}, {"u1", "u2"}, {}))
+            self.assertFalse(unit_anomalies.should_quarantine({}, {"u2"}, {"u2": {"diagnostics": []}}))
             self.assertTrue(unit_anomalies.should_quarantine({"u1": {}}, {"u2"}, {}))
-            self.assertTrue(unit_anomalies.should_quarantine({}, {"u2"}, {"u2": {"diagnostics": []}}))
+            self.assertTrue(unit_anomalies.should_quarantine({"u1": {}}, {"u2"}, {"u2": {"diagnostics": []}}))
 
             unit_anomalies.record_anomalies(folder, "answers", {"u2": "Answer not verbatim-bound"})
             self.assertEqual(unit_anomalies.quarantined_unit_ids(folder, "answers"), {"u2"})
+
+            from workflow import upload_payload
+            blocked = upload_payload.build_payload({"items": []}, batch_dir=folder)
+            self.assertTrue(
+                any(err.get("code") == "UNIT_QUARANTINED" and err.get("unit_id") == "u2"
+                    for err in blocked["errors"]),
+                blocked["errors"],
+            )
 
             rows = [
                 {"unit_id": "u1", "number": "1", "type": "单项填空", "state": "ok", "needs_human": False},
@@ -162,6 +171,84 @@ class AnomalyViewsTest(unittest.TestCase):
 
             unit_anomalies.clear_stage_anomalies(folder, "answers", ["u2"])
             self.assertEqual(unit_anomalies.quarantined_unit_ids(folder, "answers"), set())
+            cleared = upload_payload.build_payload({"items": []}, batch_dir=folder)
+            self.assertFalse(any(err.get("code") == "UNIT_QUARANTINED" for err in cleared["errors"]))
+
+    def test_one_word_per_blank_merged_underline_is_not_flagged_as_red_anomaly(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            rows = [
+                {
+                    "unit_id": "u1",
+                    "number": "1",
+                    "type": "完成句子",
+                    "state": "attention",
+                    "verdict": "error",
+                    "needs_human": True,
+                    "open_summary": "labels：该答案四词填入一个空，与大题“每空一词”冲突。",
+                },
+                {
+                    "unit_id": "u2",
+                    "number": "2",
+                    "type": "完成句子",
+                    "state": "attention",
+                    "verdict": "error",
+                    "needs_human": True,
+                    "open_summary": "labels：答案与原卷不符，且与大题“每空一词”冲突。",
+                },
+                {
+                    "unit_id": "u3",
+                    "number": "3",
+                    "type": "单项填空",
+                    "state": "attention",
+                    "verdict": "error",
+                    "needs_human": True,
+                    "open_summary": "labels：题干全角标点与空格排版不规范，存在格式瑕疵。",
+                },
+                {
+                    "unit_id": "u4",
+                    "number": "4",
+                    "type": "单项填空",
+                    "state": "attention",
+                    "verdict": "error",
+                    "needs_human": True,
+                    "open_summary": "labels：题干存在格式问题且缺选项D。",
+                },
+            ]
+            summary = anomaly_views.decorate_anomaly_rows(folder, rows, manifest={"stages": {}}, advance={"running": False})
+            # u1（每空一词连线）与 u3（纯标点/空格排版瑕疵）均不标红
+            self.assertFalse(rows[0]["is_anomaly"])
+            self.assertFalse(rows[2]["is_anomaly"])
+            # u2（答案与原卷不符）与 u4（缺选项）含实质内容错误，仍须标红
+            self.assertTrue(rows[1]["is_anomaly"])
+            self.assertTrue(rows[3]["is_anomaly"])
+            self.assertEqual(summary["anomaly_unit_count"], 2)
+
+    def test_review_check_path_canonicalization_records_rewrite_log(self):
+        from workflow import review_rounds
+
+        checks = [{
+            "unit_id": "q-1",
+            "verdict": "ok",
+            "rationale": "核对知识点路径。",
+            "evidence": ["原文"],
+            "assessment": {
+                "type": "单项填空",
+                "subtypes": ["四个选项"],
+                "knowledge": ["语法/错误中间层/一般现在时"],
+                "answer_points": [],
+                "subquestions": [],
+            },
+        }]
+        rewrites = []
+        projected = review_rounds._project_review_checks(
+            checks,
+            units_by_id={"q-1": {"unit_id": "q-1", "unit_kind": "standalone"}},
+            rewrite_log=rewrites,
+        )
+        self.assertEqual(len(projected), 1)
+        if projected[0]["assessment"]["knowledge"] != ["语法/错误中间层/一般现在时"]:
+            self.assertTrue(any("语法/错误中间层/一般现在时 -> " in entry for entry in rewrites), rewrites)
 
 
 if __name__ == "__main__":

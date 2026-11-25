@@ -18,6 +18,29 @@ from workflow.workflow_primitives import read_json_safe as load
 
 _POST_FLOW_STAGES = frozenset({"upload_gate", "upload", "publish_gate"})
 _STAGE_TITLES = {s.id: s.title for s in wf_contracts.STAGES} if wf_contracts else {}
+_ONE_WORD_BLANK_CUE = re.compile(r"每空一词|每空仅填一词")
+_BLANK_COUNT_CONFLICT_CUE = re.compile(
+    r"空数|占一空|一个空|单空|仅给两段|填入一个空|每空.*(?:冲突|矛盾)|(?:冲突|矛盾).*每空"
+)
+_GENERAL_FORMAT_ONLY_CUE = re.compile(
+    r"(?:全角|半角|标点|空格|缩进|对齐|换行|断行|连字符|下划线(?:长度|连排|偏移)|横线(?:长度|连排|未断开)|加粗(?:范围|偏移)|排版(?:格式|瑕疵|问题)|格式(?:不规范|瑕疵|问题))"
+)
+_SUBSTANTIVE_ERROR_CUE = re.compile(
+    r"答案错误|答案有误|答案不符|答案与原卷|答案缺失|无答案|漏题|缺题干|缺选项|缺材料|缺失题干|缺失选项|缺失材料|错别字|乱码|截断|串题|原卷缺失|图片缺失|题型错误|无法作答"
+)
+
+
+def _is_source_format_only_complaint(row: dict, detail: str) -> bool:
+    """原稿固有排版/格式瑕疵（如每空一词连排长横线、标点/空格/对齐/下划线偏移）不算实质内容异常。
+
+    一旦同时包含实质内容缺陷关键词（漏题、答案不符、缺题干/选项、乱码截断等），一律仍按实质异常标红。
+    """
+    text = str(detail or "").strip()
+    if not text or _SUBSTANTIVE_ERROR_CUE.search(text):
+        return False
+    if _ONE_WORD_BLANK_CUE.search(text) and _BLANK_COUNT_CONFLICT_CUE.search(text):
+        return True
+    return bool(_GENERAL_FORMAT_ONLY_CUE.search(text))
 
 
 def load_preview_batch_items(folder: Path) -> list[dict]:
@@ -315,8 +338,16 @@ def decorate_anomaly_rows(
             or str(row.get("verdict") or "") == "error"
             or str(row.get("severity") or "") == "blocker"
         ):
-            detail = _clean_reason(row.get("open_summary") or "")
-            push(f"一审内容判错：{detail}" if detail else "一审判定存在阻断/内容错误")
+            raw_summary = str(row.get("open_summary") or "")
+            detail = _clean_reason(raw_summary)
+            if (
+                str(row.get("state") or "") != "blocked"
+                and str(row.get("severity") or "") != "blocker"
+                and _is_source_format_only_complaint(row, raw_summary)
+            ):
+                pass
+            else:
+                push(f"一审内容判错：{detail}" if detail else "一审判定存在阻断/内容错误")
 
         row["is_anomaly"] = bool(reasons)
         row["anomaly_reasons"] = reasons

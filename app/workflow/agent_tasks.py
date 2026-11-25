@@ -1663,15 +1663,23 @@ def _validate(batch, stage, payload, context, units, *, strict_preserve=True, no
             main_type_asm = typed[unit["unit_id"]]["type"]
             whole_unit = taxonomy.whole_unit_type(main_type_asm)
             ap_only_asm = taxonomy.answer_point_only_type(main_type_asm, unit.get("unit_kind"))
+            from . import unit_anomalies
+            quarantined_knowledge = unit_anomalies.quarantined_unit_ids(batch, "knowledge")
             # 与知识点阶段同一口径：组题（有子题或 unit_kind=group）子题 knowledge 可空，
-            # 选词填空整题允许目录 knowledge=[]。
+            # 选词填空整题允许目录 knowledge=[]；被隔离的知识点异常单元也允许以空标签流转到审核页标红，
+            # 最终由 format_gate / upload_payload 的 UNIT_QUARANTINED 拦截上传。
             is_group_unit = bool(children) or str(unit.get("unit_kind") or "") == "group"
+            is_quarantined_empty_kp = (
+                unit["unit_id"] in quarantined_knowledge
+                and not row.get("knowledge")
+                and not any(c.get("knowledge") for c in children)
+            )
             for labeled in [row, *children]:
                 if (whole_unit or is_group_unit) and labeled is not row:
                     if labeled.get("knowledge"):
                         _strings(labeled["knowledge"], "knowledge", True)
                     continue
-                _strings(labeled.get("knowledge"), "knowledge", not ap_only_asm)
+                _strings(labeled.get("knowledge"), "knowledge", (not ap_only_asm) and (not is_quarantined_empty_kp))
                 if "evidence" in labeled:
                     _evidence(labeled)
             if stage == "assemble":

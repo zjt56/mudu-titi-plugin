@@ -116,27 +116,36 @@ def clear_stage_anomalies(batch_dir, stage: str, unit_ids) -> None:
         _save_anomalies(batch_dir, {"version": 1, "updated_at": _now_iso(), "units": units})
 
 
-def quarantined_unit_ids(batch_dir, stage: str | None = None) -> set[str]:
-    """Return unit_ids currently quarantined in 07_review/unit-anomalies.json."""
+def quarantined_entries(batch_dir, stage: str | None = None) -> list[dict]:
+    """Return active quarantined anomaly entries (`unit_id`, `stage`, `reason`, `deterministic`)."""
     data = load_anomalies(batch_dir)
-    result: set[str] = set()
-    for uid, entries in (data.get("units") or {}).items():
+    rows: list[dict] = []
+    for uid, entries in sorted((data.get("units") or {}).items()):
         if not isinstance(entries, list):
             continue
         for entry in entries:
             if not isinstance(entry, dict) or not entry.get("quarantined"):
                 continue
-            if stage is None or str(entry.get("stage") or "") == stage:
-                result.add(str(uid))
-                break
-    return result
+            entry_stage = str(entry.get("stage") or "")
+            if stage is not None and entry_stage != stage:
+                continue
+            rows.append({
+                "unit_id": str(uid),
+                "stage": entry_stage,
+                "reason": str(entry.get("reason") or ""),
+                "deterministic": bool(entry.get("deterministic")),
+            })
+    return rows
+
+
+def quarantined_unit_ids(batch_dir, stage: str | None = None) -> set[str]:
+    """Return unit_ids currently quarantined in 07_review/unit-anomalies.json."""
+    return {row["unit_id"] for row in quarantined_entries(batch_dir, stage=stage)}
 
 
 def should_quarantine(accepted: dict, pending: set, deterministic: dict) -> bool:
-    """Quarantine only isolated/deterministic failures, never a full-batch outage."""
-    if not pending:
-        return False
-    return bool(accepted) or bool(deterministic)
+    """Quarantine only isolated failures when real units succeeded; never mask a full-batch outage."""
+    return bool(pending) and bool(accepted)
 
 
 def quarantined_response_for_unit(stage: str, unit: dict, error: object) -> dict:
