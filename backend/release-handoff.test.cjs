@@ -36,6 +36,10 @@ test('actual producer marker reaches host at repository root and restores throug
   const context = vm.createContext({ WORKFLOW_DIR: workflowDir, join, resolve, restoreRelease,
     console: { log() {} }, clearTimeout,
     operationsManager: { busyForRestart: () => repairActive },
+    // workerBusy 定义在截取范围之外（顶层），这里替身为空闲 worker。
+    workerBusy: async () => false,
+    // SPLIT_WORKER_ENABLED 为顶层常量，不在截取范围内；关闭分离 worker 以只验证发布交接。
+    SPLIT_WORKER_ENABLED: false,
     backend: { ready: false },
     ensureBackend: async () => ({ ok: ++boots > 1, error: 'simulated_unhealthy_boot' }),
     createReleaseCoordinator: (supplied) => {
@@ -45,7 +49,7 @@ test('actual producer marker reaches host at repository root and restores throug
       c.stop = () => { stops++; originalStop(); };
       return c;
     } });
-  vm.runInContext('let releaseCoordinator = null, backendWatcher = null, backendWatchTimer = null, restartTimer = null;\n' + start + '\n' + stop + '\nthis.start = startReleaseCoordinator; this.stop = stopBackendWatch;', context);
+  vm.runInContext('let releaseCoordinator = null, backendWatcher = null, backendWatchTimer = null, restartTimer = null, releaseWorkerReloadTimer = null;\n' + start + '\n' + stop + '\nthis.start = startReleaseCoordinator; this.stop = stopBackendWatch;', context);
   const coordinator = context.start();
   t.after(() => context.stop());
   const markerPath = join(root, '.operations-release.json');

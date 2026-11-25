@@ -6,6 +6,25 @@ const vm = require('node:vm');
 
 const client = fs.readFileSync(path.join(__dirname, '../lib/client.js'), 'utf8');
 
+// useState 的下标按 UploadView 源码中的声明顺序推算，避免新增 state 后写死的下标错位。
+function stateIndexOf(name) {
+  const start = client.indexOf('    function UploadView(');
+  const body = client.slice(start, client.indexOf('    function diagBanner(', start));
+  const decl = body.indexOf('const [' + name + ', ');
+  assert.ok(start >= 0 && decl >= 0, 'UploadView 缺少 state: ' + name);
+  return (body.slice(0, decl).match(/useState\(/g) || []).length;
+}
+const BATCHES_STATE = stateIndexOf('batches');
+const REFRESH_ERROR_STATE = stateIndexOf('refreshError');
+// refresh 同理按 UploadView 中 useCallback 的声明顺序推算（前面已有 sortQueueBatches）。
+const REFRESH_CALLBACK = (() => {
+  const start = client.indexOf('    function UploadView(');
+  const body = client.slice(start, client.indexOf('    function diagBanner(', start));
+  const decl = body.indexOf('const refresh = React.useCallback(');
+  assert.ok(decl >= 0, 'UploadView 缺少 refresh 回调');
+  return (body.slice(0, decl).match(/useCallback\(/g) || []).length;
+})();
+
 // Render only the existing upload component: no timers, requests, models or real batches.
 function renderFlow(items, current = items[0], options = {}) {
   let stateIndex = 0;
@@ -14,7 +33,7 @@ function renderFlow(items, current = items[0], options = {}) {
     flow_done: !!options.finished, advance: options.advance || {}, stage: { items, current, done: 0, total: items.length } };
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter((x) => x != null && x !== false) }),
-    useState(initial) { const index = stateIndex++; return [index === 6 ? (options.batches || [batch]) : index === 11 ? (options.refreshError || initial) : initial, value => updates.push({ index, value })]; },
+    useState(initial) { const index = stateIndex++; return [index === BATCHES_STATE ? (options.batches || [batch]) : index === REFRESH_ERROR_STATE ? (options.refreshError || initial) : initial, value => updates.push({ index, value })]; },
     useRef: (current) => ({ current }), useEffect() {}, useMemo: (fn) => fn(),
     useCallback: (callback) => { callbacks.push(callback); return callback; },
   };
@@ -30,7 +49,7 @@ function renderFlow(items, current = items[0], options = {}) {
   const helpersEnd = client.indexOf('    function diagBanner(', start);
   assert.ok(start >= 0 && helpersEnd > start);
   vm.runInContext(client.slice(start, helpersEnd), context);
-  return { tree: context.UploadView({}), context, refresh: callbacks[0], updates };
+  return { tree: context.UploadView({}), context, refresh: callbacks[REFRESH_CALLBACK], updates };
 }
 function walk(node, predicate, found = []) {
   if (!node || typeof node !== 'object') return found;
@@ -270,7 +289,7 @@ test('late polling responses cannot overwrite newer progress and errors remain v
   const older = f.refresh(), newer = f.refresh();
   replies[1].resolve({ batches: [{ name: 'fresh' }] }); await newer;
   replies[0].resolve({ batches: [{ name: 'old' }] }); await older;
-  assert.deepEqual(f.updates.filter(x => x.index === 6).map(x => x.value[0].name), ['fresh']);
+  assert.deepEqual(f.updates.filter(x => x.index === BATCHES_STATE).map(x => x.value[0].name), ['fresh']);
   const failing = f.refresh(); replies[2].reject(new Error('offline')); await failing;
   assert.ok(f.updates.some(x => typeof x.value === 'string' && x.value.includes('进度刷新失败')));
 });

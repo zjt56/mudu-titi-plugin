@@ -195,7 +195,7 @@ def _run_batch_upload(name, actor, unreviewed_revision='', attempt_token=''):
         srv._check_upload_preconditions(folder, unreviewed_revision, attempt_token)
         job["step"] = "暂存引用的媒体"
         staged = srv._stage_upload_media(folder)
-        preflight_path = folder / "07_upload" / "preflight.json"
+        preflight_path = Path(folder) / "07_upload" / "preflight.json"
         try:
             preflight_before = preflight_path.stat().st_mtime_ns
         except OSError:

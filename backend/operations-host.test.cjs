@@ -47,7 +47,7 @@ function nativeOperations({ available = true, routeError = false, ready = true, 
   let enabled = true, options, ensureCount = 0;
   const manager = { start() {}, stop, status: () => ({ available }) };
   const env = {
-    AbortSignal, console, backend, PLUGIN_DIR: '/mock/plugin',
+    AbortSignal, console, backend, PLUGIN_DIR: '/mock/plugin', backendAuthHeaders: () => ({}),
     operationsSettings: { read: () => ({ enabled }), save: value => { enabled = value.enabled; return { enabled }; } },
     ensureBackend: async () => { ensureCount++; backend.ready = true; return { ok: true }; },
     readRouter: () => ({}), harnessDefaultModel: () => ({}),

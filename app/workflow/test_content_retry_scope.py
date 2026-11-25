@@ -27,11 +27,17 @@ class ContentRetryScopeTest(unittest.TestCase):
                 with self.subTest(stage=stage, action=action):
                     state = self.state()
                     before = (self.batch / 'workflow/manifest.json').read_bytes()
-                    with self.assertRaisesRegex(ValueError, 'content_retry_requires_scope'), \
-                         patch.object(self_heal, '_requeue') as queue:
-                        self_heal._apply(self.batch, state, stage,
+                    with patch.object(self_heal, '_requeue') as queue:
+                        call = lambda: self_heal._apply(self.batch, state, stage,
                             'Official artifact missing; response already exists but import refused',
                             {'action': action, 'reason': 'retry'}, 1, {'files': {}})
+                        if action == 'record_only':
+                            # 559fe96 起内容阶段 record_only 直接拒绝并升级代码修复：不抛错、不重派、不写反馈。
+                            result = call()
+                            self.assertEqual((result['status'], result['escalation']), ('refused', 'code_repair'))
+                        else:
+                            with self.assertRaisesRegex(ValueError, 'content_retry_requires_scope'):
+                                call()
                     queue.assert_not_called()
                     self.assertEqual((self.batch / 'workflow/manifest.json').read_bytes(), before)
                     self.assertFalse((self.batch / 'workflow/repair-feedback' / (stage + '.json')).exists())
@@ -63,10 +69,15 @@ class ContentRetryScopeTest(unittest.TestCase):
                 'retryable': False, 'failure_class': failure_class}]})
             for action in self.aliases:
                 with self.subTest(failure_class=failure_class, action=action), \
-                     self.assertRaisesRegex(ValueError, 'content_source_binding_requires_code_repair'), \
                      patch.object(self_heal, '_requeue') as queue:
-                    self_heal._apply(self.batch, self.state(), 'explanations', detail,
+                    call = lambda: self_heal._apply(self.batch, self.state(), 'explanations', detail,
                         {'action': action, 'reason': 'new context'}, 1, {'files': {}})
+                    if action == 'record_only':
+                        result = call()
+                        self.assertEqual((result['status'], result['escalation']), ('refused', 'code_repair'))
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'content_source_binding_requires_code_repair'):
+                            call()
                 queue.assert_not_called()
             with self.assertRaisesRegex(ValueError, 'requires_code_repair'):
                 self_heal._content_retry_scope(self.batch, 'explanations', detail, unit_ids=['q-1'])

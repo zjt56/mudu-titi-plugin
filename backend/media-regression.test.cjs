@@ -46,7 +46,7 @@ test('health probe uses constant-time health route and consumes its identity res
   const code = host.slice(host.indexOf('function backendChildAlive('), host.indexOf('function spawnBackend('));
   let consumed = false;
   const probe = vm.runInNewContext(code + '\nprobeBackend', {
-    AbortController, setTimeout, clearTimeout, backendUrl: () => 'http://backend/',
+    AbortController, setTimeout, clearTimeout, backendUrl: () => 'http://backend/', process, backendAuthHeaders: () => ({}),
     backend: { proc: { pid: 123, exitCode: null, signalCode: null }, instanceId: 'owned' },
     fetch: async (url) => {
       assert.equal(url, 'http://backend/api/health');
@@ -60,7 +60,7 @@ test('health probe cancels non-success responses without reading their body', as
   const code = host.slice(host.indexOf('function backendChildAlive('), host.indexOf('function spawnBackend('));
   let released = false;
   const probe = vm.runInNewContext(code + '\nprobeBackend', {
-    AbortController, setTimeout, clearTimeout, backendUrl: () => 'http://backend/',
+    AbortController, setTimeout, clearTimeout, backendUrl: () => 'http://backend/', process, backendAuthHeaders: () => ({}),
     backend: { proc: { pid: 123, exitCode: null, signalCode: null }, instanceId: 'owned' },
     fetch: async () => ({ ok: false, body: { cancel: async () => { released = true; } }, json: () => { throw Error('must not read'); } }),
   });
@@ -71,6 +71,7 @@ test('ready proxy skips full batch probes and handles an already-ended GET', asy
   const code = host.slice(host.indexOf('async function proxyToBackend('), host.indexOf('// 写入 router 时'));
   const proxy = vm.runInNewContext(code + '\nproxyToBackend', {
     Buffer, AbortController, setTimeout, clearTimeout, backend: { port: 8791, ready: true },
+    backendAuthHeaders: () => ({}),
     probeBackend: async () => { await new Promise((resolve) => setImmediate(resolve)); return true; },
     fetch: async () => new Response(Buffer.from([255, 216, 255]), { headers: { 'content-type': 'image/jpeg', 'content-length': '3' } }),
   });

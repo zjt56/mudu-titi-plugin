@@ -1224,6 +1224,24 @@ def _retryable_upstream_task(task):
         return False
 
 
+# 宿主内容管理器停止（插件重载/后端重启）或 Python 调用被中断时，任务被写成 cancelled，
+# 但这不是内容或模型失败：没有候选、没有结果。旧实现同一 identity 永远复用这个已取消
+# 任务、立即以 retryable=False 失败，只能靠运维局部重生成换 identity（九上37 即如此）。
+# 只放行这两种确切原文；超时、删除批次、上下文/路由变化、已有候选/结果的任务仍是终态。
+_INTERRUPTED_ERRORS = frozenset(("Content manager stopped", "Native content invocation interrupted"))
+
+
+def _retryable_interrupted_task(task):
+    stamp = task.get("updated_at")
+    return (task.get("protocol") == PROTOCOL and task.get("status") == "cancelled"
+            and task.get("error") in _INTERRUPTED_ERRORS
+            and task.get("error_code") in (None, "cancelled")
+            and task.get("failure_class") is None and task.get("accepted") is False
+            and not any(key in task for key in ("candidate", "response", "validation_rejection"))
+            and not isinstance(stamp, bool) and isinstance(stamp, (int, float))
+            and math.isfinite(stamp) and stamp > 0)
+
+
 def _identity_receipt(identity):
     """Resolve a single intact retry chain; ambiguity preserves the old receipt."""
     index = _scan_index()
@@ -1248,7 +1266,7 @@ def _identity_receipt(identity):
             if children or len(seen) != len(rows):
                 return current, UPSTREAM_MAX_REDISPATCHES
             return current, count
-        if not _retryable_upstream_task(current):
+        if not (_retryable_upstream_task(current) or _retryable_interrupted_task(current)):
             return current, UPSTREAM_MAX_REDISPATCHES
         current = children[0]
         task_id = current.get("task_id")
@@ -1306,8 +1324,9 @@ def invoke(prompt, run_dir, config, *, permit_parallel=False):
         task, redispatches = _identity_receipt(identity)
         previous_task_id = None
         if (task is not None and redispatches < UPSTREAM_MAX_REDISPATCHES
-                and _retryable_upstream_task(task)
-                and time.time() - task["updated_at"] >= UPSTREAM_RETRY_COOLDOWN):
+                and (_retryable_interrupted_task(task)
+                     or (_retryable_upstream_task(task)
+                         and time.time() - task["updated_at"] >= UPSTREAM_RETRY_COOLDOWN))):
             previous_task_id = task["task_id"]
             task = None
         if task is None:

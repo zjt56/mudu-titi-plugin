@@ -64,6 +64,7 @@ function fake(options = {}) {
       child.stderr = new EventEmitter();
       child.port = Number(args[args.length - 1]);
       child.instanceId = opts.env.WF_BACKEND_INSTANCE_ID;
+      child.args = args;
       child.kill = (signal) => {
         signals.push({ child, signal });
         if (options.neverExit || (options.ignoreTerm && signal === 'SIGTERM')) return true;
@@ -320,7 +321,11 @@ test('watchdog leaves a healthy backend alone and spawns nothing', async () => {
     assert.equal(result.ok, true);
     assert.equal(result.skipped, 'alive');
     assert.equal(f.backend.proc, current);
-    assert.equal(f.children.length, 1);
+    // 分离 worker 开启时，backendWatchdogTick 对健康后端会补启缺失的 worker（有意设计）；
+    // 这里只要求不再起第二个后端，worker 至多补启一个。
+    const workers = f.children.filter(c => (c.args || []).includes('workbench.worker'));
+    assert.equal(f.children.length - workers.length, 1);
+    assert.ok(workers.length <= 1);
   } finally { await f.stopBackend(); }
 });
 

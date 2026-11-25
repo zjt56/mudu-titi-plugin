@@ -1235,3 +1235,38 @@ class AliasAlignmentTests(unittest.TestCase):
         report = upload_payload.build_payload(batch(item), self.catalog)
         self.assertTrue(report["passed"], report["errors"])
         self.assertNotIn("SUBQUESTION_COUNT_MISMATCH", {e.get("code") for e in report["errors"]})
+
+    def _cloze_10_blanks_with_tail(self, tail, subtype="10空"):
+        item = reading_group()
+        item["question_type"] = "完形填空"
+        item["filterMetadata"]["subtypes"] = [subtype]
+        item["material"] = " ".join(f"It is __{i}__." for i in range(1, 11))
+        item["numbers"] = list(range(1, 12))
+        item["subquestions"] = [
+            {"number": i, "stem": "______", "options": ["A. a", "B. b", "C. c", "D. d"],
+             "answer": "A", "explanation": "无", "knowledge": ["词汇/词汇辨析/动词辨析"]}
+            for i in range(1, 11)
+        ] + [dict(tail, number=11)]
+        return upload_payload.build_payload(batch(item), self.catalog)
+
+    def test_cloze_10_blanks_plus_short_answer_followup_passes_count_check(self):
+        # 第11题为无选项简答追问（如 40 批）：N空按正文编号空位计数，不依赖追问标记文字。
+        report = self._cloze_10_blanks_with_tail(
+            {"stem": "What is the main idea of the passage?", "options": [],
+             "answer": "It is about learning.", "explanation": "无", "knowledge": ["词汇/词汇辨析/动词辨析"]})
+        self.assertNotIn("SUBQUESTION_COUNT_MISMATCH", {e.get("code") for e in report["errors"]})
+
+    def test_cloze_10_blanks_plus_unmarked_choice_followup_passes_count_check(self):
+        # 第11题为无任何标记的普通选择追问（如 48/52 批）。
+        report = self._cloze_10_blanks_with_tail(
+            {"stem": "Which is the best title?", "options": ["A. One", "B. Two", "C. Three", "D. Four"],
+             "answer": "B", "explanation": "无", "knowledge": ["词汇/词汇辨析/动词辨析"]})
+        self.assertNotIn("SUBQUESTION_COUNT_MISMATCH", {e.get("code") for e in report["errors"]})
+
+    def test_cloze_blank_count_relaxation_still_rejects_wrong_subtype(self):
+        # 负向对照：正文10空+11子题时，9空/12空仍须报错，防止计数被放宽成任意值。
+        tail = {"stem": "Which is the best title?", "options": ["A. One", "B. Two", "C. Three", "D. Four"],
+                "answer": "B", "explanation": "无", "knowledge": ["词汇/词汇辨析/动词辨析"]}
+        for subtype in ("9空", "12空"):
+            report = self._cloze_10_blanks_with_tail(tail, subtype)
+            self.assertIn("SUBQUESTION_COUNT_MISMATCH", {e.get("code") for e in report["errors"]}, subtype)
