@@ -90,6 +90,29 @@ class OperationsImprovementsTest(unittest.TestCase):
             state = op._discover(folder)
         self.assertIsNone(state.get("incident"))
 
+    def test_discover_skips_review_stage_when_only_quality_differences(self):
+        folder = _seed_batch(self.root, "review-diff-batch")
+        op.service_heartbeat(True)
+        manifest = mf.load(folder)
+        manifest["stages"]["review"] = {"status": mf.FAILED}
+        mf.save(folder, manifest)
+        with mock.patch.object(self_heal, "_candidate", return_value=("review", "review stalled")), \
+             mock.patch.object(op, "_review_differences", return_value=True):
+            state = op._discover(folder)
+        self.assertIsNone(state.get("incident"))
+
+    def test_discover_still_opens_review_blocker_without_differences(self):
+        folder = _seed_batch(self.root, "review-real-batch")
+        op.service_heartbeat(True)
+        manifest = mf.load(folder)
+        manifest["stages"]["review"] = {"status": mf.FAILED}
+        mf.save(folder, manifest)
+        with mock.patch.object(self_heal, "_candidate", return_value=("review", "REVIEW_PROTOCOL_ERROR")), \
+             mock.patch.object(op, "_review_differences", return_value=False):
+            state = op._discover(folder)
+        self.assertIsNotNone(state.get("incident"))
+        self.assertEqual(state["incident"]["stage"], "review")
+
     # --- P0 & P2: self_heal delegation and source_binding producer ---
     def test_self_heal_producer_recognizes_source_binding(self):
         folder = _seed_batch(self.root, "prod-batch")

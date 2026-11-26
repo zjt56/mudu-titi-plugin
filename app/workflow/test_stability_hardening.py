@@ -214,6 +214,45 @@ class TestBatchMetricsSixDimensions(unittest.TestCase):
             self.assertEqual(m["self_heal_verified"]["count"], 0)
             self.assertEqual(m["pipeline_progress_only"]["count"], 1)
 
+    def _batch(self, root, name, incident):
+        b = root / name
+        (b / "workflow").mkdir(parents=True)
+        (b / "07_review").mkdir(parents=True)
+        (b / "workflow/manifest.json").write_text(json.dumps({"batch_name": name, "stages": {}}), encoding="utf-8")
+        (b / "workflow/operations.json").write_text(json.dumps({"incident": incident}), encoding="utf-8")
+        return b
+
+    def test_quality_differences_incident_is_not_a_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            b = self._batch(Path(tmp), "qd", {"status": "quality_differences",
+                                               "failure_class": "quality_differences", "trigger": "first_blocker"})
+            row = batch_metrics.evaluate_batch(b)
+            self.assertTrue(row["first_pass_no_blocker"])
+            self.assertEqual(row["blocker_kind"], "")
+
+    def test_real_repair_counts_as_self_heal_even_with_pipeline_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ok = self._batch(root, "ok", {
+                "status": "resolved", "resolution_source": "pipeline_progress", "trigger": "first_blocker",
+                "verification": {"verified": True},
+                "events": [{"action": "regenerate_units", "outcome": "completed"}]})
+            cr = self._batch(root, "cr", {
+                "status": "resolved", "resolution_source": "pipeline_progress", "trigger": "stale_running",
+                "verification": {"verified": True}, "code_repair": {"status": "verified"}, "events": []})
+            unk = self._batch(root, "unk", {
+                "status": "resolved", "resolution_source": "pipeline_progress", "trigger": "first_blocker",
+                "verification": {"verified": True},
+                "events": [{"action": "install_code_repair", "outcome": "unknown"},
+                           {"action": "apply_repair", "outcome": "failed"}]})
+            rows = {r["batch_name"]: r for r in batch_metrics.summarize_batches([ok, cr, unk])["batches"]}
+            self.assertTrue(rows["ok"]["self_heal_verified"])
+            self.assertFalse(rows["ok"]["pipeline_progress_only"])
+            self.assertTrue(rows["cr"]["self_heal_verified"])
+            self.assertEqual(rows["cr"]["blocker_kind"], "stale_running")
+            self.assertFalse(rows["unk"]["self_heal_verified"])
+            self.assertTrue(rows["unk"]["pipeline_progress_only"])
+
 
 if __name__ == "__main__":
     unittest.main()

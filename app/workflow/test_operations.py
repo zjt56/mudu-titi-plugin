@@ -18,6 +18,10 @@ class OperationsTests(unittest.TestCase):
         self.root = Path(self.tmp.name) / "workflows"
         self.folder = self.root / "paper"
         (self.folder / "workflow").mkdir(parents=True)
+        # 隔离运维心跳：真实 workbench 服务会写系统临时目录下的全局心跳文件，
+        # 未隔离时测试结果随本机是否在跑服务而变化。
+        patch.object(op, "_HEARTBEAT_FILE", Path(self.tmp.name) / "hb.json").start()
+        patch.object(op, "_service_until", 0.0).start()
         self.manifest = {"batch_dir": str(self.folder), "stages": {"validate": {"status": "failed"}}, "inputs": {}}
         self.put("workflow/manifest.json", self.manifest)
         # self_heal signs with retry evidence (inputs/code hashes), so the exact

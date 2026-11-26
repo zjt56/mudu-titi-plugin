@@ -14,6 +14,11 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.batch = Path(self.tmp.name).resolve() / 'batch'
         self.batch.mkdir()
+        # 隔离运维心跳：本机 workbench 在线时 recover 会直接委派给运维，测试结果随环境漂移。
+        from workflow import operations as op
+        patch.object(op, '_HEARTBEAT_FILE', Path(self.tmp.name) / 'hb.json').start()
+        patch.object(op, '_service_until', 0.0).start()
+        self.addCleanup(patch.stopall)
         self.manifest = mf.new_manifest('batch', self.batch, {}, {})
         mf.touch_stage(self.manifest, 'answers', mf.FAILED, notes='route failure')
         mf.save(self.batch, self.manifest)

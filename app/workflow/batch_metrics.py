@@ -16,6 +16,15 @@ from pathlib import Path
 import sys
 
 
+REPAIR_ACTIONS = frozenset({"install_code_repair", "regenerate_units", "apply_repair"})
+SUCCESS_OUTCOMES = frozenset({"completed", "succeeded", "applied", "verified"})
+
+
+def _successful_outcome(outcome) -> bool:
+    # 白名单：unknown/failed 等结果未确认，不得计为修复成功。
+    return str(outcome or "").lower() in SUCCESS_OUTCOMES
+
+
 def _read_json(path: Path) -> dict:
     if not path.is_file():
         return {}
@@ -47,24 +56,31 @@ def evaluate_batch(batch_dir) -> dict:
     quality_released = bool(rg_status == "completed" and rg.get("release_ready") is True)
 
     incident = ops.get("incident") if isinstance(ops.get("incident"), dict) else None
-    receipts = ops.get("receipts") if isinstance(ops.get("receipts"), list) else []
     events = incident.get("events") if isinstance(incident, dict) and isinstance(incident.get("events"), list) else []
-    had_blocker = bool(incident is not None)
-    first_pass_no_blocker = not had_blocker
-
     resolution_source = str((incident or {}).get("resolution_source") or "")
     inc_status = str((incident or {}).get("status") or "")
+    failure_class = str((incident or {}).get("failure_class") or "")
+    # 审核差异是产出不是卡点（规则 6/24），历史上先开后改判的记录不计入卡点。
+    quality_differences_only = bool(incident is not None and (
+        inc_status == "quality_differences" or failure_class == "quality_differences"))
+    had_blocker = bool(incident is not None and not quality_differences_only)
+    first_pass_no_blocker = not had_blocker
+    blocker_kind = (failure_class or str((incident or {}).get("trigger") or "")) if had_blocker else ""
+
+    verified = bool(((incident or {}).get("verification") or {}).get("verified") is True)
+    repair_action = any(
+        isinstance(e, dict) and e.get("action") in REPAIR_ACTIONS and _successful_outcome(e.get("outcome"))
+        for e in events)
+    code_repair_verified = str(((incident or {}).get("code_repair") or {}).get("status") or "") == "verified"
+    # 真实修复后复验通过即为自愈；resolution_source=pipeline_progress 只说明收口方式，
+    # 不能把已发生的修复动作抹掉。
+    self_heal_verified = bool(
+        had_blocker and inc_status == "resolved" and verified and (repair_action or code_repair_verified))
     pipeline_progress_only = bool(
         had_blocker
         and inc_status == "resolved"
         and resolution_source == "pipeline_progress"
-    )
-    verified = bool((incident or {}).get("verification", {}).get("verified") is True)
-    repair_action = any(isinstance(e, dict) and e.get("action") in {"repair", "code_repair", "install_code_repair", "regenerate_units"}
-                        for e in events)
-    self_heal_verified = bool(
-        had_blocker and inc_status == "resolved" and verified and repair_action
-        and resolution_source not in ("", "pipeline_progress", "quality_differences")
+        and not self_heal_verified
     )
 
     return {
@@ -79,6 +95,7 @@ def evaluate_batch(batch_dir) -> dict:
         "self_heal_verified": self_heal_verified,
         "pipeline_progress_only": pipeline_progress_only,
         "incident_status": inc_status,
+        "blocker_kind": blocker_kind,
         "resolution_source": resolution_source,
     }
 

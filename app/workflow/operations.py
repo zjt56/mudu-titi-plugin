@@ -1279,6 +1279,10 @@ def _discover(folder, *, force=False):
     if stage == "review":
         if record.get("status") in {mf.COMPLETED, mf.APPROVED}:
             return state
+        # 审核已执行完成且 review_gate 仅剩审核差异时，差异是产出而非卡点（规则 6/18/24）。
+        # 复用 reconcile 同一判定口径，避免先开卡点、事后再改判 quality_differences。
+        if _review_differences(folder, {"stage": "review"}):
+            return state
         if record.get("status") == mf.NEEDS_REVIEW:
             # Quality differences are valid review output, but needs_review also
             # represents protocol/stall failures. Verify the current round
