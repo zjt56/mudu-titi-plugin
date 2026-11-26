@@ -162,9 +162,9 @@
               if (manual) setRefreshing(false);
               return;
             }
-            // 只有可重试的错误（网络/超时/5xx）才继续退避；4xx（如 404）直接放弃。
+            // 只有明确业务 4xx（400/401/403）直接放弃；热重载/重启窗口期宿主可能短暂返回 404，允许退避重试。
             const msg = String((e && e.message) || e);
-            const retriable = !/\b(400|401|403|404)\b/.test(msg);
+            const retriable = !/\b(400|401|403)\b/.test(msg);
             if (!retriable) break;
           }
         }
