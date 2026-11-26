@@ -1,7 +1,7 @@
     // ---- 整卷单元详情缓存（LRU，最多保留 8 份试卷，确保大于首屏预取数 4 份）----------
     var UNIT_CACHE = new Map();
     var UNIT_CACHE_ORDER = [];
-    var UNIT_CACHE_MAX = 8;
+    var UNIT_CACHE_MAX = 2;
     function unitCacheTouch(batchName) {
       const key = String(batchName || '');
       const idx = UNIT_CACHE_ORDER.indexOf(key);
@@ -48,7 +48,7 @@
     }
     // 题型审核跨批次单题轻量 LRU（最多保留 24 题），不挤占「试卷审核」的整卷预热缓存。
     var TYPE_UNIT_CACHE = new Map();
-    var TYPE_UNIT_CACHE_MAX = 24;
+    var TYPE_UNIT_CACHE_MAX = 12;
     function typeUnitCacheKey(batchName, unitId) {
       return String(batchName || '') + '\0' + String(unitId || '');
     }
@@ -204,7 +204,7 @@
       if (!resolved) return h('span', { role: 'status', style: T.hint }, '图片加载中…');
       if (resolved.error) return h('div', { role: 'status', style: { ...T.hint, margin: '8px 0' } },
         '图片未显示：' + (name || '') + '（' + resolved.error + '） ',
-        h('button', { className: 'wf-btn', style: T.btn, onClick: () => { try { const u = imageRequestUrl(url); IMG_CACHE.delete(u); IMG_RESOLVED.delete(u); const i = IMG_CACHE_ORDER.indexOf(u); if (i >= 0) IMG_CACHE_ORDER.splice(i, 1); } catch {} setAttempt((n) => n + 1); } }, '重试图片'));
+        h('button', { className: 'wf-btn', style: T.btn, onClick: () => { try { const u = imageRequestUrl(url); IMG_CACHE.delete(u); const old = IMG_RESOLVED.get(u); IMG_RESOLVED.delete(u); revokeIfBlobUrl(old); } catch {} setAttempt((n) => n + 1); } }, '重试图片'));
       return h('img', {
         src: resolved.src, alt: name || '试题配图', className: 'wf-img',
         style: style || undefined,

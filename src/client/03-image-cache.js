@@ -3,8 +3,7 @@
     // PreviewImage 首帧即可同步渲染 <img>，彻底消除切题时的“图片加载中…”闪烁。
     var IMG_CACHE = new Map();
     var IMG_RESOLVED = new Map();
-    var IMG_CACHE_ORDER = [];      // 兼容保留；主 LRU 顺序由 Map 插入序维护
-    var IMG_CACHE_MAX = 400;       // 最多缓存 400 张（题图很小，约几 MB 量级）
+    var IMG_CACHE_MAX = 100;       // 最多缓存 100 张；LRU 顺序由 Map 插入序维护
     function revokeIfBlobUrl(src) {
       if (typeof src === 'string' && src.startsWith('blob:') && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
         try { URL.revokeObjectURL(src); } catch {}

@@ -276,8 +276,14 @@
             }
           }
         };
-        const timer = setInterval(poll, 900);
-        return () => { cancelled = true; clearInterval(timer); };
+        // 串行轮询：上一次请求结束后再等 900ms，避免慢请求时多个请求重叠堆积。
+        let timer = null;
+        const loop = async () => {
+          await poll();
+          if (!cancelled) timer = setTimeout(loop, 900);
+        };
+        timer = setTimeout(loop, 900);
+        return () => { cancelled = true; if (timer) clearTimeout(timer); };
       }, [aiModal?.status, batchName, load]);
 
       async function openPaperPreview() {

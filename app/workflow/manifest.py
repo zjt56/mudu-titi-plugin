@@ -107,11 +107,12 @@ def sha256_file(path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     value = digest.hexdigest()
-    # Keep only a bounded process-local cache. Old metadata keys are harmless,
-    # but clearing prevents a long-lived backend from retaining every revision.
-    if len(_FILE_DIGEST_CACHE) >= _FILE_DIGEST_CACHE_LIMIT:
-        _FILE_DIGEST_CACHE.clear()
+    # Bounded LRU: evict oldest entries one at a time (dict keeps insertion
+    # order) instead of clearing everything and causing a re-hash storm.
+    _FILE_DIGEST_CACHE.pop(key, None)
     _FILE_DIGEST_CACHE[key] = value
+    while len(_FILE_DIGEST_CACHE) > _FILE_DIGEST_CACHE_LIMIT:
+        _FILE_DIGEST_CACHE.pop(next(iter(_FILE_DIGEST_CACHE)), None)
     return value
 
 
