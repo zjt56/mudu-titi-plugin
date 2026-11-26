@@ -844,7 +844,7 @@ def release_awaiting_restart(root):
     return json.loads(marker.read_text(encoding="utf-8")).get("state") == "installed"
 
 
-def install(job, *, backup_dir, allow=False):
+def install(job, *, backup_dir, allow=False, force_while_busy=False):
     """Journaled install under explicit authorization or local autonomy.
 
     ``allow=True`` remains the trusted Host's legacy API. Autonomous calls leave
@@ -857,6 +857,11 @@ def install(job, *, backup_dir, allow=False):
         authorization = install_authorization(root)
         if not authorization["allowed"]:
             raise ValueError("install_disabled")
+    if not force_while_busy:
+        from . import run_snapshot
+        busy_batches = run_snapshot.detect_active_batches(root)
+        if busy_batches:
+            raise ValueError("active_batch_running:" + ",".join(busy_batches))
     plan = job.get("plan")
     if plan:
         for change in plan.get("changes", []):

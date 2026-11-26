@@ -177,6 +177,14 @@ def _stage_age_seconds(record):
 def _recent_stage_activity(folder, stage_id, window=STALE_RUNNING_SECONDS):
     """Return True if a stage's run/attempt directory or live activity shows active work."""
     wf = Path(folder) / "workflow"
+    if stage_id == "review":
+        try:
+            from . import review_progress
+            prog = review_progress.has_active_progress(folder, window)
+            if prog is not None:
+                return prog
+        except (ImportError, OSError, ValueError, TypeError):
+            pass
     try:
         from . import activity as wf_activity
         live = wf_activity.read(folder)
@@ -223,6 +231,10 @@ def _stale_running_candidate(folder, manifest, *, force=False):
         record = stages.get(spec.id) or {}
         if record.get("status") != mf.RUNNING:
             continue
+        if spec.id == "review":
+            rg = stages.get("review_gate") or {}
+            if rg.get("status") == mf.NEEDS_REVIEW and rg.get("execution_completed") is True:
+                continue
         age = _stage_age_seconds(record)
         busy = _execution_busy(folder)
         if not busy and (force or (age is not None and age >= ORPHAN_RUNNING_GRACE_SECONDS)):

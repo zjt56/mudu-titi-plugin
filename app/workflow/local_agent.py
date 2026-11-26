@@ -806,7 +806,12 @@ def _check_input_hashes(batch_dir, hashes):
         except OSError as exc:
             raise AgentError(f"Bundled input is no longer readable: {relative}", "context_changed") from exc
         if digest.hexdigest() != expected:
-            raise AgentError(f"Bundled input changed during agent task: {relative}", "context_changed")
+            from workflow import run_snapshot
+            change_kind = run_snapshot.classify_input_change(relative)
+            raise AgentError(
+                f"Bundled input changed during agent task: {relative} [change_kind={change_kind}]",
+                "context_changed",
+            )
 
 
 def _part_snapshot_dir(batch_dir, stage):

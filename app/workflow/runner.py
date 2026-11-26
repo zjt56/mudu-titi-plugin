@@ -1419,6 +1419,11 @@ def cmd_diagnose(args) -> int:
 def _run_batch_locked(batch_dir: Path, fn) -> int:
     """Serialize a complete public batch operation with protocol imports."""
     from .local_agent import _batch_lock
+    try:
+        from . import run_snapshot
+        run_snapshot.capture(batch_dir)
+    except OSError:
+        pass
     with _batch_lock(batch_dir, 1500):
         return fn()
 

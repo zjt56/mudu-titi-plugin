@@ -339,8 +339,22 @@ def restore(batch, source_text):
                     # while only one already carries the exact underline from source.
                     continue
                 if owned is None:
+                    ranked = []
+                    for _owner, _key, p, left, right, ins, ovl, exact in matches:
+                        score = (2 if exact else 0) + (1 if ins else 0) + (0 if ovl else 1)
+                        ranked.append({
+                            "field": "/".join(map(str, p)),
+                            "unit_index": _unit_index(p),
+                            "span": [left, right],
+                            "exact_paragraph": bool(exact),
+                            "already_underlined": bool(ins),
+                            "overlap": bool(ovl),
+                            "score": score,
+                        })
+                    ranked.sort(key=lambda c: (-c["score"], c["field"]))
                     issues.append(dict(evidence, code="UNDERLINE_MAPPING_AMBIGUOUS",
-                                       message=f"完整原文上下文对应 {len(matches)} 个位置，未自动改动"))
+                                       message=f"完整原文上下文对应 {len(matches)} 个位置，未自动改动",
+                                       candidates=ranked))
                     continue
                 owned_overlap = False
                 for owner, key, path, left, right, inside, overlap, _exact in matches:

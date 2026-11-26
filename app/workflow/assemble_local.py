@@ -647,8 +647,14 @@ def try_assemble(batch_dir, config=None):
         return 3 if managed else None
     from . import agent_tasks
     try:
+        built = build(batch_dir)
+        try:
+            from . import preassemble_diagnostics
+            preassemble_diagnostics.diagnose(batch_dir, built.get("items"), write_report=True)
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
         candidate = {"status": "completed",
-                     "artifacts": {agent_tasks.ARTIFACTS["assemble"]: build(batch_dir)},
+                     "artifacts": {agent_tasks.ARTIFACTS["assemble"]: built},
                      "notes": ["确定性组装：沿用来源绑定的前置题目对象或既有结构，合并上游标签，正常执行整批保真校验，未调用模型"],
                      "findings": []}
         agent_tasks.accept_result(batch_dir, "assemble", candidate, validate_only=True)
