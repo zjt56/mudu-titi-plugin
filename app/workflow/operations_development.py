@@ -844,7 +844,7 @@ def release_awaiting_restart(root):
     return json.loads(marker.read_text(encoding="utf-8")).get("state") == "installed"
 
 
-def install(job, *, backup_dir, allow=False, force_while_busy=False):
+def install(job, *, backup_dir, allow=False, force_while_busy=False, runtime_lock_held=False):
     """Journaled install under explicit authorization or local autonomy.
 
     ``allow=True`` remains the trusted Host's legacy API. Autonomous calls leave
@@ -857,11 +857,25 @@ def install(job, *, backup_dir, allow=False, force_while_busy=False):
         authorization = install_authorization(root)
         if not authorization["allowed"]:
             raise ValueError("install_disabled")
-    if not force_while_busy:
-        from . import run_snapshot
-        busy_batches = run_snapshot.detect_active_batches(root)
-        if busy_batches:
-            raise ValueError("active_batch_running:" + ",".join(busy_batches))
+    if runtime_lock_held:
+        return _install_locked(job, backup_dir=backup_dir, allow=allow, force_while_busy=force_while_busy)
+    from . import local_agent
+    with local_agent._runtime_lock(30, shared=False):
+        if not force_while_busy:
+            from . import run_snapshot
+            busy_batches = run_snapshot.detect_active_batches(root)
+            if busy_batches:
+                raise ValueError("active_batch_running:" + ",".join(busy_batches))
+        return _install_locked(job, backup_dir=backup_dir, allow=allow, force_while_busy=force_while_busy)
+
+
+def _install_locked(job, *, backup_dir, allow=False, force_while_busy=False):
+    root = Path(job["source_root"])
+    authorization = {"allowed": True, "autonomous": False, "mode": "explicit_host"}
+    if allow is not True:
+        authorization = install_authorization(root)
+        if not authorization["allowed"]:
+            raise ValueError("install_disabled")
     plan = job.get("plan")
     if plan:
         for change in plan.get("changes", []):

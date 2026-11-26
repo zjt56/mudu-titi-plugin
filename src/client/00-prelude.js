@@ -118,15 +118,15 @@ window.__ModuleLoader__.load({
       toolbarTitle: { fontWeight: 600, fontSize: 13.5 },
       paperRow: (active) => ({
         margin: '0 2px 6px', padding: '7px 9px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
-        borderRadius: 8, transition: 'background .16s, border-color .16s',
+        borderRadius: 8, transition: 'background .16s, border-color .16s, color .16s',
         // 列表保留 Harness 默认字体，题目正文在内容区域使用统一排版。
         fontFamily: 'inherit',
         // 每道题都是独立的一行卡片：细边框把题与题分开，不再像连成一片。
-        // 选中态用加深的中性底色 + 左侧强调条，浅色/深色主题都看得清。
-        background: active ? 'var(--wf-sel-bg)' : 'var(--dsw-alias-bg-base)',
-        border: '1px solid ' + (active ? 'var(--wf-sel-border)' : 'var(--dsw-alias-border-l2)'),
-        color: 'var(--dsw-alias-label-primary)',
-        boxShadow: active ? 'inset 2px 0 0 var(--dsw-alias-label-primary)' : 'none',
+        // 选中态采用与主导航/筛选一致的浅蓝色体系 + 左侧蓝色强调条，兼容浅色/深色主题。
+        background: active ? 'color-mix(in srgb, #3b82f6 12%, var(--dsw-alias-bg-base))' : 'var(--dsw-alias-bg-base)',
+        border: '1px solid ' + (active ? 'color-mix(in srgb, #3b82f6 42%, var(--dsw-alias-border-l2))' : 'var(--dsw-alias-border-l2)'),
+        color: active ? 'color-mix(in srgb, #2563eb 78%, var(--dsw-alias-label-primary))' : 'var(--dsw-alias-label-primary)',
+        boxShadow: active ? 'inset 3px 0 0 #2563eb' : 'none',
       }),
       main: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
       scroll: { flex: 1, overflow: 'auto', padding: 18 },

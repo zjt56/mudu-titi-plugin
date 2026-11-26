@@ -1194,6 +1194,12 @@ def main(argv=None):
         config = dict(config, _part_model_binding=_part_model_binding(config))
         batch_dir = args.batch_dir.expanduser().resolve()
         config["_content_batch_dir"] = str(batch_dir)
+        if not args.dry_run:
+            try:
+                from workflow import run_snapshot
+                run_snapshot.capture(batch_dir)
+            except OSError:
+                pass
         assembling = args.stage == "preassemble"
         accept_stage = args.stage
         if assembling:

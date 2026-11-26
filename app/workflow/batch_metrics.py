@@ -48,7 +48,8 @@ def evaluate_batch(batch_dir) -> dict:
 
     incident = ops.get("incident") if isinstance(ops.get("incident"), dict) else None
     receipts = ops.get("receipts") if isinstance(ops.get("receipts"), list) else []
-    had_blocker = bool(incident is not None or receipts)
+    events = incident.get("events") if isinstance(incident, dict) and isinstance(incident.get("events"), list) else []
+    had_blocker = bool(incident is not None)
     first_pass_no_blocker = not had_blocker
 
     resolution_source = str((incident or {}).get("resolution_source") or "")
@@ -58,9 +59,11 @@ def evaluate_batch(batch_dir) -> dict:
         and inc_status == "resolved"
         and resolution_source == "pipeline_progress"
     )
+    verified = bool((incident or {}).get("verification", {}).get("verified") is True)
+    repair_action = any(isinstance(e, dict) and e.get("action") in {"repair", "code_repair", "install_code_repair", "regenerate_units"}
+                        for e in events)
     self_heal_verified = bool(
-        had_blocker
-        and inc_status == "resolved"
+        had_blocker and inc_status == "resolved" and verified and repair_action
         and resolution_source not in ("", "pipeline_progress", "quality_differences")
     )
 

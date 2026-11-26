@@ -86,11 +86,11 @@ test('全局中性色板：无蓝色，按钮浅白底 + 中性灰文字', () =>
   }
 });
 
-test('左侧题目列表：每题有独立边框分隔，选中态加深并带强调条', () => {
+test('左侧题目列表：每题有独立边框分隔，选中态使用浅蓝色并带蓝色强调条', () => {
   assert.match(client, /margin: '0 2px 6px', padding: '7px 9px'/);
-  assert.match(client, /border: '1px solid ' \+ \(active \? 'var\(--wf-sel-border\)' : 'var\(--dsw-alias-border-l2\)'\)/);
-  assert.match(client, /background: active \? 'var\(--wf-sel-bg\)' : 'var\(--dsw-alias-bg-base\)'/);
-  assert.match(client, /boxShadow: active \? 'inset 2px 0 0 var\(--dsw-alias-label-primary\)' : 'none'/);
+  assert.match(client, /border: '1px solid ' \+ \(active \? 'color-mix\(in srgb, #3b82f6 42%, var\(--dsw-alias-border-l2\)\)' : 'var\(--dsw-alias-border-l2\)'\)/);
+  assert.match(client, /background: active \? 'color-mix\(in srgb, #3b82f6 12%, var\(--dsw-alias-bg-base\)\)' : 'var\(--dsw-alias-bg-base\)'/);
+  assert.match(client, /boxShadow: active \? 'inset 3px 0 0 #2563eb' : 'none'/);
   // hover 不再把选中行刷成纯白，也不影响原卷正文。
   assert.match(client, /\.wf-paper\[data-unit\]:not\(\.wf-active\):hover/);
   assert.doesNotMatch(client, /\.wf-paper\.wf-active:hover\{filter:brightness/);

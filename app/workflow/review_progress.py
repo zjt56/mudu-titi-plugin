@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import threading
 import time
+from contextlib import contextmanager
 
 PROGRESS_REL = "workflow/review-progress.json"
 _LOCK = threading.Lock()
@@ -35,14 +36,23 @@ def _save(batch_dir, data: dict) -> None:
     tmp.replace(p)
 
 
-def record_part_start(batch_dir, task_id: str, round_id: str, target_count: int, lease_seconds: float = 600.0) -> None:
+def record_part_start(batch_dir, task_id: str, round_id: str, target_count: int, lease_seconds: float = 600.0, *, generation: str | None = None) -> None:
     """记录单个审核分片开始执行与调用租约。"""
     now = time.time()
     with _LOCK:
         doc = load(batch_dir) or {"schema": "review-progress-v1", "parts": {}}
+        generation = str(generation or doc.get("generation") or "")
+        if generation:
+            doc["generation"] = generation
+            doc["parts"] = {
+                key: value for key, value in doc.setdefault("parts", {}).items()
+                if isinstance(value, dict) and str(value.get("generation") or "") == generation
+                and value.get("status") == "running"
+            }
         parts = doc.setdefault("parts", {})
         parts[str(task_id)] = {
             "task_id": str(task_id),
+            "generation": str(generation or doc.get("generation") or ""),
             "round_id": str(round_id),
             "target_count": int(target_count),
             "started_at": now,
@@ -63,6 +73,8 @@ def record_part_progress(
     installed_targets: int | None = None,
     status: str | None = None,
     active_lease: bool | None = None,
+    lease_seconds: float | None = None,
+    generation: str | None = None,
 ) -> None:
     """记录单个审核分片的有效进展（如模型返回、目标安装或终态收口）。"""
     now = time.time()
@@ -70,7 +82,11 @@ def record_part_progress(
         doc = load(batch_dir) or {"schema": "review-progress-v1", "parts": {}}
         parts = doc.setdefault("parts", {})
         entry = parts.setdefault(str(task_id), {"task_id": str(task_id), "started_at": now})
+        if generation is not None:
+            entry["generation"] = str(generation)
         entry["last_progress_at"] = now
+        if active_lease and lease_seconds is not None:
+            entry["lease_expires_at"] = now + max(30.0, float(lease_seconds))
         if installed_targets is not None:
             entry["installed_targets"] = int(installed_targets)
         if status is not None:
@@ -83,7 +99,26 @@ def record_part_progress(
         _save(batch_dir, doc)
 
 
-def has_active_progress(batch_dir, window_seconds: float, *, now: float | None = None) -> bool | None:
+@contextmanager
+def lease(batch_dir, task_id: str, *, lease_seconds: float, generation: str | None = None, interval: float = 30.0):
+    """Renew a review part lease while the model call is alive."""
+    stop = threading.Event()
+    def renew():
+        while not stop.wait(max(1.0, float(interval))):
+            try:
+                record_part_progress(batch_dir, task_id, active_lease=True, lease_seconds=lease_seconds, generation=generation)
+            except OSError:
+                pass
+    thread = threading.Thread(target=renew, daemon=True, name="review-lease")
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
+
+
+def has_active_progress(batch_dir, window_seconds: float, *, now: float | None = None, generation: str | None = None) -> bool | None:
     """检查 review-progress.json 中是否存在仍在有效推进或持有有效租约的分片。
 
     返回 None 表示尚无分片进度文件（调用方回退到既有目录 mtime 检测）；
@@ -97,8 +132,11 @@ def has_active_progress(batch_dir, window_seconds: float, *, now: float | None =
     if not isinstance(parts, dict) or not parts:
         return None
     ts = time.time() if now is None else float(now)
+    active_generation = str(generation or doc.get("generation") or "")
     for entry in parts.values():
         if not isinstance(entry, dict):
+            continue
+        if active_generation and str(entry.get("generation") or "") != active_generation:
             continue
         if entry.get("status") != "running":
             continue

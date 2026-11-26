@@ -21,8 +21,8 @@
         + '.wf-hoverable:hover{background:var(--dsw-alias-bg-layer-2)!important}'
         // 只让「题目列表行」响应 hover；原卷正文 .wf-paper 不跟着变色。
         // 选中行不再被 hover 的浅底盖掉，只加深边框。
-        + '.wf-paper[data-unit]:not(.wf-active):hover,.wf-paper[data-type-unit]:not(.wf-active):hover{background:var(--wf-sel-hover)!important;border-color:var(--wf-brand-border)!important;color:var(--dsw-alias-label-primary)!important}'
-        + '.wf-paper[data-unit].wf-active:hover,.wf-paper[data-type-unit].wf-active:hover{border-color:var(--wf-sel-border)!important}'
+        + '.wf-paper[data-unit]:not(.wf-active):hover,.wf-paper[data-type-unit]:not(.wf-active):hover{background:color-mix(in srgb, #3b82f6 6%, var(--dsw-alias-bg-base))!important;border-color:color-mix(in srgb, #3b82f6 28%, var(--dsw-alias-border-l2))!important;color:var(--dsw-alias-label-primary)!important}'
+        + '.wf-paper[data-unit].wf-active:hover,.wf-paper[data-type-unit].wf-active:hover{border-color:color-mix(in srgb, #2563eb 55%, var(--dsw-alias-border-l2))!important}'
         + '.wf-card-hover:hover{border-color:var(--wf-brand-border)!important;box-shadow:0 4px 16px rgba(0,0,0,.09)!important}'
         // 按钮状态：内联 style 的 background/border 优先级更高，hover 必须 !important 才生效。
         + '.wf-btn:not(:disabled):hover{background:var(--dsw-alias-bg-layer-2)!important;border-color:var(--wf-brand-border)!important;color:var(--wf-brand)!important}'

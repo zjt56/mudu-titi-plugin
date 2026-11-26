@@ -72,8 +72,8 @@ def _extract_subtypes(item: dict) -> list[str]:
 def _diagnose_unit(item: dict, index: int) -> list[dict]:
     uid = _unit_id(item, index)
     findings: list[dict] = []
-    subs = item.get("subQuestions") or item.get("sub_questions") or []
-    is_group = bool(item.get("kind") == "group" or subs)
+    subs = item.get("subquestions") or item.get("subQuestions") or item.get("sub_questions") or []
+    is_group = bool(item.get("unit_kind") == "group" or item.get("kind") == "group" or subs)
     material = str(item.get("material") or "").strip()
     stem = str(item.get("stem") or "").strip()
     qtype = str(item.get("type") or item.get("question_type") or "").strip()
@@ -125,7 +125,12 @@ def _diagnose_unit(item: dict, index: int) -> list[dict]:
             break
     if expected_opt is not None:
         raw_options = item.get("options")
-        if isinstance(raw_options, list) and raw_options and len(raw_options) != expected_opt:
+        actual_options = len(raw_options) if isinstance(raw_options, list) else 0
+        if not actual_options and isinstance(subs, list):
+            child_counts = [len(s.get("options") or []) for s in subs if isinstance(s, dict)]
+            if child_counts:
+                actual_options = max(child_counts)
+        if actual_options != expected_opt:
             findings.append({
                 "unit_id": uid,
                 "code": "PRE_E20_OPTION_COUNT_CONFLICT",
@@ -134,7 +139,7 @@ def _diagnose_unit(item: dict, index: int) -> list[dict]:
                 "evidence": {
                     "subtype": matched_sub,
                     "expected": expected_opt,
-                    "actual": len(raw_options),
+                    "actual": actual_options,
                 },
             })
 

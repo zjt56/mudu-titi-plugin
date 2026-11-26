@@ -181,8 +181,10 @@ def _recent_stage_activity(folder, stage_id, window=STALE_RUNNING_SECONDS):
         try:
             from . import review_progress
             prog = review_progress.has_active_progress(folder, window)
-            if prog is not None:
-                return prog
+            if prog is True:
+                return True
+            if prog is False:
+                return False
         except (ImportError, OSError, ValueError, TypeError):
             pass
     try:
@@ -2048,7 +2050,7 @@ def _install_code_repair(folder, incident, data):
     if not plan or plan.get("code_fingerprint") != dev.fingerprint(job):
         raise ValueError("current_install_plan_required")
     incident["_install_started"] = True
-    installed = dev.install(job, backup_dir=_code_root(folder), allow=True)
+    installed = dev.install(job, backup_dir=_code_root(folder), allow=True, runtime_lock_held=True)
     record.update(status="installed_pending_restart", installed_at=mf.now_iso(), plan_id=plan["plan_id"],
                   install_process=_process_identity(), install_attempt_id=incident["attempt_id"],
                   authorization_mode=authorization.get("mode"))
