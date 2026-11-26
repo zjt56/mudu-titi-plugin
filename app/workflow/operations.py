@@ -904,6 +904,7 @@ def _recovery_plan(folder, incident):
     budgets = _budgets(incident)
     record = _incident_code_record(folder, incident) or {}
     actions = []
+    authorization_wait = ""
     if budgets["attempts"] < budgets["attempts_limit"]:
         if record.get("status") == "installed_pending_restart":
             actions = ["restart_backend_then_claim_verify"]
@@ -911,7 +912,11 @@ def _recovery_plan(folder, incident):
             actions = ["resume:retry_stage_with_fresh_context", "verify"]
         elif record.get("status") == "prepared":
             if budgets["installs"] < budgets["installs_limit"]:
-                actions = ["install_code_repair"]
+                authorization = _install_authorization(confirm=True)
+                if authorization.get("allowed") is True:
+                    actions = ["install_code_repair"]
+                else:
+                    authorization_wait = "等待受控宿主安装授权；未授权时不重复调用 install_code_repair"
         elif record.get("status") in {"workspace_ready", "tests_passed", "tests_failed"}:
             actions = ["code_repair"]
         else:
@@ -921,7 +926,8 @@ def _recovery_plan(folder, incident):
                       "repair": {key: record.get(key) for key in
                                  ("job_id", "status", "plan_id", "installed_at", "settled_at", "workspace_fingerprint")}})
     return {"evidence": evidence, "progress": progress, "next_actions": actions,
-            "mode": "isolated_code_repair", "requires_human": False}
+            "mode": "isolated_code_repair", "requires_human": False,
+            "authorization_wait": authorization_wait}
 
 
 def _agent_lock_free():

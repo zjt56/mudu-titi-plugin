@@ -83,6 +83,17 @@ class AutonomousOperationsTests(unittest.TestCase):
         self.evidence.return_value = 'inputs-code-v2'
         self.assertEqual(len(op.incidents(self.root)['incidents']), 1)
 
+    def test_prepared_recovery_waits_without_install_authorization(self):
+        incident = {'stage': 'validate', 'attempts': []}
+        with patch.object(op, '_incident_code_record', return_value={
+                'status': 'prepared', 'plan_id': 'plan-1'}), \
+             patch.object(op, '_evidence', return_value='evidence-1'), \
+             patch.object(op, '_install_authorization', return_value={
+                 'allowed': False, 'mode': 'disabled', 'config_path': '/tmp/.operations-autonomy.json'}):
+            plan = op._recovery_plan(self.folder, incident)
+        self.assertEqual(plan['next_actions'], [])
+        self.assertIn('等待受控宿主安装授权', plan['authorization_wait'])
+
     def test_restart_discovery_reclaims_live_old_process_lease_immediately(self):
         old = self.claim()
         with patch.object(op, '_process_identity', return_value={'pid': 99, 'generation': 'new'}):
