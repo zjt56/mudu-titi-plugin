@@ -200,6 +200,40 @@ def available(batch_dir) -> bool:
         return False
 
 
+def _restore_printed_blank_shells(data: dict, units) -> int:
+    """给「原卷确有编号空位」却被留空的组题子题补空壳题干。
+
+    早期来源/画线视图可能把 `5.` 之后的行内编号空（`6.`–`10.`，含
+    `7.b______` 这种字母提示空）串进上一小题题干，后面的子题题干就留空，
+    整批结构体检会以 `[A9] 子题 N: stem 为空` 拦下。确认结构里的原文确实
+    印刷了该题号的空位，就是空壳题干（`______`）的充分证据：只填空题干，
+    不改已有题干、材料、选项或答案，也不生成任何新内容。
+    """
+    from .preview import _weak_numbers
+    changed = 0
+    for item in data.get("items") or []:
+        if not isinstance(item, dict) or item.get("unit_kind") != "group":
+            continue
+        unit = units.get(_unit_id(item)) if isinstance(units, dict) else None
+        if not isinstance(unit, dict):
+            continue
+        numbers = {int(n) for n in (unit.get("numbers") or []) if str(n).isdigit()}
+        printed = set()
+        for line in str(unit.get("stem") or "").splitlines():
+            printed.update(n for n in _weak_numbers(line) if n in numbers)
+        if not printed:
+            continue
+        for child in item.get("subquestions") or []:
+            if not isinstance(child, dict):
+                continue
+            number = child.get("number")
+            if (isinstance(number, int) and number in printed
+                    and not str(child.get("stem") or "").strip()):
+                child["stem"] = "______"
+                changed += 1
+    return changed
+
+
 def _overlay_labels(target: dict, source: dict, main_type=None) -> None:
     tb = source.get("textbook") if isinstance(source, dict) else None
     if isinstance(tb, dict) and tb:
@@ -337,6 +371,9 @@ def project_final_view(batch_dir, payload: dict) -> dict:
         children = {str(c['number']): c for c in early.get('subquestions') or []}
         for child in target.get('subquestions') or []:
             overlay(child, children[str(child['number'])])
+    # 画线/来源视图也可能把行内编号空留给上一小题；最终视图必须按确认结构
+    # 的原文空位补齐空壳子题题干，否则整批 A9（stem 为空）会拦下。
+    _restore_printed_blank_shells(final, {u['unit_id']: u for u in units})
     return final
 
 
@@ -455,6 +492,7 @@ def build(batch_dir) -> dict:
                 child["answer"] = answers[answer_key]
             if answer_key in difficulty and "difficulty" in child:
                 child["difficulty"] = difficulty[answer_key]
+    _restore_printed_blank_shells(data, units)
     return data
 
 

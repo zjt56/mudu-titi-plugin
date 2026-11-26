@@ -225,5 +225,38 @@ class WindowsSubprocessEncodingTest(unittest.TestCase):
             self.assertEqual((kw.get("env") or {}).get("PYTHONIOENCODING"), "utf-8")
 
 
+class Sha256FileDigestLruTest(unittest.TestCase):
+    def test_true_lru_eviction_and_thread_safety(self):
+        import concurrent.futures
+        from collections import OrderedDict
+        from workflow import manifest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            files = []
+            for i in range(6):
+                p = Path(tmp) / f"f{i}.txt"
+                p.write_text(f"payload-{i}", encoding="utf-8")
+                files.append(p)
+            fresh_cache = OrderedDict()
+            with patch.object(manifest, "_FILE_DIGEST_CACHE", fresh_cache), \
+                    patch.object(manifest, "_FILE_DIGEST_CACHE_LIMIT", 2):
+                d0 = manifest.sha256_file(files[0])
+                manifest.sha256_file(files[1])
+                # Touch files[0] so it becomes most-recently-used; files[1] must be evicted next.
+                self.assertEqual(manifest.sha256_file(files[0]), d0)
+                manifest.sha256_file(files[2])
+                cached_paths = {k[0] for k in fresh_cache.keys()}
+                self.assertEqual(cached_paths, {str(files[0].resolve()), str(files[2].resolve())})
+
+                # Concurrent hammering must not raise RuntimeError or exceed limit.
+                def worker(idx):
+                    for step in range(20):
+                        manifest.sha256_file(files[(idx + step) % len(files)])
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+                    list(pool.map(worker, range(6)))
+                self.assertLessEqual(len(fresh_cache), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

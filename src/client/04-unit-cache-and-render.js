@@ -1,4 +1,4 @@
-    // ---- 整卷单元详情缓存（LRU，最多保留 8 份试卷，确保大于首屏预取数 4 份）----------
+    // ---- 整卷单元详情缓存（LRU，最多保留 2 份试卷，首屏预取同步不超出此上限）----------
     var UNIT_CACHE = new Map();
     var UNIT_CACHE_ORDER = [];
     var UNIT_CACHE_MAX = 2;
@@ -46,7 +46,7 @@
         entry.units.set(String(detail.unit_id), detail);
       }
     }
-    // 题型审核跨批次单题轻量 LRU（最多保留 24 题），不挤占「试卷审核」的整卷预热缓存。
+    // 题型审核跨批次单题轻量 LRU（最多保留 12 题），不挤占「试卷审核」的整卷预热缓存。
     var TYPE_UNIT_CACHE = new Map();
     var TYPE_UNIT_CACHE_MAX = 12;
     function typeUnitCacheKey(batchName, unitId) {

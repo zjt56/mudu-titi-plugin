@@ -861,7 +861,11 @@ def build(batch_dir, *, units=None):
                         # 图片本身就是这一空的提示（答案册仍按号给答案）：按同表其余空位的
                         # 写法投影为填空位；图片仍原样留在材料与单元附件里，不算生成内容。
                         child["stem"] = "______"
-                    if not child["stem"] and any(int(number) in _weak_numbers(line) for line in material_weak_lines):
+                    if (not child["stem"] and not unnumbered
+                            and any(int(number) in _weak_numbers(line) for line in lines)):
+                        # 编号空不只在材料行：短文填空常由 `5.` 另起一段并串起
+                        # `6.`–`10.` 的行内空（含 `7.b______` 这种字母提示空）。
+                        # 这些仍是原文印刷空位，子题题干只留空壳；否则整批 A9 会拦空题干。
                         child["stem"] = "______"  # Explicit blank exists in shared source, not generated prose.
                     elif not unnumbered and not child["stem"] and not child["options"]:
                         issues.append({"unit_id": uid, "number": number, "code": "CHILD_CONTENT_UNRESOLVED",

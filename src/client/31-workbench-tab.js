@@ -196,7 +196,7 @@
         ? (batches || []).filter((b) => b && !b.uploaded && b.flow_done)
             .slice()
             .sort((a, b) => batchLatestTime(b) - batchLatestTime(a))
-            .slice(0, 4)
+            .slice(0, UNIT_CACHE_MAX)
             .map((b) => b.name + '\x1f' + batchCacheSignature(b))
             .join('\0')
         : '';

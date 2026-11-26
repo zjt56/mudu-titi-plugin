@@ -560,6 +560,34 @@ class QuestionDraftTest(unittest.TestCase):
             self.assertIn("不能完成assemble或审核", task["prompt"])
             self.assertEqual(task["input_hashes"][question_draft.PATH], hashlib.sha256((self.root / question_draft.PATH).read_bytes()).hexdigest())
 
+    def test_passage_fill_children_with_inline_printed_blanks_keep_shell_stems(self):
+        """短文填空：`5.` 串起的 6.–10. 行内编号空也要给空壳子题题干。
+
+        原卷第一段行内是 1.–4.，`5.` 另起一段并串起 6.–10.（含 `7.b______`
+        字母提示空）。子题 6.–10. 若只按材料行找空位就会留空题干，整批 A9
+        「stem 为空」失败。
+        """
+        text = (
+            '**Ⅱ. 根据短文内容或所给提示填空**\n'
+            'Paul’s classroom is very nice.There 1.________(be) twenty desks and chairs for the students.'
+            'Each desk has a small 2.________(draw) for their books and pencils.There are many pictures and posters '
+            'on the 3.________(wall).Some posters are about animals,and others are about 4.________(科学).\n'
+            '**5.**________ the front of the classroom,there is a big whiteboard.The teacher writes 6.________(重要的) '
+            'things on the board.There is also a desk for the teacher.Paul likes the reading corner at the7.b________ '
+            'of the classroom.There are many books there,and he 8.________(love) to read stories during free time.\n'
+            'The classroom 9.________ a big window.The sunlight comes in and makes the classroom bright.Paul feels '
+            '10.________(happy) in his classroom because it is a good place to learn and play with classmates.'
+        )
+        self.source(text, [(list(range(1, 11)), "group", "短文填空", 2, 4)])
+        draft = question_draft.build(self.root)
+        stems = {child["number"]: child["stem"] for child in draft["items"][0]["subquestions"]}
+        self.assertEqual(sorted(stems), list(range(1, 11)))
+        for number in (1, 2, 3, 4, 6, 7, 8, 9, 10):
+            self.assertEqual(stems[number], "______")
+        self.assertTrue(stems[5])
+        self.assertNotIn("CHILD_CONTENT_UNRESOLVED",
+                         [issue["code"] for issue in draft["issues"]])
+
 
 class ImagePrefixedOptionsTest(unittest.TestCase):
     """图片前置选项 `[IMG x]A. …` 按顺序把图配到 A/B/C/D，不错位、不丢失。"""

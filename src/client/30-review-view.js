@@ -255,7 +255,7 @@
         const poll = async () => {
           try {
             const st = await jget('/batches/' + encodeURIComponent(batchName) + '/ai-supplement');
-            if (cancelled) return;
+            if (cancelled) return false;
             setAiModal(st);
             if (st.status === 'done') {
               setAiBusy('');
@@ -263,24 +263,29 @@
               invalidateBatchUnits(batchName);
               if (!disableBatchBundle) loadBatchUnitsBundle(batchName, { force: true }).catch(() => {});
               load({ force: true, silent: true });
+              return false;
             } else if (st.status === 'error') {
               setAiBusy('');
               setAiNotice('补充失败：' + String(st.error || st.message || '未知错误'));
+              return false;
             } else if (st.status !== 'running') {
               setAiBusy('');
+              return false;
             }
+            return true;
           } catch (e) {
             if (!cancelled) {
               setAiBusy('');
               setAiModal((prev) => prev ? { ...prev, status: 'error', error: String(e.message || e) } : null);
             }
+            return false;
           }
         };
-        // 串行轮询：上一次请求结束后再等 900ms，避免慢请求时多个请求重叠堆积。
+        // 串行轮询：上一次请求结束后再等 900ms，避免慢请求时多个请求重叠堆积；终态立即停表。
         let timer = null;
         const loop = async () => {
-          await poll();
-          if (!cancelled) timer = setTimeout(loop, 900);
+          const keepPolling = await poll();
+          if (!cancelled && keepPolling) timer = setTimeout(loop, 900);
         };
         timer = setTimeout(loop, 900);
         return () => { cancelled = true; if (timer) clearTimeout(timer); };

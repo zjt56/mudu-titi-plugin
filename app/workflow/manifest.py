@@ -13,8 +13,10 @@ import json
 import os
 import re
 import stat
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 
@@ -27,8 +29,9 @@ DELIVERY_FILENAME = "delivery.json"
 # Hashes are requested repeatedly while the scheduler inspects dependencies and
 # review evidence. Cache only by filesystem metadata; any size/mtime change
 # automatically forces a fresh digest, so validation semantics stay unchanged.
-_FILE_DIGEST_CACHE = {}
+_FILE_DIGEST_CACHE: OrderedDict = OrderedDict()
 _FILE_DIGEST_CACHE_LIMIT = 4096
+_FILE_DIGEST_LOCK = threading.Lock()
 
 # Inputs consumed directly by a stage but not represented by its immediate
 # dependency's declared outputs. Keeping these bindings here prevents stale
@@ -99,20 +102,23 @@ def sha256_file(path) -> str:
     if not path.is_file():
         return ""
     key = (str(path.resolve()), stat_result.st_size, stat_result.st_mtime_ns)
-    cached = _FILE_DIGEST_CACHE.get(key)
-    if cached is not None:
-        return cached
+    with _FILE_DIGEST_LOCK:
+        cached = _FILE_DIGEST_CACHE.get(key)
+        if cached is not None:
+            _FILE_DIGEST_CACHE.move_to_end(key)
+            return cached
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     value = digest.hexdigest()
-    # Bounded LRU: evict oldest entries one at a time (dict keeps insertion
-    # order) instead of clearing everything and causing a re-hash storm.
-    _FILE_DIGEST_CACHE.pop(key, None)
-    _FILE_DIGEST_CACHE[key] = value
-    while len(_FILE_DIGEST_CACHE) > _FILE_DIGEST_CACHE_LIMIT:
-        _FILE_DIGEST_CACHE.pop(next(iter(_FILE_DIGEST_CACHE)), None)
+    # Bounded thread-safe LRU: evict oldest entries one at a time instead of
+    # clearing everything and causing a re-hash storm.
+    with _FILE_DIGEST_LOCK:
+        _FILE_DIGEST_CACHE[key] = value
+        _FILE_DIGEST_CACHE.move_to_end(key)
+        while len(_FILE_DIGEST_CACHE) > _FILE_DIGEST_CACHE_LIMIT:
+            _FILE_DIGEST_CACHE.popitem(last=False)
     return value
 
 

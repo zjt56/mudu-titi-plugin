@@ -190,6 +190,48 @@ class AssembleLocalTest(unittest.TestCase):
             self.assertIsNone(assemble_local.try_assemble(self.batch))
         self.assertTrue((self.batch / assemble_local.FALLBACK).is_file())
 
+    def test_empty_group_child_stem_restored_from_confirmed_printed_blank(self):
+        """组题子题题干被早期视图留空、而原卷确有编号空位时，最终视图补空壳。"""
+        passage = (
+            "Paul’s classroom is very nice.There 1.________(be) twenty desks and chairs. "
+            "Each desk has a small 2.________(draw). There are pictures on the 3.________(wall), "
+            "and others are about 4.________(科学).\n"
+            "**5.**________ the front of the classroom,there is a big whiteboard.The teacher writes "
+            "6.________(重要的) things on the board."
+        )
+        numbers = [1, 2, 3, 4, 5, 6]
+        _write(self.batch, assemble_local.STRUCTURE, {"units": [{
+            "unit_id": "sec-u1", "unit_kind": "group", "type": "短文填空", "numbers": numbers,
+            "stem": passage,
+            "source_span": {"basis": "cleaned_source", "start_line": 1, "end_line": 2}}]})
+        children = [{"number": n, "stem": "______", "options": []} for n in (1, 2, 3, 4)]
+        children.append({"number": 5, "options": [], "stem": (
+            "______ the front of the classroom,there is a big whiteboard."
+            "The teacher writes 6.________(重要的) things on the board.")})
+        children.append({"number": 6, "stem": "", "options": []})
+        _write(self.batch, assemble_local.BATCH, {"items": [{
+            "unit_id": "sec-u1", "id": "sec-u1", "unit_kind": "group", "number": 1,
+            "numbers": numbers, "question_type": "短文填空", "filterMetadata": {"subtypes": []},
+            "stem": "", "material": passage.splitlines()[0], "options": [],
+            "subquestions": children, "knowledge": [], "knowledgeIds": [], "knowledge_ids": [],
+            "answer": "", "explanation": "", "articleSummary": "", "wordCount": 100,
+            "difficulty": "适中"}]})
+        _write(self.batch, assemble_local.TYPES, {"items": [{
+            "unit_id": "sec-u1", "type": "短文填空", "subtypes": [], "words": 100}]})
+        _write(self.batch, assemble_local.KNOWLEDGE, {"items": [{
+            "unit_id": "sec-u1", "knowledge": [], "knowledgeIds": [], "subquestions": []}]})
+        _write(self.batch, assemble_local.EXPLANATIONS, {"items": [{
+            "unit_id": "sec-u1", "explanation": "", "articleSummary": "", "subquestions": []}]})
+        _write(self.batch, assemble_local.ANSWERS, {"answers": {}, "difficulty": {}})
+        if (self.batch / assemble_local.GUARD).is_file():
+            (self.batch / assemble_local.GUARD).unlink()
+        after = assemble_local.build(self.batch)
+        stems = {c["number"]: c["stem"] for c in after["items"][0]["subquestions"]}
+        self.assertEqual(stems[6], "______")
+        self.assertTrue(stems[5].startswith("______ the front"), stems[5])
+        for number in (1, 2, 3, 4):
+            self.assertEqual(stems[number], "______")
+
     def test_first_assembly_merges_complete_source_draft_without_model(self):
         from workflow import agent_tasks, question_draft
         initial = Path(self.tmp.name) / "first"
