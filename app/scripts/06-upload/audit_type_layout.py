@@ -201,17 +201,30 @@ def _check_unit(u, *, content_only=False):
     # E20 选项条数 + C11/E20 选项字母连续
     if qt in OPTION_RULES:
         want, where = OPTION_RULES[qt]
-        _check_option_count(problems, uid, qt, kind, u, subs, want, where)
-        if where == "unit":
-            _check_option_continuity(problems, uid, qt, "单元选项", u.get("options") or [], "单元选项")
+        if qt == "补全对话":
+            fm = u.get("filterMetadata") if isinstance(u.get("filterMetadata"), dict) else {}
+            subtypes = {str(s).strip() for s in (fm.get("subtypes") or u.get("subtypes") or []) if str(s).strip()}
+            if subtypes & {"填写单词", "填写句子"}:
+                want = 0
+            elif "6选5" in subtypes:
+                want = 6
+            elif "5选5" in subtypes:
+                want = 5
+        if want == 0:
+            if u.get("options"):
+                problems.append(f"[E20] {uid} ({qt}): 开放填写型补全对话不应带选项，现有 {len(u.get('options') or [])} 条")
         else:
-            has_sub_opts = any(c.get("options") for c in subs)
-            if has_sub_opts:
-                for c in subs:
-                    _check_option_continuity(
-                        problems, uid, qt, "子题选项", c.get("options") or [], f"子题 {c.get('number')} 选项")
-            else:
+            _check_option_count(problems, uid, qt, kind, u, subs, want, where)
+            if where == "unit":
                 _check_option_continuity(problems, uid, qt, "单元选项", u.get("options") or [], "单元选项")
+            else:
+                has_sub_opts = any(c.get("options") for c in subs)
+                if has_sub_opts:
+                    for c in subs:
+                        _check_option_continuity(
+                            problems, uid, qt, "子题选项", c.get("options") or [], f"子题 {c.get('number')} 选项")
+                else:
+                    _check_option_continuity(problems, uid, qt, "单元选项", u.get("options") or [], "单元选项")
 
     # C12：填空类子题不该有选项（选词/短文/教材语篇填空/补全对话子题）
     if qt in ("短文填空", "选词填空", "教材语篇填空") and subs:

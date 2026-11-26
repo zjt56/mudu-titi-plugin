@@ -63,16 +63,34 @@ test('matchReviewFilter 按全部、试卷类、课时类、已上传四个平�
 
 test('试卷审核采用简洁平铺筛选栏（全部 / 试卷类 / 课时类 / 已上传），移除顶部统计条与重启后端，卡片标绿已上传', () => {
   const filterIdx = client.indexOf('const reviewFilterBar = h(');
-  assert.ok(filterIdx >= 0);
-  const toolbarChunk = client.slice(filterIdx, filterIdx + 1200);
+  const modalIdx = client.indexOf('const sourcePickerModal =', filterIdx);
+  assert.ok(filterIdx >= 0 && modalIdx > filterIdx);
+  const toolbarChunk = client.slice(filterIdx, modalIdx);
   assert.match(toolbarChunk, /TEXT\.reload/);
   assert.doesNotMatch(toolbarChunk, /BackendRestartControl/);
   assert.doesNotMatch(client, /'共 ' \+ baseList\.length \+ ' 份 · 未上传 '/);
-  assert.match(client, /jget\('\/batches\?review_list=1'\)/);
-  assert.match(toolbarChunk, /renderFilterChip\('all', '全部', baseList\.length\)/);
-  assert.match(toolbarChunk, /renderFilterChip\('exam', '试卷类', examCount\)/);
-  assert.match(toolbarChunk, /renderFilterChip\('lesson', '课时类', lessonCount\)/);
+  assert.match(client, /'\/batches\?review_list=1'/);
+  assert.doesNotMatch(toolbarChunk, /renderFilterChip\('all'/);
+  assert.match(toolbarChunk, /'aria-haspopup': 'dialog'/);
+  assert.match(toolbarChunk, /h\('span', null, selectedSourceLabel\)/);
+  assert.match(toolbarChunk, /String\(sourceFilteredBase\.length\)/);
+  assert.doesNotMatch(toolbarChunk, /renderFilterChip\('exam'/);
+  assert.doesNotMatch(toolbarChunk, /renderFilterChip\('lesson'/);
   assert.match(toolbarChunk, /renderFilterChip\('uploaded', '已上传', uploadedCount/);
+  assert.match(toolbarChunk, /renderFilterChip\('upload_anomaly', '异常录入', uploadAnomalyCount/);
+  assert.match(client, /const selectedSourceLabel = selectedSource \|\| '全部来源';/);
+  assert.match(client, /title: '选择来源'/);
+  assert.match(client, /'中考真题', '中考模拟', '中考复习', '期末试题'/);
+  const isBatchUploaded = extractFn('isBatchUploaded');
+  const isBatchUploadAnomaly = vm.runInNewContext(
+    client.match(/function isBatchUploadAnomaly\([^)]*\) \{[\s\S]*?\n      \}/)[0] + '\nisBatchUploadAnomaly',
+    { isBatchUploaded },
+  );
+  assert.equal(isBatchUploadAnomaly({ name: 'a1', upload_status: { state: 'failed', error: '网络超时' } }), true);
+  assert.equal(isBatchUploadAnomaly({ name: 'a2', has_anomaly: true }), true);
+  assert.equal(isBatchUploadAnomaly({ name: 'a3', stage_blocked: true }), true);
+  assert.equal(isBatchUploadAnomaly({ name: 'ok1', uploaded: true, has_anomaly: true }), false);
+  assert.equal(isBatchUploadAnomaly({ name: 'ok2', uploaded: false, has_anomaly: false }), false);
   assert.doesNotMatch(client, /renderFilterGroup/);
   assert.match(client, /const uploadedCard = isBatchUploaded\(b\);/);
   assert.match(client, /uploadedCard \? \{ background: 'rgba\(34, 197, 94, 0\.06\)', borderColor: 'rgba\(34, 197, 94, 0\.24\)' \}/);

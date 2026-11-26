@@ -442,6 +442,33 @@ class OperationsImprovementsTest(unittest.TestCase):
             self.assertEqual(v_done["incident"]["resolution_source"], "pipeline_progress")
             self.assertEqual(op._code_record(folder)["status"], "verified")
 
+    def test_recommended_action_typed_playbooks(self):
+        # 外部认证/API Key 失效：禁止进 request_code_repair
+        auth_act = op._recommended_action("knowledge", "Authentication Fails, Your api key: ****4fdd is invalid", [], {})
+        self.assertIn("waiting_external", auth_act)
+        self.assertIn("禁止进入 request_code_repair", auth_act)
+
+        # 运行中规则/输入变更：直接用最新输入重跑原阶段，不改代码
+        changed_act = op._recommended_action("preassemble", "Bundled input changed during agent task: sync-practice-rules.json", [], {})
+        self.assertIn("retry_stage_with_fresh_context", changed_act)
+        self.assertIn("不要改代码", changed_act)
+
+        # Python 运行时代码异常：直接隔离代码修复
+        crash_act = op._recommended_action("assemble", "NameError: name 'mf' is not defined", [], {})
+        self.assertIn("request_code_repair", crash_act)
+
+        # 画线映射：先核对选项标号与兄弟选项证据
+        ul_act = op._recommended_action("underlines", "UNDERLINE_MAPPING_AMBIGUOUS", [], {})
+        self.assertIn("选项标号", ul_act)
+
+        # [A8]/[A9]：核对原卷共享材料与合法形态，禁编造占位
+        a8_act = op._recommended_action("assemble", "Assemble format precheck failed: [A8] material 为空", [], {})
+        self.assertIn("shared_rubric", a8_act)
+
+        # 结构化源选项/源表问题：优先 preview_repair/apply_repair
+        opt_act = op._recommended_action("format_gate", "SOURCE_OPTIONS_INCOMPLETE", [], {})
+        self.assertIn("preview_repair/apply_repair", opt_act)
+
 
 if __name__ == "__main__":
     unittest.main()

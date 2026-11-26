@@ -78,6 +78,21 @@ def phonetic_write_group(unit):
             and hit.get("rule") == "phonetic-write" and hit.get("kind") == "group")
 
 
+def dialogue_word_group(unit):
+    """Identify the synchronous-practice fill-in-word mini-dialogue group (`dialogue-word`).
+
+    Example: ``**Ⅱ. 填入恰当的特殊疑问词或词组,完成对话**``.
+    Each subquestion carries its own standalone mini-dialogue and blank, so there
+    is no shared passage between the heading and item 1; the printed section
+    heading itself is the source-backed group instruction.
+    """
+    from .sync_practice import heading_hit
+    hit = heading_hit((unit.get("source_section") or {}).get("title") or "") or {}
+    qtype = unit.get("type") or unit.get("_source_question_type")
+    return (unit.get("unit_kind") == "group" and qtype == "补全对话"
+            and hit.get("rule") == "dialogue-word" and hit.get("kind") == "group")
+
+
 def native_section_rubric(lines, unit, *, band_evidence=None):
     """Bind the printed heading of an intact, scoped source group."""
     from .question_content import legitimate_source_shape
@@ -93,11 +108,13 @@ def native_section_rubric(lines, unit, *, band_evidence=None):
     picture = picture_sentence_group(unit) or picture_spelling_group(unit)
     word_bank_heading = heading_word_bank_group(unit)
     phonetic_write = phonetic_write_group(unit)
+    dialogue_word = dialogue_word_group(unit)
     if phonetic_write:
         from .sync_practice import looks_like_sync_practice
         phonetic_write = looks_like_sync_practice("\n".join(lines))
     if (unit.get("identity_version") != "scoped-v1"
-            or unit.get('type') != '语音题' and not native_alias and not picture and not word_bank_heading and not phonetic_write):
+            or unit.get('type') != '语音题' and not native_alias and not picture
+            and not word_bank_heading and not phonetic_write and not dialogue_word):
         return []
     section, span = unit.get("source_section") or {}, unit.get("source_span") or {}
     heading, first, last = section.get("start_line"), span.get("start_line"), span.get("end_line")
@@ -131,10 +148,10 @@ def native_section_rubric(lines, unit, *, band_evidence=None):
     anchors = printed_anchors(body)
     printed = [number for _, number in anchors]
     if picture:
-        if not anchors or not any(re.fullmatch(r"\s*\[IMG\s+[^\]]+\]\s*", line)
+        if not anchors or not any(re.fullmatch(r"(?:\s*\[IMG\s+[^\]]+\])+\s*", line)
                                   for line in body[:anchors[0][0]]):
             return []
-    if word_bank_heading or phonetic_write:
+    if word_bank_heading or phonetic_write or dialogue_word:
         if not anchors or any(line.strip() for line in body[:anchors[0][0]]):
             return []
     if printed and sorted(printed) != sorted(int(n) for n in unit.get("numbers") or []):

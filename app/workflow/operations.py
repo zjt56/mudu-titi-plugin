@@ -685,19 +685,62 @@ def _is_model_contract_error(stage, detail):
     return False
 
 
+def _is_external_auth_error(detail):
+    """Return True when failure is caused by external model API key / auth misconfiguration."""
+    text = str(detail or "").lower()
+    markers = (
+        "authentication fails",
+        "invalid api key",
+        "invalid_api_key",
+        "incorrect api key",
+        "unauthorized",
+        "api key is invalid",
+        "your api key:",
+    )
+    return any(m in text for m in markers)
+
+
+def _is_bundled_input_changed(detail):
+    """Return True when a bundled rule or input file changed while the task was running."""
+    text = str(detail or "").lower()
+    return ("bundled input changed during agent task" in text
+            or "inputs_changed" in text)
+
+
+def _is_code_runtime_crash(detail):
+    """Return True when detail clearly carries an unhandled Python runtime code exception."""
+    text = str(detail or "")
+    return bool(re.search(
+        r"\b(NameError|AttributeError|UnboundLocalError|SyntaxError|ImportError|ModuleNotFoundError)\b",
+        text,
+    ))
+
+
 def _recommended_action(stage, detail, issues, incident):
     codes = " ".join([str(detail or "")] + [str(i.get("code") or "") for i in issues]).lower()
+    if _is_external_auth_error(detail):
+        return "waiting_external（外部模型认证/API Key 失效，禁止进入 request_code_repair 改代码，请等待外部密钥或路由配置恢复）"
+    if _is_bundled_input_changed(detail):
+        return "resume(retry_stage_with_fresh_context)（任务执行期间规则或输入文件变更，直接用最新输入重跑原阶段，不要改代码）"
+    if _is_code_runtime_crash(detail):
+        return "request_code_repair（确定性代码运行时异常，直接进入隔离工作区复现、修补并跑单测）"
     if incident.get("escalation"):
         return "request_code_repair"
     if _is_model_contract_error(stage, detail):
         return "resume(retry_stage_with_fresh_context)（模型输出契约缺漏，优先局部重问/刷新上下文，不要改代码）"
+    if stage == "underlines":
+        return "read_evidence（核对 01_source/正文.txt 与 06_batch 选项标号、同行兄弟选项及画线坐标；确认属通用映射规则缺陷后再 request_code_repair）"
     if stage in ("review", "review_gate"):
         if "review_sample_source_unverified" in codes or "source_binding" in codes or "source_unverified" in codes:
             return "resume(upstream_rederive) 或 request_code_repair"
         return "resume(retry_stage_with_fresh_context)"
     if stage in REGENERABLE:
-        return "regenerate_units（先核对候选与受影响题号）"
+        return "regenerate_units（先核对候选与受影响题号，保留已验证基线，严禁整卷重跑）"
     if stage in ("assemble", "validate", "format_gate"):
+        if "[a8]" in codes or "[a9]" in codes:
+            return "read_evidence（先核对原卷是否确无共享文字材料如看图/微对话组题；真实漏提走上游恢复，合法形态误拦再走 shared_rubric/phonetic_structure 隔离修复，禁止编造占位）"
+        if any(tok in codes for tok in ("source_options_incomplete", "source_table", "attachment_url", "group_boundary_review")):
+            return "preview_repair/apply_repair（结构化源数据修复优先；预演拒绝后再评估上游溯源或隔离代码修复）"
         return "preview_repair/apply_repair 或 request_code_repair"
     return "read_evidence 后选择最小修复动作或 request_code_repair"
 

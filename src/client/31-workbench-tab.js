@@ -81,8 +81,25 @@
         }
       }
       const [menuFor, setMenuFor] = React.useState(''); // 卡片「⋯」菜单当前展开的批次
-      // 筛选态：'all' | 'exam' | 'lesson' | 'uploaded'
+      // 筛选态：'all' | 'uploaded' | 'upload_anomaly'；来源筛选独立走弹窗选择（'' = 全部来源）
       const [reviewFilter, setReviewFilter] = React.useState('all');
+      const [selectedSource, setSelectedSource] = React.useState('');
+      const [sourceModalOpen, setSourceModalOpen] = React.useState(false);
+      const [sourceModalFilter, setSourceModalFilter] = React.useState('');
+      const [taxonomySources, setTaxonomySources] = React.useState([
+        '中考真题', '中考模拟', '中考复习', '期末试题', '期中试题', '月考试题',
+        '开学试题', '单元测验', '同步练习', '木牍原创', '木牍改编', '精品题源', '课本原创',
+      ]);
+      React.useEffect(() => {
+        if (!isActive) return undefined;
+        let cancelled = false;
+        jget('/taxonomy').then((tx) => {
+          if (!cancelled && tx && Array.isArray(tx.sources) && tx.sources.length) {
+            setTaxonomySources(tx.sources.filter((s) => typeof s === 'string' && s.trim()));
+          }
+        }).catch(() => {});
+        return () => { cancelled = true; };
+      }, [isActive]);
       // 列表加载态：'idle' | 'loading' | 'ready' | 'error'。若已有共享缓存则直接就绪，避免切换标签闪出加载页。
       const [listState, setListState] = React.useState(() => (typeof SHARED_BATCHES_CACHE !== 'undefined' && (SHARED_BATCHES_CACHE.review || SHARED_BATCHES_CACHE.full || SHARED_BATCHES_CACHE.lite)) ? 'ready' : 'idle');
       const loadSeq = React.useRef(0);
@@ -434,7 +451,15 @@
         ), deleteDialog);
       }
 
-      // 试卷审核分类：同步练习（及缺 source_type 但命中课时特征的批次）归「课时类」，其余真题/模拟/期中期末/月考/单元卷归「试卷类」。
+      // 试卷来源标签：优先取识别到的 source_type（如 同步练习 / 中考真题 / 期末考试 / 月考 等）；
+      // 缺失时命中课时特征归「同步练习」，其余归「未分类」。
+      function batchSourceLabel(b) {
+        const st = String((b && b.paper && b.paper.source_type) || (b && b.meta && b.meta.source_type) || '').trim();
+        if (st && st !== '未提供' && st !== '未填写') return st;
+        const label = String((b && b.paper && b.paper.title) || (b && b.name) || '');
+        if (/课时|Section\s*[AB]|Grammar\s*Focus|Pronunciation|单元话题写作|综合阅读提升|综合训练|单元综合/i.test(label)) return '同步练习';
+        return '未分类';
+      }
       function batchCategory(b) {
         const st = String((b && b.paper && b.paper.source_type) || (b && b.meta && b.meta.source_type) || '').trim();
         if (st === '同步练习') return 'lesson';
@@ -450,6 +475,16 @@
         if (stages.some((s) => s && s.id === 'upload' && s.status === 'completed')) return true;
         const rec = b.upload_status && b.upload_status.receipt;
         return Boolean(rec && (rec.state === 'staged' || rec.submitted_at || rec.remote_confirmation_required));
+      }
+
+      // 判断批次是否属于「异常录入」（未成功上传，且存在上传失败、阶段阻断或单题异常）。
+      function isBatchUploadAnomaly(b) {
+        if (!b || typeof b !== 'object' || isBatchUploaded(b)) return false;
+        const us = b.upload_status || {};
+        if (us.state === 'failed' || Boolean(us.error)) return true;
+        const stages = Array.isArray(b.stages) ? b.stages : [];
+        if (stages.some((s) => s && s.id === 'upload' && s.status === 'failed')) return true;
+        return Boolean(b.has_anomaly || Number(b.anomaly_count || 0) > 0 || b.stage_blocked);
       }
 
       // 判断批次是否仍在「上传试卷 → 排队区」且尚未完成；若批次已在当前阶段阻断/失败且无活跃执行，
@@ -468,33 +503,82 @@
         if (key === 'exam') return batchCategory(b) === 'exam';
         if (key === 'lesson') return batchCategory(b) === 'lesson';
         if (key === 'uploaded') return isBatchUploaded(b);
+        if (key === 'upload_anomaly') return isBatchUploadAnomaly(b);
         return true;
       }
-      // 排除仍在「上传试卷 → 排队区」且尚未完成的批次；保留已完成或已上传的批次，按最新时间降序排列，
-      // 提供「全部 / 试卷类 / 课时类 / 已上传」四个平铺筛选按钮。
+      // 排除仍在「上传试卷 → 排队区」且尚未完成的批次；保留已完成或已上传的批次，按最新时间降序排列。
       const baseList = (batches || []).filter((b) => !isBatchPendingInQueue(b))
         .sort((a, b) => batchLatestTime(b) - batchLatestTime(a));
-      const examCount = baseList.filter((b) => batchCategory(b) === 'exam').length;
-      const lessonCount = baseList.filter((b) => batchCategory(b) === 'lesson').length;
-      const uploadedCount = baseList.filter((b) => isBatchUploaded(b)).length;
-      const list = baseList.filter((b) => matchReviewFilter(b, reviewFilter));
+      const sourceEntries = (() => {
+        const map = new Map();
+        const orderIndex = new Map();
+        (taxonomySources || []).forEach((name, idx) => {
+          const clean = String(name || '').trim();
+          if (!clean || map.has(clean)) return;
+          orderIndex.set(clean, idx);
+          map.set(clean, { name: clean, count: 0, uploaded: 0, anomaly: 0 });
+        });
+        for (const b of baseList) {
+          const src = batchSourceLabel(b);
+          const rec = map.get(src) || { name: src, count: 0, uploaded: 0, anomaly: 0 };
+          rec.count += 1;
+          if (isBatchUploaded(b)) rec.uploaded += 1;
+          if (isBatchUploadAnomaly(b)) rec.anomaly += 1;
+          map.set(src, rec);
+        }
+        return Array.from(map.values()).sort((a, b) => {
+          const aUn = a.name === '未分类';
+          const bUn = b.name === '未分类';
+          if (aUn !== bUn) return aUn ? 1 : -1;
+          const aHas = a.count > 0 ? 0 : 1;
+          const bHas = b.count > 0 ? 0 : 1;
+          if (aHas !== bHas) return aHas - bHas;
+          if (b.count !== a.count) return b.count - a.count;
+          const ai = orderIndex.has(a.name) ? orderIndex.get(a.name) : 9999;
+          const bi = orderIndex.has(b.name) ? orderIndex.get(b.name) : 9999;
+          if (ai !== bi) return ai - bi;
+          return a.name.localeCompare(b.name, 'zh-Hans-CN');
+        });
+      })();
+      const sourceFilteredBase = selectedSource
+        ? baseList.filter((b) => batchSourceLabel(b) === selectedSource)
+        : baseList;
+      const uploadedCount = sourceFilteredBase.filter((b) => isBatchUploaded(b)).length;
+      const uploadAnomalyCount = sourceFilteredBase.filter((b) => isBatchUploadAnomaly(b)).length;
+      const list = sourceFilteredBase.filter((b) => matchReviewFilter(b, reviewFilter));
+      const selectedSourceLabel = selectedSource || '全部来源';
       const emptyTitleMap = {
-        exam: '暂无试卷类批次',
-        lesson: '暂无课时类批次',
         uploaded: '暂无已上传批次',
+        upload_anomaly: '暂无异常录入批次',
       };
+      const chooseSource = (value) => {
+        setSelectedSource(value || '');
+        if (!value) setReviewFilter('all');
+        setSourceModalOpen(false);
+        setSourceModalFilter('');
+      };
+      const modalFilteredSources = (() => {
+        const kw = String(sourceModalFilter || '').trim().toLowerCase();
+        return kw
+          ? sourceEntries.filter((s) => String(s.name || '').toLowerCase().includes(kw))
+          : sourceEntries;
+      })();
       const renderFilterChip = (id, label, count, opts) => {
         const activeChip = reviewFilter === id;
-        const isGreen = Boolean(opts && opts.tone === 'green');
-        const activeBg = isGreen ? '#16a34a' : '#2563eb';
-        const activeShadow = isGreen ? '0 2px 8px rgba(22, 163, 74, 0.28)' : '0 2px 8px rgba(37, 99, 235, 0.28)';
+        const tone = opts && opts.tone;
+        const isGreen = tone === 'green';
+        const isRed = tone === 'red';
+        const activeBg = isGreen ? '#16a34a' : (isRed ? '#dc2626' : '#2563eb');
+        const activeShadow = isGreen
+          ? '0 2px 8px rgba(22, 163, 74, 0.28)'
+          : (isRed ? '0 2px 8px rgba(220, 38, 38, 0.28)' : '0 2px 8px rgba(37, 99, 235, 0.28)');
         const dotColor = !activeChip && opts && opts.dotColor;
         return h('button', {
           key: id,
           type: 'button',
           className: 'wf-filter-chip' + (activeChip ? ' wf-filter-chip-active' : ''),
           'aria-pressed': activeChip,
-          onClick: () => setReviewFilter(id),
+          onClick: () => setReviewFilter((cur) => (cur === id ? 'all' : id)),
           style: {
             display: 'inline-flex',
             alignItems: 'center',
@@ -543,14 +627,124 @@
           flexShrink: 0,
         },
       },
-        renderFilterChip('all', '全部', baseList.length),
-        renderFilterChip('exam', '试卷类', examCount),
-        renderFilterChip('lesson', '课时类', lessonCount),
+        h('button', {
+          type: 'button',
+          className: 'wf-btn',
+          'aria-haspopup': 'dialog',
+          'aria-expanded': sourceModalOpen,
+          onClick: () => { setSourceModalFilter(''); setSourceModalOpen(true); },
+          style: {
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '5px 12px',
+            fontSize: 12.5,
+            fontWeight: (selectedSource || reviewFilter === 'all') ? 600 : 500,
+            lineHeight: 1.2,
+            borderRadius: 999,
+            border: '1px solid ' + ((selectedSource || reviewFilter === 'all') ? '#2563eb' : 'var(--dsw-alias-border-l2)'),
+            background: (selectedSource || reviewFilter === 'all') ? '#2563eb' : 'var(--dsw-alias-bg-layer-1)',
+            color: (selectedSource || reviewFilter === 'all') ? '#ffffff' : 'var(--dsw-alias-label-primary)',
+            boxShadow: (selectedSource || reviewFilter === 'all') ? '0 2px 8px rgba(37, 99, 235, 0.28)' : '0 1px 2px rgba(15, 23, 42, 0.05)',
+            fontVariantNumeric: 'tabular-nums',
+            whiteSpace: 'nowrap',
+            cursor: 'pointer',
+          },
+          title: '点击按来源筛选试卷',
+        },
+          h('span', null, selectedSourceLabel),
+          h('span', {
+            style: {
+              fontSize: 11,
+              fontWeight: 600,
+              padding: '1px 6px',
+              borderRadius: 999,
+              background: (selectedSource || reviewFilter === 'all') ? 'rgba(255, 255, 255, 0.22)' : 'rgba(15, 23, 42, 0.07)',
+              color: (selectedSource || reviewFilter === 'all') ? '#ffffff' : 'var(--dsw-alias-label-secondary)',
+            },
+          }, String(sourceFilteredBase.length)),
+          h('span', { style: { fontSize: 10.5, opacity: 0.85 } }, '▾'),
+        ),
         renderFilterChip('uploaded', '已上传', uploadedCount, { tone: 'green', dotColor: uploadedCount > 0 ? '#16a34a' : '' }),
+        renderFilterChip('upload_anomaly', '异常录入', uploadAnomalyCount, { tone: 'red', dotColor: uploadAnomalyCount > 0 ? '#dc2626' : '' }),
         h('span', { style: { flex: 1 } }),
         refreshHint ? h('span', { role: 'status', style: { ...T.hint, whiteSpace: 'nowrap' } }, refreshHint) : null,
         h('button', { className: 'wf-btn', style: T.btn, disabled: refreshing, onClick: () => loadBatches({ manual: true }) }, refreshing ? '刷新中…' : TEXT.reload),
       );
+      const sourcePickerModal = sourceModalOpen ? h(ModalShell, {
+        title: '选择来源',
+        tag: selectedSourceLabel,
+        width: 680,
+        onClose: () => setSourceModalOpen(false),
+        footer: [
+          selectedSource ? h('button', { key: 'all', type: 'button', className: 'wf-btn', style: T.btn, onClick: () => chooseSource('') }, '选择全部来源') : null,
+          h('button', { key: 'close', type: 'button', className: 'wf-btn', style: T.btn, onClick: () => setSourceModalOpen(false) }, TEXT.close),
+        ].filter(Boolean),
+      },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+          h('input', {
+            className: 'wf-input',
+            type: 'search',
+            autoFocus: true,
+            value: sourceModalFilter,
+            placeholder: '筛选来源名称…',
+            style: { ...T.input, width: '100%' },
+            onChange: (e) => setSourceModalFilter(e.target.value),
+          }),
+          h('div', {
+            role: 'listbox',
+            'aria-label': '全部来源',
+            style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8 },
+          },
+            ...(!String(sourceModalFilter || '').trim() || '全部来源'.includes(String(sourceModalFilter || '').trim().toLowerCase()) ? [
+              h('button', {
+                key: '__all__',
+                type: 'button',
+                role: 'option',
+                'aria-selected': selectedSource === '',
+                className: 'wf-type-grid-item',
+                onClick: () => chooseSource(''),
+                style: {
+                  display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4,
+                  padding: '10px 12px', borderRadius: 10, textAlign: 'left',
+                  border: '1px solid ' + (selectedSource === '' ? 'var(--wf-sel-border)' : 'var(--dsw-alias-border-l2)'),
+                  background: selectedSource === '' ? 'var(--wf-sel-bg)' : 'var(--dsw-alias-bg-base)',
+                  color: 'var(--dsw-alias-label-primary)',
+                },
+              },
+                h('span', { style: { fontWeight: 600, fontSize: 13 } }, '全部来源'),
+                h('span', { style: { fontSize: 11.5, color: 'var(--dsw-alias-label-secondary)', fontVariantNumeric: 'tabular-nums' } },
+                  baseList.length + ' 份'),
+              ),
+            ] : []),
+            ...modalFilteredSources.map((s) => {
+              const isSelected = selectedSource === s.name;
+              return h('button', {
+                key: s.name,
+                type: 'button',
+                role: 'option',
+                'aria-selected': isSelected,
+                className: 'wf-type-grid-item',
+                onClick: () => chooseSource(s.name),
+                style: {
+                  display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4,
+                  padding: '10px 12px', borderRadius: 10, textAlign: 'left',
+                  border: '1px solid ' + (isSelected ? 'var(--wf-sel-border)' : 'var(--dsw-alias-border-l2)'),
+                  background: isSelected ? 'var(--wf-sel-bg)' : 'var(--dsw-alias-bg-base)',
+                  color: 'var(--dsw-alias-label-primary)',
+                },
+              },
+                h('span', { style: { fontWeight: isSelected ? 600 : 500, fontSize: 13 } }, s.name),
+                h('span', { style: { fontSize: 11.5, color: 'var(--dsw-alias-label-secondary)', fontVariantNumeric: 'tabular-nums' } },
+                  s.count + ' 份' + (s.anomaly > 0 ? (' · ' + s.anomaly + ' 异常') : '')),
+              );
+            }),
+          ),
+          modalFilteredSources.length === 0 && String(sourceModalFilter || '').trim()
+            ? h('div', { style: { ...T.hint, textAlign: 'center', padding: 12 } }, '没有匹配的来源')
+            : null,
+        ),
+      ) : null;
       return h(React.Fragment, null, h('div', { style: { flex: 1, display: 'flex', minHeight: 0, background: 'var(--dsw-alias-bg-base)' } },
         h('div', { style: T.main },
           reviewFilterBar,
@@ -636,6 +830,6 @@
             ); }),
           ),
         ),
-      ), deleteDialog);
+      ), deleteDialog, sourcePickerModal);
     }
 

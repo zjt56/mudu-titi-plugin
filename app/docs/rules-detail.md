@@ -151,3 +151,7 @@
 ## 规则 51：选词填空子类形态与单词拼写边界规则
 
 - 落地：`app/workbench/taxonomy.py`（`_check_labels` 校验 `选词填空` `group`/`standalone` 与 `多句`/`单句` 一致性）、`app/references/sync-practice-rules.json`（`spell-grammar-word` 改 `单句`）、`app/workflow/agent_tasks.py`（`_types` 传 `unit_kind` 校验 + `RULES["types"]`/`RULES["knowledge"]` 约束）、`app/workflow/review_rounds.py`（`_build_prompt` 加强边界与子类约束）、`app/prompts/roles/{types,preassemble,knowledge,review}.md`、`app/docs/sync-practice.md`；回归 `app/workflow/test_tagging_optimizations_20261125.py`、`app/workflow/test_sync_practice.py`。
+
+## 规则 52：AI 运维分型处置与状态机即时收口规则
+
+- 落地：`app/workflow/operations.py`（`_is_external_auth_error`、`_is_bundled_input_changed`、`_is_code_runtime_crash`、`_recommended_action` 分型路由矩阵）、`lib/operations-agent.js`（`OPERATIONS_PROMPT` 分型处置约束）、`app/workflow/runner.py`（`_record_success`/`_mark_crashed`/`review_gate` 写盘前刷新 `manifest["status"] = mf.derive_status(...)`）；回归 `app/workflow/test_operations_improvements.py::test_recommended_action_typed_playbooks`、`app/workflow/test_execution_state.py::test_record_success_syncs_manifest_status_to_pending_confirmation`。

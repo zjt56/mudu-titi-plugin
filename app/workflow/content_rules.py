@@ -36,6 +36,10 @@ _SPELLING_GUIDELINE_TYPES = frozenset((
 ))
 _SENTENCE_COMPLETION_GUIDELINE_TYPES = frozenset(("完成句子",))
 _READING_GUIDELINE_TYPES = frozenset(("阅读理解",))
+_TYPE_BOUNDARY_GUIDELINE_TYPES = frozenset((
+    "语音题", "选词填空", "单词拼写", "完成句子", "翻译", "情景运用",
+    "短文填空", "教材语篇填空", "任务型阅读", "补全对话", "改错", "其他",
+))
 
 
 def boundary_guidelines_block(stage: str = "", types=None) -> str:
@@ -57,6 +61,10 @@ def boundary_guidelines_block(stage: str = "", types=None) -> str:
             writing = data.get("writing_subtypes") or []
             if writing:
                 lines.append("【同源边界口径·书面表达子类】" + " ".join(str(x) for x in writing))
+        if type_set is None or bool(type_set & _TYPE_BOUNDARY_GUIDELINE_TYPES):
+            tb = data.get("type_and_subtype_boundaries") or []
+            if tb:
+                lines.append("【同源边界口径·题型与子类对照及综合判定】" + " ".join(str(x) for x in tb))
     if stage in ("", "knowledge", "review"):
         if type_set is None or bool(type_set & _PHRASE_GUIDELINE_TYPES):
             phrase = data.get("phrase_knowledge_granularity") or []

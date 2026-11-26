@@ -300,17 +300,25 @@
           'aria-pressed': activeChip,
           onClick: () => { pendingSelectEdgeRef.current = 'first'; setStatusFilter(id); setPage(1); },
           style: {
-            display: 'inline-flex', alignItems: 'center', gap: 5,
-            padding: '5px 11px', fontSize: 12.5, fontWeight: activeChip ? 600 : 500, lineHeight: 1.2,
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '5px 12px', fontSize: 12.5, fontWeight: activeChip ? 600 : 500, lineHeight: 1.2,
             borderRadius: 999,
-            border: '1px solid ' + (activeChip ? 'var(--wf-sel-border)' : 'var(--dsw-alias-border-l2)'),
-            background: activeChip ? 'var(--wf-sel-bg)' : 'var(--dsw-alias-bg-layer-1)',
-            color: 'var(--dsw-alias-label-primary)',
+            border: '1px solid ' + (activeChip ? '#2563eb' : 'var(--dsw-alias-border-l2)'),
+            background: activeChip ? '#2563eb' : 'var(--dsw-alias-bg-layer-1)',
+            color: activeChip ? '#ffffff' : 'var(--dsw-alias-label-primary)',
+            boxShadow: activeChip ? '0 2px 8px rgba(37, 99, 235, 0.28)' : '0 1px 2px rgba(15, 23, 42, 0.05)',
             whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
+            cursor: 'pointer',
           },
         },
           h('span', null, label),
-          h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, String(count)),
+          h('span', {
+            style: {
+              fontSize: 11, fontWeight: 600, padding: '1px 6px', borderRadius: 999,
+              background: activeChip ? 'rgba(255, 255, 255, 0.22)' : 'rgba(15, 23, 42, 0.07)',
+              color: activeChip ? '#ffffff' : 'var(--dsw-alias-label-secondary)',
+            },
+          }, String(count)),
         );
       };
 

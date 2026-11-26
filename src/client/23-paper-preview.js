@@ -804,7 +804,8 @@
                 const hasOpts = Array.isArray(sub.options) && sub.options.length > 0;
                 const blankOnly = !sStem || /^[\s_]+$/.test(sStem);
                 const subAtts = renderAttachments(sub.attachments, unitKey + ':s' + si + ':att', showKey, sub.options);
-                if (blankOnly && !hasOpts && !subAtts) {
+                const hasMaterialBlanks = Boolean(it.material && /(?:_{2,}|__\d+__|[（(]\s*\d+\s*[）)]|<u>\s*\d+\s*<\/u>)/.test(String(it.material)));
+                if (blankOnly && !hasOpts && !subAtts && hasMaterialBlanks) {
                   return showKey && (sub.answer || sub.explanation)
                     ? h('div', { key: String(sNum) + ':' + si, style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', paddingLeft: 18, marginBottom: 4 } },
                         String(sNum) + '. ' + (sub.answer ? '答案：' + sub.answer + '　' : '') + (sub.explanation ? '解析：' + sub.explanation : ''))
@@ -817,7 +818,7 @@
                         h('div', { style: { flex: 1, minWidth: 0 } }, renderOptionsGrid(sub.options, it.materialBlocks, usedBlocks, unitKey + ':s' + si, sub.attachments)),
                       )
                     : h('div', null,
-                        !blankOnly ? renderRichBlocks(joinNumberedStem(sNum, sStem, true), it.materialBlocks, usedBlocks, unitKey + ':s' + si + ':stem') : null,
+                        (!blankOnly || !hasMaterialBlanks) ? renderRichBlocks(joinNumberedStem(sNum, sStem || '______', true), it.materialBlocks, usedBlocks, unitKey + ':s' + si + ':stem') : null,
                         subAtts,
                         renderOptionsGrid(sub.options, it.materialBlocks, usedBlocks, unitKey + ':s' + si + ':opts', sub.attachments),
                       ),

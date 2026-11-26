@@ -127,14 +127,55 @@ _OPTION_NUMBER = re.compile(r"[（(]\s*[)）]\s*(\d{1,2})\s*[.．]")
 _MIXED = ("完成下列各题", "完成各题", "思维导图", "完成表格", "排序", "判断正误", "信息摘录")
 
 
+_INITIAL_BLANK = re.compile(r"(?<![A-Za-z])[A-Za-z](?:\s*_{2,}|\s*\u3000+|\s*[（(][^）)\n]*[\u4e00-\u9fff])")
+_CHINESE_CUE = re.compile(r"[（(][^）)\n]*[\u4e00-\u9fff][^）)\n]*[）)]")
+_CLOZE_UNDERLINE_NUM = re.compile(r"_{2,}\s*(\d{1,2})\s*_{2,}")
+
+
+def refine_unit_subtype(hit: dict | None, body: str) -> dict | None:
+    """结合单题题干把宽泛大题规则细化到逐题精确子类（不猜、不改写已明确一致的子类）。"""
+    if not hit or not str(body or "").strip():
+        return hit
+    text = plain_text(body)
+    rule = hit.get("rule")
+    if rule == "spell-initial" and "或" in str(hit.get("title") or ""):
+        has_initial = bool(_INITIAL_BLANK.search(text))
+        has_chinese = bool(_CHINESE_CUE.search(text))
+        if has_chinese and not has_initial:
+            out = dict(hit)
+            out["subtype"] = "汉语提示"
+            return out
+        if has_initial and not has_chinese:
+            out = dict(hit)
+            out["subtype"] = "首字母"
+            return out
+        if has_initial and has_chinese:
+            out = dict(hit)
+            out["subtype"] = "汉语及首字母"
+            return out
+    elif rule == "sentence-rewrite":
+        if re.search(r"[对就][画划]线部分提问", text):
+            out = dict(hit)
+            out["subtype"] = "划线提问"
+            return out
+        if "同义句" in text:
+            out = dict(hit)
+            out["subtype"] = "同义句转化"
+            return out
+    return hit
+
+
 def refine(hit: dict | None, body: str) -> dict | None:
-    """用正文把子类补齐：阅读小题数、完形空数、任务型问答/综合、补全对话 7选5/填写单词。
+    """用正文把子类补齐：阅读小题数、完形空数、任务型问答/综合、补全对话 7选5/填写单词，
+    以及「首字母或汉语提示」「按要求完成句子」的逐题子类细化。
 
     规则里 ``subtype`` 为 None 表示必须看正文才能定；正文不足以判断时保持 None，
     不猜、不默认。
     """
-    if not hit or hit.get("subtype"):
+    if not hit:
         return hit
+    if hit.get("subtype"):
+        return refine_unit_subtype(hit, body)
     full_text = plain_text(body)
     # 完形填空按空数定子类（10空等），☆拓展设问的追问不是第 N 空；
     # 阅读理解的 ☆拓展设问与 1、2、3 同属本题组小题，计入总小题数（选择N题）。
@@ -144,7 +185,11 @@ def refine(hit: dict | None, body: str) -> dict | None:
     numbers = {match.group(1) for match in _OPTION_NUMBER.finditer(text)}
     if name == "完形填空":
         blank = "\u3000"
-        count = len(numbers) or len(re.findall(rf"{blank}\d{{1,2}}{blank}", text))
+        count = (
+            len(numbers)
+            or len({m.group(1) for m in _CLOZE_UNDERLINE_NUM.finditer(text)})
+            or len(re.findall(rf"{blank}\d{{1,2}}{blank}", text))
+        )
         if count:
             hit["subtype"] = {5: "5空", 10: "10空", 15: "15空"}.get(count, "其他空数")
     elif name == "阅读理解":

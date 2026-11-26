@@ -188,6 +188,7 @@ def _record_success(batch_dir: Path, manifest: dict, stage: contracts.Stage) -> 
     )
     mf.record_delivery(batch_dir, manifest, stage)
     mf.mark_delivery_consumed(batch_dir, stage.id)
+    manifest["status"] = mf.derive_status(manifest)
     return True
 
 
@@ -207,6 +208,7 @@ def _mark_crashed(batch_dir: Path, manifest: dict, stage: contracts.Stage,
                 return
             mf.touch_stage(current, stage.id, mf.FAILED, exit_code=1,
                            notes="执行器异常：" + str(exc)[:300])
+            current["status"] = mf.derive_status(current)
             mf.save(batch_dir, current)
             if current is not manifest:
                 manifest.clear()
@@ -1239,6 +1241,7 @@ def do_review_gate(batch_dir: Path, manifest: dict, *, lock_held=False) -> int:
                            release_ready=False,
                            notes=f"审核已执行完成，{n} 项差异待人工审核（未放行，未上传）")
             mf.record_delivery(batch_dir, current, contracts.STAGE_BY_ID["review_gate"])
+            current["status"] = mf.derive_status(current)
             mf.save(batch_dir, current)
             if current is not manifest:
                 manifest.clear()
@@ -1248,6 +1251,7 @@ def do_review_gate(batch_dir: Path, manifest: dict, *, lock_held=False) -> int:
         else:
             mf.touch_stage(current, "review_gate", mf.BLOCKED,
                            notes=f"{len(result['errors'])} 条未解决")
+        current["status"] = mf.derive_status(current)
         mf.save(batch_dir, current)
         if current is not manifest:  # 同一对象时 clear+update 会把自己清空
             manifest.clear()

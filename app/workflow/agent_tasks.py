@@ -298,6 +298,39 @@ def retire_stale_feedback(batch, unit_ids, *, stages=None):
     return retired
 
 
+def retire_resolved_feedback(batch, stage, *, tag=""):
+    """阶段通过程序校验并正式交付后，退役其历史局部修复反馈，避免后续重跑被旧反馈误导。
+
+    preassemble 与 types 共用 repair-feedback/types.json（_collect 把 preassemble
+    映射到 types）；assemble 通过整批校验（含确定性路径 assemble_local.try_assemble）
+    后，此前由 assemble 失败生成的 assemble/preassemble/types 反馈也一并退役留档。
+    """
+    root = Path(batch).resolve() / "workflow" / "repair-feedback"
+    if not root.is_dir():
+        return []
+    if stage == "preassemble":
+        names = ("preassemble", "types")
+    elif stage == "assemble":
+        names = ("assemble", "preassemble", "types")
+    else:
+        names = (str(stage),)
+    retired = []
+    for name in names:
+        fb = root / f"{name}.json"
+        if not fb.is_file():
+            continue
+        try:
+            resolved_dir = root / "resolved"
+            resolved_dir.mkdir(parents=True, exist_ok=True)
+            suffix = str(tag).strip() or hashlib.sha256(fb.read_bytes()).hexdigest()[:12]
+            target = resolved_dir / f"{name}-{suffix}.json"
+            fb.replace(target)
+            retired.append(target.relative_to(Path(batch).resolve()).as_posix())
+        except OSError:
+            pass
+    return retired
+
+
 def _collect(batch, stage, speculative=False, allow_pending_audio=False):
     stage = "types" if stage == "preassemble" else stage
     batch = Path(batch).resolve()

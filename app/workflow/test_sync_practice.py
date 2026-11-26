@@ -372,6 +372,42 @@ class TestColumnBannersAndRepeatedAnswerHeadings(unittest.TestCase):
             with self.subTest(non_banner=non_banner):
                 self.assertFalse(is_column_banner(non_banner))
 
+    def test_refine_unit_subtype_for_or_spelling_and_rewrite_and_cloze_extra(self):
+        from . import content_rules
+        # 根据首字母或汉语提示完成单词：按单题题干精确细分
+        self.assertEqual(
+            sp.classify_with_body("根据首字母或汉语提示完成单词", "1. We visited a big ____ (公园).")["subtype"],
+            "汉语提示",
+        )
+        self.assertEqual(
+            sp.classify_with_body("根据首字母或汉语提示完成单词", "2. He is very p____ with students.")["subtype"],
+            "首字母",
+        )
+        self.assertEqual(
+            sp.classify_with_body("根据首字母或汉语提示完成单词", "3. He is very p____ (受欢迎的).")["subtype"],
+            "汉语及首字母",
+        )
+        # 按要求完成句子：按小题括号指令精确细分
+        self.assertEqual(
+            sp.classify_with_body("按要求完成句子,每空一词", "1. He goes to school by bus.(对画线部分提问)")["subtype"],
+            "划线提问",
+        )
+        self.assertEqual(
+            sp.classify_with_body("按要求完成句子,每空一词", "2. She is good at English.(改为同义句)")["subtype"],
+            "同义句转化",
+        )
+        self.assertEqual(
+            sp.classify_with_body("按要求完成句子,每空一词", "3. He has a book.(改为否定句)")["subtype"],
+            "改写句子",
+        )
+        # 完形填空 10 空带 ☆拓展设问：不计入拓展设问，仍判 10空
+        cloze_body = " ".join(f"__{i}__" for i in range(1, 11)) + "\n☆拓展设问\n11. What is the title?"
+        self.assertEqual(sp.classify_with_body("完形填空", cloze_body)["subtype"], "10空")
+        # 同源边界口径注入 preassemble 与 review（且不污染完形填空分片）
+        self.assertIn("题型与子类对照及综合判定", content_rules.boundary_guidelines_block("preassemble"))
+        self.assertIn("☆佳句仿写", content_rules.boundary_guidelines_block("review", ["翻译"]))
+        self.assertEqual(content_rules.boundary_guidelines_block("review", ["完形填空"]), "")
+
 
 if __name__ == "__main__":
     unittest.main()

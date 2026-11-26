@@ -999,12 +999,18 @@ def dependency_satisfied(manifest: dict, stage_id: str, *, allow_unqualified: bo
 
 
 def ready_stages(batch_dir, manifest: dict, *, allow_unqualified: bool = False) -> list[str]:
-    """依赖全部满足、可以开始执行的阶段。"""
+    """依赖全部满足、可以开始执行的阶段（含已过期需重跑的非人工阶段，防上游过期锁死）。"""
     ready = []
     for stage in contracts.STAGES:
         record = manifest["stages"].get(stage.id, {})
-        if record.get("status") in TERMINAL_OK:
-            continue
+        status = record.get("status")
+        if status in TERMINAL_OK:
+            if (status == SKIPPED or stage.kind == contracts.HUMAN or stage.id == "upload"
+                    or not (record.get("input_hashes") or record.get("output_hashes"))):
+                continue
+            stale, _ = is_stale(batch_dir, manifest, stage)
+            if not stale:
+                continue
         if any(not dependency_satisfied(manifest, dep, allow_unqualified=allow_unqualified)
                for dep in stage.depends_on):
             continue

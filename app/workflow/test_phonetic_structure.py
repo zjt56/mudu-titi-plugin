@@ -707,6 +707,103 @@ class PhoneticStructureTest(unittest.TestCase):
         self.assertTrue(any('[A8]' in p for p in check(wiped, self.verified())))
         self.assertIn('GROUP_INCOMPLETE', {e['code'] for e in upload_payload.build_payload({'items': [wiped]}, batch_dir=self.root)['errors']})
 
+    def test_picture_spelling_group_with_multiple_inline_images_on_one_line(self):
+        """看图写词组题在首题号前同行并排多张 [IMG ...] 时，仍须保留大题导语并通过 A8 结构体检。"""
+        from workflow import assemble_precheck, denoise, extract, structure_gate
+        text = (
+            'Unit 7 Happy Birthday!\n'
+            '第一课时 Section A (1a—1d)\n'
+            '**Ⅰ. 用英语写出下列图片中的节日所在的农历月份**\n'
+            '[IMG pic1.jpeg][IMG pic2.jpeg][IMG pic3.jpeg]\n'
+            '1.________   2.________   3.________\n'
+            '\n'
+            '[IMG pic4.jpeg][IMG pic5.jpeg][IMG pic6.jpeg]\n'
+            '**4.**________   5.________   6.________\n'
+        )
+        structure, text, _ = extract.infer_structure(text)
+        units = structure_gate._build_units(
+            structure['sections'], structure['groups'], denoise.clean_body(text)[0].splitlines())
+        self.assertEqual(len(units), 1)
+        for path, content in (('正文.txt', text), ('structure.json', structure),
+                              ('structure.confirmed.json', {'units': units})):
+            self.write('01_source/' + path, content)
+        for name in ('pic1.jpeg', 'pic2.jpeg', 'pic3.jpeg', 'pic4.jpeg', 'pic5.jpeg', 'pic6.jpeg'):
+            (self.root / '01_source/media' / name).write_bytes(b'img-' + name.encode('ascii'))
+
+        row = question_draft.build(self.root)['items'][0]
+        row['question_type'] = '单词拼写'
+        for child, ans in zip(row['subquestions'], ('May', 'August', 'December', 'January', 'May', 'October')):
+            child['answer'] = ans
+        for att in row['attachments']:
+            att['url'] = '/source-media/' + self.root.name + '/' + att['name']
+        for child in row['subquestions']:
+            for att in child.get('attachments') or []:
+                att['url'] = '/source-media/' + self.root.name + '/' + att['name']
+
+        self.assertEqual(row['material'], '')
+        self.assertEqual(row['stem'], '**Ⅰ. 用英语写出下列图片中的节日所在的农历月份**')
+        self.assertEqual([a['name'] for a in row['attachments']], ['pic1.jpeg', 'pic2.jpeg', 'pic3.jpeg'])
+        self.assertEqual([a['name'] for a in row['subquestions'][2].get('attachments') or []],
+                         ['pic4.jpeg', 'pic5.jpeg', 'pic6.jpeg'])
+        verified = self.verified()
+        self.assertEqual(phonetic_structure.shape(row, verified), (True, False))
+
+        # 模拟 assemble 阶段先跑 restore_source_stems 再跑 assemble_precheck：
+        # 已转为子题附件的 [IMG ...] 不得被回填回子题 stem，否则会破坏 verified_groups 比对并误报 A8。
+        payload = {'items': [row]}
+        question_content.restore_source_stems(self.root, payload)
+        self.assertNotIn('[IMG', row['subquestions'][2]['stem'])
+        self.assertEqual(phonetic_structure.shape(row, verified), (True, False))
+
+        check = self.check_script('check_structure')._check_unit
+        self.assertEqual(check(row, verified), [])
+        with patch('workflow.assemble_precheck.SCRIPTS', ('check_structure.py',)):
+            self.assertTrue(assemble_precheck.precheck(payload, batch_dir=self.root)['passed'])
+
+    def test_dialogue_word_group_preserves_rubric_and_passes_a8_and_e20(self):
+        """同步练习「填入恰当的特殊疑问词或词组,完成对话」(dialogue-word) 为补全对话/填写单词整题组，
+        每小题自带微型对话、无共享材料与 A–G 选项，须提取大题导语并通过 A8 与 E20 预检。"""
+        from workflow import assemble_precheck, denoise, extract, structure_gate
+        text = (
+            'Unit 7 Happy Birthday!\n'
+            '第三课时 Grammar Focus\n'
+            '**Ⅱ. 填入恰当的特殊疑问词或词组,完成对话**\n\n'
+            '**1.**—____________ book is yours,the green one or the red one?\n'
+            '—The green one.\n\n'
+            '**2.**—____________ is your birthday?\n'
+            '—On 2nd May.\n'
+        )
+        structure, text, _ = extract.infer_structure(text)
+        units = structure_gate._build_units(
+            structure['sections'], structure['groups'], denoise.clean_body(text)[0].splitlines())
+        self.assertEqual(len(units), 1)
+        for path, content in (('正文.txt', text), ('structure.json', structure),
+                              ('structure.confirmed.json', {'units': units})):
+            self.write('01_source/' + path, content)
+
+        row = question_draft.build(self.root)['items'][0]
+        row['question_type'] = '补全对话'
+        row['filterMetadata'] = {'subtypes': ['填写单词'], 'source': '测试同步', 'source_type': '同步练习', 'year': 2026}
+        for child, ans in zip(row['subquestions'], ('Which', 'When')):
+            child['answer'] = ans
+
+        self.assertEqual(row['material'], '')
+        self.assertEqual(row['stem'], '**Ⅱ. 填入恰当的特殊疑问词或词组,完成对话**')
+        verified = self.verified()
+        self.assertEqual(phonetic_structure.shape(row, verified), (True, False))
+
+        check = self.check_script('check_structure')._check_unit
+        self.assertEqual(check(row, verified), [])
+        pre = assemble_precheck.precheck({'items': [row]}, batch_dir=self.root)
+        self.assertTrue(pre['passed'], pre)
+
+        # 反向防线：普通 7选5 补全对话缺少 7 条选项仍报 E20
+        seven_five = copy.deepcopy(row)
+        seven_five['filterMetadata']['subtypes'] = ['7选5']
+        pre_75 = assemble_precheck.precheck({'items': [seven_five]}, batch_dir=self.root)
+        self.assertFalse(pre_75['passed'])
+        self.assertTrue(any('[E20]' in p for p in pre_75['problems']))
+
 
 if __name__ == '__main__':
     unittest.main()

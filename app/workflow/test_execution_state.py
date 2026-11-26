@@ -147,6 +147,35 @@ class BoundedPollingTest(unittest.TestCase):
                 auto.poll_batch(Path('/unused'), {}, stop_at='not-a-stage')
         advance.assert_not_called()
 
+    def test_record_success_syncs_manifest_status_to_pending_confirmation(self):
+        import tempfile
+        from workflow import contracts, runner
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            (batch / 'workflow').mkdir(parents=True)
+            manifest = {
+                'workflow_id': 'status-sync-test',
+                'status': 'failed',
+                'stages': {
+                    'validate': {'status': mf.COMPLETED},
+                    'review': {'status': mf.COMPLETED},
+                    'review_gate': {
+                        'status': mf.NEEDS_REVIEW,
+                        'execution_completed': True,
+                        'continue_unqualified': True,
+                        'release_ready': False,
+                    },
+                    'format_gate': {'status': mf.FAILED},
+                },
+            }
+            with patch.object(mf, 'input_hashes', return_value={}), \
+                 patch.object(mf, 'output_hashes', return_value={}), \
+                 patch.object(mf, 'record_delivery'), \
+                 patch.object(mf, 'mark_delivery_consumed'):
+                ok = runner._record_success(batch, manifest, contracts.STAGE_BY_ID['format_gate'])
+            self.assertTrue(ok)
+            self.assertEqual(manifest['status'], 'pending_confirmation')
+
 
 if __name__ == '__main__':
     unittest.main()

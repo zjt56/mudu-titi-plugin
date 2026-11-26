@@ -19,5 +19,5 @@ test('审核列表保留已暂存批次并提供已上传筛选', () => {
   assert.match(server, /"uploaded":/);
   assert.match(client, /if \(b\.uploaded \|\| b\.upload_pending_confirmation\) return true/);
   assert.match(client, /if \(key === 'uploaded'\) return isBatchUploaded\(b\)/);
-  assert.match(client, /const list = baseList\.filter\(\(b\) => matchReviewFilter\(b, reviewFilter\)\)/);
+  assert.match(client, /const list = sourceFilteredBase\.filter\(\(b\) => matchReviewFilter\(b, reviewFilter\)\)/);
 });

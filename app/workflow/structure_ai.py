@@ -384,11 +384,11 @@ def _classify_prompt(raw_text: str, candidate: dict, pdf_ocr=None) -> str:
     )
 
 
-def sync_subtype(candidate: dict, start: int, qtype: str) -> str:
+def sync_subtype(candidate: dict, start: int, qtype: str, stem: str = "") -> str:
     """按包含该窗口的大题标题回填子类；题型不一致或规则无子类时返回空串。
 
     课时同步里模型经常只回题型不回子类（如 单词拼写 的「汉语及首字母」）。
-    子类只从本批次已确认的大题标题里确定性反查，判不出就留空，不自造。
+    子类只从本批次已确认的大题标题里确定性反查，并结合单题题干细化宽泛子类，判不出就留空，不自造。
     """
     owner = next((section for section in ((candidate or {}).get("sections") or [])
                   if isinstance(section, dict)
@@ -398,6 +398,8 @@ def sync_subtype(candidate: dict, start: int, qtype: str) -> str:
     if owner is None:
         return ""
     hit = sync_practice.classify(str(owner.get("title") or ""))
+    if hit and stem:
+        hit = sync_practice.refine(hit, stem)
     if hit and hit.get("type") == qtype and hit.get("subtype"):
         return str(hit["subtype"])
     return ""
@@ -487,7 +489,7 @@ def _sanitize_classified(reply, raw_text: str, candidate: dict, *, diagnostics=N
             continue
         subtype = str(raw.get("subtype") or "").strip()
         if scoped and not subtype:
-            subtype = sync_subtype(candidate, start, qtype)
+            subtype = sync_subtype(candidate, start, qtype, stem)
         source_chunk = "\n".join(lines[start - 1:end])
         char_positions = [i for i, c in enumerate(source_chunk) if not c.isspace()]
         compact = ''.join(source_chunk[i] for i in char_positions)

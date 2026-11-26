@@ -319,5 +319,62 @@ class RepairFeedbackTest(unittest.TestCase):
                 self.assertEqual(source, (self.batch / "01_source/正文.txt").read_bytes())
 
 
+class TestStaleFeedbackAndReadyStages(unittest.TestCase):
+    def test_retire_resolved_feedback_cleans_preassemble_and_assemble_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            fb_dir = batch / "workflow" / "repair-feedback"
+            fb_dir.mkdir(parents=True, exist_ok=True)
+            for name in ("preassemble", "types", "assemble", "knowledge"):
+                (fb_dir / f"{name}.json").write_text('{"reason": "stale"}', encoding="utf-8")
+
+            retired = agent_tasks.retire_resolved_feedback(batch, "preassemble", tag="abc12345")
+            self.assertEqual(len(retired), 2)
+            self.assertFalse((fb_dir / "preassemble.json").exists())
+            self.assertFalse((fb_dir / "types.json").exists())
+            self.assertTrue((fb_dir / "assemble.json").exists())
+            self.assertTrue((fb_dir / "knowledge.json").exists())
+
+            (fb_dir / "types.json").write_text('{"reason": "stale2"}', encoding="utf-8")
+            retired_asm = agent_tasks.retire_resolved_feedback(batch, "assemble", tag="deterministic")
+            self.assertEqual(len(retired_asm), 2)
+            self.assertFalse((fb_dir / "assemble.json").exists())
+            self.assertFalse((fb_dir / "types.json").exists())
+            self.assertTrue((fb_dir / "knowledge.json").exists())
+            self.assertTrue((fb_dir / "resolved" / "assemble-deterministic.json").is_file())
+            self.assertTrue((fb_dir / "resolved" / "types-deterministic.json").is_file())
+
+    def test_ready_stages_includes_stale_completed_upstream_instead_of_deadlocking(self):
+        from workflow import manifest as mf
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            (batch / "01_source").mkdir(parents=True, exist_ok=True)
+            (batch / "03_types").mkdir(parents=True, exist_ok=True)
+            (batch / "06_batch").mkdir(parents=True, exist_ok=True)
+            (batch / "01_source/正文.txt").write_text("1. Test\n", encoding="utf-8")
+            (batch / "06_batch/batch.base.json").write_text('{"items": []}', encoding="utf-8")
+            (batch / "03_types/types.json").write_text('{"items": []}', encoding="utf-8")
+            manifest = {
+                "batch_dir": str(batch),
+                "inputs": {},
+                "stages": {
+                    "extract": {"status": mf.COMPLETED},
+                    "structure_gate": {"status": mf.COMPLETED},
+                    "preassemble": {
+                        "status": mf.COMPLETED,
+                        "output_hashes": {
+                            "06_batch/batch.base.json": "old-hash-mismatch",
+                            "03_types/types.json": "old-hash-mismatch",
+                        },
+                    },
+                    "content_snapshot": {"status": mf.INVALIDATED},
+                },
+            }
+            with patch.object(mf, "dependency_satisfied", side_effect=lambda m, dep, **kw: dep in {"extract", "structure_gate"}):
+                ready = mf.ready_stages(batch, manifest)
+            self.assertIn("preassemble", ready)
+            self.assertNotIn("content_snapshot", ready)
+
+
 if __name__ == "__main__":
     unittest.main()

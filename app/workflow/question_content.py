@@ -1084,12 +1084,29 @@ def restore_source_stems(batch_dir: str | Path, batch: dict) -> int:
                 return parsed[key]
         return None
 
+    def _already_normalized_with_attachments(target, stem):
+        """True when target['stem'] already equals stem after promoting its [IMG] refs to attachments."""
+        img_names = [m.group(1).strip() for m in IMAGE.finditer(stem)]
+        if not img_names:
+            return False
+        attached = {
+            str(a.get("name") or "").strip()
+            for a in (target.get("attachments") or [])
+            if isinstance(a, dict) and a.get("kind") == "image" and a.get("placement") == "question"
+        }
+        if not set(img_names).issubset(attached):
+            return False
+        stripped = IMAGE.sub("", stem)
+        current = str(target.get("stem") or "")
+        return stripped == current or stripped.strip() == current.strip()
+
     def fill(target, parsed):
         nonlocal changed
         if not isinstance(parsed, dict) or not parsed.get("found"):
             return
         stem = parsed.get("stem")
-        if isinstance(stem, str) and stem.strip() and target.get("stem") != stem:
+        if (isinstance(stem, str) and stem.strip() and target.get("stem") != stem
+                and not _already_normalized_with_attachments(target, stem)):
             target["stem"] = stem
             changed += 1
         options = parsed.get("options")

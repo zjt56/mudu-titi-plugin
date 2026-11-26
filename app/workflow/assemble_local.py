@@ -667,6 +667,9 @@ def try_assemble(batch_dir, config=None):
         report = agent_tasks.accept_result(batch_dir, "assemble", candidate)
     if report.get("completed"):
         record_guard(batch_dir)
+        # 确定性组装不经过 agent_protocol，这里同样须退役旧 repair-feedback，
+        # 避免修复代码后再次重跑 preassemble/assemble 时被历史反馈误导。
+        agent_tasks.retire_resolved_feedback(batch_dir, "assemble", tag="deterministic")
         fallback = Path(batch_dir) / FALLBACK
         if fallback.exists():
             fallback.unlink()
