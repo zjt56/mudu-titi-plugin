@@ -322,7 +322,9 @@ def retire_resolved_feedback(batch, stage, *, tag=""):
         try:
             resolved_dir = root / "resolved"
             resolved_dir.mkdir(parents=True, exist_ok=True)
-            suffix = str(tag).strip() or hashlib.sha256(fb.read_bytes()).hexdigest()[:12]
+            digest = hashlib.sha256(fb.read_bytes()).hexdigest()[:8]
+            clean_tag = str(tag).strip()
+            suffix = f"{clean_tag}-{digest}" if clean_tag else hashlib.sha256(fb.read_bytes()).hexdigest()[:12]
             target = resolved_dir / f"{name}-{suffix}.json"
             fb.replace(target)
             retired.append(target.relative_to(Path(batch).resolve()).as_posix())

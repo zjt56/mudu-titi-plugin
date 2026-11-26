@@ -341,8 +341,13 @@ class TestStaleFeedbackAndReadyStages(unittest.TestCase):
             self.assertFalse((fb_dir / "assemble.json").exists())
             self.assertFalse((fb_dir / "types.json").exists())
             self.assertTrue((fb_dir / "knowledge.json").exists())
-            self.assertTrue((fb_dir / "resolved" / "assemble-deterministic.json").is_file())
-            self.assertTrue((fb_dir / "resolved" / "types-deterministic.json").is_file())
+            self.assertEqual(len(list((fb_dir / "resolved").glob("assemble-deterministic-*.json"))), 1)
+            self.assertEqual(len(list((fb_dir / "resolved").glob("types-deterministic-*.json"))), 1)
+
+            # 再次用同一 tag 退役不同内容时，不应覆盖历史归档
+            (fb_dir / "assemble.json").write_text('{"reason": "stale-next"}', encoding="utf-8")
+            agent_tasks.retire_resolved_feedback(batch, "assemble", tag="deterministic")
+            self.assertEqual(len(list((fb_dir / "resolved").glob("assemble-deterministic-*.json"))), 2)
 
     def test_ready_stages_includes_stale_completed_upstream_instead_of_deadlocking(self):
         from workflow import manifest as mf
@@ -374,6 +379,33 @@ class TestStaleFeedbackAndReadyStages(unittest.TestCase):
                 ready = mf.ready_stages(batch, manifest)
             self.assertIn("preassemble", ready)
             self.assertNotIn("content_snapshot", ready)
+
+    def test_local_ready_stages_and_supervisor_include_stale_completed_local_stage(self):
+        from workflow import auto, manifest as mf, supervisor
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp)
+            (batch / "01_source").mkdir(parents=True, exist_ok=True)
+            (batch / "06_batch").mkdir(parents=True, exist_ok=True)
+            (batch / "01_source/正文.txt").write_text("1. Test\n", encoding="utf-8")
+            (batch / "06_batch/batch.json").write_text('{"items": []}', encoding="utf-8")
+            manifest = {
+                "batch_dir": str(batch),
+                "inputs": {},
+                "stages": {
+                    "assemble": {"status": mf.COMPLETED},
+                    "audio": {"status": mf.SKIPPED},
+                    "validate": {
+                        "status": mf.COMPLETED,
+                        "output_hashes": {"06_batch/batch.json": "old-hash-mismatch"},
+                    },
+                },
+            }
+            with patch.object(mf, "dependency_satisfied", return_value=True):
+                local_ready = auto.local_ready_stages(batch, manifest, auto.load_bridge())
+                self.assertIn("validate", local_ready)
+                sup_state = {}
+                self.assertTrue(supervisor._new_deferred_work(batch, manifest, set(), sup_state))
+                self.assertIn("validate", sup_state["deferred_work"])
 
 
 if __name__ == "__main__":

@@ -127,7 +127,7 @@ _OPTION_NUMBER = re.compile(r"[（(]\s*[)）]\s*(\d{1,2})\s*[.．]")
 _MIXED = ("完成下列各题", "完成各题", "思维导图", "完成表格", "排序", "判断正误", "信息摘录")
 
 
-_INITIAL_BLANK = re.compile(r"(?<![A-Za-z])[A-Za-z](?:\s*_{2,}|\s*\u3000+|\s*[（(][^）)\n]*[\u4e00-\u9fff])")
+_INITIAL_BLANK = re.compile(r"(?<![A-Za-z])(?!(?:[aAI])(?=\s))[A-Za-z](?:\s*_{2,}|\s*\u3000+|\s*[（(][^）)\n]*[\u4e00-\u9fff])")
 _CHINESE_CUE = re.compile(r"[（(][^）)\n]*[\u4e00-\u9fff][^）)\n]*[）)]")
 _CLOZE_UNDERLINE_NUM = re.compile(r"_{2,}\s*(\d{1,2})\s*_{2,}")
 

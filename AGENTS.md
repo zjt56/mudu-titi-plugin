@@ -87,7 +87,7 @@
 
 - Python 工作流：`cd app && PYTHONPATH=. python3 -m unittest workflow.test_<area>`（重大改动跑全量）；
 - 前端/路由：`node --test backend/*.test.cjs backend/*.test.mjs`；
-- 宿主插件：`node --check lib/index.js lib/client.js`；
+- 宿主插件：`node --check lib/*.js`；
 - 变更记录必须写实际通过数字。
 
 ## 五、协作与上下文卫生

@@ -285,8 +285,15 @@ def local_ready_stages(batch_dir, manifest, bridge=None):
     bridge = load_bridge() if bridge is None else bridge
     ready = []
     for stage in contracts.STAGES:
-        if manifest.get('stages', {}).get(stage.id, {}).get('status') in mf.TERMINAL_OK:
-            continue
+        record = manifest.get('stages', {}).get(stage.id, {})
+        status = record.get('status')
+        if status in mf.TERMINAL_OK:
+            if (status == mf.SKIPPED or stage.kind == contracts.HUMAN or stage.id == 'upload'
+                    or not (record.get('input_hashes') or record.get('output_hashes'))):
+                continue
+            stale, _ = mf.is_stale(batch_dir, manifest, stage)
+            if not stale:
+                continue
         if not all(mf.dependency_satisfied(manifest, dep, allow_unqualified=ZERO_TOUCH)
                    for dep in stage.depends_on):
             continue

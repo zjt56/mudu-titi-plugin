@@ -387,6 +387,19 @@ class TestColumnBannersAndRepeatedAnswerHeadings(unittest.TestCase):
             sp.classify_with_body("根据首字母或汉语提示完成单词", "3. He is very p____ (受欢迎的).")["subtype"],
             "汉语及首字母",
         )
+        # 冠词 a/A 与代词 I 后接空白不算首字母提示
+        self.assertEqual(
+            sp.classify_with_body("根据首字母或汉语提示完成单词", "4. This is a ______ (苹果).")["subtype"],
+            "汉语提示",
+        )
+        self.assertEqual(
+            sp.classify_with_body("根据首字母或汉语提示完成单词", "5. I ______ (喜欢) apples.")["subtype"],
+            "汉语提示",
+        )
+        self.assertEqual(
+            sp.classify_with_body("根据首字母或汉语提示完成单词", "6. This is a______ (苹果).")["subtype"],
+            "汉语及首字母",
+        )
         # 按要求完成句子：按小题括号指令精确细分
         self.assertEqual(
             sp.classify_with_body("按要求完成句子,每空一词", "1. He goes to school by bus.(对画线部分提问)")["subtype"],

@@ -386,7 +386,7 @@ def _new_local_work(folder, manifest, healing, state):
     for stage_id in auto.local_ready_stages(folder, manifest):
         record = (manifest.get("stages") or {}).get(stage_id) or {}
         if (stage_id not in LOCAL_STAGES or stage_id == diagnosed
-                or record.get("status") not in {"pending", "invalidated"}):
+                or record.get("status") not in {"pending", "invalidated", mf.COMPLETED}):
             continue
         inputs = mf.input_hashes(folder, manifest, contracts.STAGE_BY_ID[stage_id])
         binding = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
@@ -406,7 +406,7 @@ def _new_deferred_work(folder, manifest, deferred, state):
     for stage_id in mf.ready_stages(folder, manifest, allow_unqualified=True):
         record = manifest["stages"].get(stage_id) or {}
         if (stage_id not in LOCAL_STAGES or stage_id in deferred
-                or record.get("status") not in {"pending", "invalidated"}):
+                or record.get("status") not in {"pending", "invalidated", mf.COMPLETED}):
             continue
         inputs = mf.input_hashes(folder, manifest, contracts.STAGE_BY_ID[stage_id])
         binding = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()

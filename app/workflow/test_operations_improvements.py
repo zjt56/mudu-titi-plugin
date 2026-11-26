@@ -469,6 +469,14 @@ class OperationsImprovementsTest(unittest.TestCase):
         opt_act = op._recommended_action("format_gate", "SOURCE_OPTIONS_INCOMPLETE", [], {})
         self.assertIn("preview_repair/apply_repair", opt_act)
 
+        # 普通运行时或权限错误里带 unauthorized 字样，不应误判为外部认证故障
+        perm_act = op._recommended_action("assemble", "PermissionError: unauthorized write to temp dir", [], {})
+        self.assertNotIn("waiting_external", perm_act)
+
+        # 结构化 error_code=unauthorized 仍应判为外部认证故障
+        struct_auth_act = op._recommended_action("knowledge", '{"error_code": "unauthorized", "message": "bad key"}', [], {})
+        self.assertIn("waiting_external", struct_auth_act)
+
 
 if __name__ == "__main__":
     unittest.main()

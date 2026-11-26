@@ -95,10 +95,10 @@ TRANSIENT = re.compile(r"(?i)\b(rate[_ -]?limit|timeout|timed out|busy|locked|un
 _EXTERNAL_AUTHENTICATION = re.compile(
     r"(?is)(?:\b(?:authentication|unauthori[sz]ed|permission[_ -]?denied|forbidden|"
     r"invalid[_ -]?api[_ -]?key|api[_ -]?key|credential|凭据|密钥)\b"
-    r".{0,120}?(?:fail(?:ed|ure)?|invalid|reject(?:ed)?|denied|error|错误|失败|拒绝)|"
-    r"(?:fail(?:ed|ure)?|invalid|reject(?:ed)?|denied|error|错误|失败|拒绝)"
-    r".{0,120}?(?:\b(?:authentication|unauthori[sz]ed|permission[_ -]?denied|forbidden|"
-    r"invalid[_ -]?api[_ -]?key|api[_ -]?key|credential|凭据|密钥)\b|\bHTTP\s*[45]0[13]\b))")
+    r".{0,120}?(?:\b(?:fail(?:ed|ure)?|invalid|reject(?:ed)?|denied|error)\b|错误|失败|拒绝)|"
+    r"(?:\b(?:fail(?:ed|ure)?|invalid|reject(?:ed)?|denied|error)\b|错误|失败|拒绝)"
+    r".{0,120}?\b(?:authentication|unauthori[sz]ed|permission[_ -]?denied|forbidden|"
+    r"invalid[_ -]?api[_ -]?key|api[_ -]?key|credential|凭据|密钥)\b|\bHTTP\s*[45]0[13]\b)")
 
 
 def _external_authentication_failure(detail):
@@ -687,13 +687,14 @@ def _is_model_contract_error(stage, detail):
 
 def _is_external_auth_error(detail):
     """Return True when failure is caused by external model API key / auth misconfiguration."""
+    if _external_authentication_failure(detail):
+        return True
     text = str(detail or "").lower()
     markers = (
         "authentication fails",
         "invalid api key",
         "invalid_api_key",
         "incorrect api key",
-        "unauthorized",
         "api key is invalid",
         "your api key:",
     )
