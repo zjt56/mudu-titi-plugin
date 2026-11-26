@@ -68,15 +68,15 @@
 
 自治开关与运维服务启停分别保存。`<源码根>/.operations-autonomy.json` 使用 `md-operations-autonomy/v1`，记录严格布尔 `enabled`、规范化 `source_root`、授权说明 `authorization` 和更新时间。文件缺失默认关闭；损坏、错根或符号链接配置拒绝授权，不静默当作已启用。该点文件不会复制到隔离工作区，也不在修复读写允许清单中，模型不能自行授权。测试进程会剥除旧安装环境变量和凭据。
 
-可信本地宿主/配置入口调用 `workflow.operations_development.set_autonomy(source_root, enabled=True, authorization="用户明确授权的本地自治修复")` 原子持久化；同一 API 传 `enabled=False` 撤销。`autonomy_config(source_root)` 查询实际配置，`install_authorization(source_root, confirm=False)` 返回 `allowed/autonomous/mode/config_path/authorization`；`mode` 区分 `local_autonomy`、`legacy_confirmed` 和 `disabled`。这些 Python API 是可信本地配置边界，不向事件模型暴露设置授权的工具。当前用户本轮已明确授权本机自治修复，由本地配置入口启用此开关；代码默认值仍保持关闭。
+可信本地宿主/配置入口调用 `workflow.operations_development.set_autonomy(source_root, enabled=True, authorization="用户明确授权的本地自治修复")` 原子持久化；同一 API 传 `enabled=False` 撤销。`autonomy_config(source_root)` 查询实际配置，`install_authorization(source_root, confirm=False)` 返回 `allowed/autonomous/mode/config_path/authorization`；`mode` 区分 `local_autonomy`、`legacy_confirmed` 和 `disabled`。这些 Python API 是可信本地配置边界，不向事件模型暴露设置授权的工具。代码默认值仍保持关闭，当前工作区配置已撤销自治安装授权。
 
 已启用自治时，受控工作流自动完成隔离复现、修改、测试、安装计划、安全安装、宿主重启、重新认领和原失败检查复验。关闭授权不更改既有批次产物，不取消已写入的回滚证据；后续安装重新检查授权。没有任何路径因此获得自动上传、发布、直接编辑用户数据或裁决审核差异的权限。
 
 ### 隔离代码修复
 
-判断为程序缺陷时，运维会话不获得 shell，也不能直接改运行中的插件；只能请求一个独立代码修复任务：
+判断为程序缺陷时，运维会话不获得 shell，也不能直接改运行中的插件；只能显式请求一个独立代码修复任务。普通源码 `search/read/read_lines/status/diff` 检查不会创建工作区，`finish` 排队恢复也不会隐式创建工作区：
 
-1. `request_code_repair`：把**当前运行的有效源码**（含未提交修改）复制到临时工作区，保留只读基线副本和可编辑副本，跳过 `.git`、`workflows`、虚拟环境、缓存、密钥样式文件和点文件；同一有效修复尝试复用工作区；安装后必须证明后端进程已更换、重新认领并执行原检查。复验仍失败时，旧记录归档，新请求以当前已安装源码重新捕获基线，允许在总安装预算内进行下一次修复。
+1. `request_code_repair`：这是唯一创建隔离工作区的入口。它把**当前运行的有效源码**（含未提交修改）复制到临时工作区，保留只读基线副本和可编辑副本，跳过 `.git`、`workflows`、虚拟环境、缓存、密钥样式文件和点文件；同一有效修复尝试复用工作区；安装后必须证明后端进程已更换、重新认领并执行原检查。复验仍失败时，旧记录归档，新请求以当前已安装源码重新捕获基线，允许在总安装预算内进行下一次修复。
 2. `code_repair operation=read/write/patch/restore_base`：只在工作区内读写允许清单中的 `app/workflow/*.py` 与测试文件；拒绝符号链接、`..`、盘符和清单外路径。`write` 是整文件替换，必须给完整文件；传入行号/context 等片段编辑参数会被拒绝。局部修改使用 `patch`，需提供文件当前 SHA 和原文件中逐字唯一的非空片段。误写或截断使用 `restore_base`，后端核对只读 `.base` 副本的摘要与长度后，仅恢复隔离工作区文件；恢复前将损坏候选保存到 `.repair-history/`，并清空测试记录和安装计划。已安装或安装中的工作区不允许恢复基线。
 3. `code_repair operation=test`：用固定参数运行指定 unittest，剥除令牌、密钥、密码、API Key、认证变量和 `DSH_*` 环境变量；记录测试指纹，测试后再改文件会使测试证据失效。
 4. `code_repair operation=diff/prepare`：输出补丁并生成安装计划；计划要求生产源码自捕获后未变化、无删除、无锁定文件改动、测试通过且测试文件本身被运行过。

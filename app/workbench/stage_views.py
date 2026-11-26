@@ -210,7 +210,10 @@ def paper_info(folder: Path, report, manifest) -> dict:
         subtopic, _ = extract_unit_subtopic(head_text, str(batch.get("batch") or folder.name))
         if subtopic and subtopic not in title:
             title = f"{title} {subtopic}"
+    orig_files = descriptor.get("original_filenames") if isinstance(descriptor.get("original_filenames"), dict) else {}
+    original_filename = str(orig_files.get("source") or "").strip()
     return {"title": title,
+            "original_filename": original_filename,
             "batch": str(batch.get("batch") or folder.name),
             "source": str(resolved.get("source") or MISSING),
             "source_type": str(resolved.get("source_type") or MISSING),

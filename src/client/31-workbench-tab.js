@@ -192,29 +192,7 @@
 
       // 审核列表展示时，仅在后台静默预热最靠前的 4 份已完成流程（flow_done）且未上传的试卷，
       // 避免在审核未结束前就把「待审核」空快照锁进缓存。
-      const topReviewNamesKey = (!active && isActive)
-        ? (batches || []).filter((b) => b && !b.uploaded && b.flow_done)
-            .slice()
-            .sort((a, b) => batchLatestTime(b) - batchLatestTime(a))
-            .slice(0, UNIT_CACHE_MAX)
-            .map((b) => b.name + '\x1f' + batchCacheSignature(b))
-            .join('\0')
-        : '';
-      React.useEffect(() => {
-        if (!topReviewNamesKey) return;
-        let cancelled = false;
-        const names = topReviewNamesKey.split('\0').map((s) => s.split('\x1f')[0]).filter(Boolean);
-        (async () => {
-          for (const name of names) {
-            if (cancelled) return;
-            const entry = UNIT_CACHE.get(String(name));
-            if (entry && (entry.loaded || entry.promise)) continue;
-            try { await loadBatchUnitsBundle(name); } catch (_) {}
-          }
-        })();
-        return () => { cancelled = true; };
-      }, [topReviewNamesKey]);
-
+      // 按需加载模式：列表页不做整卷预取与悬停预取；仅在用户实际点击试卷卡片时按需加载。
       // Reconnect and page re-entry always consult durable status before enabling upload.
       React.useEffect(() => {
         if (!active) return;
@@ -225,36 +203,15 @@
         return () => { clearTimeout(initTimer); clearInterval(timer); uploadGeneration.current[name] = (uploadGeneration.current[name] || 0) + 1; };
       }, [active && active.name]);
 
-      const hoverPrefetchTimerRef = React.useRef(null);
-      const cancelHoverPrefetch = React.useCallback(() => {
-        if (hoverPrefetchTimerRef.current) {
-          clearTimeout(hoverPrefetchTimerRef.current);
-          hoverPrefetchTimerRef.current = null;
-        }
-      }, []);
-      const scheduleHoverPrefetch = React.useCallback((name) => {
-        cancelHoverPrefetch();
-        const entry = UNIT_CACHE.get(String(name || ''));
-        if (entry && (entry.loaded || entry.promise)) return;
-        hoverPrefetchTimerRef.current = setTimeout(() => {
-          hoverPrefetchTimerRef.current = null;
-          loadBatchUnitsBundle(name).catch(() => {});
-        }, 150);
-      }, [cancelHoverPrefetch]);
-      React.useEffect(() => cancelHoverPrefetch, [cancelHoverPrefetch]);
-
       function openBatch(name) {
-        cancelHoverPrefetch();
+        clearAllUnitCaches();
+        clearImageCache();
         const prior = uploadStatesRef.current[name];
         setUploadState(name, { state: 'checking', attempted: !!(prior && prior.attempted), message: '正在查询上传状态…' });
-        // 优先取完整 rows 首题 ID，其次取 lite 列表携带的 first_unit_id，再其次取预取缓存首题 ID，
-        // 彻底避免刚切页点卡时落入 unitId='_' 的两跳串行等待。
         const b = (batches || []).find((x) => x.name === name);
         const rows = (b && b.rows) || [];
         const firstRow = rows[0];
-        const cachedEntry = UNIT_CACHE.get(String(name || ''));
-        const cachedFirstId = (cachedEntry && cachedEntry.loaded && Array.isArray(cachedEntry.order) && cachedEntry.order[0]) || '';
-        const unitId = firstRow ? (firstRow.unit_id || firstRow.number) : ((b && b.first_unit_id) || cachedFirstId || '_');
+        const unitId = firstRow ? (firstRow.unit_id || firstRow.number) : ((b && b.first_unit_id) || '_');
         setActive({ name, unitId, overview: b || null });
         if (!b || !Array.isArray(b.rows)) {
           jget('/batches/' + encodeURIComponent(name)).then((full) => {
@@ -265,13 +222,6 @@
               ? { ...cur, unitId: cur.unitId === '_' && first ? (first.unit_id || first.number) : cur.unitId, overview: full }
               : cur));
           }).catch(() => {});
-          if (unitId === '_') {
-            loadBatchUnitsBundle(name).then((entry) => {
-              const firstUid = entry && Array.isArray(entry.order) && entry.order[0];
-              if (!firstUid) return;
-              setActive((cur) => (cur && cur.name === name && cur.unitId === '_' ? { ...cur, unitId: firstUid } : cur));
-            }).catch(() => {});
-          }
         }
       }
       async function doAdvance(name) {
@@ -401,8 +351,10 @@
           loadBatches();
         };
         return h(React.Fragment, null, h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--dsw-alias-bg-base)' } },
-          // 来源横条：独立悬浮卡片，与下方工作区留出间隙；操作按钮统一右对齐。
+          // 来源横条：独立悬浮卡片，「返回列表」左对齐并用细竖线与来源名称隔开，其余操作按钮右对齐。
           h('div', { style: { ...T.toolbar, margin: '10px 14px 0', padding: '9px 14px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 12, background: 'var(--dsw-alias-bg-layer-1)', boxShadow: '0 4px 16px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06)', flexShrink: 0 } },
+            h('button', { className: 'wf-btn', style: { ...T.btn, flexShrink: 0 }, onClick: () => { clearAllUnitCaches(); clearImageCache(); setActive(null); } }, TEXT.back),
+            h('span', { 'aria-hidden': 'true', style: { width: 1, height: 18, background: 'var(--dsw-alias-border-l2)', flexShrink: 0 } }),
             h('span', { style: T.toolbarTitle }, (active.overview?.paper?.title || active.name)),
             h('span', { style: { ...T.hint, marginLeft: 4 } }, '↑/↓ 或 k/j 切换题组'),
             h('span', { style: { flex: 1 } }),
@@ -410,7 +362,6 @@
             upload.message && uploadNotice !== active.name && (upload.attempted || upload.state === 'failed' || upload.state === 'idle') ? h('button', { className: 'wf-btn', style: T.btn, onClick: () => setUploadNotice(active.name) }, '查看上传通知') : null,
             h('button', { className: 'wf-btn-primary', style: T.btnPrimary, onClick: () => doUpload(active.name), disabled: !['idle', 'failed'].includes(upload.state) || typeof upload.requiresUnreviewedConfirmation !== 'boolean' || advBusy === active.name }, upload.state === 'running' ? '上传中…' : '上传批次'),
             h('button', { className: 'wf-btn-danger', style: T.btnDanger, onClick: () => openDelete(active.name) }, '删除批次'),
-            h('button', { className: 'wf-btn', style: T.btn, onClick: () => setActive(null) }, TEXT.back),
           ),
           uploadNotice === active.name && upload.message ? (() => {
             const isErrorNotice = upload.state === 'failed' || upload.state === 'unknown';
@@ -594,8 +545,6 @@
                   marginRight: 'auto',
                   ...(uploadedCard ? { background: 'rgba(34, 197, 94, 0.06)', borderColor: 'rgba(34, 197, 94, 0.24)' } : (anomalyCard ? { background: 'rgba(220, 38, 38, 0.06)', borderColor: 'rgba(220, 38, 38, 0.28)' } : null)),
                 },
-                onMouseEnter: () => scheduleHoverPrefetch(b.name),
-                onMouseLeave: cancelHoverPrefetch,
                 onClick: () => openBatch(b.name),
               },
               // 第一行：标题 + 细字体统计（无底色，仅“待审”带底色）

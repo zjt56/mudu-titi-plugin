@@ -2242,11 +2242,13 @@ _OVERVIEW_CACHE = {}
 _OVERVIEW_SNAPSHOT = None
 _OVERVIEW_SNAPSHOT_DIRTY = False
 _CACHE_GUARD = threading.Lock()
-# 内存排查：整卷 bundle/上下文单项可达数十 MB，上限按条数收紧，避免长期驻留。
-_OVERVIEW_CACHE_MAX = 128
-_REVIEW_SNAPSHOT_CACHE_MAX = 64
-_UNITS_BUNDLE_CACHE_MAX = 4
-_DETAIL_CTX_CACHE_MAX = 8
+# 按需加载模式：
+# - overview / review_snapshot 单条仅几 KB，上限必须大于本地批次总数（否则每次列表/题型审核都会 0% 命中、全盘重扫 12s+）；
+# - units_bundle / detail_ctx 单条可达数 MB~数十 MB，保持极小活跃工作集（1 / 3）。
+_OVERVIEW_CACHE_MAX = 512
+_REVIEW_SNAPSHOT_CACHE_MAX = 512
+_UNITS_BUNDLE_CACHE_MAX = 1
+_DETAIL_CTX_CACHE_MAX = 3
 
 
 def _cache_get_lru(cache: dict, key):
@@ -2374,7 +2376,7 @@ def _overview_key(folder):
         except OSError:
             parts.append((relative, "missing"))
     # 升级后须重算旧投影，包含从入口迁出的耗时计算。
-    for filename in ("server.py", "batch_overview.py", "anomaly_views.py"):
+    for filename in ("server.py", "batch_overview.py", "anomaly_views.py", "stage_views.py"):
         try:
             code = Path(__file__).with_name(filename).stat()
             parts.append((filename, code.st_mtime_ns, code.st_size))

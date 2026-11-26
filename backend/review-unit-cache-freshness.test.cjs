@@ -69,9 +69,11 @@ test('batchCacheSignature changes on flow_done / open_findings / stage transitio
   };
   assert.notEqual(batchCacheSignature(beforeReview), batchCacheSignature(afterReview));
 
-  // 确认不再在审核未完成时用 b.unit_total > 0 提前把旧快照锁进缓存
-  assert.match(src, /filter\(\(b\) => b && !b\.uploaded && b\.flow_done\)/);
-  assert.doesNotMatch(src, /filter\(\(b\) => b && !b\.uploaded && \(b\.flow_done \|\| b\.unit_total > 0\)\)/);
-  // 首屏预取数量不得超过 UNIT_CACHE_MAX，避免预取后半段把最常点的前几份试卷挤出缓存
-  assert.match(src, /\.slice\(0, UNIT_CACHE_MAX\)/);
+  // 按需加载 + 微预取下 1 题：彻底移除列表页自动整卷预取、悬停整卷预取与进卷整卷 bundle 拉取
+  assert.doesNotMatch(src, /topReviewNamesKey/);
+  assert.doesNotMatch(src, /scheduleHoverPrefetch/);
+  assert.match(src, /var UNIT_CACHE_MAX = 1;/);
+  assert.match(src, /var TYPE_UNIT_CACHE_MAX = 3;/);
+  assert.match(src, /var IMG_CACHE_MAX = 24;/);
+  assert.match(src, /nextPrefetchTarget/);
 });

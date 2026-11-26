@@ -89,6 +89,29 @@ REPAIRS = {"repair_source_tables": "apply_source_table_repair",
            "repair_upload_format": "apply_source_format_repair"}
 TRANSIENT = re.compile(r"(?i)\b(rate[_ -]?limit|timeout|timed out|busy|locked|unavailable|"
                        r"temporar|connection|network|cooldown)\b")
+# Authentication and route-credential failures are external configuration
+# blockers. They remain recorded by the pipeline, but cannot be repaired by
+# editing workflow source code or by creating a code-repair workspace.
+_EXTERNAL_AUTHENTICATION = re.compile(
+    r"(?is)(?:\b(?:authentication|unauthori[sz]ed|permission[_ -]?denied|forbidden|"
+    r"invalid[_ -]?api[_ -]?key|api[_ -]?key|credential|凭据|密钥)\b"
+    r".{0,120}?(?:fail(?:ed|ure)?|invalid|reject(?:ed)?|denied|error|错误|失败|拒绝)|"
+    r"(?:fail(?:ed|ure)?|invalid|reject(?:ed)?|denied|error|错误|失败|拒绝)"
+    r".{0,120}?(?:\b(?:authentication|unauthori[sz]ed|permission[_ -]?denied|forbidden|"
+    r"invalid[_ -]?api[_ -]?key|api[_ -]?key|credential|凭据|密钥)\b|\bHTTP\s*[45]0[13]\b))")
+
+
+def _external_authentication_failure(detail):
+    """Return true only for an explicit provider credential/config fault."""
+    text = str(detail or "")
+    if not text:
+        return False
+    if re.search(r'"(?:error_code|code|type)"\s*:\s*"(?:authentication|invalid_api_key|unauthorized|permission_denied|forbidden)"', text, re.I):
+        return True
+    if re.search(r"\bHTTP\s*(?:401|403)\b", text, re.I) and re.search(
+            r"(?i)authentication|api[_ -]?key|credential|凭据|密钥", text):
+        return True
+    return bool(_EXTERNAL_AUTHENTICATION.search(text))
 
 
 def _only_transient_detail(detail):
@@ -1167,6 +1190,11 @@ def _discover(folder, *, force=False):
             return state
         stale_running = True
     record = manifest.get("stages", {}).get(stage) or {}
+    # Credential and route-authentication failures are already persisted by the
+    # pipeline with a typed wait. Operations must not create a repair incident
+    # or spend code-repair attempts for them.
+    if _external_authentication_failure(detail) or (record.get("model_authentication") is not None):
+        return state
     if stage == "review_gate":
         detail_low = str(detail or "").strip().lower()
         if (record.get("status") not in {mf.FAILED, mf.BLOCKED, mf.NEEDS_REVIEW}
@@ -1817,9 +1845,10 @@ def _request_code_repair(folder, incident, data):
                      "install_code_repair confirm=true 由受控宿主安装并重启"]}
 
 
-_AUTO_INIT_CODE_OPS = frozenset((
-    "status", "search", "read", "read_lines", "write", "patch", "patch_lines", "multi_patch", "diff",
-))
+# A code-repair workspace is an explicit escalation boundary. Read-only source
+# inspection must not create one as a side effect, because ordinary diagnosis can
+# inspect source evidence without authorizing a repair job or consuming disk.
+_AUTO_INIT_CODE_OPS = frozenset()
 
 
 def _normalize_test_names(tests):
@@ -2329,11 +2358,9 @@ def action(root, folder, payload, *, enqueue=None):
                     incident.update(status=outcome, eligible=False, attempt_id=None, lease_expires_at=0)
                     _settle_code_repair(folder, incident, outcome)
                 else:
-                    plan = _recovery_plan(folder, incident)
-                    if plan["next_actions"] == ["request_code_repair"]:
-                        # Deterministic isolated setup makes the first escalation
-                        # concrete; it never edits production or batch content.
-                        _request_code_repair(folder, incident, {"summary": data["summary"]})
+                    # Queue the bounded recovery decision only. Creating a code
+                    # workspace is an explicit request_code_repair action, so a
+                    # finish call cannot allocate a new repair job as a side effect.
                     _queue_recovery(folder, incident, outcome, data["summary"])
                 result = {"outcome": "resolved" if outcome == "resolved" else "recovery_queued",
                           "requested_outcome": outcome, "status": incident["status"],

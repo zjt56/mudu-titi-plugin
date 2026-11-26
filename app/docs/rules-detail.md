@@ -41,6 +41,7 @@
 ## 规则 18：Harness 运维为附加能力
 
 - 落地：`app/workflow/operations.py`、`app/workflow/operations_development.py`、`lib/operations-agent.js`；说明见 `app/docs/harness-operations.md`。
+- 代码修复工作区必须由 `request_code_repair` 显式创建。`code_repair` 的源码检查和 `finish` 恢复排队不得产生隐式工作区。认证、凭据、无效 API Key、HTTP 401/403 等外部配置故障保留流水线 typed wait，不进入代码修复发现。
 
 ## 规则 19：提示词示例即契约（示例与校验器同源）
 

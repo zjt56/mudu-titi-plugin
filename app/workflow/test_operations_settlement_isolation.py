@@ -71,6 +71,24 @@ class RepairSettlementIsolationTests(unittest.TestCase):
                     result = op._discover(self.folder)
                 self.assertEqual(bool(result['incident']), expected)
 
+    def test_external_authentication_failure_does_not_create_incident(self):
+        for detail in (
+                'Authentication Failed: invalid API key',
+                '{"error_code":"authentication","message":"provider rejected credentials"}',
+                'HTTP 403: unauthorized credential'):
+            with self.subTest(detail=detail):
+                state = {'identity': {}, 'incident': None, 'receipts': [], 'failures': {}}
+                manifest = {'stages': {'validate': {'status': op.mf.FAILED}}}
+                with patch.object(op, '_load', return_value=state), \
+                     patch.object(op, '_identity', return_value={}), \
+                     patch.object(op.mf, 'load', return_value=manifest), \
+                     patch.object(op.self_heal, '_candidate', return_value=('validate', detail)), \
+                     patch.object(op.self_heal, '_load', return_value={'events': []}), \
+                     patch.object(op.self_heal, '_retry_evidence', return_value={}), \
+                     patch.object(op, 'service_available', return_value=True):
+                    result = op._discover(self.folder)
+                self.assertIsNone(result['incident'])
+
     def test_request_creates_new_workspace_for_other_incident(self):
         old = self.record('workspace_ready', 'old-incident')
         new = {'job_id': 'new', 'workspace': str(self.folder / 'workspace'),

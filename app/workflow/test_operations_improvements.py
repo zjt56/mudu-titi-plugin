@@ -136,7 +136,7 @@ class OperationsImprovementsTest(unittest.TestCase):
                 with self.subTest(stage=stage, rel=rel):
                     self.assertTrue((repo_root / rel).is_file(), f"missing hint {rel} for stage {stage}")
 
-    def test_code_repair_auto_initializes_workspace_and_normalizes_test_names(self):
+    def test_code_repair_requires_explicit_workspace_request_and_normalizes_test_names(self):
         src_root = self.root / "src_auto"
         (src_root / "app" / "workflow").mkdir(parents=True)
         (src_root / "app" / "workflow" / "sample_mod.py").write_text(
@@ -150,8 +150,15 @@ class OperationsImprovementsTest(unittest.TestCase):
         incident = {"incident_id": "inc-auto", "stage": "validate", "detail": "fail", "attempts": []}
         with mock.patch.object(op, "_source_root", return_value=src_root), \
              mock.patch.object(op, "_code_root", return_value=self.root / "dev-root"):
-            res = op._code_repair(folder, incident, {"operation": "read_lines", "path": "app/workflow/sample_mod.py", "start_line": 1})
-            self.assertTrue(res.get("workspace_auto_initialized"))
+            with self.assertRaisesRegex(ValueError, "code_repair_not_requested"):
+                op._code_repair(folder, incident, {
+                    "operation": "read_lines", "path": "app/workflow/sample_mod.py", "start_line": 1,
+                })
+            op._request_code_repair(folder, incident, {"summary": "explicit repair request"})
+            res = op._code_repair(folder, incident, {
+                "operation": "read_lines", "path": "app/workflow/sample_mod.py", "start_line": 1,
+            })
+            self.assertNotIn("workspace_auto_initialized", res)
             self.assertEqual(res["limit"], 200)
             self.assertEqual(len(res["lines"]), 149)
             tested = op._code_repair(folder, incident, {

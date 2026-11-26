@@ -153,15 +153,30 @@
         return items.find((it) => itemKey(it) === selectedKey) || items[0];
       }, [items, selectedKey]);
 
+      const nextItem = React.useMemo(() => {
+        if (!items.length || !activeItem) return null;
+        const curKey = itemKey(activeItem);
+        const idx = items.findIndex((it) => itemKey(it) === curKey);
+        return (idx >= 0 && idx + 1 < items.length) ? items[idx + 1] : null;
+      }, [items, activeItem]);
+
       const sameBatchRows = React.useMemo(() => {
         if (!activeItem) return [];
         return items.filter((it) => it && it.batch_name === activeItem.batch_name);
       }, [items, activeItem]);
 
-      // 切页后列表滚动回到顶部
+      // 切页、切换题型/筛选或离开题型审核页签时，立即释放上一页单题与题图缓存。
       React.useEffect(() => {
         if (listScrollRef.current) listScrollRef.current.scrollTop = 0;
+        if (typeof clearTypeUnitCache === 'function') clearTypeUnitCache();
+        if (typeof clearImageCache === 'function') clearImageCache();
       }, [currentPage, selectedType, appliedQuery, statusFilter]);
+      React.useEffect(() => {
+        if (!isActive) {
+          if (typeof clearTypeUnitCache === 'function') clearTypeUnitCache();
+          if (typeof clearImageCache === 'function') clearImageCache();
+        }
+      }, [isActive]);
 
       // 选中行滚进可视区
       React.useEffect(() => {
@@ -467,6 +482,7 @@
           disableKeyNav: true,
           hidePaperPreview: true,
           hideAiSupplement: true,
+          nextUnit: nextItem ? { batchName: nextItem.batch_name, unitId: nextItem.unit_id } : null,
           onUnitMutated: () => loadPage({ silent: true }),
         });
       }

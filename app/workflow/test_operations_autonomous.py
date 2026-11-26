@@ -68,8 +68,8 @@ class AutonomousOperationsTests(unittest.TestCase):
         self.assertIn('autonomous_action_required', result['evidence']['error'])
         state = op._load(self.folder)
         self.assertEqual(state['incident']['status'], 'claimed')
-        self.assertEqual(state['incident']['recovery']['next_actions'], ['code_repair'])
-        self.assertEqual(op._code_record(self.folder)['status'], 'workspace_ready')
+        self.assertEqual(state['incident']['recovery']['next_actions'], ['request_code_repair'])
+        self.assertIsNone(op._code_record(self.folder))
         # A real failed test then allows a bounded recovery round; another idle
         # finish after that round waits for actual changed input/code evidence.
         op._attempt(state['incident'], 'code_test', 'isolated_tests', 'workspace-v1', 'failed')

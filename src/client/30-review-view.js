@@ -4,7 +4,7 @@
     function ReviewView(props) {
       const React = require('react');
       const h = React.createElement;
-      const { batchName, unitId, rows, disableBatchBundle, hideListCol, disableKeyNav, hidePaperPreview, hideAiSupplement, contextPaper, onUnitMutated } = props;
+      const { batchName, unitId, rows, disableBatchBundle, hideListCol, disableKeyNav, hidePaperPreview, hideAiSupplement, contextPaper, onUnitMutated, nextUnit } = props;
       const isViewActive = props.isActive !== false;
       const writeCachedUnit = disableBatchBundle ? setTypeCachedUnit : setCachedUnit;
       const onSelectUnit = props.onSelectUnit || (() => {});
@@ -71,21 +71,6 @@
             setErr('');
             return;
           }
-          // 若悬停/列表预取已在途，给它极短宽限（120ms）直接复用；若超时未回，立即改发轻量单题请求，
-          // 避免整卷打包拖慢首题与「标签审核」的首次渲染。
-          const existingEntry = UNIT_CACHE.get(String(batchName || ''));
-          if (existingEntry && existingEntry.promise) {
-            const fromBundle = await Promise.race([
-              existingEntry.promise.then(() => getCachedUnit(batchName, unitId)).catch(() => null),
-              new Promise((resolve) => setTimeout(() => resolve(null), 120)),
-            ]);
-            if (!request.current()) return;
-            if (fromBundle && !isCachedUnitStale(fromBundle, currentRowRef.current)) {
-              applyDetail(fromBundle);
-              setErr('');
-              return;
-            }
-          }
         }
         // 冷启动/网络抖动时单次失败会让题目区空白：对可重试错误做几次短退避重试，
         // 每次都以 requestGate 的 current() 为准，切题即作废旧请求。
@@ -101,7 +86,6 @@
             writeCachedUnit(batchName, unitId, d);
             applyDetail(d);
             setErr('');
-            if (!force && !disableBatchBundle) loadBatchUnitsBundle(batchName).catch(() => {});
             return;
           } catch (e) {
             if (!request.current()) return;
@@ -111,37 +95,45 @@
           }
         }
         if (request.current() && !silent) setErr(String((lastErr && lastErr.message) || lastErr || '加载失败'));
-      }, [batchName, unitId, applyDetail, disableBatchBundle]);
-      // 进卷后台预加载整卷全部单元与题图：若当前题已在缓存或整卷已在途则立即执行，
-      // 否则稍作让路（100ms），避免冷启动时整卷请求与首题标签审核抢占后端。
-      // 题型审核跨批次分页模式（disableBatchBundle=true）严禁整卷预拉取，避免大批缓存膨胀。
-      React.useEffect(() => {
-        if (disableBatchBundle) return undefined;
-        let cancelled = false;
-        const startBundle = () => {
-          if (cancelled) return;
-          loadBatchUnitsBundle(batchName).then((entry) => {
-            if (cancelled || !entry) return;
-            const cur = entry.units.get(String(unitId));
-            const orderedUrls = [];
-            if (cur) orderedUrls.push(...collectBlockImageUrls(cur.preview_blocks));
-            for (const uid of (entry.order || [])) {
-              if (String(uid) === String(unitId)) continue;
-              const u = entry.units.get(String(uid));
-              if (u) orderedUrls.push(...collectBlockImageUrls(u.preview_blocks));
-            }
-            prefetchImages(orderedUrls, 4);
-          }).catch(() => {});
-        };
-        const existingEntry = UNIT_CACHE.get(String(batchName || ''));
-        if (getCachedUnit(batchName, unitId) || (existingEntry && (existingEntry.loaded || existingEntry.promise))) {
-          startBundle();
-          return () => { cancelled = true; };
+      }, [batchName, unitId, applyDetail, writeCachedUnit]);
+      // 按需加载 + 微预取下 1 题：停留当前题 250ms 后静默预取下一题单题详情与该题题图，
+      // 彻底停用整卷 bundle 预拉取；切题或离页立即取消定时器并中止在途请求。
+      const nextPrefetchTarget = React.useMemo(() => {
+        if (nextUnit && nextUnit.batchName && nextUnit.unitId != null && nextUnit.unitId !== '_') {
+          return { batchName: String(nextUnit.batchName), unitId: String(nextUnit.unitId) };
         }
-        const timer = setTimeout(startBundle, 400);
-        return () => { cancelled = true; clearTimeout(timer); };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, [batchName, disableBatchBundle]);
+        if (!Array.isArray(rows) || !rows.length || !batchName || !unitId || unitId === '_') return null;
+        const idx = rows.findIndex((r) => r && String(r.unit_id || r.number) === String(unitId));
+        if (idx < 0 || idx + 1 >= rows.length) return null;
+        const nxt = rows[idx + 1];
+        const nextUid = nxt && (nxt.unit_id || nxt.number);
+        if (nextUid == null || String(nextUid) === String(unitId)) return null;
+        return { batchName: String(batchName), unitId: String(nextUid) };
+      }, [nextUnit, rows, batchName, unitId]);
+      React.useEffect(() => {
+        if (!isViewActive || !detail || !nextPrefetchTarget) return undefined;
+        const { batchName: nb, unitId: nu } = nextPrefetchTarget;
+        if (getCachedUnit(nb, nu)) return undefined;
+        let cancelled = false;
+        let controller = null;
+        const timer = setTimeout(() => {
+          if (cancelled) return;
+          controller = typeof AbortController === 'function' ? new AbortController() : null;
+          jget('/batches/' + encodeURIComponent(nb) + '/units/' + encodeURIComponent(nu), controller ? controller.signal : undefined)
+            .then((d) => {
+              if (cancelled || !d) return;
+              writeCachedUnit(nb, nu, d);
+              const urls = collectBlockImageUrls(d.preview_blocks);
+              if (urls.length) prefetchImages(urls, 2);
+            })
+            .catch(() => {});
+        }, 250);
+        return () => {
+          cancelled = true;
+          clearTimeout(timer);
+          if (controller) { try { controller.abort(); } catch (_) {} }
+        };
+      }, [isViewActive, detail, nextPrefetchTarget, writeCachedUnit]);
       React.useEffect(() => {
         mounted.current = true;
         const cached = getCachedUnit(batchName, unitId);
@@ -152,12 +144,11 @@
           if (cached) {
             applyDetail(cached);
             invalidateBatchUnits(batchName);
-            if (!disableBatchBundle) loadBatchUnitsBundle(batchName, { force: true }).catch(() => {});
           }
           load({ force: !!cached, silent: !!cached });
         }
         return () => { mounted.current = false; requestGate.current.cancel(); };
-      }, [batchName, unitId, currentRowKey, applyDetail, load, disableBatchBundle]);
+      }, [batchName, unitId, currentRowKey, applyDetail, load]);
       React.useEffect(() => { setLabelNotice(''); setLabelError(''); setLabelDlg(false); setContentDlg(false); setAiNotice(''); setContentEditDlg(false); setContentEditError(''); setBusy(''); setErr(''); }, [batchName, unitId]);
       // 仅在当前视图可见且批次仍在后台运行时才每 8 秒轮询；隐藏页签时彻底暂停轮询与窗口聚焦监听。
       const lastFocusRefreshRef = React.useRef(0);
@@ -261,7 +252,6 @@
               setAiBusy('');
               setAiNotice(String(st.message || (st.applied ? `✓ 已生成 ${st.applied} 项（已标注 AI 生成）` : '无可补充缺项')));
               invalidateBatchUnits(batchName);
-              if (!disableBatchBundle) loadBatchUnitsBundle(batchName, { force: true }).catch(() => {});
               load({ force: true, silent: true });
               return false;
             } else if (st.status === 'error') {
@@ -338,7 +328,6 @@
             setAiBusy('');
             setAiNotice(String(res.message || (res.applied ? `✓ 已生成 ${res.applied} 项（已标注 AI 生成）` : '无可补充缺项')));
             invalidateBatchUnits(batchName);
-            if (!disableBatchBundle) loadBatchUnitsBundle(batchName, { force: true }).catch(() => {});
             await load({ force: true, silent: true });
           } else if (res.status === 'error') {
             setAiBusy('');

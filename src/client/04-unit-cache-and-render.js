@@ -1,7 +1,8 @@
-    // ---- 整卷单元详情缓存（LRU，最多保留 2 份试卷，首屏预取同步不超出此上限）----------
+    // ---- 按需单题缓存（仅保留当前活跃题 + 微预取下 1 题，离卷/切页即清）----------
     var UNIT_CACHE = new Map();
     var UNIT_CACHE_ORDER = [];
-    var UNIT_CACHE_MAX = 2;
+    var UNIT_CACHE_MAX = 1;
+    var UNIT_CACHE_PER_BATCH_MAX = 4;
     function unitCacheTouch(batchName) {
       const key = String(batchName || '');
       const idx = UNIT_CACHE_ORDER.indexOf(key);
@@ -25,8 +26,13 @@
     function getCachedUnit(batchName, unitId) {
       const entry = UNIT_CACHE.get(String(batchName || ''));
       if (entry) {
-        const hit = entry.units.get(String(unitId));
-        if (hit) return hit;
+        const key = String(unitId);
+        const hit = entry.units.get(key);
+        if (hit) {
+          entry.units.delete(key);
+          entry.units.set(key, hit);
+          return hit;
+        }
       }
       const tk = typeUnitCacheKey(batchName, unitId);
       if (TYPE_UNIT_CACHE.has(tk)) {
@@ -41,14 +47,30 @@
       if (!batchName || !detail) return;
       const entry = ensureBatchCacheEntry(batchName);
       const key = String(unitId);
+      entry.units.delete(key);
       entry.units.set(key, detail);
       if (detail.unit_id != null && String(detail.unit_id) !== key) {
-        entry.units.set(String(detail.unit_id), detail);
+        const alt = String(detail.unit_id);
+        entry.units.delete(alt);
+        entry.units.set(alt, detail);
+      }
+      while (entry.units.size > UNIT_CACHE_PER_BATCH_MAX) {
+        const oldest = entry.units.keys().next().value;
+        if (oldest === undefined || oldest === key) break;
+        entry.units.delete(oldest);
       }
     }
-    // 题型审核跨批次单题轻量 LRU（最多保留 12 题），不挤占「试卷审核」的整卷预热缓存。
+    // 题型审核跨批次单题轻量 LRU（最多保留 3 题：当前题 + 微预取下 1 题 + 上 1 题），切页/切题型即清。
     var TYPE_UNIT_CACHE = new Map();
-    var TYPE_UNIT_CACHE_MAX = 12;
+    var TYPE_UNIT_CACHE_MAX = 3;
+    function clearTypeUnitCache() {
+      TYPE_UNIT_CACHE.clear();
+    }
+    function clearAllUnitCaches() {
+      UNIT_CACHE.clear();
+      UNIT_CACHE_ORDER.length = 0;
+      TYPE_UNIT_CACHE.clear();
+    }
     function typeUnitCacheKey(batchName, unitId) {
       return String(batchName || '') + '\0' + String(unitId || '');
     }

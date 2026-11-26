@@ -258,6 +258,7 @@
           const r = await window.fetch(API + '/uploads', { method: 'POST', body: fd });
           if (!r.ok) throw new Error((await r.text()) || r.status);
           const data = await r.json();
+          const firstFileName = (files && files[0] && files[0].name) ? String(files[0].name) : '';
           setFiles([]);
           setFileRoles([]);
           if (fileInputRef.current) { try { fileInputRef.current.value = ''; } catch (_) {} }
@@ -265,9 +266,12 @@
           setTick((x) => x + 1);
           // 乐观立即入队：拿到上传回执就立刻把新试卷写入排队区并选中，后台再静默刷新对齐。
           if (data && data.name && !(data.duplicate && data.uploaded)) {
+            const optimisticPaper = data.paper
+              ? { ...data.paper, original_filename: data.paper.original_filename || firstFileName }
+              : { title: form.title || data.name, original_filename: firstFileName };
             const optimistic = {
               name: data.name,
-              paper: data.paper || { title: form.title || data.name },
+              paper: optimisticPaper,
               stage: data.stage || { items: [] },
               advance: data.advance || { running: true },
               flow_done: Boolean(data.flow_done),
@@ -470,7 +474,8 @@
                     },
                   }, exiting ? '✓' : (blockedInQueue ? '!' : String(entry.rank))),
                   h('div', { style: { flex: 1, minWidth: 0 } },
-                    h('div', { style: { fontSize: 12.5, fontWeight: 600, color: exiting ? '#15803d' : (blockedInQueue ? 'var(--dsw-alias-state-error-primary)' : (active ? 'var(--wf-brand)' : 'var(--dsw-alias-label-primary)')), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, (b.paper && b.paper.title) || b.name),
+                    // 排队区固定显示原始文件名（不随清洗后标题变化）；流程图上方仍按清洗后 paper.title 展示。
+                    h('div', { style: { fontSize: 12.5, fontWeight: 600, color: exiting ? '#15803d' : (blockedInQueue ? 'var(--dsw-alias-state-error-primary)' : (active ? 'var(--wf-brand)' : 'var(--dsw-alias-label-primary)')), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: (b.paper && b.paper.original_filename) || (b.paper && b.paper.title) || b.name }, (b.paper && b.paper.original_filename) || (b.paper && b.paper.title) || b.name),
                     h('div', { style: { ...T.hint, fontSize: 11, marginTop: 1, color: blockedInQueue ? 'var(--dsw-alias-state-error-primary)' : T.hint.color, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, exiting ? '已完成，已移出排队区' : ((cur.id ? shortStageName(cur) : (st.hint || '等待')) + (blockedInQueue ? ' · 异常停滞' : '') + (total ? ' · ' + done + '/' + total : ''))),
                     h('div', { style: { height: 3, borderRadius: 999, background: 'var(--dsw-alias-bg-layer-2)', marginTop: 6, overflow: 'hidden' } },
                       h('div', { style: { width: pct + '%', height: '100%', borderRadius: 999, background: exiting ? '#16a34a' : (blockedInQueue ? 'var(--dsw-alias-state-error-primary)' : 'var(--wf-brand)'), opacity: .75, transition: 'width .3s ease' } })),
