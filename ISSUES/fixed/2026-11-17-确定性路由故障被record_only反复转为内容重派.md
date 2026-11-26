@@ -1,7 +1,7 @@
 # 卡点：确定性路由故障被record_only反复转为内容重派
 
 - id: 2026-11-17-确定性路由故障被record_only反复转为内容重派
-- status: open
+- status: fixed
 - batch: 【木牍教育】19年安徽中考英语-2
 - batch_dir: workflows/【木牍教育】19年安徽中考英语-2
 - stage: answers
@@ -9,6 +9,9 @@
 - created: 2026-11-17T18:06:53+08:00
 - last_seen: 2026-11-17T18:06:53+08:00
 - occurrences: 1
+- fixed_at: 2026-11-26T14:47:40+08:00
+- fix_commit: 559fe96
+- verification: 2026-11-26 复验 test_content_retry_scope+test_operations_development+test_recovery_runtime_failures 39 项通过（连续2轮，已隔离运维心跳）
 - title: 确定性路由故障被record_only反复转为内容重派
 
 ## 现象（卡点）
@@ -23,4 +26,7 @@
 
 ## 修复记录
 
-（未修复）
+- 修复方式：self_heal._apply 对 answers/types/explanations/knowledge/audio 的 record_only 直接拒绝(repair_not_applicable)并升级 code_repair，不写反馈不重派；路由/配置类 runtime 失败抛 content_runtime_requires_code_repair
+- 修复提交：559fe96
+- 复验证据：2026-11-26 复验 test_content_retry_scope+test_operations_development+test_recovery_runtime_failures 39 项通过（连续2轮，已隔离运维心跳）
+- 标记时间：2026-11-26T14:47:40+08:00
