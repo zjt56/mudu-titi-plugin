@@ -2,10 +2,10 @@
 
 运行在 **DeepSeek Harness（DSH）** 中的英语试卷录题、审核与题库上传插件。
 
-将一份或多份 Word / PDF 试卷（可附答案、解析与听力音频）整理为结构化、可审核、可上传的题目批次，自动完成 **19 个本地阶段**（提取原文 → 结构确认 → 前置判型 → 并行填充 → 汇总装配 → 本地体检 → 两轮审核 → 格式检查），并在工作台提供内容编辑、独立 AI 大意/解析补充与差异核对。**远端目录写入、上传暂存与发布始终需要人工明确确认，插件绝不自动提交题库。**
+将一份或多份 Word / PDF 试卷（可附答案、解析与听力音频）整理为结构化、可审核、可上传的题目批次，自动完成 **19 个本地阶段**（提取原文 → 结构确认 → 前置判型 → 并行填充 → 汇总装配 → 本地体检 → 内容审核 → 格式检查），并在工作台提供 **试卷审核 / 题型审核**、原卷双栏对照、内容编辑、独立 AI 大意/解析补充与差异核对。**远端目录写入、上传暂存与发布始终需要人工明确确认，插件绝不自动提交题库。**
 
-- **原生前端**：[`lib/client.js`](lib/client.js)（DSH 侧边栏原生面板）
-- **插件宿主**：[`lib/index.js`](lib/index.js)（后端生命周期管理、配置与路由桥接）
+- **原生前端**：[`src/client/`](src/client/) 源码片段经 [`tools/build-client.mjs`](tools/build-client.mjs) 构建生成 [`lib/client.js`](lib/client.js)（DSH 侧边栏原生面板）
+- **插件宿主**：[`lib/index.js`](lib/index.js)（后端生命周期管理、热更新排空重启、配置与路由桥接）
 - **本地后端**：[`app/workbench/server.py`](app/workbench/server.py)（纯 REST 服务，不含网页）
 - **阶段契约**：[`app/workflow/contracts.py`](app/workflow/contracts.py)（19 阶段状态与产物交接唯一来源）
 
@@ -15,13 +15,13 @@
 
 | 模块 | 能力说明 |
 |---|---|
-| **零人工本地流水线** | 19 阶段自动推进，按依赖并行填充（听力仅阻塞审核，不阻塞文字装配与体检），支持 `scoped-v1` 分节重号与无号题独立定位。 |
+| **零人工本地流水线** | 19 阶段自动推进，按依赖并行填充；`validate` 后非听力审核分片立即与听力并行，仅听力分片等待转写；支持 `scoped-v1` 分节重号与无号题独立定位。 |
 | **原文保真优先** | 题干、选项、材料、表格严格切片自原卷；来源优先级固定为 **Word > PDF/OCR > 空占位**，不编造、不跨材料借用。 |
-| **灵活大模型路由** | 基于 Node 原生 [`backend/wf-router.mjs`](backend/wf-router.mjs) 跨平台路由，支持全局默认、各子 Agent、**文章大意/答案解析**与两轮审核分别指定模型。 |
-| **独立 AI 补充与并发编辑** | 工作台支持手动编辑答案/解析/大意（带字段级乐观并发校验）及按需触发「AI 文章大意 / AI 解析」；补充任务完全脱离主上传流程锁，互不阻塞。 |
-| **差异是产出，不是卡点** | 一审/二审与原标签的差异完整落入人工审核队列，不自动改标签、不伪造通过，也不阻断手动上传；仅确定性硬校验失败才构成阻断。 |
-| **AI 运维自愈（可选）** | 仅在出现失败或卡点时按需介入，基于确定性证据包诊断，支持局部修复与复验，绝不盲目整卷重跑。 |
-| **严格上传安全边界** | 本地硬校验通过且人工确认后，才执行远端答案考点注册、目录刷新、冻结载荷与上传暂存；凭据与真实试卷绝不入库。 |
+| **灵活大模型路由** | 基于 Node 原生 [`backend/wf-router.mjs`](backend/wf-router.mjs) 跨平台路由，支持全局默认、各子 Agent、**文章大意/答案解析**与审核分别指定模型，并隔离临时会话防内存膨胀。 |
+| **双视图工作台与并发编辑** | 提供 **试卷审核** 与 **题型审核**（按题型分页与键盘跨页）、Word 原卷双栏对照、字段级乐观并发编辑及独立「AI 文章大意 / AI 解析」补充，互不阻塞主流程。 |
+| **差异是产出，不是卡点** | 一审全量与原标签的差异完整落入人工审核队列（兼容历史二审），不自动改标签、不伪造通过，也不阻断手动上传；仅确定性硬校验失败才构成阻断。 |
+| **AI 运维分型自愈与稳定性加固** | 按故障分型选最小解法（外部认证等待恢复、规则变更直重跑、单题重生成、结构化修复、代码崩溃才隔离修复）；内置运行快照与安装前活跃批次互斥、只读前置诊断、Review 分片级进展监控与六维批次健康统计。 |
+| **严格上传安全边界** | 本地硬校验通过且人工确认后，才执行远端答案考点注册、目录刷新、冻结载荷与专用上传 Key 暂存；凭据与真实试卷绝不入库。 |
 
 ---
 
@@ -80,15 +80,15 @@ types            题型交接校验（先于后续填充完成）
 audio            听力切段 / 转写     ┐
 answers          答案填充            │
 explanations     原卷解析与大意抄录   ├ 按依赖并行推进，听力仅阻塞审核
-knowledge        知识点与教材匹配     │ 原卷无解析/大意时保留「无」占位
-content_snapshot 画线前内容快照       │
-meta             难度与分类          │
-underlines       画线标记            ┘
+knowledge        知识点标注（当前暂停教材匹配） │ 原卷无解析/大意时保留「无」占位
+content_snapshot 画线前内容快照               │
+meta             难度与分类                   │
+underlines       画线标记与候选消歧           ┘
 assemble         汇总装配与固化（消费画线视图，确定性合并点）
-validate         本地自动体检（硬校验）
-review           两轮内容审核（一审全量 + 二审抽检）
+validate         本地自动体检（内容/结构/来源/标签硬校验）
+review           内容审核（一审全量 + 缺证据局部补审，非听力与听力并行）
 review_gate      审核放行判断（差异待人工不阻断手动上传）
-format_gate      最终上传格式检查
+format_gate      最终上传格式与平台适配检查
 upload_gate      上传人工确认
 upload           写入远端上传暂存
 publish_gate     发布人工确认
@@ -189,35 +189,43 @@ PYTHONPATH=app python3 -m workflow.auto run --inbox inbox --once
 # 卡点台账查询与同步
 PYTHONPATH=app python3 -m workflow.issue_log list --status open
 PYTHONPATH=app python3 -m workflow.issue_log sync --all
+
+# 六维批次健康统计（区分硬校验、审核完成、质量放行、首次直通、自愈复验与仅流程继续）
+PYTHONPATH=app python3 -m workflow.batch_metrics workflows/<batch-name>
 ```
 
 ### 目录结构
 
 ```text
-lib/client.js                  DSH 原生前端面板
+src/client/                    前端模块化源码（16 个片段，修改后执行 build-client.mjs）
+tools/build-client.mjs         拼接生成 lib/client.js 的构建脚本
+lib/client.js                  DSH 原生前端面板（构建产物，勿直接手改）
 lib/index.js                   插件宿主、后端生命周期与配置接口
 app/workbench/server.py        纯 REST 工作台后端
-app/workflow/                  19 阶段引擎、闸门、审核、AI 补充与上传协议
+app/workflow/                  19 阶段引擎、闸门、审核、快照互斥、诊断与健康统计
 app/audio/                     WhisperX 听力安装、转写与切段
 backend/wf-router.mjs|.sh      跨平台模型路由入口
 config/                        模型、审核与提示词模板
-app/docs/                      各子系统设计文档
-CHANGELOG/                     行为与规则变更记录
+app/docs/                      各子系统设计文档与完整硬规则
+CHANGELOG/                     行为与规则变更记录（本地忽略）
 ISSUES/                        卡点台账（open / fixed）
 ```
 
 ### 运行测试
 
 ```bash
+# 前端构建与宿主全量语法检查
+node tools/build-client.mjs
+node --check lib/*.js
+node --test backend/*.test.cjs backend/*.test.mjs
+
 # Python 工作流定向测试（仓库根目录）
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=app python3 -m unittest \
+  workflow.test_stability_hardening \
+  workflow.test_operations \
   workflow.test_ai_supplement \
   workflow.test_review_child_source \
   workflow.test_upload
-
-# Node 宿主与前端测试
-node --check lib/index.js lib/client.js
-node --test backend/*.test.cjs backend/*.test.mjs
 ```
 
 ---
