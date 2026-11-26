@@ -207,6 +207,8 @@ class TaggingOptimizations20261125Test(unittest.TestCase):
         self.assertEqual(taxonomy.check_question_labels(ok_group), [])
         bad_group = dict(ok_group, knowledge=["语篇体裁/记叙文/故事", "主题/人与自我/生活与学习/日常活动"])
         self.assertTrue(taxonomy.check_question_labels(bad_group))
+        # 规则 51：选词填空整题不能标「单句」，单题必须标「单句」且不能标「多句/短文」
+        self.assertTrue(any("单句" in p for p in taxonomy.check_question_labels(dict(ok_group, subtypes=["单句"]))))
 
         # 单题（standalone）：删除主题和语篇体裁，只保留词汇/语法，不启用答案考点
         self.assertFalse(taxonomy.answer_point_only_type("选词填空", "standalone"))
@@ -226,6 +228,8 @@ class TaggingOptimizations20261125Test(unittest.TestCase):
         self.assertEqual(taxonomy.check_question_labels(ok_standalone), [])
         bad_standalone = dict(ok_standalone, knowledge=["主题/人与自我/生活与学习/日常活动"])
         self.assertTrue(taxonomy.check_question_labels(bad_standalone))
+        self.assertTrue(any("单句" in p for p in taxonomy.check_question_labels(dict(ok_standalone, subtypes=["多句"]))))
+        self.assertTrue(any("单句" in p for p in taxonomy.check_question_labels(dict(ok_standalone, subtypes=["短文"]))))
 
         # 整题确定性直标 + 上传答案考点自动派生
         with tempfile.TemporaryDirectory() as tmp:

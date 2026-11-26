@@ -147,3 +147,7 @@
 ## 规则 50：题干边界洁净、解析附件保留与提示词减负通用规则
 
 - 落地：`app/workflow/question_draft.py`、`lesson_bands.py`、`wire_format.py`、`question_content.py`、`assemble_local.py`、`unit_tasks.py`、`app/scripts/06-upload/audit_sentence_blanks.py`。
+
+## 规则 51：选词填空子类形态与单词拼写边界规则
+
+- 落地：`app/workbench/taxonomy.py`（`_check_labels` 校验 `选词填空` `group`/`standalone` 与 `多句`/`单句` 一致性）、`app/references/sync-practice-rules.json`（`spell-grammar-word` 改 `单句`）、`app/workflow/agent_tasks.py`（`_types` 传 `unit_kind` 校验 + `RULES["types"]`/`RULES["knowledge"]` 约束）、`app/workflow/review_rounds.py`（`_build_prompt` 加强边界与子类约束）、`app/prompts/roles/{types,preassemble,knowledge,review}.md`、`app/docs/sync-practice.md`；回归 `app/workflow/test_tagging_optimizations_20261125.py`、`app/workflow/test_sync_practice.py`。

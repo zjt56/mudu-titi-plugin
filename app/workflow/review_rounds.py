@@ -242,6 +242,8 @@ def _round_prompt(round_id, targets, context):
         "明确要求用所给词的适当形式填空、根据汉语提示补词等且无备选答案的独立填词题，不得因为要填子类而判成单项填空/四个选项；"
         "此规则不以 A–D 文字出现为充分条件（三个选项、图片选项、共享选项和听力选项均可能合法；仅有图片/音频占位时不得断言无选项或编造内容）。"
         "填词题需区分句子、整篇语境、选词框与作答指令，不一律套用单词拼写。"
+        "【选词填空与单词拼写边界·必须遵守】单词拼写通常在题目中有首字母或汉语提示；选词填空题干或共享材料会明确给出指定的单词/短语，严禁把两者混淆。"
+        "选词填空子类除整篇语篇挖空填 [\"短文\"] 外，整题（组题 unit_kind=group）必须填 [\"多句\"]，单题（unit_kind=standalone）必须填 [\"单句\"]，不得混用。"
         "【子类必填·必须遵守】主类在 references/filter-framework.json 中有子类时，assessment.subtypes 至少填一个目录合法子类，目录无子类才写 []，不得自造。"
         + ("单词拼写若为「用所给词的适当形式填空」，即使涉及派生词性变化（如 invent→inventor）也只填单一子类 [\"适当形式\"]，不叠加「词形转换」；仅当同时给出两类独立提示线索时才多选。"
            if has_spelling else "")
@@ -250,7 +252,7 @@ def _round_prompt(round_id, targets, context):
         "【标签分层与专项规则】"
         "① 阅读理解（组题）：全部标签（语篇体裁 + 主题 + 设题角度/阅读/*）标在组题级 assessment.knowledge，subquestions[i].knowledge 保持 []；"
         "其中文体必须通读全文（首段、主体展开与结尾落点）再判断，严禁只看首段或其中一小段；设题角度必须逐小题分析每道小题的问法与解题路径（如五道小题逐题分析），再把各小题得出的「设题角度/阅读/*」去重汇总到组题级。"
-        "② 选词填空：整题（unit_kind=group）只要答案考点——assessment.knowledge 填 []、subquestions[i].knowledge 填 []，不打主题/语篇体裁/目录词汇语法，在 assessment.answer_points 填去重答案词/短语；"
+        "② 选词填空：除整篇语篇挖空（短文）外，整题（unit_kind=group）子类为「多句」、单题（unit_kind=standalone）子类为「单句」，且题干或材料会明确给出指定单词/短语（区别于带首字母或汉语提示的单词拼写）；整题（unit_kind=group）只要答案考点——assessment.knowledge 填 []、subquestions[i].knowledge 填 []，不打主题/语篇体裁/目录词汇语法，在 assessment.answer_points 填去重答案词/短语；"
         "单题（unit_kind=standalone）删除主题和语篇体裁，只判「词汇/语法」并省略 answer_points。"
         "③ 完成句子：必须以空格/划线处的标准答案反推词汇与语法考点，禁止拿题干非空已有内容打标。"
         "【原稿格式瑕疵 ≠ 实质内容错误】详见 references/boundary-guidelines.json（review_format_vs_substantive_error）："

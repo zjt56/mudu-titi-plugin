@@ -79,7 +79,7 @@ Python→Node 视觉桥的 JSON stdin/stdout 固定为 UTF-8，不依赖 Windows
 - 单项填空、完成句子（汉语提示 / 改写句子 / 划线提问 / 同义句转化）、单词拼写（汉语及首字母 /
   适当形式 / 汉语提示 / 词形转换 / 句意及音标中的一句一空题）、翻译、改错、书面表达；
 - 一句一空的语法功能词填空（人称代词、do/does、连词 and/but/because、介词、How/What、if/whether、
-  关系代词）→ `选词填空/多句`，仍按单独题；用户若统一改为组题，只改 `spell-grammar-word` 一条规则。
+  关系代词）→ `选词填空/单句`，仍按单独题；用户若统一改为组题，只改 `spell-grammar-word` 一条规则。
 
 > 2026-11-11 桌面《英语题型汇总.xlsx》**表一（题型汇总）**改判的 15 行已按上表落到
 > `app/references/sync-practice-rules.json`（`spell-grammar-word`、`spell-modal`、`sentence-picture`、

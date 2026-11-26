@@ -611,6 +611,11 @@ def _check_labels(values, prefixes=None, unit_kind=None):
                 problems.append(f"子类 {bad} 不属于「{main_type}」，可选：{allowed}")
         if main_type and main_type != "单词拼写" and len(subs) > 1:
             problems.append(f"主类「{main_type}」子类只能单选")
+        if main_type == "选词填空" and uk in ("group", "standalone"):
+            if uk == "group" and "单句" in subs:
+                problems.append("选词填空整题（group）子类不能为「单句」，应按材料形态选「多句」或「短文」")
+            elif uk == "standalone" and any(s != "单句" for s in subs):
+                problems.append("选词填空单题（standalone）子类必须为「单句」，不能为「多句」或「短文」")
     difficulty = values.get("difficulty", "")
     if not isinstance(difficulty, str):
         problems.append("难度必须是字符串")
