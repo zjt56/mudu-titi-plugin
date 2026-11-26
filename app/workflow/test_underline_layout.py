@@ -387,6 +387,34 @@ class UnderlineLayoutTest(unittest.TestCase):
         self.assertEqual(report['changes'], [])
         self.assertEqual(candidate, batch)
 
+    def test_option_label_disambiguates_same_word_across_questions(self):
+        # 完形填空 C. school 与语音题 B. s<u>ch</u>ool 同词不同标号，不应报 UNDERLINE_MAPPING_AMBIGUOUS
+        batch = {
+            'items': [
+                {'unit_id': 'u-cloze', 'subquestions': [{'number': 1, 'options': ['A. weekend', 'B. sports', 'C. school', 'D. family']}]},
+                {'unit_id': 'u-phonetic', 'subquestions': [{'number': 2, 'options': ['A. shop', 'B. school', 'C. share', 'D. chess']}]},
+            ]
+        }
+        source = '1. A. weekend B. sports C. school D. family\n2. A. <u>sh</u>op B. s<u>ch</u>ool C. <u>sh</u>are D. <u>ch</u>ess'
+        candidate, report = underline.restore(batch, source)
+        self.assertTrue(report['passed'], report)
+        self.assertEqual(candidate['items'][0]['subquestions'][0]['options'][2], 'C. school')
+        self.assertEqual(candidate['items'][1]['subquestions'][0]['options'][1], 'B. s<u>ch</u>ool')
+
+    def test_sibling_options_disambiguate_same_label_and_word_across_questions(self):
+        # 两道题都出现 B. school 且均未带下划线时，依据同行兄弟选项（A/C/D）唯一锁定语音题并精准恢复下划线
+        batch = {
+            'items': [
+                {'unit_id': 'u-cloze', 'subquestions': [{'number': 1, 'options': ['A. home', 'B. school', 'C. park', 'D. zoo']}]},
+                {'unit_id': 'u-phonetic', 'subquestions': [{'number': 2, 'options': ['A. shop', 'B. school', 'C. share', 'D. chess']}]},
+            ]
+        }
+        source = '1. A. home B. school C. park D. zoo\n2. A. <u>sh</u>op B. s<u>ch</u>ool C. <u>sh</u>are D. <u>ch</u>ess'
+        candidate, report = underline.restore(batch, source)
+        self.assertTrue(report['passed'], report)
+        self.assertEqual(candidate['items'][0]['subquestions'][0]['options'][1], 'B. school')
+        self.assertEqual(candidate['items'][1]['subquestions'][0]['options'][1], 'B. s<u>ch</u>ool')
+
 
 if __name__ == '__main__':
     unittest.main()

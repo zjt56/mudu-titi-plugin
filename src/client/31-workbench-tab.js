@@ -9,6 +9,9 @@
       const [serverActiveWork, setServerActiveWork] = React.useState(false);
       const [active, setActive] = React.useState(null); // {name, unitId}
       const [err, setErr] = React.useState('');
+      const [refreshing, setRefreshing] = React.useState(false);
+      const [refreshHint, setRefreshHint] = React.useState('');
+      const refreshTimer = React.useRef(null);
       const [del, setDel] = React.useState(null); // 彻底删除确认弹层 {name,value,busy,error}
       const [advBusy, setAdvBusy] = React.useState('');
       const [uploadStates, setUploadStates] = React.useState({});
@@ -84,9 +87,15 @@
       const [listState, setListState] = React.useState(() => (typeof SHARED_BATCHES_CACHE !== 'undefined' && (SHARED_BATCHES_CACHE.review || SHARED_BATCHES_CACHE.full || SHARED_BATCHES_CACHE.lite)) ? 'ready' : 'idle');
       const loadSeq = React.useRef(0);
 
-      const loadBatches = React.useCallback(async () => {
+      const loadBatches = React.useCallback(async (opts) => {
+        const manual = Boolean(opts && opts.manual === true);
         // 每次加载递增序号，只让最新一次的结果落地（防止重试/手动刷新交叉覆盖）。
         const seq = ++loadSeq.current;
+        if (manual) {
+          setRefreshing(true);
+          setRefreshHint('');
+          if (refreshTimer.current) { clearTimeout(refreshTimer.current); refreshTimer.current = null; }
+        }
         setListState((s) => (s === 'ready' ? s : 'loading'));
         setErr('');
         // 冷启动/后端重启时首包可能 5xx 或短暂连不上：指数退避重试几次，
@@ -94,13 +103,20 @@
         const delays = [0, 600, 1200, 2000, 3000];
         let lastErr = null;
         for (let attempt = 0; attempt < delays.length; attempt++) {
-          if (seq !== loadSeq.current) return; // 已被更新的请求取代
+          if (seq !== loadSeq.current) {
+            if (manual) setRefreshing(false);
+            return; // 已被更新的请求取代
+          }
           if (delays[attempt]) await new Promise((r) => setTimeout(r, delays[attempt]));
           try {
             // 审核列表卡片不渲染整卷 rows/extraction/流程图详表，使用 review_list=1（自带 first_unit_id），
             // 同时返回未上传与已上传批次以支持分组筛选，进入单批时再按需拉取该批的 rows 与单元详情。
-            const d = await jget('/batches?review_list=1');
-            if (seq !== loadSeq.current) return;
+            const url = manual ? ('/batches?review_list=1&_t=' + Date.now()) : '/batches?review_list=1';
+            const d = await jget(url);
+            if (seq !== loadSeq.current) {
+              if (manual) setRefreshing(false);
+              return;
+            }
             const list = d.batches || [];
             if (typeof SHARED_BATCHES_CACHE !== 'undefined') { SHARED_BATCHES_CACHE.review = list; }
             setServerActiveWork(Boolean(d && d.has_active_work));
@@ -117,17 +133,29 @@
             });
             setListState('ready');
             setErr('');
+            if (manual) {
+              setRefreshing(false);
+              setRefreshHint('已刷新');
+              refreshTimer.current = setTimeout(() => setRefreshHint(''), 1800);
+            }
             return;
           } catch (e) {
             lastErr = e;
-            if (seq !== loadSeq.current) return;
+            if (seq !== loadSeq.current) {
+              if (manual) setRefreshing(false);
+              return;
+            }
             // 只有可重试的错误（网络/超时/5xx）才继续退避；4xx（如 404）直接放弃。
             const msg = String((e && e.message) || e);
             const retriable = !/\b(400|401|403|404)\b/.test(msg);
             if (!retriable) break;
           }
         }
-        if (seq !== loadSeq.current) return;
+        if (seq !== loadSeq.current) {
+          if (manual) setRefreshing(false);
+          return;
+        }
+        if (manual) setRefreshing(false);
         setListState('error');
         setErr(String((lastErr && lastErr.message) || lastErr || '加载失败'));
       }, []);
@@ -506,9 +534,12 @@
           alignItems: 'center',
           flexWrap: 'wrap',
           gap: '8px 10px',
-          padding: '10px 18px',
-          borderBottom: '1px solid var(--dsw-alias-border-l1)',
-          background: 'var(--dsw-alias-bg-base)',
+          margin: '10px 14px 0',
+          padding: '9px 14px',
+          borderRadius: 12,
+          border: '1px solid var(--dsw-alias-border-l1)',
+          background: 'var(--dsw-alias-bg-layer-1)',
+          boxShadow: '0 4px 16px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06)',
           flexShrink: 0,
         },
       },
@@ -517,15 +548,16 @@
         renderFilterChip('lesson', '课时类', lessonCount),
         renderFilterChip('uploaded', '已上传', uploadedCount, { tone: 'green', dotColor: uploadedCount > 0 ? '#16a34a' : '' }),
         h('span', { style: { flex: 1 } }),
-        h('button', { className: 'wf-btn', style: T.btn, onClick: loadBatches }, TEXT.reload),
+        refreshHint ? h('span', { role: 'status', style: { ...T.hint, whiteSpace: 'nowrap' } }, refreshHint) : null,
+        h('button', { className: 'wf-btn', style: T.btn, disabled: refreshing, onClick: () => loadBatches({ manual: true }) }, refreshing ? '刷新中…' : TEXT.reload),
       );
-      return h(React.Fragment, null, h('div', { style: { flex: 1, display: 'flex', minHeight: 0 } },
+      return h(React.Fragment, null, h('div', { style: { flex: 1, display: 'flex', minHeight: 0, background: 'var(--dsw-alias-bg-base)' } },
         h('div', { style: T.main },
           reviewFilterBar,
           err ? h('div', { style: { padding: 14, ...T.statusErr } },
             '试卷列表加载失败：' + err + ' ',
             h('button', { className: 'wf-btn', style: { ...T.btn, marginLeft: 10 }, onClick: loadBatches }, '重试')) : null,
-          h('div', { className: 'wf-scroll', style: T.scroll },
+          h('div', { className: 'wf-scroll', style: { ...T.scroll, padding: '12px 14px 16px' } },
             listState === 'loading' && baseList.length === 0
               ? h(EmptyState, { title: '正在加载试卷列表…' })
               : listState === 'error' && baseList.length === 0

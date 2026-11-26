@@ -1271,7 +1271,7 @@
             }, '预览对照'),
           ),
           h('div', { className: 'wf-scroll wf-review-container' },
-           h('div', { className: 'wf-review-layout', style: { padding: '2px 2px 4px' } },
+           h('div', { className: 'wf-review-layout', style: { padding: '4px 6px 8px' } },
             // 左：原卷预览 + 小题
             h('div', { className: 'wf-review-main', style: { minWidth: 0 } },
               h('div', { style: T.card },
@@ -1295,9 +1295,17 @@
                 onEdit: () => { setContentEditError(''); setContentEditDlg(true); },
               }),
             ),
-            // 右：悬浮等宽三按钮 + 标签审核（对比）+ 审核说明（差异说明 + 修改/通过/驳回按钮）
+            // 右：悬浮等宽三按钮卡片 + 标签审核（对比）+ 审核说明（差异说明 + 修改/通过/驳回按钮）
             h('div', { className: 'wf-review-notes' },
-              hideAiSupplement ? null : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 } },
+              hideAiSupplement ? null : h('div', {
+                style: {
+                  display: 'flex', flexDirection: 'column', gap: 8,
+                  padding: '10px 12px', marginBottom: 12,
+                  border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 12,
+                  background: 'var(--dsw-alias-bg-layer-1)',
+                  boxShadow: floatingShadow,
+                },
+              },
                 h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, width: '100%' } },
                   h('button', {
                     className: 'wf-btn',

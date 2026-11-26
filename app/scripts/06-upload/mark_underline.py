@@ -96,8 +96,13 @@ def fields(value, path=()):
             yield from fields(child, path + (index,))
 
 
-def contexts(text, *, include_role=False):
+def contexts(text, *, include_role=False, include_label=False):
     """Retain full paragraph context, splitting only explicit labeled options."""
+    def _emit(item, is_option, label_letter=None, siblings=None):
+        if include_label:
+            return (item, is_option, label_letter, siblings or ())
+        return (item, is_option) if include_role else item
+
     for paragraph in text.splitlines():
         # Word can wrap the printed number (and its choice slot / dot) in separate bold runs,
         # e.g. "**1****.**..." or "**(** **)** **3.**...".
@@ -105,16 +110,21 @@ def contexts(text, *, include_role=False):
             r"^\s*(?:\*\*)*\s*(?:[（(](?:\s|\*\*)*[）)]\s*(?:\*\*)*\s*)?\d{1,3}(?:\s*\*\*)*\s*(?:[.．](?!\s*(?:\*\*\s*)?\d)|[、)])(?:\s*\*\*)*",
             "", paragraph)
         # Label dots can be separated from text by inline formatting.
-        labels = list(re.finditer(r"(?<![A-Za-z])(?:[A-H])[.．、]", paragraph))
+        labels = list(re.finditer(r"(?<![A-Za-z])([A-H])[.．、]", paragraph))
         if not labels:
-            yield (paragraph, False) if include_role else paragraph
+            yield _emit(paragraph, False)
             continue
         if MARK.search(paragraph[:labels[0].start()]):
             prefix = paragraph[:labels[0].start()]
-            yield (prefix, False) if include_role else prefix
+            yield _emit(prefix, False)
+        parsed_opts = []
         for i, label in enumerate(labels):
             option = paragraph[label.end():labels[i + 1].start() if i + 1 < len(labels) else len(paragraph)]
-            yield (option, True) if include_role else option
+            plain_opt, _ = visible(option, normalize_blanks=True)
+            parsed_opts.append((option, label.group(1), plain_opt))
+        siblings = tuple((lbl, txt) for _, lbl, txt in parsed_opts)
+        for option, lbl, _txt in parsed_opts:
+            yield _emit(option, True, lbl, siblings)
 
 
 def _unit_index(path):
@@ -198,6 +208,31 @@ def _exact_paragraph_unit(matches):
     return units.pop()
 
 
+def _sibling_option_match(matches, siblings):
+    """Narrow ambiguous option matches when only one option list owns all siblings from the same line."""
+    if len(siblings) < 2:
+        return None
+    sibling_set = set(siblings)
+    full_hits = []
+    for m in matches:
+        owner, _key, path = m[:3]
+        if not isinstance(owner, list) or "options" not in path:
+            continue
+        owner_opts = set()
+        for item in owner:
+            if not isinstance(item, str):
+                continue
+            v, _ = visible(item, normalize_blanks=True)
+            m_opt = re.match(r"^([A-H])[.．、]", v)
+            if m_opt:
+                owner_opts.add((m_opt.group(1), v[m_opt.end():]))
+        if sibling_set.issubset(owner_opts):
+            full_hits.append(m)
+    if len(full_hits) == 1:
+        return full_hits
+    return None
+
+
 def restore(batch, source_text):
     candidate = copy.deepcopy(batch)
     changes, issues = [], []
@@ -206,7 +241,7 @@ def restore(batch, source_text):
     # An answer-book example can repeat a prompt verbatim with different marks;
     # it must never supply underlines to the question surface (or fail mapping).
     _, question_text, _ = infer_structure(source_text)
-    for context, option_context in contexts(question_text, include_role=True):
+    for context, option_context, option_label, option_siblings in contexts(question_text, include_role=True, include_label=True):
         plain_context, _ = visible(context, normalize_blanks=True)
         for mark in MARK.finditer(context):
             marked_plain, _ = visible(mark.group(1))
@@ -227,8 +262,11 @@ def restore(batch, source_text):
                 if option_context:
                     if 'options' not in path:
                         continue
-                    unlabelled = re.sub(r'^[A-H][.．、]', '', value)
+                    m_opt = re.match(r'^([A-H])[.．、]', value)
+                    unlabelled = value[m_opt.end():] if m_opt else value
                     if unlabelled != plain_context:
+                        continue
+                    if option_label and m_opt and m_opt.group(1) != option_label:
                         continue
                 # A bare marked word must equal an entire field/option; it
                 # cannot be searched globally inside arbitrary prose.
@@ -265,6 +303,10 @@ def restore(batch, source_text):
                 issues.append(dict(evidence, code="UNDERLINE_MAPPING_MISSING",
                                    message="完整原文上下文对应 0 个位置，未自动改动"))
                 continue
+            if len(matches) > 1 and option_context and option_siblings:
+                narrowed = _sibling_option_match(matches, option_siblings)
+                if narrowed is not None:
+                    matches = narrowed
             if len(matches) > 1:
                 # A unit may legitimately mirror the same passage in several of
                 # its own text fields (e.g. stem repeats the opening paragraph of
@@ -290,6 +332,12 @@ def restore(batch, source_text):
                 # lines that carry no underline. Genuinely competing positions
                 # (several exact fields, or none) stay ambiguous.
                 owned = _exact_paragraph_unit(matches)
+                if (owned is None and option_context
+                        and all('options' in p and not ovl for _, _, p, _, _, _, ovl, _ in matches)
+                        and sum(1 for _, _, _, _, _, ins, _, _ in matches if ins) == 1):
+                    # Two questions share the same option label+word (e.g. B. school),
+                    # while only one already carries the exact underline from source.
+                    continue
                 if owned is None:
                     issues.append(dict(evidence, code="UNDERLINE_MAPPING_AMBIGUOUS",
                                        message=f"完整原文上下文对应 {len(matches)} 个位置，未自动改动"))
